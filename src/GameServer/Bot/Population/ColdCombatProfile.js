@@ -184,7 +184,7 @@ function statSources(profile, timestamp, options = {}) {
     };
     const situation = {
         hp: 1, maxHp: 1, moving: false, walking: false, seated: false,
-        get night() { options.onNightRead?.(); return options.night ?? GameTime.isNight(timestamp); }
+        get night() { options.onNightRead?.(); return options.night ?? clockNight(timestamp); }
     };
     const sources = activeEffects(profile.effects, timestamp).map(effectStats);
     for (const skill of profile.skills || []) {
@@ -829,6 +829,11 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
 // Shared candidate names are interned once; a build keeps only numeric hashes,
 // power numbers and packed gains. Owners release both variants and night markers.
 const buildGains = new Map();
+// Every read of night from the game clock counts (perf C3): an economy review
+// that made none holds across a day/night switch (EconomyContext).
+let nightReads = 0;
+function clockNight(timestamp) { nightReads++; return GameTime.isNight(timestamp); }
+function nightReadCount() { return nightReads; }
 const ownerBuilds = new Map();
 const candidateIndex = new Map();
 const POWER_FIELDS = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
@@ -877,7 +882,7 @@ function powerNumbers(entry) {
     return Object.fromEntries(POWER_FIELDS.map((field, index) => [field, entry.power[index]]));
 }
 function buildOptions(entry, timestamp) {
-    return { night: entry.night === 0 ? false : GameTime.isNight(timestamp) };
+    return { night: entry.night === 0 ? false : clockNight(timestamp) };
 }
 function resizeGains(entry, idCapacity, gainCapacity) {
     const buffer = new ArrayBuffer(idCapacity * 3 + gainCapacity * 16);
@@ -901,12 +906,12 @@ function buildGainsFor(state = {}, timestamp = Date.now()) {
         if (readsNight) {
             entry = { night: 2, owners: 0 };
             if (owner) buildGains.set(baseKey, entry);
-            key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
+            key = buildHash(text + (clockNight(timestamp) ? '|n' : '|d'));
             entry = newEntry(power, 1, baseKey);
         } else entry = newEntry(power, 0, baseKey);
         if (owner) buildGains.set(key, entry);
     } else if (entry.night === 2) {
-        key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
+        key = buildHash(text + (clockNight(timestamp) ? '|n' : '|d'));
         entry = buildGains.get(key);
         if (!entry) {
             entry = newEntry(powerFor(state, timestamp), 1, baseKey);
@@ -966,7 +971,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, effectsKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, effectsKey, nightReadCount, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

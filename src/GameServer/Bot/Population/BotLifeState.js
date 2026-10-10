@@ -2574,7 +2574,13 @@ const BotLifeState = {
                 nextAmount,
                 Number(inventory[key]?.starterMobLootAmount || 0) + protectedStarterLoot
             );
+            // A stack keeps its other fields (slot, equipped, enchant...), as
+            // every other writer of a bag row does: one row, one shape (perf
+            // C3: a shape flip changed the review's input key). An item row
+            // with instances is rebuilt as before.
+            const { starterMobLootAmount: _starter, ...previous } = itemStackable(item.selfId, item) ? inventory[key] || {} : {};
             inventory[key] = {
+                ...previous,
                 selfId: item.selfId,
                 name: item.name || inventory[key]?.name || itemName(item.selfId),
                 amount: nextAmount,
@@ -2585,6 +2591,7 @@ const BotLifeState = {
         });
         if (adena > 0) {
             inventory['57'] = {
+                ...(inventory['57'] || {}),
                 selfId: 57,
                 name: inventory['57']?.name || 'Adena',
                 amount: adena
