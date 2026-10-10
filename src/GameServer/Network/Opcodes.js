@@ -78,6 +78,7 @@ const Opcodes = {
         table[0x94] = ClientRequest.privateStoreTitle(3);
         table[0x96] = ClientRequest.privateStoreSell;
         table[0xaa] = ClientRequest.userCommand;
+        table[0xa7] = ClientRequest.multiSellChoose;
         table[0xac] = ClientRequest.recipeBookOpen;
         table[0xae] = ClientRequest.recipeItemMakeInfo;
         table[0xaf] = ClientRequest.recipeItemMakeSelf;

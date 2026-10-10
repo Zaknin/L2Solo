@@ -1,3 +1,5 @@
+// Lisvus C4 multisell/7097.xml and 7098.xml, revision
+// fdc7e33af5d69067b41a6ee7cc7c07fe7aa35975.
 const CRYSTAL_D = 1458;
 const CRYSTAL_C = 1459;
 
@@ -13,7 +15,7 @@ const LISTS = {
         item(71, 'Flamberge', 573, 2865),
         item(72, 'Stormbringer', 573, 2865),
         item(76, 'Sword of Delusion', 1075, 5375),
-        item(294, 'War Pick', 573, 2865),
+        item(161, 'Silver Axe', 573, 2865),
         item(162, 'War Axe', 1075, 5375),
         item(192, 'Crystal Staff', 573, 2865),
         item(200, "Sage's Staff", 1075, 5375),
@@ -40,7 +42,7 @@ const LISTS = {
         item(471, 'Karmian Stockings', 59, 295),
         item(472, "Demon's Stockings", 115, 575),
         item(2429, 'Chain Boots', 32, 160),
-        item(568, 'Composite Boots', 62, 310),
+        item(64, 'Composite Boots', 62, 310),
         item(2452, 'Reinforced Mithril Gloves', 32, 160),
         item(608, 'Mithril Gauntlets', 62, 310),
         item(631, 'Eldarake', 34, 170),
@@ -54,46 +56,18 @@ const LISTS = {
     ]
 };
 
-const NPC_NAMES = {
-    7097: 'Trader Galladucci',
-    7098: 'Trader Alexandria'
-};
-
-function esc(value) {
-    return String(value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-}
-
 function fetchForNpc(npcSelfId) {
     return LISTS[npcSelfId] || [];
 }
 
-function renderHtml(npcSelfId, message = '') {
+function resolve(npcSelfId, entryId) {
     const rows = fetchForNpc(npcSelfId);
-    const title = NPC_NAMES[npcSelfId] || 'Luxury Trader';
-    const lines = [
-        '<html><body>',
-        `${esc(title)}:<br>`,
-        'Luxury exchange goods:<br>'
-    ];
-
-    if (message) {
-        lines.push(`<font color="LEVEL">${esc(message)}</font><br>`);
-    }
-
-    rows.forEach((row, index) => {
-        const required = row.required.map((entry) => `${esc(entry.name)} x${entry.amount}`).join(', ');
-        lines.push(`${esc(row.result.name)} - ${required} <a action="bypass -h exchange-shop buy ${index}">Exchange</a><br>`);
-    });
-
-    lines.push('<br><a action="bypass -h sell-shop">Sell items</a><br>');
-    lines.push('</body></html>');
-    return lines.join('');
+    // C4 includes the enchantment in the entry ID. These lists only sell +0.
+    return Number.isInteger(entryId) && entryId > 0 && entryId % 100000 === 0
+        ? rows[entryId / 100000 - 1] || null : null;
 }
 
 module.exports = {
     fetchForNpc,
-    renderHtml
+    resolve
 };

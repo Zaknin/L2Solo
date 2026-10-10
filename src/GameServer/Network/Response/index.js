@@ -42,6 +42,7 @@ module.exports = {
          moveToLocation: require('./MoveToLocation'),
              moveToPawn: require('./MoveToPawn'),
                 npcHtml: require('./NpcHtml'),
+            multiSellList: require('./MultiSellList'),
                 npcInfo: require('./NpcInfo'),
            radarControl: require('./RadarControl'),
           petStatusShow: require('./PetStatusShow'),

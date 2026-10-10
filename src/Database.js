@@ -7573,6 +7573,47 @@ const Database = {
         }, 'item:unseal'));
     },
 
+    exchangeLuxuryItems(characterId, { listId, entryId, amount, validate }) {
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const recipe = invoke('GameServer/World/Generics/NpcExchangeShopLists').resolve(listId, entryId);
+            const product = recipe && require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, recipe.result.selfId);
+            if (!product || !Number.isInteger(amount) || amount < 1 || amount > 5000) throw Error('invalid_multisell_selection');
+            validate?.();
+            const count = amount * recipe.result.amount;
+            const slots = one('SELECT COUNT(*) AS count FROM items WHERE characterId = ?', [characterId]).count;
+            const character = one('SELECT race FROM characters WHERE id = ?', [characterId]);
+            const skill = one('SELECT level FROM skills WHERE characterId = ? AND selfId = 1372', [characterId]);
+            const capacity = require('./GameServer/Inventory/InventoryLimits').capacity(character?.race, skill?.level);
+            if (slots + count > capacity) throw Error('multisell_inventory_full');
+            const consumed = [];
+            for (const ingredient of recipe.required) {
+                const rows = all('SELECT id, selfId, amount, equipped FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id',
+                    [characterId, ingredient.selfId]);
+                validate?.(rows);
+                let remaining = ingredient.amount * amount;
+                for (const row of rows) {
+                    if (!remaining) break;
+                    const take = Math.min(remaining, row.amount);
+                    consumed.push({ id: row.id, selfId: row.selfId, remaining: row.amount - take });
+                    remaining -= take;
+                }
+                if (remaining) throw Error('multisell_missing_materials');
+            }
+            for (const row of consumed) {
+                if (row.remaining) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [row.remaining, row.id, characterId]);
+                else write('DELETE FROM items WHERE id = ? AND characterId = ?', [row.id, characterId]);
+            }
+            // Equipment never stacks: each requested unit gets its own +0 instance.
+            const products = [];
+            for (let i = 0; i < count; i++) {
+                const id = Number(write('INSERT INTO items(selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, 1, 0, ?, ?)',
+                    [product.selfId, product.template.name, product.etc.slot, characterId]).insertId);
+                products.push({ id, selfId: product.selfId, amount: 1, equipped: false, slot: product.etc.slot });
+            }
+            return { consumed, products };
+        }, 'item:luxury-exchange'));
+    },
+
     combineInventoryItems(characterId, { ingredients, product, validate }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             validate?.();

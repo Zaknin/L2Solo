@@ -720,6 +720,7 @@ const tests = [
     'tests/test_npc_dual_role.js',
     'tests/test_newbie_helper_starting_zones.js',
     'tests/test_npc_shop_stock.js',
+    'tests/test_luxury_multisell.js',
     'tests/test_npc_shop_row_index.js',
     'tests/test_npc_sell_shop.js',
     'tests/test_sell_junk_packet_bounds.js',

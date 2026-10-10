@@ -60,6 +60,7 @@ const CLIENT_PACKET_NAMES = {
     0x6d: 'RestartPoint',
     0x9d: 'RequestSkillCoolTime',
     0xaa: 'UserCommand',
+    0xa7: 'MultiSellChoose',
     0xb9: 'Recommend',
     0xc0: 'RequestPledgePower',
     0xc1: 'RequestMakeMacro',
@@ -147,7 +148,7 @@ const SERVER_PACKET_NAMES = {
     0xc7: 'NpcHtmlMessage',
     0xc8: 'TutorialShowQuestionMark',
     0xce: 'RelationChanged',
-    0xd0: 'ExtendedPacket',
+    0xd0: 'MultiSellList',
     0xe7: 'SendMacroList'
 };
 

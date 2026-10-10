@@ -4,6 +4,7 @@ function npcTalkResponse(session, data) {
     let parts = data.link.split(' ') ?? [];
     if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.log("npcTalkResponse link:", data.link, "parts:", parts);
     if (parts.length === 0 || !parts[0]) return;
+    if (!['multisell', 'exchange-shop'].includes(parts[0])) session.activeMultiSell = null;
 
     if (parts[0] === 'quest') {
         const QuestService = invoke('GameServer/Quest/QuestService');

@@ -5,6 +5,7 @@ function npcTalk(session, npc) {
 
     session.activeNpcShop = null;
     session.activeNpcSellShop = null;
+    session.activeMultiSell = null;
     session.activeWarehouse = null;
     session.activePetExchange = null;
     session.activeWeaponSA = null;
