@@ -192,7 +192,7 @@ function depositActorAtWarehouse(actor, state, session, target) {
 
 async function depositColdUnlocked(state, candidates) {
     const [rows, warehouseRows] = await Promise.all([
-        Database.fetchItems(state.characterId),
+        Database.fetchItems(state.characterId, 'warehouse_deposit_cold'),
         Database.fetchWarehouseItems(state.characterId)
     ]);
     const retained = storedAmounts(warehouseRows);

@@ -1780,7 +1780,7 @@ async function persistedPlayerDetail(characterId) {
             WHERE c.id = ?
             LIMIT 1
         `, [id], { read: true }], 'observer:player-detail'),
-        Database.fetchItems(id)
+        Database.fetchItems(id, 'observer_player_detail')
     ]);
     const row = rows[0];
     if (!row || Number(row.isBot) === 1) return null;

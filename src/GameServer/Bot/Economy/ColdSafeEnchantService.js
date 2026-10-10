@@ -235,7 +235,7 @@ async function enchantSafe(state, options = {}) {
     if (!state || state.phase === 'hot' || !state.characterId || !hasPotential(state)) {
         return { state, enchanted: false, operations: [] };
     }
-    const rows = await Database.fetchItems(state.characterId);
+    const rows = await Database.fetchItems(state.characterId, 'cold_safe_enchant');
     const operations = plan(rows, options);
     if (!operations.length) return { state, enchanted: false, operations: [] };
 

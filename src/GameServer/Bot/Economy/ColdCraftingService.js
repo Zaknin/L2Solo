@@ -191,7 +191,7 @@ function hasCombinationIngredients(items, recipe) {
 }
 
 async function combineDualSword(state, recipe, station) {
-    const items = await Database.fetchItems(state.characterId);
+    const items = await Database.fetchItems(state.characterId, 'cold_craft_dual_sword');
     if (!hasCombinationIngredients(items, recipe)) {
         return { state: await refreshPhysicalInventory(state), crafted: false, reason: 'materials_changed' };
     }
@@ -293,7 +293,7 @@ async function craft(state, random = Math.random) {
     }
 
     const componentCraft = Number(recipe.recipeId) !== Number(finalRecipe?.recipeId);
-    const customerItems = await Database.fetchItems(state.characterId);
+    const customerItems = await Database.fetchItems(state.characterId, 'cold_craft');
     const requestedBatch = !learning ? requiredCraftCount(finalRecipe, recipe, state) : 1;
     const materialBatch = craftableBatchCount(customerItems, recipe, Math.min(64, requestedBatch));
     const batchCount = station.clan || station.workshop ? Math.min(materialBatch, Math.floor(crafterMp / Math.max(1, Number(recipe.mpCost)))) : materialBatch;

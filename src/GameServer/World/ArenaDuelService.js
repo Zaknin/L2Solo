@@ -157,7 +157,7 @@ async function makeSnapshot(candidate) {
     const character = await loadColdCharacter(sourceId);
     if (!character) return null;
     const [items, skills] = await Promise.all([
-        Database.fetchItems(sourceId),
+        Database.fetchItems(sourceId, 'arena_snapshot'),
         Database.fetchSkills(sourceId)
     ]);
     const classInfo = DataCache.classTemplates?.find((entry) => Number(entry.classId) === Number(character.classId)) || {};

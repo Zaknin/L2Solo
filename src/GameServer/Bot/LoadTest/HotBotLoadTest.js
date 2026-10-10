@@ -309,7 +309,7 @@ const HotBotLoadTest = {
 
     measure({ count, durationMs, tickMs, spreadMs, runStartedAt, mode, coldMin }) {
         const prepare = mode === 'mixed' ? this.prepareMixedWorld(coldMin) : Promise.resolve(0);
-        prepare.then((preparedDue) => Promise.all(hotSessions().map((session) => Database.fetchItems(session.actor.fetchId())
+        prepare.then((preparedDue) => Promise.all(hotSessions().map((session) => Database.fetchItems(session.actor.fetchId(), 'hot_load_test')
             .then((items) => [session.actor.fetchId(), items[0] || null])))
             .then((entries) => ({ entries, preparedDue })))
             .then(({ entries, preparedDue }) => this.measureReady({

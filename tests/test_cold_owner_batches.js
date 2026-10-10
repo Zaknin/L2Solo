@@ -387,6 +387,13 @@ async function createProbe(index) {
     assert.deepStrictEqual(atomicRows.map((row) => Number(row.exp)), partyExpectedExp,
         'an aborted party transition must not persist one member without the other');
 
+    // Developer diagnostics: each committed bot times its commit parts and the
+    // batch counts its bots.
+    const metrics = invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics();
+    assert(metrics.counts['commit_batch:bots:all'] >= 2, 'the commit batch counts its bots');
+    for (const part of ['row_read', 'stats_merge', 'row_write', 'physical', 'settle', 'reread']) {
+        assert(metrics.durations[`commit_${part}`]?.count >= 1, `commit part ${part} is timed`);
+    }
     console.log('Cold owner batch partial-stale and ACK-loss checks passed');
 })().catch((error) => {
     console.error(error);

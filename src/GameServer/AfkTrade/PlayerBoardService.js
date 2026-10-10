@@ -130,7 +130,7 @@ function create({ afk = () => invoke('GameServer/AfkTrade/AfkTradeService'),
             try {
                 const result = await workshops().craft(ownerId, recipeId, playerId, {
                     expectedPrice: Number(request.price), expectedRevision: Number(request.revision) });
-                const rows = await database().fetchItems(playerId);
+                const rows = await database().fetchItems(playerId, 'player_board_craft');
                 if (!current()) return { ok: false, reason: 'player_unavailable' };
                 session.actor.backpack.items = [];
                 for (const row of rows) session.actor.backpack.insertItem(row.id, row.selfId, row);

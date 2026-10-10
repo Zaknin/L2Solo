@@ -3166,7 +3166,7 @@ const BotLifeState = {
 
     refreshInventory(state, options = {}) {
         if (!state?.characterId) return Promise.resolve(state || null);
-        return Database.fetchItems(state.characterId).then((items) => {
+        return Database.fetchItems(state.characterId, 'life_refresh_inventory').then((items) => {
             // Cold progression owns virtual item counts between hot
             // materializations. The character inventory remains authoritative
             // for equip flags, so a stale snapshot cannot sell worn gear.
@@ -3281,7 +3281,7 @@ const BotLifeState = {
         const id = Number(characterId);
         const state = previousState || cache.get(id);
         if (!id || !state) return Promise.resolve(null);
-        return Database.fetchItems(id).then((items) => {
+        return Database.fetchItems(id, 'life_sync_external_inventory').then((items) => {
             const inventory = inventorySummaryFromItems(items || []);
             const refreshed = {
                 ...state,

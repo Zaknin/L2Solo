@@ -325,7 +325,7 @@ async function craftAtWorkshop(session, bot, target) {
         }
         session.workshopOriginal = undefined;
         if (session.actor !== bot || bot.fetchIsOnline?.() === false) return;
-        const items = await invoke('Database').fetchItems(bot.fetchId());
+        const items = await invoke('Database').fetchItems(bot.fetchId(), 'shopping_workshop');
         const byId = new Map(items.map(row => [Number(row.id), row]));
         const backpack = bot.backpack;
         for (const item of [...backpack.fetchItems()]) {

@@ -298,7 +298,7 @@ async function obtainCrystals(state, candidate, batches) {
         candidate.basket.purchases.find(row => row.selfId === candidate.crystalId));
     const [skill] = await Database.fetchSkill(state.characterId, 248);
     if (Number(skill?.level || 0) < CRYSTAL_SKILL_LEVEL[candidate.rank]) return { state, ready: false };
-    const ownedRows = await Database.fetchItems(state.characterId);
+    const ownedRows = await Database.fetchItems(state.characterId, 'cold_shot_crystals_owned');
     const ownedRowIds = new Set(ownedRows.map(item => Number(item.id)));
     if (gear.source === 'craft') {
         const requirements = gear.inputs.map(input => {
@@ -321,7 +321,7 @@ async function obtainCrystals(state, candidate, batches) {
         if (next.hot || activated) return { ...next, state: activated || next.state, ready: false, hot: true };
         if (!next.ready) return next;
         state = next.state;
-        const materials = materialRows(await Database.fetchItems(state.characterId), gear.recipe);
+        const materials = materialRows(await Database.fetchItems(state.characterId, 'cold_shot_crystals_gear'), gear.recipe);
         if (hotState(state)) return { state: hotState(state), ready: false, hot: true };
         if (!materials || Number(state.vitals?.mp || 0) < Number(gear.recipe.mpCost)) return { state, ready: false };
         const template = require('../../Item/ItemTemplateIndex').find(DataCache.items, gear.selfId);
@@ -343,7 +343,7 @@ async function obtainCrystals(state, candidate, batches) {
         if (!bought.bought || bought.hot) return { state: bought.state, ready: false };
         state = bought.state;
     }
-    const row = (await Database.fetchItems(state.characterId)).find(item =>
+    const row = (await Database.fetchItems(state.characterId, 'cold_shot_crystals_row')).find(item =>
         (gear.source === 'owned' || !ownedRowIds.has(Number(item.id))) && Number(item.selfId) === gear.selfId
             && Number(item.amount) === 1 && !item.equipped && !Number(item.enchant || 0));
     if (!row) return { state, ready: false };
@@ -374,7 +374,7 @@ async function craft(state, candidate, index, now) {
     const batchRecipe = { ...candidate.recipe, materials: candidate.recipe.materials.map((material) => ({
         ...material, amount: Number(material.amount) * batches
     })) };
-    const rows = materialRows(await Database.fetchItems(state.characterId), batchRecipe);
+    const rows = materialRows(await Database.fetchItems(state.characterId, 'cold_shot_craft'), batchRecipe);
     if (hotState(state)) return hotState(state);
     if (!rows) return state;
     let admitted = null, crafted;

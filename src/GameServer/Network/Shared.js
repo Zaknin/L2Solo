@@ -15,7 +15,7 @@ const Shared = {
             const createPaperdoll = (character) => {
                 return new Promise((done) => {
                     Promise.all([
-                        Database.fetchItems(character.id),
+                        Database.fetchItems(character.id, 'character_list'),
                         Database.fetchCharacterRecipes(character.id)
                     ]).then(([items, recipes]) => {
                         character.items = items;

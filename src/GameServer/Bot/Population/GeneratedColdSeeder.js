@@ -255,7 +255,7 @@ function awardBaseGear(characterId, classId) {
         Number(template?.etc?.slot || 0) === 14 &&
         String(template?.template?.kind || '').startsWith('Weapon.')
     ));
-    return Database.fetchItems(characterId).then((existing) => {
+    return Database.fetchItems(characterId, 'seeder_base_gear').then((existing) => {
         const existingIds = new Set((existing || []).map((item) => Number(item.selfId)));
         return Promise.all(items
             .filter((item) => !existingIds.has(Number(item.selfId)))
@@ -306,7 +306,7 @@ function awardProfileSkills(characterId, classId, level) {
 }
 
 function ensureAdena(characterId, amount) {
-    return Database.fetchItems(characterId).then((existing) => {
+    return Database.fetchItems(characterId, 'seeder_adena').then((existing) => {
         const adena = (existing || []).find((item) => Number(item.selfId) === 57);
         if (adena) return null;
         return Database.setItem(characterId, {

@@ -75,7 +75,7 @@ async function finish(state,timestamp=Date.now()) {
     let count = 0;
     const converted = new Map();
     if (near) {
-        for (const item of await Database.fetchItems(state.characterId)) {
+        for (const item of await Database.fetchItems(state.characterId, 'mammon_unseal')) {
             const recipe = recipeFor(item.selfId,state);
             if (!recipe || Number(item.amount)!==1) continue;
             if (item.equipped) await Database.updateItemEquipState(state.characterId,item.id,false,item.slot);

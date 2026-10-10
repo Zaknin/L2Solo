@@ -2703,7 +2703,19 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
     }
 }
 
-function applyColdPhysicalStateUnsafe(characterId, physical = {}) {
+// Diagnostics only: time spent in each part of one bot's cold commit; no clock
+// read and no allocation while developer diagnostics are off.
+function coldCommitParts() {
+    if (!DiagnosticConfig.developerDiagnostics) return null;
+    let last = performance.now();
+    const spent = {};
+    return {
+        lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
+        done() { for (const part in spent) Diagnostics.duration(`commit_${part}`, spent[part]); }
+    };
+}
+
+function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) {
     const before = one('SELECT hp,karma,pk FROM characters WHERE id = ?', [characterId]);
     // Use the persisted XP delta inside the fenced transaction: unchanged
     // snapshots cannot wash karma twice, and non-combat updates grant none.
@@ -2728,7 +2740,10 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}) {
         ]);
     });
     if (physical.soulCrystals?.length) applySoulCrystalStepsUnsafe(characterId, physical.soulCrystals);
+    parts?.lap('physical');
     if (physical.inventory) syncInventorySummaryUnsafe(characterId, physical.inventory);
+    parts && Diagnostics.count('commit_inventory', physical.inventory ? 'sent' : 'absent');
+    parts?.lap('inventory');
     if (physical.pvpKills?.length) {
         if (physical.pvpKills.length > 18) throw Error('cold PvP: too many kills');
         const current = one('SELECT level, pvp, pk, karma FROM characters WHERE id = ?', [characterId]);
@@ -5447,12 +5462,15 @@ const Database = {
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
             if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
+            const parts = coldCommitParts();
             const row = coldSimulationRow(characterId);
             const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
+            parts?.lap('row_read');
             if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
             const { patch, stats, deathExperience } = preserveColdVersionedStatsParsed(row, requestedPatch);
             const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
             const partition = coldSimulationPartition(proposed, request, stats);
+            parts?.lap('stats_merge');
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
             const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
             const revision = expectedRevision + 1;
@@ -5477,9 +5495,11 @@ const Database = {
                     reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp)
                 };
             }
+            parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
-            const pkDrops = physical ? applyColdPhysicalStateUnsafe(characterId, physical) : [];
+            const pkDrops = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : [];
+            parts?.lap('physical');
             // What deals and closed records left for the bot on the board while
             // the worker held it reaches its bag with this save.
             EconomyJournal.detail('board_settlement');
@@ -5489,6 +5509,11 @@ const Database = {
             // Persist the entitlement under the same lease fence and transaction
             // as EXP. Cold-to-hot resurrection reads this durable record.
             syncColdDeathExperienceUnsafe(characterId, deathExperience, timestamp);
+            const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
+            parts?.lap('settle');
+            const committedRow = coldSimulationRow(characterId);
+            parts?.lap('reread');
+            parts?.done();
             return {
                 ok: true,
                 characterId,
@@ -5498,16 +5523,19 @@ const Database = {
                 leaseUntil: 0,
                 reason: 'committed_released',
                 ...(pkDrops.length ? { pkDrops } : {}),
-                ...(request.memoryEvents !== undefined ? { memorySnapshots: commitColdInteractionMemoryUnsafe(request) || [] } : {}),
+                ...(memorySnapshots !== undefined ? { memorySnapshots } : {}),
                 ...(settled ? { settled: true } : {}),
-                row: coldSimulationRow(characterId)
+                row: committedRow
             };
         });
         return inTransaction(() => {
             // Validate all participants after earlier queued writes have settled.
             // Preflight outside this transaction could allow half an encounter.
+            const groupClock = atomicGroups.size && DiagnosticConfig.developerDiagnostics ? performance.now() : null;
             validateAtomicGroups();
+            if (groupClock !== null) Diagnostics.duration('commit_groups', performance.now() - groupClock);
             const results = commitBatch();
+            const partyClock = groupClock !== null ? performance.now() : null;
             for (const [groupId, group] of atomicGroups) {
                 if (atomicGroupFailures.has(groupId)) continue;
                 const changes = group[0].atomicGroup.partyChanges || [];
@@ -5551,6 +5579,8 @@ const Database = {
                     }
                 }
             }
+            if (partyClock !== null) Diagnostics.duration('commit_party_raid', performance.now() - partyClock);
+            DiagnosticConfig.developerDiagnostics && Diagnostics.count('commit_batch', 'bots', 'all', batch.length);
             return results;
         }, 'bot-life:cold-owner-commit-release-batch');
     },
@@ -6566,7 +6596,9 @@ const Database = {
         if (item.petData) values.petData = typeof item.petData === 'string' ? item.petData : JSON.stringify(item.petData);
         return withCharacterFlush(characterId, () => insert('items', values, 'item:insert'));
     },
-    fetchItems(characterId) {
+    // caller: a static tag of the call site, counted for developer diagnostics only.
+    fetchItems(characterId, caller = 'untagged') {
+        DiagnosticConfig.developerDiagnostics && Diagnostics.count('item_list', 'call', caller);
         return withCharacterFlush(characterId, () => select('items', ['*'], 'characterId = ? AND amount > 0', [characterId], 'item:list'));
     },
     updateItemAmount(characterId, id, amount) {

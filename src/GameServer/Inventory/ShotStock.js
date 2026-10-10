@@ -360,7 +360,7 @@ function ensureCharacterStock(characterId, options = {}) {
     if (!id) return Promise.resolve({ changed: false, reason: 'missing_character' });
 
     const targetAmount = Number(options.targetAmount || DEFAULT_TARGET_AMOUNT);
-    return persistenceDatabase().fetchItems(id).then((rows) => {
+    return persistenceDatabase().fetchItems(id, 'shot_stock').then((rows) => {
         const plan = options.plan || planForRows(rows || [], options.classId ?? characterId?.classId);
         const current = existingRow(rows, plan.selfId);
         const currentAmount = Number(current?.amount || 0);

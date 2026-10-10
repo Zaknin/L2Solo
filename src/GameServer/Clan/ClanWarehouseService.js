@@ -76,7 +76,7 @@ async function wornByClan(clan) {
     clanWorn.set(number(clan.id), input);
     const rows = new Map();
     for (const member of clan.members || []) {
-        if (member.phase === 'cold') rows.set(number(member.characterId), await Database.fetchItems(member.characterId));
+        if (member.phase === 'cold') rows.set(number(member.characterId), await Database.fetchItems(member.characterId, 'clan_warehouse_worn'));
     }
     if (clanWorn.get(number(clan.id)) === input) {
         input.at = Date.now(); input.rows = rows;
@@ -131,7 +131,7 @@ async function offerSpareGear(clan, member, warehouseRows, warehouseRevision) {
         remember();
         return { deposited: 0, warehouseRevision };
     }
-    const rows = await Database.fetchItems(id);
+    const rows = await Database.fetchItems(id, 'clan_warehouse_spare_gear');
     let deposited = 0;
     for (const offer of fresh) {
         let best = null;
@@ -247,7 +247,7 @@ async function resolveClan(clan, options = {}) {
             .map(item => Number(item.selfId));
         if (member.simulationOwner === 'cold_simulation_owner' && !supplyIds.length) continue;
         if (Database.materializeClanSupplies && !await Database.materializeClanSupplies(member.characterId, member.simulationRevision, supplyIds)) continue;
-        const items = await Database.fetchItems(member.characterId);
+        const items = await Database.fetchItems(member.characterId, 'clan_warehouse_resolve');
         const candidates = Policy.depositCandidates(member, items, warehouseRows, { ...Config, demand, goalKey: goal?.goalKey });
         for (const candidate of candidates) {
             if (Date.now() >= deadlineAt || attempted >= batchSize) {

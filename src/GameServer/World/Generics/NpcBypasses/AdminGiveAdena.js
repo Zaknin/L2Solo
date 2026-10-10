@@ -49,7 +49,7 @@ module.exports = function(session, parts) {
             if (rows && rows[0]) {
                 const charId = rows[0].id;
                 const charRealName = rows[0].name;
-                Database.fetchItems(charId).then((items) => {
+                Database.fetchItems(charId, 'admin_give_adena').then((items) => {
                     const adenaItem = items.find(ob => ob.selfId === 57);
                     if (adenaItem) {
                         const total = adenaItem.amount + amount;

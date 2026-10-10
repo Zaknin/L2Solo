@@ -126,7 +126,7 @@ async function craftSelf(session, recipeId, random = Math.random, options = {}) 
         const success = bot ? result.success : drawn;
         if (result.coldLifeRow) Commit.acceptRow(result.coldLifeRow);
         if (result.replayed) {
-            const rows = await Database.fetchItems(actorId);
+            const rows = await Database.fetchItems(actorId, 'recipe_craft_self');
             actor.backpack.items = rows.map(row => {
                 const data = ItemTemplateIndex.find(DataCache.items, Number(row.selfId));
                 return new Item(row.id, { ...utils.crushOb(data || {}), amount: row.amount,

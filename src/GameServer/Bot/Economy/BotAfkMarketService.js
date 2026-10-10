@@ -492,7 +492,7 @@ async function reconcileSellShop(state, goal) {
     if (review?.signature === signature && stock.lines.every(viableSellLine)) return { state, changed: false };
     const [characters, inventory] = await Promise.all([
         Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner'),
-        Database.fetchItems(ownerId)
+        Database.fetchItems(ownerId, 'market_reconcile_shop')
     ]);
     const row = characters[0];
     if (!row || !String(row.username || '').startsWith('bot_')) return { state, changed: false };
@@ -566,7 +566,7 @@ async function listOnBoard(state, options = {}) {
     const stock = Number(current?.storeType) === AfkTrade.SELL ? current : null;
     const [characters, inventory] = await Promise.all([
         Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner'),
-        Database.fetchItems(ownerId)
+        Database.fetchItems(ownerId, 'market_list_on_board')
     ]);
     const row = characters[0];
     if (!row) return { state, listed: 0, reason: 'owner_missing' };
@@ -756,7 +756,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         });
         // A selected WTS is an intention from the field, not a seated shop.
         // Native market visits own shop opening and its separately valued trip.
-        const inventory = await Database.fetchItems(ownerId);
+        const inventory = await Database.fetchItems(ownerId, 'market_execute_plan');
         const current = AfkTrade.findOwnerProjection(ownerId)?.shop;
         const shop = Number(current?.storeType) === AfkTrade.SELL ? current : null;
         return listSellAds(ownerId, state, listings, shop, inventory,
