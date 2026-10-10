@@ -74,11 +74,13 @@ function initialise() {
 }
 
 function* reservations(state) {
-    const reserved = {}, plan = state.stats?.equipmentPlan;
+    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state), plan = state.stats?.equipmentPlan;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
+    if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')
+        for (const row of plan.materials || []) reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount));
     const equipped = new Map(), staged = new Map();
     for (const key in state.inventory || {}) {
         const item = state.inventory[key], template = ItemIndex.find(Data.items, Number(item.selfId));

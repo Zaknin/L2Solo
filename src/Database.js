@@ -2189,7 +2189,10 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const physical = all('SELECT * FROM items WHERE characterId=? AND amount>0', [characterId]);
     const stats = jsonObject(step.row.statsJson);
-    const held = new Set(heldItemIds);
+    const crystalState = { stats };
+    const held = new Set([...heldItemIds, ...(stats.equipmentPlan?.materials || [])
+        .filter(row => invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(crystalState, row.selfId))
+        .map(row => Number(row.selfId))]);
     const reconciled = Life.reconcileEquipmentInventory({ characterId, level: Number(step.row.level), phase: 'cold', stats,
         inventory: Life.inventorySummaryFromItems(physical.filter(row => Number(row.equipped) || !held.has(Number(row.selfId)))) });
     const ids = new Set([Number(itemId)]);
@@ -2200,7 +2203,7 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
         if (equipped !== Number(row.equipped) || slot !== Number(row.slot)) {
             write('UPDATE items SET equipped=?,slot=? WHERE id=? AND characterId=?', [equipped, slot, row.id, characterId]);
             ids.add(Number(row.selfId));
-            if (Diagnostics.active()) stageNativeDiagnostic(characterId, step, 'native_equip', equipped ? 'equipped' : 'unequipped',
+            if (Diagnostics.active() && step.command) stageNativeDiagnostic(characterId, step, 'native_equip', equipped ? 'equipped' : 'unequipped',
                 { item: Number(row.selfId), nativeId: Number(row.id), actual: equipped });
         }
     }
@@ -7326,7 +7329,7 @@ const Database = {
                     || slot !== Number(template.etc?.slot || 0))) throw Error('npc_item_template_changed');
                 if (seller && step && slot > 0) {
                     const blocker = invoke('GameServer/Bot/Population/BotLifeState').marketPurchaseBlocker({
-                        stats: jsonObject(step.row.statsJson), inventory: jsonObject(step.row.inventorySummary)
+                        level: Number(step.row.level), stats: jsonObject(step.row.statsJson), inventory: jsonObject(step.row.inventorySummary)
                     }, { selfId: itemId }, count);
                     if (blocker) throw Error(blocker);
                 }
@@ -7729,7 +7732,7 @@ const Database = {
                     left -= amount;
                 }
             };
-            let result, changedIds = [], hennas;
+            let result, changedIds = [], hennas, equipmentPatch;
             const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
             if (proposal.kind === 'enchant') {
                 const Rules = invoke('GameServer/Items/C4EnchantRules');
@@ -7755,6 +7758,78 @@ const Database = {
                     changedIds.push(crystalId);
                 }
                 changedIds.push(item.selfId, proposal.scrollId);
+            } else if (proposal.kind === 'crystallize') {
+                const Crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
+                const character = one('SELECT * FROM characters WHERE id = ?', [characterId]);
+                const life = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
+                const Life = invoke('GameServer/Bot/Population/BotLifeState');
+                const physical = all('SELECT * FROM items WHERE characterId = ? AND amount > 0 ORDER BY id', [characterId]);
+                const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
+                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    inventory: Life.inventorySummaryFromItems(physical) };
+                const protectedInventory = jsonObject(life?.inventorySummary);
+                for (const id of Object.keys(source.inventory))
+                    source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
+                const town = invoke('GameServer/World/TownRespawn').getClosestTown(character?.locX, character?.locY, character?.locZ);
+                if (!invoke('GameServer/Bot/AI/PersonalGearProgression').personal(source)
+                    || Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
+                    || Math.hypot(Number(character.locX) - town.locX, Number(character.locY) - town.locY) > 7500)
+                    throw Error('invalid_bot_crystallization');
+                const inputs = proposal.items || [{ selfId: proposal.sourceSelfId, amount: proposal.amount || 1 }];
+                if (!Array.isArray(inputs) || !inputs.length || inputs.length > Crystals.BATCH_LIMIT)
+                    throw Error('improvement_source_changed');
+                const claimed = new Set(), selected = []; let total = 0;
+                for (const input of inputs) {
+                    const id = Number(input.selfId), count = Number(input.amount), template = invoke('GameServer/DataCache').items.find(row => row.selfId === id);
+                    if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !Crystals.reward(template)
+                        || Crystals.free(source, id) < count || selected.length + count > Crystals.BATCH_LIMIT)
+                        throw Error('improvement_source_changed');
+                    claimed.add(id);
+                    const rows = physical.filter(row => row.selfId === id && !row.equipped && row.amount === 1).slice(0, count);
+                    if (rows.length !== count) throw Error('improvement_source_changed');
+                    for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant).net; }
+                }
+                const target = one('SELECT id,amount FROM items WHERE characterId=? AND selfId=1458 ORDER BY id LIMIT 1', [characterId]);
+                const amount = Number(target?.amount || 0) + total;
+                if (!Number.isSafeInteger(amount) || amount > 2147483647) throw Error('crystal stack is full');
+                for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
+                if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
+                else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(1458,?,?,0,0,?)',
+                    [invoke('GameServer/DataCache').items.find(row => row.selfId === 1458).template.name, amount, characterId]);
+                changedIds.push(...claimed, 1458); result = 'crystallize';
+            } else if (proposal.kind === 'luxury_exchange') {
+                const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
+                const recipe = Luxury.resolve(proposal);
+                const character = one('SELECT * FROM characters WHERE id = ?', [characterId]);
+                const life = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
+                const Life = invoke('GameServer/Bot/Population/BotLifeState');
+                const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
+                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    inventory: Life.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ? ORDER BY id', [characterId])) };
+                const protectedInventory = jsonObject(life?.inventorySummary);
+                for (const id of Object.keys(source.inventory))
+                    source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
+                const town = invoke('GameServer/World/TownRespawn').getClosestTown(character?.locX, character?.locY, character?.locZ);
+                if (!Luxury.eligible(source, recipe) || town?.name !== 'Giran'
+                    || Math.hypot(Number(character.locX) - town.locX, Number(character.locY) - town.locY) > 7500)
+                    throw Error('invalid_bot_luxury_exchange');
+                const blocker = Life.marketPurchaseBlocker(source, { selfId: recipe.itemId }, recipe.amount);
+                if (blocker) throw Error(blocker);
+                for (const cost of recipe.materials) {
+                    const held = source.inventory[cost.selfId] || {};
+                    if (held.protected || held.acceptedCustomer || held.assignedClan || held.available === false
+                        || Number(held.amount || 0) - Math.max(Number(held.protectedAmount || 0),
+                            Number(held.reservedAmount || 0), Number(source.stats.clanMaterialDemand?.[cost.selfId] || 0)) < cost.amount)
+                        throw Error('improvement_missing_materials');
+                    consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
+                }
+                const product = invoke('GameServer/DataCache').items.find(row => row.selfId === recipe.itemId);
+                for (let count = 0; count < recipe.amount; count++) mutate(
+                    'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
+                    [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
+                changedIds.push(recipe.itemId); result = 'luxury_exchange';
+                const equipped = state && equipColdPurchaseUnsafe(characterId, { row: life }, recipe.itemId, true);
+                if (equipped) { changedIds.push(...equipped.ids); equipmentPatch = equipped.patch; }
             } else if (proposal.kind === 'sa') {
                 const SA = invoke('GameServer/Items/C4WeaponSAExchange');
                 const recipe = SA.resolve(proposal.npcId, proposal.recipeId);
@@ -7800,6 +7875,7 @@ const Database = {
             if (state) {
                 const current = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]);
                 const stats = jsonObject(current.statsJson);
+                Object.assign(stats, equipmentPatch);
                 stats.lastImprovement = { kind: proposal.kind, result, at: now(), objectId: proposal.objectId || null };
                 if (hennas) stats.hennas = hennas;
                 if (result === 'crystal_quest') stats.soulCrystalQuest = true;

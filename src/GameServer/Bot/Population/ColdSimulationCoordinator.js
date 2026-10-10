@@ -1028,6 +1028,7 @@ class ColdSimulationCoordinator {
         const eligibleActivity = state.activity === 'hunting'
             || (partyRoute && state.activity === 'grouped');
         if (!eligibleActivity) return null;
+        if (!partyRoute && invoke('GameServer/Bot/Economy/BotCrystallization').ready(state)) return null;
         if (partyRoute && partyMembers.some((member) => ['resting', 'traveling', 'dead'].includes(member.activity))) return null;
 
         let physical = null;

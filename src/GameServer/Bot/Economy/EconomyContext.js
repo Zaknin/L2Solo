@@ -664,8 +664,9 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
 // What a review's stock reader, usefulness, worth and purchase budget read:
 // one copy for the build and every later view of its plan.
 function stockReader(state, rootItem) {
+    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state);
     return (id, rootKey) => ({ owned: rootKey.startsWith('stock:') && rootItem(rootKey) === id
-        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}),
+        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}, reserved),
     incoming: positive(state.acceptedIncoming?.[id]) });
 }
 function valueReaders(state, network, values, persona, knowledgeEnabled, kitCost, money) {

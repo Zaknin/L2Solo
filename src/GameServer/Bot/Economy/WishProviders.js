@@ -36,7 +36,7 @@ const GEAR_RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 const GEAR_ROOTS = 4;
 const GEAR_ROUNDS = 4;
 const SOLVER_LIMITS = new Set(['missing_wish_requirement', 'cyclic_wish_network', 'invalid_wish_node', 'wish_network_depth']);
-function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisitionAllowed = null, progression = null) {
+function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisitionAllowed = null, progression = null, exchanges = null) {
     const Data = invoke('GameServer/DataCache');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const revision = Sources.revision();
@@ -85,7 +85,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
         const owned = current && Data.items && need('../../Item/ItemTemplateIndex').find(Data.items, current.selfId);
         const before = owned ? Planner.itemScore(owned, role, classId) : 0;
         const efficientByRank = new Map();
-        let affordable = null, above = null, retained = null;
+        let affordable = null, above = null, retained = null, exchangeEfficient = null, exchangeStrong = null;
         const cheaper = (a, b) => !b || a.price < b.price || a.price === b.price && a.item.selfId < b.item.selfId;
         const better = (a, b) => !b || a.ratio > b.ratio || a.ratio === b.ratio && cheaper(a, b);
         for (const at of allowed) {
@@ -100,6 +100,10 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
             // A proxy can nominate a same-score SA/set alternative, but cannot
             // declare its true build benefit; gearGain does that below.
             if (score < before) continue;
+            if (exchanges?.has(Number(item.selfId))) {
+                if (better(row, exchangeEfficient)) exchangeEfficient = row;
+                if (!exchangeStrong || score > exchangeStrong.score || score === exchangeStrong.score && cheaper(row, exchangeStrong)) exchangeStrong = row;
+            }
             const rank = String(item.etc?.rank || 'none');
             if (better(row, efficientByRank.get(rank))) efficientByRank.set(rank, row);
             if (price <= budget && (!affordable || score > affordable.score
@@ -110,7 +114,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
         // A price-efficient representative of every usable rank keeps intermediate
         // purchases in the comparison, even when the wallet covers a higher one.
         // Rank nominates alternatives, never a required next purchase.
-        for (const row of [retained, ...efficientByRank.values(), affordable, above]) if (row) selected.set(Number(row.item.selfId), row.item);
+        for (const row of [retained, ...efficientByRank.values(), affordable, above, exchangeEfficient, exchangeStrong]) if (row) selected.set(Number(row.item.selfId), row.item);
         result.set(slot, [...selected.values()].slice(0, GEAR_FINALISTS_PER_SLOT));
     }
     return result;
@@ -315,6 +319,10 @@ function buildProjection(state, ctx, deps) {
     const price = id => ctx.price(id);
     const horizon = stageHours(state, ctx.hunt.expPerHour, ctx.persona);
     const progression = Progression.assess(state);
+    const preparation = Progression.preparation(state, progression);
+    const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
+    const luxury = Progression.personal(state) && state.level < 52 && (state.level >= 40 || preparation)
+        ? need('./BotLuxuryExchange').recipes() : null;
     const powerWeight = (ctx.persona.primaryDrive === 'progression' ? 1 : 0.5) + trait(ctx.persona, 'caution');
     const statusWeight = trait(ctx.persona, 'ambition') * (1 + Number(ctx.persona.primaryDrive === 'wealth'));
     const sourceIndex = deps.spots?.length ? Planner.sourceIndexFor(deps.spots) : null;
@@ -389,7 +397,7 @@ function buildProjection(state, ctx, deps) {
         if (!Sources.allowsRecipe(recipe)) return null;
         const dual = recipe?.kind === 'dual_sword_combine';
         const ownCapable = recipe && (dual || invoke('GameServer/Bot/Economy/CraftShopService').canCraft(state, recipe));
-        if (!ownCapable && state.level < 40 && Progression.personal(state)) return null;
+        if (!ownCapable && state.level < 40 && Progression.personal(state) && !preparation) return null;
         const own = ownCapable ? Profit.craftFacts(recipe, { batches: 1, ...craftLabour() }) : null;
         let workshop = !ownOnly && recipe && deps.workshops ? knownWorkshop(recipe, state, ctx, deps) : null;
         if (workshop && own?.status === 'ready' && knownRecipes.has(Number(recipe.recipeId))
@@ -473,6 +481,31 @@ function buildProjection(state, ctx, deps) {
             .find(row => Number(row.productId) === Number(id));
         const craft = craftPath(recipe, id, depth);
         if (craft) paths.push(craft);
+        const exchange = luxury?.get(Number(id));
+        if (exchange) {
+            const requirements = exchange.materials.map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
+            const trip = ctx.trip?.details?.('Giran');
+            if (requirements.every(row => row.key) && trip?.known) paths.push({ kind: 'luxury_exchange',
+                activity: 'improving', itemId: Number(id), costHours: 1 / 3600,
+                town: 'Giran', quoted: true, tripHours: trip.hours, tripFees: trip.fees,
+                improvement: { kind: 'luxury_exchange', ...exchange }, grossRequirements: requirements });
+        }
+        if (luxury && Number(id) === 1458) {
+            const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
+            for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
+                const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
+                    .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
+                if (requirements.some(row => !row.key)) continue;
+                paths.push({ kind: 'crystallize', activity: 'improving', itemId: 1458,
+                    productCount: choice.net, batchLimit: choice.batchLimit,
+                    availableUnits: choice.net * choice.batchLimit,
+                    costHours: 1 / 3600, town: 'Giran', quoted: true,
+                    tripHours: trip.hours, tripFees: trip.fees,
+                    improvement: { kind: 'crystallize', npcId: Crystals.npcId,
+                        ...(choice.inputs ? { items: choice.inputs } : { sourceSelfId: choice.selfId }) },
+                    grossRequirements: requirements });
+            }
+        }
         // Held units are worth what the bot gets selling them now (Q1 A);
         // only an item the bot holds needs that value.
         let exitValue;
@@ -482,7 +515,7 @@ function buildProjection(state, ctx, deps) {
             do step = steps.next(); while (!step.done);
             exitValue = step.value;
         }
-        const node = { key, object: Number(id), price: price(id), ...(exitValue === undefined ? {} : { exitValue }), paths: paths.length <= 3 ? paths : [...paths.slice(0, 2), paths.find(path => path.kind === 'craft') || paths[2]] };
+        const node = { key, object: Number(id), price: price(id), ...(exitValue === undefined ? {} : { exitValue }), paths: paths.slice(0, 4) };
         descriptors.set(key, node);
         if (scratch && readScope) builtBy.set(key, readScope);
         add(node);
@@ -648,24 +681,31 @@ function buildProjection(state, ctx, deps) {
             positive(values.get(material.selfId)) + improvement.valueHours / Math.max(1, material.amount));
     }
     const candidates = [];
-    const wornFor = wornReader(state), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
+    const planningState = preparation || state;
+    const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
+    let futureGain;
     const acquisitionAllowed = id => Sources.hasNonRaidSource(id)
         || positive(state.inventory?.[id]?.amount) > 0 || !!observedPurchase(id);
-    for (const [slot, items] of gearCandidates(state, ctx, wornFor, acquisitionAllowed, progression)) for (const item of items) {
-        if (!Planner.considerable(item, state)) continue;
+    for (const [slot, items] of gearCandidates(planningState, ctx, wornFor, acquisitionAllowed, progression, luxury)) for (const item of items) {
+        if (!Planner.considerable(item, planningState)) continue;
         const current = replacementWorn(wornFor, slot);
         if (Number(current?.selfId) === Number(item.selfId)) continue;
-        const gain = gainFor(item, slot);
+        const early = !!preparation && item.etc?.rank === 'c';
+        const gain = early ? (futureGain ||= gearGainReader(preparation, timestamp,
+            Profile.buildGainsFor(preparation, timestamp), magic, ctx.gearThreatMask ?? 3))(item, slot) : gainFor(item, slot);
+        const benefitHorizon = early ? futureHorizon : horizon;
         const currentPrice = current ? price(current.selfId) : 0;
         const market = invoke('GameServer/Bot/Economy/MarketCounters');
         const future = resale(price(item.selfId), { trend: market.moveOf(market.counterOf(item.selfId), ctx.timestamp),
-            hours: horizon, understanding: ctx.persona.understanding, assertiveness: trait(ctx.persona, 'assertiveness'),
+            hours: benefitHorizon, understanding: ctx.persona.understanding, assertiveness: trait(ctx.persona, 'assertiveness'),
             caution: trait(ctx.persona, 'caution'), nextBuyerUse: price(item.selfId) * Math.min(1, gain.attack + gain.defence),
             npcFloor: ctx.buyback(item.selfId) });
-        const value = Math.max(Progression.priority(item, slot, progression) ? 1 : 0, (gain.attack + gain.defence * ctx.deathHours) * horizon
+        const value = Math.max(Progression.priority(item, slot, progression) ? 1 : 0, (gain.attack + gain.defence * ctx.deathHours) * benefitHorizon
             + (ctx.hunt.perHour > 0 ? (future - currentPrice) / ctx.hunt.perHour : 0));
         if (!(value > 0) || !(price(item.selfId) > 0)) continue;
-        candidates.push({ item, slot, value, gain, progressionPriority: Progression.priority(item, slot, progression) });
+        candidates.push({ item, slot, value, gain, notBeforeHours: early ? horizon : 0,
+            horizonHours: early ? horizon + futureHorizon : horizon,
+            progressionPriority: Progression.priority(item, slot, progression) });
     }
     // MVP-6: every nominated candidate is valued by the same path solver
     // the network uses, over its own scratch arena of item descriptors. A
@@ -690,7 +730,10 @@ function buildProjection(state, ctx, deps) {
                 object: { itemId: Number(candidate.item.selfId), slot: candidate.slot }, price: price(candidate.item.selfId),
                 valueHours: Math.max(candidate.progressionPriority ? 1 : 0, candidate.value * powerWeight + (candidate === rare ? rare.value * statusWeight : 0)),
                 progressionPriority: candidate.progressionPriority,
-                ...(candidate.progressionPriority ? {} : { benefitPerHour }), horizonHours: candidate.progressionPriority ? Infinity : horizon,
+                ...(luxury ? { personalAcquisition: true } : {}),
+                ...(candidate.progressionPriority ? {} : { benefitPerHour }),
+                notBeforeHours: candidate.notBeforeHours,
+                horizonHours: candidate.progressionPriority ? Infinity : candidate.horizonHours,
                 paths: [{ requirements: [{ key, amount: 1 }] }] } });
         admission.maxScratch = Math.max(admission.maxScratch, keys.length);
     }
@@ -734,7 +777,9 @@ function buildProjection(state, ctx, deps) {
             const fundable = Number(Network.fundable(row.wish)), heldFundable = held ? Number(Network.fundable(held.wish)) : -1;
             if (!held || fundable > heldFundable || fundable === heldFundable && before(row, held)) best.set(row.family, row);
         }
-        return [...best.values()].sort((a, b) => before(a, b) ? -1 : before(b, a) ? 1 : 0);
+        return [...best.values()].sort((a, b) => b.node.progressionPriority - a.node.progressionPriority
+            || (luxury ? Number(Network.fundable(b.wish)) - Number(Network.fundable(a.wish)) : 0)
+            || (before(a, b) ? -1 : before(b, a) ? 1 : 0));
     };
     // Family winners enter one at a time by score while the union of their
     // descriptors stays within forty; a winner that does not fit is pending
@@ -996,15 +1041,22 @@ function knownWorkshop(recipe, state, ctx, deps) {
 // owner. This runs in the worker on the already built graph, not a second plan.
 function personalCraftPlan(state, context) {
     const leaf = context?.network?.activity;
-    if (!leaf || !leaf.rootKey || !['crafting', 'shopping', 'hunting'].includes(leaf.activity)) return null;
-    const wish = context.network.queue.find(row => row.key === leaf.rootKey);
-    const targetId = Number(wish?.object?.itemId);
+    if (!leaf || !leaf.rootKey || !['crafting', 'shopping', 'hunting', 'improving'].includes(leaf.activity)) return null;
+    const wish = context.network.queue.find(row => row.key === leaf.rootKey)
+        || { object: context.projection?.nodes?.find(row => row.key === leaf.rootKey)?.object,
+            plan: context.network.plans.get(leaf.rootKey) };
+    const targetId = Number(wish?.object?.itemId || leaf.rootKey.split(':')[1]);
     if (!targetId || !leaf.rootKey.startsWith('power:')) return null;
-    const providers = {}, components = {}, visited = new Set();
-    let finalRecipe = null;
+    const providers = {}, components = {}, visited = new Set(), crystalInputs = new Map();
+    let finalRecipe = null, exchange = leaf.kind === 'luxury_exchange' ? leaf.improvement : null;
     const visit = (plan, depth = 0) => {
         if (!plan || depth > 8 || visited.has(plan)) return;
         visited.add(plan);
+        if (plan.kind === 'luxury_exchange' && Number(plan.improvement?.itemId) === targetId)
+            exchange = plan.improvement;
+        if (plan.kind === 'crystallize') for (const input of plan.improvement.items
+            || [{ selfId: plan.improvement.sourceSelfId, amount: Number(plan.batches || 1) }])
+            crystalInputs.set(Number(input.selfId), Math.min(need('./BotCrystallization').BATCH_LIMIT, Number(input.amount)));
         if (plan.kind === 'craft' && plan.workshop) {
             const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(plan.recipeId);
             if (!recipe) return;
@@ -1016,7 +1068,14 @@ function personalCraftPlan(state, context) {
         }
         for (const row of plan.requirements || []) visit(row.plan || context.network.plans.get(row.key), depth + 1);
     };
-    visit(wish?.plan);
+    visit(wish?.plan || context.network.plans.get(`item:${targetId}`));
+    if (exchange) return { strategy: 'luxury_exchange', status: 'active',
+        target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) }, exchange,
+        materials: [...exchange.materials.map(row => ({ ...row })),
+            ...[...crystalInputs].map(([selfId, amount]) => ({ selfId, amount }))],
+        ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
+            selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
+        valueRate: Number(wish.ratio || 0), source: 'wish_network' };
     if (!finalRecipe) return null;
     return { strategy: 'craft', status: 'active',
         target: { selfId: targetId },

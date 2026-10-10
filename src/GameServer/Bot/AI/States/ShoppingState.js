@@ -105,7 +105,8 @@ function clearCompletedMarketPlan(session, bot, purchase) {
     const componentPurchase = combineResultId > 0
         && Number(equipmentPlan?.target?.selfId || 0) !== combineResultId;
     const stats = { ...(state.stats || {}) };
-    if (!componentPurchase) delete stats.equipmentPlan;
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, purchase.selfId);
+    if (!componentPurchase && !crystalInput) delete stats.equipmentPlan;
     session.coldLifeState = {
         ...state,
         adena: Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || state.adena || 0),

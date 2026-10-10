@@ -81,12 +81,13 @@ function fundingDelay({ requiredCash = 0, spendableCash = 0, incomePerHour = 0 }
 }
 // A benefit earned per hour over the horizon H starts only when the goal is
 // ready: the part lost to the delay is benefitPerHour x min(H, delay).
-function readyBenefit({ valueHours = 0, benefitPerHour = 0, horizonHours = Infinity, delayHours = 0 } = {}) {
+function readyBenefit({ valueHours = 0, benefitPerHour = 0, horizonHours = Infinity, delayHours = 0, notBeforeHours = 0 } = {}) {
     const delay = Number(delayHours);
     if (delayHours === null || !Number.isFinite(delay) || delay < 0) return null;
     const horizon = Number(horizonHours);
     return Math.max(0, positive(valueHours) - positive(benefitPerHour)
-        * Math.min(Number.isFinite(horizon) && horizon >= 0 ? horizon : Infinity, delay));
+        * Math.max(0, Math.min(Number.isFinite(horizon) && horizon >= 0 ? horizon : Infinity, delay)
+            - positive(notBeforeHours)));
 }
 
 function riskWeight(state, persona) {

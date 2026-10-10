@@ -23,8 +23,8 @@ function assess(state = {}) {
     const Compatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
-    if (level >= 40) return { required: false, gaps: new Map() };
-    const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : 20 });
+    if (level >= 52 || level >= 40 && !personal(state)) return { required: false, gaps: new Map() };
+    const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : level < 40 ? 20 : 40 });
     const starters = new Set((Data.newbieItems || []).flatMap(row => row.items || [])
         .filter(row => row.equipped).map(row => Number(row.selfId)));
     const equipped = new Map();
@@ -35,7 +35,7 @@ function assess(state = {}) {
     }
     const weapon = equipped.get(7) || equipped.get(14);
     const twoHanded = !!equipped.get(14);
-    const rank = level >= 20 ? 1 : 0;
+    const rank = level >= 40 ? 2 : level >= 20 ? 1 : 0;
     const gaps = new Map();
     for (const entry of baseline.items) {
         const slot = Number(entry.slot);
@@ -73,4 +73,30 @@ function priority(item, slot, assessment) {
     return gap.priority;
 }
 
-module.exports = { personal, assess, priority };
+// Preparation changes the acquisition ceiling, never the wear/expertise rule.
+// The future bag is short lived and uses the same class, paired-slot and armor
+// selection as a physical inventory reconciliation at level 40.
+function preparation(state, assessment = assess(state)) {
+    if (!personal(state) || state.level < 20 || state.level >= 40 || assessment.required) return null;
+    return futureState(state);
+}
+function futureState(state) {
+    const exp = Number(invoke('GameServer/DataCache').experience[39]);
+    const next = { ...state, level: 40, exp, stats: { ...state.stats, exp } };
+    next.inventory = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').equipInventoryUpgrades(next, state.inventory);
+    return next;
+}
+function preparedAmounts(state) {
+    if (!personal(state) || state.level < 20 || state.level >= 40) return {};
+    const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
+    if (!Object.values(state.inventory || {}).some(row => Number(row.amount) > 0
+        && Index.find(Data.items, row.selfId)?.etc?.rank === 'c')) return {};
+    const reserved = {};
+    for (const row of Object.values(futureState(state).inventory)) {
+        if (Index.find(Data.items, row.selfId)?.etc?.rank === 'c' && row.equippedCount > 0)
+            reserved[row.selfId] = Number(row.equippedCount);
+    }
+    return reserved;
+}
+
+module.exports = { personal, assess, priority, preparation, preparedAmounts };

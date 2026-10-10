@@ -136,7 +136,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
     const byKey = new Map();
     for (const node of nodes) {
         if (typeof node?.key !== 'string' || !node.key || byKey.has(node.key)
-            || (node.need && !NEEDS.includes(node.need)) || (node.paths?.length || 0) > 3) {
+            || (node.need && !NEEDS.includes(node.need)) || (node.paths?.length || 0) > 4) {
             throw new TypeError('invalid_wish_node');
         }
         byKey.set(node.key, node);
@@ -248,7 +248,8 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 if (diagnostic) Diagnostics.count('network', 'path_refused', 'unknown_outcome');
                 continue;
             }
-            const units = allocation && path.kind === 'craft' ? Math.ceil(amount / Number(path.productCount || 1)) : allocation ? amount : 1;
+            const units = allocation && ['craft', 'crystallize'].includes(path.kind)
+                ? Math.min(Number(path.batchLimit || Infinity), Math.ceil(amount / Number(path.productCount || 1))) : allocation ? amount : 1;
             if (!Number.isSafeInteger(units) || units <= 0) continue;
             const local = allocation ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
             let price = nonnegative(path.price) * units, effort = (allocation ? priceOf({ ...path, ownInputOpportunityValue: 0 }) : priceOf(path)) * units,
@@ -373,7 +374,8 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         if (plan && nonnegative(node.benefitPerHour) > 0) {
             const delay = Valuation.fundingDelay({ requiredCash: wish.price, spendableCash: spendable, incomePerHour: hourAdena });
             const ready = Valuation.readyBenefit({ valueHours: base, benefitPerHour: node.benefitPerHour,
-                horizonHours: node.horizonHours, delayHours: delay === null ? null : delay + nonnegative(plan.hours) });
+                horizonHours: node.horizonHours, notBeforeHours: node.notBeforeHours,
+                delayHours: delay === null ? null : delay + nonnegative(plan.hours) });
             if (ready === null) wish.resolved = false;
             else { wish.readyHours = delay + nonnegative(plan.hours); wish.valueHours = ready * Number(plan.successProbability ?? 1); return; }
         }
@@ -562,11 +564,13 @@ class WishNetwork {
             const node = byKey.get(key);
             if (!(amount > 0) || stockFor && plan.missingAmount === 0) return;
             demands.set(key, (demands.get(key) || 0) + value / amount);
-            const ready = plan.kind !== 'craft' || !plan.awaitingIncoming && !plan.requirements.length;
+            const ready = !['craft', 'luxury_exchange', 'crystallize'].includes(plan.kind)
+                || !plan.awaitingIncoming && !plan.requirements.length;
             const acquired = Math.min(amount, Number(plan.availableUnits ?? Infinity));
             if (plan.activity && plan.executable && ready && acquired > 0) {
                 const leafKey = `${rootKey}:${key}:${plan.activity}`;
                 const leaf = leaves.get(leafKey) || { ...plan, key: leafKey, nodeKey: key, rootKey, activity: plan.activity,
+                    ...(plan.kind === 'crystallize' ? { improvement: { ...plan.improvement, amount: plan.batches || 1 } } : {}),
                     object: node.object, amount: acquired,
                     price: stockFor ? plan.price * acquired / amount : plan.basePrice * acquired + tripValue(plan.tripEntries, 'fees'),
                     effort: stockFor ? plan.effort * acquired / amount : plan.baseEffort * acquired + tripEffort(plan.tripEntries), valueHours: 0 };
@@ -583,6 +587,9 @@ class WishNetwork {
         const unfunded = gap;
         if (unfunded) for (const path of moneyPaths.slice(0, 3)) {
             const shortfall = Math.max(0, unfunded.price - available);
+            // A missing seller is not a cash deficit. With its price already
+            // covered, earning more cannot advance this acquisition.
+            if (!shortfall && byKey.get(unfunded.key)?.personalAcquisition) continue;
             const key = `money:${unfunded.key}:${path.activity}:${path.object || ''}`;
             // A bag can pay part of this gap once. It does not establish an
             // hourly income or promise the entire purchase after more time.

@@ -392,6 +392,11 @@ function reservedEquipmentAmounts(state) {
     const craft = reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
     const upgrades = reservedUpgradeAmounts(state);
+    const exchange = state.stats?.equipmentPlan;
+    if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
+        for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
+    for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const book of invoke('GameServer/Skills/SkillBookCatalog').requiredBooks(state)) {
         upgrades[book.selfId] = Math.max(Number(upgrades[book.selfId] || 0), 1);
     }
@@ -421,7 +426,8 @@ function reservationInputKey(state = {}) {
             state.inventory?.[row.selfId]?.amount == null ? Number(row.owned || 0) : null]);
     const combine = plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)
         ? quantities(plan.combine.requirements) : null;
-    return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine]);
+    return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
+        plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null]);
 }
 
 function actorItemValue(item, property, method) {

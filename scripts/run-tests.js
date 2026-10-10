@@ -67,6 +67,8 @@ const tests = [
     'tests/test_bot_armor_policy.js',
     'tests/test_bot_hunt_efficiency.js',
     'tests/test_personal_gear_progression.js',
+    'tests/test_c_grade_preparation.js',
+    'tests/test_c_grade_purchase.js',
     'tests/test_party_income_comparison.js',
     'tests/test_spot_value_table.js',
     'tests/test_spot_income_band_cache.js',

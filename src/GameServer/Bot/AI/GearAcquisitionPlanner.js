@@ -650,9 +650,11 @@ function preferredTarget(state = {}, options = {}) {
     const recipesByProduct = new Map(recipes.filter(recipe => Sources.allowsRecipe(recipe)).map((recipe) => [Number(recipe.productId), recipe]));
     const excluded = excludedTargetIds(options);
     const excludedMaterials = new Set((options.excludedMaterialIds || []).map(Number));
+    const acquisitionState = options.wishTargetId
+        ? invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state : state;
     const allCandidates = (options.wishTargetId ? [catalogItem(options.wishTargetId)].filter(Boolean) : DataCache.items || [])
         .filter(item => Sources.hasSource(item.selfId))
-        .filter((item) => options.wishTargetId ? considerable(item, state, role)
+        .filter((item) => options.wishTargetId ? considerable(item, acquisitionState, role)
             : suitable(item, state, role, recipeRank || gradeForLevel(state.level)))
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter(item => !options.wishTargetId || Number(item.selfId) === Number(options.wishTargetId))
@@ -1129,7 +1131,8 @@ function marketPlanForTarget(state = {}, targetId, options = {}) {
     const target = ItemTemplateIndex.find(DataCache.items, targetId);
     const role = roleFor(state);
     const ownedItems = inventoryItems(state.inventory);
-    if (!target || !considerable(target, state, role)) return null;
+    const acquisitionState = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state;
+    if (!target || !considerable(target, acquisitionState, role)) return null;
     if (!isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
     const offer = marketOfferForTarget(target, state, options);
     return offer ? marketPlan(state, target, offer, { buyOrderEscrow: options.buyOrderEscrow }) : null;
@@ -1548,7 +1551,8 @@ function levelingRecoveryFor(state = {}, plan = state.stats?.equipmentPlan, time
     const death = state.stats?.deathExperience;
     // Old plans may already have been restamped at the reduced level while
     // retaining a target from the old grade. Recover those persisted routes too.
-    const gradeRegression = rankIndex(plan.grade) > rankIndex(gradeForLevel(level))
+    const acquisitionLevel = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state)?.level || level;
+    const gradeRegression = rankIndex(plan.grade) > rankIndex(gradeForLevel(acquisitionLevel))
         && Number(death?.expLost || 0) > 0
         && Number(death?.penaltyAppliedAt || 0) >= Number(plan.startedAt || 0);
     const pressure = SpotRiskPolicy.deathPressure(state, plan.next?.spotId);

@@ -89,11 +89,12 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), priority: () => 0, personal: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name.endsWith('BoardIndex')) return { SELL: 1 };
     if (name === './BotImprovementPolicy') return { isCaster: () => false };
+    if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === './WishPurchaseEvidence') return require('../src/GameServer/Bot/Economy/WishPurchaseEvidence');
     if (name === './WealthCraftDecision') return { freeAmount: (state, row) => Number(row.amount || 0) };
     throw Error(name);
@@ -296,8 +297,14 @@ console.log('PASS source evidence: native quote query, allowed NPC, unknown rout
 // benefit while waiting even when no earning gap remains in its saved packet.
 const NativeData = invoke('GameServer/DataCache'); NativeData.init();
 const NativeEconomy = invoke('GameServer/Bot/Economy/EconomyContext');
+const nativeKit = {};
+for (const row of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 1, level: 40 }).items) {
+    const equippedSlots = [...nativeKit[row.selfId]?.equippedSlots || [], row.slot];
+    nativeKit[row.selfId] = { ...row, amount: equippedSlots.length, equipped: true,
+        equippedCount: equippedSlots.length, equippedSlots };
+}
 const nativeState = { ...state, characterId: 90110, phase: 'cold', adena: 1e12,
-    inventory: { 57: { selfId: 57, amount: 1e12 } },
+    inventory: { ...nativeKit, 57: { selfId: 57, amount: 1e12 } },
     stats: { classId: 1, exp: NativeData.experience[39] + 1 },
     vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
 const nativeDeps = { board: new BoardIndex(), spots: [], npcOffersFor: () => [], tripCost: preparedTrip,

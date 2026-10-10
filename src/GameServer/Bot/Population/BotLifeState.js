@@ -429,10 +429,14 @@ function marketPurchaseBlocker(state = {}, offer = {}, qty = 1) {
     const combinationAmount = (state.stats?.equipmentPlan?.combine?.requirements || [])
         .filter((requirement) => Number(requirement.selfId) === selfId)
         .reduce((sum, requirement) => sum + Number(requirement.amount || 0), 0);
-    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount);
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+    const crystalWorn = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(state.inventory?.[String(selfId)] || {}, slot).length : 0;
+    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount, crystalInput + crystalWorn);
     const owned = Math.max(0, Number(state.inventory?.[String(selfId)]?.amount || 0));
     if (owned + count > capacity) return 'already_owned';
-    if (slot === 8 && hasEquippedTwoHandedWeapon(state)) return 'incompatible_loadout';
+    const loadout = template.etc?.rank === 'c' && Number(state.level) < 40
+        ? invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state : state;
+    if (!crystalInput && slot === 8 && hasEquippedTwoHandedWeapon(loadout)) return 'incompatible_loadout';
     return null;
 }
 
@@ -3333,15 +3337,17 @@ const BotLifeState = {
         const template = itemTemplate(selfId);
         if (!template) return Promise.resolve(null);
         const slot = Number(template.etc?.slot || 0);
+        const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+        const wearable = !crystalInput && GearAcquisitionPlanner.equipmentCandidate(template, state);
         const pairSlots = [1, 2].includes(slot) ? [1, 2] : [4, 5].includes(slot) ? [4, 5] : [];
-        if (slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
+        if (!crystalInput && slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
         if (marketPurchaseBlocker(state, offer, count)) return Promise.resolve(null);
         const inventory = Object.fromEntries(Object.entries(state.inventory || {}).map(([key, item]) => [key, {
             ...item,
             ...(Array.isArray(item?.equippedSlots) ? { equippedSlots: [...item.equippedSlots] } : {})
         }]));
-        let purchaseSlots = [];
-        if (pairSlots.length) {
+        let purchaseSlots = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot) : [];
+        if (wearable && pairSlots.length) {
             const requestedSlot = Number(offer?.equipSlot || 0);
             const existingSlots = GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot);
             const occupied = new Set(Object.values(inventory).flatMap((item) => GearAcquisitionPlanner.equippedSlotsFor(item, item.slot)));
@@ -3364,7 +3370,7 @@ const BotLifeState = {
                 };
             }));
             purchaseSlots = [...new Set([...existingSlots, ...purchaseSlots])].slice(0, pairSlots.length).sort((a, b) => a - b);
-        } else if (slot) {
+        } else if (wearable && slot) {
             Object.keys(inventory).forEach((key) => {
                 if (GearAcquisitionPlanner.equippedSlotsFor(inventory[key], inventory[key]?.slot).includes(slot)) {
                     inventory[key] = { ...inventory[key], equipped: false, equippedCount: 0, equippedSlots: [] };
@@ -3377,9 +3383,9 @@ const BotLifeState = {
             selfId,
             name: template.template?.name || offer.itemName || itemName(selfId),
             amount: Number(inventory[String(selfId)]?.amount || 0) + count,
-            equipped: pairSlots.length ? purchaseSlots.length > 0 : slot > 0,
-            equippedCount: pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0,
-            equippedSlots: pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [],
+            equipped: crystalInput ? purchaseSlots.length > 0 : wearable && (pairSlots.length ? purchaseSlots.length > 0 : slot > 0),
+            equippedCount: crystalInput ? purchaseSlots.length : wearable ? pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0 : 0,
+            equippedSlots: crystalInput ? purchaseSlots : wearable ? pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [] : [],
             stackable: slot === 0 || !!inventory[String(selfId)]?.stackable,
             slot,
             rank: template.etc?.rank || 'none',

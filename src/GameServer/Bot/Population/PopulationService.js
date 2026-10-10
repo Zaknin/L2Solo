@@ -3729,12 +3729,26 @@ const PopulationService = {
         }
 
         return LifeState.applyResolve(effectiveState, result, { ...options, ...(workerPlan?.statsPacket ? { statsPacket: workerPlan.statsPacket } : {}) })
-            .then((updatedState) => {
+            .then(async (updatedState) => {
             if (!updatedState) {
                 Config.developerDiagnostics && Metrics.recordSkippedResolve('cold_apply_failed');
                 return { ok: false, reason: 'apply_failed', state };
             }
             if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.hold(updatedState.characterId, workerPlan.economyDecision);
+
+            const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');
+            const acquisitionLeaf = ColdSimulationCoordinator.economyDecisions.activity(updatedState);
+            if (acquisitionLeaf?.activity === 'improving'
+                && ['crystallize', 'luxury_exchange'].includes(acquisitionLeaf.improvement?.kind)
+                && updatedState.currentRegion === 'Giran' && improvementService.inTown(updatedState)) {
+                const improved = await improvementService.reviewCold(updatedState);
+                if (improved.changed) {
+                    // Consumed inputs retire this card. Replan in town before
+                    // another purchase or the return to a hunting spot.
+                    ColdSimulationCoordinator.economyDecisions.release(updatedState.characterId);
+                    return { ok: true, state: improved.state, debug: result.debug };
+                }
+            }
 
             Config.developerDiagnostics && Metrics.recordBackgroundResolve();
             Config.developerDiagnostics && Metrics.recordCombat(result.debug);
@@ -3853,6 +3867,15 @@ const PopulationService = {
             checkWorkerCommandAdmission(state, options);
             if (!request.precomputedResult) {
                 return Promise.resolve({ ok: false, reason: 'worker_result_required', state });
+            }
+            const card = request.precomputedPlan?.economyDecision;
+            const acquisitionLeaf = card && invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(card).activity;
+            const acquisitionTravel = invoke('GameServer/Bot/Economy/BotImprovementService')
+                .acquisitionTravel(state, acquisitionLeaf);
+            if (acquisitionTravel) {
+                const saved = await LifeState.upsertState(acquisitionTravel, 'equipment_improvement_travel');
+                return { ok: !!saved, state: saved || state,
+                    reason: saved ? 'equipment_improvement_travel' : 'state_write_rejected' };
             }
             // Worker-owned recovery finishes before the main economy command.
             // Reconsider a funded weapon purchase before applying another fight,
