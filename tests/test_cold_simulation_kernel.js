@@ -97,6 +97,14 @@ function claimAck(kernel, payload) {
         probe.paused = true;
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:paused'), 1);
+        // A due bot inside a PvP encounter is requeued past it: the tick took due
+        // work but sent no claim, so it is not idle even though the head is not due.
+        const encounter = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
+        encounter.upsert({ state: state(93, { stats: { pvpEncounter: { expiresAt: at + 5000 } },
+            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        encounter.tick();
+        assert.strictEqual(added('worker_tick:empty:no_claim'), 1);
+        assert.strictEqual(added('worker_tick:empty:not_due'), 1, 'a requeued bot is not counted as an idle tick');
         const off = { ...counts() };
         PopulationConfig.developerDiagnostics = false;
         probe.paused = false;

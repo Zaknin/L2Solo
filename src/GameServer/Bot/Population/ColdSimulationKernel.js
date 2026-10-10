@@ -965,6 +965,7 @@ class ColdSimulationKernel {
 
     dueCandidates(timestamp = this.now(), capacity = this.maxBatch, decisionBudget = { remaining: 64 }) {
         this.partyCapacityBlocked = false;
+        this.duePicked = 0;
         const limit = Math.max(0, Math.min(this.maxBatch, Number(capacity) || 0));
         const candidates = [];
         let commandsSelected = 0;
@@ -975,9 +976,11 @@ class ColdSimulationKernel {
                 if (head.dueAt > timestamp) break;
                 if (head.alarmKind === 'decision') {
                     if (decisionBudget.remaining <= 0) break;
+                    DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
                     this.drainDecisionDeadlines(timestamp, decisionBudget);
                     continue;
                 }
+                DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
                 this.drainOperationalAlarms(timestamp);
                 continue;
             }
@@ -988,6 +991,7 @@ class ColdSimulationKernel {
             if (Number(head.dueAt || 0) > timestamp) break;
             const entry = head;
             this.heap.remove(entry);
+            DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
             this.consumeHeapEntry(entry);
             const id = Number(entry.characterId);
             // A catalog page may race an ACK and carry a newer revision while
@@ -1345,9 +1349,12 @@ class ColdSimulationKernel {
         });
     }
 
-    // Diagnostics only: why a scheduler tick sent no claim, and for a not-yet-due
-    // head how far away it is (how often a wake at the earliest due bot would fire).
+    // Diagnostics only: why a scheduler tick sent no claim. `no_claim`: the tick
+    // still took due work (a command, a busy or requeued bot, an alarm). For a
+    // not-yet-due head, how far away the next heap entry (bot or alarm) is: how
+    // often a wake at the earliest entry would fire instead of the 20 ms poll.
     countEmptyTick(timestamp) {
+        if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
         if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
         const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
         if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
