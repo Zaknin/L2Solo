@@ -71,6 +71,41 @@ function claimAck(kernel, payload) {
 }
 
 (async () => {
+    {
+        // Developer diagnostics: every scheduler tick is counted as claimed or
+        // as empty with its reason; a not-yet-due head records its distance.
+        const PopulationConfig = require('../src/GameServer/Bot/Population/PopulationConfig');
+        const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
+        const wasOn = PopulationConfig.developerDiagnostics;
+        PopulationConfig.developerDiagnostics = true;
+        const counts = () => Diagnostics.metrics().counts;
+        const before = { ...counts() };
+        const added = (key) => (counts()[key] || 0) - (before[key] || 0);
+        let at = 1000;
+        const probe = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:heap_empty'), 1);
+        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:not_due'), 1);
+        assert.strictEqual(added('worker_tick_gap:lt1s:unknown'), 1);
+        at = 2000;
+        probe.tick();
+        assert.strictEqual(added('worker_tick:claimed:unknown'), 1);
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:no_capacity'), 1);
+        probe.paused = true;
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:paused'), 1);
+        const off = { ...counts() };
+        PopulationConfig.developerDiagnostics = false;
+        probe.paused = false;
+        probe.tick();
+        PopulationConfig.developerDiagnostics = true;
+        assert.deepStrictEqual(counts(), off, 'no tick is counted with developer diagnostics off');
+        PopulationConfig.developerDiagnostics = wasOn;
+    }
+
     const valid = Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', { candidates: [] }), 'worker', { workerEpoch: 'epoch' });
     assert.strictEqual(valid.ok, true);
     assert.strictEqual(Protocol.validateEnvelope(null, 'worker').reason, 'invalid_envelope');

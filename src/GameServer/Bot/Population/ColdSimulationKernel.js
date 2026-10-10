@@ -10,6 +10,7 @@ const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
+const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const BotErrands = require('./BotErrands');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
@@ -1344,24 +1345,43 @@ class ColdSimulationKernel {
         });
     }
 
+    // Diagnostics only: why a scheduler tick sent no claim, and for a not-yet-due
+    // head how far away it is (how often a wake at the earliest due bot would fire).
+    countEmptyTick(timestamp) {
+        if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
+        const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
+        if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        EconomyDiagnostics.count('worker_tick', 'empty', 'not_due');
+        EconomyDiagnostics.count('worker_tick_gap', gap < 20 ? 'lt20ms' : gap < 100 ? 'lt100ms' : gap < 1000 ? 'lt1s' : 'ge1s');
+    }
+
     tick() {
         DiagnosticConfig.developerDiagnostics && (this.stats.loopRuns += 1);
         this.stats.lastLoopAt = this.now();
         const decisionBudget = { remaining: 64 };
         this.drainDecisionDeadlines(this.stats.lastLoopAt, decisionBudget);
         this.recoverStalled(this.stats.lastLoopAt);
-        if (this.paused || this.stopping) return;
+        if (this.paused || this.stopping) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'paused');
+            return;
+        }
         const capacity = this.maxInFlight - this.claiming.size - this.inFlight.size - this.commanding.size;
         if (capacity <= 0) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'no_capacity');
             // Completed work owns these slots until main acknowledges its
             // commit. Drain it on the scheduler tick instead of leaving a
             // full (especially player-sized) window idle until the flush timer.
             this.flushDue();
             return;
         }
-        const candidates = this.dueCandidates(this.now(), capacity, decisionBudget);
+        const timestamp = this.now();
+        const candidates = this.dueCandidates(timestamp, capacity, decisionBudget);
         if (this.partyCapacityBlocked) this.flushDue();
-        if (!candidates.length) return;
+        if (!candidates.length) {
+            DiagnosticConfig.developerDiagnostics && this.countEmptyTick(timestamp);
+            return;
+        }
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'claimed');
         DiagnosticConfig.developerDiagnostics && (this.stats.selected += candidates.length);
         const requestId = `claim:${this.nextClaimRequest++}`;
         for (const candidate of candidates) {
