@@ -119,8 +119,10 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
     if (!spot || spot.raidBoss || !members.length || members.length > 9) return { rows: new Map(), spots, timestamp, spot };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+    const Rewards = require('../Economy/SpotRewardExpectation');
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
     const key = rosterKey(members);
+    const spoilerIndex = members.findIndex(member => invoke('GameServer/Bot/AI/BotRoles').isSpoiler(member));
     const level = Math.max(...members.map(member => positive(member.level)));
     const Offer = invoke('GameServer/Bot/Economy/ColdBuffOffer');
     const providers = members.filter(member => invoke('GameServer/Bot/Economy/BuffServicePolicy').serviceClass(member)).slice(0, 1);
@@ -133,7 +135,8 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
         return member;
     });
     const values = members.map((member, index) => {
-        const row = Table.value(spot.id, tableRole(member), member.level, true);
+        const row = Table.value(spot.id, tableRole(member), member.level, true,
+            { spoilSkillLevel: Rewards.spoilSkillLevel(member) });
         if (!row || buffed[index] === member) return row;
         const damage = Match.damageRate(Match.stateProfiles(member, { timestamp }));
         const gain = damage > 0 ? Match.damageRate(Match.stateProfiles(buffed[index], { timestamp })) / damage : 1;
@@ -159,11 +162,14 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
         if (!safe || !gross?.kills || !row?.kills || !kills) continue;
         const costs = Hunt.consumablePrices(member);
         const share = row.kills / totalKills;
-        const drop = gross.loot / gross.kills;
+        const expected = Rewards.value(spot, level, { spoilSkillLevel: index === spoilerIndex ? Rewards.spoilSkillLevel(member) : 0,
+            spoilerLevel: member.level });
+        const drop = expected ? expected.drop : (gross.dropLoot ?? gross.loot) / gross.kills;
         // Spoil stays with its spoiler under the native party agreement.
-        const raw = Table.value(spot.id, tableRole(member), member.level, true);
-        const spoil = tableRole(member) === 'spoiler' ? Math.max(0, raw.loot / raw.kills - drop) : 0;
-        const income = kills * (gross.adena / gross.kills / members.length + drop / members.length + spoil
+        const raw = Table.value(spot.id, tableRole(member), member.level, true,
+            { spoilSkillLevel: Rewards.spoilSkillLevel(member) });
+        const spoil = expected?.spoil || 0;
+        const income = kills * ((expected?.adena ?? gross.adena / gross.kills) / members.length + drop / members.length + spoil
             - share * (raw.shots * costs.shots + raw.potions * costs.potions) / raw.kills);
         rows.set(member.characterId, { income: income * Hunt.onSpotShare(member), kills, spotId,
             source: 'table_party', travelHours: walkHours(member, spot) });

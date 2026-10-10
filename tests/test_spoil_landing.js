@@ -32,6 +32,9 @@ SPOIL_MAGIC_LEVELS.forEach((magicLevel, index) => {
     for (const [gap, percent] of C4_TABLE) {
         assert.strictEqual(landingPercent(254, index + 1, magicLevel + gap), percent,
             `Spoil ${index + 1} (magic level ${magicLevel}) at gap ${gap} must land ${percent}%`);
+        assert(Math.abs(Formulas.spoilSuccessChance({ skillId: 254, skillLevel: index + 1,
+            attackerLevel: 80, targetLevel: magicLevel + gap }) * 100 - percent) < 1e-10,
+            'analytical landing must match all 10000 native random-roll steps');
     }
 });
 [28, 36, 43, 49, 55, 62, 66, 70, 74].forEach((magicLevel, index) => {

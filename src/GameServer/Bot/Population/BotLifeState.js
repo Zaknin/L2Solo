@@ -1666,7 +1666,10 @@ const BotLifeState = {
                         locZ: row.locZ
                     }))
                     .then(() => {
-                        cache.set(state.characterId, state);
+                        // Publish the saved checkpoint, including its new
+                        // updatedAt. The pre-save state makes every native
+                        // worker command stale against the repaired SQL row.
+                        cache.set(state.characterId, normalize(row));
                     });
             }), Promise.resolve())
                 .then(() => reconcilePersistedLoadouts())
@@ -3745,6 +3748,10 @@ const BotLifeState = {
                 || (state.activity === 'crafting' && state.stats?.craftShop)) {
                 return;
             }
+            // An arrived trader waits on the native meeting event; its old
+            // resolve deadline is not a task waiting in the worker's heap.
+            if (state.stats?.tradeMeeting
+                && require('./ColdSimulationKernel').lifecycleKind(state) === 'event_driven') return;
 
             const nextResolveAt = Number(state.timing?.nextResolveAt || 0);
             if (nextResolveAt > timestamp && !hasStaleRateModelPlan(state)) return;

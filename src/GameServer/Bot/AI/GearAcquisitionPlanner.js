@@ -1253,7 +1253,7 @@ function sourceWithinVoluntaryHuntBand(state = {}, source = {}) {
     const botLevel = Number(state.level || 0);
     const sourceLevel = Number(source.npcLevel || source.spotLevel || 0);
     if (!botLevel || !sourceLevel) return true;
-    const economic = state.economicLower || require('../Economy/EquipmentIncomeRoute').economicHunt(state);
+    const economic = state.economicLower || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
     return sourceLevel - botLevel >= (economic ? -15 : BotTargetScorer.MIN_LEVEL_GAP);
 }
 
@@ -2240,7 +2240,9 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     if (rules && rules.entries === entries) return rules;
     if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.entries.length; }
     const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
-    const band = { level: killerLevel, economicLower };
+    // This shared rule row already has the resolved economic band. Do not
+    // re-enter the actor's wish policy (and resolve its module) per record.
+    const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
     for (let ordinal = 0; ordinal < entries.length; ordinal++) {
         const entry = entries[ordinal], target = sourceTargetOf(entry);
         const value = dropYieldFor(entry.reward, itemId, entry.kind, target.npcLevel, killerLevel, ratesKey);
@@ -2248,7 +2250,7 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
         expected[ordinal] = value.expectedYield;
         reasons[ordinal] = target.raidBoss ? FACT_RULE_RAID
             : !sourceNpcHuntable(target.npcId) ? FACT_RULE_CANNOT_HUNT
-                : !sourceWithinVoluntaryHuntBand(band, target) ? FACT_RULE_LEVEL_BAND : 0;
+                : killerLevel && target.npcLevel && target.npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
     }
     rules = { entries, expected, reasons };
     sourceIndexCache.factRuleCells += entries.length;

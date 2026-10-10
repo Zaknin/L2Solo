@@ -2,8 +2,12 @@
 const DiagnosticConfig = require('../Population/PopulationConfig');
 const Trip = require('../Population/ColdTrip');
 const Routes = require('../Travel/TravelRoutes');
+const EMPTY_SPOTS = Object.freeze([]);
 let source, entries = new Map(), catalogs = new WeakMap(), builds = 0, missing = 0, buildMs = 0;
 function table(spots) {
+    // A worker has no live World catalogue. Retain its empty answer when
+    // callers alternate that default with the worker's planning catalogue.
+    if (!spots) spots = EMPTY_SPOTS;
     if (source === spots) return entries;
     // ARCH-NOTE: ALT native profile/raw catalogs coexist. A single last
     // source evicts the other on every alternating reader. Weak keys retain

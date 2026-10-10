@@ -21,8 +21,9 @@ near(ref.kills, 200, 'at the reference level the row\'s kills');
 // this older fixture expected unpenalized rewards. Preserve that gameplay rule.
 near(ref.exp, 20000 * (5 / 6), 'exp per hour = kills x exp per kill x gap-six penalty');
 near(ref.sp, 1000 * (5 / 6), 'SP per hour follows the same C4 penalty');
-near(ref.adena, 6000, 'adena per hour');
-near(ref.loot, 4000, 'loot per hour');
+assert.strictEqual(ref.rewardSource, 'unavailable', 'a combat-only fixture must not invent native reward facts');
+near(ref.adena, 0, 'no fabricated adena without an NPC catalog');
+near(ref.loot, 0, 'no fabricated loot without an NPC catalog');
 near(ref.shots, 800, 'shots per hour');
 near(ref.deaths, 0.2, 'deaths per hour = kills x deaths per kill');
 near(ref.busyShare, 0.5, 'combat and recovery share of the hour');
@@ -32,8 +33,7 @@ near(Table.value('S', 'dps', 18).deaths, 100 * (0.001 + 0.01), 'deaths per kill 
 near(Table.value('S', 'dps', 19).kills, 200 * 0.625, 'between measured gaps the curve is linear');
 near(Table.value('S', 'dps', 30).kills, 240, 'higher levels follow the curve');
 near(Table.value('S', 'dps', 40).kills, 240, 'beyond the last gap the curve is flat');
-near(Table.value('S', 'dps', 29).adena, 200 * 1.2 * 30 * 0.375, 'adena follows its curve (deep blue)');
-near(Table.value('S', 'dps', 29).loot, 200 * 1.2 * 20 * 0.375, 'loot follows the adena curve');
+near(Table.value('S', 'dps', 29).adena, 0, 'an old reward curve cannot stand in for actual NPCs');
 near(Table.value('S', 'dps', 90).kills, Table.value('S', 'dps', 78).kills, 'levels above the maximum count as the maximum');
 near(Table.value('T', 'dps', 24).kills, 48, 'kills never exceed what the spot\'s monster count allows');
 assert.strictEqual(Table.value('S', 'dps', 15), null, 'below the lowest level that finds a safe target: no solo hunt');
@@ -44,18 +44,16 @@ near(Table.value('S', 'spoiler', 18).kills, 150, 'a role without a measured curv
 assert.strictEqual(Table.referenceLevel('S', 'spoiler'), 24, 'the level the row was measured at');
 assert.strictEqual(Table.spotLevel('T'), 18);
 
-// Rates: kills do not change, exp, SP and adena scale with the server's rates, loot with the spot's
-// measured response to the drop rate (S keeps 0.8 of rate x loot at x10, 0.6 at x50).
+// Combat rates remain independent of native reward availability.
 process.env.L2NODE_PROGRESSION_RATE = 'x10';
 const x10 = Table.value('S', 'dps', 24, true);
 near(x10.kills, ref.kills, 'the rate does not change the fights');
 near(x10.exp, ref.exp * 10, 'exp x rate');
 near(x10.sp, ref.sp * 10, 'SP x rate');
-near(x10.adena, ref.adena * 10, 'adena x rate');
-near(x10.loot, ref.loot * 10 * 0.8, 'loot x rate x the spot\'s response to the drop rate');
+assert.strictEqual(x10.rewardSource, 'unavailable');
 process.env.L2NODE_PROGRESSION_RATE = 'x50';
 near(Table.value('S', 'dps', 24, true).loot, ref.loot * 50 * 0.6, 'and at x50');
-near(Table.value('T', 'dps', 24, true).loot, Table.value('T', 'dps', 24, true).kills * 20 * 50, 'a spot whose drops scale fully');
+near(Table.value('T', 'dps', 24, true).loot, 0, 'rates cannot create missing native loot facts');
 process.env.L2NODE_PROGRESSION_RATE = 'x1';
 
 // New tables report distinct bag slots per hour, with the drop response and
@@ -95,6 +93,9 @@ assert.strictEqual(raw.header.inputs.rate, 'x1', 'the file is at rate x1');
 // A few spots of the committed table (rate x1). Bearded Keltir fields (level 2): every role hunts it;
 // a dps kills more with shots, more at a higher level, and never more than the spot allows.
 Table.useFile();
+const keltirNpc = DataCache.npcs.find(npc => npc.template?.name === 'Bearded Keltir' && Number(npc.template?.level) === 1);
+assert(keltirNpc);
+Table.useSpots([{ id: '-15_42', npcEntries: [{ selfId: keltirNpc.selfId, count: 1 }] }]);
 const keltir = Table.value('-15_42', 'dps', 5, true);
 assert(keltir && keltir.kills > 100 && keltir.kills <= 275.2 && keltir.exp > 0 && keltir.adena > 0, 'a low field gives a dps kills, exp and adena');
 assert(Table.value('-15_42', 'dps', 5, false).kills <= keltir.kills, 'shots do not slow a dps');

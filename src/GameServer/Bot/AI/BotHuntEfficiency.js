@@ -181,13 +181,14 @@ function huntIncome(state, timestamp = Date.now(), mode) {
     const own = bestIncome(sampledRows(state, timestamp, mode), onSpotShare(state));
     if (own?.perHour > 0) return { ...own, source: 'own' };
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+    const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
     const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
-    const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true);
+    const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true, rewardOptions);
     const progress = current || Table.best(tableRole, levelOf(state), true);
     const costs = consumablePrices(state);
-    const row = current && netIncome(current, costs) > 0 ? current : Table.rankedIncome(tableRole, levelOf(state), costs)[0]
-        || Table.rankedIncome(tableRole, levelOf(state), costs, -7, false)[0];
+    const row = current && netIncome(current, costs) > 0 ? current : Table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
+        || Table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
     if (!row) return { perHour: 0, perKill: 0, expPerHour: 0, source: 'unavailable' };
     const income = netIncome(row, costs);
     return { perHour: income * onSpotShare(state), perKill: row.kills > 0 ? income / row.kills : 0,
@@ -200,9 +201,10 @@ function huntHour(hunt, state = {}) {
     const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
     const costs = consumablePrices(state);
+    const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
     const table = invoke('GameServer/Bot/AI/SpotValueTable');
-    const row = table.rankedIncome(tableRole, levelOf(state), costs)[0]
-        || table.rankedIncome(tableRole, levelOf(state), costs, -7, false)[0];
+    const row = table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
+        || table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
     return Math.max(1, row ? netIncome(row, costs) : 0);
 }
 function hourValue(state, timestamp = Date.now(), mode) {

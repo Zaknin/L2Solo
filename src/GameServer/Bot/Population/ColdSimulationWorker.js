@@ -122,6 +122,7 @@ let safetyStateRepairs = 0;
 let safetyOrphanRepairs = 0;
 let previousElu = null;
 let planningSpots = [];
+invoke('GameServer/Bot/AI/SpotValueTable').useSpots(() => planningSpots);
 let planningNpcOfferRows = [];
 const tables = new TableMirror({ actorProjectorRole: workerProjectorRole });
 // Planning producers import this same collector; its worker cap is64 rows.
@@ -198,7 +199,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         && left.sourceReady === right.sourceReady
         && left.routeKey === right.routeKey
         && left.mode === right.mode && left.buyOrderEscrow === right.buyOrderEscrow,
-    onSlots: count => invoke('GameServer/Bot/Economy/EconomyContext').setPlanningContexts?.(count),
+    onWorking: count => invoke('GameServer/Bot/Economy/EconomyContext').setPlanningContexts?.(count),
     capture: (id, input, read, readScope) => {
         const book = invoke('GameServer/Bot/Economy/RecipeBookCodec').unpack(input.recipeBook);
         return { state: input.state, board: boardReady(), timestamp: input.timestamp, read, readScope,

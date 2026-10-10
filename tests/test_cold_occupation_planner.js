@@ -4,8 +4,9 @@ require('../src/GameServer/Bot/Population/PopulationConfig').developerDiagnostic
 const { ColdOccupationPlanner } = require('../src/GameServer/Bot/Population/ColdOccupationPlanner');
 const { compact, capture, ColdEconomyDecisions, stateKey } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
 
-const posted = [], tokens = new Map(), callbacks = [];
+const posted = [], tokens = new Map(), callbacks = [], working = [];
 const planner = new ColdOccupationPlanner({ schedule: callback => callbacks.push(callback), now: () => 0,
+    onWorking: count => working.push(count),
     sourceToken: id => tokens.get(id) || 0, capture: (id, input, read) => { read(id); return { id, input }; },
     create: captured => ({ captured, stage: 1, units: 0 }), step: cursor => ++cursor.units === 100,
     result: cursor => ({ known: true, recipeId: cursor.captured.id, productId: 100 + cursor.captured.id,
@@ -17,6 +18,7 @@ for (let portion = 0; portion < 8; portion++) {
     assert(planner.slots.size <= 64);
 }
 assert.equal(planner.slots.size, 64);
+assert.equal(planner.workingContexts, 64, 'all unfinished graphs reserve the shared review allowance');
 assert.equal(planner.waiting.size, 1, 'incomplete contexts remain pinned');
 const first = planner.slots.get(1).work;
 callbacks.shift()();
@@ -36,6 +38,9 @@ while ((planner.ready.size || planner.waiting.size) && guard++ < 2000) callbacks
 assert.equal(planner.ready.size, 0); assert.equal(planner.waiting.size, 0);
 assert.equal(posted.filter(row => row[0] === 65).length, 1, 'FIFO waiter eventually progresses');
 assert(planner.slots.size <= 64);
+assert.equal(planner.workingContexts, 0, 'completed scalar cards do not disable the economic review cache');
+assert.equal(working.at(-1), 0);
+assert(working.every(count => count >= 0 && count <= 64), 'the graph reservation remains bounded through eviction and restarts');
 planner.stop(); assert.equal(planner.slots.size, 0); assert.equal(planner.dependencies.size, 0);
 
 // Query snapshots are temporary owners, unlike the kernel's native state.

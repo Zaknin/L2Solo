@@ -32,9 +32,10 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
     deathHours ??= Valuation.deathHours(state, hunt);
     const riskWeight = Valuation.riskWeight(state, persona);
     const costs = Hunt.consumablePrices(state, price);
+    const rewardOptions = { spoilSkillLevel: require('./SpotRewardExpectation').spoilSkillLevel(state) };
     const own = Hunt.sampledRows(state, timestamp, mode);
     const calibrations = own.flatMap(row => {
-        const base = Table.value(row.spotId, tableRole, state.level, true);
+        const base = Table.value(row.spotId, tableRole, state.level, true, rewardOptions);
         return base?.exp > 0 ? [Math.max(0, row.exp) / row.cycleMs * 3600000 / base.exp] : [];
     });
     const calibration = calibrations.length ? calibrations.reduce((sum, value) => sum + value, 0) / calibrations.length : 1;
@@ -44,7 +45,7 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
         // Charged observations cannot estimate a deliberately uncharged hunt.
         const observed = shots ? own.find(row => row.spotId === spot.id) : null;
         const rate = observed ? 3600000 / observed.cycleMs : 0;
-        const theoretical = Table.value(spot.id, tableRole, state.level, shots);
+        const theoretical = Table.value(spot.id, tableRole, state.level, shots, rewardOptions);
         const base = observed ? {
             exp: observed.exp * rate, adena: observed.adena * rate, loot: observed.loot * rate,
             kills: observed.kills * rate, deaths: theoretical?.deaths || 0, costs: Number(observed.costs || 0) * rate

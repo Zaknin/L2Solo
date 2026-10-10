@@ -189,4 +189,4 @@ function rollSpoilForFight({ spot, killerLevel, npcSelfId = 0, rng = Math.random
     return spoils;
 }
 
-module.exports = { npcLevel, progressionForFight, rollRewardsForFight, rollAdenaForFight, rollForFight, rollSpoilForFight };
+module.exports = { npcLevel, rewardDataForSpot, progressionForFight, rollRewardsForFight, rollAdenaForFight, rollForFight, rollSpoilForFight };

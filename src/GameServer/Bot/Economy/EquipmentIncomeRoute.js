@@ -13,7 +13,7 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)) return null;
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
     const role = state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
-    const spoiler = !!invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
+    const spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
         { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) });
     if (!required && !economicHunt(state) && !spoiler) return null;
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
@@ -33,7 +33,8 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const ids = new Set([state.spotId, ...Hunt.sampledRows(state, timestamp).map(row => row.spotId)]);
     const minGap = -15;
     const candidates = shots => {
-        for (const row of Table.rankedIncome(tableRole, state.level, costs, minGap, shots)) ids.add(row.spotId);
+        for (const row of Table.rankedIncome(tableRole, state.level, costs, minGap, shots,
+            { spoilSkillLevel: spoiler?.skillLevel || 0 })) ids.add(row.spotId);
         return [...ids].map(id => Index.spotById(spots, id)).filter(spot => spot && !spot.raidBoss
             && Number(spot.avgLevel || spot.minLevel || 1) - state.level >= minGap
             && !excluded.has(String(spot.id)) && survives(spot)

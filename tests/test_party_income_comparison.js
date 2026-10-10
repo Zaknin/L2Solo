@@ -9,6 +9,7 @@ const Goals = invoke('GameServer/Bot/Population/PartyGoalPolicy');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
 const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+const Rewards = require('../src/GameServer/Bot/Economy/SpotRewardExpectation');
 const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const Routes = invoke('GameServer/Bot/AI/LevelingRoutes');
@@ -35,7 +36,8 @@ for (const multiplier of [1, 10, 50]) assert.equal(Income.evaluate({ ...base,
 
 const original = { value: Table.value, ranked: Table.rankedIncome, hunt: Hunt.huntIncome,
     samples: Hunt.sampledRows, costs: Hunt.consumablePrices, ensure: Profiles.ensure, gate: Routes.isSpotAllowedForState,
-    forState: Economy.forState, forGroup: Economy.forGroup, npcs: Data.npcs, rewards: Data.npcRewards };
+    forState: Economy.forState, forGroup: Economy.forGroup, npcs: Data.npcs, rewards: Data.npcRewards,
+    rewardValue: Rewards.value };
 const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const originalBuffPrice = BuffPolicy.priceFor;
@@ -53,6 +55,9 @@ const state = { characterId: 990130, level: 20, adena: 0, spotId: 'peer', phase:
         partyRequest: { priority: 'required', spotId: 'peer', reason: 'gear_acquisition' } } };
 const peer = { ...state, characterId: 990131 };
 try {
+    // These admission fixtures provide synthetic table money, with no native
+    // NPC reward catalog. Native money expectations have a separate regression.
+    Rewards.value = () => null;
     Table.value = (id, role, level, shots) => id === 'lower' ? row(shots ? 650 : 600, shots ? 200 : 0)
         : row(shots ? 1200 : 300, shots ? 900 : 0);
     Table.rankedIncome = (role, level, costs, gap, shots) => spots.map(spot => ({ ...Table.value(spot.id, role, level, shots), spotId: spot.id }));
@@ -133,6 +138,7 @@ try {
     Profiles.ensure = original.ensure; Routes.isSpotAllowedForState = original.gate;
     Economy.forState = original.forState; Economy.forGroup = original.forGroup;
     Data.npcs = original.npcs; Data.npcRewards = original.rewards;
+    Rewards.value = original.rewardValue;
     BuffPolicy.priceFor = originalBuffPrice;
 }
 

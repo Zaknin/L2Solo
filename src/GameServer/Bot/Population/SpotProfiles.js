@@ -624,3 +624,7 @@ SpotProfiles.clanEquipmentReservationKey = clanEquipmentReservationKey;
 SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT = MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT;
 
 module.exports = SpotProfiles;
+// A getter also sees replaced period catalogs and manually hydrated profiles;
+// table forecasts never call ensure() or import a live World from a worker.
+const EMPTY_REWARD_SPOTS = [];
+invoke('GameServer/Bot/AI/SpotValueTable').useSpots(() => SpotProfiles.cache || EMPTY_REWARD_SPOTS);

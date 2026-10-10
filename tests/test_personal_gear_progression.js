@@ -90,6 +90,11 @@ function verify() {
         { spotId: 'net', adena: 800, loot: 0, costs: 100, kills: 10, exp: 50, cycleMs: 60000 }]);
     assert.equal(sampled.spotId, 'net', 'shots and potions can reverse the preferred earning spot');
     const poorOrc = bot(44, 7, first.inventory);
+    const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+    const nativeRankedIncome = Table.rankedIncome;
+    // This fixture has no profitable charged camp; the alternative retains
+    // its real NPC rewards and the native uncharged combat measurements.
+    Table.rankedIncome = (...args) => args[4] === false ? nativeRankedIncome(...args) : [];
     const noShots = Hunt.huntIncome(poorOrc, timestamp);
     assert(noShots.perHour > 0 && noShots.useShots === false,
         'negative paid-shot margins fall back to a positive native uncharged hunt');
@@ -107,6 +112,7 @@ function verify() {
     const uncharged = invoke('GameServer/Bot/Economy/SpotEconomics').create(losingOrc,
         { timestamp, moneyWeight: 1 })({ id: retry.spotId, density: 1 }, false);
     assert(uncharged.income > 0, 'charged observations are not reused for an uncharged earning route');
+    Table.rankedIncome = nativeRankedIncome;
     const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
     const spots = ['poor', 'rich'].map((id, at) => ({ id, avgLevel: 10, minLevel: 10, maxLevel: 10,
         density: 10, tagsAuthoritative: true, tags: ['starter'], npcEntries: [],
