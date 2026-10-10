@@ -1032,7 +1032,11 @@ const PopulationService = {
         Metrics.init();
         Metrics.startEventLoopMonitor();
         invoke('GameServer/Bot/Economy/CraftWorkshopService').init();
-        this.lifeReadyPromise = LifeState.init();
+        this.lifeReadyPromise = Promise.resolve(LifeState.init()).then(async result => {
+            await invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').init();
+            await invoke('GameServer/Clan/ClanGoalService').clanProjection();
+            return result;
+        });
         Promise.resolve(this.lifeReadyPromise).then(() => ClanActionService.startEvents(() => { this.nextClanActionAt = 0; }))
             .catch(error => utils.infoWarn('ClanReview', 'startup: %s', error.message));
         LifeEvents.init();

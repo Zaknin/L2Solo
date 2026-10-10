@@ -6598,14 +6598,19 @@ const Database = {
     setWarehouseItem(characterId, item) {
         const values = { selfId: item.selfId, name: item.name ?? '', amount: item.amount ?? 1, enchant: Math.max(0, Number(item.enchant ?? 0) || 0), characterId };
         if (item.petData) values.petData = typeof item.petData === 'string' ? item.petData : JSON.stringify(item.petData);
-        return insert('warehouse_items', values, 'warehouse:insert');
+        return insert('warehouse_items', values, 'warehouse:insert').then(result => {
+            invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result;
+        });
     },
     updateWarehouseItemAmount(characterId, id, amount) {
-        if (Number(amount) <= 0) return remove('warehouse_items', 'id = ? AND characterId = ?', [id, characterId], 'warehouse:delete-empty');
-        return update('warehouse_items', { amount }, 'id = ? AND characterId = ?', [id, characterId], 'warehouse:amount');
+        const work = Number(amount) <= 0
+            ? remove('warehouse_items', 'id = ? AND characterId = ?', [id, characterId], 'warehouse:delete-empty')
+            : update('warehouse_items', { amount }, 'id = ? AND characterId = ?', [id, characterId], 'warehouse:amount');
+        return work.then(result => { invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result; });
     },
     deleteWarehouseItem(characterId, id) {
-        return remove('warehouse_items', 'id = ? AND characterId = ?', [id, characterId], 'warehouse:delete');
+        return remove('warehouse_items', 'id = ? AND characterId = ?', [id, characterId], 'warehouse:delete')
+            .then(result => { invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result; });
     },
 
     liquidateWarehouseGear(characterId, selections = [], options = {}) {
@@ -6744,7 +6749,10 @@ const Database = {
                 payout,
                 state: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [id]))
             };
-        }, 'warehouse:cleanup-gear'));
+        }, 'warehouse:cleanup-gear')).then(result => {
+            if (result.ok) invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(id);
+            return result;
+        });
     },
 
     transferInventoryToWarehouse(characterId, item) {
@@ -6763,10 +6771,12 @@ const Database = {
             if (inventoryAmount <= 0) write('DELETE FROM items WHERE id = ? AND characterId = ?', [item.id, characterId]);
             else write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [inventoryAmount, item.id, characterId]);
             return { warehouseId: Number(warehouseId), warehouseAmount, inventoryAmount, enchant: sourceEnchant };
-        }, 'warehouse:deposit'));
+        }, 'warehouse:deposit')).then(result => {
+            invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result;
+        });
     },
 
-    transferWarehouseToInventory(characterId, item, { coldState = null, inTown = false } = {}) {
+    transferWarehouseToInventory(characterId, item, { coldState = null, inTown = false, validate = null } = {}) {
         if (coldState && inTown !== true) return Promise.reject(new Error('economy_state_changed'));
         // ARCH-NOTE: a legacy movement save need not advance simulationRevision.
         // Capture the town intent before the character flush/queue, then compare
@@ -6774,6 +6784,7 @@ const Database = {
         const townIntent = coldState && { activity: coldState.activity, currentRegion: coldState.currentRegion,
             locX: Number(coldState.loc?.locX || 0), locY: Number(coldState.loc?.locY || 0), locZ: Number(coldState.loc?.locZ || 0) };
         return withCharacterFlush(characterId, () => inTransaction(() => {
+            validate?.();
             let life = null;
             if (coldState) {
                 life = one(`SELECT phase, activity, currentRegion, locX, locY, locZ,
@@ -6817,7 +6828,9 @@ const Database = {
             const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [item.selfId]);
             return { inventoryId: Number(inventoryId), inventoryAmount, warehouseAmount, petData: source.petData, enchant: sourceEnchant,
                 ...(coldLifeRow ? { coldLifeRow } : {}) };
-        }, 'warehouse:withdraw'));
+        }, 'warehouse:withdraw')).then(result => {
+            invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result;
+        });
     },
 
     patchWarehouseWithdrawal(characterId, withdrawal) {
@@ -7714,9 +7727,15 @@ const Database = {
                     if (row && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER)) throw Error('improvement_hot_source_changed');
                 }
                 if (state) {
-                    const row = one('SELECT phase, simulationOwner, simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]);
+                    const row = one(`SELECT phase, simulationOwner, simulationRevision, activity, currentRegion, locX, locY, locZ
+                        FROM bot_life_state WHERE characterId = ?`, [characterId]);
                     if (state.characterId !== characterId || row?.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
                         || Number(row.simulationRevision) !== Number(state.simulation?.revision || 0)) throw Error('economy_state_changed');
+                    // Cold travel lives in the lifecycle row; the offline
+                    // character position can still be its previous hunt.
+                    if (proposal.kind !== 'enchant' && (row.activity !== state.activity || row.currentRegion !== state.currentRegion
+                        || ['locX', 'locY', 'locZ'].some(key => Number(row[key]) !== Number(state.loc?.[key]))))
+                        throw Error('economy_state_changed');
                 }
             };
             guard();
@@ -7770,10 +7789,11 @@ const Database = {
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
-                const town = invoke('GameServer/World/TownRespawn').getClosestTown(character?.locX, character?.locY, character?.locZ);
+                const position = state ? life : character;
+                const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
                 if (!invoke('GameServer/Bot/AI/PersonalGearProgression').personal(source)
                     || Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
-                    || Math.hypot(Number(character.locX) - town.locX, Number(character.locY) - town.locY) > 7500)
+                    || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
                     throw Error('invalid_bot_crystallization');
                 const inputs = proposal.items || [{ selfId: proposal.sourceSelfId, amount: proposal.amount || 1 }];
                 if (!Array.isArray(inputs) || !inputs.length || inputs.length > Crystals.BATCH_LIMIT)
@@ -7809,9 +7829,10 @@ const Database = {
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
-                const town = invoke('GameServer/World/TownRespawn').getClosestTown(character?.locX, character?.locY, character?.locZ);
+                const position = state ? life : character;
+                const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
                 if (!Luxury.eligible(source, recipe) || town?.name !== 'Giran'
-                    || Math.hypot(Number(character.locX) - town.locX, Number(character.locY) - town.locY) > 7500)
+                    || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
                     throw Error('invalid_bot_luxury_exchange');
                 const blocker = Life.marketPurchaseBlocker(source, { selfId: recipe.itemId }, recipe.amount);
                 if (blocker) throw Error(blocker);
@@ -9560,7 +9581,12 @@ const Database = {
         resolveKey,
         expectedWarehouseRevision = null,
         expectedSimulationRevision = null,
-        allowParty = false
+        allowParty = false,
+        goalKey = null,
+        rewardUnitPrice = 0,
+        supplyGoalKeys = null,
+        expectedPhase = 'cold',
+        validateLive = null
     } = {}) {
         const clan = Number(clanId);
         const character = Number(characterId);
@@ -9576,22 +9602,64 @@ const Database = {
             const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
             const clanRow = one('SELECT id, level FROM clans WHERE id = ?', [clan]);
             const member = one('SELECT id, clanId FROM characters WHERE id = ?', [character]);
-            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId, inventorySummary
+            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId, inventorySummary, statsJson, adena
                 FROM bot_life_state WHERE characterId = ?`, [character]);
             if (!simulation || !clanRow || !member || Number(member.clanId) !== clan) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
-            if (!life || String(life.phase || '') !== 'cold'
+            if (Number(clanRow.level) < 1) return { ok: false, code: 'warehouse_level_unavailable' };
+            if (!life || !['cold', 'hot'].includes(expectedPhase) || String(life.phase || '') !== expectedPhase
                 || (!allowParty && String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER)
                 || (!allowParty && String(life.partyId || '') !== '')) {
                 return { ok: false, code: 'stale_snapshot' };
             }
+            if (expectedPhase === 'hot' && (typeof validateLive !== 'function' || !validateLive()))
+                return { ok: false, code: 'live_state_changed' };
             if (expectedSimulationRevision !== null
                 && Number(life.simulationRevision || 0) !== Number(expectedSimulationRevision)) {
                 return { ok: false, code: 'stale_snapshot', simulationRevision: Number(life.simulationRevision || 0) };
             }
 
             const previousState = jsonObject(simulation.stateJson);
+            if (supplyGoalKeys) {
+                const goals = [previousState.goal, previousState.productionGoal].filter(goal => goal?.goalKey
+                    && !['completed', 'cancelled', 'failed', 'abandoned'].includes(goal.status));
+                if (goals.some(goal => !supplyGoalKeys.includes(goal.goalKey))
+                    || supplyGoalKeys.some(key => !goals.some(goal => goal.goalKey === key)))
+                    return { ok: false, code: 'clan_goal_changed' };
+                const members = goals.map(goal => {
+                    const row = one('SELECT characterId, inventorySummary, statsJson FROM bot_life_state WHERE characterId = ?', [Number(goal.target?.memberId || 0)]);
+                    return row && { characterId: row.characterId, inventory: jsonObject(row.inventorySummary), stats: jsonObject(row.statsJson) };
+                }).filter(Boolean);
+                const gap = invoke('GameServer/Clan/ClanSupplyPolicy').requirements(
+                    { id: clan, level: clanRow.level, state: previousState, members },
+                    all('SELECT selfId, amount, reservedAmount FROM clan_warehouse_items WHERE clanId = ?', [clan]));
+                if (requested > Number(gap[selfId] || 0)) return { ok: false, code: 'clan_supplies_filled' };
+            }
+            const reward = Math.floor(Number(rewardUnitPrice)) * requested;
+            const deliveryGoal = reward > 0 && [previousState.goal, previousState.productionGoal].find(goal =>
+                goal?.goalKey === goalKey && ['item', 'equipment'].includes(goal.type)
+                && goal.policy?.strategy !== 'craft'
+                && !['completed', 'cancelled', 'failed', 'abandoned'].includes(goal.status)
+                && Number(goal.target?.itemId ?? goal.target?.selfId) === selfId
+                && requested <= Math.max(0, Number(goal.required || 1) - Number(goal.progress || 0)));
+            if (reward > 0 && !deliveryGoal) return { ok: false, code: 'clan_goal_changed' };
+            if (deliveryGoal) {
+                const stored = Number(one('SELECT COALESCE(SUM(amount), 0) AS amount FROM clan_warehouse_items WHERE clanId = ? AND selfId = ?', [clan, selfId]).amount);
+                if (requested + stored > Math.max(0, Number(deliveryGoal.required || 1) - Number(deliveryGoal.progress || 0)))
+                    return { ok: false, code: 'clan_supplies_filled' };
+            }
+            if (reward > 0) {
+                const template = invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, selfId);
+                const nativePrice = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(template?.template?.price);
+                if (!Number.isSafeInteger(reward) || Number(rewardUnitPrice) !== nativePrice)
+                    return { ok: false, code: 'clan_reward_invalid' };
+                const treasury = all('SELECT * FROM clan_warehouse_items WHERE clanId = ? AND selfId = 57', [clan]);
+                const budget = invoke('GameServer/ClanHall/Policy').freeAdena(treasury,
+                    { id: clan, level: clanRow.level }, previousState.mode || 'autonomous',
+                    deliveryGoal === previousState.goal ? null : previousState.goal);
+                if (budget < reward) return { ok: false, code: 'clan_funds_short' };
+            }
             const currentWarehouseRevision = Math.max(0, Number(previousState.warehouseRevision) || 0);
             if (expectedWarehouseRevision !== null
                 && currentWarehouseRevision !== Number(expectedWarehouseRevision)) {
@@ -9612,9 +9680,9 @@ const Database = {
                 };
             }
 
-            const source = one(`SELECT id, selfId, name, amount, enchant, petData
+            const source = one(`SELECT id, selfId, name, amount, enchant, petData, equipped
                 FROM items WHERE id = ? AND characterId = ?`, [sourceItemId, character]);
-            if (!source || Number(source.selfId) !== selfId || Number(source.amount || 0) < requested) {
+            if (!source || source.equipped || Number(source.selfId) !== selfId || Number(source.amount || 0) < requested) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
 
@@ -9662,14 +9730,38 @@ const Database = {
             if (sourceAfter <= 0) write('DELETE FROM items WHERE id = ? AND characterId = ?', [source.id, character]);
             else write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [sourceAfter, source.id, character]);
 
-            const lifeUpdate = updateColdInventorySnapshotUnsafe(character, selfId, {
+            const event = {
                 clanId: clan,
                 selfId,
                 amount: -requested,
                 warehouseId,
                 at: timestamp
-            }, expectedSimulationRevision === null ? Number(life.simulationRevision || 0) : Number(expectedSimulationRevision), allowParty);
+            };
+            const lifeUpdate = expectedPhase === 'cold' ? updateColdInventorySnapshotUnsafe(character, selfId, event,
+                expectedSimulationRevision === null ? Number(life.simulationRevision || 0) : Number(expectedSimulationRevision), allowParty)
+                : { ok: true, simulationRevision: Number(life.simulationRevision || 0) + 1,
+                    row: writeColdInventorySnapshotUnsafe(character, life, [selfId], null, { lastClanWarehouseTransfer: event }) };
             if (!lifeUpdate.ok) throw new Error(`clan warehouse deposit rejected: ${lifeUpdate.code}`);
+            if (reward > 0) {
+                let remaining = reward;
+                for (const cash of all('SELECT id, amount, reservedAmount FROM clan_warehouse_items WHERE clanId = ? AND selfId = 57 ORDER BY id', [clan])) {
+                    const take = Math.min(remaining, Math.max(0, Number(cash.amount) - Number(cash.reservedAmount || 0)));
+                    if (take >= Number(cash.amount)) write('DELETE FROM clan_warehouse_items WHERE id = ?', [cash.id]);
+                    else if (take) write('UPDATE clan_warehouse_items SET amount = amount - ?, updatedAt = ? WHERE id = ?', [take, timestamp, cash.id]);
+                    remaining -= take;
+                }
+                if (remaining) throw new Error('clan reward funding changed');
+                const next = one('SELECT inventorySummary FROM bot_life_state WHERE characterId = ?', [character]);
+                const inventory = jsonObject(next.inventorySummary);
+                const wallet = Number(expectedPhase === 'hot' ? inventory[57]?.amount || 0 : life.adena) + reward;
+                inventory[57] = { ...(inventory[57] || {}), selfId: 57, name: 'Adena', amount: wallet };
+                write('UPDATE bot_life_state SET adena = ?, inventorySummary = ? WHERE characterId = ?', [wallet, JSON.stringify(inventory), character]);
+                write('DELETE FROM items WHERE characterId = ? AND selfId = 57', [character]);
+                write("INSERT INTO items(selfId, name, amount, enchant, equipped, slot, characterId) VALUES(57, 'Adena', ?, 0, 0, 0, ?)", [wallet, character]);
+                recordClanGoalEventUnsafe({ clanId: clan, eventType: 'member_item_reward', goalType: deliveryGoal.type,
+                    plan: 'owned_item', reasonCode: 'owned_item_to_clan_warehouse',
+                    payloadJson: JSON.stringify({ characterId: character, selfId, amount: requested, reward }), occurredAt: timestamp });
+            }
 
             const nextWarehouseRevision = currentWarehouseRevision + 1;
             const state = simulationState(simulation.stateJson, clan, previousState.leaderId, previousState.memberIds || [], timestamp);
@@ -9690,6 +9782,7 @@ const Database = {
                 characterId: character,
                 selfId,
                 amount: requested,
+                reward,
                 warehouseId,
                 warehouseAmount,
                 warehouseRevision: nextWarehouseRevision,

@@ -160,11 +160,13 @@ async function main() {
         assert(accepted[0].ok);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchSkills(state.characterId)).length,0,'accepted proposal cannot synthesize tree ranks');
         const paid=await Life.reviewTrainingAfterCommit(state);
-        assert((await DB.fetchSkill(state.characterId,1184))[0]?.level>0);assert(paid.sp<100000);assert(!paid.inventory[1049]);
+        assert((await DB.fetchSkill(state.characterId,1184))[0]?.level>0);assert(paid.sp<100000);
+        assert.equal(paid.inventory[1049].amount, 1, 'personal training keeps skill books for NPC sale');
+        assert(invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(paid).some(row => row.selfId === 1049));
         assert.equal(paid.stats.coldCombat.skillSource,'database');
         assert.deepEqual(paid.stats.coldCombat.skills.map(row=>[row.selfId,row.level]),
             Profile.skillSnapshotsFromRecords(await DB.fetchSkills(state.characterId)).map(row=>[row.selfId,row.level]));
-        console.log('PASS accepted Worker SP/book -> real paid native training -> current authoritative kit');
+        console.log('PASS accepted Worker SP -> real paid native training, skill books available for sale -> current authoritative kit');
     } finally { await DB.close();fs.rmSync(directory,{recursive:true,force:true}); }
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

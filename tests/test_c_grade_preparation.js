@@ -52,7 +52,9 @@ for (const classId of [0, 10, 18, 25, 38, 49, 50, 53, 54, 56]) {
     assert(Progression.assess({ ...complete, level: 40 }).required, 'D opens the C milestone at 40');
     assert.equal(Progression.assess({ ...complete, level: 52 }).required, false);
 }
-assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'clan progression keeps its existing owner');
+if (isMainThread) invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 1, level: 1, state: {} });
+else invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
+assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'a clan with warehouse access keeps its existing C progression owner');
 assert.equal(Progression.assess({ ...source, level: 40, clanId: 1 }).required, false);
 
 const board = new BoardIndex();

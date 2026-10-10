@@ -25,7 +25,9 @@ module.exports = ({ all, write, inTransaction, now }) => {
             WHERE parties.status IN ('active', 'hot') AND members.clanId > 0
               AND json_extract(parties.statsJson, '$.objective.strategy') = 'craft'
               AND COALESCE(json_extract(parties.statsJson, '$.objective.clanGoalKey'), '') = ''${filter}`, ids || [])) {
-            const repaired = Policy.reconcileParty({ stats: JSON.parse(row.statsJson || '{}') }, row.actualClanId);
+            const previous = { stats: JSON.parse(row.statsJson || '{}') };
+            const repaired = Policy.reconcileParty(previous, row.actualClanId);
+            if (repaired === previous) continue;
             const next = { ...row, statsJson: JSON.stringify(repaired.stats), updatedAt: now() };
             write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
                 [next.statsJson, next.updatedAt, next.partyId]);

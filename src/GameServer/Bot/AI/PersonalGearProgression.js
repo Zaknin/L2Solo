@@ -7,7 +7,7 @@ function adventurer(state = {}) {
             && Number(state.stats?.generatedIndex) >= 10000);
 }
 function personal(state = {}) {
-    return adventurer(state) && !(Number(state.clanId ?? state.stats?.clanId) > 0);
+    return adventurer(state) && !invoke('GameServer/Clan/ClanSupplyPolicy').hasWarehouse(state);
 }
 
 // A milestone describes a usable kit, not a particular shopping list. The
@@ -99,4 +99,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, assess, priority, preparation, preparedAmounts };
+module.exports = { personal, adventurer, assess, priority, preparation, preparedAmounts };

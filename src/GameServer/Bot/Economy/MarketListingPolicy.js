@@ -77,7 +77,7 @@ function evaluate(state, options = {}) {
         reserved: { ...options.reserved, ...craftReservations } });
     const decisionPoint = options.decisionPoint ?? (Number(options.now) || ctx.timestamp);
     const kept = options.kept || new Map();
-    const liquidate = invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state);
+    const liquidate = invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state);
     const decisions = [];
     const forBoard = [];
     let keptLines = 0;

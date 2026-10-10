@@ -69,6 +69,14 @@ async function verifyAuthoredPhysicalCraft() {
                 equipmentPlan: { status: 'ready_to_craft', strategy: 'craft', recipeId: recipe.recipeId,
                     target: { selfId: recipe.productId } }
             });
+        const created = await Database.createAutonomousClan({ name: 'PersonalCraftClan', leaderId: customer.characterId,
+            memberIds: [customer.characterId], founderQuorum: 1, maxBotClans: 40, maxBotMemberShare: 1 });
+        assert(created.ok, created.code);
+        await Database.execute(['UPDATE clans SET level=1 WHERE id=?', [created.clanId]]);
+        await invoke('GameServer/Clan/ClanGoalService').clanProjectionById(created.clanId);
+        customer = Life.cachedState(customer.characterId);
+        assert.equal(customer.stats.equipmentPlan.strategy, 'craft', 'joining preserves a personal equipment recipe');
+        assert.equal(customer.stats.equipmentPlan.clanGoal, undefined);
         const ids = [customer.characterId, crafter.characterId];
         const noGrantBefore = await image(ids);
         const physical = noGrantBefore[0].items;

@@ -265,7 +265,8 @@ function prepareEquipmentMarketStop(session, bot, town, BotAI) {
 function prepareWarehouseStop(session, bot, town, BotAI) {
     if (session.shoppingServicePhase === 'warehouse') return true;
     if (session.shoppingWarehouseDone || !usesWarehouseStop(session)) return false;
-    if (!BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
+    if (!BotWarehouse.hasActorWithdrawalCandidates(bot, session.coldLifeState)
+        && !BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
         session.shoppingWarehouseDone = true;
         return false;
     }

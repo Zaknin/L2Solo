@@ -976,20 +976,29 @@ function buildProjection(state, ctx, deps) {
     for (const node of deps.nodes || []) { if (node.need) root(node); else add(node); }
     const moneyPaths = ctx.hunt.perHour > 0 ? [{ activity: 'hunting', kind: 'money',
         spotId: ctx.bestSpotId, incomePerHour: ctx.hunt.perHour, riskHours: ctx.expectedDeathHours }] : [];
-    const sale = invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(state, {
-        preparedReservations: deps.saleReservations,
+    const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+    const saleState = Warehouse.saleState(state);
+    const sale = invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(saleState, {
+        preparedReservations: invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(saleState),
         keptAmounts: { ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, ctx),
             ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: ctx.stock('potions').target }),
             ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) }
     }).filter(row => row.npcComparable && !values.has(Number(row.selfId)));
     const saleValue = sale.reduce((sum, row) => sum + ctx.buyback(row.selfId) * row.count, 0);
     if (saleValue > 0) {
-        const town = state.stats?.shopTown?.town || invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, sale, {
-            findSpot: id => need('../AI/SpotIndex').spotById(deps.spots, id)
-        });
-        const route = ctx.trip?.details?.(town);
-        if (route?.known && route.fees <= Number(state.adena || 0)
-            && need('../Population/ColdOccupationSources').hasNpcSellerInTown(town)) {
+        // NPC buyback is the same across towns. Compare the prepared routes
+        // once; a nearby seller can fund gear without an unaffordable fare to
+        // the item's preferred player-market town.
+        let best = null;
+        for (const town of need('./EconomicTrip').towns) {
+            if (!need('../Population/ColdOccupationSources').hasNpcSellerInTown(town)) continue;
+            const route = ctx.trip?.details?.(town);
+            if (!route?.known || route.fees > Number(state.adena || 0)) continue;
+            const cost = route.fees + route.hours * Math.max(1, ctx.hunt.perHour);
+            if (!best || cost < best.cost) best = { town, route, cost };
+        }
+        if (best) {
+            const { town, route } = best;
             moneyPaths.push({ activity: 'selling', kind: 'liquidate', repeatable: false,
                 capacityCash: saleValue, cashFees: route.fees, actionHours: route.hours,
                 town, items: sale.map(row => row.selfId) });

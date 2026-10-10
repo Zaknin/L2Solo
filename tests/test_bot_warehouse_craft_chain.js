@@ -27,7 +27,7 @@ try {
     assert.deepEqual(Warehouse.craftRequests(dual, [{ selfId: 72, amount: 1 }, { selfId: 75, amount: 1 }, { selfId: 1870, amount: 431 }]),
         [{ selfId: 72, amount: 1, reason: 'craft' }, { selfId: 75, amount: 1, reason: 'craft' }],
         'stored sword components suppress their whole manufacturing trees');
-    assert.deepEqual(Warehouse.craftRequests({ ...dual, stats: { ...dual.stats, clanId: 7 } }, [{ selfId: 1870, amount: 431 }]), [],
-        'clan members do not resume unauthorized personal crafting');
+    assert.deepEqual(Warehouse.craftRequests({ ...dual, stats: { ...dual.stats, clanId: 7 } }, [{ selfId: 1870, amount: 431 }]),
+        Warehouse.craftRequests(dual, [{ selfId: 1870, amount: 431 }]), 'membership does not block a personal recipe chain');
     console.log('Nested warehouse crafting, shared stock and stored dual components passed');
 } finally { Recipes.resolveByRecipeId = originalId; Recipes.resolveByProductId = originalProduct; }

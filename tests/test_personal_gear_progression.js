@@ -53,7 +53,7 @@ function verify() {
         const member = { ...first, ...membership };
         assert.deepEqual([...Progression.assess(member).gaps], [...Progression.assess(first).gaps],
             'clan membership does not remove the working kit milestone');
-        assert.equal(Progression.personal(member), false, 'clan custody keeps its own surplus policy');
+        assert.equal(Progression.personal(member), true, 'without a warehouse membership preserves personal progression');
     }
     assert.equal(Progression.assess({ ...first, stats: { ...first.stats, craftStationId: 1 } }).required, false,
         'stationary craft services remain outside adventurer equipment progression');
@@ -109,10 +109,10 @@ function verify() {
     assert(sale.npc.some(row => row.selfId === 1049 && row.count === 2));
     assert.equal(Disposition.warehouseCandidates(spare).length, 0);
     const clanSurplus = { ...spare, stats: { ...spare.stats, clanId: 1 } };
-    assert(Disposition.warehouseCandidates(clanSurplus).some(row => row.selfId === 1864),
-        'a clan member still preserves surplus materials for its warehouse policy');
-    assert.equal(Disposition.isNpcOnlyItem(clanSurplus.inventory[1049], undefined, clanSurplus), false,
-        'personal gear completion does not liquidate clan skill books');
+    assert.equal(Disposition.warehouseCandidates(clanSurplus).length, 0,
+        'membership alone never hoards personal surplus');
+    assert.equal(Disposition.isNpcOnlyItem(clanSurplus.inventory[1049], undefined, clanSurplus), true,
+        'without a clan warehouse the ordinary personal book rule still applies');
     const amulet = Data.items.find(item => /^Amulet/.test(item.template?.name || '')
         && require('../src/GameServer/Items/ItemAcquisitionCatalog').hasSource(item.selfId));
     assert(amulet);

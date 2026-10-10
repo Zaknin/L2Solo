@@ -65,6 +65,7 @@ async function run() {
         assert.equal(physicalCharacter.classId, 54);
         assert.equal(invoke('GameServer/World/TownRespawn').getClosestTown(physicalCharacter.locX, physicalCharacter.locY,
             physicalCharacter.locZ).name, 'Giran');
+        await DB.execute(['UPDATE characters SET locX=91058,locY=171959,locZ=-3760 WHERE id=?', [state.characterId]]);
         const beforeExchange = await DB.fetchItems(state.characterId);
         await DB.execute([`CREATE TEMP TRIGGER fail_luxury BEFORE INSERT ON items WHEN NEW.characterId=9633
             AND NEW.selfId=162 BEGIN SELECT RAISE(ABORT,'luxury rollback'); END`]);
@@ -118,6 +119,7 @@ async function run() {
         assert(!Disposition.saleCandidates(state).some(row => spareIds.includes(row.selfId)), 'exchange inputs stay reserved');
         const batch = { kind: 'crystallize', npcId: Crystals.npcId,
             items: [{ selfId: spareIds[0], amount: 2 }, { selfId: spareIds[1], amount: 1 }] };
+        await DB.execute(['UPDATE characters SET locX=91058,locY=171959,locZ=-3760 WHERE id=?', [state.characterId]]);
         const bagBefore = await DB.fetchItems(state.characterId);
         const kitBefore = bagBefore.filter(row => row.equipped);
         await DB.execute([`CREATE TEMP TRIGGER fail_crystal BEFORE INSERT ON items WHEN NEW.characterId=9636
@@ -189,6 +191,12 @@ async function run() {
         state = await Life.applyMarketPurchase(state, { selfId: 90, price: 100, sourceType: 'fixture' }, 2);
         state = await Life.upsertState({ ...state, activity: 'hunting', currentRegion: 'Dion',
             loc: { locX: 18748, locY: 145437, locZ: -3132 } }, 'outside_station_fixture');
+        const crystalCommand = { kind: 'crystallize', npcId: Crystals.npcId, sourceSelfId: 90, amount: 2 };
+        await assert.rejects(DB.applyBotImprovement(state.characterId, crystalCommand, { coldState: state }),
+            /invalid_bot_crystallization/, 'an old character position in Giran cannot authorize an outside cold bot');
+        await assert.rejects(DB.applyBotImprovement(state.characterId, crystalCommand, {
+            coldState: { ...state, activity: 'shopping', currentRegion: 'Giran', loc: location }
+        }), /economy_state_changed/, 'a same-revision command cannot claim a different town');
         const economy = invoke('GameServer/Bot/Economy/EconomyContext'), originalBuild = economy.forState;
         economy.forState = () => { throw Error('town handoff must not rebuild the forecast on main'); };
         let dispatched;
@@ -203,7 +211,7 @@ async function run() {
         assert.equal(dispatched.state.stats.travel.arrivalActivity, 'shopping');
         assert(dispatched.state.adena < state.adena, 'native dispatch pays the existing travel cost');
         assert.equal(dispatched.state.inventory[90].amount, 2, 'dispatch cannot consume inputs before arrival');
-        console.log('PASS native early C acquisition/Luxury: deferred wear, protected stash, D-only cost, player costs, rollback, missing inputs and stale/repeated command');
+        console.log('PASS native early C acquisition/Luxury: deferred wear, protected stash, D-only cost, player costs, rollback, missing inputs, authoritative cold location and stale/repeated command');
     } finally {
         await DB.close(); require('node:fs').rmSync(fixture.directory, { recursive: true, force: true });
     }

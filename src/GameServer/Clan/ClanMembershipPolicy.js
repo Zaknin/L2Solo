@@ -1,19 +1,15 @@
-let ClanCraftingPolicy;
-
-// Membership is authoritative; an old solo plan must not survive joining a clan.
+// Membership is authoritative; joining keeps unrelated personal acquisition.
 function reconcileState(state, clanId = Number(state?.stats?.clanId || 0)) {
     const current = state.stats || {};
     const plan = current.equipmentPlan;
     const foreignGoal = Number(plan?.clanGoal?.clanId || 0) > 0 && Number(plan.clanGoal.clanId) !== clanId;
-    const personalCraft = (ClanCraftingPolicy ||= require('./ClanCraftingPolicy')).isPersonalCraft({ clanId }, plan);
     const request = current.partyRequest;
-    const invalidRequest = (Number(request?.clanId || 0) > 0 && Number(request.clanId) !== clanId)
-        || (clanId > 0 && request?.strategy === 'craft' && !request.clanGoalKey);
+    const invalidRequest = Number(request?.clanId || 0) > 0 && Number(request.clanId) !== clanId;
     const invalidObjective = current.clanPartyObjective && Number(current.clanPartyObjective.clanId) !== clanId;
-    if (Number(current.clanId || 0) === clanId && !foreignGoal && !personalCraft && !invalidRequest && !invalidObjective) return state;
+    if (Number(current.clanId || 0) === clanId && !foreignGoal && !invalidRequest && !invalidObjective) return state;
     const stats = { ...current, clanId };
     let activity = state.activity;
-    if (personalCraft || foreignGoal) {
+    if (foreignGoal) {
         delete stats.equipmentPlan;
         delete stats.craftReturn;
         delete stats.clanMaterialDemand;
@@ -28,12 +24,7 @@ function reconcileState(state, clanId = Number(state?.stats?.clanId || 0)) {
     return { ...state, activity, stats };
 }
 
-function reconcileParty(party, leaderClanId) {
-    const objective = party.stats?.objective;
-    if (!Number(leaderClanId) || objective?.strategy !== 'craft' || objective.clanGoalKey) return party;
-    const stats = { ...party.stats, objective: null, acquisitionGoal: null, lastRequirementRefreshAt: 0 };
-    return { ...party, stats };
-}
+function reconcileParty(party) { return party; }
 
 function activeGoalKeys(clanState = {}) {
     return new Set([clanState.goal, clanState.productionGoal].filter(goal => goal?.goalKey

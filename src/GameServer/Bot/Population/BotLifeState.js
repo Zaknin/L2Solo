@@ -1643,6 +1643,7 @@ const BotLifeState = {
             // even when its wall-clock lease had time remaining. Reclaim the
             // rows before any legacy startup repair can touch them.
             .then(() => invoke('GameServer/Bot/Population/ColdSimulationOwner').recoverStartupLeases())
+            .then(() => invoke('GameServer/Clan/ClanSupplyPolicy').init())
             .then(() => Database.reconcileBotClanMembership()).then(({ repairedMembers, repairedParties }) => {
                 if (repairedMembers || repairedParties) {
                     utils.infoWarn('BotLife', 'reconciled clan membership and crafting goals: bots=%d parties=%d', repairedMembers, repairedParties);

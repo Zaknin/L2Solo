@@ -188,7 +188,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         : kernel?.states.get(id)?.state === input.sourceState),
     sameInput: (left, right) => left.mode === 'wish' || right.mode === 'wish'
         ? left.mode === right.mode && left.sourceState === right.sourceState && left.routeKey === right.routeKey
-        : left.state.updatedAt === right.state.updatedAt
+        : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
         && ColdEconomyDecision.stateKey(left.state) === ColdEconomyDecision.stateKey(right.state)
         && left.state.simulation?.revision === right.state.simulation?.revision
         && left.state.simulation?.ownerId === right.state.simulation?.ownerId
@@ -448,7 +448,7 @@ function occupationFor(state, timestamp, context = {}, mode = 'occupation') {
         routeRequests.set(id, input);
         return occupationPlanner.request(-id, input);
     }
-    return occupationPlanner.request(id, { state, sourceState, timestamp, buyOrderEscrow: context.buyOrderEscrow || 0,
+    return occupationPlanner.request(id, { state, sourceState, timestamp, assetsKey: assetsKey(state), buyOrderEscrow: context.buyOrderEscrow || 0,
         knownShotRecipes: context.knownShotRecipes || [], recipeBook: context.recipeBook, stock: context.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
@@ -474,6 +474,10 @@ function requestRoute(payload) {
     occupationPlanner.request(-id, input, { awaitResult: false });
 }
 const refreshedStates = new WeakSet();
+function assetsKey(state) {
+    return `${invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').version(state)}:${
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)}`;
+}
 const economyPlanHash = plan => require('../Fnv1a').fnv1a32(JSON.stringify(plan));
 function occupationOwnerChanged(id, refresh = false) {
     const entry = kernel?.states.get(Number(id));
@@ -481,7 +485,7 @@ function occupationOwnerChanged(id, refresh = false) {
     // One economy refresh per native state object.
     if (refresh && refreshedStates.has(entry.state)) return;
     if (refresh) refreshedStates.add(entry.state);
-    occupationPlanner.request(id, { state: entry.state, sourceState: entry.state,
+    occupationPlanner.request(id, { state: entry.state, sourceState: entry.state, assetsKey: assetsKey(entry.state),
         timestamp: Date.now(), mode: refresh ? 'refresh' : 'occupation', pending: entry.context.economyPending || 0,
         buyOrderEscrow: entry.context.buyOrderEscrow || 0,
         knownShotRecipes: entry.context.knownShotRecipes || [],
@@ -537,6 +541,30 @@ tables.watch('market', {
     remove: key => {
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
+    }
+});
+tables.watch('personal_warehouse', {
+    reset: () => {},
+    put: key => occupationOwnerChanged(Number(key)),
+    remove: key => occupationOwnerChanged(Number(key))
+});
+tables.watch('clan_supplies', {
+    reset: () => {},
+    put: key => {
+        // Only the bounded retained contexts can carry an obsolete hot card.
+        // Cold owners notice the version at their next natural resolve.
+        for (const entry of occupationPlanner.slots.values()) {
+            const state = entry.input.state;
+            if (state.phase === 'hot' && Number(state.clanId ?? state.stats?.clanId) === Number(key))
+                occupationOwnerChanged(entry.id);
+        }
+    },
+    remove: key => {
+        for (const entry of occupationPlanner.slots.values()) {
+            const state = entry.input.state;
+            if (state.phase === 'hot' && Number(state.clanId ?? state.stats?.clanId) === Number(key))
+                occupationOwnerChanged(entry.id);
+        }
     }
 });
 function boardReady() {
@@ -632,6 +660,8 @@ let planningOccupancyCachedAt = 0;
 // Personas come from the main thread's 'personas' table (BotPersona.loadAll).
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 BotPersona.useRowSource((characterId) => tables.rows('personas').get(characterId));
+invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
 let eventLoopDelay = null;
 
 // The owner notices moved counters only during its own natural resolve.
@@ -1028,7 +1058,7 @@ function startKernel(config = {}) {
         const entry = kernel.states.get(id);
         const side = meeting.actorA === id ? 0 : 1;
         const state = meeting.incoming ? { ...entry.state, acceptedIncoming: meeting.incoming[side], incomingPending: false } : entry.state;
-        return occupationPlanner.request(id, { state, sourceState: entry.state, timestamp: Date.now(),
+        return occupationPlanner.request(id, { state, sourceState: entry.state, timestamp: Date.now(), assetsKey: assetsKey(state),
             mode: 'meeting', meeting, recipeBook: entry.context.recipeBook, buyOrderEscrow: entry.context.buyOrderEscrow || 0,
             routeKey: EconomicTrip.key(entry.state), sourceReady: tables.ready('board') && tables.ready('market') }).then(result => {
                 if (!result?.token) throw Error(result?.reason || 'trade_meeting_preparation_pending');

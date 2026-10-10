@@ -387,7 +387,7 @@ function reservedUpgradeAmounts(state) {
     return reserved;
 }
 
-function reservedEquipmentAmounts(state) {
+function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
     const craft = reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
@@ -403,9 +403,10 @@ function reservedEquipmentAmounts(state) {
     const targetId = Number(state?.stats?.equipmentPlan?.target?.selfId || 0);
     if (targetId && Number(state?.inventory?.[targetId]?.amount || 0) > 0
         && !state.inventory[targetId].equipped) upgrades[targetId] = 1;
-    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades)])].reduce((reserved, selfId) => {
+    const clan = options.clan === false ? {} : invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades), ...Object.keys(clan)])].reduce((reserved, selfId) => {
         reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0),
-            Number(upgrades[selfId] || 0));
+            Number(upgrades[selfId] || 0)) + Number(clan[selfId] || 0);
         return reserved;
     }, {});
 }
@@ -427,7 +428,8 @@ function reservationInputKey(state = {}) {
     const combine = plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)
         ? quantities(plan.combine.requirements) : null;
     return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
-        plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null]);
+        plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -485,7 +487,10 @@ function saleCandidates(state, options = {}) {
     const limit = options.unlimited
         ? Number.MAX_SAFE_INTEGER
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
-    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)), ...(options.reserved || {}) };
+    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)) };
+    const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    for (const [id, amount] of Object.entries(options.reserved || {}))
+        reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
     // The healing potions, the bot's own shots and the Scrolls of Escape a bot
     // spends are kept up to their restock targets; a surplus is sold.
     const basics = options.keptAmounts ? null
@@ -495,12 +500,10 @@ function saleCandidates(state, options = {}) {
         ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, basics),
         ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) };
     for (const [selfId, amount] of Object.entries(kept)) {
-        reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount);
+        reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount + Number(clan[selfId] || 0));
     }
     const candidatesFor = (item) => {
         const selfId = Number(item?.selfId || 0);
-        if (ClanCrafting.clanIdFor(state) && (ClanCrafting.isResource(selfId)
-            || Number(state.stats?.clanMaterialDemand?.[selfId] || 0) > 0)) return [];
         const sellableAmount = saleFreeAmount(state, item, reserved);
         if (!selfId || selfId === 57 || BeginnerShots.isRestricted(selfId) || sellableAmount <= 0) return [];
 
@@ -616,7 +619,7 @@ function isWarehouseCandidate(item, template = templateFor(item?.selfId)) {
 function warehouseCandidates(state) {
     // Personal surplus finances equipment. Craft inputs and accepted native
     // obligations are already protected by reservations, not spare storage.
-    if (invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)) return [];
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return [];
     const reserved = reservedEquipmentAmounts(state);
     return Object.values(state?.inventory || {}).flatMap((item) => {
         const equipped = Math.max(0, Number(item.equippedCount ?? (item.equipped ? 1 : 0)) || 0);

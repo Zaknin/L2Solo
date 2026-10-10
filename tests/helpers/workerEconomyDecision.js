@@ -30,7 +30,9 @@ module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = fals
         escape: { held: Number(state.inventory?.[736]?.amount || 0), unitPrice: economy.price(736),
             usable: !invoke('GameServer/Karma').closesTowns(state.stats?.karma) }
     };
-    return { ...(nativeRoutes ? { watchList: economy.watchList } : {}), decision: { ...decision }, materials: decision.materials, statsPacket: economy.statsPacket, reserveInputs,
+    return { ...(nativeRoutes ? { watchList: economy.watchList } : {}),
+        warehouseAssets: invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').inventory(state),
+        decision: { ...decision }, materials: decision.materials, statsPacket: economy.statsPacket, reserveInputs,
         queue: economy.network.queue.map(row => ({ key: row.key, materials: row.object?.materials || [], price: row.price, ratio: row.ratio, valueHours: row.valueHours, funded: row.funded, cumulativePrice: row.cumulativePrice, object: row.object })),
         forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };`;

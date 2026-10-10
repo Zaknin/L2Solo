@@ -642,8 +642,7 @@ function preferredTarget(state = {}, options = {}) {
     const craftRecipes = options.craftRecipes
         ? options.craftRecipes.filter((recipe) => recipe.type === 'dwarven' && Sources.allowsRecipe(recipe))
         : CraftShopService.publishedStationRecipes().recipes;
-    const recipes = ClanCrafting.clanIdFor(state) && !options.clanCrafting
-        ? [] : [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()];
+    const recipes = [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()];
     const recipeRank = options.recipeId
         ? String((DataCache.items || []).find((item) => Number(item.selfId) === Number(recipes.find((recipe) => Number(recipe.recipeId) === Number(options.recipeId))?.productId))?.etc?.rank || '')
         : null;
@@ -1444,10 +1443,10 @@ function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now(
         && (!previousPlan?.recipeId || Sources.allowsRecipe(previousPlan.recipeId));
     return {
         levelingRecovery,
-        planCurrent: targetAllowed && !levelingRecovery && !ClanCrafting.isPersonalCraft(state, previousPlan) && Boolean(previousPlan)
+        planCurrent: targetAllowed && !levelingRecovery && Boolean(previousPlan)
             && sameGrade
             && Number(previousPlan.plannedForLevel || 0) === currentLevel,
-        routeCurrent: targetAllowed && !levelingRecovery && !ClanCrafting.isPersonalCraft(state, previousPlan) && Boolean(previousPlan)
+        routeCurrent: targetAllowed && !levelingRecovery && Boolean(previousPlan)
             && sameGrade
             && sourceAllowed
             && sourceViable
@@ -1471,7 +1470,6 @@ function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now(
 function finalizePlan(state = {}, previousPlan = null, rawPlan = {}, context = {}, timestamp = Date.now()) {
     const recovery = context.levelingRecovery || levelingRecoveryFor(state, previousPlan, timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery, previousPlan);
-    if (ClanCrafting.isPersonalCraft(state, rawPlan)) return { status: 'deferred', strategy: 'none', reason: 'clan_managed_crafting', materials: [], next: null };
     if (clanGoalPlanLocked(state, previousPlan) && context?.allowClanGoalReplan !== true) {
         return previousPlan;
     }
@@ -1778,7 +1776,6 @@ function plannedMaterialAcquired(state, plan) {
 
 function bestSourceForPlan(state = {}, plan = {}, spots = [], options = {}) {
     if (levelingRecoveryFor(state, plan, options.timestamp)) return null;
-    if (ClanCrafting.isPersonalCraft(state, plan) && !options.clanCrafting) return null;
     if (plan?.status !== 'active' || plannedMaterialAcquired(state, plan)) return null;
     const itemId = itemIdForPlan(plan);
     if (!itemId) return null;
@@ -1858,7 +1855,6 @@ function retargetPlanSource(state = {}, plan = {}, source = null) {
 function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options = {}) {
     const recovery = options.levelingRecovery || levelingRecoveryFor(state, previousPlan, options.timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery, previousPlan);
-    if (ClanCrafting.isPersonalCraft(state, previousPlan) && !options.clanCrafting) return planFor(state, { ...options, spots });
     const offerOptions = { ...options, origin: offerOrigin(state, { ...options, spots }) };
     const weaponBridge = npcEquipmentBridgePlan(state, offerOptions);
     if (weaponBridge) return weaponBridge;
@@ -2646,9 +2642,6 @@ function rawPlanFor(state = {}, options = {}) {
 function planFor(state = {}, options = {}) {
     const recovery = options.levelingRecovery || levelingRecoveryFor(state, state.stats?.equipmentPlan, options.timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery);
-    if (ClanCrafting.clanIdFor(state) && !options.clanCrafting && options.recipeId) {
-        options = { ...options, recipeId: null };
-    }
     const excluded = new Set((options.excludedTargetIds || []).map(Number).filter(Boolean));
     const maxExpectedKills = Number(options.maxExpectedKills);
     let plan;
