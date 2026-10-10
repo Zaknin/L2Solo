@@ -75,7 +75,7 @@ module.exports.publicationProbe = async stage => {
         const first = Economy.forState(current,options),clone = structuredClone(current);
         clone.updatedAt++;
         const fresh = Economy.forState(clone,options);
-        assert.notStrictEqual(fresh.plan,first.plan,'worker identity backstop cannot retain an old canonical input');
+        assert.strictEqual(fresh.plan,first.plan,'a new publication with equal inputs serves the kept plan, which holds no state (perf C2)');
         assert.strictEqual(fresh.state,clone);
         assert.deepEqual(fresh.statsPacket,first.statsPacket);
         assert.deepEqual(fresh.network.activity,first.network.activity);
@@ -111,7 +111,7 @@ module.exports.publicationProbe = async stage => {
     }
     if (stage === 'replaced') {
         assert.notStrictEqual(current,module.exports.previous);
-        assert.equal(Economy.size().context,1,'only unchanged member context remains');
+        assert.equal(Economy.size().context,2,'publication keeps both member plans, which hold no state (perf C2)');
         assert.equal(Economy.size().groups,0,'native snapshot publication evicted every old group closure');
         assert.equal(Profile.size().ownerBuilds,module.exports.buildOwners);
         const economy=Economy.forState(current,options);
@@ -121,7 +121,7 @@ module.exports.publicationProbe = async stage => {
             {persist:false,projectClassProgression:true,timestamp:current.updatedAt+1});
         assert.notStrictEqual(projected,current);
         kernel.states.set(911,{...kernel.states.get(911),state:projected});
-        assert.equal(Economy.size().context,1,'central publication also releases an accepted projection');
+        assert.equal(Economy.size().context,2,'central publication keeps the plan of an accepted projection (perf C2)');
         assert.strictEqual(Runtime.index.getSource(911,'state').source,projected);
         Economy.forGroup({id:'worker-projected',adena:200},[projected,kernel.states.get(912).state],options);
         kernel.states.delete(911);

@@ -56,7 +56,7 @@ function evaluate(state = {}, options = {}) {
     if (leaf.activity === 'shopping' && itemId) {
         // The card's amount to order; only units that reached the bag or
         // accepted incoming since that decision fill it.
-        amount = require('../Population/ColdEconomyDecision').remainingToOrder(leaf, state, context.state || state, itemId);
+        amount = require('../Population/ColdEconomyDecision').remainingToOrder(leaf, state, context.decidedHeld || context.state || state, itemId);
         if (!amount) return [];
         if (amount < leaf.amount) estimatedCost = leaf.price / leaf.amount * amount;
     }

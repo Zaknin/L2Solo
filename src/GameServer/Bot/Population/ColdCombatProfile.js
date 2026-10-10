@@ -845,6 +845,13 @@ function releaseBuild(key) {
         if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
     }
 }
+// The effects active at `timestamp` as they enter a build's power: the
+// reading time's part of powerKey (also an economy input key part, perf C2).
+function effectsKey(state = {}, timestamp = Date.now()) {
+    const saved = state.stats?.coldCombat || {};
+    return activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
+        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
+}
 function powerKey(state = {}, timestamp = Date.now()) {
     const saved = state.stats?.coldCombat || {};
     const worn = state.inventory && typeof state.inventory === 'object'
@@ -852,8 +859,7 @@ function powerKey(state = {}, timestamp = Date.now()) {
             row.enchant, (row.equippedSlots || []).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
-    const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
-        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
+    const effects = effectsKey(state, timestamp);
     return [saved.classId, state.stats?.classId, state.classId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
         JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects].join('|');
@@ -960,7 +966,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, effectsKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

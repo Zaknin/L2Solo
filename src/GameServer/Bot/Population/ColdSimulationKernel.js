@@ -426,8 +426,11 @@ class RetainedStateMap extends Map {
 
     set(id, entry) {
         const current = this.get(id);
-        if (current?.state !== entry.state && typeof invoke === 'function') {
-            invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication');
+        // A new state object keeps the actor's economy plan (perf C2): the plan
+        // holds no state and serves a later state only on equal inputs. Groups
+        // that hold the old state object in their member views are released.
+        if (current && current.state !== entry.state && typeof invoke === 'function') {
+            invoke('GameServer/Bot/Economy/EconomyContext').forgetGroupsOf(id, 'state_publication');
         }
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }

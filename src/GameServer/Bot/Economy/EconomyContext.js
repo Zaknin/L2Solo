@@ -9,6 +9,7 @@ const { WishNetwork, remember, admitRoots, remainingQuantity } = require('./Wish
 const { isMainThread } = require('node:worker_threads');
 const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
+const { createHash } = require('node:crypto');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 let routeAnchors = new WeakMap();
@@ -22,11 +23,21 @@ function registerProvider(key, provider) {
 }
 // actorKey -> { key, reads, plan, stateRef, gearThreat } of bots: bounded
 // (WishNetwork.remember). The plan is data (planOf); a reader gets view().
+// The main thread keeps 64 (its entries hold the graph nodes). The worker
+// keeps one plan per actor (perf C2): a few KB without any state, released
+// when the actor leaves the worker (remove, owner_release), so the bound is
+// the population; WORKER_LIMIT only guards a runaway.
 const cache = new Map();
+const WORKER_LIMIT = 16384;
 let planningContexts = 0;
+const keptLimit = () => isMainThread ? 64 - planningContexts : WORKER_LIMIT;
+const keeps = deps => deps.rememberContext !== false && (!isMainThread || planningContexts < 64);
+// The cache entry and the plan keep a digest of the input key, not its
+// ~2.4 KB text; the caller's own key text is what a view reports.
+const keyDigest = key => createHash('sha1').update(key).digest('base64');
 function setPlanningContexts(count) {
     planningContexts = Math.max(0, Math.min(64, Math.floor(Number(count) || 0)));
-    while (cache.size > 64 - planningContexts) {
+    while (cache.size > keptLimit()) {
         const key = cache.keys().next().value; cache.delete(key); engine.forget(key, 'planning_capacity');
         if (Diagnostics.active()) { Diagnostics.count('context', 'eviction', 'planning_capacity'); noteRelease(key, 'planning_capacity'); }
     }
@@ -107,7 +118,7 @@ function routeState(state, session) {
     return { ...state, loc: anchor.loc };
 }
 function inputKey(state, deps = {}) {
-    const stats = state.stats || {};
+    const stats = state.stats || {}, time = Number(deps.timestamp || Date.now());
     const items = Object.values(state.inventory || {}).map(row => [row.selfId, row.amount, row.equippedCount || row.equipped,
         row.slot, row.enchant, row.stackable, row.starterMobLootAmount, row.kind, row.rank,
         row.reservedAmount, row.protectedAmount, row.protected, row.acceptedCustomer, row.assignedClan, row.available,
@@ -128,7 +139,21 @@ function inputKey(state, deps = {}) {
         Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
         deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled(),
         stats.production?.crafts || 0, positive(state.sp),
-        (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')].join('|');
+        (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(','),
+        // Read by the build, kept by a worker plan across state objects (perf
+        // C2): the role and route mode (spot table, party hunt), the shop town,
+        // a craft station's identity, the errands' clan money, own trade
+        // experience (price belief), the spot-income learning and own danger
+        // sample, the time on the spot; and the reading time where the build
+        // reads it: which hunt samples are inside their window, the effects
+        // still active and night (the build's power, ColdCombatProfile).
+        state.party?.role, stats.role, stats.routeMode, stats.shopTown?.town, stats.craftStationId, state.accountName,
+        JSON.stringify([stats.marketErrand || null, stats.marketErrands || null]),
+        JSON.stringify(state.marketTrades || null), stats.lifelongKills, stats.fightsWon,
+        JSON.stringify(stats.spotRisk || null), stats.huntClock?.onSpot, stats.huntClock?.total,
+        invoke('GameServer/Bot/AI/BotHuntEfficiency').windowMask(state, time),
+        invoke('GameServer/Bot/Population/ColdCombatProfile').effectsKey(state, time),
+        invoke('GameServer/World/GameTime').isNight(time)].join('|');
 }
 // The market as an input of one bot: the board lines and the counter of each
 // item its review read, as tokens at the time of reading. The context stays
@@ -140,17 +165,22 @@ function marketToken(board, id, deps = {}) {
     const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
     return `${board?.itemRevision ? board.itemRevision(id) : '-'}|${Counters.revisionOf(Counters.counterOf(id))}|${deps.workshopRevision?.(id) || 0}`;
 }
-function marketHolds(board, reads, deps) {
-    for (const [id, token] of reads) if (marketToken(board, id, deps) !== token) return false;
-    return true;
-}
-function marketKey(reads) {
-    let hash = 0x811c9dc5;
-    for (const [id, token] of reads) {
+// The items a review read, in reading order, and two running FNV digests
+// of their tokens (`id=token;`): a kept plan holds ~1 KB of ids instead of
+// ~10 KB of token strings (perf C2). Lane a is the market part of the
+// network key; both lanes (64 bits) decide whether the market still holds.
+class MarketReads {
+    constructor() { this.ids = []; this.a = 0x811c9dc5; this.b = 0x9e3779b9; }
+    has(id) { return this.ids.includes(id); }
+    add(id, token) {
         const text = `${id}=${token};`;
-        for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
+        this.ids.push(id); this.a = fnv1a32(text, this.a); this.b = fnv1a32(text, this.b);
     }
-    return hash.toString(16);
+    holds(board, deps) {
+        let a = 0x811c9dc5, b = 0x9e3779b9;
+        for (const id of this.ids) { const text = `${id}=${marketToken(board, id, deps)};`; a = fnv1a32(text, a); b = fnv1a32(text, b); }
+        return a === this.a && b === this.b;
+    }
 }
 // Board reads of the review go through here while it is built, so each
 // item it looked at is remembered with its token. Later readers of
@@ -398,12 +428,13 @@ function forState(state = {}, deps = {}) {
     if (!deps.routeRows && held?.plan.routeKey === Trip.key(state)) deps.routeRows = held.plan.routeRows;
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
-    const key = inputKey(state, { ...deps, timestamp });
+    const key = inputKey(state, { ...deps, timestamp }), digest = keyDigest(key);
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
-    if (held?.key === key && (isMainThread || held.stateRef.deref() === state) && (!deps.withNodes || held.projection)
-        && marketHolds(sourceBoard, held.reads, deps)) {
-        if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
+    // Equal inputs and market tokens serve the kept plan to any state object
+    // (perf C2): the plan holds no state, so a new publication is no reason.
+    if (held?.key === digest && (!deps.withNodes || held.projection) && held.reads.holds(sourceBoard, deps)) {
+        if (deps.onSourceRead) for (const id of held.reads.ids) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', 'same_inputs');
             // The gap is measured from the last use, as the cache keeps by last use.
@@ -411,19 +442,21 @@ function forState(state = {}, deps = {}) {
             if (last) last.at = Date.now();
         }
         held.gearThreat = gearThreat;
-        remember(cache, actorKey, held);
+        // The latest state served owns the entry for a release that names
+        // its state (a private query snapshot, forgetContext).
+        if (held.stateRef.deref() !== state) held.stateRef = new WeakRef(state);
+        remember(cache, actorKey, held, keptLimit());
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
-            held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
-        return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection });
+            held.reads.add(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
+        return view(state, held.plan, deps, { key, board: sourceBoard, read: late, projection: held.projection });
     }
     const started = diagnostic ? performance.now() : 0;
     // Identity replacement is the worker's technical safety backstop, not an
     // economic event. An input-key mismatch is named as a dependency change;
     // it does not claim which historical event caused it.
-    const diagnosticReason = !diagnostic ? null : !held ? 'not_retained' : held.key !== key
-        ? 'input_dependency_changed' : !isMainThread && held.stateRef.deref() !== state ? 'state_publication'
-        : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
+    const diagnosticReason = !diagnostic ? null : !held ? 'not_retained' : held.key !== digest
+        ? 'input_dependency_changed' : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, shadowEntry = null;
     if (diagnostic) {
@@ -436,11 +469,11 @@ function forState(state = {}, deps = {}) {
             // 'capacity' (LRU), 'planning_capacity', 'unkept' (forState did not keep it) or the owner's forgetContext reason.
             if (diagnosticReason === 'not_retained') Diagnostics.count('context', 'shadow_released', last.released || 'unknown');
         }
-        const kept = deps.rememberContext !== false && planningContexts < 64;
+        const kept = keeps(deps);
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
-    const reads = new Map();
+    const reads = new MarketReads();
     let building = true;
     // MVP-6 Bounds: while a gear candidate's arena is built its reads wait
     // in its own scope; the provider keeps the scopes whose descriptors
@@ -449,7 +482,7 @@ function forState(state = {}, deps = {}) {
     let scope = null;
     const read = id => { id = Number(id); if (reads.has(id)) return;
         if (scope) { if (!scope.has(id)) scope.set(id, marketToken(sourceBoard, id, deps)); return; }
-        reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
+        reads.add(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -471,7 +504,7 @@ function forState(state = {}, deps = {}) {
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
-            keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); } } } };
+            keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.add(id, token); deps.onSourceRead?.(id); } } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
         ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
@@ -501,7 +534,7 @@ function forState(state = {}, deps = {}) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
             if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
         }
-        return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
+        return view(state, planOf(context, base, { key: digest, market: null, tripHour, prices }), deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
     }
     // One stock reader for the provider's gear witnesses and the network
     // build; the projection is read lazily once it exists (stock roots).
@@ -513,7 +546,7 @@ function forState(state = {}, deps = {}) {
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
         cycleHours: workshop.cycleHours, repeatable: true });
-    const market = marketKey(reads);
+    const market = reads.a.toString(16);
     const networkKey = `${key}#${market}`;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
@@ -558,18 +591,18 @@ function forState(state = {}, deps = {}) {
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0] });
-    const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
-    if (deps.rememberContext !== false && planningContexts < 64) {
-        if (diagnostic && !cache.has(actorKey) && cache.size >= 64 - planningContexts) {
+    const plan = planOf(context, base, { key: digest, market, tripHour, projection, knowledgeEnabled, prices });
+    if (keeps(deps)) {
+        if (diagnostic && !cache.has(actorKey) && cache.size >= keptLimit()) {
             Diagnostics.count('context', 'eviction', 'capacity');
             noteRelease(cache.keys().next().value, 'capacity');
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        remember(cache, actorKey, { key, reads, plan, stateRef: new WeakRef(state), gearThreat,
-            projection: isMainThread ? projection : null }, 64 - planningContexts);
+        remember(cache, actorKey, { key: digest, reads, plan, stateRef: new WeakRef(state), gearThreat,
+            projection: isMainThread ? projection : null }, keptLimit());
     }
-    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
+    return view(state, plan, deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -622,7 +655,9 @@ function compactNetwork(network) {
     const all = network.plans || new Map(), plans = new Map();
     for (const [key, plan] of all) if (key.startsWith('item:')) plans.set(key, trim(plan));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
-    return { ...network, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
+    // The network key text (input key + market) is the view's (perf C2).
+    const { inputKey: _text, ...rest } = network;
+    return { ...rest, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
 }
 // The build's prices of what the plan's own numbers were made from (the
 // kit, the queue, the watch list): a later view starts from them, so its
@@ -634,6 +669,14 @@ function planPrices(prices, kit, context) {
     const kept = new Map();
     for (const id of ids) if (prices.has(Number(id))) kept.set(Number(id), prices.get(Number(id)));
     return kept;
+}
+// What the decision's own state held of its activity's item: a later view
+// over another state object reads the decided baseline from here (perf C2).
+function decidedHeld(state, leaf) {
+    const Decision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+    const ids = new Set([leaf?.itemId, typeof leaf?.object === 'number' ? leaf.object : leaf?.object?.itemId]
+        .map(Number).filter(id => id > 0));
+    return [...ids].map(id => [id, Decision.heldFor(state, id)]);
 }
 function planOf(context, base, { key, market, tripHour, projection = null, knowledgeEnabled, prices }) {
     const stockRoots = new Map();
@@ -648,7 +691,8 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
         network: compactNetwork(context.network), moneyPrice: context.moneyPrice, gapHorizonHours: context.gapHorizonHours,
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
-        prices: planPrices(prices, base.kit, context), gearPlanMemo: undefined };
+        prices: planPrices(prices, base.kit, context), decided: decidedHeld(context.state, context.network?.activity),
+        gearPlanMemo: undefined };
 }
 // What a review's stock reader, usefulness, worth and purchase budget read:
 // one copy for the build and every later view of its plan.
@@ -688,8 +732,11 @@ function view(state, plan, deps, built = {}) {
     const price = built.price || pricing(state, plan.persona, built.board, plan.timestamp, deps, built.read, new Map(plan.prices)).price;
     const { stock, kitCost } = built.kit || kitReader(plan.kit, price,
         () => plan.kit.scrollHours ??= scrollHoursFor(state, deps.spots, plan.bestSpotId));
-    const network = plan.network;
-    const context = { inputKey: plan.market === null ? plan.key : `${plan.key}#${plan.market}`, actorKey: plan.actorKey, state,
+    // The caller's key text equals the plan's (its digest matched); the
+    // network object is the view's own, sharing the plan's rows.
+    const inputKey = plan.market === null ? built.key : `${built.key}#${plan.market}`;
+    const network = { ...plan.network, inputKey };
+    const context = { inputKey, actorKey: plan.actorKey, state,
         timestamp: plan.timestamp, gearThreatMask: plan.gearThreatMask, persona: plan.persona, board: built.board, hunt: plan.hunt,
         price, buyback, calibration: plan.calibration, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
         deathHours: plan.deathHours, lostGearHours: plan.lostGearHours, karmaHours: plan.karmaHours,
@@ -703,6 +750,10 @@ function view(state, plan, deps, built = {}) {
     // The plan is the identity of one decision for memos kept beside it
     // (a refused trip, the gear plan choice), not this view object.
     Object.defineProperty(context, 'plan', { value: plan });
+    context.decidedHeld = id => {
+        const row = plan.decided.find(([held]) => held === Number(id));
+        return row ? row[1] : invoke('GameServer/Bot/Population/ColdEconomyDecision').heldFor(state, id);
+    };
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
@@ -841,6 +892,12 @@ function forgetContext(id, reason = 'explicit_invalidation', expectedState = nul
     if (expectedState && cache.get(key)?.stateRef.deref() !== expectedState) return;
     if (cache.delete(key) && Diagnostics.active()) { Diagnostics.count('context', 'eviction', reason); noteRelease(key, reason); }
     engine.forget(key, reason);
+    forgetGroupsOf(id, reason);
+}
+// A held group keeps its members' views with their states: a member's new
+// state object releases the groups that hold it, never its own plan (perf C2).
+function forgetGroupsOf(id, reason = 'state_publication') {
+    id = Number(id);
     for (const [groupKey, held] of groups) {
         if (held.ids.includes(id)) {
             groups.delete(groupKey);
@@ -859,6 +916,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, forgetGroupsOf, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

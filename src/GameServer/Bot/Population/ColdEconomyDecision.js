@@ -213,9 +213,11 @@ function heldFor(state, itemId) {
 }
 // What a shopping leaf still orders now: the core's amount less what reached
 // the bag or accepted incoming since the decision (heldAtDecision; a full
-// worker leaf is read against its own decided state).
+// worker leaf is read against its own decided state, or the held amounts
+// its plan kept: `decided` is a state or a reader id -> held, perf C2).
 function remainingToOrder(leaf, state, decided = state, itemId = leaf?.itemId) {
-    const id = Number(itemId), baseline = Number(leaf?.heldAtDecision ?? heldFor(decided, id));
+    const id = Number(itemId), baseline = Number(leaf?.heldAtDecision
+        ?? (typeof decided === 'function' ? decided(id) : heldFor(decided, id)));
     return Math.max(0, Math.ceil(Number(leaf?.amount) || 0) - Math.max(0, heldFor(state, id) - baseline));
 }
 
