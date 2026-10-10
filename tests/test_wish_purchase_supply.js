@@ -186,7 +186,8 @@ assert.equal(expensive.queue[0].price, 1200, 'observed ask replaces the optimist
 assert.equal(expensive.queue[0].funded, false);
 assert.equal(expensive.activity, null, 'an unaffordable actual ask cannot execute shopping');
 const paidTrip = town => town === 'Giran' ? 6 : Infinity;
-paidTrip.details = town => ({ known: town === 'Giran', hours: 2, fees: 400 });
+// The road inside the horizon: a path past it waits (E212), this case is the fees.
+paidTrip.details = town => ({ known: town === 'Giran', hours: 0.5, fees: 400 });
 const travelTooDear = run(false, { wallet: 1500, context: { trip: paidTrip } });
 assert.equal(travelTooDear.queue[0].price, 1600, 'the purse includes actual future road fees');
 assert.equal(travelTooDear.queue[0].funded, false);
