@@ -54,6 +54,7 @@ function traderContext(state, deps = {}) {
         demandFor: deps.demandFor || economy.demandFor || null,
         ownStock: deps.ownStock || economy.ownStock || null,
         canSell: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
+            && !invoke('GameServer/Bot/Economy/ItemDisposition').isStarterEquipment(line)
             && deps.canSell?.(line) !== false,
         canBuy: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && (Number(line.enchant || 0) > 0 || !npcOwnsPurchase(economy, line.selfId)),

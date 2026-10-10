@@ -111,6 +111,19 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
+let starterItemsSource = null;
+let starterItemIds = new Set();
+
+function isStarterEquipment(item, template = templateFor(item?.selfId)) {
+    const source = DataCache.newbieItems;
+    if (starterItemsSource !== source) {
+        starterItemsSource = source;
+        starterItemIds = new Set((source || []).flatMap(row => row.items || [])
+            .map(grant => Number(grant.selfId)));
+    }
+    return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
+}
+
 function isSkillBookItem(item, template = templateFor(item?.selfId)) {
     const kind = kindFor(item, template);
     const name = String(item?.name || template?.template?.name || '').toLowerCase();
@@ -178,6 +191,7 @@ function isSpareConsumable(item, template = templateFor(item?.selfId)) {
 
 function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null) {
     if (isQuestItem(item, template)) return false;
+    if (isStarterEquipment(item, template)) return true;
     if (isEquipmentItem(item, template)) return false;
     if (state && invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state) && (isSkillBookItem(item, template)
         || invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId)))) return true;
@@ -259,8 +273,11 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     const candidates = saleCandidates(state, { unlimited: true });
     const npcOnlySlots = npcOnlySlotCount(state, candidates);
     const skillBookSlots = skillBookSlotCount(state, candidates);
+    // Replaced creation gear goes to the NPC without waiting for a full bag.
+    // The shared sale candidates already protect worn and reserved copies.
+    const unusedStarterGear = candidates.some(item => isStarterEquipment(item));
     const overCapacity = slots > INVENTORY_SLOT_LIMIT;
-    const accumulatedNpcOnly = skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
+    const accumulatedNpcOnly = unusedStarterGear || skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
     const surplusGearSlots = slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
         ? candidates.reduce((total, item) => {
             const lowGradeGear = (String(item.kind || '').startsWith('Weapon.')
@@ -635,6 +652,7 @@ module.exports = {
     isMarketRecipeItem,
     isShotRecipeItem,
     isSkillBookItem,
+    isStarterEquipment,
     inventoryCleanupNeed,
     inventorySlotCount,
     soloSaleSlotLimit,
