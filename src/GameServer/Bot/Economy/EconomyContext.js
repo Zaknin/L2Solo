@@ -211,6 +211,12 @@ function crowdToken(entry, self) {
     return [entry.count, entry.reservedCount, entry.capacity, has(entry.retained, self), has(entry.reservedKeys, self),
         [...(entry.reservationKeys || [])].join(','), [...(entry.retainedReservationKeys || [])].join(',')].join('/');
 }
+// A rebuild on a changed validity token (crowd, night) keeps the input key,
+// and its plan may differ by design: its shadow row is named apart, so
+// same_key:new_plan stays the alarm for a key that misses a real input.
+function shadowKind(same, reason) {
+    return !same ? 'new_key' : reason === 'spot_crowd_changed' || reason === 'night_changed' ? 'same_key_token' : 'same_key';
+}
 class CrowdReads {
     constructor(self) { this.self = self; this.ids = []; this.all = false; this.a = 0x811c9dc5; this.b = 0x9e3779b9; }
     digest(occupancy) {
@@ -591,7 +597,7 @@ function forState(state = {}, deps = {}) {
             money: state.stats?.money || [0, 0, base.survivalReserve, 0] };
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
-            if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
+            if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowKind(shadowSame, diagnosticReason)}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
         }
         return view(state, planOf(context, base, { key: digest, market: null, tripHour, prices }), deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
     }
@@ -608,12 +614,13 @@ function forState(state = {}, deps = {}) {
     // The network key and the group key carry the plan's validity tokens:
     // the market it read, and, when its build read them, the spot crowd and
     // night (a rebuild on a changed token is a new network, not a cached one).
-    const nightRead = () => Combat().nightReadCount() !== nightReads ? GameTime.isNight(timestamp) : null;
-    const night = nightRead();
+    const night = Combat().nightReadCount() !== nightReads ? GameTime.isNight(timestamp) : null;
     const market = `${reads.a.toString(16)}${crowd?.ids.length || crowd?.all ? `#c${crowd.all ? '*' : crowd.a.toString(16)}` : ''}${night === null ? '' : night ? '#n' : '#d'}`;
     const networkKey = `${key}#${market}`;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
-        remembered: deps.rememberContext !== false,
+        // A build that enumerated the whole crowd snapshot has no token for
+        // it: its network is never served from the engine's cache.
+        remembered: deps.rememberContext !== false && !crowd?.all,
         stockFor: context.stockFor,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
@@ -647,7 +654,7 @@ function forState(state = {}, deps = {}) {
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
         if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan',
-            `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
+            `${shadowKind(shadowSame, diagnosticReason)}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
     }
     if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
@@ -663,7 +670,7 @@ function forState(state = {}, deps = {}) {
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        remember(cache, actorKey, { key: digest, reads: reads.seal(), crowd, night: nightRead(), plan, stateRef: new WeakRef(state), gearThreat,
+        remember(cache, actorKey, { key: digest, reads: reads.seal(), crowd, night, plan, stateRef: new WeakRef(state), gearThreat,
             projection: isMainThread ? projection : null }, keptLimit());
     }
     return view(state, plan, deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
