@@ -715,8 +715,8 @@ function planTrimmer(unresolved = new Set()) {
 // the plans of requirement rows that have none, not every graph node.
 function compactNetwork(network) {
     const unresolved = new Set(), trim = planTrimmer(unresolved);
-    const row = wish => ({ key: wish.key, object: wish.object, price: wish.price, valueHours: wish.valueHours,
-        ratio: wish.ratio, funded: wish.funded, plan: trim(wish.plan) });
+    const row = wish => ({ key: wish.key, need: wish.need, object: wish.object, price: wish.price, reserved: wish.reserved,
+        valueHours: wish.valueHours, ratio: wish.ratio, funded: wish.funded, plan: trim(wish.plan) });
     const queue = (network.queue || []).map(row);
     const at = network.gap ? (network.queue || []).indexOf(network.gap) : -1;
     const leaf = network.activity;
