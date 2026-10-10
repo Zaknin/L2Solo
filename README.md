@@ -31,7 +31,7 @@ Optional but recommended for a better experience
 
 🔥 Hot bots - bots that the player can see, or within maximum client view range. Any cold bot can become hot if the player is nearby. Highest detail level, uses much more compute for realistic movement, actions, etc.
 
-🌳 Static bots - mostly static traders in towns and crafting stations in Giran. Needed only for a specific function, no brain, no communication or goals.
+🌳 Static bots - static traders in towns and crafting stations in Giran. Needed only for a specific function, no brain, no communication or goals.
 
 
 ## Latest updates
@@ -172,6 +172,8 @@ You will need:
 ## Quick Start
 
 ```bash
+git clone https://github.com/pmbstyle/L2Solo.git
+cd L2Solo
 npm install
 npm start
 ```
@@ -180,9 +182,9 @@ That command will start the L2Solo Launcher.
 
 Press `Start` in the launcher to run the server. 
 
-Use **Saved Games** while the server is stopped to save a full copy of your world database. Enter a name or leave it blank for a generated one. Saves are stored in `tmp/saves` (or `saves` inside a custom runtime directory), with no limit on their number beyond available disk space. The list shows each save's name, date, time, and size in GB.
+Use **Saved Games** while the server is stopped to save a full copy of your world database. Enter a name or leave it blank for a generated one. Saves are stored in `tmp/saves` (or `saves` inside a custom runtime directory), with no limit on their number beyond available disk space.
 
-**Load** replaces the current database with the selected save and leaves the server stopped. **Delete** permanently removes that save. Both actions ask for confirmation. All saves are manual: loading never creates an automatic backup. Configuration files and launcher settings are not part of a save.
+**Load** replaces the current database with the selected save and leaves the server stopped. **Delete** permanently removes that save. Configuration files and launcher settings are not part of a save.
 
 On the first server start, L2Solo checks `data/Geodata`. If the region files are missing, it downloads the verified C4 geodata pack from `https://l2solo.com/files/geodata.zip` and installs it before opening the game server. The archive is about 209 MiB and expands to about 900 MiB. You can prepare it without starting the server with:
 
@@ -196,7 +198,7 @@ Custom mirrors and external geodata directories can be configured with `L2NODE_G
 
 Committed defaults live in `config/default.ini`.
 
-Private local overrides go in `config/local.ini`. This is where API keys and a machine-specific SQLite path belong.
+Private local overrides go in `config/local.ini`.
 
 Example:
 
@@ -215,7 +217,7 @@ providerOrder = OpenAI
 providerSort = price
 allowFallbacks = false
 requireParameters = true
-debug = true
+debug = false
 ```
 
 OpenRouter can also read the key/model from environment variables:
@@ -246,18 +248,7 @@ partyRouterModel = <model-id-from-the-provider>
 For Ollama, use `http://127.0.0.1:11434/v1/chat/completions` and a pulled model
 tag such as `llama3.2`. The API key can be empty for local providers; a value
 like `ollama` or `lm-studio` is also accepted when the server expects an
-OpenAI-compatible client key. Thinking is disabled by default for `[AI]`,
-which keeps the bounded bot response budget available for the required JSON;
-set `reasoningEffort` to `low`, `medium`, or `high` when the selected model
-benefits from explicit reasoning.
-
-Clan chat uses the same `model` and `partyRouterModel` settings. Names, roles,
-selected clanmates and follow-up messages are routed first; ambiguous messages
-use the routing model to choose one responder or ask for clarification. Both
-active and background clan bots can reply in the clan channel. This path is
-conversation-only, with no tools or game actions. The clan shares a bounded
-in-memory conversation history, separate from party chat and private tells;
-it expires after 30 minutes of inactivity and resets on server restart.
+OpenAI-compatible client key. Thinking is disabled by default for `[AI]`.
 
 ## In-Game Commands
 
@@ -289,6 +280,6 @@ This project is a heavily modified solo-MMO fork of the original [NodeL2 Server 
 
 L2Solo is licensed under the Apache 2.0 license.
 
-Crafting with ❤️ by a player for players 🤘
+Crafting with ❤️ by players for players 🤘
 
 <img width="600"  alt="L2solo hit the star" src="https://github.com/user-attachments/assets/5e22564f-fe8e-4956-af21-1158f1849a31" />
