@@ -653,7 +653,9 @@ function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation =
 
 function marketListingIntent(state, goal = null) {
     const forcedCleanup = state?.stats?.forcedMarketCleanup || null;
-    if (!forcedCleanup && goal?.type !== 'sell_inventory') {
+    const ordinaryVisit = state?.phase === 'cold' && state.activity === 'shopping'
+        && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state);
+    if (!forcedCleanup && goal?.type !== 'sell_inventory' && !ordinaryVisit) {
         return { shouldOpen: false, state };
     }
     if (!forcedCleanup) return { shouldOpen: true, state };
@@ -3442,7 +3444,8 @@ const PopulationService = {
         }
         // With a worker result the fight already happened: the transition
         // branch below applies it first and then starts the cleanup trip.
-        const cleanupAfterFight = !!precomputedResult && !!inventoryCleanupGoal(state, startedAt);
+        const cleanupAfterFight = !!precomputedResult && state.activity !== 'shopping'
+            && !!inventoryCleanupGoal(state, startedAt);
         const cleanupState = precomputedResult ? null : inventoryCleanupTravelState(state, startedAt);
         if (cleanupState) {
             const { cleanup, ...travelState } = cleanupState;
@@ -3740,6 +3743,23 @@ const PopulationService = {
             }
             if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.hold(updatedState.characterId, workerPlan.economyDecision);
 
+            // Every ordinary town visit publishes its worker-selected stock
+            // before native errands can finish the visit and leave town.
+            if (updatedState.activity === 'shopping' && workerPlan?.economyPlan) {
+                const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
+                const beforeWrite = () => {
+                    if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
+                        || ColdSimulationCoordinator.workerEpoch !== sourceEpoch)
+                        throw new WorkerCommandAdmissionRefusal('stale_worker_source');
+                    if (ColdSimulationCoordinator.fencedBots?.has(updatedState.characterId)
+                        || LifeState.cachedState(updatedState.characterId)?.phase !== 'cold')
+                        throw new WorkerCommandAdmissionRefusal('hot_handoff_fenced');
+                };
+                const board = await BotAfkMarketService.executePlan(updatedState, workerPlan.economyPlan,
+                    { reviewGoal: false, beforeWrite });
+                updatedState = board.state || updatedState;
+            }
+
             const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');
             const acquisitionLeaf = ColdSimulationCoordinator.economyDecisions.activity(updatedState);
             if (acquisitionLeaf?.activity === 'improving'
@@ -3800,6 +3820,7 @@ const PopulationService = {
                     }
                     const listingIntent = marketListingIntent(purchasedState, goal);
                     const listingPromise = !marketLifecycle.closed && listingIntent.shouldOpen
+                        && (!workerPlan?.economyPlan || listingIntent.cleanup)
                         ? BotAfkMarketService.canTradeRemotely(listingIntent.state, goal)
                             ? BotAfkMarketService.reconcile(listingIntent.state, goal)
                                 .then((remote) => ({ state: remote.state, listed: false, remote: remote.changed }))

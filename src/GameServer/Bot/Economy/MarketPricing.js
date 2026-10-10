@@ -179,8 +179,8 @@ function disposition(item, ctx, { town = null, room = 1, stockQuote = false, sta
     const { market, belief } = priced;
     // A free conditional offer retains these same physical goods. It is not
     // a forecast: neither income nor a buyer/arrival/lifetime is invented.
-    // Only the field advert owner enables this option; shops and production
-    // continue to require the ordinary supported outcome.
+    // The listing owner enables this option before choosing its storefront
+    // or board advertisement. Production still needs a supported outcome.
     const quotePrice = stockQuotePrice(belief, market,
         stockQuote && room > 0 && ctx.ownStock?.known !== false);
     const quote = quotePrice !== null;

@@ -19,6 +19,8 @@ assert.equal(Plan.edges(after, before, {}, 200, options), 2, 'stock recovery cro
 after = clone(); after.stats.money[3] = 1000; after.adena = 1200;
 assert.equal(Plan.edges(before, after, {}, 200, options), 4, 'money uses the real E4 packet predicate');
 after = clone(); assert.equal(Plan.edges(before, after, { goalReviewAt: 150 }, 200, options), 8);
+assert.equal(Plan.edges({ ...before, activity: 'traveling' }, { ...after, activity: 'shopping' }, {}, 200, options), 8,
+    'arrival runs the natural town review even when the bag and goal deadline did not change');
 assert.equal(Plan.edges(before, after, { goalReviewAt: 100 }, 200, options), 0, 'already-due goal is not a new edge');
 after.level++; assert.equal(Plan.edges(before, after, {}, 200, options), 16);
 after = clone(); after.activity = 'dead'; assert.equal(Plan.edges(before, after, {}, 200, options), 32);

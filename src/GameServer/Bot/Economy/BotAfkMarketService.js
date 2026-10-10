@@ -197,8 +197,8 @@ function stateWithEscrow(state, stock) {
 // The bot's shop lines and what it lists past them (sell ads), from the
 // sale decision (MarketListingPolicy.evaluate) on its bag and its shop: a kept
 // line keeps its price (the bot's own look reprices it, MarketPricing.look); a new
-// one is listed at the bot's ask. Shots fill the shop first, as the author's
-// review placed them. Returns { lines, listed, listings }.
+// one is listed at the bot's ask. The most valuable unit asks fill the shop
+// first; the rest become ads. Returns { lines, listed, listings }.
 function sellLines(state, stock, inventory, evaluateOptions = {}) {
     const existing = stock?.storeType === AfkTrade.SELL
         ? stock.lines.filter((line) => Number(line.count) > 0).map((line) => ({
@@ -216,9 +216,6 @@ function sellLines(state, stock, inventory, evaluateOptions = {}) {
         })) : [];
     const classified = evaluateOptions.decided || decide(state, stock, existing, evaluateOptions);
     const listings = classified.listings;
-    const priorityMarketItems = new Set(classified.listings
-        .filter((item) => String(item.kind || '').startsWith('Other.Shot'))
-        .map((item) => Number(item.selfId)));
     const remaining = new Map(listings.map((item) => [lineKey(item), Number(item.count)]));
     const listed = new Map((classified.decisions || [])
         .filter((decision) => decision.action === 'list')
@@ -264,10 +261,10 @@ function sellLines(state, stock, inventory, evaluateOptions = {}) {
             break;
         }
     };
-    existing.filter((line) => priorityMarketItems.has(line.selfId)).forEach(keepExisting);
-    listings.filter((item) => priorityMarketItems.has(Number(item.selfId))).forEach(appendListing);
-    existing.filter((line) => !priorityMarketItems.has(line.selfId)).forEach(keepExisting);
-    listings.filter((item) => !priorityMarketItems.has(Number(item.selfId))).forEach(appendListing);
+    for (const listing of ListingPolicy.prioritizeListings(listings)) {
+        existing.filter(line => lineKey(line) === lineKey(listing)).forEach(keepExisting);
+        appendListing(listing);
+    }
     return { lines: next.filter(viableSellLine).slice(0, MAX_LINES), listed, listings };
 }
 
@@ -275,11 +272,12 @@ function sellLines(state, stock, inventory, evaluateOptions = {}) {
 // shop's stock: the shop's lines keep their slot and price, its sell ads
 // take their slots.
 function decide(state, stock, existing, options = {}) {
-    const ads = AfkTrade.ownerRecords(Number(state.characterId)).filter((record) => record.kind === 'sell_ad').length;
+    const own = AfkTrade.boardIndex().ownerLines(Number(state.characterId)).filter(line => line.storeType === AfkTrade.SELL);
     return ListingPolicy.evaluate(stateWithEscrow(state, stock), {
         ...options, economy: options.economy || require('../Population/ColdEconomyDecision').economyFor(state),
-        slots: Math.max(0, ListingPolicy.BOARD_SLOTS - ads),
-        kept: new Map(existing.map((line) => [lineKey(line), line.price]))
+        stockQuotes: true, slots: ListingPolicy.BOARD_SLOTS,
+        kept: new Map([...own, ...existing].map((line) => [lineKey(line), line.price])),
+        conditionalKept: new Set(own.filter(line => line.custodyPolicy === 1).map(lineKey))
     });
 }
 
@@ -512,7 +510,8 @@ async function reconcileSellShop(state, goal) {
         if (!published.shop) return { state, changed: false, reason: published.reason };
         shop = published.shop;
     }
-    const ads = await listSellAds(ownerId, state, sale.listings, shop, inventory);
+    const advertisingInventory = shop !== stock ? await Database.fetchItems(ownerId) : inventory;
+    const ads = await listSellAds(ownerId, state, sale.listings, shop, advertisingInventory);
     if (shop === stock && !ads.listed) {
         rememberInventory(ownerId, state);
         return { state, changed: false };
@@ -543,6 +542,9 @@ async function publishSellShop(ownerId, state, stock, lines, town, row, inventor
             head: Number(row.head || 0),
             appearance: appearance(row, inventory),
             lines,
+            promoteAds: AfkTrade.ownerRecords(ownerId).filter(record => record.kind === 'sell_ad'
+                && record.custodyPolicy === 1 && record.lines.some(line => lines.some(next => lineKey(line) === lineKey(next))))
+                .map(record => ({ id: record.id, revision: record.revision })),
             ...(stock ? { expectedRevision: stock.revision } : {})
         }) };
     } catch (error) {
@@ -576,7 +578,10 @@ async function listOnBoard(state, options = {}) {
     let reason = null;
     let shop = stock;
     let shopTown = null;
-    const town = sale.lines.length ? stock?.town || options.planTowns?.get(Number(sale.lines[0].selfId)) || MarketTownPolicy.openingTown(state, sale.lines, options.now).town : null;
+    const visitTown = state.activity === 'shopping' && ShopPlaces.hasPlaza(state.currentRegion)
+        && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state) ? state.currentRegion : null;
+    const town = sale.lines.length ? stock?.town || options.planTowns?.get(Number(sale.lines[0].selfId))
+        || state.stats?.shopTown?.town || visitTown || MarketTownPolicy.openingTown(state, sale.lines, options.now).town : null;
     if (town && !stock && town !== state.currentRegion) {
         // The shop opens in its own town: the bot goes there with its lines.
         shopTown = town;
@@ -595,7 +600,8 @@ async function listOnBoard(state, options = {}) {
             }
         }
     }
-    const ads = await listSellAds(ownerId, state, sale.listings, shop, inventory, options);
+    const advertisingInventory = shop && shop !== stock && !shopTown ? await Database.fetchItems(ownerId) : inventory;
+    const ads = await listSellAds(ownerId, state, sale.listings, shop, advertisingInventory, options);
     listed += ads.listed;
     return { state: LifeState.snapshot(ownerId) || state, listed, reason: reason || ads.reason, shopTown };
 }
@@ -647,7 +653,7 @@ async function listSellAds(ownerId, state, listings, shop, inventory, options = 
 // Executes only the worker's quoted lines. The native writers validate
 // current item/record rows; a failed step is dropped by the coordinator's
 // existing after-commit guard, and the next resolve can decide again.
-async function executePlan(state, plan, { step = work => work(), beforeWrite = () => {}, preparedState = state } = {}) {
+async function executePlan(state, plan, { step = work => work(), beforeWrite = () => {}, preparedState = state, reviewGoal = true } = {}) {
     if (state.stats?.tradeMeeting || invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return { state, pending: true };
     const ownerId = Number(state.characterId);
     const authority = invoke('GameServer/Bot/Economy/EconomyCommit').authority(preparedState);
@@ -755,11 +761,19 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
                     { price: Number(price), storeType: AfkTrade.SELL, enchant, count: Number(count) }) };
         });
-        // A selected WTS is an intention from the field, not a seated shop.
-        // Native market visits own shop opening and its separately valued trip.
-        const inventory = await Database.fetchItems(ownerId);
+        // The worker marks promotion at a real visit (or a standing shop's
+        // refresh). Never manufacture a town visit from a field quote.
         const current = AfkTrade.findOwnerProjection(ownerId)?.shop;
         const shop = Number(current?.storeType) === AfkTrade.SELL ? current : null;
+        if (plan.shop) {
+            if (state.phase !== 'cold' || (shop ? shop.town !== plan.shop
+                : state.activity !== 'shopping' || state.currentRegion !== plan.shop
+                    || !invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state)))
+                return { state, reason: 'shop_visit_changed' };
+            return listOnBoard(state, { decided: { listings },
+                planTowns: new Map(plan.sell.map(row => [Number(row[0]), row[3]])) });
+        }
+        const inventory = await Database.fetchItems(ownerId);
         return listSellAds(ownerId, state, listings, shop, inventory,
             { planTowns: new Map(plan.sell.map(row => [Number(row[0]), row[3]])) });
     });
@@ -806,6 +820,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         return { state: LifeState.cachedState(ownerId) || state };
     }) : null;
     if (published?.buyPending) return { state, buyPending: true };
+    if (!reviewGoal) return { state };
     await run(async () => {
         const snapshot = await invoke('GameServer/Bot/Goals/GoalService').review(state, { saleTown: plan.sell?.[0]?.[3] || state.stats?.shopTown?.town });
         const goal = snapshot?.current;

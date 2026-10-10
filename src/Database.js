@@ -4338,9 +4338,25 @@ const Database = {
             return Promise.reject(new Error('invalid_afk_trade_shop'));
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
+            // Promote conditional quotes together with shop custody. A stale
+            // ad or a failed item reservation rolls the entire move back.
+            const closedRecords = [];
+            for (const expected of config.promoteAds || []) {
+                const ad = afkTradeShopUnsafe(Number(expected.id));
+                checkRecordRevisionUnsafe(ad, expected.revision);
+                if (kind !== 'shop' || Number(config.storeType) !== BoardRules.SELL
+                    || !isBotOwnerUnsafe(characterId) || Number(ad?.ownerId) !== characterId
+                    || ad.kind !== 'sell_ad' || ad.custodyPolicy !== 1
+                    || !ad.lines.every(line => rows.some(row => Number(row.selfId) === Number(line.selfId)
+                        && Number(row.enchant || 0) === Number(line.enchant || 0))))
+                    throw Error('afk_trade_shop_changed');
+                closeBoardRecordUnsafe(ad);
+                closedRecords.push(closedRecord(ad, 'closed'));
+            }
             const opened = openBoardRecordUnsafe(characterId, { ...config, kind }, rows);
             return {
                 shop: opened.shop,
+                closedRecords,
                 ownerInventory: afkTradeInventoryUnsafe(characterId),
                 coldLifeRows: fenceAfkTradePartiesUnsafe([characterId], opened.changedIds)
             };

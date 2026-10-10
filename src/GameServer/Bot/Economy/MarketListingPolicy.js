@@ -4,13 +4,22 @@ const BoardRules = require('../../AfkTrade/BoardRules');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
-const PriceDecision = invoke('GameServer/Bot/Economy/PriceDecision');
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
 
 
 function isGear(item = {}) {
     return String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
+}
+
+// A showcase has three places. Rank unit asks, not stack totals: a cheap
+// bulk lot must not displace a valuable single item. Stable ties keep the
+// same selection on the worker and at a native town visit.
+function prioritizeListings(listings = []) {
+    return listings.slice().sort((left, right) => Number(right.price || 0) - Number(left.price || 0)
+        || Number(right.enchant || 0) - Number(left.enchant || 0)
+        || Number(isGear(right)) - Number(isGear(left))
+        || Number(left.selfId) - Number(right.selfId));
 }
 
 // Physical and quest rules remain hard constraints. All other candidates
@@ -59,9 +68,9 @@ const BOARD_SLOTS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.sell_ad;
 // The bot's sale at a market visit or a review (group E): the author's hard
 // rules first; every other item goes by one expected-value decision (the
 // board at its best ask, the NPC buy-back now, a buy ad answered in its town,
-// or keeping it), one roll; the
-// items for the board compete for its free slots by their gain over the NPC,
-// one weighted roll. A line the bot already has keeps its slot and its price
+// or keeping it), one roll. The highest unit asks take the market's bounded
+// slots, including held listings, so new valuable loot can replace cheap stock.
+// A line the bot already has keeps its price
 // (its own look reprices it or takes it back, MarketPricing.look). options: now
 // (the decision point), slots (board slots), kept (selfId -> price of its
 // lines), stored (selfId -> units in the warehouse), plus traderContext's.
@@ -76,11 +85,12 @@ function evaluate(state, options = {}) {
     const candidates = ItemDisposition.saleCandidates(state, { ...options, unlimited: true,
         reserved: { ...options.reserved, ...craftReservations } });
     const decisionPoint = options.decisionPoint ?? (Number(options.now) || ctx.timestamp);
-    const kept = options.kept || new Map();
+    const kept = options.kept || new Map((ctx.board?.ownerLines?.(Number(state.characterId)) || [])
+        .filter(line => line.storeType === BoardRules.SELL)
+        .map(line => [`${line.selfId}:${line.enchant || 0}`, line.price]));
     const liquidate = invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state);
     const decisions = [];
     const forBoard = [];
-    let keptLines = 0;
     for (const item of candidates) {
         const hard = classify(state, item);
         if (hard.action !== 'market') {
@@ -88,7 +98,7 @@ function evaluate(state, options = {}) {
             continue;
         }
         const keptKey = `${item.selfId}:${item.enchant || 0}`;
-        if (!liquidate && (kept.has(keptKey) || !item.enchant && kept.has(Number(item.selfId)))) {
+        if (kept.has(keptKey) || !item.enchant && kept.has(Number(item.selfId))) {
             // Only unreserved conditional stock can answer from the field.
             // Reuse the sale decision, preserving the held ask unless it
             // actually chooses the opposite bid. Backed custody stays native.
@@ -107,15 +117,21 @@ function evaluate(state, options = {}) {
             }
             decisions.push({ action: 'list', reason: 'kept_line', item: { ...item, price: kept.get(keptKey) ?? kept.get(Number(item.selfId)),
                 marketReason: 'kept_line' } });
-            keptLines += 1;
             continue;
         }
         const town = MarketTownPolicy.targetTownForItems(state, [item], options);
         const chosen = MarketPricing.disposition(item, ctx, {
-            town, room: liquidate ? 0 : roomFor(item, options.stored), stockQuote: !liquidate && options.stockQuotes === true,
+            // A market quote can wait for a buyer even when this adventurer
+            // otherwise liquidates surplus instead of warehousing it.
+            town, room: options.stockQuotes === true ? 1 : liquidate ? 0 : roomFor(item, options.stored),
+            stockQuote: options.stockQuotes === true,
             rollKey: ['dispose', ctx.characterId, item.selfId, decisionPoint]
         });
-        const decision = { action: chosen.action === 'keep' ? liquidate ? 'npc' : 'warehouse' : chosen.action,
+        // A valid ask without a known buyer waits on the market. It creates
+        // no assumed receipts; physical reservations were removed above.
+        const action = chosen.priced?.ask?.stockQuote && chosen.action !== 'ad' ? 'list'
+            : chosen.action === 'keep' ? liquidate ? 'npc' : 'warehouse' : chosen.action;
+        const decision = { action,
             reason: chosen.priced?.ask?.stockQuote ? 'stock_quote' : 'expected_value', item,
             priced: chosen.priced, gain: chosen.gain, answer: chosen.answer,
             // Attention to a free quote uses its possible spread, never expected receipts.
@@ -124,15 +140,15 @@ function evaluate(state, options = {}) {
         decisions.push(decision);
         if (decision.action === 'list') forBoard.push(decision);
     }
-    const slots = Math.max(0, Math.floor(Number(options.slots ?? BOARD_SLOTS)) - keptLines);
-    const chosen = new Set(PriceDecision.chooseSlots(forBoard, slots, `slots:${ctx.characterId}:${decisionPoint}`));
     for (const decision of forBoard) {
-        if (chosen.has(decision)) {
-            const price = decision.priced.ask.price;
-            decision.item = { ...decision.item, price, marketReason: decision.reason,
-                pricing: MarketPricing.lineState(decision.item.selfId, ctx, { price, storeType: BoardRules.SELL, enchant: decision.item.enchant || 0 }) };
-            continue;
-        }
+        const price = decision.priced.ask.price;
+        decision.item = { ...decision.item, price, marketReason: decision.reason,
+            pricing: MarketPricing.lineState(decision.item.selfId, ctx, { price, storeType: BoardRules.SELL, enchant: decision.item.enchant || 0 }) };
+    }
+    const slots = Math.max(0, Math.floor(Number(options.slots ?? BOARD_SLOTS)));
+    const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item)).slice(0, slots));
+    for (const decision of decisions) {
+        if (decision.action !== 'list' || chosen.has(decision.item)) continue;
         decision.action = liquidate ? 'npc' : 'warehouse';
         decision.reason = 'no_board_slot';
     }
@@ -193,6 +209,7 @@ module.exports = {
     classify,
     evaluate,
     isGear,
+    prioritizeListings,
     traderContext,
     actorState,
     npcSaleForActor

@@ -210,6 +210,12 @@ const occupationPlanner = new ColdOccupationPlanner({
     },
     create: input => ({ iterator: (function* () {
         if (input.mode === 'wish') return yield* EconomicTrip.prepare(input.state);
+        if (input.mode === 'showcase') return { economyPlan:
+            yield* invoke('GameServer/Bot/Population/ColdEconomyPlan').prepare(input.state, input.economy, {
+                showcaseOnly: true, now: input.timestamp, board: input.board, tripCost: input.economy.trip,
+                npcOffersFor: OccupationSources.npcOffersFor,
+                findSpot: id => SpotIndex.spotById(planningSpots, id)
+            }) };
         if (input.mode === 'meeting') {
             const request = input.meeting, ownId = Number(input.state.characterId);
             const side = request.actorA === ownId ? 0 : 1, own = request.parties[side];
@@ -416,12 +422,12 @@ const occupationPlanner = new ColdOccupationPlanner({
         }
         // The action result is the existing compact native plan. Its derived
         // network is needed while preparing it, never by the completed cache.
-        if (input.mode === 'action') input.economy = null;
+        if (input.mode === 'action' || input.mode === 'showcase') input.economy = null;
         if (shuttingDown || kernel?.states.get(id)?.state !== input.sourceState) return;
         if (meta.stale) {
             send('ready', { phase: 'economy_workshop_stale', characterId: id,
                 updatedAt: Number(input.state.updatedAt || 0), key: ColdEconomyDecision.stateKey(input.state) });
-        } else if (input.mode !== 'action' && input.state.phase === 'hot') {
+        } else if (input.mode !== 'action' && input.mode !== 'showcase' && input.state.phase === 'hot') {
             const decision = ColdEconomyDecision.capture({ workshop }, input.state);
             send('ready', { phase: 'economy_decided', characterId: id, economyDecision: decision });
         }
@@ -994,7 +1000,10 @@ function startKernel(config = {}) {
                 stats: plannedStats
             };
             const routedState = beginHuntingTrip(plannedState, context?.route, timestamp) || plannedState;
+            const showcase = routedState.activity === 'shopping'
+                ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             return {
+                ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,
