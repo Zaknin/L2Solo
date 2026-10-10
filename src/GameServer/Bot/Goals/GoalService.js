@@ -76,6 +76,15 @@ const GoalService = {
         return cached ? Promise.resolve(cached) : GoalState.load(characterId);
     },
 
+    async currentForMarket(state, options = {}) {
+        const snapshot = await this.current(state.characterId);
+        // Arrival can change the worker's selected step (for example, the
+        // trip used the last escape scroll). Read that card before buying;
+        // an active goal from departure must not become a false shop miss.
+        if (state.activity !== 'shopping' && snapshot?.current?.status === 'active') return snapshot;
+        return this.review(state, options);
+    },
+
     complete(characterId) {
         return GoalState.clear(characterId, 'completed');
     },

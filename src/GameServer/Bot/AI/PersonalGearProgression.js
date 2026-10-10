@@ -1,17 +1,21 @@
 'use strict';
 
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
-function personal(state = {}) {
-    return !(Number(state.clanId ?? state.stats?.clanId) > 0)
-        && !state.stats?.craftStationId
+function adventurer(state = {}) {
+    return !state.stats?.craftStationId
         && !(state.activity === 'crafting' && state.stats?.craftShop
             && Number(state.stats?.generatedIndex) >= 10000);
+}
+function personal(state = {}) {
+    return adventurer(state) && !(Number(state.clanId ?? state.stats?.clanId) > 0);
 }
 
 // A milestone describes a usable kit, not a particular shopping list. The
 // shared wish solver still compares buying, earning cash, drops and crafting.
 function assess(state = {}) {
-    if (!personal(state)) return { required: false, gaps: new Map() };
+    // Clan custody changes where surplus goes, not the member's need for a
+    // working kit. Its own wallet and native sources still fund equipment.
+    if (!adventurer(state)) return { required: false, gaps: new Map() };
     const Data = invoke('GameServer/DataCache');
     const Index = invoke('GameServer/Item/ItemTemplateIndex');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');

@@ -41,8 +41,11 @@ async function run() {
         const learned = Economy.stateForActor(actor, session);
         assert.equal(learned.craftLevel, 1);
         assert.equal(learned.clanId, 9);
-        assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(learned).required, false,
-            'a hot clan member stays outside personal equipment milestones');
+        const gearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+        assert.equal(gearProgression.assess(learned).required, true,
+            'a hot clan member still needs its own working kit');
+        assert.equal(gearProgression.personal(learned), false,
+            'native hot membership retains clan custody of surplus');
         assert.notEqual(Economy.inputKey(unlearned), Economy.inputKey(learned), 'learning invalidates the planning inputs');
         assert.notEqual(Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
             Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));

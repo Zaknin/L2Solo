@@ -418,12 +418,10 @@ function canResumeWarehouseMarketSale(state) {
 }
 
 // cleanupNeed: the member's bag need when the caller already has it.
-function canTakePartyMarketBreak(party, members, member, timestamp = Date.now(), cleanupNeed = undefined) {
+function canTakePartyMarketBreak(party, members, member, timestamp = Date.now(), cleanupNeed = undefined, goal = null) {
     if (!PartyMarketBreak.allowed(party, member, timestamp, cleanupNeed)) return false;
     if (PartyMarketBreak.clanDuty(party)) return members.length > 1;
-    if (timestamp - Number(party.stats?.formedAt || party.startedAt || timestamp) < Config.partyMarketBreakMinSessionMs) return false;
-    if (Number(party.stats?.fightsResolved || 0) < Config.partyMarketBreakMinFights) return false;
-    if (timestamp - Number(party.stats?.lastMarketBreakAt || 0) < Config.partyMarketBreakCooldownMs) return false;
+    if (!PartyMarketBreak.sessionReady(party, member, goal, timestamp, Config)) return false;
     const role = PartyComposition.roleForState(member);
     const coverage = PartyComposition.roleCoverage(members);
     return !(['tank', 'healer'].includes(role) && Number(coverage[role] || 0) <= 1);
@@ -505,7 +503,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
             : cachedGoal;
         if (due || cleanupNeeded) reviewed += 1;
         await BotAfkMarketService.reconcile(current, goalSnapshot?.current, goalSnapshot?.candidates);
-        if (departed || !canTakePartyMarketBreak(party, members, current, timestamp, cleanupNeeded)) continue;
+        if (departed || !canTakePartyMarketBreak(party, members, current, timestamp, cleanupNeeded, goalSnapshot?.current)) continue;
 
         // Goal review can overlap the next worker claim. Re-read the reflected
         // ownership revision immediately before the atomic transition so the
@@ -513,7 +511,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
         const currentMember = LifeState.cachedState(member.characterId) || member;
         if (String(currentMember.party?.partyId || currentMember.partyId || '') !== String(party.partyId)) continue;
         const need = currentMember === current ? cleanupNeeded : PartyMarketBreak.memberNeed(party, currentMember, timestamp);
-        if (!canTakePartyMarketBreak(party, members, currentMember, timestamp, need)) continue;
+        if (!canTakePartyMarketBreak(party, members, currentMember, timestamp, need, goalSnapshot?.current)) continue;
         const travel = GoalExecutor.beginMarketTravel(currentMember,
             PartyMarketBreak.goal(party, currentMember, goalSnapshot?.current, timestamp, need), timestamp,
             { economy: currentMember === current ? goalSnapshot?.economy : null });
@@ -3346,7 +3344,7 @@ const PopulationService = {
                     const currentMember = remote?.state || member;
                     if (spot.raidBoss) return [...activeMembers, currentMember];
                     const need = breakTaken ? null : PartyMarketBreak.memberNeed(party, currentMember, Date.now());
-                    if (breakTaken || !canTakePartyMarketBreak(party, resolvedMembers, currentMember, Date.now(), need)) {
+                    if (breakTaken || !canTakePartyMarketBreak(party, resolvedMembers, currentMember, Date.now(), need, goalSnapshot?.current)) {
                         return [...activeMembers, currentMember];
                     }
                     const travel = GoalExecutor.beginMarketTravel(currentMember,
@@ -3753,12 +3751,9 @@ const PopulationService = {
                         ? await BotWarehouse.releaseCold(current, { inTown: true }) : { state: current };
                     return ColdMarketListingService.resolve(LifeState.cachedState(current.characterId) || released.state || current);
                 })
-                .then((marketLifecycle) => GoalService.current(marketLifecycle.state.characterId)
-                    .then((goalSnapshot) => {
-                        if (goalSnapshot?.current?.status === 'active') return goalSnapshot;
-                        const returnSpot = SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId);
-                        return GoalService.review(marketLifecycle.state, { spot: returnSpot || spot });
-                    })
+                .then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
+                    spot: SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId) || spot
+                })
                     .then((goalSnapshot) => ColdMarketService.tryPurchase(marketLifecycle.state, goalSnapshot?.current)
                         .then((marketResult) => ({ marketLifecycle, marketResult, goal: goalSnapshot?.current || null }))))
                 .then(({ marketLifecycle, marketResult, goal }) => {

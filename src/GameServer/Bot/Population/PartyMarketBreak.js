@@ -15,6 +15,24 @@ function clanDuty(party) {
 function pending(party, now = Date.now()) {
     return Object.values(party?.stats?.marketAbsences || {}).filter(value => Number(value.until) > now);
 }
+function sessionReady(party, member, goal, now, config) {
+    // The hour engine has already selected this quote over earning/farming.
+    // An ordinary party's minimum session must not postpone a payable kit.
+    if (!clanDuty(party) && party?.stats?.objective?.sourceKind !== 'raid'
+        && goal?.type === 'upgrade_gear' && goal.plan?.sourceType === 'npc') {
+        const cost = Number(goal.plan.estimatedCost), Funding = require('../Economy/PurchaseFunding');
+        if (cost > 0 && Funding.spendable(member, 0, Funding.goalTerms(goal)) >= cost) {
+            const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+            const assessment = Progression.assess(member);
+            const item = invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, goal.target?.itemId);
+            const slot = Number(String(goal.plan.wishKey || '').match(/^power:\d+:(\d+)$/)?.[1] || goal.target?.itemSlot);
+            if (item && assessment.required && Progression.priority(item, slot, assessment)) return true;
+        }
+    }
+    return now - Number(party.stats?.formedAt || party.startedAt || now) >= config.partyMarketBreakMinSessionMs
+        && Number(party.stats?.fightsResolved || 0) >= config.partyMarketBreakMinFights
+        && now - Number(party.stats?.lastMarketBreakAt || 0) >= config.partyMarketBreakCooldownMs;
+}
 // The bag need a clan-duty break reads; null outside a clan duty. A caller
 // that already has it passes it on (`need`) so the bag is walked once.
 function memberNeed(party, member, now = Date.now()) {
@@ -50,4 +68,4 @@ function ready(state) {
         && !state.stats?.travel && !state.stats?.marketReturn
         && ['hunting', 'party_wait', 'grouped'].includes(state.activity);
 }
-module.exports = { clanDuty, pending, memberNeed, allowed, goal, departure, stats, ready };
+module.exports = { clanDuty, pending, sessionReady, memberNeed, allowed, goal, departure, stats, ready };

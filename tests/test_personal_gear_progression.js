@@ -46,9 +46,30 @@ function verify() {
         assert(Progression.assess({ ...state, level: 20 }).required, 'NG kit opens D milestone at 20');
         const d = bot(classId, 20, inventoryFor(Gear.planFor({ classId, level: 20 }).items));
         assert.equal(Progression.assess(d).required, false, `full usable D kit closes class ${classId}`);
+        assert.equal(Progression.assess({ ...d, stats: { ...d.stats, clanId: 1 } }).required, false,
+            `full usable D kit also closes clan member class ${classId}`);
     }
-    assert.equal(Progression.assess({ ...first, stats: { ...first.stats, clanId: 1 } }).required, false,
-        'personal milestones do not take over clan planning');
+    for (const membership of [{ clanId: 1 }, { stats: { ...first.stats, clanId: 1 } }]) {
+        const member = { ...first, ...membership };
+        assert.deepEqual([...Progression.assess(member).gaps], [...Progression.assess(first).gaps],
+            'clan membership does not remove the working kit milestone');
+        assert.equal(Progression.personal(member), false, 'clan custody keeps its own surplus policy');
+    }
+    assert.equal(Progression.assess({ ...first, stats: { ...first.stats, craftStationId: 1 } }).required, false,
+        'stationary craft services remain outside adventurer equipment progression');
+    const richArtisan = bot(56, 31, inventoryFor([
+        { selfId: 2370, slot: 7 }, { selfId: 102, slot: 8 }, { selfId: 26, slot: 10 },
+        { selfId: 30, slot: 11 }, { selfId: 44, slot: 6 }, { selfId: 37, slot: 12 },
+        { selfId: 605, slot: 9 }, { selfId: 878, slot: 4 }
+    ]));
+    richArtisan.adena = 35000000;
+    richArtisan.stats.clanId = 1;
+    const artisanGaps = Progression.assess(richArtisan).gaps;
+    assert.equal(artisanGaps.size, 11, 'rich clan Artisan has every NG/empty slot debt except its D gloves');
+    assert([1, 2, 3, 5].every(slot => artisanGaps.get(slot)?.priority === 2),
+        'both earrings, necklace and missing second ring precede existing-slot upgrades');
+    assert.equal(Progression.priority(Data.items.find(item => item.selfId === 4), 7,
+        Progression.assess(richArtisan)), 0, 'the obsolete NG Club wish cannot satisfy the D milestone');
 
     const kit = inventoryFor(Gear.planFor({ classId: 0, level: 10 }).items);
     const ear = Object.values(kit).find(row => row.equippedSlots.includes(2));
@@ -64,6 +85,14 @@ function verify() {
             () => [true, 0, 0]) });
     assert(ctx.projection.roots.includes(`power:${ear.selfId}:2`), 'same-template second earring is an acquisition root');
     assert(!ctx.projection.roots.some(key => key.startsWith('level:')), 'XP goal waits for the working kit');
+    const clanMember = { ...paired, stats: { ...paired.stats, clanId: 1 } };
+    const clanCtx = Economy.forState(clanMember, { spots: [], board, timestamp, npcOffersFor: () => [],
+        routeRows: Array.from({ length: require('../src/GameServer/Bot/Economy/EconomicTrip').towns.length },
+            () => [true, 0, 0]) });
+    assert(clanCtx.projection.roots.includes(`power:${ear.selfId}:2`),
+        'a clan member with its own money still acquires an empty equipment slot');
+    assert.equal(clanCtx.network.activity.rootKey, `power:${ear.selfId}:2`,
+        'an affordable clan member kit piece precedes optional profit goals');
     const selected = Planner.preferredTarget(paired, { wishTargetId: ear.selfId, wishSlot: 2 });
     assert.equal(selected?.item.selfId, ear.selfId, 'native target planner accepts the second identical copy');
     const receipt = Planner.equipInventoryUpgrades(paired, { ...kit, [ear.selfId]: { ...kit[ear.selfId], amount: 2 } });
@@ -79,6 +108,11 @@ function verify() {
     assert(sale.npc.some(row => row.selfId === 1864 && row.count === 10));
     assert(sale.npc.some(row => row.selfId === 1049 && row.count === 2));
     assert.equal(Disposition.warehouseCandidates(spare).length, 0);
+    const clanSurplus = { ...spare, stats: { ...spare.stats, clanId: 1 } };
+    assert(Disposition.warehouseCandidates(clanSurplus).some(row => row.selfId === 1864),
+        'a clan member still preserves surplus materials for its warehouse policy');
+    assert.equal(Disposition.isNpcOnlyItem(clanSurplus.inventory[1049], undefined, clanSurplus), false,
+        'personal gear completion does not liquidate clan skill books');
     const amulet = Data.items.find(item => /^Amulet/.test(item.template?.name || '')
         && require('../src/GameServer/Items/ItemAcquisitionCatalog').hasSource(item.selfId));
     assert(amulet);
