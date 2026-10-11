@@ -16,6 +16,10 @@ const id = 730183;
         await Database.execute(['UPDATE characters SET username=? WHERE id=?', ['bot_native_afk_visit', id]]);
         await Database.setItem(id, { selfId: 57, amount: 1000000, slot: 0 });
         await Database.setItem(id, { selfId: 1, amount: 1, equipped: 1, slot: 7 });
+        for (const enchant of [0, 1, 3]) await Database.setItem(id, {
+            selfId: 626, amount: 1, enchant, equipped: enchant === 3 ? 1 : 0, slot: enchant === 3 ? 8 : 0
+        });
+        const shieldsBefore = (await Database.fetchItems(id)).filter(row => row.selfId === 626);
         for (const selfId of [1786, 1792, 1793, 1800, 1803, 2143, 2151, 2173, 2174, 2175, 1867, 1869, 1870, 1871, 1872, 1873, 1880, 1897])
             await Database.setItem(id, { selfId, amount: 1000, slot: 0 });
         const place = Town.marketTown('Elven Village').center;
@@ -43,6 +47,10 @@ const id = 730183;
         assert.equal(plan.take, undefined, 'town errands retain their own purchase executor');
         assert.equal(plan.buyAds, undefined);
         assert.equal(plan.travel, null);
+        const shieldPlans = plan.sell.filter(row => row[0] === 626);
+        assert(shieldPlans.some(row => row[4] === 1),
+            'the native worker quotes the +1 spare despite a +0 copy in the bag');
+        assert(!shieldPlans.some(row => row[4] === 3), 'the worn shield stays reserved');
         const prices = plan.sell.map(row => row[2]);
         assert.deepEqual(prices.slice(0, 3), prices.slice().sort((a, b) => b - a).slice(0, 3));
         const Economy = invoke('GameServer/Bot/Economy/EconomyContext'), saved = Economy.forState;
@@ -65,6 +73,19 @@ const id = 730183;
         const own = Afk.boardIndex().ownerLines(id);
         assert.equal(new Set(own.map(line => `${line.selfId}:${line.enchant}`)).size, own.length);
         assert(!own.some(line => line.selfId === 1), 'the worn weapon cannot be offered');
-        console.log('PASS native ordinary town visit: real worker prices, valuable showcase, overflow ads, reserved equipment, main handoff');
+        for (const row of shieldPlans) {
+            const line = own.find(line => line.selfId === 626 && line.enchant === row[4]);
+            assert(line, 'the town lifecycle publishes the worker selected enchant without an ambiguous-copy failure');
+            assert.equal(line.price, row[2]);
+            const source = shieldsBefore.find(item => item.enchant === row[4]);
+            const recordLine = Afk.ownerRecords(id).flatMap(record => record.lines).find(row => row.id === line.lineId);
+            assert.equal(recordLine.sourceObjectId, source.id, 'native custody selects the exact physical enchant');
+        }
+        const worn = (await Database.fetchItems(id)).find(row => row.selfId === 626 && row.enchant === 3);
+        assert.equal(worn.id, shieldsBefore.find(row => row.enchant === 3).id);
+        assert.equal(worn.equipped, 1);
+        assert(!own.some(line => line.selfId === 626 && line.enchant === 3));
+        assert(Buffer.byteLength(JSON.stringify(plan)) <= require('../src/GameServer/Bot/Population/ColdEconomyPlan').MAX_PLAN_PAYLOAD_BYTES);
+        console.log('PASS native ordinary town visit: real worker prices, mixed enchants, physical custody, reserved equipment, main handoff');
     } finally { await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -7811,7 +7811,7 @@ const Database = {
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
                 const position = state ? life : character;
                 const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
-                if (!invoke('GameServer/Bot/AI/PersonalGearProgression').personal(source)
+                if (!invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(source)
                     || Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
                     || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
                     throw Error('invalid_bot_crystallization');

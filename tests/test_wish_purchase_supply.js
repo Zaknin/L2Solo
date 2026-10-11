@@ -43,7 +43,8 @@ const adapters = {
 };
 // Liquidation funding reads the shared sale and kept-stock readers (f75b6525); this
 // fixture sells nothing, so no inventory row is a sale candidate.
-Object.assign(adapters, { 'GameServer/Bot/Economy/ItemDisposition': { saleCandidates: () => [] },
+Object.assign(adapters, { 'GameServer/Bot/Economy/PersonalWarehouseIndex': { saleState: state => state },
+    'GameServer/Bot/Economy/ItemDisposition': { saleCandidates: () => [], reservedEquipmentAmounts: () => ({}) },
     'GameServer/Inventory/ShotStock': { keptAmounts: () => ({}) },
     'GameServer/Bot/AI/HealingPotionStock': { keptAmounts: () => ({}) },
     'GameServer/Bot/Travel/ScrollStock': { keptAmounts: () => ({}) } });
@@ -89,7 +90,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name.endsWith('BoardIndex')) return { SELL: 1 };

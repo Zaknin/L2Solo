@@ -23,7 +23,7 @@ function assess(state = {}) {
     const Compatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
-    if (level >= 52 || level >= 40 && !personal(state)) return { required: false, gaps: new Map() };
+    if (level >= 52) return { required: false, gaps: new Map() };
     const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : level < 40 ? 20 : 40 });
     const starters = new Set((Data.newbieItems || []).flatMap(row => row.items || [])
         .filter(row => row.equipped).map(row => Number(row.selfId)));
@@ -80,6 +80,11 @@ function preparation(state, assessment = assess(state)) {
     if (!personal(state) || state.level < 20 || state.level >= 40 || assessment.required) return null;
     return futureState(state);
 }
+// Warehouse custody does not remove the member's own C acquisition sources.
+// Early preparation keeps its existing personal-owner boundary.
+function allowsCGradeAcquisition(state) {
+    return adventurer(state) && (Number(state.level) >= 40 || personal(state));
+}
 function futureState(state) {
     const exp = Number(invoke('GameServer/DataCache').experience[39]);
     const next = { ...state, level: 40, exp, stats: { ...state.stats, exp } };
@@ -99,4 +104,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, priority, preparation, preparedAmounts };
+module.exports = { personal, adventurer, assess, priority, preparation, preparedAmounts, allowsCGradeAcquisition };

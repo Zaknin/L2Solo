@@ -2,7 +2,6 @@
 const Station = require('../../World/GiranCrystallizationStation');
 const Rules = require('../../Items/C4EnchantRules');
 const Index = require('../../Item/ItemTemplateIndex');
-const CANDIDATE_LIMIT = 16;
 const BATCH_LIMIT = 16;
 let templates, candidates;
 function reward(template, enchant = 0) {
@@ -18,9 +17,11 @@ function catalog() {
     const Data = invoke('GameServer/DataCache');
     if (templates === Data.items) return candidates;
     templates = Data.items;
+    // The immutable D catalogue bounds the scan. Rank only after reading
+    // actual quotes: a template-price shortlist hides cheap live inputs.
     candidates = templates.filter(row => reward(row) && Number(row.template.price) > 0)
         .sort((a, b) => a.template.price / reward(a).net - b.template.price / reward(b).net || a.selfId - b.selfId)
-        .slice(0, CANDIDATE_LIMIT).map(row => Number(row.selfId));
+        .map(row => Number(row.selfId));
     return candidates;
 }
 function spareState(state) {
@@ -54,11 +55,6 @@ function choices(state, purchase, trip, incomePerHour = 0) {
             const amount = Math.min(own, BATCH_LIMIT - bundleAmount);
             bundle.push({ selfId: id, amount }); bundleAmount += amount; bundleNet += amount * result.net;
         }
-        if (!held) {
-            const inventory = { ...state.inventory, [id]: { selfId: id, amount: 1, slot: template.etc.slot, equipped: false } };
-            const equipped = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').equipInventoryUpgrades(state, inventory);
-            if (equipped[id]?.equipped || equipped[id]?.equippedCount > 0) continue;
-        }
         const offer = purchase(id);
         if (!own && !offer) continue;
         const batchLimit = Math.min(BATCH_LIMIT, own + Math.min(capacity, Number(offer?.availableUnits || 0)));
@@ -67,9 +63,23 @@ function choices(state, purchase, trip, incomePerHour = 0) {
         rows.push({ selfId: id, ...result, score: (total + (own ? 0 : offer.tripHours) * incomePerHour) / result.net,
             batchLimit, hours: (own ? 0 : offer.tripHours) + trip.hours });
     }
-    const selected = rows.sort((a, b) => a.score - b.score || a.hours - b.hours || a.selfId - b.selfId);
+    rows.sort((a, b) => a.score - b.score || a.hours - b.hours || a.selfId - b.selfId);
+    const selected = [], limit = bundle.length > 1 ? 1 : 2;
+    // Kit reconciliation is expensive. Check candidates in actual landed
+    // price order and stop once the two retained paths are safe inputs.
+    for (const row of rows) {
+        const id = row.selfId;
+        if (!state.inventory?.[id]) {
+            const template = Index.find(Data.items, id);
+            const inventory = { ...state.inventory, [id]: { selfId: id, amount: 1, slot: template.etc.slot, equipped: false } };
+            const equipped = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').equipInventoryUpgrades(state, inventory);
+            if (equipped[id]?.equipped || equipped[id]?.equippedCount > 0) continue;
+        }
+        selected.push(row);
+        if (selected.length === limit) break;
+    }
     return bundle.length > 1
-        ? [{ inputs: bundle, net: bundleNet, batchLimit: 1 }, ...selected.slice(0, 1)] : selected.slice(0, 2);
+        ? [{ inputs: bundle, net: bundleNet, batchLimit: 1 }, ...selected] : selected;
 }
 function inputAmount(state, id) {
     const plan = state.stats?.equipmentPlan;
@@ -82,7 +92,7 @@ function inputAmount(state, id) {
 function ready(state) {
     const plan = state.stats?.equipmentPlan;
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active'
-        || !invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)) return false;
+        || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)) return false;
     const amount = id => invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {});
     const cost = plan.exchange?.materials?.find(row => Number(row.selfId) === 1458)?.amount;
     if (Number(cost) > 0 && amount(1458) >= Number(cost)) return true;
@@ -90,4 +100,4 @@ function ready(state) {
     return inputs.length > 0 && inputs.length <= BATCH_LIMIT && inputs.every(row => Number(row.amount) > 0
         && amount(row.selfId) >= Number(row.amount));
 }
-module.exports = { reward, catalog, choices, free, inputAmount, ready, npcId: Station.npcId, CANDIDATE_LIMIT, BATCH_LIMIT };
+module.exports = { reward, catalog, choices, free, inputAmount, ready, npcId: Station.npcId, BATCH_LIMIT };

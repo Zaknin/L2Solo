@@ -96,13 +96,18 @@ async function run() {
         assert.deepEqual(await DB.fetchItems(state.characterId), reservedBag, 'Luxury respects crystal ownership reservations');
         // Expertise permits immediate native wear after the same exchange.
         state = await seed(9635);
-        await DB.execute(['UPDATE characters SET level=40 WHERE id=?', [state.characterId]]);
-        state = await Life.upsertState({ ...state, level: 40 }, 'c_expertise_fixture');
+        await DB.execute(["INSERT INTO clans(id,name,level,leaderId) VALUES(77,'CTransitionClan',1,9635)"]);
+        invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 77, level: 1, state: {} });
+        await DB.execute(['UPDATE characters SET level=40,exp=?,clanId=77 WHERE id=?', [Data.experience[39], state.characterId]]);
+        state = await Life.upsertState({ ...state, level: 40, exp: Data.experience[39], clanId: 77,
+            stats: { ...state.stats, clanId: 77, exp: Data.experience[39] } }, 'c_expertise_fixture');
+        assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state), false,
+            'the native exchange fixture has actual clan warehouse access');
         await DB.setItem(state.characterId, { selfId: 1458, name: 'D crystal', amount: 6000 });
         state = await Life.syncExternalInventory(state.characterId, 'luxury_fixture', state);
         const adult = await DB.applyBotImprovement(state.characterId, proposal, { coldState: state });
         assert(Life.acceptLifecycleRow(adult.coldLifeRow, 'luxury_fixture').inventory[162].equipped,
-            'the atomic physical exchange equips C after expertise');
+            'the atomic physical exchange equips C for a clan member after expertise');
 
         const Crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
         state = await seed(9636);
@@ -211,6 +216,27 @@ async function run() {
         assert.equal(dispatched.state.stats.travel.arrivalActivity, 'shopping');
         assert(dispatched.state.adena < state.adena, 'native dispatch pays the existing travel cost');
         assert.equal(dispatched.state.inventory[90].amount, 2, 'dispatch cannot consume inputs before arrival');
+        state = await seed(9641);
+        await DB.execute(['UPDATE characters SET level=47,exp=?,clanId=77 WHERE id=?', [Data.experience[46], state.characterId]]);
+        state = await Life.upsertState({ ...state, level: 47, exp: Data.experience[46], clanId: 77,
+            stats: { ...state.stats, clanId: 77, exp: Data.experience[46],
+            equipmentPlan: { strategy: 'luxury_exchange', status: 'active', target: { selfId: 161, slot: 7 },
+                exchange: silver, materials: [...silver.materials, { selfId: 90, amount: 2 }] } } }, 'clan_c_chain_fixture');
+        state = await Life.applyMarketPurchase(state, { selfId: 90, price: 100, sourceType: 'fixture' }, 2);
+        assert(state && Crystals.ready(state), 'a clan member admits its physically bought crystal inputs');
+        const clanKit = (await DB.fetchItems(state.characterId)).filter(row => row.equipped);
+        const clanCrystals = await townStep(state, crystalCommand);
+        assert(clanCrystals.ok);
+        assert.equal(clanCrystals.state.stats.lastImprovement.kind, 'crystallize');
+        assert(!clanCrystals.state.inventory[90]);
+        assert.deepEqual((await DB.fetchItems(state.characterId)).filter(row => row.equipped), clanKit,
+            'clan crystallization preserves every worn D item');
+        const clanEquipment = await townStep(clanCrystals.state, { kind: 'luxury_exchange', ...silver });
+        assert(clanEquipment.ok);
+        assert.equal(clanEquipment.state.stats.lastImprovement.kind, 'luxury_exchange');
+        assert(clanEquipment.state.inventory[161].equipped, 'the real clan lifecycle chain equips the acquired C weapon');
+        assert.equal(clanEquipment.state.adena, state.adena, 'a clan exchange consumes owned crystals without an extra cash charge');
+        assert.equal((await DB.fetchClanWarehouseItems(77)).length, 0, 'personal C acquisition never spends the clan warehouse');
         console.log('PASS native early C acquisition/Luxury: deferred wear, protected stash, D-only cost, player costs, rollback, missing inputs, authoritative cold location and stale/repeated command');
     } finally {
         await DB.close(); require('node:fs').rmSync(fixture.directory, { recursive: true, force: true });

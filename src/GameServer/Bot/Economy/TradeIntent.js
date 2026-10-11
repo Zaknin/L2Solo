@@ -73,9 +73,11 @@ function preparedProject(network, worth, limit) {
                 rows.set(id, { itemId: id, amount: plan.missingAmount + (previous?.amount || 0), worth: worth(id),
                     kind: wish.object?.kind, key: wish.key, recipeId, valueHours: value + (previous?.valueHours || 0), valueRate: wish.ratio });
             }
-            const path = plan.intentionPath || plan, requirements = path.requirements || [];
+            const path = plan.intentionPath || plan, command = path.execution || path;
+            const requirements = command.requirements || [];
+            const share = path.execution ? Math.min(1, Number(command.availableUnits) / plan.missingAmount) : 1;
             const total = requirements.reduce((sum, row) => sum + row.amount, 0);
-            for (const row of requirements) visit(row.key, row.plan, value * row.amount / Math.max(1, total), path.recipeId || recipeId, depth + 1);
+            for (const row of requirements) visit(row.key, row.plan, value * share * row.amount / Math.max(1, total), path.recipeId || recipeId, depth + 1);
         };
         visit(wish.key, wish.plan, wish.valueHours);
         for (const [id, row] of rows) if (!watched.has(id)) { watched.add(id); result.push(row); }

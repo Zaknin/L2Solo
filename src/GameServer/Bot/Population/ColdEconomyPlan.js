@@ -128,15 +128,18 @@ function* prepareNative(state, economy, options) {
     for (let at = 0; at < Math.min(8, listings.length); at++) {
         const row = listings[at];
         const showcase = publishShop && at < 3;
-        const town = showcase ? shopTown : own.find(line => line.storeType === SELL && line.selfId === row.selfId)?.town
+        const enchant = Number(row.enchant || 0);
+        const town = showcase ? shopTown : own.find(line => line.storeType === SELL && line.selfId === Number(row.selfId)
+            && Number(line.enchant || 0) === enchant)?.town
             || (at < 3 ? shopTown : (yield* Town.chooseTown(state, [row], townOptions)).town);
         const unchanged = own.some(line => line.storeType === SELL && line.selfId === Number(row.selfId)
+            && Number(line.enchant || 0) === enchant
             && line.count === Number(row.count) && line.price === Number(row.price) && line.town === town
             && (!publishShop || (showcase ? line.kind === 'shop' : line.kind !== 'shop')));
         if (showcase) { showcaseRows++; showcaseChanged ||= !unchanged; }
         // A shop replacement needs its complete desired stock, including
         // unchanged lines, so it cannot accidentally return the best one.
-        if (showcase || town && !unchanged) sell.push([Number(row.selfId), Number(row.count), Number(row.price), town]);
+        if (showcase || town && !unchanged) sell.push([Number(row.selfId), Number(row.count), Number(row.price), town, enchant]);
         yield 'stock';
     }
     if (!showcaseChanged) sell.splice(0, showcaseRows);

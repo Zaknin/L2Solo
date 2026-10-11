@@ -29,7 +29,7 @@ function resolve(proposal) {
 }
 function eligible(state, recipe) {
     const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
-    if (!recipe || !Progression.personal(state) || Number(state.level) < 20
+    if (!recipe || !Progression.allowsCGradeAcquisition(state) || Number(state.level) < 20
         || Number(state.level) < 40 && Progression.assess(state).required) return false;
     const Data = invoke('GameServer/DataCache'), Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const item = require('../../Item/ItemTemplateIndex').find(Data.items, recipe.itemId);

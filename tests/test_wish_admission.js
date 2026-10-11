@@ -41,7 +41,8 @@ const adapters = {
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => true, isServiceCrafter: () => false },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
     'GameServer/Bot/Economy/MarketCounters': { moveOf: () => 0, counterOf: () => 'armor c' },
-    'GameServer/Bot/Economy/ItemDisposition': { saleCandidates: () => [] },
+    'GameServer/Bot/Economy/PersonalWarehouseIndex': { saleState: state => state },
+    'GameServer/Bot/Economy/ItemDisposition': { saleCandidates: () => [], reservedEquipmentAmounts: () => ({}) },
     'GameServer/Inventory/ShotStock': { keptAmounts: () => ({}) },
     'GameServer/Bot/AI/HealingPotionStock': { keptAmounts: () => ({}) },
     'GameServer/Bot/Travel/ScrollStock': { keptAmounts: () => ({}) }
@@ -80,7 +81,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return Diagnostics;
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return tracked;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');

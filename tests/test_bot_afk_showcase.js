@@ -122,6 +122,44 @@ const listings = [
         await Afk.init();
         assert(Afk.findOwnerProjection(owner), 'the remaining showcase restores after restart');
         assert.equal(Afk.offers(1101, 1).find(row => row.sourceId === owner).recordKind, 'shop');
-        console.log('PASS town showcase: valuable unit asks, atomic promotion/rollback, stale visit, board browsing, purchase and restore');
+        for (const enchant of [0, 1, 2]) await Database.setItem(owner, {
+            selfId: 626, amount: 1, enchant, equipped: enchant === 2 ? 1 : 0, slot: enchant === 2 ? 8 : 0
+        });
+        const shields = (await Database.fetchItems(owner)).filter(row => row.selfId === 626);
+        state = await Life.syncExternalInventory(owner, 'mixed_enchant_loot', Life.cachedState(owner));
+        state = await Life.upsertState({ ...state, activity: 'shopping', currentRegion: 'Giran',
+            loc: { locX: 83396, locY: 147904, locZ: -3400 } }, 'mixed_enchant_visit');
+        listings.splice(0, listings.length, { selfId: 626, enchant: 0, count: 1, price: 93905 });
+        await Market.executePlan(state, prepare());
+        assert.equal(Afk.findOwnerProjection(owner).shop.lines[0].enchant, 0);
+        state = Life.cachedState(owner);
+        listings[0].enchant = 1;
+        const enchanted = prepare();
+        assert.equal(enchanted.shop, 'Giran', 'a different enchant requires replacement even at the same item, count and price');
+        assert.deepEqual(enchanted.sell, [[626, 1, 93905, 'Giran', 1]]);
+        await Market.executePlan(state, enchanted);
+        const enchantedLine = Afk.findOwnerProjection(owner).shop.lines[0];
+        assert.equal(enchantedLine.enchant, 1);
+        assert.equal(enchantedLine.sourceObjectId, shields.find(row => row.enchant === 1).id);
+        const remaining = await Database.fetchItems(owner);
+        assert.equal(remaining.filter(row => row.selfId === 626 && row.enchant === 0)
+            .reduce((sum, row) => sum + row.amount, 0), 1, 'the displaced +0 returns physically');
+        assert.equal(remaining.find(row => row.enchant === 2 && row.selfId === 626).equipped, 1);
+        await Afk.closeBotRecord(owner, Afk.findOwnerProjection(owner).shop.id);
+        state = Life.cachedState(owner);
+        const inventoryBefore = await Database.fetchItems(owner);
+        await assert.rejects(Market.executePlan(state, { sell: [[626, 1, 93905, 'Giran', -1]], withdraw: [], travel: null },
+            { reviewGoal: false }), /economy_plan_invalid_enchant/);
+        await assert.rejects(Market.executePlan(state, { sell: [[626, 1, 93905, 'Giran']], withdraw: [], travel: null },
+            { reviewGoal: false }), /economy_plan_ambiguous_copies/, 'legacy tuples cannot guess among mixed copies');
+        await Market.executePlan(state, { sell: [[626, 1, 93905, 'Giran', 5]], withdraw: [], travel: null }, { reviewGoal: false });
+        assert.deepEqual(await Database.fetchItems(owner), inventoryBefore, 'a missing planned enchant cannot take another copy');
+        await Market.executePlan(state, { sell: [[626, 1, 93905, 'Dion', 0], [626, 1, 93905, 'Elven Village', 1]],
+            withdraw: [], travel: null }, { reviewGoal: false });
+        const shieldAds = Afk.ownerRecords(owner).filter(row => row.kind === 'sell_ad')
+            .flatMap(record => record.lines.filter(line => line.selfId === 626).map(line => ({ enchant: line.enchant, town: record.town })));
+        assert.deepEqual(shieldAds.sort((a, b) => a.enchant - b.enchant),
+            [{ enchant: 0, town: 'Dion' }, { enchant: 1, town: 'Elven Village' }], 'each enchant retains its own planned town');
+        console.log('PASS town showcase: promotion/rollback, purchase/restore, mixed-enchant replacement, exact custody and ad towns');
     } finally { Listing.evaluate = saved.evaluate; Goals.review = saved.review; await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

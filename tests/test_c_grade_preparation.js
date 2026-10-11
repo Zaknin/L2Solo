@@ -54,8 +54,23 @@ for (const classId of [0, 10, 18, 25, 38, 49, 50, 53, 54, 56]) {
 }
 if (isMainThread) invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 1, level: 1, state: {} });
 else invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
-assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'a clan with warehouse access keeps its existing C progression owner');
-assert.equal(Progression.assess({ ...source, level: 40, clanId: 1 }).required, false);
+assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'clan early C preparation keeps its existing owner');
+for (const classId of [0, 10, 18, 25, 38, 46, 49, 50, 53, 54, 56]) {
+    for (const level of [40, 47, 51]) {
+        const adult = bot(classId, level), member = { ...adult, clanId: 1 };
+        assert(Progression.assess(member).required, `clan D kit opens C milestone for class ${classId} at ${level}`);
+        assert.deepEqual([...Progression.assess(member).gaps], [...Progression.assess(adult).gaps],
+            'warehouse access does not change personal C equipment gaps');
+        assert(Progression.allowsCGradeAcquisition(member));
+        assert.equal(Progression.priority(Data.items.find(item => item.selfId === 850), 2,
+            Progression.assess(member)), 0, 'a D earring cannot satisfy the C milestone');
+    }
+    assert.equal(Progression.assess({ ...bot(classId, 52), clanId: 1 }).required, false);
+}
+assert.equal(Progression.allowsCGradeAcquisition({ ...source, clanId: 1 }), false,
+    'early C preparation retains the pre-40 clan boundary');
+assert.equal(Progression.allowsCGradeAcquisition({ ...source, level: 40,
+    stats: { ...source.stats, craftStationId: 1 } }), false, 'stationary services are outside equipment acquisition');
 
 const board = new BoardIndex();
 board.put({ id: 91, ownerId: 990332, storeType: 1, kind: 'shop', town: 'Giran',
@@ -95,6 +110,15 @@ assert.equal(readyExchange.network.activity.activity, 'improving');
 const exchangePlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(dStock, readyExchange);
 assert.equal(exchangePlan?.strategy, 'luxury_exchange');
 assert(exchangePlan.materials.every(row => row.selfId === 1458));
+const clanStock = { ...dStock, level: 47, clanId: 1,
+    stats: { ...dStock.stats, wishFocus: ['power:850:2', 0, 0] } };
+const clanExchange = review(clanStock);
+assert.equal(clanExchange.network.activity.kind, 'luxury_exchange', 'a clan member can execute its own C exchange');
+assert.notEqual(clanExchange.network.focus[0], 'power:850:2', 'an obsolete D focus cannot hold the C milestone');
+assert(clanExchange.network.queue.filter(row => row.object?.slot).every(row =>
+    Data.items.find(item => item.selfId === row.object.itemId)?.etc.rank === 'c'),
+    'clan gear wishes acquire C while the D kit is inadequate');
+assert(!clanExchange.projection.roots.some(key => key.startsWith('level:')), 'clan C equipment precedes leveling');
 const crystalBoard = new BoardIndex();
 crystalBoard.put({ id: 92, ownerId: 990333, storeType: 1, kind: 'shop', town: 'Giran',
     lines: [{ lineId: 2, selfId: 1458, count: 10000, enchant: 0, price: 1 }] });
@@ -117,6 +141,26 @@ const readyBag = { ...stocked, inventory: { ...stocked.inventory, [spareId]: { s
 const readyCrystals = review(readyBag, gearBoard);
 assert.equal(readyCrystals.network.activity.kind, 'crystallize');
 assert(readyCrystals.network.activity.improvement.amount >= 1);
+const smallKit = kit(54, 40);
+for (const id of Object.keys(smallKit)) if (smallKit[id].equippedSlots.some(slot => [7, 14].includes(slot))) delete smallKit[id];
+const smallWeapon = Object.values(stocked.inventory).find(row => row.equippedSlots?.some(slot => [7, 14].includes(slot)));
+const smallBag = { ...stocked, inventory: { ...smallKit, [smallWeapon.selfId]: smallWeapon, 1463: stocked.inventory[1463],
+    [spareId]: { selfId: spareId, amount: 2, equipped: false } } };
+const smallBatch = review(smallBag, gearBoard);
+assert.equal(smallBatch.network.activity.kind, 'crystallize', 'held spares run before buying more for the full C goal');
+assert.equal(smallBatch.network.activity.improvement.amount, 2);
+const smallPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(smallBag, smallBatch);
+assert.equal(smallPlan.materials.find(row => row.selfId === spareId).amount, 2,
+    'native reservations follow the two-item command, rather than the entire future input supply');
+assert(Crystals.ready({ ...smallBag, stats: { ...smallBag.stats, equipmentPlan: smallPlan } }),
+    'physical two-item command remains ready when the market offers sixteen more');
+const smallCard = invoke('GameServer/Bot/Population/ColdEconomyDecision').capture(smallBatch, smallBag);
+assert.equal(smallCard.activity.improvement.amount, 2, 'the compact worker card keeps the physical command quantity');
+assert(smallCard.data.byteLength <= 800);
+const smallWatch = invoke('GameServer/Bot/Economy/TradeIntent').project(smallBag, smallBatch.network,
+    smallBatch.projection, () => 1);
+assert(!smallWatch.some(row => row.itemId === spareId), 'the retained command does not advertise inputs already held');
+assert(smallWatch.every(row => Number.isFinite(row.valueHours)), 'retaining a command preserves its output share');
 const card = invoke('GameServer/Bot/Population/ColdEconomyDecision').capture(readyCrystals, readyBag);
 assert.equal(card.activity.improvement.amount, readyCrystals.network.activity.improvement.amount);
 assert(card.data.byteLength <= 800, 'the worker/native decision keeps its byte bound');
@@ -140,7 +184,8 @@ assert(Crystals.ready(townReady), 'owned inputs admit the finite town command');
 assert.equal(invoke('GameServer/Bot/Population/ColdSimulationKernel').lifecycleKind(townReady), 'command');
 assert(!Crystals.ready({ ...townReady, inventory: { ...townReady.inventory,
     [spareId]: { ...townReady.inventory[spareId], amount: 0 } } }));
-assert(!Crystals.ready({ ...townReady, clanId: 1 }), 'clan scheduling stays unchanged');
+assert(Crystals.ready({ ...townReady, clanId: 1 }), 'a clan member with owned inputs admits its C town command');
+assert.equal(invoke('GameServer/Bot/Population/ColdSimulationKernel').lifecycleKind({ ...townReady, clanId: 1 }), 'command');
 const Improvement = invoke('GameServer/Bot/Economy/BotImprovementService');
 const outside = { ...townReady, activity: 'hunting', currentRegion: 'Dion',
     loc: { locX: 18748, locY: 145437, locZ: -3132 } };
@@ -149,7 +194,10 @@ assert.equal(townTrip.activity, 'traveling');
 assert.equal(townTrip.stats.travel.townName, 'Giran', 'the selected NPC operation owns the destination');
 assert(townTrip.adena < outside.adena, 'the real gatekeeper trip debits its fee');
 assert.equal(Improvement.acquisitionTravel(townReady, readyCrystals.network.activity, timestamp), null);
-assert.equal(Improvement.acquisitionTravel({ ...outside, clanId: 1 }, readyCrystals.network.activity, timestamp), null);
+const clanTrip = Improvement.acquisitionTravel({ ...outside, clanId: 1 }, readyCrystals.network.activity, timestamp);
+assert.equal(clanTrip.stats.travel.townName, 'Giran', 'the clan member can reach its own C exchange station');
+assert(clanTrip.adena < outside.adena);
+assert.equal(Improvement.acquisitionTravel({ ...outside, level: 33, clanId: 1 }, readyCrystals.network.activity, timestamp), null);
 assert.equal(invoke('GameServer/Bot/Population/ColdSimulationCoordinator').routeFor(outside, null, null, [], {}), null,
     'a ready NPC operation suppresses the competing hunting route');
 const npcInput = review(stocked, new BoardIndex(), { npcOffersFor: id => id === spareId

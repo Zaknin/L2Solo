@@ -13,7 +13,7 @@ function inTown(state) {
 }
 function acquisitionTravel(state, leaf, timestamp = Date.now()) {
     if (leaf?.activity !== 'improving' || !['crystallize', 'luxury_exchange'].includes(leaf.improvement?.kind)
-        || !invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)
+        || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)
         || state.party?.partyId || state.partyId || state.stats?.pveEncounter || state.stats?.pvpEncounter
         || !['hunting', 'resting', 'party_wait'].includes(state.activity)
         || state.currentRegion === 'Giran' && inTown(state)) return null;

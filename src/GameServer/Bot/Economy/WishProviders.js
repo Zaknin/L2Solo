@@ -321,7 +321,7 @@ function buildProjection(state, ctx, deps) {
     const progression = Progression.assess(state);
     const preparation = Progression.preparation(state, progression);
     const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
-    const luxury = Progression.personal(state) && state.level < 52 && (state.level >= 40 || preparation)
+    const luxury = Progression.allowsCGradeAcquisition(state) && state.level < 52 && (state.level >= 40 || preparation)
         ? need('./BotLuxuryExchange').recipes() : null;
     const powerWeight = (ctx.persona.primaryDrive === 'progression' ? 1 : 0.5) + trait(ctx.persona, 'caution');
     const statusWeight = trait(ctx.persona, 'ambition') * (1 + Number(ctx.persona.primaryDrive === 'wealth'));
@@ -1063,9 +1063,12 @@ function personalCraftPlan(state, context) {
         visited.add(plan);
         if (plan.kind === 'luxury_exchange' && Number(plan.improvement?.itemId) === targetId)
             exchange = plan.improvement;
-        if (plan.kind === 'crystallize') for (const input of plan.improvement.items
-            || [{ selfId: plan.improvement.sourceSelfId, amount: Number(plan.batches || 1) }])
-            crystalInputs.set(Number(input.selfId), Math.min(need('./BotCrystallization').BATCH_LIMIT, Number(input.amount)));
+        if (plan.kind === 'crystallize') {
+            const command = plan.execution || plan;
+            for (const input of command.improvement.items
+                || [{ selfId: command.improvement.sourceSelfId, amount: Number(command.batches || 1) }])
+                crystalInputs.set(Number(input.selfId), Math.min(need('./BotCrystallization').BATCH_LIMIT, Number(input.amount)));
+        }
         if (plan.kind === 'craft' && plan.workshop) {
             const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(plan.recipeId);
             if (!recipe) return;

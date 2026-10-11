@@ -609,6 +609,7 @@ function planTrimmer(unresolved = new Set()) {
         if (plan.grossRequirements) out.grossRequirements = plan.grossRequirements.map(row => ({ key: row.key,
             amount: row.amount, ...(row.once ? { once: true } : {}) }));
         if (plan.intentionPath !== undefined) out.intentionPath = trim(plan.intentionPath);
+        if (plan.execution) out.execution = { ...trim(plan.execution), availableUnits: plan.execution.availableUnits };
         if (plan.requirements) out.requirements = !plan.requirements.length ? NO_REQUIREMENTS : plan.requirements.map(row => {
             if (!row.plan) unresolved.add(row.key);
             return { key: row.key, amount: row.amount, plan: trim(row.plan) };

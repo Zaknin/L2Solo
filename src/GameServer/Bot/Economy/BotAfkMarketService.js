@@ -652,7 +652,8 @@ async function listOnBoard(state, options = {}) {
     let shopTown = null;
     const visitTown = state.activity === 'shopping' && ShopPlaces.hasPlaza(state.currentRegion)
         && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state) ? state.currentRegion : null;
-    const town = sale.lines.length ? stock?.town || options.planTowns?.get(Number(sale.lines[0].selfId))
+    const town = sale.lines.length ? stock?.town || options.planTowns?.get(lineKey(sale.lines[0]))
+        || options.planTowns?.get(Number(sale.lines[0].selfId))
         || state.stats?.shopTown?.town || visitTown || MarketTownPolicy.openingTown(state, sale.lines, options.now).town : null;
     if (town && !stock && town !== state.currentRegion) {
         // The shop opens in its own town: the bot goes there with its lines.
@@ -705,7 +706,8 @@ async function listSellAds(ownerId, state, listings, shop, inventory, options = 
             stackable, petData: row.petData || null, pricing: listing.pricing
         };
         if (!viableSellLine(line)) continue;
-        const town = options.planTowns?.get(selfId) || MarketTownPolicy.shopTown(state, [line]);
+        const town = options.planTowns?.get(lineKey(line)) || options.planTowns?.get(selfId)
+            || MarketTownPolicy.shopTown(state, [line]);
         const center = ListingService.townCenter(town) || { locX: 0, locY: 0, locZ: 0 };
         configs.push({ storeType: AfkTrade.SELL, title: marketStoreTitle([line]), town, ...center, lines: [line] });
         advertised.add(lineKey(listing));
@@ -840,23 +842,26 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         const ctx = ListingPolicy.traderContext(state);
         // Listings come from MarketListingPolicy.evaluate: sale candidates
         // and classify already admitted their sources.
-        const listings = plan.sell.slice(0, 8).map(([selfId, count, price]) => {
+        const listings = plan.sell.slice(0, 8).map(([selfId, count, price, town, plannedEnchant]) => {
             const item = ItemTemplateIndex.find(DataCache.items, selfId);
-            const bag = state.inventory?.[selfId], copies = (bag?.instances || []).filter(row => !row.equipped && row.amount > 0);
-            const enchants = new Set([...copies.map(row => Number(row.enchant || 0)),
-                ...AfkTrade.boardIndex().ownerLines(ownerId).filter(line => line.storeType === AfkTrade.SELL && line.selfId === Number(selfId))
-                    .map(line => Number(line.enchant || 0))]);
-            if (!enchants.size) enchants.add(Number(bag?.enchant || 0));
-            // ARCH-NOTE: the fixed tuple carries no enchant/source row. A
-            // unique physical enchant is unambiguous; mixed copies wait for
-            // the native town visit rather than offering the wrong copy.
-            if (enchants.size !== 1) throw Error('economy_plan_ambiguous_copies');
-            const enchant = [...enchants][0];
+            let enchant = plannedEnchant;
+            if (enchant === undefined) {
+                // Older prepared plans can only select a unique enchant.
+                const bag = state.inventory?.[selfId], copies = (bag?.instances || []).filter(row => !row.equipped && row.amount > 0);
+                const enchants = new Set([...copies.map(row => Number(row.enchant || 0)),
+                    ...AfkTrade.boardIndex().ownerLines(ownerId).filter(line => line.storeType === AfkTrade.SELL && line.selfId === Number(selfId))
+                        .map(line => Number(line.enchant || 0))]);
+                if (!enchants.size) enchants.add(Number(bag?.enchant || 0));
+                if (enchants.size !== 1) throw Error('economy_plan_ambiguous_copies');
+                enchant = [...enchants][0];
+            }
+            if (!Number.isSafeInteger(enchant) || enchant < 0) throw Error('economy_plan_invalid_enchant');
             return { selfId: Number(selfId), count: Number(count), price: Number(price), enchant,
                 name: item?.template?.name || `Item ${selfId}`, kind: item?.template?.kind || '',
                 pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
                     { price: Number(price), storeType: AfkTrade.SELL, enchant, count: Number(count) }) };
         });
+        const planTowns = new Map(listings.map((line, at) => [lineKey(line), plan.sell[at][3]]));
         // The worker marks promotion at a real visit (or a standing shop's
         // refresh). Never manufacture a town visit from a field quote.
         const current = AfkTrade.findOwnerProjection(ownerId)?.shop;
@@ -866,12 +871,11 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 : state.activity !== 'shopping' || state.currentRegion !== plan.shop
                     || !invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state)))
                 return { state, reason: 'shop_visit_changed' };
-            return listOnBoard(state, { decided: { listings },
-                planTowns: new Map(plan.sell.map(row => [Number(row[0]), row[3]])) });
+            return listOnBoard(state, { decided: { listings }, planTowns });
         }
         const inventory = await Database.fetchItems(ownerId);
         return listSellAds(ownerId, state, listings, shop, inventory,
-            { planTowns: new Map(plan.sell.map(row => [Number(row[0]), row[3]])) });
+            { planTowns });
     });
     // An empty desired list closes the old ads; it does not run another bid
     // decision on main. The plan's quote remains the quote the worker made.
