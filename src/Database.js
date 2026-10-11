@@ -4629,14 +4629,18 @@ const Database = {
                 try {
                     // Fence the original snapshot once per record. Our earlier
                     // lines in this transaction can advance its revision.
-                    reviewRecord(reprice);
+                    const shop = reviewRecord(reprice);
                     const line = one('SELECT * FROM afk_trade_lines WHERE id = ?', [id]);
                     checkLinePricingUnsafe(line, reprice.previousPricing);
+                    const count = reprice.count ?? null;
+                    if (count !== null && (shop.custodyPolicy !== 1 || Number(shop.storeType) !== BoardRules.SELL
+                        || !Number.isSafeInteger(count) || count < 1 || count > Number(line.count)))
+                        throw Error('invalid_afk_trade_quantity');
                     if (reprice.pricing) {
                         pricingValues(reprice.pricing);
                         if (reprice.pricing.seenFills > Number(line.fills)) throw new Error('invalid_board_pricing');
                     }
-                    repriced = repriceAfkTradeLineUnsafe(characterId, id, unitPrice, null, null,
+                    repriced = repriceAfkTradeLineUnsafe(characterId, id, unitPrice, null, count,
                         { checkpoint: !reprice.pricing });
                     if (reprice.pricing && updateLinePricingUnsafe(line, reprice.pricing)) updated += 1;
                 } catch (error) {
@@ -10647,7 +10651,7 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
         const row = one('SELECT * FROM bot_life_state WHERE characterId=?', [id]);
         if (!row || row.phase !== 'cold' || Number(row.hp) <= 0
             || ['dead', 'fighting', 'resting'].includes(row.activity)) return false;
-        const held = jsonObject(row.statsJson).travel;
+        const stats = jsonObject(row.statsJson), held = stats.travel;
         if (held?.meetingId === meeting.id) return false;
         const at = now();
         const Trip = require('./GameServer/Bot/Population/ColdTrip');
@@ -10667,12 +10671,28 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
             townName: meeting.town, regionName: meeting.town, arrivalActivity: 'shopping', arrivalEvent: 'trade_meeting_arrival',
             method, reason: 'trade_meeting', meetingId: meeting.id, meetingRevision: meeting.revision,
             startedAt: at, arrivalAt: at + Math.max(1000, durationMs), paid: { fee: receipt.fee, ...(receipt.scroll ? { scroll: 736 } : {}) } };
-        write("UPDATE bot_life_state SET activity='traveling',activityStartedAt=?,nextResolveAt=?,statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)) WHERE characterId=?", [at, travel.arrivalAt, JSON.stringify({ travel }), id]);
+        // A previously accepted meeting may have waited for the original
+        // return trip to finish, which clears its old marketReturn on arrival.
+        const marketReturn = !stats.marketReturn && row.activity === 'hunting'
+            ? { loc: travel.from, regionName: row.currentRegion || null, spotId: row.spotId || null } : null;
+        write("UPDATE bot_life_state SET activity='traveling',activityStartedAt=?,nextResolveAt=?,statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)) WHERE characterId=?", [at, travel.arrivalAt, JSON.stringify({ travel,
+            ...(marketReturn ? { marketReturn } : {}) }), id]);
         return true;
     },
     snapshot: (id, changed, patch) => {
         const row = one('SELECT * FROM bot_life_state WHERE characterId=?', [id]);
         if (!row) return null;
+        const stats = jsonObject(row.statsJson);
+        // Save the original outing once, before either side leaves for its
+        // first meeting. Later legs/appointments keep the same return and wish.
+        if (patch.tradeMeeting && !stats.tradeMeeting && !stats.marketReturn
+            && ['hunting', 'resting', 'fighting'].includes(row.activity)) {
+            const meeting = TradeMeetings.meeting(patch.tradeMeeting[0]);
+            const position = row.phase === 'hot' ? tradeMeetingPositionUnsafe(id) || row : row;
+            if (meeting && Math.hypot(position.locX - meeting.locX, position.locY - meeting.locY, position.locZ - meeting.locZ) > 200)
+                patch = { ...patch, marketReturn: { loc: { locX: position.locX, locY: position.locY, locZ: position.locZ },
+                    regionName: row.currentRegion || null, spotId: row.spotId || null } };
+        }
         if (row.phase === 'cold') return writeColdInventorySnapshotUnsafe(id, row, changed, null, patch);
         write("UPDATE bot_life_state SET statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)),simulationRevision=simulationRevision+1 WHERE characterId=?", [JSON.stringify(patch), id]);
         return normalizeRow(coldSimulationRow(id));

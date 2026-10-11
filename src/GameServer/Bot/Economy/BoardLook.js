@@ -224,6 +224,9 @@ function review(state, lines, ctx, lookSeen) {
         // the next own resolve, even when its sources have stayed unchanged.
         if (line.storeType === 3 && (line.price > cache[SCRATCH + 19]
             || line.price > cache[SCRATCH + 15])) reason |= 4;
+        // Consumption/reservations can invalidate a held sell quote without
+        // a public price change. Retry a refused correction at the next look.
+        if (line.storeType === 1 && line.custodyPolicy === 1 && line.count > ctx.saleCount?.(line)) reason |= 4;
         if (exists ? !sameRange(cache, at, SCRATCH, 5, 9)
             : cache[SCRATCH + 8] > 0) reason |= 1;
         if (exists && !sameRange(cache, at, SCRATCH, 9, 13)

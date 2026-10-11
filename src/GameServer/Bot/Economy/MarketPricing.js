@@ -29,6 +29,23 @@ function traderContext(state, deps = {}) {
     const trader = PriceDecision.traderOf(persona, { hourAdena: hour, moneyPrice: economy.moneyPrice, gapHorizonHours: economy.gapHorizonHours });
     // The bot's own trip to a town: none to the town it is shopping in.
     const here = state?.activity === 'shopping' ? state.currentRegion || null : null;
+    let saleAmounts = null;
+    const saleCount = line => {
+        // Accepted custody keeps its advertised remainder until completion.
+        if (line.storeType !== SELL || line.custodyPolicy !== 1 || state.stats?.tradeMeeting)
+            return line.count;
+        if (!saleAmounts) {
+            const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+            const candidates = Disposition.saleCandidates(state, { unlimited: true,
+                keptAmounts: {
+                    ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, economy),
+                    ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: economy.stock('potions').target }),
+                    ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state)
+                }, reserved: economy.craftReservations || Disposition.selectedCraftAmounts(state, economy.network) });
+            saleAmounts = new Map(candidates.map(item => [`${item.selfId}:${item.enchant || 0}`, item.count]));
+        }
+        return Math.min(line.count, saleAmounts.get(`${line.selfId}:${line.enchant || 0}`) || 0);
+    };
     return {
         state,
         characterId: Number(state?.characterId || 0),
@@ -61,6 +78,7 @@ function traderContext(state, deps = {}) {
             && deps.canSell?.(line) !== false,
         canBuy: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && (Number(line.enchant || 0) > 0 || !npcOwnsPurchase(economy, line.selfId)),
+        saleCount: deps.saleCount || (typeof economy.stock === 'function' ? saleCount : null),
         derivedDemandValue: deps.derivedDemandValue ?? economy.derivedDemandValue,
         derivedDemandSupported: deps.derivedDemandSupported ?? economy.derivedDemandSupported,
         tripCost: trip || null,
@@ -269,6 +287,13 @@ function look(state, lines, ctx) {
             expectedRevision: line.revision, previousPricing: { ...line.pricing } };
         if (!invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)) {
             withdrawals.push(move); continue;
+        }
+        const count = ctx.saleCount?.(line);
+        if (line.storeType === SELL && line.custodyPolicy === 1 && Number.isSafeInteger(count) && count < line.count) {
+            if (!count) withdrawals.push(move);
+            else reprices.push({ ...move, price: line.price, count,
+                pricing: { ...line.pricing, seenCount: count } });
+            continue;
         }
         const counter = MarketCounters.counter(MarketCounters.counterOf(line.selfId), ctx.timestamp);
         const reason = Number(ctx.reviewReasons?.get(line.lineId) || 0);

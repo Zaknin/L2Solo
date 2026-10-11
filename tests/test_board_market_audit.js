@@ -222,6 +222,32 @@ async function run() {
         assert.strictEqual((await Database.settleBoardOwner(owner)).settled, false);
     });
 
+    await check('conditional sales track free stock without moving reserved items', async () => {
+        const owner = await bot([{ selfId: 1864, name: 'Stem', amount: 10 }]);
+        const opened = (await Database.createAfkTradeShop(owner, await sellAd(owner))).shop;
+        AfkTrade.refreshRecord(opened);
+        const line = AfkTrade.boardIndex().ownerLines(owner)[0];
+        assert.equal(line.custodyPolicy, 1);
+        const state = LifeState.cachedState(owner), before = await bag(owner, 1864);
+        const ctx = { characterId: owner, timestamp: Date.now(), saleCount: () => 2 };
+        const seen = new (invoke('GameServer/Bot/Economy/BoardLook').SeenLines)();
+        const review = MarketPricing.lookOwn(state, [line], ctx, seen);
+        assert.equal(review.reprices[0].count, 2, 'stock correction does not wait for a price observation');
+        assert.equal(review.reprices[0].price, line.price);
+        assert.equal(MarketPricing.lookOwn(state, [line], ctx, seen).reprices[0].count, 2,
+            'a refused quantity correction is retried at the next own look');
+        assert.equal((await BotMarket.applyReview(owner, review)).changed, 1);
+        const fresh = AfkTrade.boardIndex().ownerLines(owner)[0];
+        assert.equal(fresh.count, 2);
+        assert.equal(await bag(owner, 1864), before, 'conditional quantity reduction returns no phantom items');
+        assert.equal((await BotMarket.applyReview(owner, review)).changed, 0, 'old quantity corrections are revision fenced');
+        const withdraw = MarketPricing.lookOwn(state, [fresh], { ...ctx, saleCount: () => 0 }, seen);
+        assert.equal(withdraw.withdrawals.length, 1, 'fully reserved stock leaves the order book');
+        await BotMarket.applyReview(owner, withdraw);
+        assert.equal(AfkTrade.boardIndex().ownerLines(owner).length, 0);
+        assert.equal(await bag(owner, 1864), before);
+    });
+
     await check('partial fill must fence a stale price look', async () => {
         const owner = await bot([{ selfId: 1864, name: 'Stem', amount: 10 }]);
         const buyer = await bot([{ selfId: 57, name: 'Adena', amount: 1000 }]);

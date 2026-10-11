@@ -85,9 +85,6 @@ function* prepareNative(state, economy, options) {
     }
     const bidLimits = limits.length ? { bidLimits: limits } : {};
     const purchase = canAct && !options.showcaseOnly ? Ready.purchase(state, economy, options.board) : null;
-    // Taking a selected quote precedes pricing/publishing another offer.
-    // Only native acceptance reserves it; a rejection retains the old board.
-    if (purchase) return { take: purchase, sell: [], withdraw: [], travel: null, ...bidLimits };
     const kept = new Map(own.filter(line => line.storeType === SELL)
         .map(line => [`${line.selfId}:${line.enchant || 0}`, line.price]));
     const inventory = { ...state.inventory };
@@ -104,8 +101,12 @@ function* prepareNative(state, economy, options) {
         conditionalKept.delete(`${line.selfId}:${line.enchant || 0}`);
     const sale = Listing.evaluate(saleState, { ...options, economy, stockQuotes: true,
         slots: Listing.BOARD_SLOTS, kept, conditionalKept, stored: new Map() });
-    const answer = canAct && !options.showcaseOnly && economy.network?.activity?.activity !== 'shopping' ? Ready.sale(sale.answers, state) : null;
+    // A profitable surplus sale is a temporary meeting, not a replacement
+    // wish. Leave the selected purchase/focus intact for the next review.
+    const answer = canAct && !options.showcaseOnly ? Ready.sale(sale.answers, state) : null;
     if (answer) return { take: answer, sell: [], withdraw: [], travel: null, ...bidLimits };
+    // Only native acceptance reserves a quote; rejection keeps the plan.
+    if (purchase) return { take: purchase, sell: [], withdraw: [], travel: null, ...bidLimits };
     const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
     const townOptions = { context: ctx, tripCost: options.tripCost || ctx.tripCost, timestamp: options.now,
         prepareTrip: options.prepareTrip, findSpot: options.findSpot, onDecision: options.onTownDecision };
