@@ -68,7 +68,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
         }
         kits.set(key, slots);
     }
-    const maxRank = GEAR_RANKS.indexOf(Planner.gradeForLevel(state.level));
+    const maxRank = GEAR_RANKS.indexOf(Progression.acquisitionRankFor(state, progression || undefined));
     const result = new Map();
     const budget = Math.max(0, Number(state.adena || 0) - Number(ctx?.survivalReserve || 0));
     const target = Number(state.stats?.equipmentPlan?.target?.selfId || 0);
@@ -321,7 +321,7 @@ function buildProjection(state, ctx, deps) {
     const progression = Progression.assess(state);
     const preparation = Progression.preparation(state, progression);
     const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
-    const luxury = Progression.allowsCGradeAcquisition(state) && state.level < 52 && (state.level >= 40 || preparation)
+    const luxury = Progression.allowsCGradeAcquisition(state) && (state.level < 52 || progression.required) && (state.level >= 40 || preparation)
         ? need('./BotLuxuryExchange').recipes() : null;
     const powerWeight = (ctx.persona.primaryDrive === 'progression' ? 1 : 0.5) + trait(ctx.persona, 'caution');
     const statusWeight = trait(ctx.persona, 'ambition') * (1 + Number(ctx.persona.primaryDrive === 'wealth'));
@@ -682,12 +682,13 @@ function buildProjection(state, ctx, deps) {
     }
     const candidates = [];
     const planningState = preparation || state;
+    const acquisitionRank = Progression.acquisitionRankFor(planningState, preparation ? undefined : progression);
     const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
     let futureGain;
     const acquisitionAllowed = id => Sources.hasNonRaidSource(id)
         || positive(state.inventory?.[id]?.amount) > 0 || !!observedPurchase(id);
     for (const [slot, items] of gearCandidates(planningState, ctx, wornFor, acquisitionAllowed, progression, luxury)) for (const item of items) {
-        if (!Planner.considerable(item, planningState)) continue;
+        if (!Planner.considerable(item, planningState, Planner.roleFor(planningState), acquisitionRank)) continue;
         const current = replacementWorn(wornFor, slot);
         if (Number(current?.selfId) === Number(item.selfId)) continue;
         const early = !!preparation && item.etc?.rank === 'c';

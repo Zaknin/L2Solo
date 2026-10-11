@@ -581,7 +581,8 @@ assert.strictEqual(BotWeaponCompatibility.isCasterWeapon(
     target.item.stats?.mAtk
 ), true, 'a mage acquisition target must be an actual caster weapon, not merely a compatible sword or blunt');
 const bGradeMageTarget = GearAcquisitionPlanner.preferredTarget({ ...mage, level: 52 });
-assert(bGradeMageTarget, 'a B-grade mage without gear must receive an equipment target');
+assert(bGradeMageTarget, 'a level-52 mage without gear must receive a C completion target');
+assert.strictEqual(bGradeMageTarget.item.etc.rank, 'c', 'B expertise cannot skip the C kit');
 assert.strictEqual(BotWeaponCompatibility.isCasterWeapon(
     bGradeMageTarget.item.template.kind,
     bGradeMageTarget.item.template.name,
@@ -1190,11 +1191,19 @@ try {
         }],
         spoils: []
     }];
+    const completedCInventory = {};
+    for (const row of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 17, level: 40 }).items) {
+        if ([7, 14].includes(row.slot)) continue;
+        const slots = [...completedCInventory[row.selfId]?.equippedSlots || [], row.slot];
+        completedCInventory[row.selfId] = { ...row, amount: slots.length,
+            equipped: true, equippedCount: slots.length, equippedSlots: slots };
+    }
     const fallbackTarget = GearAcquisitionPlanner.preferredTarget({
         characterId: 990200,
         level: 61,
         stats: { classId: 17, role: 'buffer' },
         inventory: {
+            ...completedCInventory,
             [ownedAWeapon.selfId]: { selfId: ownedAWeapon.selfId, amount: 1, equipped: true, slot: 7 }
         }
     }, {

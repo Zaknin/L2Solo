@@ -23,7 +23,6 @@ function assess(state = {}) {
     const Compatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
-    if (level >= 52) return { required: false, gaps: new Map() };
     const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : level < 40 ? 20 : 40 });
     const starters = new Set((Data.newbieItems || []).flatMap(row => row.items || [])
         .filter(row => row.equipped).map(row => Number(row.selfId)));
@@ -59,6 +58,13 @@ function assess(state = {}) {
             priority: empty ? Compatibility.isWeaponSlot(slot) ? 3 : 2 : 1 });
     }
     return { required: gaps.size > 0, gaps, starters, role, classId };
+}
+
+// Expertise permits wearing higher grades, but acquisition first closes every
+// usable C slot. Already worn higher-grade pieces also satisfy that milestone.
+function acquisitionRankFor(state = {}, assessment = null) {
+    const rank = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').gradeForLevel(state.level);
+    return RANKS.indexOf(rank) > RANKS.indexOf('c') && (assessment || assess(state)).required ? 'c' : rank;
 }
 
 function priority(item, slot, assessment) {
@@ -104,4 +110,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, priority, preparation, preparedAmounts, allowsCGradeAcquisition };
+module.exports = { personal, adventurer, assess, acquisitionRankFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition };
