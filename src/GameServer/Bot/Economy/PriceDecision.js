@@ -205,7 +205,8 @@ function marketFor(selfId, { board = null, ownerId = 0, town = null, units = 1, 
     // ARCH-NOTE: the delivered counter tracks kind-level deals, not permitted
     // item arrivals/exposure/lifetime. Dividing by listing count manufactured
     // demand and made split own listings create buyers. No supported producer
-    // currently supplies those three item facts, so the external tail is unknown.
+    // supplies them from category counters; only explicit item evidence can
+    // make the external tail known.
     const supported = Boolean(jointKnown && demand && demand.known !== false && demand.origin && demand.authority
         && Number(demand.selfId ?? id) === id && Number(demand.enchant ?? enchant) === Number(enchant)
         && Number.isFinite(demand.applicableUnits) && demand.applicableUnits >= 0

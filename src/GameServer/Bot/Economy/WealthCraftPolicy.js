@@ -110,6 +110,7 @@ function* evaluatePrepared({ state, recipe, batches = 1, basket, exit, ownedFor 
     const mp = Number(facts.mp);
     if (!recipe || exit.unknownJoint || !Number.isSafeInteger(batches) || batches < 1 || batches > MAX_BATCHES
         || exit.trial === true && batches !== 1
+        || batches > Number(exit.maxBatches ?? MAX_BATCHES)
         || !Number.isSafeInteger(productCount) || productCount <= 0 || !(successRate > 0 && successRate <= 1)
         || !Number.isFinite(mp) || mp < 0 || !basket || mp + Number(basket.extraMp || 0) > Number(state?.vitals?.mp || 0)
         || basket.cashCost + basket.actualCashFees > Number(state?.adena || 0)
@@ -130,10 +131,14 @@ function* evaluatePrepared({ state, recipe, batches = 1, basket, exit, ownedFor 
     if (!Number.isFinite(cycleHours) || cycleHours < 0 || !Number.isFinite(exitFees) || exitFees < 0) return null;
     const oldCount = count(context.existingOutput ?? ownedFor(Number(recipe.productId))?.count ?? 0);
     if (!Number.isFinite(oldCount) || !Number.isSafeInteger(oldCount + productCount)) return null;
+    // A commercial batch first fills the crafter's missing personal stock.
+    // Those units give their own use benefit, never external sale receipts.
+    const reservedOutput = exit.type === 'use' ? 0 : Math.min(productCount, count(context.outputReserve ?? 0));
+    if (!Number.isFinite(reservedOutput)) return null;
     const without = Price.saleOutcome(saleInput(exit, oldCount, context));
     yield 'without';
     if (!without.known) return null;
-    const full = Price.saleOutcome(saleInput(exit, oldCount + productCount, context));
+    const full = Price.saleOutcome(saleInput(exit, oldCount + productCount - reservedOutput, context));
     yield 'success';
     if (!full.known) return null;
     if (exit.trial === true && !(full.sold > without.sold)) return null;
@@ -142,7 +147,8 @@ function* evaluatePrepared({ state, recipe, batches = 1, basket, exit, ownedFor 
     const receipts = full.receipts - without.receipts;
     const residual = full.residualValue - without.residualValue;
     const ownUse = Math.min(Math.max(0, full.residual - without.residual), Math.max(0, Number(exit.ownUseUnits || 0)));
-    const ownBenefit = ownUse * Number(exit.ownUseUnitHours || 0);
+    const ownBenefit = ownUse * Number(exit.ownUseUnitHours || 0)
+        + reservedOutput * Number(context.reservedOutputUnitHours || 0);
     const base = { cashNow: basket.cashCost, ownInputOpportunityValue: basket.ownedValue,
         actualCashFees: basket.actualCashFees + exitFees,
         foregoneBenefitHours: mpHours + activeHours + basket.travelHours + exitHours

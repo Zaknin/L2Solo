@@ -29,6 +29,19 @@ function traderContext(state, deps = {}) {
     const trader = PriceDecision.traderOf(persona, { hourAdena: hour, moneyPrice: economy.moneyPrice, gapHorizonHours: economy.gapHorizonHours });
     // The bot's own trip to a town: none to the town it is shopping in.
     const here = state?.activity === 'shopping' ? state.currentRegion || null : null;
+    const demandFor = (id, enchant, town, askingPrice) => {
+        const demand = !enchant ? require('./ShotTradeDemand').forecast(id, town, timestamp) : null;
+        if (!demand || !(askingPrice > 0)) return demand;
+        const board = deps.board || economy.board;
+        const belief = PriceBelief.prior(id, { board, characterId: Number(state.characterId),
+            timestamp, understanding: trader.understanding, marketTrades: state.marketTrades || {} });
+        if (!belief) return null;
+        const market = PriceDecision.marketFor(id, { board, ownerId: state.characterId, town, timestamp,
+            tripCost: trip, npcOffers: deps.npcOffersFor?.(id) || [], demand });
+        return { ...demand, willingUnits: PriceDecision.willingUnitsAt(belief, trader,
+            { price: askingPrice, applicableUnits: demand.applicableUnits,
+                landed: askingPrice + market.ownTrip, npcLanded: market.npcLanded }) };
+    };
     let saleAmounts = null;
     const saleCount = line => {
         // Accepted custody keeps its advertised remainder until completion.
@@ -71,7 +84,7 @@ function traderContext(state, deps = {}) {
         board: deps.board || economy.board,
         npcOffersFor: deps.npcOffersFor || (() => []),
         purchaseNpcOffersFor: deps.purchaseNpcOffersFor || deps.npcOffersFor || (() => []),
-        demandFor: deps.demandFor || economy.demandFor || null,
+        demandFor: deps.demandFor || economy.demandFor || demandFor,
         ownStock: deps.ownStock || economy.ownStock || null,
         canSell: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && !invoke('GameServer/Bot/Economy/ItemDisposition').isStarterEquipment(line)
@@ -153,7 +166,7 @@ function marketFor(selfId, ctx, { town = null, units = 1, enchant = 0 } = {}) {
     return PriceDecision.marketFor(selfId, {
         board: ctx.board, ownerId: ctx.characterId, town, units, enchant, tripCost: ctx.tripCost,
         npcOffers: ctx.npcOffersFor(selfId), timestamp: ctx.timestamp,
-        demand: ctx.demandFor?.(Number(selfId), Number(enchant)) || null,
+        demand: ctx.demandFor?.(Number(selfId), Number(enchant), town) || null,
         ownUnits: stock?.units ?? units,
         // Different accepted own asks have no declared common exposure. A
         // failed physical preparation cannot become a smaller profitable lot.

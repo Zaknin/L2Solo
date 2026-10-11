@@ -16,6 +16,7 @@ const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Uptime = require('../Population/Uptime');
 const DataCache = invoke('GameServer/DataCache');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
+const ShotTradeDemand = require('./ShotTradeDemand');
 
 const HOUR_MS = 60 * 60 * 1000;
 const PRICES_KEPT = 21;
@@ -205,10 +206,12 @@ function deal(selfId, unitPrice, quantity, timestamp = Date.now(), sellerId = 0,
         item.buyers.shift();
     }
     const byTown = town ? countTown(key, String(town), timestamp) : null;
+    const shotDemand = ShotTradeDemand.deal(id, Number(quantity), town, timestamp);
     if (channel) {
         channel.changed('market', counterRow(key, counter));
         channel.changed('market', itemRow(id, item));
         if (byTown) channel.changed('market', townRow(key, byTown));
+        if (shotDemand) channel.changed('market', shotDemand);
     }
     notifyChanged({ key, deals: counter.deals });
 }
@@ -364,7 +367,8 @@ function publish(tableChannel) {
         allRows: () => [
             ...[...counters].map(([key, value]) => counterRow(key, value)),
             ...[...items].map(([id, value]) => itemRow(id, value)),
-            ...[...towns].map(([key, value]) => townRow(key, value))
+            ...[...towns].map(([key, value]) => townRow(key, value)),
+            ...ShotTradeDemand.rows()
         ]
     });
 }
@@ -374,6 +378,7 @@ function useTable(rows) {
     resets++;
     priceEvidenceCache = new WeakMap();
     mirror = rows;
+    ShotTradeDemand.useTable(rows);
 }
 
 // Where the spots for first prices come from in this thread.
@@ -395,6 +400,7 @@ function reset() {
     counters.clear();
     items.clear();
     towns.clear();
+    ShotTradeDemand.reset();
     mirror = null;
     notifyChanged({ reset: true });
 }

@@ -39,6 +39,7 @@ function recheck(state, selected) {
         || !Array.isArray(packet) || !(packet[0] > 0) || !(packet[1] > 0)) return null;
     const Source = require('../Population/ColdOccupationSources'); Source.initialise();
     const board = AfkTrade.boardIndex(), Fields = require('../../AfkTrade/BoardIndex');
+    const ownLines = board.ownerLines(Number(state.characterId));
     const ItemIndex = require('../../Item/ItemTemplateIndex');
     const context = { hourAdena: Number(packet[0]), moneyPrice: Number(packet[1]), fixedBatches: batches,
         ...Source.craftLabour(state) };
@@ -74,6 +75,19 @@ function recheck(state, selected) {
             exit = { type: 'afk', conditional: line.custodyPolicy === 1, price: Number(line.price), count: Number(line.count), town: line.town, offer: Fields.offerFields(line) };
         } else if (recordId === -1 && Number.isSafeInteger(lineId) && lineId > 0 && price > 0 && revision >= 0) {
             exit = { type: 'use', price: 0, count: 0, ownUseUnits: lineId, ownUseUnitHours: price, residualUnitValue: 0 };
+        } else if (recordId === -2 && Number.isSafeInteger(lineId) && price > 0 && revision > 0) {
+            exit = require('./ShotSalePolicy').exit(state, Number(recipe.productId), { board,
+                town: Policy.townForCode(lineId), trip, current: price, lot: Number(recipe.productCount),
+                reserve: Math.max(0, Number(selected.ownReserve || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
+                    - Number(state.acceptedIncoming?.[recipe.productId] || 0)),
+                npcOffers: Source.npcOffersFor(Number(recipe.productId)),
+                units: Number(recipe.productCount) + Number(ownStock.get(Number(recipe.productId))?.count || 0)
+                    + ownLines.filter(line => line.storeType === AfkTrade.SELL && line.custodyPolicy !== 1
+                        && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + Number(line.count), 0) });
+            // A forecast has no accepted price authority. Reprice it against
+            // current evidence and revalue the selected physical quantity;
+            // public bids above still require their exact line and revision.
+            if (!exit || exit.forecast.authority.revision < revision) return null;
         }
     } else {
         const rows = board.list(recipe.productId, AfkTrade.BUY);
@@ -88,11 +102,11 @@ function recheck(state, selected) {
         if (limit) return null;
         exit.cheaperUnits = cheaperUnits;
         exit.trip = trip(exit.town); exit.tripDetails = trip.details?.(exit.town);
+        exit = Price.prospectiveExit(state, exit, { board });
         const output = ownStock.get(Number(recipe.productId));
-        for (const line of board.ownerLines(Number(state.characterId))) {
-            if (line.storeType !== AfkTrade.SELL || line.selfId !== Number(recipe.productId)) continue;
+        for (const line of ownLines) {
+            if (line.storeType !== AfkTrade.SELL || line.custodyPolicy === 1 || line.selfId !== Number(recipe.productId)) continue;
             if (line.price !== exit.price) return null;
-            output.count += Number(line.count);
         }
     }
     // The worker's purchase rule (ColdOccupationSources.preparePurchase): the
@@ -128,7 +142,13 @@ function recheck(state, selected) {
         else if (sourceCode > 0 && (!scrap || Number(scrap.productId) !== gearId)) return null;
         else if (sourceCode === -3 && !hintedTown) return null;
     }
-    const options = { ownStock, knownRecipes: scrap ? [{ recipeId: scrap.recipeId }] : [],
+    const personal = Number(selected.ownReserve) > 0
+        ? invoke('GameServer/Bot/Economy/EconomyContext').basics(state).stock('shots') : null;
+    const stock = personal && Number(personal.itemId) === Number(recipe.productId)
+        ? { ...personal, target: Math.max(Number(personal.target || 0), Number(selected.ownReserve)) } : null;
+    if (stock) ownStock.get(Number(recipe.productId)).count = Math.max(0,
+        Number(state.inventory?.[recipe.productId]?.amount || 0) + Number(state.acceptedIncoming?.[recipe.productId] || 0) - stock.target);
+    const options = { ownStock, ownLines, stock, ownIncludesIncoming: true, knownRecipes: scrap ? [{ recipeId: scrap.recipeId }] : [],
         itemTemplate: id => ItemIndex.find(DataCache.items, Number(id)), gearRowsFor: () => gear ? [gear] : [],
         prepareTrip: function* (town) { yield 'trip'; return trip.details?.(town) || { known: false }; },
         preparePurchase: function* (owner, id, amount, query) { yield 'quote'; return purchase(id, amount, query); },
@@ -396,7 +416,8 @@ async function craft(state, candidate, index, now) {
     const saved = await persist({ ...state, stats: { ...(state.stats || {}),
         shotCraft: { recipeId: Number(candidate.recipe.recipeId), productId: Number(candidate.recipe.productId),
             amount: craftedUnits, expectedProfit: candidate.profit,
-            unitPrice: candidate.salePrice, at: now }
+            unitPrice: candidate.salePrice, town: candidate.exit.town,
+            saleKind: candidate.exit.type, at: now }
     } }, 'shot_craft_completed') || state;
     await LifeEvents.record(saved.characterId, 'shot_craft', `${saved.name} crafted ${craftedUnits} ${candidate.output.template?.name || 'shots'}`, {
         recipeId: Number(candidate.recipe.recipeId), productId: Number(candidate.recipe.productId),

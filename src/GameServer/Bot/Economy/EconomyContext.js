@@ -119,6 +119,8 @@ function inputKey(state, deps = {}) {
     return [state.level, stats.classId, state.craftLevel ?? stats.dwarvenCraftLevel, items, positive(state.adena), stats.decisionSeq, stats.activityLeaf, stats.visitEvery?.[0], stats.visitEvery?.[1],
         deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
         Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
+        Number(stats.shotRecipeDemand?.at) + 30 * 60 * 1000 > Number(deps.timestamp || Date.now())
+            ? Number(stats.shotRecipeDemand.itemId) : 0,
         Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
         Math.floor(positive(stats.frustration) * 10), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
         stats.generatedCold, stats.race, stats.marketSellRetryAfter,

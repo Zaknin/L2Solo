@@ -310,6 +310,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
             input.state = { ...input.state, stats: { ...input.state.stats, ...input.economy.statsPacket } };
+            input.stock = input.economy.stock('shots');
             yield 'candidate';
         }
         if (input.mode === 'occupation') {
@@ -365,7 +366,10 @@ const occupationPlanner = new ColdOccupationPlanner({
             const cursor = Shots.createShot(input.state, input.knownRecipes, prepared.context, options);
             while (!Shots.stepShot(cursor)) yield cursor.stage;
             const value = Shots.resultShot(cursor);
-            if (value && cursor.selectedValueHours > selectedValue) selected = value;
+            // Consumable production is the crafter's primary earning route.
+            // The same positive finite value gate still rejects unprofitable
+            // production; other crafts remain the fallback when shots cannot sell.
+            if (value && cursor.selectedValueHours > 0) selected = value;
         }
         const economyPlan = input.economy ? yield* invoke('GameServer/Bot/Population/ColdEconomyPlan').prepare(input.state, input.economy, {
             ...prepared.options, now: input.timestamp, board: input.board, persona: BotPersona.of(input.state),
@@ -550,10 +554,20 @@ MarketCounters.useSpots(() => planningSpots);
 tables.watch('market', {
     reset: () => { occupationPlanner.resetSources(); kernel?.lookSeen.clear(); },
     put: key => {
+        if (String(key).startsWith('h:')) {
+            const id = Number(String(key).slice(2));
+            for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
+            occupationPlanner.sourceChanged(id);
+        }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     },
     remove: key => {
+        if (String(key).startsWith('h:')) {
+            const id = Number(String(key).slice(2));
+            for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
+            occupationPlanner.sourceChanged(id);
+        }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     }

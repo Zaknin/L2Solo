@@ -114,7 +114,7 @@ function* chooseTown(state, items = [], options = {}) {
             if (!canOpenTown(town)) continue;
             let known = true, receipts = 0, residual = 0, input = 0;
             for (const row of groups.values()) {
-                const demand = ctx.demandFor(row.id, row.enchant, town);
+                const demand = ctx.demandFor(row.id, row.enchant, town, row.price);
                 const held = ctx.ownStock?.groups?.get(`${row.id}:${row.enchant}`);
                 if (!row.joint || held?.prices?.size > 1 || demand?.known === false || !demand?.origin
                     || demand.origin === 'public_bid' || !demand.authority || demand.town !== town

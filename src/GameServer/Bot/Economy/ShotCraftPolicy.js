@@ -37,7 +37,9 @@ function selectionFor(route) {
     const ownReserve = Number(personal?.itemId) === Number(route.recipe.productId) ? Math.max(0, Number(personal.target || 0)) : 0;
     const exit = offer ? [Number(offer.recordId), Number(offer.lineId), Number(route.exit.price),
         Number(offer.revision ?? offer.expectedRevision)] : route.exit?.type === 'use'
-        ? [-1, Number(route.exit.ownUseUnits), Number(route.exit.ownUseUnitHours), ownReserve] : null;
+        ? [-1, Number(route.exit.ownUseUnits), Number(route.exit.ownUseUnitHours), ownReserve]
+        : route.exit?.type === 'listing' ? [-2, townCode(route.exit.town), Number(route.exit.price),
+            Number(route.exit.forecast.authority.revision)] : null;
     const source = route.gear;
     let gear = null;
     if (source) {
@@ -170,6 +172,7 @@ function crystalRoute(state, rank, crystalId, required, index) {
 function nativeShotOptions(state, index, context) {
     const trip = context.trip || Profit.tripFor(state, context);
     const reserved = ItemDisposition.reservedEquipmentAmounts(state), ownStock = new Map();
+    const ownLines = index.board?.ownerLines(Number(state.characterId)) || [];
     const stock = context.stock?.('shots');
     for (const key in state.inventory || {}) {
         const row = state.inventory[key], id = Number(row.selfId || key);
@@ -222,13 +225,24 @@ function nativeShotOptions(state, index, context) {
                 index.offersFor(Number(recipe.productId), 1),
                 { ownerId: owner.characterId, price: Number(quote.price), enchant: Number(quote.enchant || 0), count: Number(quote.count) });
             yield 'quote';
-            exits.push({ type: 'afk', conditional: !!quote.conditional, price: Number(quote.price), count: Number(quote.count), cheaperUnits,
-                ...(limit ? { applicableUnits: NaN } : {}), town: quote.town, trip: trip(quote.town), tripDetails: trip.details?.(quote.town), offer: quote });
+            exits.push(require('./PriceDecision').prospectiveExit(state, {
+                type: 'afk', conditional: !!quote.conditional, price: Number(quote.price), count: Number(quote.count), cheaperUnits,
+                ...(limit ? { applicableUnits: NaN } : {}), town: quote.town, trip: trip(quote.town), tripDetails: trip.details?.(quote.town), offer: quote
+            }, { board: index.board, timestamp: index.at }));
             yield 'quote';
         }
+        exits.push(...yield* require('./ShotSalePolicy').exits(owner, recipe, { board: index.board, timestamp: index.at,
+            trip, npcOffersFor: id => require('../Population/ColdOccupationSources').npcOffersFor(id),
+            reserve: Number(stock?.itemId) === Number(recipe.productId)
+                ? Math.max(0, Number(stock.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
+                    - Number(state.acceptedIncoming?.[recipe.productId] || 0)) : 0,
+            existing: Number(ownStock.get(Number(recipe.productId))?.count || 0)
+                + ownLines.filter(line => line.storeType === 1 && line.custodyPolicy !== 1
+                    && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + line.count, 0) }));
         return exits;
     };
-    return { context: { ...context, trip }, options: { ownStock, stock, preparePurchase, prepareExits,
+    return { context: { ...context, trip }, options: { ownStock, ownLines, stock, preparePurchase, prepareExits,
+        ownIncludesIncoming: true,
         prepareTrip: function* (town) { yield 'trip'; return trip.details?.(town) || { known: true, hours: 0, fees: 0 }; },
         gearRowsFor: rank => index.gear.get(rank) || [], itemTemplate: id => index.itemTemplates.get(Number(id)),
         knownRecipes: (index.scrapCraftRoutes || []).map(row => ({ recipeId: row.recipe.recipeId })) } };
@@ -379,9 +393,17 @@ function* recipeShotSearch(state, recipe, context, options = {}) {
         if (missing && unitValue > 0) exits.push({ type: 'use', price: 0, count: 0, ownUseUnits: missing,
             ownUseUnitHours: unitValue, residualUnitValue: 0 });
     }
+    const ownedOutput = Number(ownFor(Number(recipe.productId))?.count || 0);
+    const postedOutput = (options.ownLines || []).filter(line => line.storeType === 1 && line.custodyPolicy !== 1
+        && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + Number(line.count), 0);
+    const outputReserve = Number(personal?.itemId) === Number(recipe.productId)
+        ? Math.max(0, Number(personal.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
+            - Number(state.acceptedIncoming?.[recipe.productId] || 0)) : 0;
     const selected = yield* Basket.searchQuantity({ state: { ...state,
         adena: PurchaseFunding.spendable(state, 0, { upperBound: true }) }, recipe, exits, ownedFor: ownFor,
-        planFor: () => null, context: { ...context, preparePurchase } });
+        planFor: () => null, context: { ...context, existingOutput: ownedOutput + postedOutput
+            + (options.ownIncludesIncoming ? 0 : Number(state.acceptedIncoming?.[recipe.productId] || 0)),
+            outputReserve, reservedOutputUnitHours: Number(personal?.benefitHours || 0) / Math.max(1, Number(personal?.target || 0)), preparePurchase } });
     if (!selected) return null;
     const cash = selected.basket.cashCost + selected.basket.actualCashFees;
     const r = cash > 0 ? selected.valueHours / cash : Infinity;
@@ -461,7 +483,8 @@ function unpackKnown(ids = []) {
 // the remaining 69 B; exact public revisions let native rechecks recover the
 // unchanged price/record from the same bounded indexed view.
 function packStep(step) {
-    const sparseExit = row => !row ? [] : row[0] > 0 || row[0] == null ? [Number(row[1]), Number(row[3])]
+    const sparseExit = row => !row ? [] : row[0] === -2 ? [-Number(row[1]), Number(row[2]), Number(row[3])]
+        : row[0] > 0 || row[0] == null ? [Number(row[1]), Number(row[3])]
         : row[0] === -1 ? [0, Number(row[1]), Number(row[2]), Number(row[3])]
             : [-Number(row[1]), Number(row[2])];
     const sparseGear = row => !row ? [] : Number(row[1]) === 0 ? [Number(row[0]), 0, Number(row[3]), Number(row[5])]
@@ -491,6 +514,7 @@ function unpackStep(step) {
             const exit = row[2], gear = row[3];
             if (exit.length === 2) result.exit = exit[0] > 0 ? [null, Number(exit[0]), null, Number(exit[1])]
                 : [0, -Number(exit[0]), Number(exit[1]), 0];
+            else if (exit.length === 3 && exit[0] < 0) result.exit = [-2, -Number(exit[0]), Number(exit[1]), Number(exit[2])];
             else if (exit.length === 4 && exit[0] === 0) result.exit = [-1, Number(exit[1]), Number(exit[2]), Number(exit[3])];
             if (Array.isArray(gear) && gear.length >= 2) result.gear = gear[1] === 0
                 ? [Number(gear[0]), 0, null, Number(gear[2]), null, Number(gear[3])]

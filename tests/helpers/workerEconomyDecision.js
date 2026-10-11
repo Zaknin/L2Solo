@@ -9,9 +9,9 @@ const Protocol = require('../../src/GameServer/Bot/Population/ColdSimulationProt
 // A test-only observer of the actual cold worker's native economy and capture.
 // No supplied activity/wish/material leaf and no main-thread full model.
 const observer = String.raw`
-module.exports.nativeRecipeEarning = async (id, timestamp) => {
+module.exports.nativeRecipeEarning = async (id, timestamp, refreshEconomy = false) => {
     const entry = kernel.states.get(Number(id));
-    const result = await occupationFor(entry.state, timestamp, entry.context, 'action');
+    const result = await occupationFor(entry.state, timestamp, entry.context, refreshEconomy ? 'refresh' : 'action');
     return { ...result, forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };
 module.exports.nativeTownVisit = async (id, timestamp) => {
@@ -38,6 +38,8 @@ module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = fals
     return { ...(nativeRoutes ? { watchList: economy.watchList } : {}),
         warehouseAssets: invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').inventory(state),
         decision: { ...decision }, materials: decision.materials, statsPacket: economy.statsPacket, reserveInputs,
+        tradeIntents: require('../Economy/TradeIntent').project(state, economy.network, economy.projection,
+            id => economy.worth(id) ?? economy.price(id), 40),
         queue: economy.network.queue.map(row => ({ key: row.key, materials: row.object?.materials || [], price: row.price, ratio: row.ratio, valueHours: row.valueHours, funded: row.funded, cumulativePrice: row.cumulativePrice, object: row.object })),
         forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };`;
@@ -50,12 +52,12 @@ loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.obse
 parentPort.on('message', async message => {
     if (!message.nativeEconomyDecision) return;
     try { parentPort.postMessage({ probeId: message.msgId,
-        value: await loaded.exports[message.townVisit ? 'nativeTownVisit' : message.recipeEarning ? 'nativeRecipeEarning' : 'nativeEconomyDecision'](message.characterId, message.timestamp, message.nativeRoutes) }); }
+        value: await loaded.exports[message.townVisit ? 'nativeTownVisit' : message.recipeEarning ? 'nativeRecipeEarning' : 'nativeEconomyDecision'](message.characterId, message.timestamp, message.recipeEarning ? message.refreshEconomy : message.nativeRoutes) }); }
     catch (error) { parentPort.postMessage({ probeId: message.msgId, error: error.stack }); }
 });`;
 
 module.exports = async function workerEconomyDecision(state, { context = {}, timestamp = Date.now(),
-    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, nativeRoutes = false, townVisit = false } = {}) {
+    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false } = {}) {
     const epoch = `native:economy-decision:${state.characterId}`;
     const messages = [];
     const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
@@ -94,7 +96,7 @@ module.exports = async function workerEconomyDecision(state, { context = {}, tim
         send('snapshot_page', { rows: [{ state, context }, ...extraStates], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'native-economy'), nativeEconomyDecision: true,
-            characterId: state.characterId, timestamp, recipeEarning, nativeRoutes, townVisit });
+            characterId: state.characterId, timestamp, recipeEarning, refreshEconomy, nativeRoutes, townVisit });
         const response = await wait(message => message.probeId === 'native-economy');
         if (response.error) throw Error(response.error);
         assert.deepEqual(response.value.forbiddenLoaded, [], 'native economy worker loads no World actor/network/database implementation');

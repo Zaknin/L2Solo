@@ -532,6 +532,8 @@ function buildProjection(state, ctx, deps) {
         yield* deps.producerRecipes || [];
     };
     const production = new Map(), seenProduction = new Set();
+    const investment = state.stats?.shotRecipeDemand;
+    const investmentId = Number(investment?.at) + 30 * 60 * 1000 > timestamp ? Number(investment.itemId) : 0;
     const serviceCraft = invoke('GameServer/Bot/Economy/CraftShopService');
     if (ctx.board && ctx.hourAdena > 0 && serviceCraft.isServiceCrafter(state)
         && !state.stats?.craftStationId && !/^bot_craft_\d+$/i.test(String(state.accountName || ''))) {
@@ -575,25 +577,38 @@ function buildProjection(state, ctx, deps) {
             const oldUnits = stock + Number(state.acceptedIncoming?.[id] || 0) + ownSales.reduce((sum, line) => sum + Number(line.count), 0);
             if (!Number.isSafeInteger(oldUnits) || oldUnits < 0) continue;
             const material = String(ItemTemplates.find(items, id)?.template?.kind || '').startsWith('Other.Material');
+            const shot = need('./ShotTradeDemand').isShot(id);
             let best = exitCeiling(ctx.board.list(id, 3), ownSales, 0);
             if (material) best = exitCeiling(deps.fixedProductionOffersFor?.(id) || [], ownSales, best);
+            if (shot && need('./ShotTradeDemand').forecast(id, null, timestamp)) best = Math.max(best, positive(price(id)));
             if (!(best > 0)) continue;
-            admitted.push({ recipe, count, id, ownSales, oldUnits, material, known: knownRecipes.has(Number(recipe.recipeId)),
+            const earningPreference = shot ? Number(recipe.recipeItemId) === investmentId ? 2 : 1 : 0;
+            admitted.push({ recipe, count, id, ownSales, oldUnits, material, shot, earningPreference, known: knownRecipes.has(Number(recipe.recipeId)),
                 ceiling: positive(count * Math.max(best, positive(ctx.buyback(id))) * Number(recipe.successRate ?? 100) / 100) });
         }
         if (admitted.length > PRODUCER_PRICED) {
-            admitted.sort((a, b) => b.ceiling - a.ceiling || Number(b.known) - Number(a.known) || a.recipe.recipeId - b.recipe.recipeId);
+            admitted.sort((a, b) => b.earningPreference - a.earningPreference
+                || b.ceiling - a.ceiling || Number(b.known) - Number(a.known) || a.recipe.recipeId - b.recipe.recipeId);
             admitted.length = PRODUCER_PRICED;
         }
-        for (const { recipe, count, id, ownSales, oldUnits, material } of admitted) {
+        for (const { recipe, count, id, ownSales, oldUnits, material, shot, earningPreference } of admitted) {
         const asks = ctx.board.list(id, SELL);
         const publicOffers = ctx.board.list(id, 3).slice(0, 5);
         const fixedOffers = material ? (deps.fixedProductionOffersFor?.(id) || []).slice(0, 5) : [];
-        for (const offer of [...publicOffers, ...fixedOffers]) {
+        const listingOffers = shot ? need('./WealthCraftPolicy').drain(need('./ShotSalePolicy').exits(state, recipe, {
+            board: ctx.board, timestamp, trip: ctx.trip, npcOffersFor: ctx.npcOffersFor, existing: oldUnits })) : [];
+        for (const offer of [...publicOffers, ...fixedOffers, ...listingOffers]) {
             if (!usableExit(offer, ownSales)) continue;
             const trip = ctx.trip?.details?.(offer.town);
             if (!trip?.known || ![trip.hours, trip.fees].every(value => Number.isFinite(value) && value >= 0)) continue;
-            const sale = Price.bidSale(state, offer, { board: ctx.board, persona: ctx.persona, timestamp, asks,
+            const sale = offer.type === 'listing' ? (() => {
+                const input = { applicableUnits: offer.applicableUnits, willingUnits: offer.willingUnits,
+                    cheaperUnits: offer.cheaperUnits, price: offer.price, residualUnitValue: offer.residualUnitValue };
+                const before = Price.saleOutcome({ ...input, units: oldUnits });
+                const after = Price.saleOutcome({ ...input, units: oldUnits + count });
+                return { status: before.known && after.known ? 'ready' : 'unknown', exit: offer,
+                    before, after, gross: after.receipts - before.receipts };
+            })() : Price.bidSale(state, offer, { board: ctx.board, persona: ctx.persona, timestamp, asks,
                 oldUnits, units: count, residualUnitValue: ctx.buyback(id), fixed: offer.type === 'static' });
             if (sale.status !== 'ready' || sale.exit.trial && !(sale.after.sold > sale.before.sold)) continue;
             const { gross } = sale;
@@ -606,11 +621,12 @@ function buildProjection(state, ctx, deps) {
             // the bounded DAG can expose a cheaper farm/component craft.
             const previous = production.get(id);
             if (!previous || proxy > previous.proxy || proxy === previous.proxy && recipe.recipeId < previous.recipe.recipeId)
-                production.set(id, { recipe, gross, proxy, inputPrice: inputPrice + learningPrice, town: offer.town, trip });
+                production.set(id, { recipe, gross, proxy, shot, earningPreference, inputPrice: inputPrice + learningPrice, town: offer.town, trip });
         }
         }
     }
-    const producerFinalists = [...production.values()].sort((a, b) => b.proxy - a.proxy || a.recipe.recipeId - b.recipe.recipeId).slice(0, 3);
+    const producerFinalists = [...production.values()].sort((a, b) => b.earningPreference - a.earningPreference
+        || b.proxy - a.proxy || a.recipe.recipeId - b.recipe.recipeId).slice(0, 3);
     const produced = new Set();
     for (const row of producerFinalists) {
         const id = Number(row.recipe.productId);
@@ -619,6 +635,11 @@ function buildProjection(state, ctx, deps) {
         if (!path) continue;
         produced.add(id);
         root({ key: `resale:${id}`, need: 'power', object: { itemId: id, amount: Number(row.recipe.productCount || 1), kind: 'resale' },
+            primaryEarning: row.earningPreference,
+            // Keep the crafter's finite income setup in the same graph as
+            // its gear. Otherwise its separate native action can travel to
+            // a recipe seller whose meeting has no surviving need certificate.
+            progressionPriority: row.shot && progression.required ? 3 : 0,
             progressionFunding: progression.required,
             valueHours: row.gross / ctx.hourAdena, price: row.inputPrice,
             paths: [{ ...path, trial: true, repeatable: false, quoted: true,
@@ -1011,6 +1032,7 @@ function buildProjection(state, ctx, deps) {
     const rank = key => { const node = byKey.get(key); return positive(node.valueHours)
         / Math.max(1 / 3600, positive(node.price) / Math.max(1, ctx.hunt.perHour) + positive(node.costHours)); };
     roots.sort((a, b) => positive(byKey.get(b).progressionPriority) - positive(byKey.get(a).progressionPriority)
+        || positive(byKey.get(b).primaryEarning) - positive(byKey.get(a).primaryEarning)
         || rank(b) - rank(a) || a.localeCompare(b));
     const cut = Network.admitRoots(roots, byKey, { rootLimit: WISH_ROOTS, nodeLimit: Network.MAX_NODES });
     admission.pending.push(...cut.pending);

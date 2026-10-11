@@ -137,7 +137,7 @@ class ShotMarketIndex {
             }
             for (const id of this.recipeIds) ownRecipeStock.set(id, positive(projectedOwnState.inventory?.[id]?.amount));
         }
-        return { at: now, itemTemplates: this.itemTemplates, npcPrice: this.npcPrice, npcSources: this.npcSources, gear: this.gear,
+        return { at: now, board, itemTemplates: this.itemTemplates, npcPrice: this.npcPrice, npcSources: this.npcSources, gear: this.gear,
             shotSupply: this.shotSupply, shotMinPrice: this.shotMinPrice, shotDemand: this.shotDemand,
             recipeStock: this.recipeStock, recipeHolders: this.recipeHolders, unlistedSupply, ownRecipeStock,
             demandKnown: false, lifetimeKnown: false, repeatable: false,
