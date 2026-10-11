@@ -305,6 +305,9 @@ function chooseAsk(belief, market, trader, rollKey, current = 0) {
 // gain by that chance alone. `current`: the ad's bid now; it stands while
 // it is still among the near-best ones, as an ask does.
 function chooseBid(belief, market, trader, { worth, cap }, rollKey, current = 0) {
+    // The buyer can buy the whole quantity now for this landed cost. A bid
+    // includes its own meeting trip, so it cannot pay more for the same goods.
+    cap = Math.min(cap, market.purchaseCap ?? Infinity);
     const width = PriceBelief.sigma(belief);
     const reference = Math.exp(belief.mu);
     const centre = belief.mu - (trader.assertiveness - 0.5) * width;
@@ -321,6 +324,12 @@ function chooseBid(belief, market, trader, { worth, cap }, rollKey, current = 0)
         const price = Math.max(1, Math.round(Math.exp(belief.mu + z * width)));
         if (price > cap || candidates.some((candidate) => candidate.price === price)) continue;
         const candidate = valueAt(price);
+        if (candidate) candidates.push(candidate);
+    }
+    // The exact outside price need not lie on the belief's coarse grid.
+    if (Number.isFinite(market.purchaseCap) && cap >= 1
+        && !candidates.some(candidate => candidate.price === Math.floor(cap))) {
+        const candidate = valueAt(Math.floor(cap));
         if (candidate) candidates.push(candidate);
     }
     if (!candidates.length) return null;

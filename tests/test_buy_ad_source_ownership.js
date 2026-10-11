@@ -11,6 +11,7 @@ const imports = {
     'GameServer/Bot/Economy/PurchaseFunding': { spendable: () => 50000, goalTerms: (goal, itemId) => ({ itemId }) },
     'GameServer/Bot/Economy/ItemDisposition': { isQuestItem: () => false },
     'GameServer/Bot/Economy/MarketListingPolicy': { traderContext: () => context },
+    'GameServer/Bot/Economy/MarketTownPolicy': { targetTownForItems: () => 'Giran' },
     'GameServer/Bot/Economy/MarketPricing': { bid: id => { priced.push(id); return { price: 3000, pricing: {} }; } }
 };
 new Function('invoke', 'require', 'module', fs.readFileSync(filename, 'utf8'))(
@@ -50,7 +51,7 @@ for (const deferred of [{ intentPending: true }, { routePending: true }, { watch
         'unknown preparation and independently projected alternatives never retire an ad');
 }
 const trip = () => 0; trip.details = () => ({ known: true, hours: 0, fees: 0 });
-const board = { first: () => null, itemRevision: () => 0 };
+const board = { first: () => null, list: () => [], itemRevision: () => 0 };
 const ctx = Pricing.traderContext(state, { economy, board, tripCost: trip,
     persona: { traits: {} }, findSpot: () => null, timestamp: 1800000000000 });
 assert.equal(Pricing.bid(736, ctx, { units: 9, worth: 10000, cap: 10000, rollKey: ['test'] }), null);

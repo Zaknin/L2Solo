@@ -298,7 +298,7 @@ class ColdSimulationCoordinator {
             snapshotDeferrals: 0,
             routeCapacityRejects: 0,
             afterCommitStepErrors: { partyCache: 0, raidCache: 0, raidSettlement: 0, economyDecision: 0,
-                journal: 0, board: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
+                journal: 0, board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
                 economyPlan: 0, clanEvents: 0, partyPlans: 0, buff: 0 }
         };
         this.economyPlanCount = 0;
@@ -2021,6 +2021,14 @@ class ColdSimulationCoordinator {
                 if (this.economyPlanTimes.length > 256) this.economyPlanTimes.shift();
             }
         }
+        // The native plan may have just started a trip or changed the money
+        // packet. Correct only this owner's standing bids against that final
+        // state, even when wish preparation or a board write was deferred.
+        if (sourceCurrent()) await this.step('boardLimits', id, async () => {
+            const checked = await invoke('GameServer/Bot/Economy/BotAfkMarketService')
+                .reviewPurchaseLimits(state, { beforeWrite });
+            state = checked.state || state;
+        });
         await this.step('clanEvents', id, () => invoke('GameServer/Clan/ClanReviewEvents').committedMember(entry.proposal[CLAN_BEFORE], state));
         await this.step('party', id, async () => {
             if (entry.proposal.partyResolution?.party) {

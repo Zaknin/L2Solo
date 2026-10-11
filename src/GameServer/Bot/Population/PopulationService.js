@@ -3745,7 +3745,13 @@ const PopulationService = {
 
             // Every ordinary town visit publishes its worker-selected stock
             // before native errands can finish the visit and leave town.
-            if (updatedState.activity === 'shopping' && workerPlan?.economyPlan) {
+            let correctedBids = false;
+            const checked = await BotAfkMarketService.reviewPurchaseLimits(updatedState);
+            updatedState = checked.state || updatedState;
+            correctedBids = checked.changed;
+            // A correction changed the owner's board revision. Its earlier
+            // optional plan waits for fresh preparation, rather than replaying it.
+            if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids) {
                 const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
                 const beforeWrite = () => {
                     if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
@@ -3880,6 +3886,13 @@ const PopulationService = {
                     outcome.state = improved.state || trained;
                 }
             }
+            // Native errands can start a new trip after publishing the bids.
+            // Finish this owner's resolve against that final route and money
+            // packet, including recovery and preparation-pending branches.
+            if (outcome?.ok && outcome.state) {
+                const checked = await BotAfkMarketService.reviewPurchaseLimits(outcome.state);
+                outcome.state = checked.state || outcome.state;
+            }
             return outcome;
         }).finally(() => {
             if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.release(state.characterId);
@@ -3899,7 +3912,8 @@ const PopulationService = {
                 .acquisitionTravel(state, acquisitionLeaf);
             if (acquisitionTravel) {
                 const saved = await LifeState.upsertState(acquisitionTravel, 'equipment_improvement_travel');
-                return { ok: !!saved, state: saved || state,
+                const checked = saved && await BotAfkMarketService.reviewPurchaseLimits(saved);
+                return { ok: !!saved, state: checked?.state || saved || state,
                     reason: saved ? 'equipment_improvement_travel' : 'state_write_rejected' };
             }
             // Worker-owned recovery finishes before the main economy command.
@@ -3917,7 +3931,8 @@ const PopulationService = {
                 if (!travel && latest !== current) return { ok: false, reason: 'state_changed', state: latest };
                 if (travel) {
                     const saved = await LifeState.upsertState(travel, 'goal_market_travel_before_combat');
-                    return { ok: !!saved, state: saved || state,
+                    const checked = saved && await BotAfkMarketService.reviewPurchaseLimits(saved);
+                    return { ok: !!saved, state: checked?.state || saved || state,
                         reason: saved ? 'goal_market_travel' : 'state_write_rejected' };
                 }
             }

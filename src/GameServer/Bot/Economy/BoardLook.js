@@ -2,6 +2,7 @@
 const Counters = require('./MarketCounters');
 const Rolls = require('../AI/TendencyRoll');
 const SpotEconomics = require('./SpotEconomics');
+const BidPurchaseAlternative = require('./BidPurchaseAlternative');
 const MAX_LINES = 8;
 const HOUR_MS = 3600000;
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -154,12 +155,17 @@ function inputsFor(state, line, ctx, target, at, previousAt, preparedDirty) {
     const worth = raw === null || raw === undefined ? NaN : Number(raw);
     target[at + 14] = Number.isFinite(worth) && worth >= 0 ? worth : NaN;
     target[at + 15] = Number.isFinite(target[at + 14])
-        ? Math.floor(Math.min(worth, line.price + Math.max(0, Number(ctx.adena) || 0) / Math.max(1, line.count))) : NaN;
+        ? Math.floor(Math.min(worth, BidPurchaseAlternative.cashCap(line, ctx))) : NaN;
     const stock = state.inventory?.[line.selfId] || {}, group = ctx.ownStock?.groups?.get(`${line.selfId}:${line.enchant || 0}`);
     target[at + 16] = Number(group?.units ?? stock.amount ?? 0);
     target[at + 17] = Math.max(Number(stock.reservedAmount || 0), Number(state.stats?.clanMaterialDemand?.[line.selfId] || 0));
     target[at + 18] = Math.max(Number(stock.protectedAmount || 0), Number(stock.starterMobLootAmount || 0));
-    target[at + 19] = ctx.ownStock?.known === false ? 0 : group ? Number(!(group.prices?.size > 1)) : NaN;
+    // BUY has no physical joint stock. Reuse that scalar slot for its outside
+    // option: route/fare changes must invalidate a bid even without a trade.
+    if (line.storeType === 3) {
+        target[at + 19] = BidPurchaseAlternative.forLine(line, ctx);
+        ctx.purchaseCaps?.set(line.lineId, target[at + 19]);
+    } else target[at + 19] = ctx.ownStock?.known === false ? 0 : group ? Number(!(group.prices?.size > 1)) : NaN;
     const source = invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId);
     const sell = line.storeType === 1 && ctx.canSell?.(line) === false;
     const buy = line.storeType === 3 && ctx.canBuy?.(line) === false;
@@ -187,6 +193,7 @@ function attention(state, line, ctx, observed) {
 }
 
 function review(state, lines, ctx, lookSeen) {
+    ctx = { ...ctx, purchaseCaps: new Map() };
     const cache = cacheOf(lookSeen);
     const visitNumber = Math.max(0, finite(state.stats?.townLook?.n));
     const visit = visitNumber > (cache.townVisit ?? visitNumber);
@@ -212,6 +219,11 @@ function review(state, lines, ctx, lookSeen) {
         const exists = at >= 0 && sameRange(cache, at, SCRATCH, 1, 5);
         if (at >= 0 && !exists) { cache.delete(Number(line.lineId)); at = -1; }
         let reason = visit && line.storeType === 3 ? 8 : 0;
+        // Remembering a proposed correction cannot acknowledge its delivery.
+        // A refused write must not hide the same violated purchase limit on
+        // the next own resolve, even when its sources have stayed unchanged.
+        if (line.storeType === 3 && (line.price > cache[SCRATCH + 19]
+            || line.price > cache[SCRATCH + 15])) reason |= 4;
         if (exists ? !sameRange(cache, at, SCRATCH, 5, 9)
             : cache[SCRATCH + 8] > 0) reason |= 1;
         if (exists && !sameRange(cache, at, SCRATCH, 9, 13)

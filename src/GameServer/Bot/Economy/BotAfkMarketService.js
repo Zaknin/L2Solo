@@ -47,10 +47,9 @@ function buyAds(characterId) {
 // A continuing item's ad keeps its town. A new wanted item opens by the
 // same weighted decision as a shop; karma closes every town but Floran.
 function buyAdTown(state, ads, wanted) {
-    const standing = ads.find((ad) => (ad.lines || []).some((line) =>
-        wanted.some((item) => Number(item.selfId) === Number(line.selfId))));
-    return standing && Karma.townFor(state.stats?.karma, standing.town) === standing.town
-        ? standing.town : MarketTownPolicy.targetTownForItems(state, wanted);
+    return MarketTownPolicy.buyAdTown(state, wanted, ads.flatMap(ad => (ad.lines || []).map(line => ({
+        ...line, recordId: ad.id, kind: ad.kind, storeType: ad.storeType, town: ad.town
+    }))));
 }
 
 function linesOf(records) {
@@ -294,16 +293,20 @@ function saleDecision(state, options = {}) {
 
 // The bot's buy ad lines carry the quote, its authored worth and cursors.
 function buyLines(state, goal, options = {}) {
-    return invoke('GameServer/Bot/Economy/BuyAdPolicy').linesFor(state, goal, options);
+    return invoke('GameServer/Bot/Economy/BuyAdPolicy').linesFor(state, goal, {
+        ...options, townFor: items => buyAdTown(state, buyAds(state.characterId), items)
+    });
 }
 
 // The bot's buy ads ask for the same items and counts: their bids are the
-// bot's own look's (MarketPricing.look), as a kept sell line's ask is.
+// bot's own look's (MarketPricing.look), as a kept sell line's ask is. A
+// prepared cheaper purchase is a limit even when quantity stays the same.
 function sameBuyOrder(stock, lines) {
     if (Number(stock?.storeType) !== AfkTrade.BUY || stock.lines.length !== lines.length) return false;
     return stock.lines.every(line => lines.some(wanted => Number(line.selfId) === Number(wanted.selfId)
         && Number(line.enchant || 0) === Number(wanted.enchant || 0)
-        && Number(line.count) === Number(wanted.count)));
+        && Number(line.count) === Number(wanted.count)
+        && (!Number.isFinite(wanted.purchaseCap) || Number(line.price) <= wanted.purchaseCap)));
 }
 
 // The shop offers the same items, counts and enchants; prices may differ.
@@ -377,16 +380,65 @@ async function withdrawSourceInvalidBuyAds(ownerId) {
 // (replacing another one); a buy goal it travels for takes the ads back
 // first (the trip pays from the wallet); without a buy goal the ads stand
 // while the needs still ask for their items (standingBuyNeed), else go.
+async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
+    const hour = Number(state.stats?.money?.[0]);
+    if (state.phase !== 'cold' || !ads.length || !Number.isFinite(hour) || hour < 0
+        || state.stats?.tradeMeeting) return false;
+    // A preparation is still a quote, checked by record revision at native
+    // acceptance. It cannot lock an overpriced remaining ad indefinitely.
+    // Native lifecycle transitions can have no worker plan. Compare only the
+    // owner's five bids against reserved stock/NPCs and known routes, using the
+    // existing money packet; this does not build or value a wish graph.
+    const Alternative = require('./BidPurchaseAlternative');
+    const trip = require('./EconomicTrip').reader(state, { hourAdena: hour });
+    const ctx = { state, characterId: Number(state.characterId), adena: Number(state.adena), hour,
+        board: AfkTrade.boardIndex(), travelDetails: trip.details,
+        npcOffersFor: selfId => MarketOpportunity.npcOffersAll(selfId) };
+    const reprices = [], withdrawals = [];
+    for (const ad of ads.slice(0, 5)) for (const line of ad.lines || []) {
+        if (!line.pricing || !(line.count > 0)) continue;
+        const owned = { ...line, town: ad.town, custodyPolicy: ad.custodyPolicy };
+        const ceiling = Math.min(Alternative.forLine(owned, ctx), Alternative.cashCap(owned, ctx));
+        if (!Number.isSafeInteger(ceiling) || ceiling < 0 || ceiling >= line.price) continue;
+        const move = { lineId: line.id, recordId: ad.id, selfId: line.selfId,
+            expectedRevision: ad.revision, previousPricing: { ...line.pricing } };
+        if (!ceiling) withdrawals.push(move);
+        else reprices.push({ ...move, price: ceiling, pricing: { ...line.pricing, price: ceiling } });
+    }
+    if (!reprices.length && !withdrawals.length) return false;
+    beforeWrite?.();
+    const result = await AfkTrade.repriceBotLines(state.characterId, reprices, { withdrawals,
+        coldAuthority: require('./EconomyCommit').authority(state),
+        canCommitReview: beforeWrite ? () => { beforeWrite(); return true; } : null });
+    if (result.skipped) throw Error('afk_trade_shop_changed');
+    return true;
+}
+
+async function reviewPurchaseLimits(state, options = {}) {
+    const ownerId = Number(state.characterId);
+    state = LifeState.snapshot(ownerId) || state;
+    try {
+        const changed = await reduceStandingBids(state, buyAds(ownerId), options);
+        return { state: LifeState.snapshot(ownerId) || state, changed };
+    } catch (error) {
+        if (staleMove(error) || error.message === 'economy_plan_need_changed')
+            return { state: LifeState.snapshot(ownerId) || state, changed: false, reason: error.message };
+        throw error;
+    }
+}
+
 async function reconcileBuyAds(state, goal, candidates) {
     const ownerId = Number(state.characterId);
-    const ads = buyAds(ownerId);
-    state = LifeState.snapshot(ownerId) || state;
+    const checked = await reviewPurchaseLimits(state);
+    if (checked.reason) return checked;
+    state = checked.state;
+    const ads = buyAds(ownerId), corrected = checked.changed;
     // Only the core's buy step opens or widens an ad (MVP-1): a goal without
     // a buy side never borrows the first watched item as a guessed target.
     const side = desiredSide(goal);
     const lines = linesOf(ads);
     if (side !== AfkTrade.BUY) {
-        if (!ads.length || (!side && standingBuyNeed(state, lines, candidates))) return { state, changed: false };
+        if (!ads.length || (!side && standingBuyNeed(state, lines, candidates))) return { state, changed: corrected };
         if (state.phase !== 'cold') return { state, changed: false };
         return withdrawBuyAds(ownerId, null, state);
     }
@@ -401,7 +453,7 @@ async function reconcileBuyAds(state, goal, candidates) {
     const town = buyAdTown(state, ads, wanted);
     if (!wanted.length) return ads.length ? withdrawBuyAds(ownerId, null, state) : { state, changed: false };
     if (ads[0]?.town === town && sameBuyOrder({ storeType: AfkTrade.BUY, lines }, wanted)) {
-        return { state, changed: false };
+        return { state, changed: corrected };
     }
     let shop;
     try {
@@ -416,6 +468,25 @@ async function reconcileBuyAds(state, goal, candidates) {
 // One buy ad per wanted item, in the town the item trades in. An ad stands
 // nowhere in the world: its place is the town's centre.
 async function publishBuyAds(ownerId, ads, lines, town, expectedAuthority = null) {
+    // Reconciliation deliberately retains a continuing line's price. Apply
+    // only violated prepared limits through the existing fenced price writer
+    // before quantity reconciliation, including a native town review.
+    const reprices = [];
+    for (const ad of ads) if (ad.town === town) for (const line of ad.lines || []) {
+        const wanted = lines.find(row => Number(row.selfId) === Number(line.selfId)
+            && Number(row.enchant || 0) === Number(line.enchant || 0));
+        if (!Number.isFinite(wanted?.purchaseCap) || !(line.price > wanted.purchaseCap) || !line.pricing) continue;
+        reprices.push({ recordId: ad.id, lineId: line.id, selfId: line.selfId, expectedRevision: ad.revision,
+            previousPricing: { ...line.pricing }, price: wanted.price, pricing: { ...line.pricing, price: wanted.price } });
+    }
+    if (reprices.length) {
+        const result = await AfkTrade.repriceBotLines(ownerId, reprices, {
+            ...(expectedAuthority?.phase === 'cold' ? { coldAuthority: expectedAuthority }
+                : expectedAuthority?.phase === 'hot' ? { hotAuthority: expectedAuthority } : {})
+        });
+        if (result.skipped) throw Error('afk_trade_shop_changed');
+        ads = buyAds(ownerId);
+    }
     const center = ListingService.townCenter(town) || { locX: 0, locY: 0, locZ: 0 };
     const result = await AfkTrade.replaceBotRecords(ownerId, 'buy_ad', lines.map((line) => ({
         storeType: AfkTrade.BUY,
@@ -675,6 +746,30 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
     const heldAtDecision = itemId => Number(card?.itemId) === Number(itemId) && Number.isFinite(Number(card.heldAtDecision))
         ? Number(card.heldAtDecision) : Decision.heldFor(preparedState, itemId);
     const filledSince = itemId => Decision.heldFor(LifeState.cachedState(ownerId) || state, itemId) > heldAtDecision(itemId);
+    if (plan.bidLimits?.length) await run(async () => {
+        if (!stillPrepared()) throw Error('economy_plan_need_changed');
+        if (!Array.isArray(plan.bidLimits) || plan.bidLimits.length > 5) throw Error('economy_plan_bid_cap');
+        const reprices = [], withdrawals = [], seen = new Set();
+        for (const row of plan.bidLimits) {
+            if (!Array.isArray(row) || row.length !== 6 || !row.every(Number.isSafeInteger)
+                || row.slice(0, 5).some(value => value < 1) || row[5] < 0 || row[5] >= row[4] || seen.has(row[0]))
+                throw Error('economy_plan_bid_cap');
+            seen.add(row[0]);
+            const [lineId, recordId, revision, count, price, ceiling] = row;
+            const ad = buyAds(ownerId).find(record => record.id === recordId);
+            const line = ad?.lines.find(candidate => candidate.id === lineId);
+            if (!line?.pricing || ad.revision !== revision || line.count !== count || line.price !== price)
+                throw Error('afk_trade_shop_changed');
+            const move = { lineId, recordId, selfId: line.selfId, expectedRevision: revision,
+                previousPricing: { ...line.pricing } };
+            if (!ceiling) withdrawals.push(move);
+            else reprices.push({ ...move, price: ceiling, pricing: { ...line.pricing, price: ceiling } });
+        }
+        const result = await AfkTrade.repriceBotLines(ownerId, reprices, { withdrawals,
+            ...(authority.phase === 'cold' ? { coldAuthority: authority } : { hotAuthority: authority }) });
+        if (result.skipped) throw Error('afk_trade_shop_changed');
+        return result;
+    });
     if (plan.take) {
         if (!stillPrepared()) return { state, tradeDeferred: true };
         const buying = plan.take[0] === AfkTrade.SELL;
@@ -788,6 +883,9 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         if (!stillPrepared()) throw Error('economy_plan_need_changed');
         if (filledAd()) return { state, buyPending: true };
         const ads = buyAds(ownerId), existing = linesOf(ads);
+        if (Object.hasOwn(plan, 'buyCaps') && (!Array.isArray(plan.buyCaps) || plan.buyCaps.length !== plan.buyAds.length
+            || plan.buyCaps.some((cap, at) => cap !== null && (!Number.isSafeInteger(cap) || cap < 1 || plan.buyAds[at][2] > cap))))
+            throw Error('economy_plan_bid_cap');
         const ctx = ListingPolicy.traderContext(state);
         let money = PurchaseFunding.budget(state, buyOrderEscrow(ownerId));
         // Planned bids come from BuyAdPolicy.linesFor: bidFor admitted each source.
@@ -805,7 +903,8 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
             }
             if (!intent) money -= count * price;
             const item = ItemTemplateIndex.find(DataCache.items, selfId);
-            return { selfId, count, price, intent, survivalCost, enchant: 0, name: item?.template?.name || `Item ${selfId}`,
+            return { selfId, count, price, intent, survivalCost, purchaseCap: plan.buyCaps?.[at] ?? Infinity,
+                enchant: 0, name: item?.template?.name || `Item ${selfId}`,
                 slot: Number(item?.etc?.slot || 0), stackable: item?.etc?.stackable === true,
                 pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
                     { price, storeType: AfkTrade.BUY, enchant: 0, count: Number(count) }) };
@@ -907,7 +1006,7 @@ async function applyReview(ownerId, review = {}, { coldAuthority = null, hotAuth
     return { changed: result.changed, updated: result.updated || 0 };
 }
 
-module.exports = { executePlan, applyReview, buyOrderEscrow, buyLines, reconcileBuyAds, withdrawSourceInvalidBuyAds, canTradeRemotely, desiredSide, listOnBoard, openBuyAd,
+module.exports = { executePlan, applyReview, buyOrderEscrow, buyLines, reconcileBuyAds, reviewPurchaseLimits, withdrawSourceInvalidBuyAds, canTradeRemotely, desiredSide, listOnBoard, openBuyAd,
     saleDecision,
     pruneResourceLots, reconcile, rememberInventory, viableSellLine, withdraw, withdrawBuyAds,
     _resetForTests() { reviewedInventory.clear(); pending.clear(); } };

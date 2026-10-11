@@ -282,6 +282,11 @@ const occupationPlanner = new ColdOccupationPlanner({
                 input.buyOrderEscrow || 0, { r: valueRate, survivalCost: own.survivalCost }) : Infinity;
             if (!Number.isSafeInteger(total) || total > spendable || own.route.fee > Number(input.state.adena || 0))
                 throw Error('trade_meeting_funding');
+            invoke('GameServer/Bot/Economy/BidPurchaseAlternative').assertMeetingPurchase(request.lines, side, request.town, {
+                state: input.state, characterId: ownId, adena: Number(input.state.adena || 0), hour: economy.hourAdena,
+                economy, board: input.board, travelDetails: economy.trip.details,
+                npcOffersFor: OccupationSources.npcOffersFor
+            }, Math.min(spendable, Number(input.state.adena || 0)));
             request.dependencies = [...occupationPlanner.slots.get(ownId).reads.keys()].map(id => {
                 const scope = MarketCounters.counterOf(id);
                 return [id, `g:${input.board.groupFingerprint(scope)}`, MarketCounters.revisionOf(scope).split('.').slice(1).join('.'),
@@ -680,6 +685,7 @@ function reviewMarket(state, timestamp, economy) {
     const ctx = MarketPricing.traderContext(state, {
         timestamp, board, economy, persona: BotPersona.of(state),
         npcOffersFor: (selfId) => planningNpcCatalog.offersFor(selfId),
+        purchaseNpcOffersFor: OccupationSources.npcOffersFor,
         findSpot: (spotId) => SpotIndex.spotById(planningSpots, spotId),
         canSell: invoke('GameServer/Bot/Economy/BoardLook').feasibilityPredicate(state, lines, economy?.workshop?.feasibility)
     });

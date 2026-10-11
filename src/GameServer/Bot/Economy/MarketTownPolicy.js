@@ -75,6 +75,19 @@ function targetTownForItems(state, items = [], options = {}) {
     return 'Giran';
 }
 
+// The prepared bid and its native publication use the same meeting town.
+// Retain the oldest matching buy ad, unless karma closes that town.
+function buyAdTown(state, items, owned = []) {
+    let standing = null;
+    for (const line of owned) {
+        if (line.kind !== 'buy_ad' || line.storeType !== 3 || !(line.count > 0)
+            || !items.some(item => Number(item.selfId) === Number(line.selfId))) continue;
+        if (!standing || line.recordId < standing.recordId) standing = line;
+    }
+    return standing && Karma.townFor(state.stats?.karma, standing.town) === standing.town
+        ? standing.town : targetTownForItems(state, items);
+}
+
 // One bounded town choice over the actual offered stock. Category counters
 // are not item demand. Unsupported forecasts retain the grade prior; they
 // cannot multiply the lot's asking value into imaginary receipts.
@@ -211,6 +224,7 @@ function targetTownForSale(state) {
 }
 
 module.exports = {
+    buyAdTown,
     GLUDIO_D_GRADE_SHARE_PERCENT,
     NO_GRADE_MARKETS,
     dGradeMarketFor,

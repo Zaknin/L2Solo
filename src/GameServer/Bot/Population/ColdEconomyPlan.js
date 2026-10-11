@@ -68,11 +68,26 @@ function* prepareNative(state, economy, options) {
         && !['dead', 'resting', 'traveling', 'crafting'].includes(state.activity)
         && !state.stats?.tradeMeeting && !state.incomingPending
         && !invoke('GameServer/Bot/Population/SurvivalFloor').forState(state, Number(options.now) || Date.now());
+    const own = options.board?.ownerLines(Number(state.characterId)) || [];
+    const ctx = Listing.traderContext(state, { ...options, economy });
+    const limits = [];
+    // A selected trade can keep succeeding or retrying for several visits.
+    // It must not bypass corrections of the owner's other standing bids.
+    if (!options.showcaseOnly) {
+        const Alternative = require('../Economy/BidPurchaseAlternative');
+        const bidCtx = economy.trip?.details ? { ...ctx, travelDetails: economy.trip.details } : ctx;
+        for (const line of own.filter(row => row.storeType === 3 && row.count > 0 && row.pricing).slice(0, 5)) {
+            const ceiling = Math.min(Alternative.forLine(line, bidCtx), Alternative.cashCap(line, bidCtx));
+            if (Number.isSafeInteger(ceiling) && ceiling >= 0 && ceiling < line.price)
+                limits.push([line.lineId, line.recordId, line.revision, line.count, line.price, ceiling]);
+            yield 'owned';
+        }
+    }
+    const bidLimits = limits.length ? { bidLimits: limits } : {};
     const purchase = canAct && !options.showcaseOnly ? Ready.purchase(state, economy, options.board) : null;
     // Taking a selected quote precedes pricing/publishing another offer.
     // Only native acceptance reserves it; a rejection retains the old board.
-    if (purchase) return { take: purchase, sell: [], withdraw: [], travel: null };
-    const own = options.board?.ownerLines(Number(state.characterId)) || [];
+    if (purchase) return { take: purchase, sell: [], withdraw: [], travel: null, ...bidLimits };
     const kept = new Map(own.filter(line => line.storeType === SELL)
         .map(line => [`${line.selfId}:${line.enchant || 0}`, line.price]));
     const inventory = { ...state.inventory };
@@ -90,9 +105,8 @@ function* prepareNative(state, economy, options) {
     const sale = Listing.evaluate(saleState, { ...options, economy, stockQuotes: true,
         slots: Listing.BOARD_SLOTS, kept, conditionalKept, stored: new Map() });
     const answer = canAct && !options.showcaseOnly && economy.network?.activity?.activity !== 'shopping' ? Ready.sale(sale.answers, state) : null;
-    if (answer) return { take: answer, sell: [], withdraw: [], travel: null };
+    if (answer) return { take: answer, sell: [], withdraw: [], travel: null, ...bidLimits };
     const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
-    const ctx = Listing.traderContext(state, { ...options, economy });
     const townOptions = { context: ctx, tripCost: options.tripCost || ctx.tripCost, timestamp: options.now,
         prepareTrip: options.prepareTrip, findSpot: options.findSpot, onDecision: options.onTownDecision };
     const listings = Listing.prioritizeListings(sale.listings);
@@ -125,7 +139,7 @@ function* prepareNative(state, economy, options) {
     const listed = new Set(sale.listings.map(row => `${row.selfId}:${row.enchant || 0}`));
     const withdraw = own.filter(line => line.storeType === SELL && !listed.has(`${line.selfId}:${line.enchant || 0}`))
         .slice(0, 8).map(line => line.lineId);
-    const plan = { sell, withdraw, ...(showcaseChanged ? { shop: shopTown } : {}), travel: null };
+    const plan = { sell, withdraw, ...(showcaseChanged ? { shop: shopTown } : {}), travel: null, ...bidLimits };
     let goal, money;
     if (!options.showcaseOnly) {
         const needs = require('../Goals/NeedsEvaluator').evaluate(state, { ...options, economy, errand: null, now: options.now, saleTown: shopTown });
@@ -134,19 +148,21 @@ function* prepareNative(state, economy, options) {
         const BuyAds = require('../Economy/BuyAdPolicy');
         money = BuyAds.goalMoney(state, goal, options.buyOrderEscrow || 0, economy);
         const lines = BuyAds.linesFor(buyState, goal, { ...options, economy,
+            townFor: items => Town.buyAdTown(state, items, own),
             watchList: economy.watchList || [], money });
         let batch;
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
         Object.assign(plan, batch, { travel: goal?.plan?.marketTown ? goal.plan.wishKey || null : null });
-        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; plan.d = 1; }
+        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = 1; }
         const shot = decideShot(state, economy, { ...options, ownLines: own });
         if (shot) plan.shot = shot;
     }
     // A complete buy batch is indivisible. Optional work is retained by the
     // existing dirty preparation owner; absent buyAds means not prepared.
-    if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds })) > MAX_PLAN_PAYLOAD_BYTES) {
-        delete plan.buyAds; delete plan.buyKit; plan.d = (plan.d || 0) | 1;
+    if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds, buyKit: plan.buyKit, buyCaps: plan.buyCaps,
+        bidLimits: plan.bidLimits })) > MAX_PLAN_PAYLOAD_BYTES) {
+        delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = (plan.d || 0) | 1;
     }
     while (Buffer.byteLength(JSON.stringify(plan)) > MAX_PLAN_PAYLOAD_BYTES) {
         if (plan.sell.length) {
@@ -179,12 +195,15 @@ function* prepareNative(state, economy, options) {
 }
 // The buy batch as the plan carries it: each bid's row and, when any is
 // set, the survival tranche each bid was decided with (BuyAdPolicy
-// survivalCost); executePlan and the native bid check reuse that value.
+// survivalCost) and executable purchase limits. Native publication reuses
+// these scalars, never another route or price calculation.
 function buyBatch(lines) {
     const rows = lines.slice(0, 3);
     const buyAds = rows.map(row => row.intent ? require('../Economy/TradeIntent').encode(row.intent) : [row.selfId, row.count, row.price]);
     const buyKit = rows.map(row => Number(row.survivalCost) || 0);
-    return buyKit.some(Boolean) ? { buyAds, buyKit } : { buyAds };
+    const buyCaps = rows.map(row => Number.isFinite(row.purchaseCap) ? Math.floor(row.purchaseCap) : null);
+    return { buyAds, ...(buyKit.some(Boolean) ? { buyKit } : {}),
+        ...(buyCaps.some(cap => cap !== null) ? { buyCaps } : {}) };
 }
 function decide(state, economy, options = {}) {
     const iterator = prepare(state, economy, options);
