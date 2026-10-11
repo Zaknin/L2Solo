@@ -673,6 +673,16 @@ function marketListingIntent(state, goal = null) {
     };
 }
 
+function openMarketListing(intent, goal) {
+    // An existing shop can sell remotely, but cannot unload the bag that
+    // brought its owner to town or defer the next cleanup trip.
+    if (!intent.cleanup && BotAfkMarketService.canTradeRemotely(intent.state, goal)) {
+        return BotAfkMarketService.reconcile(intent.state, goal)
+            .then((remote) => ({ state: remote.state, listed: false, remote: remote.changed }));
+    }
+    return ColdMarketListingService.open(intent.state, { forcedCleanup: intent.cleanup || null });
+}
+
 function assignPartyMembers(members = [], party) {
     const assigned = [];
     const failed = [];
@@ -3827,12 +3837,7 @@ const PopulationService = {
                     const listingIntent = marketListingIntent(purchasedState, goal);
                     const listingPromise = !marketLifecycle.closed && listingIntent.shouldOpen
                         && (!workerPlan?.economyPlan || listingIntent.cleanup)
-                        ? BotAfkMarketService.canTradeRemotely(listingIntent.state, goal)
-                            ? BotAfkMarketService.reconcile(listingIntent.state, goal)
-                                .then((remote) => ({ state: remote.state, listed: false, remote: remote.changed }))
-                            : ColdMarketListingService.open(listingIntent.state, {
-                                forcedCleanup: listingIntent.cleanup || null
-                            })
+                        ? openMarketListing(listingIntent, goal)
                         : Promise.resolve({ state: purchasedState, listed: false });
                     const marketStatePromise = listingPromise.then((listingResult) => {
                         const listingState = listingResult.state || purchasedState;
@@ -3997,6 +4002,7 @@ PopulationService.finishPartySpotTravel = finishPartySpotTravel;
 PopulationService.finishPartyTravelRecord = finishPartyTravelRecord;
 PopulationService.walkerAppearance = walkerAppearance;
 PopulationService.marketListingIntent = marketListingIntent;
+PopulationService.openMarketListing = openMarketListing;
 PopulationService.canResumeAffordableMarketPlan = canResumeAffordableMarketPlan;
 PopulationService.partyLimitsForObjective = partyLimitsForObjective;
 PopulationService.requiresClanEquipmentParty = requiresClanEquipmentParty;

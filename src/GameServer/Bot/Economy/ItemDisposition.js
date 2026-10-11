@@ -491,8 +491,8 @@ function saleCandidates(state, options = {}) {
     const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
     for (const [id, amount] of Object.entries(options.reserved || {}))
         reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
-    // The healing potions, the bot's own shots and the Scrolls of Escape a bot
-    // spends are kept up to their restock targets; a surplus is sold.
+    // Potions, crafter ammunition and travel scrolls use restock reserves.
+    // Ordinary bots retain their current ammunition independently of forecasts.
     const basics = options.keptAmounts ? null
         : invoke('GameServer/Bot/Economy/EconomyContext').basics(state, { saleReservations: reserved });
     const kept = options.keptAmounts || {
@@ -504,6 +504,9 @@ function saleCandidates(state, options = {}) {
     }
     const candidatesFor = (item) => {
         const selfId = Number(item?.selfId || 0);
+        // Prepared reserves can describe only the bag while this projection
+        // also includes warehouse or escrow stock. Personal shots stay owned.
+        if (invoke('GameServer/Inventory/ShotStock').isPersonalShot(state, selfId)) return [];
         const sellableAmount = saleFreeAmount(state, item, reserved);
         if (!selfId || selfId === 57 || BeginnerShots.isRestricted(selfId) || sellableAmount <= 0) return [];
 

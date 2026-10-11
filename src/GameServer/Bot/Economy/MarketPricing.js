@@ -75,6 +75,8 @@ function traderContext(state, deps = {}) {
         ownStock: deps.ownStock || economy.ownStock || null,
         canSell: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && !invoke('GameServer/Bot/Economy/ItemDisposition').isStarterEquipment(line)
+            // Also withdraw legacy backed stock, which is no longer in the bag.
+            && (state.stats?.tradeMeeting || !invoke('GameServer/Inventory/ShotStock').isPersonalShot(state, line.selfId))
             && deps.canSell?.(line) !== false,
         canBuy: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && (Number(line.enchant || 0) > 0 || !npcOwnsPurchase(economy, line.selfId)),

@@ -22,6 +22,12 @@ after = clone(); assert.equal(Plan.edges(before, after, { goalReviewAt: 150 }, 2
 assert.equal(Plan.edges({ ...before, activity: 'traveling' }, { ...after, activity: 'shopping' }, {}, 200, options), 8,
     'arrival runs the natural town review even when the bag and goal deadline did not change');
 assert.equal(Plan.edges(before, after, { goalReviewAt: 100 }, 200, options), 0, 'already-due goal is not a new edge');
+assert.equal(Plan.edges({ ...before, activity: 'resting' }, after, { goalReviewAt: 100 }, 200, options), 8,
+    'recovery reviews a goal whose deadline passed while economic actions were blocked');
+assert.equal(Plan.edges({ ...before, activity: 'resting' }, after, {}, 200, options), 8,
+    'recovery reviews stock and new loot even without a saved goal deadline');
+assert.equal(Plan.edges(after, clone(), { goalReviewAt: 100 }, 200, options), 0,
+    'the next ordinary hunting resolve does not repeat the recovery review');
 after.level++; assert.equal(Plan.edges(before, after, {}, 200, options), 16);
 after = clone(); after.activity = 'dead'; assert.equal(Plan.edges(before, after, {}, 200, options), 32);
 for (const blocked of [{ activity: 'resting' }, { activity: 'traveling' }, { party: { partyId: 'p' } }, { partyId: 'p' }]) {

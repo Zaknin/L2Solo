@@ -260,6 +260,10 @@ const occupationPlanner = new ColdOccupationPlanner({
                     survival.set(line.selfId, Math.round(economy.kitCost?.(line.selfId, line.price) || 0));
                     total += line.count * line.price;
                 } else {
+                    // An old own SELL quote must not bypass personal stock
+                    // protection when preparing a new meeting.
+                    if (invoke('GameServer/Inventory/ShotStock').isPersonalShot(input.state, line.selfId))
+                        throw Error('trade_meeting_protected_stock');
                     const item = input.state.inventory?.[line.selfId];
                     const free = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(input.state, item || {});
                     if (free < sold.get(line.selfId)) throw Error('trade_meeting_protected_stock');

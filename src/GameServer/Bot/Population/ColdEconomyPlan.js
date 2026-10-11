@@ -7,7 +7,7 @@ const MAX_SHOT_BYTES = 128;
 const { COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES } = require('./ColdEconomyDecision');
 const MAX_PLAN_PAYLOAD_BYTES = MAX_BYTES - COMMAND_HEADER_BYTES - 32 - 8;
 
-// Arrival is an existing town decision point; ordinary counts/XP/wallet
+// Arrival and recovery are natural decision points; ordinary counts/XP/wallet
 // changes do not schedule main-thread economic work.
 function edges(before, after, context = {}, timestamp = Date.now(), options = {}) {
     if (!after || ['resting', 'traveling'].includes(after.activity)
@@ -29,6 +29,9 @@ function edges(before, after, context = {}, timestamp = Date.now(), options = {}
     if (Number(context.goalReviewAt) > Number(before?.timing?.lastResolvedAt || 0)
         && Number(context.goalReviewAt) <= timestamp) bits |= 8;
     if (after.activity === 'shopping' && before?.activity === 'traveling') bits |= 8;
+    // Rest blocks actions, so stock/loot changes and a goal deadline may have
+    // passed without preparation. Reconsider them once the bot can act again.
+    if (after.activity === 'hunting' && before?.activity === 'resting') bits |= 8;
     if (Number(after.level) > Number(before?.level)) bits |= 16;
     if (after.activity === 'dead' && before?.activity !== 'dead') bits |= 32;
     return bits;

@@ -176,15 +176,25 @@ function usePolicy(state, prepared = {}) {
             ? affordableUse(Number(prepared.unitPrice ?? Infinity)) : 0 };
 }
 
-// The shots a bot keeps, by selfId: its own shot up to the amount a restock
-// buys it to (restockPlan); any more of it, and shots of another grade, are
-// spare. One rule for the sale set (ItemDisposition.saleCandidates) and the
-// shot crafters' surplus (ColdShotEconomyService), so nothing the restock has
-// just bought is sold back.
+// Personal ammunition stays usable when a hunt forecast or bag interval
+// shrinks. Only a native crafter can treat its current shot as production
+// surplus; an older grade becomes spare after changing the weapon.
+function isPersonalShot(state, selfId) {
+    if (!SHOT_IDS.includes(Number(selfId))) return false;
+    const plan = planForState(state);
+    return Number(selfId) === plan.selfId && plan.perAction > 0
+        && !invoke('GameServer/Bot/Economy/CraftEligibility').isServiceCrafter(state);
+}
+
 function keptAmounts(state, basics = null) {
     // The stock rule needs no wish network (L25).
     const stock = (basics || invoke('GameServer/Bot/Economy/EconomyContext').basics(state)).stock('shots');
-    return { [stock.itemId]: Math.max(0, stock.target - (stock.beginnerCurrent || 0)) };
+    const kept = { [stock.itemId]: Math.max(0, stock.target - (stock.beginnerCurrent || 0)) };
+    const plan = planForState(state);
+    if (isPersonalShot(state, plan.selfId)) {
+        kept[plan.selfId] = Math.max(kept[plan.selfId] || 0, Number(state.inventory?.[plan.selfId]?.amount) || 0);
+    }
+    return kept;
 }
 
 function planFor({ classId, rank = 'none' } = {}) {
@@ -620,6 +630,7 @@ module.exports = {
     actionShotKind,
     kindForSelfId,
     isCompatibleWithActor,
+    isPersonalShot,
     keptAmounts,
     usePolicy,
     enableAutoShot,

@@ -174,34 +174,8 @@ function privateOffers(selfId, town) {
     });
 }
 
-// Fixed bot supply is a shot-only game-data table, built once per rate and
-// indexed by item. Player-facing live stores keep their own trade path.
-let fixedRate = null;
-let fixedRows = null;
-let fixedByItem = new Map();
-const EMPTY_OFFERS = Object.freeze([]);
-function fixedStoreOffers(selfId = null) {
-    if (require('./ProductionPolicy').shotsDisabled()) return EMPTY_OFFERS;
-    const rate = invoke('GameServer/Bot/Economy/BotEconomyPricing').economyRate();
-    if (!fixedRows || fixedRate !== rate) {
-        fixedRate = rate;
-        fixedByItem = new Map();
-        const rows = [];
-        const Pricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
-        for (const id of SHOT_IDS) {
-            const offers = Pricing.sellersOf(id).filter((row) => Number(row.price) > 0).map((row) => {
-                const store = MerchantStoreConfigs[row.sourceName];
-                return Object.freeze({ ...row, sourceType: 'configured_store', sourceId: row.sourceName,
-                    sellerKind: 'fixed', selfId: id, itemName: itemName(id), count: Infinity, available: true,
-                    locX: Number(store?.locX || 0), locY: Number(store?.locY || 0), locZ: Number(store?.locZ || 0) });
-            });
-            fixedByItem.set(id, Object.freeze(offers));
-            rows.push(...offers);
-        }
-        fixedRows = Object.freeze(rows);
-    }
-    return selfId === null ? fixedRows : fixedByItem.get(Number(selfId)) || EMPTY_OFFERS;
-}
+// The worker and native purchase executor share the same shot-only table.
+const fixedStoreOffers = require('./FixedShotOffers').offers;
 
 function hotOffers(selfId, options = {}) {
     const town = options.town || null;

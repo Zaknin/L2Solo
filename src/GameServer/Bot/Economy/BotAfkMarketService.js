@@ -11,6 +11,7 @@ const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const LotPolicy = require('./MarketLotPolicy');
+const { isNativeSource } = require('./TradeIntent');
 const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 
 const BoardRules = require('../../AfkTrade/BoardRules');
@@ -63,10 +64,10 @@ function canTradeRemotely(state, goal) {
         || !side) return false;
     if (side === AfkTrade.BUY) {
         if (!invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(goal.target?.itemId)) return false;
-        // A purchase planned at an NPC shop is made there, never through a
-        // WTB (NeedsEvaluator keeps NG/D gear on that plan); in town the bot
+        // A purchase planned at an NPC or configured shot shop is made there,
+        // never through a WTB; in town the bot
         // still takes a cheaper listing if one is there.
-        if (goal.plan?.sourceType === 'npc') return false;
+        if (isNativeSource(goal.plan?.sourceType)) return false;
         // A selected executable player quote has a physical purchase owner.
         // Publishing a bid is not completion of that purchase.
         if (goal.plan?.sourceType === 'afk' && goal.plan?.priceSource === 'offer') return false;
@@ -80,7 +81,7 @@ function canTradeRemotely(state, goal) {
             buyerCharacterId: state.characterId,
             cost: invoke('GameServer/Bot/Economy/ColdMarketService').tripFrom(state)
         });
-        if (offer?.sourceType === 'npc' && goal.plan?.priceSource !== 'offer') return false;
+        if (isNativeSource(offer?.sourceType) && goal.plan?.priceSource !== 'offer') return false;
         if (reserved && existing.some((line) => Number(line.selfId) === Number(goal.target?.itemId))) return true;
         return !!BuyStoreService.bidFor(budgetState, goal, { money: require('./BuyAdPolicy').goalMoney(state, goal, reserved) });
     }
@@ -106,13 +107,13 @@ function standingBuyNeed(state, lines, candidates) {
     const needs = candidates || invoke('GameServer/Bot/Goals/NeedsEvaluator').evaluate(state);
     // ARCH-NOTE: NeedsEvaluator's native survival floor carries rest/revive
     // in plan.kind; it no longer sets the retired target.condition field.
-    // Recovery defers wish judgement, while an NPC plan still holds no WTB.
+    // Recovery defers wish judgement, while a native store plan holds no WTB.
     if (needs.length === 1 && (needs[0].target?.condition === 'alive_and_recovered'
         || needs[0].type === 'recover' && ['rest', 'revive'].includes(needs[0].plan?.kind))) {
-        return state.stats?.equipmentPlan?.market?.sourceType !== 'npc';
+        return !isNativeSource(state.stats?.equipmentPlan?.market?.sourceType);
     }
-    // A purchase planned at an NPC shop never holds a WTB, rest or not.
-    return needs.some((need) => desiredSide(need) === AfkTrade.BUY && need.plan?.sourceType !== 'npc'
+    // A purchase planned at a native store never holds a WTB, rest or not.
+    return needs.some((need) => desiredSide(need) === AfkTrade.BUY && !isNativeSource(need.plan?.sourceType)
         && items.has(Number(need.target?.itemId)));
 }
 

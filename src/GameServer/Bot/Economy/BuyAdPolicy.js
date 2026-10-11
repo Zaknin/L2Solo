@@ -1,7 +1,8 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const npcGoal = goal => goal?.plan?.sourceType === 'npc';
+const { isNativeSource } = require('./TradeIntent');
+const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
 function templateFor(selfId) {
     return ItemTemplateIndex.find(DataCache.items, selfId) || null;
@@ -21,9 +22,9 @@ function goalMoney(state, goal, escrow = 0, economy = null) {
 }
 
 function bidFor(state, goal, { money = Infinity, ...options } = {}) {
-    // The selected goal already has an NPC executor. It cannot re-enter the
+    // The selected goal already has a native store executor. It cannot re-enter the
     // public projection through a caller's legacy goal fallback.
-    if (npcGoal(goal)) return null;
+    if (nativeGoal(goal)) return null;
     const selfId = Number(goal?.target?.itemId || 0);
     const template = templateFor(selfId);
     const basePrice = Number(template?.template?.price || 0);
@@ -95,7 +96,7 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     const goals = (watchList || require('../Population/ColdEconomyDecision').economyFor(state).watchList).map(row => ({ type: 'buy_craft_material',
         target: { itemId: row.itemId, amount: row.amount },
         intent: row, plan: { estimatedCost: row.worth, purpose: row.kind, valueRate: row.valueRate } }));
-    if (!npcGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
+    if (!nativeGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
     const candidates = goals.slice(0, 3);
