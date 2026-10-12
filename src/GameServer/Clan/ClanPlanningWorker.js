@@ -120,7 +120,7 @@ parentPort.on('message', (message) => {
             fixedOffers = indexOffers(context.fixedOffers);
             npcOffers = indexOffers(context.npcOffers);
             invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot([
-                ...context.npcOffers, ...(context.npcPriceRows || [])
+                ...(context.npcOffers || []), ...(context.npcPriceRows || [])
             ]);
             planner ||= require('./ClanEquipmentPlanner');
             const forbidden = Object.keys(require.cache).some((filename) =>
