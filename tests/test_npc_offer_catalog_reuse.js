@@ -9,7 +9,9 @@ const shops = { rowForNpc: (npc, id) => { lookups++; return id === 178 ? { selfI
 const filename = require.resolve('../src/GameServer/Bot/Economy/TownNpcCatalog');
 require.cache[filename] = { id: filename, filename, loaded: true, exports: townCatalog };
 const policyFile = require.resolve('../src/GameServer/Bot/Economy/ProductionPolicy');
-require.cache[policyFile] = { id: policyFile, filename: policyFile, loaded: true, exports: { allowsNpcShot: () => allowed } };
+// Preserve the native shot catalogue contract; only the admission gate is controlled.
+require.cache[policyFile] = { id: policyFile, filename: policyFile, loaded: true,
+    exports: { ...require(policyFile), allowsNpcShot: () => allowed } };
 global.invoke = name => ({ 'GameServer/DataCache': data, 'GameServer/World/World': {},
     'GameServer/World/Generics/NpcShopBuyLists': shops, 'GameServer/Bot/MerchantStoreConfigs': {},
     'GameServer/AfkTrade/AfkTradeService': {}, 'GameServer/ProgressionRates': { profile: () => ({ multiplier: rate }) } })[name] || {};

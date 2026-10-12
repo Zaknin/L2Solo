@@ -91,12 +91,17 @@ const provider = load('WishProviders.js' , name => {
     // catalogue) and the shared equipment rule (82e5323c, d300b1b7).
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true,
         allowsRecipe: recipe => !!recipe };
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+    if (name === '../AI/PersonalGearProgression') return {
+        assess: () => ({ required: false, gaps: new Map() }),
+        // This fixture has no C-kit gap, so acquisition uses the planner's current grade.
+        acquisitionRankFor: state => adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].gradeForLevel(state.level),
+        preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name === './PriceDecision') return producerPrice;
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
+    if (name === './ShotTradeDemand') return require('../src/GameServer/Bot/Economy/ShotTradeDemand');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     // Synthetic origins are admitted; the solver is the network under test.
