@@ -102,6 +102,7 @@ async function clanProjection(clanId = null) {
                members.id AS characterId, members.name AS memberName,
                members.title AS memberTitle, members.classId, members.level AS memberLevel, members.clanId AS memberClanId,
                life.accountName, life.activity, life.phase, life.adena, life.currentRegion, life.spotId,
+               life.level AS lifeLevel,
                COALESCE(life.locX, members.locX) AS locX, COALESCE(life.locY, members.locY) AS locY,
                COALESCE(life.locZ, members.locZ) AS locZ,
                life.partyId,
@@ -126,6 +127,7 @@ async function clanProjection(clanId = null) {
                 level: number(row.level),
                 leaderId: number(row.leaderId),
                 state: parseJson(row.stateJson, {}),
+                physicalMemberCount: 0,
                 members: []
             });
         }
@@ -136,7 +138,7 @@ async function clanProjection(clanId = null) {
             title: String(row.memberTitle || ''),
             classId: number(row.classId, -1),
             loc: { locX: number(row.locX), locY: number(row.locY), locZ: number(row.locZ) },
-            level: number(row.memberLevel),
+            level: number(row.lifeLevel, number(row.memberLevel)),
             clanId: number(row.memberClanId),
             accountName: String(row.accountName || ''),
             activity: String(row.activity || ''),
@@ -151,6 +153,7 @@ async function clanProjection(clanId = null) {
             stats: memberJson(number(row.characterId), 'stats', row.statsJson, now),
             persona: { primaryDrive: row.primaryDrive, archetype: row.archetype, traits: parseJson(row.traitsJson, {}) }
         };
+        byId.get(clanId).physicalMemberCount++;
         if (!ClanSimulationPolicy.isStaticService(member)) byId.get(clanId).members.push(member);
     });
     const projection = [...byId.values()];
@@ -290,7 +293,10 @@ async function resolveClan(clan, options = {}) {
     ReviewEvents.track(clan);
     try {
         const result = await resolveClanInternal(clan, options);
-        if (result.goal && clan) ReviewEvents.track({ ...clan, state: { ...clan.state, goal: result.goal } });
+        if (result.goal && clan) ReviewEvents.track({ ...clan, state: { ...clan.state,
+            [result.ownerSection || 'goal']: result.goal,
+            recruitmentDemand: result.recruitmentDemand === undefined ? clan.state?.recruitmentDemand : result.recruitmentDemand,
+            recruitmentScan: result.recruitmentScan === undefined ? clan.state?.recruitmentScan : result.recruitmentScan } });
         return result;
     }
     catch (error) {
@@ -335,7 +341,7 @@ async function resolveClanInternal(clan, options = {}) {
         }
     }
     if (number(clan.level) >= 3) {
-        const previous = automaticPrevious?.type === 'equipment' ? automaticPrevious : clan.state?.productionGoal || automaticPrevious;
+        const previous = automaticPrevious?.type === 'equipment' ? automaticPrevious : clan.state?.productionGoal || null;
         const candidateSnapshot = await ClanGoalCandidateService.snapshotFor(clan, previous, options);
         await ClanEquipmentService.validatePlanning(clan, candidateSnapshot.planning);
         const brain = candidateSnapshot.decisionNeeded
@@ -363,6 +369,14 @@ async function resolveClanInternal(clan, options = {}) {
             candidateIds: candidateSnapshot.candidates.map(candidate => candidate.id)
         });
         if (equipment.skipped && !equipment.completed) {
+            if (equipment.recruitmentScan) {
+                const section = equipment.ownerSection || 'goal';
+                const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id,
+                    goal: clan.state?.[section] || null, ownerSection: section,
+                    expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: null,
+                    recruitmentScan: equipment.recruitmentScan, eventType: null });
+                if (!saved.ok) return saved;
+            }
             return {
                 ok: true,
                 clanId: clan.id,
@@ -370,6 +384,11 @@ async function resolveClanInternal(clan, options = {}) {
                 changed: false,
                 skipped: true,
                 reason: equipment.reason,
+                retryable: !!equipment.continuation,
+                ...(equipment.continuation ? { reason: 'clan_planning_deferred' } : {}),
+                ownerSection: equipment.ownerSection,
+                recruitmentScan: equipment.recruitmentScan,
+                recruitmentDemand: equipment.recruitmentDemand,
                 goal: previous,
                 context: { members: clan.members || [] }
             };
@@ -379,11 +398,13 @@ async function resolveClanInternal(clan, options = {}) {
         }
         const goal = equipment.goal;
         const economy = candidateSnapshot.planning.economy;
-        if (economy) goal.economy = { focus: economy.network.focus, dormant: economy.network.dormant,
+        if (economy && !equipment.persistedGoal) goal.economy = { focus: economy.network.focus, dormant: economy.network.dormant,
             moneyPrice: economy.moneyPrice, incomePerHour: economy.incomePerHour };
         const changed = JSON.stringify(goalComparable(previous)) !== JSON.stringify(goalComparable(goal));
-        let persisted = { ok: true, goal: previous };
-        if (changed) {
+        let persisted = { ok: true, goal: equipment.persistedGoal ? goal : previous };
+        const metadataChanged = equipment.recruitmentScan !== undefined && JSON.stringify(clan.state?.recruitmentScan || null)
+            !== JSON.stringify(equipment.recruitmentScan) || !!clan.state?.recruitmentDemand;
+        if (!equipment.persistedGoal && (changed || metadataChanged)) {
             const eventType = !previous ? 'equipment_goal_created'
                 : equipment.completed ? 'equipment_goal_completed'
                 : equipment.previousFulfilled ? 'equipment_goal_advanced'
@@ -391,6 +412,9 @@ async function resolveClanInternal(clan, options = {}) {
             persisted = await Database.updateAutonomousClanGoal({
                 clanId: clan.id,
                 goal,
+                ownerSection: equipment.ownerSection || 'goal',
+                recruitmentDemand: equipment.recruitmentDemand,
+                recruitmentScan: equipment.recruitmentScan,
                 expectedUpdatedAt: number(equipment.expectedUpdatedAt ?? clan.state?.updatedAt) || null,
                 eventType,
                 reasonCode: goal.plan?.reasonCode || ''
@@ -425,6 +449,10 @@ async function resolveClanInternal(clan, options = {}) {
             level: number(clan.level),
             changed,
             goal: persisted.goal || goal,
+            ownerSection: equipment.ownerSection || 'goal',
+            recruitmentDemand: equipment.recruitmentDemand,
+            recruitmentScan: equipment.recruitmentScan,
+            retryable: equipment.retryable || equipment.continuation || false,
             context: {
                 members: clan.members || [],
                 plans: equipment.plans,
@@ -436,7 +464,7 @@ async function resolveClanInternal(clan, options = {}) {
                 decisionReason: brain?.reasonCode || candidateSnapshot.decisionReason
             },
             assignment: equipment.assignment,
-            reason: persisted.code || null
+            reason: persisted.code || (equipment.retryable || equipment.continuation ? 'clan_planning_deferred' : null)
         };
     }
     const context = await contextFor(clan);

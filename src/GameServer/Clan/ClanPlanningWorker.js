@@ -16,6 +16,7 @@ const catalogs = { items: [], npcs: [], npcRewards: [], npcSpawns: [], newbieIte
 Object.assign(invoke('GameServer/DataCache'), catalogs);
 let context = {};
 let planner;
+let raidJob = null;
 let fixedOffers = new Map();
 let npcOffers = new Map();
 // Tables from the main thread's ColdTableChannel; pages are not answered.
@@ -93,6 +94,22 @@ parentPort.on('message', (message) => {
             require('../Items/ItemAcquisitionCatalog').reset();
         } else if (message.type === 'spot_catalog') {
             spotCatalog.apply(message.page);
+        } else if (message.type === 'end_planning_job') {
+            if (raidJob?.key === message.jobKey) raidJob = null;
+        } else if (message.type === 'prepare_raids') {
+            const payload = spotCatalog.restore(message.payload);
+            if (payload.context) {
+                context = payload.context;
+                global.options.default.General = context.general;
+                global.options.default.Progression = context.progression;
+                if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+                else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
+            }
+            if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw Error('clan planning deadline');
+            if (raidJob?.key !== payload.jobKey) raidJob = { key: payload.jobKey, readiness: new Map() };
+            parentPort.postMessage({ id: message.id, result: require('./ClanRosterDemand').prepare(payload.clan,
+                payload.spots, payload.prospects, payload.previousGoal, raidJob.readiness) });
+            return;
         } else if (message.type === 'plan') {
             const payload = spotCatalog.restore(message.payload);
             context = payload.context;

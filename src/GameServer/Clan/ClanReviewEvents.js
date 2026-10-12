@@ -60,14 +60,26 @@ function changed(clanId, cause = 'clan_input') {
     return true;
 }
 
-function track(clan) {
+function syncRecruitment(clan) {
     const id = Number(clan?.id);
     if (!(id > 0)) return;
     const demand = clan.state?.recruitmentDemand;
     const owner = clan.state?.[demand?.ownerSection || 'goal'];
     if (clan.state?.mode === 'autonomous' && demand && owner && owner.status !== 'completed'
         && owner.controlledBy !== 'player' && (!demand.goalKey || demand.goalKey === owner.goalKey)) watchRecruitment(id, demand);
-    else unwatchRecruitment(id);
+    else {
+        const scan = clan.state?.recruitmentScan;
+        const scanOwner = clan.state?.[scan?.ownerSection || 'goal'];
+        if (clan.state?.mode === 'autonomous' && scan && (scan.goalKey || null) === (scanOwner?.goalKey || null)
+            && scanOwner?.status !== 'completed' && scanOwner?.controlledBy !== 'player') watchRecruitment(id, scan);
+        else unwatchRecruitment(id);
+    }
+}
+
+function track(clan) {
+    const id = Number(clan?.id);
+    if (!(id > 0)) return;
+    syncRecruitment(clan);
     forgetLeader(id);
     const leaderId = Number(clan.leaderId);
     if (cashLevelGoal(clan) && Number.isSafeInteger(leaderId) && leaderId > 0) {
@@ -237,6 +249,12 @@ function attach(connection) {
         WHEN OLD.status IS NOT NEW.status BEGIN ${byId('NEW.characterId')} END;
         CREATE TEMP TRIGGER clan_candidate_reserve_removed AFTER DELETE ON main.clan_operation_members
         WHEN OLD.status = 'active' BEGIN ${byId('OLD.characterId')} END;
+        CREATE TEMP TRIGGER clan_candidate_meeting_added AFTER INSERT ON main.board_trade_participants
+        WHEN NEW.meetingId IS NOT NULL BEGIN ${byId('NEW.characterId')} END;
+        CREATE TEMP TRIGGER clan_candidate_meeting_updated AFTER UPDATE OF meetingId ON main.board_trade_participants
+        WHEN OLD.meetingId IS NOT NEW.meetingId BEGIN ${byId('NEW.characterId')} END;
+        CREATE TEMP TRIGGER clan_candidate_meeting_removed AFTER DELETE ON main.board_trade_participants
+        WHEN OLD.meetingId IS NOT NULL BEGIN ${byId('OLD.characterId')} END;
         CREATE TEMP TRIGGER clan_candidate_saved_skills AFTER UPDATE OF statsJson ON main.bot_life_state
         WHEN OLD.statsJson IS NOT NEW.statsJson AND EXISTS (
             SELECT 1 FROM bot_party_candidate_projection p WHERE p.characterId=NEW.characterId
@@ -283,7 +301,7 @@ function stop() {
 }
 
 module.exports = { changed, track, untrack, untrackLeader: clanId => forgetLeader(Number(clanId)),
-    watchRecruitment, unwatchRecruitment, recruitmentCount: () => recruitment.size,
+    watchRecruitment, unwatchRecruitment, syncRecruitment, recruitmentCount: () => recruitment.size,
     beginCandidateCommit, commitCandidateInputs, discardCandidateCommit, candidateCheckpoint, restoreCandidateCheckpoint, attach,
     cashLevelGoal, leaderSpChanged, tracks, trackedItems, committedMember, start, stop, drain, pending: () => dirty.size,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };

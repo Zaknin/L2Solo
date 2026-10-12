@@ -207,12 +207,14 @@ function selectRecruitment(founder, candidates, required) {
     return selected;
 }
 
-async function joinExisting(candidate, clan, suitability) {
+async function joinExisting(candidate, clan, suitability, demand = null) {
     const result = await Database.joinAutonomousClan({
         clanId: clan.id,
         characterId: candidate.characterId,
         memberLimit: ClanRules.memberLimit(clan.level),
-        maxBotMemberShare: Config.maxBotMemberShare
+        maxBotMemberShare: Config.maxBotMemberShare,
+        expectedDemandGeneration: demand?.generation || null,
+        candidateFingerprint: demand ? require('./ClanRosterDemand').memberFingerprint(candidate) : null
     });
     if (!result.ok) {
         DiagnosticConfig.developerDiagnostics && (metrics.joinBlocked += 1);
@@ -226,15 +228,43 @@ async function joinExisting(candidate, clan, suitability) {
     return { ...result, suitability };
 }
 
+async function recruitForDemand(clan, demand) {
+    const Life = invoke('GameServer/Bot/Population/BotLifeState');
+    const candidates = await Life.statesByIds(demand.newMemberIds, { ownerId: 'legacy_main', unassigned: true });
+    const rows = candidates.length ? await Database.execute([`SELECT characterId,traitsJson,primaryDrive,archetype FROM bot_personas
+        WHERE characterId IN (${candidates.map(() => '?').join(',')})`, candidates.map(member => member.characterId)]) : [];
+    const personas = new Map(rows.map(row => [Number(row.characterId), { traits: parseJson(row.traitsJson), primaryDrive: row.primaryDrive, archetype: row.archetype }]));
+    const refused = [];
+    for (const candidate of candidates) {
+        candidate.persona = personas.get(candidate.characterId) || BotPersona.of(candidate.characterId);
+        candidate.partyHistory = candidate.stats?.partyHistory || {};
+        candidate.socialRelations = socialRelations(candidate.characterId);
+        const context = require('./ClanRosterDemand').intakeContext(candidate, clan);
+        const suitability = Policy.clanSuitability(candidate, clan, { threshold: Config.existingClanSuitabilityThreshold, ...context });
+        if (!suitability.ok) { refused.push(candidate.characterId); continue; }
+        const result = await joinExisting(candidate, clan, suitability, demand);
+        if (result.ok) return { accepted: candidate.characterId, refused, result };
+        refused.push(candidate.characterId);
+    }
+    return { accepted: null, refused };
+}
+
 async function resolveCandidate(candidate, options = {}) {
     const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     try {
         const clans = options.clans || await autonomousClanProjection();
         const existing = Policy.selectExistingClan(candidate, clans, {
-            threshold: Config.existingClanSuitabilityThreshold
+            threshold: Config.existingClanSuitabilityThreshold,
+            contextForClan: require('./ClanRosterDemand').intakeContext
         });
         if (existing) {
             recordReason(Contracts.REASON_CODES.FOUNDER_EXISTING_CLAN);
+            if (existing.clan.state?.recruitmentDemand) {
+                const [current] = await invoke('GameServer/Bot/Population/BotLifeState').statesByIds([candidate.characterId],
+                    { ownerId: 'legacy_main', unassigned: true });
+                if (!current) return { ok: false, code: 'recruitment_candidate_changed' };
+                return joinExisting({ ...candidate, ...current }, existing.clan, existing.suitability, existing.clan.state.recruitmentDemand);
+            }
             return joinExisting(candidate, existing.clan, existing.suitability);
         }
 
@@ -285,6 +315,7 @@ async function resolveCandidate(candidate, options = {}) {
 }
 
 const ClanSimulationService = {
+    recruitForDemand,
     config: Config,
     policy: Policy,
 

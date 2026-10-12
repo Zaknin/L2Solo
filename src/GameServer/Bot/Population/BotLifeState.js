@@ -3137,6 +3137,7 @@ const BotLifeState = {
             ${classClause} AND candidate.level BETWEEN ? AND ? ${cursorClause}
             AND NOT EXISTS (SELECT 1 FROM clan_operation_members reserved
                 WHERE reserved.characterId = candidate.characterId AND reserved.status = 'active')
+            ${options.excludeTradeMeetings ? 'AND NOT EXISTS (SELECT 1 FROM board_trade_participants t WHERE t.characterId=candidate.characterId AND t.meetingId IS NOT NULL)' : ''}
             ORDER BY candidate.classId,candidate.level,candidate.characterId LIMIT ${limit}`,
             params, { read: true }
         ], 'bot-life:clan-recruitment-candidates').then(rows => rows.map(row => {

@@ -197,26 +197,27 @@ async function scheduleProduction(clan) {
         actionKey: `clan:${clan.id}:production:${randomUUID()}` });
 }
 
-async function resolveProduction(clan) {
+async function resolveProduction(clan, options = {}) {
     if (clan.state?.goal?.controlledBy === 'player' && clan.state.goal.status !== 'completed') {
         return { ok: true, skipped: true, reason: 'player_order_active' };
     }
     if (number(clan.level) >= 3) return { ok: true, skipped: true };
     const service = invoke('GameServer/Clan/ClanEquipmentService');
     let result;
-    try { result = await service.resolveClan(clan, clan.state?.productionGoal || null); }
+    try { result = await service.resolveClan(clan, clan.state?.productionGoal || null, { ...options, ownerSection: 'productionGoal' }); }
     catch (error) {
         if (error.code !== 'clan_planning_deferred') throw error;
         return { ok: true, retryable: true, reason: 'clan_planning_deferred' };
     }
-    if (!result.ok || !result.goal) return result;
-    const update = await Database.execute([`UPDATE clan_simulation_clans SET
-        stateJson = json_set(stateJson, '$.productionGoal', json(?)), updatedAt = ?
-        WHERE clanId = ? AND json_extract(stateJson, '$.updatedAt') = ?`,
-    [JSON.stringify(result.goal), Date.now(), clan.id, result.expectedUpdatedAt]]);
-    if (Number(update.affectedRows) !== 1) return { ok: false, reason: 'production_snapshot_changed' };
-    await Database.reconcileBotClanGoals([clan.id]);
-    return { ok: true, goal: result.goal };
+    if (!result.ok || result.persistedGoal) return result;
+    if (!result.goal && !result.recruitmentScan) return result;
+    const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, ownerSection: 'productionGoal',
+        goal: result.goal || clan.state?.productionGoal || null,
+        expectedUpdatedAt: result.expectedUpdatedAt ?? number(clan.state?.updatedAt),
+        recruitmentDemand: result.recruitmentDemand, recruitmentScan: result.recruitmentScan, eventType: null });
+    if (!saved.ok) return { ...saved, reason: saved.code };
+    return { ...result, ok: true, goal: saved.goal, retryable: !!result.continuation,
+        ...(result.continuation ? { reason: 'clan_planning_deferred' } : {}) };
 }
 
 async function scheduleReviews() {
@@ -384,8 +385,23 @@ async function execute(action, options = {}) {
                 // The beneficiary got its item (BotLifeState.enqueueEquipmentGoalAdvance):
                 // below level 3 the equipment goal is the production goal, so pick the
                 // next one now instead of at the next 15-min production review.
-                if (String(payload.reason || '') === 'equipment_goal_completed' && number(clan.level) < 3) {
-                    result = await resolveProduction(clan);
+                const productionRequest = clan.state?.recruitmentDemand || clan.state?.recruitmentScan;
+                if (number(clan.level) < 3 && (String(payload.reason || '') === 'equipment_goal_completed'
+                    || productionRequest?.ownerSection === 'productionGoal' && ((payload.reasons || []).includes('recruitment_input')
+                        || String(payload.reason || '') === 'runtime_bootstrap'))) {
+                    const main = await GoalService.resolveClan(clan, { actionId: Number(action.id), reviewCauses: payload.reasons || [] });
+                    if (!main.ok || main.advanced?.ok) { result = main; break; }
+                    const fresh = await loadClan(clan.id);
+                    // The native payer/operation remains in its old action chain,
+                    // even when this PLAN needs another bounded recruitment page.
+                    // A funded level gets its native executor before equipment.
+                    await scheduleNext(fresh, fresh.state?.goal, action);
+                    if (ReviewEvents.cashLevelGoal(fresh) && fresh.state.goal.status === 'completed') { result = main; break; }
+                    const production = await resolveProduction(fresh, { reviewCauses: payload.reasons || [] });
+                    result = { ...main, ok: production.ok !== false, retryable: !!production.retryable || !!production.continuation,
+                        reason: production.reason || main.reason,
+                        production: { ownerSection: 'productionGoal', goalKey: production.goal?.goalKey || null,
+                            reason: production.reason, joined: production.joined?.accepted || null } };
                     break;
                 }
                 result = String(clan.state?.mode || '') === 'player_managed'
@@ -397,13 +413,13 @@ async function execute(action, options = {}) {
                             ? Contracts.REASON_CODES.MARKET_NO_OFFER
                             : ''
                     })
-                    : await GoalService.resolveClan(clan, { actionId: Number(action.id) });
+                    : await GoalService.resolveClan(clan, { actionId: Number(action.id), reviewCauses: payload.reasons || [] });
                 break;
             case ACTION_TYPES.CONTRIBUTION:
                 result = await EconomyService.resolveClan(clan, { deadlineAt });
                 break;
             case ACTION_TYPES.PRODUCTION:
-                result = await resolveProduction(clan);
+                result = await resolveProduction(clan, { reviewCauses: payload.reasons || [] });
                 break;
             case ACTION_TYPES.SUPPLIES:
                 result = await WarehouseService.resolveClan(clan, { deadlineAt,

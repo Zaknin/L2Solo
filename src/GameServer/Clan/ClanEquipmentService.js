@@ -18,6 +18,7 @@ const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartySt
 const DataCache = invoke('GameServer/DataCache');
 const { planForMember } = require('./ClanEquipmentPlanner');
 const PlanningWorker = require('./ClanPlanningCoordinator');
+const RosterDemand = require('./ClanRosterDemand');
 const MAX_CAPACITY_TARGET_RETRIES = 5;
 
 const metrics = {
@@ -244,7 +245,7 @@ function clanPartyObjective(plan, goal, priority = 'preferred', clanId = 0) {
     const rosterSize = Math.max(1, (goal?.assignedMemberIds || []).length);
     const maxPartySize = Math.max(2, Math.min(9, rosterSize));
     const raid = plan.next?.sourceKind === 'raid' || plan.next?.raidBoss === true;
-    const minPartySize = raid
+    const minPartySize = goal.fullRoster ? 9 : raid
         ? Math.max(2, Math.min(maxPartySize, ClanRaidPolicy.MIN_MEMBERS))
         : Math.max(2, Math.min(maxPartySize, number(Config.operationMinMembers, 5)));
     return {
@@ -269,8 +270,9 @@ function clanPartyObjective(plan, goal, priority = 'preferred', clanId = 0) {
         clanGoalKey: goal.goalKey || null,
         partyPreference: 'clan_first',
         clanOperation: 'equipment',
-        maxPartySize,
+        maxPartySize: goal.fullRoster ? 9 : maxPartySize,
         minPartySize,
+        ...(goal.fullRoster ? { fullRoster: goal.fullRoster } : {}),
         levelRange: 99,
         requestedAt: Date.now(),
         reviewAt: Date.now() + 300000,
@@ -279,10 +281,23 @@ function clanPartyObjective(plan, goal, priority = 'preferred', clanId = 0) {
     };
 }
 
+function fullRosterIdentity(marker) {
+    return marker ? [marker.clanId, marker.ownerSection, marker.goalKey, marker.generation,
+        [...(marker.memberIds || [])].map(number).sort((a, b) => a - b), marker.sourceId, marker.npcId, marker.raidInstanceId] : null;
+}
+function sameRosterRequirement(left, right) {
+    return number(left?.minPartySize) === number(right?.minPartySize)
+        && number(left?.maxPartySize) === number(right?.maxPartySize)
+        && JSON.stringify(fullRosterIdentity(left?.fullRoster)) === JSON.stringify(fullRosterIdentity(right?.fullRoster));
+}
+function startedRaidParty(party) {
+    return !!party && require('./ClanMembershipPolicy').activeRaidGoalKeys([party]).size > 0;
+}
 function stateHasSameClanObjective(state, objective) {
     return String(state?.stats?.clanPartyObjective?.clanGoalKey || '') === String(objective?.clanGoalKey || '')
         && String(state?.stats?.clanPartyObjective?.objectiveKey || '') === String(objective?.objectiveKey || '')
-        && number(state?.stats?.clanPartyObjective?.maxPartySize) === number(objective?.maxPartySize)
+        && sameRosterRequirement(state?.stats?.clanPartyObjective, objective)
+        && sameRosterRequirement(state?.stats?.partyRequest, objective)
         && state?.stats?.partyRequest?.status === 'open'
         && state.stats.partyRequest.priority === objective.priority;
 }
@@ -322,11 +337,13 @@ async function releasePreviousBeneficiary(clan, previousGoal, nextGoal) {
     return { changed: !!saved || parties.length > 0, releasedMembers };
 }
 
-async function releaseConflictingRosterParties(assignedMemberIds, goal, expectedObjective = null) {
+async function releaseConflictingRosterParties(assignedMemberIds, goal, expectedObjective = null, options = {}) {
     const roster = new Set((assignedMemberIds || []).map(number).filter(Boolean));
     if (!roster.size) return { parties: 0, releasedMembers: 0 };
     const goalKey = String(goal?.goalKey || '');
     const parties = BackgroundPartyState.active().filter((party) => {
+        if (startedRaidParty(party)) return false;
+        if (options.partyIds && !options.partyIds.includes(party.partyId)) return false;
         const memberIds = (party.memberIds || []).map(number).filter(Boolean);
         if (!memberIds.some((id) => roster.has(id))) return false;
         const partyObjective = party?.stats?.objective || null;
@@ -335,6 +352,7 @@ async function releaseConflictingRosterParties(assignedMemberIds, goal, expected
             String(party.spotId || '') === String(expectedObjective.spotId || '')
             && String(partyObjective?.objectiveKey || '') === String(expectedObjective.objectiveKey || '')
             && number(partyObjective?.npcId) === number(expectedObjective.npcId)
+            && sameRosterRequirement(partyObjective, expectedObjective)
         );
         return partyGoalKey !== goalKey
             || !sameRoute
@@ -350,6 +368,36 @@ async function releaseConflictingRosterParties(assignedMemberIds, goal, expected
         ));
     }
     return { parties: parties.length, releasedMembers };
+}
+
+async function suspendWaitingAssignments(clan, goal, previousGoal) {
+    const Policy = require('./ClanMembershipPolicy');
+    const key = String(goal.goalKey);
+    const priorKey = String(previousGoal?.goalKey || key);
+    const ownedKeys = new Set([key, priorKey]);
+    const oldParties = BackgroundPartyState.active().filter(party => !startedRaidParty(party)
+        && number(party.stats?.objective?.clanId) === number(clan.id)
+        && ownedKeys.has(String(party.stats?.objective?.clanGoalKey || '')));
+    const ids = [...new Set([...(clan.members || []).map(memberId), ...(previousGoal?.assignedMemberIds || [])])].slice(0, 40);
+    const reformed = await releaseConflictingRosterParties(ids, goal, null, { partyIds: oldParties.map(party => party.partyId) });
+    const protectedKeys = Policy.activeRaidGoalKeys(BackgroundPartyState.admitted());
+    let cleared = 0;
+    // The character row owns membership; cached life JSON may still precede
+    // an accepted join. Rehydrate only these bounded owner IDs before repair.
+    for (const current of await LifeState.statesByIds(ids)) {
+        if (number(current.clanId) !== number(clan.id)) continue;
+        const stats = current.stats || {};
+        const keys = new Set([stats.equipmentPlan?.clanGoal?.goalKey, stats.clanPartyObjective?.clanGoalKey,
+            stats.partyRequest?.clanGoalKey].filter(value => value && !ownedKeys.has(String(value))));
+        for (const value of protectedKeys) keys.add(value);
+        const repaired = Policy.reconcileGoals(current, keys);
+        if (repaired === current) continue;
+        repaired.stats.clanGoalInvalidationVersion = Math.max(Date.now(), number(stats.clanGoalInvalidationVersion) + 1);
+        // This committed goal owner is allowed to replace a locked clan plan;
+        // a generic lifecycle save would preserve the superseded plan.
+        if (await LifeState.upsertState(repaired, 'clan_equipment_goal')) cleared++;
+    }
+    return { ...reformed, cleared };
 }
 
 async function handoffWarehouseMaterials(current, plan, clan, goal) {
@@ -471,12 +519,18 @@ async function assignPartyObjective(member, clan, goal, plan, priority = 'prefer
     const id = number(member.characterId ?? member.id);
     const objective = clanPartyObjective(plan, goal, priority, clan.id);
     await LifeState.init();
-    const current = await LifeState.findByCharacterId(id);
+    let current = await LifeState.findByCharacterId(id);
     if (!current) return { ok: false, code: 'member_state_missing', memberId: id };
     const currentPartyId = current.partyId || current.party?.partyId || null;
     if (objective && currentPartyId) {
         const sameGoal = String(current.stats?.clanPartyObjective?.clanGoalKey || '') === String(goal?.goalKey || '');
-        return { ok: sameGoal, changed: false, memberId: id, code: sameGoal ? null : 'member_party_conflict' };
+        const party = BackgroundPartyState.find(currentPartyId);
+        if (!sameGoal || startedRaidParty(party) || stateHasSameClanObjective(current, objective)) {
+            return { ok: sameGoal, changed: false, memberId: id, code: sameGoal ? null : 'member_party_conflict' };
+        }
+        await releaseConflictingRosterParties(goal.assignedMemberIds || [id], goal, objective, { partyIds: [currentPartyId] });
+        current = await LifeState.findByCharacterId(id);
+        if (current.partyId || current.party?.partyId) return { ok: false, code: 'member_party_conflict', memberId: id };
     }
     if (!objective) {
         const old = current.stats?.clanPartyObjective;
@@ -528,6 +582,7 @@ async function assignPlan(member, plan, clan, goal) {
     if (samePlanTarget(currentPlan, plan)
         && number(currentPlan.clanGoal?.clanId) === number(clan.id)
         && String(currentPlan.clanGoal?.goalKey || '') === String(goal.goalKey)
+        && (!goal.fullRoster || stateHasSameClanObjective(currentState, clanPartyObjective(plan, goal, 'required', clan.id)))
         && samePlanRoute(currentPlan, plan)
         && ['status', 'strategy', 'recipeId', 'materials', 'craftProviders', 'componentRecipes', 'next'].every(key => (
             JSON.stringify(currentPlan[key]) === JSON.stringify(plan[key])
@@ -593,18 +648,91 @@ async function craftingOptions(clan) {
     return { craftRecipes: [...published.values()], allowedRecipeIds: [...published.keys()], craftProviders: providers };
 }
 
+async function prepareRecruitment(clan, profiles, previousGoal, options) {
+    const ownIds = clan.members.map(memberId).slice(0, 40);
+    if (ownIds.length) {
+        const reserved = await Database.execute([`SELECT characterId FROM clan_operation_members WHERE status='active'
+            AND characterId IN (${ownIds.map(() => '?').join(',')}) UNION SELECT characterId FROM board_trade_participants
+            WHERE meetingId IS NOT NULL AND characterId IN (${ownIds.map(() => '?').join(',')})`, [...ownIds, ...ownIds]]);
+        const reservedIds = new Set(reserved.map(row => Number(row.characterId)));
+        clan = { ...clan, members: clan.members.map(member => ({ ...member, recruitmentReserved: reservedIds.has(memberId(member)) })) };
+    }
+    const retained = new Set(previousGoal?.assignedMemberIds || []);
+    profiles = profiles.filter(profile => clan.members.some(member => ClanRaidPolicy.availableMember(member, profile, retained)));
+    const section = RosterDemand.ownerSection(clan, options.ownerSection);
+    const key = RosterDemand.scanKey(clan, profiles, previousGoal, section);
+    const previousScan = clan.state?.recruitmentScan;
+    const restarted = (options.reviewCauses || []).includes('recruitment_input');
+    const scan = !restarted && previousScan?.key === key ? { ...previousScan } : { key, refused: [] };
+    const held = !restarted && clan.state?.recruitmentDemand && clan.state.recruitmentDemand.goalKey === previousGoal?.goalKey
+        ? clan.state.recruitmentDemand.newMemberIds || [] : [];
+    const retainedIds = [...new Set([...(scan.prospects || []), ...held])].filter(value => !(scan.refused || []).includes(value)).slice(0, 9);
+    let prospects = [];
+    if (retainedIds.length) {
+        const eligible = await Database.execute([`SELECT characterId FROM bot_party_candidate_projection p
+            WHERE characterId IN (${retainedIds.map(() => '?').join(',')}) AND joinAvailability=1 AND clanId=0
+            AND NOT EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=p.characterId AND r.status='active')
+            AND NOT EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=p.characterId AND t.meetingId IS NOT NULL)`, retainedIds]);
+        prospects = await LifeState.statesByIds(eligible.map(row => row.characterId), { ownerId: 'legacy_main', unassigned: true });
+    }
+    let remaining = 64 - retainedIds.length;
+    const prepare = pool => options.jobKey ? PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline, context: options.workerContext,
+        clan, spots: profiles, prospects: pool, previousGoal }) : Promise.resolve(RosterDemand.prepare(clan, profiles, pool, previousGoal));
+    let prepared = await prepare(prospects);
+    while (!prepared.raids.length && remaining > 0 && !scan.done && prepared.requests.length) {
+        const request = prepared.requests.find(row => !(scan.exhausted || []).includes(row.kind));
+        if (!request) { scan.done = true; break; }
+        if (scan.kind !== request.kind) { scan.kind = request.kind; scan.cursor = null; }
+        if (Date.now() >= options.planningDeadline) throw planningDeferred('clan planning deadline');
+        const pageLimit = remaining;
+        const page = await LifeState.clanOperationCandidates({ targetClanId: clan.id, unclanned: true,
+            excludeTradeMeetings: true,
+            classIds: require('./ClanCandidateCapabilities').classIdsForRequirements(request.kinds),
+            minLevel: request.minLevel, maxLevel: request.maxLevel, cursor: scan.cursor, limit: remaining });
+        remaining -= page.length;
+        prospects = [...new Map([...prospects, ...page.filter(member => !(scan.refused || []).includes(memberId(member)))]
+            .map(member => [memberId(member), member])).values()];
+        scan.cursor = page.at(-1)?.candidateCursor || scan.cursor;
+        if (page.length < pageLimit) scan.exhausted = [...new Set([...(scan.exhausted || []), request.kind])];
+        prepared = await prepare(prospects);
+        if (!page.length && (scan.exhausted || []).length >= prepared.requests.length) scan.done = true;
+    }
+    scan.prospects = prepared.retainedProspects;
+    scan.ownerSection = section;
+    scan.ownFingerprint = RosterDemand.ownFingerprint(clan);
+    scan.goalKey = previousGoal?.goalKey || null;
+    scan.sources = RosterDemand.hash(profiles.map(RosterDemand.sourceFingerprint));
+    const watchRequests = prepared.requests;
+    scan.classIds = require('./ClanCandidateCapabilities').classIdsForRequirements([...new Set(watchRequests.flatMap(row => row.kinds))]);
+    scan.minLevel = watchRequests.length ? Math.min(...watchRequests.map(row => row.minLevel)) : 1;
+    scan.maxLevel = watchRequests.length ? Math.max(...watchRequests.map(row => row.maxLevel)) : 100;
+    return { ...prepared, scan, ownerSection: section, continuation: !prepared.raids.length && !scan.done && prepared.requests.length > 0 };
+}
+
 async function planningForClan(clan, previousGoal = null, options = {}) {
+    const planningDeadline = number(options.planningDeadline) || Date.now() + Math.min(45000, Math.max(1000, Config.actionLeaseMs - 5000));
+    if (PlanningWorker.enabled() && clan.state?.mode === 'autonomous' && !options.jobKey) {
+        try { return await PlanningWorker.withJob(planningDeadline,
+            jobKey => planningForClanAdmitted(clan, previousGoal, { ...options, jobKey, planningDeadline })); }
+        catch (error) { throw planningDeferred(error.message); }
+    }
+    return planningForClanAdmitted(clan, previousGoal, { ...options, planningDeadline });
+}
+
+async function planningForClanAdmitted(clan, previousGoal = null, options = {}) {
+    if (options.jobKey) options.workerContext = await PlanningWorker.context();
     // A planning pass compares the same clan snapshot against many raid bosses.
     // Readiness only depends on the member snapshot, so calculate it once per
     // member instead of rebuilding equipped-item projections for every boss.
     const raidReadinessCache = new Map();
-    const candidateSpots = options.spots || (() => {
+    let candidateSpots = options.spots || (() => {
         try {
             const profiles = SpotProfiles.ensure();
             const liveRaidIds = invoke('GameServer/RaidBoss/RaidBossSourceCatalog').liveTemplateIds();
             return profiles.flatMap((profile) => {
                 if (profile.raidBoss !== true) return [profile];
                 if (!liveRaidIds.has(number(profile.raidBossTemplateId))) return [];
+                if (clan.state?.mode === 'autonomous') return [require('../RaidBoss/RaidEncounterScope').projectSource(profile)];
                 const assessment = ClanRaidPolicy.assessment(
                     clan,
                     profile,
@@ -621,7 +749,10 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
         }
     })();
     const blockedRaidSpots = ClanRaidFailurePolicy.blockedSpotIds(previousGoal);
-    const spots = candidateSpots.filter((profile) => !blockedRaidSpots.has(String(profile.id)));
+    candidateSpots = candidateSpots.filter((profile) => !blockedRaidSpots.has(String(profile.id)));
+    const recruitment = clan.state?.mode === 'autonomous' && !activeRaidPartyForClan(clan.id)
+        ? await prepareRecruitment(clan, candidateSpots.filter(profile => profile.raidBoss), previousGoal, options) : null;
+    const spots = recruitment ? [...candidateSpots.filter(profile => !profile.raidBoss), ...recruitment.raids] : candidateSpots;
     const occupancy = options.occupancy || (() => {
         try {
             return SpotProfiles.currentOccupancy(spots) || {};
@@ -672,7 +803,7 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
     const planningDeadline = number(options.planningDeadline)
         || Date.now() + Math.min(45000, Math.max(1000, Config.actionLeaseMs - 5000));
     if (workerFingerprint && members.length) {
-        try { workerContext = await PlanningWorker.context(); }
+        try { workerContext = options.workerContext || await PlanningWorker.context(); }
         catch (error) { throw planningDeferred(error.message); }
     }
     for (let index = 0; index < members.length; index++) {
@@ -681,7 +812,7 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
         const id = number(member.characterId ?? member.id);
         const capacityUnits = equipmentRoster(clan, member, previousGoal).length;
         const memberSpots = spots.filter((spot) => spot.raidBoss !== true
-            || ClanRaidPolicy.availableMember(member, spot,
+            || (!recruitment || recruitment.teams[spot.id]?.memberIds.includes(id)) && ClanRaidPolicy.availableMember(member, spot,
                 new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean))));
         const memberOptions = {
             ...craftOptions,
@@ -698,7 +829,8 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
         let plan;
         if (workerFingerprint) {
             try {
-                plan = await PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: memberOptions, context: workerContext, deadlineAt: planningDeadline });
+                plan = await PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: memberOptions, context: workerContext,
+                    deadlineAt: planningDeadline, jobKey: options.jobKey });
                 if (Date.now() >= planningDeadline) throw planningDeferred('clan planning deadline');
             } catch (error) {
                 recordReason('clan_planning_worker_unavailable');
@@ -748,7 +880,8 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
         previousFulfilled,
         workerFingerprint,
         beneficiaryFingerprints,
-        planningDeadline
+        planningDeadline,
+        recruitment
     };
 }
 
@@ -883,10 +1016,13 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
                 plans,
                 previousFulfilled,
                 goal: { ...previousGoal, status: 'completed', updatedAt: Date.now() },
-                expectedUpdatedAt: number(clan.state?.updatedAt) || null
+                expectedUpdatedAt: number(clan.state?.updatedAt) || null,
+                ownerSection: planning.recruitment?.ownerSection, recruitmentDemand: null, recruitmentScan: null
             };
         }
-        return { ok: true, skipped: true, reason: 'no_equipment_debt', plans };
+        return { ok: true, skipped: true, reason: 'no_equipment_debt', plans,
+            recruitmentScan: planning.recruitment?.scan || null, recruitmentDemand: null,
+            ownerSection: planning.recruitment?.ownerSection, continuation: !!planning.recruitment?.continuation };
     }
     if (planning.workerFingerprint && selection.plan?.strategy === 'market') {
         const currentOffer = invoke('GameServer/Bot/Economy/MarketOpportunity').bestOffer(selection.plan.target.selfId, {
@@ -899,7 +1035,36 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         }
     }
 
-    const assignedMemberIds = equipmentRoster(clan, selection.member, previousGoal, selection.plan);
+    const team = planning.recruitment?.teams?.[selection.plan?.next?.spotId];
+    const section = RosterDemand.ownerSection(clan, options.ownerSection);
+    const scan = planning.recruitment?.scan || null;
+    if (team && !team.actualReady) {
+        const goal = Policy.buildGoal(clan, selection, previousGoal, Date.now(), { assignedMemberIds: [], roleFor: ClanPolicy.rosterRole });
+        goal.assignedMemberIds = [];
+        goal.status = 'preparing';
+        goal.reasonCodes = ['clan_recruitment_wait'];
+        if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
+        const demand = RosterDemand.buildDemand(clan, goal, team, section);
+        const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
+            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: demand, recruitmentScan: scan,
+            rosterProof: { ...demand.proof, source: team.source, ownerSection: section,
+                ownerGoal: RosterDemand.goalFingerprint(clan.state?.[section]) }, eventType: 'equipment_recruitment_wait', reasonCode: 'clan_recruitment_wait' });
+        if (!saved.ok) return saved;
+        const suspension = await suspendWaitingAssignments(clan, goal, previousGoal);
+        const joined = await invoke('GameServer/Clan/ClanSimulationService').recruitForDemand({ ...clan, state: saved.state }, demand);
+        const [row] = await Database.execute(['SELECT stateJson FROM clan_simulation_clans WHERE clanId=?', [clan.id]]);
+        const latest = parseJson(row.stateJson);
+        if (scan && joined.refused.length && latest.recruitmentDemand?.generation === demand.generation) {
+            scan.refused = [...new Set([...(scan.refused || []), ...joined.refused])].slice(-9);
+            scan.prospects = (scan.prospects || []).filter(value => !scan.refused.includes(value));
+            await Database.updateAutonomousClanGoal({ clanId: clan.id, goal: latest[section], ownerSection: section,
+                expectedUpdatedAt: number(latest.updatedAt), recruitmentDemand: latest.recruitmentDemand, recruitmentScan: scan,
+                eventType: null });
+        }
+        return { ok: true, goal: latest[section] || goal, persistedGoal: true, ownerSection: section, joined,
+            recruitmentDemand: demand, recruitmentScan: scan, suspension, retryable: true, reason: 'clan_planning_deferred', selection, plans };
+    }
+    const assignedMemberIds = team?.actualReady ? team.memberIds : equipmentRoster(clan, selection.member, previousGoal, selection.plan);
     const selectedSpot = selection.plan?.next?.spotId
         ? planning.spots.find((spot) => String(spot.id) === String(selection.plan.next.spotId))
         : null;
@@ -936,6 +1101,18 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         assignedMemberIds,
         roleFor: ClanPolicy.rosterRole
     });
+    if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
+    let persistedGoal = false;
+    if (team?.actualReady) {
+        goal.fullRoster = RosterDemand.fullRoster(clan, goal, team, section);
+        const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
+            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: null, recruitmentScan: null,
+            rosterProof: { ownFingerprint: team.ownFingerprint, rows: team.rows, source: team.source,
+                ownerSection: section, ownerGoal: RosterDemand.goalFingerprint(clan.state?.[section]) },
+            eventType: 'equipment_full_roster_ready', reasonCode: 'clan_full_roster_ready' });
+        if (!saved.ok) return saved;
+        persistedGoal = true;
+    }
     const rotation = await releasePreviousBeneficiary(clan, previousGoal, goal);
     const expectedObjective = clanPartyObjective(selection.plan, goal, 'required', clan.id);
     const craftReady = ['ready_to_craft', 'component_ready'].includes(selection.plan?.status);
@@ -975,7 +1152,12 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         partyReform,
         partyAssignments,
         previousFulfilled,
-        expectedUpdatedAt: number(latestState.updatedAt) || null
+        expectedUpdatedAt: number(latestState.updatedAt) || null,
+        persistedGoal,
+        ownerSection: section,
+        recruitmentDemand: null,
+        recruitmentScan: team?.actualReady ? null : scan,
+        continuation: !!planning.recruitment?.continuation
     };
 }
 

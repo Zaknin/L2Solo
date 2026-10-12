@@ -3901,6 +3901,43 @@ function commitColdInteractionMemoryUnsafe(request) {
 }
 
 const ClanMembership = require('./GameServer/Clan/ClanMembershipRepository')({ all, write, inTransaction, now });
+function recruitmentRows(where, params) {
+    return all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
+        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationOwner,l.simulationRevision,l.inventorySummary,l.statsJson,
+        COALESCE(p.joinAvailability,0) AS joinAvailability,
+        (EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
+            OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS recruitmentReserved
+        FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
+        LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id WHERE ${where}`, params).map(row => ({ ...row,
+            phase: row.phase || '', activity: row.activity || '', spotId: row.spotId || null, partyId: row.partyId || null,
+            simulationOwner: row.simulationOwner || 'legacy_main', stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
+}
+function recruitmentSourceCurrent(source) {
+    const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
+    const spot = Catalog.findById(source.id);
+    if (!spot) return false;
+    const current = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(spot);
+    return current.raidWorldAvailable && require('./GameServer/Clan/ClanRosterDemand').sourceFingerprint(current) === source.fingerprint;
+}
+function recruitmentProofCurrent(clanId, level, state, proof) {
+    if (!proof || !recruitmentSourceCurrent(proof.source)) return false;
+    const Demand = require('./GameServer/Clan/ClanRosterDemand');
+    if (proof.ownerSection && Demand.goalFingerprint(state[proof.ownerSection]) !== proof.ownerGoal) return false;
+    const rows = recruitmentRows('c.clanId=?', [clanId]);
+    if (rows.length > 40) return false;
+    const members = rows.filter(member => !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member));
+    if (Demand.ownFingerprint({ id: clanId, level, state, physicalMemberCount: rows.length, members }) !== proof.ownFingerprint) return false;
+    if (proof.rows.length > 9 || !proof.rows.length) return false;
+    const selected = recruitmentRows(`c.id IN (${proof.rows.map(() => '?').join(',')})`, proof.rows.map(row => row[0]));
+    return proof.rows.every(row => selected.some(member => member.characterId === row[0] && Demand.memberFingerprint(member) === row[4]
+        && (Number(member.clanId) === clanId || Number(member.clanId) === 0 && recruitmentAvailable(member))));
+}
+function recruitmentAvailable(member) {
+    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && member.simulationOwner === 'legacy_main' && !member.partyId
+        && !member.recruitmentReserved && !member.stats?.tradeMeeting
+        && !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member)
+        && !one("SELECT characterId FROM clan_operation_members WHERE characterId=? AND status='active' LIMIT 1", [member.characterId]);
+}
 function publishClanMembership(result) {
     const { previousClanId, nextClanId, ...value } = result || {};
     if (result?.ok || Number(result?.affectedRows) > 0) {
@@ -9183,13 +9220,27 @@ const Database = {
         clanId,
         characterId,
         memberLimit = 10,
-        maxBotMemberShare = 0.70
+        maxBotMemberShare = 0.70,
+        expectedDemandGeneration = null,
+        candidateFingerprint = null
     } = {}) {
         const id = Number(characterId);
         const targetClanId = Number(clanId);
         return inTransaction(() => {
             const simulation = one("SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ? AND mode = 'autonomous'", [targetClanId]);
             if (!simulation) return { ok: false, code: 'target_not_autonomous' };
+            if (expectedDemandGeneration) {
+                const state = jsonObject(simulation.stateJson), demand = state.recruitmentDemand;
+                const goal = state[demand?.ownerSection];
+                if (demand?.generation !== expectedDemandGeneration || goal?.goalKey !== demand.goalKey || goal?.status === 'completed'
+                    || goal?.controlledBy === 'player' || !demand.newMemberIds.includes(id) || !recruitmentSourceCurrent(demand.source)) {
+                    return { ok: false, code: 'recruitment_owner_changed' };
+                }
+                const [member] = recruitmentRows('c.id=?', [id]);
+                if (!member || !recruitmentAvailable(member) || require('./GameServer/Clan/ClanRosterDemand').memberFingerprint(member) !== candidateFingerprint) {
+                    return { ok: false, code: 'recruitment_candidate_changed' };
+                }
+            }
 
             const memberCount = Number(one('SELECT COUNT(*) AS count FROM characters WHERE clanId = ?', [targetClanId]).count || 0);
             if (memberCount >= Math.max(1, Number(memberLimit) || 10)) {
@@ -9269,22 +9320,40 @@ const Database = {
         goal = null,
         expectedUpdatedAt = null,
         eventType = 'goal_updated',
-        reasonCode = ''
+        reasonCode = '',
+        ownerSection = 'goal',
+        recruitmentDemand,
+        recruitmentScan,
+        rosterProof = null
     } = {}) {
         const clan = Number(clanId);
         if (!clan) return Promise.resolve({ ok: false, code: 'target_not_autonomous' });
         return inTransaction(() => {
-            const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
-            const clanRow = one('SELECT leaderId FROM clans WHERE id = ?', [clan]);
+            const simulation = one('SELECT clanId, mode, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
+            const clanRow = one('SELECT leaderId,level FROM clans WHERE id = ?', [clan]);
             if (!simulation || !clanRow) return { ok: false, code: 'target_not_autonomous' };
             const previousState = jsonObject(simulation.stateJson);
             const currentUpdatedAt = Number(previousState.updatedAt || 0);
             if (expectedUpdatedAt !== null && currentUpdatedAt !== Number(expectedUpdatedAt)) {
                 return { ok: false, code: 'ownership_conflict', updatedAt: currentUpdatedAt };
             }
+            if (!['goal', 'productionGoal'].includes(ownerSection)) return { ok: false, code: 'invalid_goal_owner' };
+            if (rosterProof && (simulation.mode !== 'autonomous'
+                || !recruitmentProofCurrent(clan, clanRow.level, previousState, rosterProof))) return { ok: false, code: 'recruitment_snapshot_changed' };
             const timestamp = now();
             const state = simulationState(simulation.stateJson, clan, clanRow.leaderId, previousState.memberIds || [], timestamp);
-            state.goal = goal || null;
+            state[ownerSection] = goal || null;
+            if (recruitmentDemand !== undefined) state.recruitmentDemand = recruitmentDemand;
+            else if (state.recruitmentDemand?.ownerSection === ownerSection && (!goal || goal.status === 'completed'
+                || goal.controlledBy === 'player' || goal.goalKey !== state.recruitmentDemand.goalKey
+                || Number(goal.plan?.sourceId) !== Number(state.recruitmentDemand.source?.npcId))) state.recruitmentDemand = null;
+            if (recruitmentScan !== undefined) state.recruitmentScan = recruitmentScan;
+            if (!goal || goal.status === 'completed' || goal.controlledBy === 'player') {
+                if (state.recruitmentDemand?.ownerSection === ownerSection) state.recruitmentDemand = null;
+                if (state.recruitmentScan?.ownerSection === ownerSection && (goal || recruitmentScan === undefined)) state.recruitmentScan = null;
+            }
+            if (Buffer.byteLength(JSON.stringify({ recruitmentDemand: state.recruitmentDemand, recruitmentScan: state.recruitmentScan })) > 2048)
+                return { ok: false, code: 'recruitment_metadata_bound' };
             state.updatedAt = timestamp;
             const updated = write(`UPDATE clan_simulation_clans
                 SET updatedAt = ?, stateJson = ? WHERE clanId = ?`, [timestamp, JSON.stringify(state), clan]);
@@ -9300,9 +9369,12 @@ const Database = {
                     occurredAt: timestamp
                 });
             }
-            return { ok: true, clanId: clan, goal: state.goal, updatedAt: timestamp,
+            return { ok: true, clanId: clan, goal: state[ownerSection], state, updatedAt: timestamp,
                 membershipRepair: ClanMembership.repairGoalsUnsafe([clan]) };
-        }, 'clan-goal:update').then(ClanMembership.publish);
+        }, 'clan-goal:update').then(ClanMembership.publish).then(result => {
+            if (result.ok) ClanReviewInputs.syncRecruitment({ id: clan, state: result.state });
+            return result;
+        });
     },
     recordClanGoalEvent({ clanId, eventType, goalType = '', plan = '', reasonCode = '', payload = {} } = {}) {
         if (!Number(clanId) || !String(eventType || '').trim()) return Promise.resolve({ ok: false, code: 'invalid_goal_event' });

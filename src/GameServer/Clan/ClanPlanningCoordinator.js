@@ -165,6 +165,7 @@ class ClanPlanningCoordinator {
     }
 
     async plan(payload, catalogs, spotCatalog = catalogs.spots || EMPTY_SPOTS) {
+        if (this.activeJob && payload.jobKey !== this.activeJob) throw new Error('clan planning worker job busy');
         await this.ready(catalogs);
         const writer = await this.ensureSpotCatalog(spotCatalog);
         if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
@@ -173,6 +174,28 @@ class ClanPlanningCoordinator {
         DiagnosticConfig.developerDiagnostics && (this.stats.completed++);
         DiagnosticConfig.developerDiagnostics && (this.stats.maxRunMs = Math.max(this.stats.maxRunMs, result.durationMs));
         return result.plan;
+    }
+
+    async withJob(deadlineAt, catalogs, work) {
+        if (this.activeJob || this.pending.size >= this.maxPending) throw new Error('clan planning worker job busy');
+        const jobKey = `raid-plan:${++this.sequence}`;
+        this.activeJob = jobKey;
+        try {
+            await this.ready(catalogs);
+            if (Date.now() >= deadlineAt) throw new Error('clan planning deadline');
+            return await work(jobKey);
+        } finally {
+            if (this.worker && !this.closed) await this.send('end_planning_job', { jobKey }).catch(() => {});
+            if (this.activeJob === jobKey) this.activeJob = null;
+        }
+    }
+
+    async prepareRaids(payload, catalogs, spotCatalog) {
+        if (!this.activeJob || payload.jobKey !== this.activeJob) throw new Error('clan planning job not admitted');
+        const writer = await this.ensureSpotCatalog(spotCatalog);
+        if (Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
+        this.tableChannel.flush();
+        return this.send('prepare_raids', { payload: writer.pack(payload) });
     }
 
     async shutdown() {
@@ -243,6 +266,8 @@ module.exports = {
     enabled: () => enabled,
     context,
     plan: (payload) => coordinator.plan(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
+    withJob: (deadlineAt, work) => coordinator.withJob(deadlineAt, invoke('GameServer/DataCache'), work),
+    prepareRaids: payload => coordinator.prepareRaids(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
     metrics: () => coordinator?.metrics() || { running: false, pending: 0 },
     shutdown: () => coordinator?.shutdown()
 };
