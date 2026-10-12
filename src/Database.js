@@ -3553,6 +3553,8 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
     // A replaced shop or an ad may name a stack the bag has merged since: the
     // same item from another stack serves. A player's new shop names its own.
     const flexible = !!active || kind !== 'shop';
+    const compatibleParts = !!active && Number(active.storeType) === BoardRules.SELL
+        && active.custodyPolicy !== 1 && kind === 'shop' && storeType === BoardRules.SELL && !conditional;
     const sourceIds = new Set();
     const botOwned = isBotOwnerUnsafe(characterId);
     rows.forEach((line) => {
@@ -3574,21 +3576,44 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
         let source = null;
         if (storeType === BoardRules.SELL) {
             let sourceId = Number(line.objectId || line.sourceObjectId || 0);
+            // Returned nonstackable stock is one physical row per unit. Keep
+            // the logical lot's metadata even when another row serves it.
+            const metadataSql = compatibleParts ? ' AND slot = ? AND petData IS ?' : '';
+            const metadataValues = compatibleParts ? [Number(line.slot || 0),
+                line.petData ? (typeof line.petData === 'string' ? line.petData : JSON.stringify(line.petData)) : null] : [];
             if (flexible) {
                 const preferred = one(`SELECT id FROM items WHERE id = ? AND characterId = ?
-                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?`,
-                [sourceId, characterId, selfId, enchant, count]);
+                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?${metadataSql}`,
+                [sourceId, characterId, selfId, enchant, count, ...metadataValues]);
                 if (!preferred || sourceIds.has(sourceId)) {
                     const candidates = all(`SELECT id FROM items WHERE characterId = ?
-                        AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?
-                        ORDER BY id`, [characterId, selfId, enchant, count]);
+                        AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?${metadataSql}
+                        ORDER BY id`, [characterId, selfId, enchant, count, ...metadataValues]);
                     sourceId = Number(candidates.find((candidate) => !sourceIds.has(Number(candidate.id)))?.id || 0);
                 }
             }
-            if (!sourceId || sourceIds.has(sourceId)) throw new Error('invalid_afk_trade_source');
-            sourceIds.add(sourceId);
-            source = conditional ? one('SELECT * FROM items WHERE id=? AND characterId=?', [sourceId, characterId])
-                : afkTradeTakeItemUnsafe(characterId, sourceId, selfId, enchant, count);
+            if (!sourceId && compatibleParts) {
+                const parts = all(`SELECT * FROM items WHERE characterId = ?
+                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount > 0${metadataSql}
+                    ORDER BY id`, [characterId, selfId, enchant, ...metadataValues]);
+                let remaining = count;
+                for (const part of parts) {
+                    const partId = Number(part.id);
+                    if (sourceIds.has(partId)) continue;
+                    const partCount = Math.min(remaining, Number(part.amount));
+                    const taken = afkTradeTakeItemUnsafe(characterId, partId, selfId, enchant, partCount);
+                    sourceIds.add(partId);
+                    if (!source) source = taken;
+                    remaining -= partCount;
+                    if (remaining === 0) break;
+                }
+                if (remaining > 0) throw new Error('invalid_afk_trade_source');
+            } else {
+                if (!sourceId || sourceIds.has(sourceId)) throw new Error('invalid_afk_trade_source');
+                sourceIds.add(sourceId);
+                source = conditional ? one('SELECT * FROM items WHERE id=? AND characterId=?', [sourceId, characterId])
+                    : afkTradeTakeItemUnsafe(characterId, sourceId, selfId, enchant, count);
+            }
             if (!conditional) changedIds.push(selfId);
         }
         write(`INSERT INTO afk_trade_lines(

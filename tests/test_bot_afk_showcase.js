@@ -11,18 +11,116 @@ const Plan = require('../src/GameServer/Bot/Population/ColdEconomyPlan');
 const Offers = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const ColdMarket = invoke('GameServer/Bot/Economy/ColdMarketService');
 const owner = 730181, buyer = 730182;
+const partsOwner = 730183, partsBuyer = 730184;
 const listings = [
     { selfId: 1835, count: 100000, price: 10, kind: 'Other.Shot' },
     { selfId: 1869, count: 10000, price: 100 },
     { selfId: 1786, count: 2, price: 50000 },
     { selfId: 1101, count: 1, price: 80000 },
-    { selfId: 79, count: 1, price: 900000 }
+    { selfId: 79, count: 2, price: 900000 }
 ];
+
+async function groupedReplacement() {
+    await Database.createAccount('bot_showcase_parts', 'fixture');
+    await Database.execute(['UPDATE characters SET username=? WHERE id=?', ['bot_showcase_parts', partsOwner]]);
+    const metadata = { selfId: 11, name: 'Bone Dagger', enchant: 1, slot: 7,
+        stackable: false, petData: JSON.stringify({ name: 'Twin', level: 1 }) };
+    const config = { storeType: Afk.SELL, town: 'Giran', title: 'Two daggers' };
+    const item = async (amount, extra = {}, characterId = partsOwner) => Number((await Database.setItem(characterId,
+        { ...metadata, amount, ...extra })).insertId);
+    const publish = (lines, extra = {}) => Database.createAfkTradeShop(partsOwner, { ...config, lines, ...extra });
+    const line = (objectId, count, extra = {}) => ({ ...metadata, objectId, count, price: 17, ...extra });
+    const bag = () => Database.fetchItems(partsOwner);
+    const total = (rows) => rows.filter(row => row.selfId === 11).reduce((sum, row) => sum + row.amount, 0);
+    const replace = (shop, lines = shop.lines.map(row => ({ ...row, objectId: row.sourceObjectId }))) =>
+        publish(lines, { replace: true, expectedRevision: shop.revision });
+    const rejectedReplacement = async (shop, lines) => {
+        const beforeBag = await bag(), beforeShop = await Database.fetchAfkTradeShops(partsOwner);
+        await assert.rejects(replace(shop, lines), /invalid_afk_trade_source/);
+        assert.deepEqual(await bag(), beforeBag, 'failure restores every physical source, including earlier lines');
+        assert.deepEqual(await Database.fetchAfkTradeShops(partsOwner), beforeShop, 'failure retains the original shop');
+    };
+
+    let shop = (await publish([line(await item(2), 2)])).shop;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        shop = (await replace(shop)).shop;
+        assert.equal(shop.lines.length, 1, 'two physical units remain one public slot');
+        assert.equal(shop.lines[0].count, 2);
+        assert.equal(shop.lines[0].price, 17);
+        assert.equal(shop.lines[0].petData, metadata.petData);
+        assert.equal(shop.lines[0].slot, 7);
+        assert.equal(total(await bag()), 0, 'all units are held by the replacement');
+    }
+    await Database.setItem(partsBuyer, { selfId: 57, amount: 100 });
+    await Database.buyFromAfkTradeShop(partsBuyer, { shopId: shop.id, ownerId: partsOwner,
+        lineId: shop.lines[0].id, amount: 1, expectedPrice: 17, expectedRevision: shop.revision });
+    shop = (await Database.fetchAfkTradeShops(partsOwner))[0];
+    assert.equal(shop.lines[0].count, 1, 'a partial fill leaves only the unsold unit');
+    shop = (await replace(shop)).shop;
+    assert.equal(shop.lines[0].count, 1);
+    assert.equal(shop.lines[0].fills, 1, 'replacement retains the fill history');
+    await Database.closeAfkTradeShop(partsOwner);
+    assert.equal((await Database.closeAfkTradeShop(partsOwner)).closed, false, 'repeat cancellation returns nothing twice');
+    const returned = (await bag()).find(row => row.selfId === 11);
+    const bought = (await Database.fetchItems(partsBuyer)).find(row => row.selfId === 11);
+    assert.equal(returned.amount + bought.amount, 2, 'partial fill and cancellation conserve both daggers');
+    for (const row of [returned, bought]) {
+        assert.equal(row.enchant, metadata.enchant);
+        assert.equal(row.slot, metadata.slot);
+        assert.equal(row.petData, metadata.petData);
+    }
+    await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
+
+    shop = (await publish([line(await item(3), 3)])).shop;
+    shop = (await replace(shop, [line(shop.lines[0].sourceObjectId, 2),
+        line(shop.lines[0].sourceObjectId, 1, { price: 19 })])).shop;
+    assert.deepEqual(shop.lines.map(row => row.count), [2, 1]);
+    assert.equal(new Set(shop.lines.map(row => row.sourceObjectId)).size, 2, 'public lines use distinct physical sources');
+    await rejectedReplacement(shop, [line(shop.lines[0].sourceObjectId, 2), line(shop.lines[1].sourceObjectId, 2)]);
+    await Database.closeAfkTradeShop(partsOwner);
+    const fragments = await bag();
+    assert.equal(total(fragments), 3, 'failed multi-line reservation neither creates nor loses stock');
+    await assert.rejects(publish([line(fragments.find(row => row.selfId === 11).id, 2)]), /inventory_item_changed/,
+        'a new shop still requires one physical source per line');
+    await assert.rejects(publish([line(fragments.find(row => row.selfId === 11).id, 2)], { kind: 'sell_ad' }),
+        /invalid_afk_trade_source/, 'conditional ads retain their single-source validation');
+    assert.deepEqual(await bag(), fragments);
+    await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
+
+    // A whole but incompatible row must not win the fast path over the
+    // compatible one-unit pieces returned by the old shop.
+    const otherSlot = await item(2, { slot: 8 });
+    const otherPet = await item(2, { petData: JSON.stringify({ name: 'Other', level: 1 }) });
+    shop = (await publish([line(await item(2), 2)])).shop;
+    shop = (await replace(shop)).shop;
+    assert.equal(shop.lines[0].slot, metadata.slot);
+    assert.equal(shop.lines[0].petData, metadata.petData);
+    assert.deepEqual((await bag()).filter(row => row.selfId === 11).map(row => row.id), [otherSlot, otherPet]);
+    await Database.closeAfkTradeShop(partsOwner);
+    await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
+
+    for (const mismatch of [{ slot: 8 }, { petData: JSON.stringify({ name: 'Other', level: 1 }) },
+        { enchant: 2 }, { equipped: true }, { selfId: 12 }, { characterId: partsBuyer }]) {
+        const { characterId = partsOwner, ...extra } = mismatch;
+        await item(1, extra, characterId);
+        shop = (await publish([line(await item(1), 1)])).shop;
+        const otherBag = await Database.fetchItems(partsBuyer);
+        await rejectedReplacement(shop, [line(shop.lines[0].sourceObjectId, 2)]);
+        assert.deepEqual(await Database.fetchItems(partsBuyer), otherBag, 'another owner never supplies the missing unit');
+        await Database.closeAfkTradeShop(partsOwner);
+        await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
+    }
+    console.log('PASS grouped replacement: repeated custody, partial fill/cancel, source reuse, rollback, metadata and strict paths');
+}
+
 (async () => {
-    const world = await createWorld([{ id: owner, classId: 0, level: 30 }, { id: buyer, level: 30 }], 'afk-showcase');
+    const world = await createWorld([{ id: owner, classId: 0, level: 30 }, { id: buyer, level: 30 },
+        { id: partsOwner, level: 30 }, { id: partsBuyer, level: 30 }], 'afk-showcase');
     const saved = { evaluate: Listing.evaluate, review: Goals.review };
     try {
         await Life.init();
+        await groupedReplacement();
+        if (process.argv.includes('--e114-regression-only')) return;
         await Database.createAccount('bot_showcase', 'fixture');
         await Database.createAccount('bot_showcase_buyer', 'fixture');
         await Database.execute(['UPDATE characters SET username=? WHERE id=?', ['bot_showcase', owner]]);
@@ -61,7 +159,7 @@ const listings = [
         const weapon = originalBag.find(row => row.selfId === 79);
         const config = { storeType: 1, town: 'Giran', locX: 83396, locY: 147904, locZ: -3400,
             promoteAds: [{ id: ad.id, revision: ad.revision }],
-            lines: [{ selfId: 79, objectId: weapon.id, count: 2, price: 900000 }] };
+            lines: [{ selfId: 79, objectId: weapon.id, count: 3, price: 900000 }] };
         await assert.rejects(Database.createAfkTradeShop(owner, config));
         assert.deepEqual(await Database.fetchAfkTradeShops(owner), adsBefore,
             'failed custody rolls the withdrawn ad back in the same transaction');
@@ -95,6 +193,8 @@ const listings = [
         assert.equal(replacement.shop, 'Giran', 'an existing shop can receive more valuable loot from afar');
         await Market.executePlan(state, replacement);
         assert.deepEqual(Afk.findOwnerProjection(owner).shop.lines.map(row => row.selfId), [78, 79, 1101]);
+        assert.equal(Afk.findOwnerProjection(owner).shop.lines.find(row => row.selfId === 79).count, 2,
+            'the real worker plan retains a grouped nonstackable lot through replacement');
         assert.equal(Afk.ownerRecords(owner).find(row => row.kind === 'sell_ad'
             && row.lines.some(line => line.selfId === 1786)).lines[0].count, 2,
             'displaced showcase stock returns to the bag and becomes an ad in the same review');
