@@ -2989,7 +2989,7 @@ const BotLifeState = {
         // objective grouping, composition, persona intent and affinity. The
         // full inventory/cold-combat payload is hydrated after selection.
         return Database.execute([
-            `SELECT characterId, characterName, level, activity, spotId,
+            `SELECT characterId, characterName, bot_life_state.level, activity, spotId,
                 activityStartedAt, updatedAt, simulationOwner, simulationRevision,
                 payloadJson
             FROM ${TABLE} INDEXED BY bot_life_state_party_candidate_projection
@@ -3053,6 +3053,9 @@ const BotLifeState = {
 
     clanOperationCandidates(options = {}) {
         if (!initialized) return Promise.resolve([]);
+        if (['classIds', 'maxLevel', 'unclanned', 'cursor'].some(key => Object.hasOwn(options, key))) {
+            return this.clanRecruitmentCandidates(options);
+        }
         const targetClanId = Math.max(0, Number(options.targetClanId) || 0);
         const minimumLevel = Math.max(1, Math.floor(Number(options.minLevel) || 1));
         const targetLevel = Math.max(minimumLevel, Math.floor(Number(options.targetLevel) || minimumLevel));
@@ -3109,6 +3112,48 @@ const BotLifeState = {
         });
     },
 
+    clanRecruitmentCandidates(options = {}) {
+        if (!initialized) return Promise.resolve([]);
+        const classIds = options.classIds === undefined ? null
+            : [...new Set((options.classIds || []).map(Number).filter(id => Number.isSafeInteger(id) && id >= 0))];
+        if (classIds && !classIds.length) return Promise.resolve([]);
+        const minLevel = Math.max(1, Math.floor(Number(options.minLevel) || 1));
+        const maxLevel = Math.min(100, Math.floor(Number(options.maxLevel) || 100));
+        if (maxLevel < minLevel) return Promise.resolve([]);
+        const limit = Math.max(1, Math.min(64, Math.floor(Number(options.limit) || 64)));
+        const targetClanId = Math.max(0, Number(options.targetClanId) || 0);
+        const cursor = options.cursor;
+        if (cursor && ![cursor.classId, cursor.level, cursor.characterId].every(value => Number.isSafeInteger(value) && value >= 0)) return Promise.resolve([]);
+        const unclanned = options.unclanned !== false;
+        const classClause = classIds ? `AND candidate.classId IN (${classIds.map(() => '?').join(',')})` : '';
+        const cursorClause = cursor ? 'AND (candidate.classId,candidate.level,candidate.characterId) > (?,?,?)' : '';
+        const params = [unclanned ? 0 : targetClanId, ...(classIds || []), minLevel, maxLevel,
+            ...(cursor ? [cursor.classId, cursor.level, cursor.characterId] : [])];
+        return Database.execute([
+            `SELECT states.*, candidate.classId AS candidateClassId, candidate.clanId AS candidateClanId
+            FROM bot_party_candidate_projection candidate INDEXED BY bot_party_candidate_recruitment
+            CROSS JOIN ${TABLE} states ON states.characterId = candidate.characterId
+            WHERE candidate.joinAvailability = 1 AND candidate.clanId ${unclanned ? '=' : '<>'} ?
+            ${classClause} AND candidate.level BETWEEN ? AND ? ${cursorClause}
+            AND NOT EXISTS (SELECT 1 FROM clan_operation_members reserved
+                WHERE reserved.characterId = candidate.characterId AND reserved.status = 'active')
+            ORDER BY candidate.classId,candidate.level,candidate.characterId LIMIT ${limit}`,
+            params, { read: true }
+        ], 'bot-life:clan-recruitment-candidates').then(rows => rows.map(row => {
+            const state = normalize(row);
+            state.classId = Number(row.candidateClassId);
+            state.clanId = Number(row.candidateClanId);
+            state.simulationOwner = state.simulation.ownerId;
+            state.partyId = state.party.partyId;
+            state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
+            state.candidateCursor = { classId: state.classId, level: state.level, characterId: state.characterId };
+            return state;
+        })).catch(err => {
+            utils.infoWarn('BotLife', 'failed to fetch clan recruitment candidates: %s', err.message);
+            return [];
+        });
+    },
+
     statesByIds(characterIds = [], options = {}) {
         if (!initialized) return Promise.resolve([]);
         const ids = [...new Set((characterIds || []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
@@ -3126,7 +3171,8 @@ const BotLifeState = {
         const params = [...ids, ...(ownerId ? [ownerId] : [])];
 
         return Database.execute([
-            `SELECT * FROM ${TABLE}
+            `SELECT ${TABLE}.*, c.classId AS canonicalClassId, c.clanId AS canonicalClanId FROM ${TABLE}
+            INNER JOIN characters c ON c.id = ${TABLE}.characterId
             WHERE characterId IN (${placeholders})
             ${ownerClause}
             ${unassignedClause}`,
@@ -3134,6 +3180,11 @@ const BotLifeState = {
             { read: true }
         ], 'bot-life:states-by-id').then((rows) => rows.map((row) => {
             const state = normalize(row);
+            state.classId = Number(row.canonicalClassId ?? state.stats?.classId ?? 0);
+            state.clanId = Number(row.canonicalClanId || 0);
+            state.simulationOwner = state.simulation.ownerId;
+            state.partyId = state.party.partyId;
+            state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             cache.set(state.characterId, state);
             return state;
         })).catch((err) => {

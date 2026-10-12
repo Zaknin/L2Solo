@@ -12,6 +12,7 @@ function checkMutationAdmission() {
 const Statements = require('./DatabaseStatements');
 const MarketTradeOverview = require('./MarketTradeOverview');
 const EconomyJournal = require('./EconomyJournal');
+const ClanReviewInputs = require('./GameServer/Clan/ClanReviewEvents');
 const PvpJournal = require('./PvpJournal');
 const CheckpointCoordinator = require('./DatabaseCheckpointCoordinator');
 const HistoryStore = require('./HistoryStore');
@@ -242,13 +243,18 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
         const startedAt = timed ? now() : 0;
         const wait = startedAt - queuedAt;
         EconomyJournal.begin(operation);
+        const candidateCheckpoint = connection?.isTransaction ? ClanReviewInputs.candidateCheckpoint() : null;
+        if (!connection?.isTransaction) ClanReviewInputs.beginCandidateCommit();
         try {
             const result = work();
             EconomyJournal.commit();
+            if (!connection?.isTransaction) ClanReviewInputs.commitCandidateInputs();
             if (timed) record(operation, wait, now() - startedAt, read);
             return result;
         } catch (error) {
             EconomyJournal.discard();
+            if (connection?.isTransaction) ClanReviewInputs.restoreCandidateCheckpoint(candidateCheckpoint);
+            else ClanReviewInputs.discardCandidateCommit();
             if (timed) record(operation, wait, now() - startedAt, read, true);
             throw error;
         } finally {
@@ -285,6 +291,7 @@ function run(sql, params = [], operation, readOverride = null, onTiming = null) 
         if (!isReadStatement(sql)) checkMutationAdmission();
         if (read) return normalizeRows(statement.all(...params));
         const result = statement.run(...params);
+        if (/^\s*ROLLBACK\s*(?:TRANSACTION\s*)?;?\s*$/i.test(sql)) ClanReviewInputs.discardCandidateCommit();
         return {
             affectedRows: Number(result.changes || 0),
             insertId: Number(result.lastInsertRowid || 0)
@@ -465,12 +472,14 @@ function performTransaction(work, operation) {
             const result = work();
             phase = 'commit';
             connection.exec('COMMIT');
+            ClanReviewInputs.commitCandidateInputs();
             publishNativeDiagnostics();
             return result;
         } catch (error) {
             reportTransactionSqliteFailure(operation, phase, error);
             try {
                 connection.exec('ROLLBACK');
+                ClanReviewInputs.discardCandidateCommit();
             } finally {
                 boardDealCountsReady = false;
                 boardCounterCountsReady = false;
@@ -545,13 +554,16 @@ async function inPreparedTransactionBatch(items, prepare, hooks, operation) {
             try {
                 if (index > 0) syncPreparedHook(before, id);
                 EconomyJournal.begin(operation);
+                ClanReviewInputs.beginCandidateCommit();
                 const prepared = prepare(id, index === 0 ? firstTimestamp : Date.now());
                 if (prepared && typeof prepared.then === 'function')
                     throw new TypeError('prepared_transaction_must_be_synchronous');
                 value = typeof prepared === 'function' ? performTransaction(prepared, operation) : prepared;
                 EconomyJournal.commit();
+                ClanReviewInputs.commitCandidateInputs();
             } catch (error) {
                 EconomyJournal.discard();
+                ClanReviewInputs.discardCandidateCommit();
                 syncPreparedHook(failed, id, error);
                 throw error;
             }
@@ -1674,6 +1686,7 @@ function applySchemaMigrations() {
         const shops = connection.prepare('DELETE FROM afk_trade_shops WHERE id = ?');
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
+    migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -3901,6 +3914,7 @@ const Database = {
             History.start({ worldPath: databasePath, historyPath, onMoved: deleteMovedOutbox,
                 transferMs: Number(options.default.Database?.historyTransferMs) || 200 });
             startEconomyJournal();
+            ClanReviewInputs.attach(connection);
             CheckpointCoordinator.start(databasePath, {
                 intervalMs: Number(options.default.Database?.checkpointIntervalMs) || 5000,
                 minWalBytes: Number(options.default.Database?.checkpointMinWalBytes) || (4 * 1024 * 1024)

@@ -159,19 +159,28 @@ function feasibility(members = [], profile = {}, readinessCache = null) {
     };
 }
 
-function composition(members = []) {
+function composition(members = [], options = {}) {
+    const desiredMembers = Math.max(MIN_MEMBERS, Math.min(MAX_MEMBERS, number(options.desiredMembers, MIN_MEMBERS)));
+    const capability = (member, kind) => !options.requireCapabilities
+        || require('./ClanCandidateCapabilities').contextualCapability(member, kind, { beneficiaries: members });
     const roles = ClanPolicy.roleCounts(members);
     const classified = members.map(raidRole);
     const tanks = classified.filter((role) => role === 'tank').length;
-    const healers = classified.filter((role) => role === 'healer').length;
-    const buffers = members.filter((member) => raidRole(member) === 'buffer').length;
+    const healers = members.filter(member => raidRole(member) === 'healer' && capability(member, 'healer')).length;
+    const buffers = members.filter((member) => raidRole(member) === 'buffer' && capability(member, 'mainBuffer')).length;
     const healingBuffers = members.filter((member) => (
-        raidRole(member) === 'buffer' && Roles.isHealingBuffer(member)
+        raidRole(member) === 'buffer' && Roles.isHealingBuffer(member) && capability(member, 'healingBuffer')
     )).length;
     const musicFighters = members.filter(Roles.isPartyMusicFighter).length;
     const damageRoles = classified.filter((role) => role === 'damage').length;
     const healingReady = healers >= 1 || healingBuffers >= 2;
-    const ready = members.length >= MIN_MEMBERS
+    const requirements = { members: desiredMembers, coreMembers: MIN_MEMBERS, tanks: 1, mainBuffers: 1,
+        damage: 2, healing: { healers: 1, healingBuffers: 2 } };
+    const deficits = { members: Math.max(0, desiredMembers - members.length), tanks: Math.max(0, 1 - tanks),
+        mainBuffers: Math.max(0, 1 - buffers), damage: Math.max(0, 2 - damageRoles),
+        healing: healingReady ? { healers: 0, healingBuffers: 0 }
+            : { healers: Math.max(0, 1 - healers), healingBuffers: Math.max(0, 2 - healingBuffers) } };
+    const ready = members.length >= desiredMembers
         && tanks >= 1
         && buffers >= 1
         && healingReady
@@ -185,7 +194,9 @@ function composition(members = []) {
         healingBuffers,
         musicFighters,
         damageRoles,
-        reason: members.length < MIN_MEMBERS ? 'raid_roster_small'
+        requirements,
+        deficits,
+        reason: members.length < desiredMembers ? 'raid_roster_small'
             : !tanks ? 'raid_tank_missing'
                 : !buffers ? 'raid_buffer_missing'
                     : !healingReady ? 'raid_healing_missing'
@@ -193,9 +204,12 @@ function composition(members = []) {
     };
 }
 
-function selectRaidMembers(members = [], readinessCache = null, beneficiary = null) {
+function selectRaidMembers(members = [], readinessCache = null, beneficiary = null, options = {}) {
+    const preferred = new Set((options.preferredMemberIds || []).map(number));
+    const preference = (left, right) => Number(preferred.has(memberId(right))) - Number(preferred.has(memberId(left)));
     const ranked = [...members].sort((left, right) => (
-        number(readinessFor(right, readinessCache).effectiveLevel, right.level)
+        preference(left, right)
+        || number(readinessFor(right, readinessCache).effectiveLevel, right.level)
         - number(readinessFor(left, readinessCache).effectiveLevel, left.level)
         || number(right.level) - number(left.level)
         || memberId(left) - memberId(right)
@@ -214,24 +228,38 @@ function selectRaidMembers(members = [], readinessCache = null, beneficiary = nu
     // long single-target preparation, but neither is a mandatory raid slot.
     const bufferPriority = member => Roles.roleClassId(member) === 52 ? 0
         : Roles.roleClassId(member) === 51 ? 1 : 2;
-    const buffers = ranked.filter(member => raidRole(member) === 'buffer')
-        .sort((a, b) => bufferPriority(a) - bufferPriority(b));
-    const healer = ranked.find((member) => raidRole(member) === 'healer');
+    const capable = (member, kind) => !options.requireCapabilities
+        || require('./ClanCandidateCapabilities').contextualCapability(member, kind, { beneficiaries: ranked });
+    const supportPriority = (left, right) => preference(left, right) || bufferPriority(left) - bufferPriority(right);
+    const buffers = ranked.filter(member => raidRole(member) === 'buffer' && capable(member, 'mainBuffer'))
+        .sort(supportPriority);
+    const healer = ranked.find((member) => raidRole(member) === 'healer' && capable(member, 'healer'));
     if (healer) add(healer);
-    else buffers.filter((member) => Roles.isHealingBuffer(member))
-        .slice(0, 2).forEach(add);
+    else {
+        const healingBuffers = options.requireCapabilities
+            ? ranked.filter(member => raidRole(member) === 'buffer' && Roles.isHealingBuffer(member) && capable(member, 'healingBuffer'))
+                .sort(supportPriority)
+            : buffers.filter(Roles.isHealingBuffer);
+        healingBuffers.slice(0, 2).forEach(add);
+    }
     add(buffers[0]);
     // Songs and dances are useful, but occupy ordinary damage slots rather
     // than the mandatory buffer/healer structure.
     const music = ranked.filter(member => Roles.isPartyMusicFighter(member));
-    add(music[0]);
-    add(music.find(member => Roles.roleClassId(member) !== Roles.roleClassId(music[0])));
+    const preferredMusic = preferred.size ? music.filter(member => preferred.has(memberId(member))) : music;
+    add(preferredMusic[0]);
+    add(preferredMusic.find(member => Roles.roleClassId(member) !== Roles.roleClassId(preferredMusic[0])));
     ranked.filter((member) => raidRole(member) === 'damage')
         .slice(0, 2)
         .forEach(add);
     const beneficiaryId = memberId(beneficiary);
     if (beneficiaryId && ranked.length > MAX_MEMBERS) {
         add(ranked.find((member) => memberId(member) === beneficiaryId));
+    }
+    if (preferred.size) {
+        ranked.filter(member => preferred.has(memberId(member))).forEach(add);
+        add(music[0]);
+        add(music.find(member => Roles.roleClassId(member) !== Roles.roleClassId(music[0])));
     }
     // Once support is covered, spare slots contribute damage before adding
     // another caster buffer. An extra support can still fill an empty slot.
@@ -241,6 +269,8 @@ function selectRaidMembers(members = [], readinessCache = null, beneficiary = nu
 }
 
 function assessment(clan = {}, profile = {}, previousGoal = null, options = {}) {
+    const desiredMembers = Math.max(MIN_MEMBERS, Math.min(MAX_MEMBERS, number(options.desiredMembers, MIN_MEMBERS)));
+    const compositionOptions = { desiredMembers, requireCapabilities: options.requireCapabilities === true || desiredMembers > MIN_MEMBERS };
     const readinessCache = options.readinessCache || new Map();
     const retained = new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean));
     const timestamp = Date.now();
@@ -250,13 +280,17 @@ function assessment(clan = {}, profile = {}, previousGoal = null, options = {}) 
     const candidates = available.filter((member) => (
         raidRole(member) !== 'filler' && combatCapable(member, profile, readinessCache)
     ));
-    const core = selectRaidMembers(candidates, readinessCache, options.beneficiary);
-    const coreComposition = composition(core);
+    const core = selectRaidMembers(candidates, readinessCache, options.beneficiary, { ...compositionOptions,
+        preferredMemberIds: options.preferredMemberIds });
+    const coreComposition = composition(core, { ...compositionOptions, desiredMembers: MIN_MEMBERS });
     if (!coreComposition.ready) {
-        const possibleComposition = composition(available.filter((member) => raidRole(member) !== 'filler'));
+        const possibleComposition = composition(available.filter((member) => raidRole(member) !== 'filler'), { ...compositionOptions, desiredMembers: MIN_MEMBERS });
         const reason = possibleComposition.ready ? 'raid_gear_insufficient' : coreComposition.reason;
-        return { ...coreComposition, ready: false, reason, eligible: core, candidates, available,
-            minMembers: MIN_MEMBERS, maxMembers: MAX_MEMBERS };
+        const demandComposition = composition(core, compositionOptions);
+        return { ...demandComposition, ready: false, reason, eligible: core, core, candidates, available,
+            deficits: { ...demandComposition.deficits, coreMembers: Math.max(0, MIN_MEMBERS - core.length),
+                gear: possibleComposition.ready ? 1 : 0, power: 0 },
+            minMembers: desiredMembers, maxMembers: MAX_MEMBERS };
     }
     const eligible = [...core];
     const selectedIds = new Set(eligible.map(memberId));
@@ -264,16 +298,18 @@ function assessment(clan = {}, profile = {}, previousGoal = null, options = {}) 
     // valuable than perfect equipment. Dwarves and other undergeared members
     // may fill them, but can never manufacture the core by themselves.
     if (eligible.length < MAX_MEMBERS) {
+        const preferred = new Set((options.preferredMemberIds || []).map(number));
         [...available]
             .filter((member) => !selectedIds.has(memberId(member)))
-            .sort((left, right) => number(right.level) - number(left.level) || memberId(left) - memberId(right))
+            .sort((left, right) => Number(preferred.has(memberId(right))) - Number(preferred.has(memberId(left)))
+                || number(right.level) - number(left.level) || memberId(left) - memberId(right))
             .forEach((member) => {
                 if (eligible.length >= MAX_MEMBERS) return;
                 eligible.push(member);
                 selectedIds.add(memberId(member));
             });
     }
-    const raidComposition = composition(eligible);
+    const raidComposition = composition(eligible, compositionOptions);
     const power = feasibility(core, profile, readinessCache);
     const raidEstimate = require('./ClanRaidEstimate').estimate(eligible, profile, readinessCache);
     const ready = raidComposition.ready && power.ready;
@@ -286,7 +322,10 @@ function assessment(clan = {}, profile = {}, previousGoal = null, options = {}) 
         core,
         raidEstimate,
         candidates,
-        minMembers: MIN_MEMBERS,
+        available,
+        deficits: { ...raidComposition.deficits, coreMembers: Math.max(0, MIN_MEMBERS - core.length),
+            gear: 0, power: power.ready ? 0 : 1 },
+        minMembers: desiredMembers,
         maxMembers: MAX_MEMBERS
     };
 }
