@@ -77,11 +77,22 @@ function fighter(id, classId, level, gear, extra = {}) {
     if (extra.shots) {
         const selfId = ShotStock.planForState(state).selfId;
         inventory[selfId] = { selfId, amount: extra.shots };
+        state.spotId = { 2: '28_10', 12: '31_7', 16: '9_35', 5: '18_7' }[classId];
+        assert(state.spotId, 'every shot fixture needs its verified native economic spot');
     }
     state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, ColdCombatProfile.skillRecordsFromTree(classId, level), TS);
     const profile = ColdCombatProfile.profileFor(state, TS);
     const hp = extra.hpRatio ? Math.round(profile.maxHp * extra.hpRatio) : profile.maxHp;
     return { ...state, vitals: { hp, mp: profile.maxMp } };
+}
+function assertNativeHeldPolicy(state) {
+    if (!state.spotId) return;
+    assert.strictEqual(invoke('GameServer/ProgressionRates').profile().multiplier, 1);
+    const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, TS);
+    assert.strictEqual(hunt.spotId, state.spotId, 'the actual native economic hunt supports this shot actor');
+    const plan = ShotStock.combatPlanForState(state);
+    assert(ShotStock.usePolicy(state, { timestamp: TS, plan }).usePerHour > 0,
+        'native owned-shot permission precedes the physical golden');
 }
 function spotFor(npcId) {
     const npc = DataCache.npcs.find((n) => n.selfId === npcId);
@@ -165,6 +176,7 @@ const SOLO_GOLDEN = {
     'bishop with spiritshots': { won: true, died: false, hp: 1121, mp: 2542, charges: 0, actions: 14, durationMs: 11548, skillUses: 4, shotActions: 4, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null }
 };
 for (const [name, state, npcId, seed, limitMs, maxActions] of SOLO) {
+    assertNativeHeldPolicy(state);
     assert.deepStrictEqual(soloOutcome(state, npcId, seed, limitMs, maxActions), SOLO_GOLDEN[name], `solo: ${name}`);
 }
 
@@ -210,6 +222,7 @@ const PARTY_GOLDEN = {
             [1016, 1290, 2542, 6, 4, 4, 0, 0, 0]] }
 };
 for (const [name, members, npcId, seed] of PARTY) {
+    members.forEach(assertNativeHeldPolicy);
     assert.deepStrictEqual(partyOutcome(members, npcId, seed), PARTY_GOLDEN[name], `party: ${name}`);
 }
 

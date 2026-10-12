@@ -1,4 +1,6 @@
 const assert = require('assert');
+const originalRate = process.env.L2NODE_PROGRESSION_RATE;
+process.env.L2NODE_PROGRESSION_RATE = 'x10';
 require('../src/Global');
 const Cache = invoke('GameServer/DataCache'); Cache.init();
 const Cold = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -6,11 +8,13 @@ const Solo = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Party = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Formulas = invoke('GameServer/Formulas');
+const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const original = Cold.npcForSpot;
 const at = Date.now();
 const spot = { id: 'shot-consumption', name: 'Shot check', minLevel: 12, maxLevel: 12, avgLevel: 12,
     density: 1, rewards: { exp: 1000, sp: 10, adenaMin: 1, adenaMax: 1 } };
 const base = { characterId: 901, name: 'Fighter', level: 12, phase: 'cold', activity: 'hunting',
+    spotId: '-18_39',
     loc: { locX: 0, locY: 0, locZ: 0 },
     inventory: { 129: { selfId: 129, amount: 1, equipped: true, slot: 7 },
         1463: { selfId: 1463, amount: 1000 } },
@@ -23,6 +27,13 @@ const base = { characterId: 901, name: 'Fighter', level: 12, phase: 'cold', acti
             skills: [], effects: [] } } };
 Cold.npcForSpot = () => ({ level: 12, maxHp: 100000, pAtk: 1, pAtkRnd: 0,
     pDef: 200, mDef: 100, accur: 1, evasion: 0, critical: 0, atkSpd: 500 });
+function assertNativeHeldPolicy(state) {
+    const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, at);
+    assert.strictEqual(hunt.spotId, state.spotId, 'the actual native economic hunt supports this actor');
+    const plan = ShotStock.combatPlanForState(state);
+    assert(ShotStock.usePolicy(state, { timestamp: at, plan }).usePerHour > 0,
+        'native owned-shot permission precedes the physical consumption check');
+}
 async function check(state, result) {
     const projected = await Life.prepareResolve(state, result, { persist: false, timestamp: at, projectClassProgression: true });
     const perAction = Cache.items.find(item => item.selfId === 129).etc.soulshot;
@@ -31,6 +42,7 @@ async function check(state, result) {
 }
 // A party of one counts its own turns (`actions`), so every turn is checked.
 function fightAlone(state, mob, rng = () => .5) {
+    assertNativeHeldPolicy(state);
     const stub = Cold.npcForSpot;
     Cold.npcForSpot = () => ({ ...stub(), ...mob });
     try { return Solo.resolvePartyFight({ members: [state], spot, rng, timestamp: at }).members[0]; }
@@ -43,6 +55,7 @@ function withSkills(skills, patch = {}) {
     Object.assign(state.vitals, patch.vitals || {});
     if (patch.classId !== undefined) {
         state.stats.classId = state.stats.coldCombat.classId = state.stats.classProgressionClassId = patch.classId;
+        state.spotId = [10, 15].includes(patch.classId) ? '7_41' : base.spotId;
     }
     Object.assign(state.inventory, patch.inventory || {});
     return state;
@@ -122,6 +135,7 @@ function checkGradeMismatch() {
 async function checkStockRunsOut() {
     const state = withSkills([]);
     state.inventory[1463].amount = 7; // Sword of Revolution takes 3 per shot: two shots, 1 left
+    assertNativeHeldPolicy(state);
     const result = Solo.resolveSolo({ state, spot, elapsedMs: 12000, timestamp: at, rng: () => .5 });
     assert.strictEqual(result.debug.shotActions, 2, 'only the shots the stock covers are loaded');
     const projected = await Life.prepareResolve(state, result, { persist: false, timestamp: at, projectClassProgression: true });
@@ -135,10 +149,13 @@ async function checkStockRunsOut() {
     assert(many.debug.wins > 1 && many.debug.shotActions === 2, 'the stock is shared by the fights of a resolve');
     const empty = withSkills([]);
     empty.inventory[1463].amount = 2;
+    assertNativeHeldPolicy(empty);
     assert.strictEqual(Solo.resolveSolo({ state: empty, spot, elapsedMs: 12000, timestamp: at, rng: () => .5 }).debug.shotActions, 0,
         'fewer than one charge loads nothing');
 }
 (async () => {
+    assert.strictEqual(invoke('GameServer/ProgressionRates').profile().multiplier, 10);
+    assertNativeHeldPolicy(base);
     const solo = Solo.resolveSolo({ state: base, spot, elapsedMs: 12000, timestamp: at, rng: () => .5 });
     assert(solo.debug.shotActions < solo.debug.combatActions, 'enemy turns must not spend the bot shots');
     await check(base, solo);
@@ -149,6 +166,7 @@ async function checkStockRunsOut() {
         return state;
     });
     const party = { partyId: 'shots-party', memberIds: [901, 902], leaderId: 901, spotId: spot.id, stats: {} };
+    members.forEach(assertNativeHeldPolicy);
     const result = Party.resolve({ party, members, spot, elapsedMs: 12000, timestamp: at, rng: () => .5 });
     assert(result.memberResults.every(member => member.result.debug.shotActions > 0),
         'every attacking member gets their own counter, including non-telemetry owners');
@@ -163,4 +181,8 @@ async function checkStockRunsOut() {
     console.log('Cold shots: solo excludes enemies, every party member pays own weapon cost; '
         + 'a cast, a skill or a landed hit spends, a miss does not; shots boost damage as hot, only the weapon grade loads, '
         + 'the debit equals the shots used');
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => { Cold.npcForSpot = original; });
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
+    Cold.npcForSpot = original;
+    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+});

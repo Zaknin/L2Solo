@@ -78,7 +78,7 @@ function pure(Shot, Restock, states, lines) {
     };
 }
 
-function nativeInputs(Data, Potions) {
+async function nativeInputs(Data, Potions) {
     const ranks = ['none', 'd', 'c', 'b', 'a', 's'];
     const weapons = ranks.map(rank => Data.items.filter(item => item.template?.kind?.startsWith('Weapon.')
         && Number(item.etc?.slot) === 7 && (item.etc.rank || 'none') === rank)
@@ -94,6 +94,42 @@ function nativeInputs(Data, Potions) {
                 equipped: true, slot: 7, amount: 1 }
         }
     }))];
+    // Keep the full grade/class matrix. SQL refusal needs its own actor whose
+    // native hunt actually funds a physical healing restock.
+    const nativeStock = require('./fixtures/profitable_stock_state');
+    const spot = nativeStock.spotFor('7_20');
+    const healthy = { characterId: 990199, phase: 'cold', activity: 'hunting', level: 30,
+        exp: Data.experience[29], adena: 100000, spotId: spot.id,
+        stats: { classId: 0 }, inventory: { ...nativeStock.kitFor(0, 30).inventory,
+            57: { selfId: 57, amount: 100000 }, 1061: { selfId: 1061, amount: 3 } } };
+    const positive = structuredClone(healthy);
+    positive.inventory[1061].amount = 1;
+    assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(healthy).required, false);
+    const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(healthy, clock);
+    assert.equal(hunt.spotId, spot.id); assert(hunt.perHour > 0);
+    const nativeDecision = require('./helpers/workerEconomyDecision');
+    const captured = await nativeDecision(healthy, { nativeRoutes: true, timestamp: clock });
+    assert(captured.reserveInputs.stocks.find(row => row.selfId === 1061)?.perHour > 0,
+        'the native selected hunt has positive healing demand');
+    healthy.stats = { ...healthy.stats, ...captured.statsPacket };
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const healthyContext = Economy.basics(healthy, { timestamp: clock });
+    const healthyStock = healthyContext.stock('potions');
+    assert.equal(healthyStock.target, 4); assert.equal(healthyStock.current, 3);
+    assert.equal(healthyStock.benefitPerUnit, 0);
+    assert.equal(healthyStock.survivalMissing, 0);
+    assert.equal(healthyContext.kitCost(1061, 330), 0);
+    assert.equal(captured.queue.some(row => row.object?.itemId === 1061), false,
+        'covered survival stock with no expected benefit creates no potion wish');
+    assert.equal(Potions.restockPlan(healthy).affordable, false);
+    const positiveCaptured = await nativeDecision(positive, { nativeRoutes: true, timestamp: clock });
+    assert(positiveCaptured.reserveInputs.stocks.find(row => row.selfId === 1061)?.perHour > 0);
+    positive.stats = { ...positive.stats, ...positiveCaptured.statsPacket };
+    const positiveContext = Economy.basics(positive, { timestamp: clock });
+    assert.equal(positiveContext.stock('potions').survivalMissing, 1);
+    assert.equal(positiveContext.kitCost(1061, 330), 330,
+        'the native missing survival unit admits its actual physical purchase tranche');
+    states.push(healthy, positive);
     const lines = states.map(state => {
         const potion = Potions.purchasePotionFor(state);
         const item = Data.items.find(item => item.selfId === potion.selfId);
@@ -104,11 +140,13 @@ function nativeInputs(Data, Potions) {
         return { selfId: potion.selfId, name: potion.name, currentAmount: stock.currentAmount,
             amount: stock.amount, unitPrice: stock.unitPrice, cost: stock.cost, adena: stock.adena };
     });
-    const positiveLineIndex = states.findIndex(state => state.level === 52);
+    const positiveLineIndex = states.length - 1;
+    assert.deepEqual({ amount: lines[positiveLineIndex - 1].amount, cost: lines[positiveLineIndex - 1].cost },
+        { amount: 0, cost: 0 }, 'three held healthy potions do not force a native purchase');
     assert.deepEqual({ selfId: lines[positiveLineIndex].selfId, amount: lines[positiveLineIndex].amount,
         unitPrice: lines[positiveLineIndex].unitPrice, cost: lines[positiveLineIndex].cost },
-    { selfId: 1061, amount: 7, unitPrice: 330, cost: 2310 },
-    'the real SQL-refusal control uses the native funded level-52 potion line');
+    { selfId: 1061, amount: 1, unitPrice: 330, cost: 330 },
+    'one held potion leaves one native survival unit funded at its actual price');
     return { states, lines, positiveLineIndex };
 }
 
@@ -172,7 +210,7 @@ function catalogHash(Data) {
 async function main(Data, sqlOpens, isolated) {
     const Shot = invoke('GameServer/Inventory/ShotStock');
     const Restock = invoke('GameServer/Inventory/ConsumableRestock');
-    const inputs = nativeInputs(Data, invoke('GameServer/Bot/AI/HealingPotionStock'));
+    const inputs = await nativeInputs(Data, invoke('GameServer/Bot/AI/HealingPotionStock'));
     const inputHash = digest({ states: inputs.states, lines: inputs.lines });
     const expected = pure(Shot, Restock, inputs.states, inputs.lines);
     assert.equal(digest({ states: inputs.states, lines: inputs.lines }), inputHash);
@@ -202,7 +240,8 @@ async function main(Data, sqlOpens, isolated) {
         exactMainWorker: true, outputHash: digest(expected), inputHash,
         catalogHash: result.catalogHash, sqlRefusals: result.sqlRefusals,
         actorMutations: result.actorMutations, nativeSqlOpens: result.sqlOpens,
-        nativeThreadId: result.threadId, positiveNativeLevel: 52, positiveNativeCost: inputs.lines[inputs.positiveLineIndex].cost }));
+        nativeThreadId: result.threadId, positiveNativeLevel: inputs.states[inputs.positiveLineIndex].level,
+        positiveNativeCost: inputs.lines[inputs.positiveLineIndex].cost }));
 }
 
 async function run() {
