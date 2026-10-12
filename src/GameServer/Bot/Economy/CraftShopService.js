@@ -43,7 +43,7 @@ const STATION_LAYOUT = [
     ['b', 'heavy', 'B Heavy: Blue Wolf & Doom', [386, 390, 406, 410, 422, 392, 408, 412, 428, 384]],
     ['b', 'robe', 'B Robes: Avadon, Blue Wolf & Doom', [372, 374, 376, 426, 398, 402, 400, 404]],
     ['b', 'light', 'B Light: Blue Wolf & Doom', [394, 410, 422, 396, 412, 428]],
-    ['b', 'weapons', 'B Grade Weapons'],
+    ['b', 'weapons', 'B Weapons: Top', [439, 459, 461, 463, 465, 467, 469, 471, 473]],
     ['b', 'jewelry', 'B Jewelry: Black Ore', [335, 337, 339]],
     ['a', 'heavy', 'A Heavy: Dark Crystal & Tallum', [554, 562, 564, 546, 538, 534, 556, 566, 548, 540]],
     ['a', 'robe', 'A Robes: DC, Tallum, Nightmare, Majestic', [526, 524, 528, 530]],
@@ -65,7 +65,10 @@ const STATION_LAYOUT = [
     // the catalogue intentionally mirrors the entry, mid and late tiers.
     ['c', 'weapons', 'C Weapons: Entry', [191, 192, 198, 199, 201, 205], 'c_weapons_entry'],
     ['c', 'weapons', 'C Weapons: Mid', [208, 209, 213, 214, 216, 217, 312], 'c_weapons_mid'],
-    ['c', 'weapons', 'C Weapons: Late', [220, 222, 223, 228, 230, 234, 237, 238, 240], 'c_weapons_late']
+    ['c', 'weapons', 'C Weapons: Late', [220, 222, 223, 228, 230, 234, 237, 238, 240], 'c_weapons_late'],
+    // B needs both entry weapons and physical/caster blunts. Selecting one
+    // recipe per weapon kind hid axes behind the most expensive staff.
+    ['b', 'weapons', 'B Weapons: Entry', [437, 441, 443, 445, 447, 449, 451, 453, 455, 457], 'b_weapons_entry']
 ];
 
 // Position groups independently from generated account slots.  Existing craft
@@ -74,12 +77,12 @@ const STATION_LAYOUT = [
 const STATION_LOCATION_ORDER = Object.freeze([
     'd_heavy', 'd_robe', 'd_light', 'd_weapons', 'd_jewelry',
     'c_heavy', 'c_robe', 'c_light', 'c_weapons_entry', 'c_weapons_mid', 'c_weapons_late', 'c_weapons_top', 'c_jewelry',
-    'b_heavy', 'b_robe', 'b_light', 'b_weapons', 'b_jewelry',
+    'b_heavy', 'b_robe', 'b_light', 'b_weapons_entry', 'b_weapons', 'b_jewelry',
     'a_heavy', 'a_robe', 'a_light', 'a_weapons', 'a_jewelry', 'a_heavy_elite',
     's_heavy', 's_robe', 's_light', 's_weapons', 's_jewelry',
     'resource_core', 'resource_master'
 ]);
-// 31 offers fit on the outer frame at a regular 238-unit interval.  If the
+// 32 offers fit on the outer frame at a regular 231-unit interval. If the
 // catalogue grows beyond this compact ring, add a second full perimeter around
 // the central column rather than filling its interior in partial rows.
 const GiranCraftStalls = perimeterStalls(GIRAN_CRAFT_OUTER, STATION_LOCATION_ORDER.length);

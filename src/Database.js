@@ -2234,6 +2234,24 @@ function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, wall
     if (!Number.isFinite(amount) || amount > budget) throw Error('economy_funding_changed');
 }
 
+// A validated personal recipe consumes its own goal's inputs. Other gear,
+// clan and explicit item reservations still belong to their original owner.
+function prepareCraftReservationsUnsafe(step, recipe) {
+    if (!step || !recipe) return;
+    const stats = jsonObject(step.row.statsJson), plan = stats.equipmentPlan;
+    if (plan?.strategy !== 'craft' || plan.clanGoal?.clanId
+        || !['active', 'component_ready', 'ready_to_craft'].includes(plan.status)) return;
+    const final = Number(plan.recipeId) === Number(recipe.recipeId)
+        && Number(plan.target?.selfId) === Number(recipe.productId);
+    const component = Number(recipe.productId) !== Number(plan.target?.selfId)
+        && Number(plan.componentRecipes?.[recipe.productId]) === Number(recipe.recipeId);
+    if (!final && !component) return;
+    step.reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts({
+        level: Number(step.row.level), phase: step.row.phase, stats,
+        inventory: jsonObject(step.row.inventorySummary)
+    }, { craft: false });
+}
+
 function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (!step) return;
     const stats = jsonObject(step.row.statsJson), inventory = jsonObject(step.row.inventorySummary);
@@ -7515,6 +7533,7 @@ const Database = {
                 for (const material of materials) supplied.set(Number(material.selfId),
                     (supplied.get(Number(material.selfId)) || 0) + Number(material.amount));
                 if (required.size !== supplied.size || [...required].some(([id, amount]) => supplied.get(id) !== amount)) throw Error('craft_recipe_materials_changed');
+                prepareCraftReservationsUnsafe(step, recipe);
                 for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(characterId, step, id, amount);
                 if (!product || Number(product.selfId) !== Number(recipe.productId)
                     || Number(product.amount) !== Number(recipe.productCount) * batches) throw Error('craft_product_changed');
@@ -7620,7 +7639,6 @@ const Database = {
             const character = one('SELECT race FROM characters WHERE id = ?', [characterId]);
             const skill = one('SELECT level FROM skills WHERE characterId = ? AND selfId = 1372', [characterId]);
             const capacity = require('./GameServer/Inventory/InventoryLimits').capacity(character?.race, skill?.level);
-            if (slots + count > capacity) throw Error('multisell_inventory_full');
             const consumed = [];
             for (const ingredient of recipe.required) {
                 const rows = all('SELECT id, selfId, amount, equipped FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id',
@@ -7635,6 +7653,9 @@ const Database = {
                 }
                 if (remaining) throw Error('multisell_missing_materials');
             }
+            validate?.([], consumed);
+            const freedSlots = consumed.filter(row => row.remaining === 0).length;
+            if (slots - freedSlots + count > capacity) throw Error('multisell_inventory_full');
             for (const row of consumed) {
                 if (row.remaining) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [row.remaining, row.id, characterId]);
                 else write('DELETE FROM items WHERE id = ? AND characterId = ?', [row.id, characterId]);
@@ -8109,6 +8130,7 @@ const Database = {
                     || product && (Number(product.selfId) !== Number(recipe.productId)
                         || Number(product.amount) !== Number(recipe.productCount) * batches)) throw new Error('workshop recipe changed');
                 if (step) {
+                    prepareCraftReservationsUnsafe(step, recipe);
                     for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(customerId, step, id, amount);
                     checkEconomyFundingUnsafe(customerId, step, Number(price), { ...funding, itemId: Number(recipe.productId) });
                     const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(recipe.productId));

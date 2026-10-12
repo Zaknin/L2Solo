@@ -46,6 +46,23 @@ for (const [recipeId, stationId] of firstStation) {
 }
 
 assert.strictEqual(CraftShopService.publishedStationRecipes(), published, 'the table is built once per item catalogue');
+const template = id => DataCache.items.find(item => Number(item.selfId) === Number(id));
+const bWeaponRecipes = allowed.filter(recipe => recipe.successRate === 100
+    && template(recipe.productId)?.etc?.rank === 'b'
+    && template(recipe.productId)?.template?.kind.startsWith('Weapon.'));
+assert.strictEqual(bWeaponRecipes.length, 19, 'native B weapons include physical and caster blunts');
+for (const recipe of bWeaponRecipes) {
+    const station = published.stationByRecipeId.get(recipe.recipeId);
+    assert(station?.id === 'b_weapons' || station?.id === 'b_weapons_entry',
+        `${template(recipe.productId).template.name} must have a published B weapon station`);
+}
+assert.strictEqual(CraftShopService.CraftStations[13].id, 'b_weapons', 'existing B crafter account keeps its station');
+assert.strictEqual(CraftShopService.CraftStations[31].id, 'b_weapons_entry', 'the entry station is appended after existing accounts');
+const entry = CraftShopService.profileFor({ level: 70, accountName: 'bot_craft_32', stats: { classId: 57 } });
+assert.strictEqual(entry.stationId, 'b_weapons_entry');
+assert(entry.entries.some(row => row.recipeId === 457), 'the new station publishes Great Axe');
+assert(entry.entries.some(row => row.recipeId === 441), 'the new station publishes Heavy War Axe');
+assert(entry.entries.length <= CraftShopService.MAX_PUBLIC_RECIPES, 'the native public recipe limit is respected');
 const originalItems = DataCache.items;
 DataCache.items = originalItems.filter((item) => Number(item.selfId) !== Number(published.recipes[0].productId));
 try {

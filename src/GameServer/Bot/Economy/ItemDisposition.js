@@ -389,7 +389,7 @@ function reservedUpgradeAmounts(state) {
 
 function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
-    const craft = reservedCraftAmounts(state);
+    const craft = options.craft === false ? {} : reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
     const upgrades = reservedUpgradeAmounts(state);
     const exchange = state.stats?.equipmentPlan;

@@ -110,7 +110,7 @@ async function run() {
     const seed = new DatabaseSync(options.default.Database.path);
     seed.exec(fs.readFileSync(path.resolve(__dirname, '../database/sql/sqlite.sql'), 'utf8'));
     seed.prepare("INSERT INTO accounts(username, password) VALUES ('luxury_test', 'test')").run();
-    for (const id of [1,2,3]) seed.prepare(`INSERT INTO characters(id, username, name, classId, race, level, maxHp, maxMp, sex, face, hair, hairColor, locX, locY, locZ)
+    for (const id of [1,2,3,4,5,6,7]) seed.prepare(`INSERT INTO characters(id, username, name, classId, race, level, maxHp, maxMp, sex, face, hair, hairColor, locX, locY, locZ)
         VALUES (?, 'luxury_test', ?, 0, 0, 40, 100, 100, 0, 0, 0, 0, 79599, 145522, -3494)`).run(id, `LuxuryTest${id}`);
     seed.close();
     Database.init(); Data.init();
@@ -148,7 +148,6 @@ async function run() {
     await Opcodes.table[0xa7](buyer,choose(7097,400000,1));
     assert.equal(buyer.packets.at(-2).readInt32LE(1),422);
     buyer.actor.maxLoad = 1000000;
-    await assert.rejects(Shop.exchange(buyer,7097,400000,79), /inventory_full/);
     await Opcodes.table[0xa7](buyer,choose(7097,500000,3));
     assert.equal(buyer.packets.at(-2).readInt32LE(1),351, 'insufficient crystals use the C4 message');
     assert.deepEqual(await Database.fetchItems(1), before);
@@ -194,16 +193,56 @@ async function run() {
     assert.equal(count(empty,161),1,'ingredients can span several inventory rows');
     assert.equal(count(empty,1459),0); assert.equal(count(empty,1458),0,'exhausted crystal rows are removed');
     assert.equal((await Database.fetchItems(3)).length,1);
+    const crowded = sessionFor(4);
+    open(crowded,7097);
+    await add(crowded,1459,573); await add(crowded,1458,2865);
+    for (let i = 0; i < 78; i++) await add(crowded,17,1);
+    assert.equal(crowded.actor.backpack.fetchItems().length,80);
+    await Shop.exchange(crowded,7097,400000,1);
+    assert.equal(crowded.actor.backpack.fetchItems().length,79,'two exhausted crystal stacks free slots before the new weapon');
+    assert.equal((await Database.fetchItems(4)).length,79,'physical inventory uses the same final slot count');
+    assert.equal(count(crowded,161),1); assert.equal(count(crowded,1459),0); assert.equal(count(crowded,1458),0);
+    const split = sessionFor(6);
+    open(split,7097);
+    await add(split,1459,300); await add(split,1459,273);
+    await add(split,1458,2000); await add(split,1458,865);
+    for (let i = 0; i < 76; i++) await add(split,17,1);
+    await Shop.exchange(split,7097,400000,1);
+    assert.equal(split.actor.backpack.fetchItems().length,77,'all four fully consumed rows free inventory slots');
+    assert.equal((await Database.fetchItems(6)).length,77);
+    const mixed = sessionFor(7);
+    await add(mixed,1459,573); await add(mixed,1458,2866);
+    for (let i = 0; i < 78; i++) await add(mixed,17,1);
+    const direct = await Database.exchangeLuxuryItems(7,{listId:7097,entryId:400000,amount:1});
+    assert.equal(direct.products.length,1,'the native transaction also works without a UI validation callback');
+    const mixedItems = await Database.fetchItems(7);
+    assert.equal(mixedItems.length,80,'only the exhausted C-crystal stack frees a slot');
+    assert.equal(mixedItems.find(item => item.selfId===1458).amount,1,'a partial crystal stack still occupies its slot');
     await add(empty,1459,1146); await add(empty,1458,5730);
     for (let i = 0; i < 77; i++) await add(empty,17,1);
-    await assert.rejects(Shop.exchange(empty,7097,400000,2),/inventory_full/,'normal inventory has 80 slots');
-    empty.actor.fetchRace = () => 4;
-    await Database.execute(['UPDATE characters SET race=4 WHERE id=3']);
     await Shop.exchange(empty,7097,400000,2);
-    assert.equal(count(empty,161),3,'dwarven inventory capacity also applies in the transaction');
+    assert.equal(count(empty,161),3,'two freed stacks can fund two outputs at the normal capacity');
+    assert.equal((await Database.fetchItems(3)).length,80);
     assert.deepEqual(receipts(empty).at(-1),Response.consoleText(29,[{kind:3,value:161},{kind:1,value:2}]),
         'receipt reports the two new items even when another copy is already owned');
-    const dwarfItems = await Database.fetchItems(3);
+    const dwarf = sessionFor(5);
+    open(dwarf,7097);
+    await add(dwarf,1459,1147); await add(dwarf,1458,5731);
+    for (let i = 0; i < 78; i++) await add(dwarf,17,1);
+    const fullBefore = await Database.fetchItems(5);
+    await assert.rejects(Shop.exchange(dwarf,7097,400000,2),/inventory_full/,'partial stacks free no slots in the live backpack');
+    await assert.rejects(Database.exchangeLuxuryItems(5,{listId:7097,entryId:400000,amount:2}),/inventory_full/,
+        'the native transaction independently rejects final inventory overflow');
+    assert.deepEqual(await Database.fetchItems(5),fullBefore,'overflow spends no crystals');
+    assert.equal(dwarf.actor.backpack.fetchItems().length,80);
+    dwarf.actor.fetchRace = () => 4;
+    await Database.execute(['UPDATE characters SET race=4 WHERE id=5']);
+    await Shop.exchange(dwarf,7097,400000,2);
+    assert.equal(count(dwarf,161),2,'dwarven inventory capacity also applies in the transaction');
+    assert.equal((await Database.fetchItems(5)).length,82);
+    assert.deepEqual(receipts(dwarf).at(-1),Response.consoleText(29,[{kind:3,value:161},{kind:1,value:2}]),
+        'dwarven exchange reports the received quantity');
+    const dwarfItems = await Database.fetchItems(5);
     for (const flag of ['activeTrade','activeEnchantItem','botTrade']) {
         buyer[flag] = {};
         await assert.rejects(Shop.exchange(buyer,7098,1300000,1),/unavailable/);
@@ -213,7 +252,7 @@ async function run() {
     assert.equal(buyer.activeMultiSell,null,'a new NPC conversation invalidates the old list');
     await Database.close(); Database.init();
     assert.deepEqual(await Database.fetchItems(1),unchanged,'native purchases survive SQLite reopen');
-    assert.deepEqual(await Database.fetchItems(3),dwarfItems);
+    assert.deepEqual(await Database.fetchItems(5),dwarfItems);
     console.log('PASS luxury multisell: 38 C4 entries, native packet route, quantities, exact crystal costs, guards, atomic rollback and SQLite reopen');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

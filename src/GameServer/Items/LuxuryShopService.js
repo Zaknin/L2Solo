@@ -41,7 +41,7 @@ async function exchange(session, listId, entryId, amount) {
         || listId !== npc.fetchSelfId() || context.npcObjectId !== npc.fetchId()
         || !recipe || !Number.isInteger(amount) || amount < 1 || amount > 5000) throw Error('invalid_multisell_selection');
     const product = ItemTemplateIndex.find(Data.items, recipe.result.selfId);
-    const validate = (rows = []) => {
+    const validate = (rows = [], consumed = null) => {
         if (session.actor !== actor || session.activeMultiSell !== context || nearby(session).fetchId() !== context.npcObjectId)
             throw Error('multisell_interrupted');
         for (const row of rows) {
@@ -49,7 +49,11 @@ async function exchange(session, listId, entryId, amount) {
             if (!item || item.fetchSelfId() !== row.selfId || item.fetchAmount() !== row.amount
                 || item.fetchEquipped() || item.fetchPetLocked?.()) throw Error('multisell_materials_changed');
         }
-        if (actor.backpack.fetchItems().length + amount * recipe.result.amount > InventoryLimits.forActor(actor)) throw Error('multisell_inventory_full');
+        if (consumed) {
+            const freedSlots = consumed.filter(row => row.remaining === 0).length;
+            if (actor.backpack.fetchItems().length - freedSlots + amount * recipe.result.amount > InventoryLimits.forActor(actor))
+                throw Error('multisell_inventory_full');
+        }
         if (actor.backpack.fetchTotalLoad() + product.template.mass * amount * recipe.result.amount > actor.fetchMaxLoad())
             throw Error('multisell_weight_limit');
     };

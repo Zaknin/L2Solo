@@ -29,7 +29,7 @@ const adapters = {
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
         powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
-    'GameServer/Items/C4RecipeItems': { resolveByProductId: id => allowCraft && id === 101 ? recipe : null, resolveByRecipeId: id => id === 301 ? recipe : null },
+    'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? [recipe] : [], resolveByRecipeId: id => id === 301 ? recipe : null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => true },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
@@ -91,11 +91,12 @@ const provider = load('WishProviders.js' , name => {
     // catalogue) and the shared equipment rule (82e5323c, d300b1b7).
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true,
         allowsRecipe: recipe => !!recipe };
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), acquisitionRankFor: () => 'c', gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name === './PriceDecision') return producerPrice;
+    if (name === './ShotTradeDemand') return { isShot: () => false, forecast: () => null };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;

@@ -35,7 +35,7 @@ const adapters = {
             return { pAtk: 100 * (1 + (worn ? gains.get(worn.selfId) : 0)), pDef: 100, mDef: 100 };
         }, buildOptions: () => ({}) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => opportunities, crystalPath: () => null },
-    'GameServer/Items/C4RecipeItems': { resolveByProductId: id => recipes.get(Number(id)) || null,
+    'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => recipes.has(Number(id)) ? [recipes.get(Number(id))] : [],
         resolveByRecipeId: id => [...recipes.values()].find(row => row.recipeId === Number(id)) || null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => true, isServiceCrafter: () => false },
@@ -81,7 +81,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return Diagnostics;
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return tracked;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), acquisitionRankFor: () => 'c', gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');

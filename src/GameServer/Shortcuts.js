@@ -6,6 +6,7 @@ async function refreshSkills(session, actor) {
     if (session.accountId?.startsWith('bot_')) return;
     try {
         const shortcuts = await Database.fetchShortcuts(actor.fetchId());
+        if (session.actor !== actor) return;
         for (const shortcut of shortcuts) {
             if (shortcut.kind !== 2) continue;
             const skill = actor.skillset.fetchSkill(shortcut.id);

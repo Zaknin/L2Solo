@@ -477,10 +477,13 @@ function buildProjection(state, ctx, deps) {
         if (drop) paths.push(drop);
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
-        const recipe = Recipes.resolveByProductId(id) || invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
-            .find(row => Number(row.productId) === Number(id));
-        const craft = craftPath(recipe, id, depth);
-        if (craft) paths.push(craft);
+        const recipes = Recipes.resolveVariantsByProductId(id);
+        const alternatives = recipes.length ? recipes : invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
+            .filter(row => Number(row.productId) === Number(id));
+        for (const recipe of alternatives) {
+            const craft = craftPath(recipe, id, depth);
+            if (craft) paths.push(craft);
+        }
         const exchange = luxury?.get(Number(id));
         if (exchange) {
             const requirements = exchange.materials.map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
@@ -1134,7 +1137,7 @@ function personalCraftPlan(state, context) {
         valueRate: Number(wish.ratio || 0), source: 'wish_network' };
     if (!finalRecipe) return null;
     return { strategy: 'craft', status: 'active',
-        target: { selfId: targetId },
+        target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) },
         ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
             selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
         recipeId: Number(finalRecipe.recipeId), outputAmount: Number(wish.object.amount || 1),
