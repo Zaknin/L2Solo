@@ -80,6 +80,32 @@ async function sharedModulesStayPure() {
 async function parityAndIntegration() {
     DataCache.init();
     const context = await Runtime.context();
+    const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+    const wearableIds = new Set(DataCache.items.filter(item => Number(item.etc?.slot) > 0)
+        .map(item => Number(item.selfId)));
+    const expectedPrices = [...new Set(invoke('GameServer/World/Generics/NpcShopBuyLists').allEntries()
+        .map(entry => Number(entry.selfId)))].filter(id => !wearableIds.has(id))
+        .map(selfId => ({ selfId, price: pricing.npcPrice({ selfId }) }))
+        .filter(row => Number.isFinite(row.price) && row.price > 0);
+    assert.deepEqual(context.npcPriceRows, expectedPrices,
+        'the compact snapshot covers every native positive nonwearable NPC quote');
+    assert.equal((await Runtime.context()).npcPriceRows, context.npcPriceRows,
+        'scalar NPC quotes reuse the existing static rate cache');
+    const ore = DataCache.items.find(item => Number(item.selfId) === 1785);
+    const orePrice = pricing.npcPrice({ selfId: 1785 });
+    assert(orePrice > invoke('GameServer/Items/NpcSellRules').npcBuyPrice(ore.template.price),
+        'Soul Ore needs its real NPC purchase floor rather than the lower NPC sale value');
+    for (const selfId of [1785, 1061]) {
+        const price = pricing.npcPrice({ selfId });
+        assert(Number.isFinite(price) && price > 0);
+        assert.equal(context.npcPriceRows.find(row => row.selfId === selfId)?.price, price,
+            `native material/consumable price ${selfId} must reach the worker snapshot`);
+    }
+    assert.equal(pricing.npcPrice({ selfId: 1464 }), Infinity,
+        'C shots have no canonical NPC purchase price');
+    assert.equal(context.npcPriceRows.some(row => row.selfId === 1464), false,
+        'a compact price snapshot must not invent an NPC C-shot source');
+    assert.equal(context.shopEntries.some(row => Number(row.selfId) === 1464), false);
     const worker = new ClanPlanningCoordinator();
     try {
         for (const [classId, level] of [[4, 20], [15, 40], [55, 52], [21, 61]]) {
@@ -113,12 +139,20 @@ async function parityAndIntegration() {
             const swordLine = { selfId: 79, price: 78600000, count: 1 };
             AfkTrade._resetForTests();
             record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
+            const swordInventory = {};
+            for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 21, level: 40 }).items) {
+                const old = swordInventory[entry.selfId], equippedSlots = [...(old?.equippedSlots || []), entry.slot];
+                swordInventory[entry.selfId] = { ...entry, amount: Number(old?.amount || 0) + 1,
+                    equipped: true, equippedCount: equippedSlots.length, equippedSlots };
+            }
             const swordMember = { characterId: 990003, level: 55, classId: 21, phase: 'cold',
-                adena: 20000000, inventory: {}, stats: { classId: 21, equipmentPlan: {
+                adena: 20000000, inventory: swordInventory, stats: { classId: 21, equipmentPlan: {
                     status: 'active', strategy: 'market', target: { selfId: 79, slot: 7 },
                     market: { town: 'Heine', price: 78600000, sourceType: 'afk_player_store' },
                     clanGoal: { clanId: 77, goalKey: 'clan-equipment:77:990003:79:7' }
                 } } };
+            assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(swordMember).required, false,
+                'held B sword market controls start after the full usable C kit');
             const swordContext = await Runtime.context();
             const unfunded = planForMember(swordMember);
             assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,

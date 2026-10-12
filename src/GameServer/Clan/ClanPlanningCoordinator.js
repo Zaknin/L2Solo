@@ -243,7 +243,18 @@ async function context() {
                 npcOffers.push(...market.npcOffersAll(items[i].selfId).map(offerRow));
                 if (i % 8 === 7) await yieldLoop();
             }
-            return { npcOffers, towns: market.TOWN_NPC_SELLERS, shopEntries: shops.allEntries().map(({ selfId }) => ({ selfId })) };
+            const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
+            const wearableIds = new Set(items.map(item => Number(item.selfId)));
+            const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+            const npcPriceRows = [];
+            // FirstPrice also needs native NPC floors for crafting inputs and
+            // consumables. Scalar quotes do not add sources to MarketOpportunity.
+            for (const selfId of new Set(shopEntries.map(entry => Number(entry.selfId)))) {
+                if (wearableIds.has(selfId)) continue;
+                const price = pricing.npcPrice({ selfId });
+                if (Number.isFinite(price) && price > 0) npcPriceRows.push({ selfId, price });
+            }
+            return { npcOffers, npcPriceRows, towns: market.TOWN_NPC_SELLERS, shopEntries };
         })());
         try { staticMarkets.set(rate, await staticMarketBuilds.get(rate)); }
         finally { staticMarketBuilds.delete(rate); }
