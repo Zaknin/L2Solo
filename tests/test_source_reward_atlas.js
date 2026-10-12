@@ -10,6 +10,7 @@ isolated.assertConfigured(options.default);
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const SourceCatalog = require('../src/GameServer/Knowledge/SourceCatalog');
 const ItemTemplateIndex = require('../src/GameServer/Item/ItemTemplateIndex');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const originalRewards = DataCache.npcRewards, originalNpcs = DataCache.npcs;
@@ -166,6 +167,7 @@ try {
     };
     const spots = [raidSpot, normalSpot, aliasSpot];
     const first = Planner.sourceIndexFor(spots), digest = summary(first);
+    assert.equal(first, SourceCatalog.sourcesByItem(spots), 'planner readers use the shared source relation view');
     assert.equal(traversals, 1);
     assert.equal(visits, originalRewards.length);
     assert.equal(npcLookups, originalRewards.length, 'one metadata lookup per static reward');
@@ -209,9 +211,9 @@ try {
     // Excludes selected-view records, whole-worker memory and runtime timing.
     let atlasRetainedHeapBytes = null;
     if (global.gc) {
-        const source = fs.readFileSync(require.resolve('../src/GameServer/Bot/AI/GearAcquisitionPlanner'), 'utf8');
+        const source = fs.readFileSync(require.resolve('../src/GameServer/Knowledge/SourceCatalog'), 'utf8');
         const start = source.indexOf('let sourceRewardAtlas =');
-        const end = source.indexOf('function sourceIndexFor(', start);
+        const end = source.indexOf('function sourcesByItem(', start);
         const context = { ItemTemplateIndex, BotRaidSafety };
         vm.createContext(context);
         vm.runInContext(source.slice(start, end) + '; this.atlasFor = sourceRewardAtlasFor;', context);

@@ -1,6 +1,7 @@
 const Sources = require('../../Items/ItemAcquisitionCatalog');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const SourceCatalog = require('../../Knowledge/SourceCatalog');
 const DataCache = invoke('GameServer/DataCache');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 const C4DualSwordCombinations = invoke('GameServer/Items/C4DualSwordCombinations');
@@ -21,9 +22,10 @@ const CraftSupplementMaterials = invoke('GameServer/Bot/Economy/CraftSupplementM
 const MAX_RESOLVED_SOURCE_CACHE = 128;
 const MAX_SOURCE_YIELDS = 16384;
 // Rows are as long as an item's index records (up to ~3,300 for a material
-// every monster drops): the bound counts record cells, 9 bytes each.
+// every monster drops): the bound counts record cells, 9 bytes for rules
+// plus at most 4 bytes for their eligible ordinals (1 MiB of ordinals total).
 const MAX_SOURCE_FACT_RULE_CELLS = 262144;
-let sourceIndexCache = { spots: null, rewards: null, npcs: null, byItemId: new Map(), resolved: new Map(), yields: new Map(),
+let sourceIndexCache = { byItemId: null, resolved: new Map(), yields: new Map(),
     plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
@@ -1924,139 +1926,14 @@ function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options =
     };
 }
 
-// No spots, no sources. A caller without spots (a default `[]`, a new array
-// each call) must not evict the index built for the real spot list: the
-// cache holds one list, and the next wish review would rebuild it in full.
-const NO_SOURCES = new Map();
-// Static NPC metadata is shared across selections. Replacing either catalog
-// releases the previous atlas; it never retains actors, clans or selected spots.
-let sourceRewardAtlas = { rewards: null, npcs: null, byNpc: new Map(), byName: new Map() };
-function sourceRewardAtlasFor(rewards, npcs) {
-    if (sourceRewardAtlas.rewards === rewards && sourceRewardAtlas.npcs === npcs) return sourceRewardAtlas;
-    const byNpc = new Map();
-    const byName = new Map();
-    const append = (index, key, row) => {
-        const rows = index.get(key) || [];
-        rows.push(row);
-        index.set(key, rows);
-    };
-    rewards.forEach((reward, ordinal) => {
-        const npc = ItemTemplateIndex.find(npcs, reward.selfId);
-        const row = { reward, ordinal, npcLevel: Number(npc?.template?.level || 0),
-            protectedRaid: BotRaidSafety.isProtectedRaidEntity(npc) };
-        append(byNpc, Number(reward.selfId), row);
-        append(byName, String(reward.template?.name || '').trim().toLowerCase(), row);
-    });
-    sourceRewardAtlas = { rewards, npcs, byNpc, byName };
-    return sourceRewardAtlas;
-}
+// Empty selections preserve the real shared view and its derived caches.
+const NO_SOURCES = SourceCatalog.sourcesByItem();
 function sourceIndexFor(spots = []) {
-    if (!spots?.length) return NO_SOURCES;
-    const rewards = DataCache.npcRewards || [];
-    const npcs = DataCache.npcs;
-    if (sourceIndexCache.spots === spots && sourceIndexCache.rewards === rewards && sourceIndexCache.npcs === npcs) {
-        return sourceIndexCache.byItemId;
+    const byItemId = SourceCatalog.sourcesByItem(spots);
+    if (byItemId !== NO_SOURCES && byItemId !== sourceIndexCache.byItemId) {
+        sourceIndexCache = { byItemId, resolved: new Map(), yields: new Map(),
+            plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
     }
-
-    const atlas = sourceRewardAtlasFor(rewards, npcs);
-    const selectedRewards = new Set();
-    const spotByNpc = new Map();
-    const spotByName = new Map();
-    // Counts and raid decorations belong to this current selection.
-    // This scratch index dies after construction; records retain two numbers.
-    const spotCounts = new Map();
-    const appendSpot = (index, key, spot) => {
-        if (!key || !spot) return;
-        const existing = index.get(key) || new Map();
-        if (!existing.has(spot.id)) existing.set(spot.id, spot);
-        index.set(key, existing);
-    };
-    (spots || []).forEach((spot) => {
-        let total = 0;
-        const byNpc = new Map();
-        for (const entry of spot.npcEntries || []) {
-            if (entry.selfId) {
-                const npcId = Number(entry.selfId);
-                if (npcId && !spotByNpc.has(npcId)) {
-                    for (const row of atlas.byNpc.get(npcId) || []) selectedRewards.add(row);
-                }
-                appendSpot(spotByNpc, npcId, spot);
-            }
-            if (entry.name) {
-                const name = String(entry.name).trim().toLowerCase();
-                if (name && !spotByName.has(name)) {
-                    for (const row of atlas.byName.get(name) || []) selectedRewards.add(row);
-                }
-                appendSpot(spotByName, name, spot);
-            }
-            const count = Math.max(1, Number(entry.count || 1));
-            const npcId = Number(entry.selfId);
-            total += count;
-            // Number(NaN) never matched the previous equality-based scan.
-            if (!Number.isNaN(npcId)) byNpc.set(npcId, (byNpc.has(npcId) ? byNpc.get(npcId) : 0) + count);
-        }
-        spotCounts.set(spot, { total, byNpc });
-    });
-
-    const byItemId = new Map();
-    // Scratch sets replace scans of each growing item's source list. A repeated
-    // reward object/spot/kind keeps its first record, as before; all joins die
-    // after construction, leaving only the current selected view.
-    const recordsByReward = new Map();
-    // Union ID/name matches, retaining original reward order for ties and aliases.
-    [...selectedRewards].sort((left, right) => left.ordinal - right.ordinal).forEach(({ reward, npcLevel, protectedRaid }) => {
-        const spotsForNpc = [...new Map([
-            ...(spotByNpc.get(Number(reward.selfId)) || []),
-            ...(spotByName.get(String(reward.template?.name || '').trim().toLowerCase()) || [])
-        ]).values()];
-        if (!spotsForNpc.length) return;
-        // Only the explicit raid-source atlas may opt a protected NPC into
-        // equipment planning. Mentioning that NPC in an ordinary spot never
-        // bypasses the global bot raid guard.
-        const eligibleSpots = protectedRaid
-            ? spotsForNpc.filter((spot) => spot?.raidBoss === true
-                && Number(spot.raidBossTemplateId || 0) === Number(reward.selfId))
-            : spotsForNpc.filter((spot) => spot?.raidBoss !== true);
-        if (!eligibleSpots.length) return;
-        const itemKinds = [
-            ['drop', reward.rewards || []],
-            ['spoil', reward.spoils || []]
-        ].flatMap(([kind, groups]) => groups.flatMap((group) => (
-            (group.items || []).map((item) => ({ id: Number(item.selfId || 0), kind })).filter((item) => item.id)
-        )));
-        eligibleSpots.forEach((spot) => {
-            // The same NPC/spot/kind serves many items. Its immutable index
-            // record is shared rather than copied into every item's list.
-            let recordsBySpot = recordsByReward.get(reward);
-            if (!recordsBySpot) {
-                recordsBySpot = new Map();
-                recordsByReward.set(reward, recordsBySpot);
-            }
-            let records = recordsBySpot.get(spot.id);
-            if (!records) {
-                records = new Map();
-                recordsBySpot.set(spot.id, records);
-            }
-            itemKinds.forEach(({ id, kind }) => {
-                let entry = records.get(kind);
-                if (!entry) {
-                    const counts = spotCounts.get(spot);
-                    const record = { reward, spot, kind, npcLevel, totalCount: counts.total,
-                        sourceCount: counts.byNpc.get(Number(reward.selfId)) ?? 0 };
-                    entry = { record, itemIds: new Set() };
-                    records.set(kind, entry);
-                }
-                if (entry.itemIds.has(id)) return;
-                entry.itemIds.add(id);
-                const entries = byItemId.get(id) || [];
-                entries.push(entry.record);
-                byItemId.set(id, entries);
-            });
-        });
-    });
-
-    sourceIndexCache = { spots, rewards, npcs, byItemId, resolved: new Map(), yields: new Map(),
-        plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
     return byItemId;
 }
 
@@ -2178,6 +2055,10 @@ function* spotTown(spot) {
 // Map, for diagnostics) counts every record by 'ready' or its reason, in
 // record order; it implies readyOnly.
 const SOURCE_FACT_STEP = 64;
+function sourceSpoilerFor(state) {
+    return invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
+        { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) }) || false;
+}
 function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const facts = [], ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
     const entries = sourceIndexFor(options.spots || []).get(Number(itemId)) || [];
@@ -2189,8 +2070,30 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly);
     let spoiler = options.spoiler;
     const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
-    for (let ordinal = 0; ordinal < entries.length; ordinal++) {
-        if (ordinal % SOURCE_FACT_STEP === 0) yield 'source';
+    // The full view still reads all rows. Ready readers walk only eligible
+    // ordinals; diagnostics merge the few static buckets at their first row.
+    // Oversized uncached rows use the full walk without an extra ordinal array.
+    const prepared = readyOnly && rules.eligible !== null;
+    const ordinals = prepared ? rules.eligible : null;
+    const buckets = prepared && counts ? rules.staticBuckets : [];
+    const length = prepared ? ordinals.length : entries.length;
+    let cursor = 0, bucketCursor = 0, processed = 0;
+    while (cursor < length || bucketCursor < buckets.length) {
+        if (processed++ % SOURCE_FACT_STEP === 0) yield 'source';
+        const ordinal = cursor < length ? (prepared ? ordinals[cursor] : cursor) : entries.length;
+        const bucket = buckets[bucketCursor];
+        if (bucket && bucket.firstOrdinal < ordinal) {
+            let reason = FACT_RULE_REASONS[bucket.rule];
+            // Raid protection precedes Spoil; other static refusals follow it.
+            if (bucket.rule !== FACT_RULE_RAID && bucket.kind === 'spoil') {
+                if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
+                if (!spoiler) reason = 'spoil_skill';
+            }
+            counts.set(reason, (counts.get(reason) || 0) + bucket.count);
+            bucketCursor++;
+            continue;
+        }
+        cursor++;
         // The fact reads the shared rule row of the record (yield and the
         // per-level refusals), not a materialized source per entry.
         const rule = rules.reasons[ordinal];
@@ -2199,8 +2102,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         let status = 'ineligible', reason = rule === FACT_RULE_RAID ? 'raid' : null;
         if (!reason && kind === 'spoil') {
             // The executor's rule: a learned Spoil, not the class (E189).
-            if (spoiler === undefined) spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
-                { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) }) || false;
+            if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
             if (!spoiler) reason = 'spoil_skill';
         }
         if (!reason && rule) reason = FACT_RULE_REASONS[rule];
@@ -2252,11 +2154,14 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
 // yield pair, raid, a huntable NPC and the voluntary level band. One row per
 // item and level holds them, aligned with the index records; it lives with
 // the index (rebuilt with it) and follows the rate profile. Numbers only, no
-// object references: 9 bytes per record. FACT_RULE_NO_CHANCE is a record the
-// bot never sees (chance 0).
+// bot references: 9 bytes per record plus at most one 4-byte eligible ordinal.
+// Static refusals use at most six buckets, each retaining its first ordinal,
+// so diagnostic reason keys keep their full-view insertion order. A record
+// with FACT_RULE_NO_CHANCE is never seen or counted by the bot (chance 0).
 const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_LEVEL_BAND = 3, FACT_RULE_NO_CHANCE = 255;
 const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt', 'level_band'];
-const NO_FACT_RULES = { entries: [], expected: new Float64Array(0), reasons: new Uint8Array(0) };
+const NO_FACT_RULES = { entries: [], expected: new Float64Array(0), reasons: new Uint8Array(0),
+    eligible: new Uint32Array(0), staticBuckets: [] };
 function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLower = false) {
     if (!entries.length) return NO_FACT_RULES;
     if (sourceIndexCache.factRulesKey !== ratesKey) {
@@ -2268,7 +2173,20 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     let rules = cache.get(key);
     if (rules && rules.entries === entries) return rules;
     if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.entries.length; }
+    const retain = entries.length <= MAX_SOURCE_FACT_RULE_CELLS;
+    // Make room before allocation: the cache retains <= 1 MiB of ordinal
+    // backing. Uncollected evictions or rows held by an active reader can
+    // outlive the cache. Oversized rows get no ordinal backing and are not
+    // retained; this caller uses their full rule arrays and original walk.
+    if (retain) while (sourceIndexCache.factRuleCells + entries.length > MAX_SOURCE_FACT_RULE_CELLS && cache.size) {
+        const [oldest, row] = cache.entries().next().value;
+        cache.delete(oldest);
+        sourceIndexCache.factRuleCells -= row.entries.length;
+    }
     const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
+    const eligible = retain ? new Uint32Array(entries.length) : null;
+    const staticBuckets = [], bucketsByRuleKind = new Map();
+    let eligibleCount = 0;
     // This shared rule row already has the resolved economic band. Do not
     // re-enter the actor's wish policy (and resolve its module) per record.
     const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
@@ -2280,15 +2198,25 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
         reasons[ordinal] = target.raidBoss ? FACT_RULE_RAID
             : !sourceNpcHuntable(target.npcId) ? FACT_RULE_CANNOT_HUNT
                 : killerLevel && target.npcLevel && target.npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
+        if (!retain) continue;
+        const rule = reasons[ordinal];
+        if (!rule) eligible[eligibleCount++] = ordinal;
+        else {
+            const bucketKey = rule * 2 + Number(entry.kind === 'spoil');
+            let bucket = bucketsByRuleKind.get(bucketKey);
+            if (!bucket) {
+                bucket = { rule, kind: entry.kind, firstOrdinal: ordinal, count: 0 };
+                bucketsByRuleKind.set(bucketKey, bucket);
+                staticBuckets.push(bucket);
+            }
+            bucket.count++;
+        }
     }
-    rules = { entries, expected, reasons };
-    sourceIndexCache.factRuleCells += entries.length;
-    while (sourceIndexCache.factRuleCells > MAX_SOURCE_FACT_RULE_CELLS && cache.size) {
-        const [oldest, row] = cache.entries().next().value;
-        cache.delete(oldest);
-        sourceIndexCache.factRuleCells -= row.entries.length;
+    rules = { entries, expected, reasons, eligible: eligible ? eligible.subarray(0, eligibleCount) : null, staticBuckets };
+    if (retain) {
+        sourceIndexCache.factRuleCells += entries.length;
+        cache.set(key, rules);
     }
-    cache.set(key, rules);
     return rules;
 }
 
