@@ -365,18 +365,16 @@ function buildProjection(state, ctx, deps) {
         if (!farmFacts.has(factsKey)) {
             if (spoiler === undefined && sourceIndex.get(Number(id)).some(entry => entry.kind === 'spoil'))
                 spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state, { skills: Profile.skillsFor(state) }) || false;
-            // Only ready facts come back; with diagnostics every record is
+            // Only the best ready fact comes back; with diagnostics every record is
             // also counted as ready or by its reason (refusals only as counts).
             const diagnostic = Diagnostics.active(), reasons = diagnostic ? new Map() : null;
             const steps = Planner.sourceFacts(state, id, 1, { spots: deps.spots, spotValue, occupancy: deps.occupancy,
                 trips: sourceTrips, trip: deps.tripCost || ctx.trip || { details: () => ({ known: false }) }, spoiler, timestamp,
-                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons });
+                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons,
+                bestForWish: { spoilOnly, progressionRequired: progression.required, hourAdena: ctx.hourAdena } });
             let step;
             do step = steps.next(); while (!step.done);
-            let best = null;
-            const cost = fact => progression.required ? fact.hours + fact.tripHours + fact.tripFees / Math.max(1, ctx.hourAdena) : fact.costHours;
-            for (const fact of step.value) if (fact.status === 'ready' && (!spoilOnly || fact.kind === 'spoil')
-                && (!best || cost(fact) < cost(best))) best = fact;
+            const best = step.value[0] || null;
             // One count per reason and item: a per-fact count cost 4% of the worker.
             if (diagnostic) {
                 for (const [reason, amount] of reasons) Diagnostics.count('provider', 'source_fact', reason, amount);

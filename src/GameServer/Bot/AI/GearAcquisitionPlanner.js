@@ -2054,10 +2054,22 @@ function* spotTown(spot) {
 // refusals are never built as objects (74% of records). options.counts (a
 // Map, for diagnostics) counts every record by 'ready' or its reason, in
 // record order; it implies readyOnly.
+// The synchronous wish reader's bestForWish keeps one winner using scalar
+// spoilOnly, progressionRequired and hourAdena inputs; all rows are still read.
 const SOURCE_FACT_STEP = 64;
 function sourceSpoilerFor(state) {
     return invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
         { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) }) || false;
+}
+function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expectedYield,
+    perHour, hours, valueHours, netHourCost, town, tripHours, tripFees, costHours) {
+    fact.kind = kind; fact.spotId = spotId; fact.npcId = npcId;
+    fact.itemId = itemId; fact.units = units; fact.expectedYield = expectedYield;
+    fact.status = 'ready'; fact.perHour = perHour; fact.hours = hours;
+    fact.valueHours = valueHours; fact.netHourCost = netHourCost;
+    fact.town = town; fact.tripHours = tripHours; fact.tripFees = tripFees;
+    fact.costHours = costHours;
+    return fact;
 }
 function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const facts = [], ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
@@ -2067,7 +2079,11 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         || require('../Economy/SpotEconomics').create(state, { timestamp, occupancy: options.occupancy });
     const trips = options.trips || new Map();
     const current = String(state.stats?.travel?.spotId || state.spotId || null);
-    const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly);
+    const bestForWish = options.bestForWish;
+    const spoilOnly = bestForWish?.spoilOnly, progressionRequired = bestForWish?.progressionRequired;
+    const hourAdena = bestForWish?.hourAdena;
+    const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly || bestForWish);
+    let bestCost;
     let spoiler = options.spoiler;
     const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
     // The full view still reads all rows. Ready readers walk only eligible
@@ -2142,9 +2158,18 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
             continue;
         }
         const hours = units / perHour, netHourCost = Math.max(0, 1 - row.valueHours);
-        facts.push({ kind, spotId: spot.id, npcId, itemId: Number(itemId), units, expectedYield, status: 'ready',
-            perHour, hours, valueHours: row.valueHours, netHourCost,
-            town, tripHours: trip.hours, tripFees: trip.fees, costHours: hours * netHourCost + trip.hours });
+        const spotId = spot.id, factItemId = Number(itemId), valueHours = row.valueHours;
+        const tripHours = trip.hours, tripFees = trip.fees, costHours = hours * netHourCost + trip.hours;
+        if (bestForWish) {
+            if (spoilOnly && kind !== 'spoil') continue;
+            const cost = progressionRequired ? hours + tripHours + tripFees / Math.max(1, hourAdena) : costHours;
+            if (facts.length && !(cost < bestCost)) continue;
+            bestCost = cost;
+        }
+        const fact = writeReadySourceFact(bestForWish ? facts[0] || {} : {}, kind, spotId, npcId,
+            factItemId, units, expectedYield, perHour, hours, valueHours, netHourCost, town, tripHours, tripFees, costHours);
+        if (bestForWish) facts[0] = fact;
+        else facts.push(fact);
     }
     return facts;
 }
