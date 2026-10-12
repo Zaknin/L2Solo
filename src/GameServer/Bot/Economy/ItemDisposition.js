@@ -8,6 +8,7 @@ const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const { CRYSTAL_IDS } = invoke('GameServer/Items/C4EnchantRules');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
 
 const SELLABLE_KINDS = ['Weapon.', 'Armor.', 'Other.Material', 'Other.Shot'];
 const NPC_ONLY_KINDS = ['Other.Recipe', 'Other.Spellbook'];
@@ -276,7 +277,8 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     // Replaced creation gear goes to the NPC without waiting for a full bag.
     // The shared sale candidates already protect worn and reserved copies.
     const unusedStarterGear = candidates.some(item => isStarterEquipment(item));
-    const overCapacity = slots > INVENTORY_SLOT_LIMIT;
+    const limit = InventoryLimits.forState(state);
+    const overCapacity = slots > limit;
     const accumulatedNpcOnly = unusedStarterGear || skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
     const surplusGearSlots = slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
         ? candidates.reduce((total, item) => {
@@ -307,7 +309,7 @@ function inventoryCleanupNeed(state = {}, options = {}) {
         slots,
         npcOnlySlots,
         ...(overCapacity || accumulatedNpcOnly || halfFull ? {} : { surplusGearSlots }),
-        limit: INVENTORY_SLOT_LIMIT
+        limit
     };
 }
 

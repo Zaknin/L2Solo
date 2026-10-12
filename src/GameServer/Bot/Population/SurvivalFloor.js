@@ -1,10 +1,11 @@
 'use strict';
 
 const ItemIndex = require('../../Item/ItemTemplateIndex');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
 const actorBags = new WeakMap();
 
 // These are C4 limits, not a desired stock or a reason to recover at low HP.
-function inventoryLimit(race) { return Number(race) === 4 ? 100 : 80; }
+const inventoryLimit = InventoryLimits.capacity;
 
 function weightPenalty(load, maximum) {
     if (!(maximum > 0)) return 0;
@@ -59,14 +60,15 @@ function forState(state, timestamp = Date.now(), inputs = null) {
     if (state.activity === 'dead' || Number(state.vitals?.hp) <= 0) return { reason: 'dead', action: 'revive' };
     if (inputs || typeof invoke !== 'function') {
         return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp, ...stateInventory(state, inputs?.items),
-            slotLimit: inventoryLimit(inputs?.race ?? state.stats?.race), ...inputs });
+            slotLimit: InventoryLimits.forState(state, inputs || {}), ...inputs });
     }
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
     const profile = Profile.profileFor(state, timestamp);
     return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp ?? profile.maxMp,
         manaRequired: Roles.shouldRestForMana(state), castCosts: stateCastCosts(state, profile, timestamp),
-        ...stateInventory(state, invoke('GameServer/DataCache').items), slotLimit: inventoryLimit(profile.race), maxLoad: profile.maxLoad });
+        ...stateInventory(state, invoke('GameServer/DataCache').items),
+        slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad });
 }
 
 function actorInventory(actor) {
@@ -85,7 +87,7 @@ function actorInventory(actor) {
 function bagMarks(actor) {
     const bag = actorInventory(actor);
     return { weight: weightPenalty(bag.load, actor.fetchMaxLoad?.() || 0),
-        full: Number(bag.slots >= inventoryLimit(actor.fetchRace?.())) };
+        full: Number(bag.slots >= InventoryLimits.forActor(actor)) };
 }
 
 function forActor(actor) {
@@ -104,7 +106,7 @@ function forActor(actor) {
         .map(skill => Attack.prototype.skillMpCost(actor, skill));
     return evaluate({ dead: actor.isDead?.() === true, hp: actor.fetchHp?.(), mp: actor.fetchMp?.(),
         manaRequired: Roles.shouldRestForMana(actor), castCosts: costs,
-        ...actorInventory(actor), slotLimit: inventoryLimit(actor.fetchRace?.()), maxLoad: actor.fetchMaxLoad?.() || 0 });
+        ...actorInventory(actor), slotLimit: InventoryLimits.forActor(actor), maxLoad: actor.fetchMaxLoad?.() || 0 });
 }
 
 module.exports = { evaluate, forState, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };
