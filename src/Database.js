@@ -3929,6 +3929,72 @@ function recruitmentSourceCurrent(source) {
     const current = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(spot);
     return current.raidWorldAvailable && require('./GameServer/Clan/ClanRosterDemand').sourceFingerprint(current) === source.fingerprint;
 }
+function clanRaidOwner(marker) {
+    const Roster = require('./GameServer/Clan/ClanRaidRoster');
+    if (!Roster.valid(marker)) return null;
+    const row = one(`SELECT s.mode,c.level,json_extract(s.stateJson,'$.${marker.ownerSection}.fullRoster') AS markerJson,
+        json_extract(s.stateJson,'$.${marker.ownerSection}.status') AS goalStatus,
+        json_extract(s.stateJson,'$.${marker.ownerSection}.controlledBy') AS controlledBy
+        FROM clan_simulation_clans s JOIN clans c ON c.id=s.clanId WHERE s.clanId=?`, [marker.clanId]);
+    const members = all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
+        (COALESCE(p.ordinaryEligible,0)=0
+            OR EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
+            OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS reserved
+        FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
+        LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id
+        WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
+    return { mode: row?.mode, level: Number(row?.level), marker: !['completed', 'cancelled', 'failed', 'abandoned'].includes(row?.goalStatus)
+        && row?.controlledBy !== 'player' ? jsonObject(row?.markerJson) : null,
+    members: members.map(member => [member.characterId, member.classId, member.clanId, member.level, !!member.reserved]) };
+}
+function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = null, openingAtImpact = false) {
+    const Roster = require('./GameServer/Clan/ClanRaidRoster');
+    const party = { ...partyRow, memberIds: JSON.parse(partyRow.memberIdsJson || '[]'), stats: jsonObject(partyRow.statsJson) };
+    const marker = Roster.markerFor(party);
+    if (!marker) return null;
+    const proof = nextStats.raidAdmission;
+    if (Roster.held(party)) {
+        return JSON.stringify(proof) === JSON.stringify(party.stats.raidAdmission)
+            && Roster.same(nextStats.objective?.fullRoster, marker)
+            && (!raidCommit || raidCommit.snapshot?.raidInstanceId === marker.raidInstanceId) ? null : 'raid_roster_held_changed';
+    }
+    // Waiting/preparation may commit without opening. They may never smuggle
+    // an active fight or a victory through the ordinary seven-member path.
+    if (!proof) return nextStats.raidEncounter?.encounter || nextStats.raidEncounter?.status === 'defeated'
+        ? 'raid_roster_not_opened' : null;
+    if (!Roster.admitted({ ...party, stats: nextStats }) || !Roster.exact(party.memberIds, marker.memberIds)
+        || !Roster.same(nextStats.objective?.fullRoster, marker)) return 'raid_roster_incomplete';
+    if (hotMembers && Roster.admitted(party) && proof.startedAt > 0 && !party.stats.raidAdmission.startedAt) {
+        const { startedAt, execution, ...next } = proof;
+        const { startedAt: previousStart, ...previous } = party.stats.raidAdmission;
+        if (!openingAtImpact || JSON.stringify(next) !== JSON.stringify(previous)
+            || execution?.at !== startedAt || !marker.memberIds.includes(execution?.attackerId)
+            || execution?.targetId <= 0 || execution?.bossId <= 0 || execution?.raidInstanceId !== marker.raidInstanceId)
+            return 'raid_roster_not_opened';
+    }
+    if (raidCommit && (proof.startedAt <= 0 || raidCommit.snapshot?.participants?.[party.partyId] !== proof.startedAt))
+        return 'raid_roster_not_opened';
+    const owner = clanRaidOwner(marker);
+    if (!owner || owner.mode !== 'autonomous' || !Roster.same(owner.marker, marker)) return 'raid_roster_owner_changed';
+    const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
+    const source = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(Catalog.findById(marker.sourceId));
+    if (!source?.raidWorldAvailable || source.raidInstanceId !== marker.raidInstanceId
+        || Number(source.raidBossTemplateId) !== marker.npcId
+        || raidCommit && raidCommit.snapshot?.raidInstanceId !== marker.raidInstanceId) return 'raid_roster_source_changed';
+    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase,
+        l.simulationOwner,l.simulationLeaseId FROM characters c JOIN bot_life_state l ON l.characterId=c.id
+        WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds)
+        : recruitmentRows(`c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
+    if (rows.length !== 9 || proof.members.some(([id, classId, level, fingerprint]) => {
+        const row = rows.find(member => member.characterId === id);
+        const input = hotMembers?.find(member => member.characterId === id) || row;
+        return !row || row.clanId !== marker.clanId || row.classId !== classId || row.level !== level
+            || owner.members.find(member => member[0] === id)?.[4]
+            || openingAtImpact && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId)
+            || row.recruitmentReserved || row.partyId !== party.partyId || Roster.inputFingerprint(input) !== fingerprint;
+    })) return 'raid_roster_member_changed';
+    return null;
+}
 function recruitmentProofCurrent(clanId, level, state, proof) {
     if (!proof || !recruitmentSourceCurrent(proof.source)) return false;
     const Demand = require('./GameServer/Clan/ClanRosterDemand');
@@ -3959,6 +4025,34 @@ function publishClanMembership(result) {
 
 
 const Database = {
+    openClanRaidPartyAtImpact(request) {
+        // The offensive callback cannot await our queue: its registered roster
+        // could change meanwhile. Abort this native action when another write
+        // or raw transaction owns the connection; ordinary action retry owns
+        // the next attempt. Never let an outer rollback erase a dealt hit.
+        const Roster = require('./GameServer/Clan/ClanRaidRoster');
+        if (!Roster.isNativeImpact(request.nativeImpact)) return { ok: false, reason: 'raid_roster_not_opened' };
+        if (!connection || connection.isTransaction || metrics.pending > 0) return { ok: false, reason: 'database_busy' };
+        try {
+            return performTransaction(() => {
+                const row = one('SELECT * FROM bot_background_parties WHERE partyId=?', [request.partyId]);
+                if (!row || row.status !== 'hot' || Number(row.updatedAt) !== Number(request.expectedUpdatedAt))
+                    return { ok: false, reason: 'party_changed' };
+                const party = { ...row, memberIds: JSON.parse(row.memberIdsJson), stats: jsonObject(row.statsJson) };
+                if (!Roster.admitted(party) || Roster.held(party) || !Roster.exact(request.members?.map(member => member.characterId), party.memberIds))
+                    return { ok: false, reason: 'raid_roster_not_opened' };
+                const at = Math.max(now(), Number(row.updatedAt) + 1);
+                const proof = { ...party.stats.raidAdmission, startedAt: at,
+                    execution: { at, attackerId: request.attackerId, targetId: request.targetId, bossId: request.bossId, raidInstanceId: request.raidInstanceId } };
+                const stats = { ...party.stats, raidAdmission: proof };
+                const reason = raidRosterCommitReason(row, stats, null, request.members, true);
+                if (reason) return { ok: false, reason };
+                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=? WHERE partyId=? AND updatedAt=?',
+                    [JSON.stringify(stats), at, row.partyId, row.updatedAt]);
+                return { ok: true, party: one('SELECT * FROM bot_background_parties WHERE partyId=?', [row.partyId]) };
+            }, 'party:marked-raid-impact');
+        } catch (_) { return { ok: false, reason: 'party_opening_rollback' }; }
+    },
     reconcileBotClanMembership: ClanMembership.reconcile,
     reconcileBotClanGoals: ClanMembership.reconcileGoals,
     init(callback = () => {}) {
@@ -5102,6 +5196,11 @@ const Database = {
     saveBackgroundParty(row) {
         return inTransaction(() => {
             const previous = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [row.partyId]);
+            const proof = jsonObject(row.statsJson).raidAdmission;
+            const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
+            if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
+                || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
+                return { affectedRows: 0 };
             if (previous?.status === 'hot' || Number(jsonObject(previous?.statsJson).clanGoalInvalidationVersion || 0)
                 > Number(jsonObject(row.statsJson).clanGoalInvalidationVersion || 0)) return { affectedRows: 0 };
             const payment = partyAgreementUnsafe(previous, row);
@@ -5137,6 +5236,11 @@ const Database = {
             return Promise.resolve({ ok: false, reason: 'invalid_party_goals' });
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
+            const previousStats = jsonObject(party?.statsJson), proposedStats = jsonObject(statsJson);
+            if (previousStats.objective?.fullRoster && (!require('./GameServer/Clan/ClanRaidRoster').same(
+                previousStats.objective.fullRoster, proposedStats.objective?.fullRoster)
+                || JSON.stringify(previousStats.raidAdmission) !== JSON.stringify(proposedStats.raidAdmission)))
+                return { ok: false, reason: 'party_roster_changed' };
             if (party?.status !== 'active' || Number(party.updatedAt) !== expectedUpdatedAt
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
@@ -5167,6 +5271,7 @@ const Database = {
         if (!party?.partyId || !characterIds.length || characterIds.length !== batch.length) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_membership' });
         }
+        if (jsonObject(party.statsJson).raidAdmission) return Promise.resolve({ ok: false, reason: 'raid_roster_not_opened' });
 
         return inTransaction(() => {
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
@@ -5554,6 +5659,12 @@ const Database = {
                 }
                 if (failure) reason = 'party_context_changed';
             }
+            if (!failure && raidCommit) {
+                const change = group[0].atomicGroup.partyChanges[0];
+                const party = one('SELECT * FROM bot_background_parties WHERE partyId=?', [change.partyId]);
+                const rosterReason = raidRosterCommitReason(party, jsonObject(change.statsJson), raidCommit);
+                if (rosterReason) { failure = true; reason = rosterReason; }
+            }
             if (failure) atomicGroupFailures.set(groupId, reason || 'party_group_aborted');
             else if (raidCommit) validatedRaidKeys.add(raidCommit.key);
         });
@@ -5903,6 +6014,10 @@ const Database = {
         }, 'bot-life:pvp-encounter-lifecycle');
     },
 
+    // Compact, addressed context for a marked group. The main process owns
+    // the native SQLite connection; workers receive only these nine scalars.
+    clanRaidOwner,
+
     transitionBackgroundParty(request = {}) {
         const members = request.members || [];
         const ids = members.map(m => Number(m.characterId));
@@ -5933,6 +6048,12 @@ const Database = {
                 }
             }
             const timestamp = Math.max(now(), Number(party.updatedAt) + 1);
+            if (jsonObject(request.statsJson).raidAdmission || jsonObject(party.statsJson).raidAdmission) {
+                const snapshots = members.map(member => ({ characterId: member.characterId, level: member.patch.level,
+                    classId: jsonObject(member.patch.statsJson).classId, inventory: jsonObject(member.patch.inventorySummary), stats: jsonObject(member.patch.statsJson) }));
+                const reason = raidRosterCommitReason(party, jsonObject(request.statsJson), null, snapshots);
+                if (reason) return { ok: false, reason };
+            }
             for (let i = 0; i < members.length; i++) {
                 const m = members[i], row = rows[i];
                 const entries = Object.entries(preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp }));

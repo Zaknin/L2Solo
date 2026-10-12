@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const isolated = require('./helpers/isolatedSocialDatabase')('cold-raid-commit');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
@@ -8,8 +10,7 @@ const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Raid = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
 const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-raid-commit-'));
-options.default.Database.path = path.join(dir, 'test.sqlite');
+const dir = isolated.directory;
 const at = Date.now();
 const spot = { id: 'raid:10484', raidBoss: true, raidBossTemplateId: 10484, raidInstanceId: 'spawn-one' };
 const state = id => Life.cachedState(id);

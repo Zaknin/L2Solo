@@ -850,6 +850,10 @@ async function releaseForClanHelp(state) {
 async function createAndCommitBackgroundParty(members = [], objectiveOverride = null, options = {}) {
     const Capacity = invoke('GameServer/Bot/Population/ClanPartyCapacity');
     const objective = objectiveOverride || members.map(partyObjectiveForState).find(Capacity.required);
+    if (objective?.fullRoster) {
+        members = require('../../Clan/ClanRaidRoster').selectMembers(members, objective, partyLimitsForObjective(objective));
+        if (members.length !== 9) return null;
+    }
     const safety = invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy');
     if (safety.applies(objective)) {
         members = members.filter(member => safety.allowed(member, objective));
@@ -858,7 +862,7 @@ async function createAndCommitBackgroundParty(members = [], objectiveOverride = 
     let release = partyAdmission.reserve(BackgroundPartyState.admitted(), Config);
     if (!release && Capacity.required(objective)) {
         const limits = partyLimitsForObjective(objective);
-        if (PartyComposition.selectMembers(members, limits).length < limits.minSize) return null;
+        if (require('../../Clan/ClanRaidRoster').selectMembers(members, objective, limits).length < limits.minSize) return null;
         const reclaimed = await Capacity.reclaim(objective, {
             parties: BackgroundPartyState, life: LifeState, database: Database, metrics: Metrics
         });
@@ -2226,7 +2230,7 @@ const PopulationService = {
                     const objective = RequiredPartyFormation.objectiveFor(state);
                     return objective && RequiredPartyFormation.spotFor(state, objective) === String(proposal.spotId || '');
                 });
-                const selected = PartyComposition.selectMembers(required, {
+                const selected = require('../../Clan/ClanRaidRoster').selectMembers(required, { fullRoster: proposal.fullRoster }, {
                     minSize: proposal.minSize,
                     maxSize: proposal.maxSize,
                     levelRange: proposal.levelRange
@@ -2403,7 +2407,7 @@ const PopulationService = {
                     const partyLimits = partyLimitsForObjective(requestedObjective);
                     if (group.length < partyLimits.minSize) return null;
 
-                    const selectedMembers = PartyComposition.selectMembers(group, {
+                    const selectedMembers = require('../../Clan/ClanRaidRoster').selectMembers(group, requestedObjective, {
                         minSize: partyLimits.minSize,
                         maxSize: partyLimits.maxSize,
                         levelRange: partyLimits.levelRange

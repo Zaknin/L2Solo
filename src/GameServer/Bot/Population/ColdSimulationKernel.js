@@ -1760,6 +1760,7 @@ class ColdSimulationKernel {
                 episodeId: run.grants.get(Number(run.party.leaderId))?.leaseId,
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 party: run.party,
+                raidOwner: this.states.get(Number(run.party.leaderId))?.context?.raidOwner || null,
                 members: run.members,
                 spot: run.spot,
                 pressure: run.pressure,

@@ -32,6 +32,7 @@ function expire(request, now = Date.now()) {
 function limitsForObjective(objective = null, defaults = {}) {
     const maxSize = Number(defaults.maxSize ?? Config.partyMaxSize);
     const minSize = Number(defaults.minSize ?? Config.partyMinSize);
+    if (objective?.fullRoster) return { maxSize: 9, minSize: 9, levelRange: defaults.levelRange ?? 99 };
     const clanEquipment = objective?.clanOperation === 'equipment'
         && Number(objective?.clanId || 0) > 0;
     if (!clanEquipment) return { maxSize, minSize, levelRange: defaults.levelRange };
@@ -82,7 +83,8 @@ function partyObjectiveForPlan(plan) {
         targetId: Number(plan.target?.selfId || 0) || null,
         clanId: Number(plan.clanGoal?.clanId || 0) || null,
         clanGoalKey: plan.clanGoal?.goalKey || null,
-        partyPreference: plan.clanGoal?.partyPreference || null
+        partyPreference: plan.clanGoal?.partyPreference || null,
+        ...(plan.clanGoal?.fullRoster ? { fullRoster: plan.clanGoal.fullRoster, minPartySize: 9, maxPartySize: 9 } : {})
     };
 }
 

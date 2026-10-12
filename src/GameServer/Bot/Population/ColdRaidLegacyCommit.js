@@ -8,15 +8,18 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
     const Authority = require('./ColdRaidAuthority');
     await Authority.init();
     spot = invoke('GameServer/RaidBoss/RaidEncounterScope').decorateSpot(spot);
+    const marker = require('../../Clan/ClanRaidRoster').markerFor(party);
+    const raidOwner = marker ? invoke('Database').clanRaidOwner(marker) : null;
     const claims = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
     const grants = claims.grants || [];
     const id = `raid:${grants.find(grant => Number(grant.characterId) === Number(party.leaderId))?.leaseId}`;
+    let rejectedRoster = null;
     try {
         if (grants.length !== members.length) return { ok: false, reason: 'raid_claim_rejected' };
         const timestamp = Date.now();
         const staged = await Raid.stage({ key: Raid.keyFor(spot, targetNpcId), id,
             memberIds: members.map(member => Number(member.characterId)) }, () => require('./BackgroundPartyResolver').resolve({
-            party, members, spot, pressure, targetNpcId, elapsedMs, timestamp }));
+            party, members, spot, pressure, targetNpcId, elapsedMs, timestamp, raidOwner }));
         const result = staged.result;
         const nextParty = { ...party, ...result.partyPatch, stats: { ...party.stats, ...result.partyPatch.stats },
             nextResolveAt: result.nextResolveAt, updatedAt: Math.max(timestamp, Number(party.updatedAt) + 1) };
@@ -48,7 +51,10 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
         }));
         const committed = await Owner.commitAndReleaseBatch(entries, { journalReason: 'raid' });
         committed.forEach(row => Raid.acknowledge(id, row.characterId, row.ok));
-        if (committed.some(row => !row.ok)) return { ok: false, reason: 'raid_commit_rejected' };
+        if (committed.some(row => !row.ok)) {
+            rejectedRoster = committed.find(row => !row.ok)?.detail;
+            return { ok: false, reason: 'raid_commit_rejected', detail: rejectedRoster };
+        }
         for (const row of committed) {
             const current = Life.cachedState(row.characterId);
             if (current) await Life.reviewTrainingAfterCommit(current);
@@ -68,6 +74,8 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
     } finally {
         Raid.abort(id);
         await Owner.releaseBatch(grants, { releaseInvalidated: true });
+        if (['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(rejectedRoster))
+            await require('../../Clan/ClanRaidRoster').cancelUnopened(party, rejectedRoster);
     }
 }
 module.exports = { resolve };

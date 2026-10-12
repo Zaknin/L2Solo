@@ -132,6 +132,7 @@ function clanPlan(plan, clan, goal) {
             priority: 'required',
             partyNeed,
             partyPreference: 'clan_first',
+            ...(goal.fullRoster ? { fullRoster: goal.fullRoster } : {}),
             ...(goal.orderId ? { orderId: goal.orderId, orderSettings: goal.orderSettings } : {})
         }
     };

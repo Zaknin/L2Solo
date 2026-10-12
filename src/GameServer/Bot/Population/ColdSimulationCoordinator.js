@@ -1268,6 +1268,8 @@ class ColdSimulationCoordinator {
                 : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null,
             isPartyLeader: !!party,
             party,
+            ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
+                ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
             route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })
@@ -2121,6 +2123,15 @@ class ColdSimulationCoordinator {
         }
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
+        const cancelled = new Set();
+        for (const result of results) {
+            if (!['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(result.detail)) continue;
+            const change = result.proposal?.atomicGroup?.partyChanges?.[0];
+            if (!change || cancelled.has(change.partyId)) continue;
+            cancelled.add(change.partyId);
+            const party = BackgroundPartyState.find(change.partyId);
+            if (party?.updatedAt === change.expectedUpdatedAt) await require('../../Clan/ClanRaidRoster').cancelUnopened(party, result.detail);
+        }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
             this.tableChannel.flush();
             return;
