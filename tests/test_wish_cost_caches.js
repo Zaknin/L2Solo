@@ -349,8 +349,9 @@ check('five books reuse the own before profile and cached gains on later reviews
     const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
     // A cold bot carries the MP cap its resolver stored; craft facts read it, not the profile.
     // Clan book wishes retain their existing gain cache. Personal bots sell
-    // skill books instead of reviewing them as equipment improvements.
-    const state = base({ characterId: 820, level: 51, stats: { ...base().stats, clanId: 7 },
+    // skill books instead of reviewing them as equipment improvements. Only a
+    // clan with a warehouse (clan level 1+) takes custody; membership alone is personal.
+    const state = base({ characterId: 820, level: 51, clanLevel: 1, stats: { ...base().stats, clanId: 7 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
     const original = { profile: Profile.profileFor, books: Books.missingBooks, opportunities: Policy.opportunities };
     let ownCalls = 0, bookReads = 0;
@@ -365,7 +366,8 @@ check('five books reuse the own before profile and cached gains on later reviews
         Providers.build(state, ctx, { spots: [] });
         assert.equal(ownCalls, 1, 'all five gains stay in the build');
         const readCount = bookReads;
-        Providers.build({ ...state, stats: { ...state.stats, clanId: 0 } }, ctx, { spots: [] });
+        assert.ok(readCount > 0, 'a clan member with a warehouse reviews skill books');
+        Providers.build({ ...state, clanLevel: 0, stats: { ...state.stats, clanId: 0 } }, ctx, { spots: [] });
         assert.equal(bookReads, readCount, 'personal bot reviews never nominate skill books');
     } finally { Profile.profileFor = original.profile; Books.missingBooks = original.books; Policy.opportunities = original.opportunities; }
 });

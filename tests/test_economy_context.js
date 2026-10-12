@@ -25,6 +25,7 @@ async function run() {
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+    const Supply = invoke('GameServer/Clan/ClanSupplyPolicy');
     const capture = Profile.capture;
     try {
         Profile.capture = () => ({});
@@ -44,8 +45,14 @@ async function run() {
         const gearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
         assert.equal(gearProgression.assess(learned).required, true,
             'a hot clan member still needs its own working kit');
-        assert.equal(gearProgression.personal(learned), false,
-            'native hot membership retains clan custody of surplus');
+        // Clan custody needs a clan warehouse (clan level 1+), not membership alone.
+        assert.equal(gearProgression.personal(learned), true,
+            'membership in a clan without a warehouse keeps personal custody');
+        Supply.useRowSource(id => id === 9 ? [9, 1, [], 1] : undefined);
+        try {
+            assert.equal(gearProgression.personal(learned), false,
+                'native hot membership retains clan custody of surplus');
+        } finally { Supply.useRowSource(null); }
         assert.notEqual(Economy.inputKey(unlearned), Economy.inputKey(learned), 'learning invalidates the planning inputs');
         assert.notEqual(Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
             Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));
@@ -365,6 +372,8 @@ async function run() {
         stockFor: id => id === 990002 ? { owned: 4 } : {}, remembered: false });
     assert.equal(closureNetwork.plans.get(ownedCraftRoot.key).requirements.length, 0,
         'physical owned ingredients remain executable after native provider pruning');
+    // Clan 1 has a warehouse, so the mage's skill books stay outside personal custody.
+    Supply.useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
     const mage = { ...base, characterId: 903, level: 40, sp: 100000,
         stats: { ...base.stats, clanId: 1, classId: 14, exp: Data.experience[39], coldCombat: { classId: 14, skillSource: 'database', skills: [] } } };
     const missing = Catalog.missingBooks(mage);
@@ -389,6 +398,7 @@ async function run() {
         const valued = context.spotValue(realSpot);
         assert.equal(score.efficiencyAdjustment, valued.valueHours * 100, 'route and wish readers share the same native table valuation');
     }
+    Supply.useRowSource(null);
     console.log('PASS actual book gain/provider/paid delta and skill/SP event key');
 
     const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');

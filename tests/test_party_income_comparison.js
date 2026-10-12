@@ -74,7 +74,10 @@ try {
     const decision = Goals.decide(state, [peer], { prepared, roll: 0 });
     assert.equal(decision.accept, false, 'required request and maximum sociability cannot bypass the funding comparison');
     assert.deepEqual(Goals.formingMembers([state, peer], { clanGoalKey: 'clan-kit' }), [state, peer]);
-    assert.equal(Income.compare({ ...state, stats: { ...state.stats, clanId: 1 } }, [peer], { prepared }), null);
+    // Only a clan with a warehouse (clan level 1+) takes over equipment custody;
+    // plain membership keeps the personal income comparison.
+    assert.equal(Income.compare({ ...state, clanLevel: 1, stats: { ...state.stats, clanId: 1 } }, [peer], { prepared }), null);
+    assert.notEqual(Income.compare({ ...state, clanLevel: 0, stats: { ...state.stats, clanId: 1 } }, [peer], { prepared }), null);
     const heldObjective = { spotId: 'peer', objectiveKey: 'held' };
     const pending = Goals.joint({ startedAt: at - Income.REVIEW_MS, spotId: 'peer',
         stats: { objective: heldObjective } }, [state, peer], { timestamp: at,

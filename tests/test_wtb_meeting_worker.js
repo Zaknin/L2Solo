@@ -31,8 +31,10 @@ invoke('GameServer/Bot/Economy/PurchaseFunding').spendable = () => 1000000;
     worker.on('error', error => { failure = error; });
     worker.on('message', message => received.push(message));
     const send = (type, payload) => worker.postMessage(Protocol.envelope(type, epoch, payload));
-    const until = async predicate => {
-        const deadline = Date.now() + 10000;
+    // Loading the worker (datapack, catalogues) alone can pass ten seconds
+    // on a loaded machine; the meeting steps after it keep the short bound.
+    const until = async (predicate, limitMs = 10000) => {
+        const deadline = Date.now() + limitMs;
         while (!received.some(predicate)) {
             if (failure) throw failure;
             const fault = received.find(message => message.type === 'fault');
@@ -43,7 +45,7 @@ invoke('GameServer/Bot/Economy/PurchaseFunding').spendable = () => 1000000;
         return received.find(predicate);
     };
     try {
-        await until(message => message.type === 'ready' && message.payload.phase === 'loaded');
+        await until(message => message.type === 'ready' && message.payload.phase === 'loaded', 120000);
         send('catalog_page', { catalog: 'spots', rows: [], done: true });
         send('catalog_page', { catalog: 'npc_offers', rows: [], done: true });
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: [], removed: [] },

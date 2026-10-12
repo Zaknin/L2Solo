@@ -23,7 +23,8 @@ Config.developerDiagnostics = false; Config.economyDiagnostics = true; Economy.r
 for (const key of ['count', 'duration', 'enabled', 'push']) Diagnostics[key] = () => { throw Error(`off reached ${key}`); };
 global.performance = { now: () => { throw Error('off reached diagnostic clock'); } };
 const off = Economy.forState(state, deps);
-assert.strictEqual(Economy.forState(state, deps), off);
+// Each read returns a fresh view; the kept plan is the reused identity.
+assert.strictEqual(Economy.forState(state, deps).plan, off.plan);
 assert.equal(Economy.summary().mainColdForState, null, 'disabled readers expose unknown rather than zero');
 Economy.forgetContext(901); Economy.reset();
 Object.assign(Diagnostics, { count: original.count, duration: original.duration, enabled: original.enabled, push: original.push });
@@ -33,9 +34,9 @@ const records = []; Diagnostics.push = row => { records.push(row); return true; 
 const on = Economy.forState(state, deps);
 assert.deepEqual(on.network, off.network, 'full wishes, options, funding, selected activity and rolls stay identical');
 assert.deepEqual(on.statsPacket, off.statsPacket);
-assert.strictEqual(Economy.forState(state, deps), on);
+assert.strictEqual(Economy.forState(state, deps).plan, on.plan);
 const clone = structuredClone(state); clone.updatedAt++;
-assert.strictEqual(Economy.forState(clone, deps), on, 'main technical publication still reuses the same economic card');
+assert.strictEqual(Economy.forState(clone, deps).plan, on.plan, 'main technical publication still reuses the same economic card');
 let metrics = Diagnostics.metrics();
 assert.equal(metrics.counts['context:request:unknown'], 3);
 assert.equal(metrics.counts['context:hit:same_inputs'], 2);
@@ -43,11 +44,16 @@ assert.equal(metrics.counts['context:build:not_retained'], 1);
 assert.equal(metrics.counts['provider:request:unknown'], 1);
 assert.equal(metrics.counts['provider:build:context_miss'], 1);
 assert.equal(metrics.durations.context.count, 1); assert.equal(metrics.durations.provider.count, 1);
-const needs = records.filter(row => row.phase === 'wish_need'); assert.equal(needs.length, 2);
+// One need row per stock kind (shots, potions, scrolls). The requested
+// amount is the survival tranche plus, unless personal gear progression is
+// required, the rest of the missing stock.
+const needs = records.filter(row => row.phase === 'wish_need'); assert.equal(needs.length, 3);
+const gearRequired = invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required;
 for (const row of needs) {
     const kind = row.wishKey.slice('stock:'.length), stock = on.stock(kind);
     assert.equal(row.target, stock.target); assert.equal(row.owned, stock.current);
-    assert.equal(row.missing, stock.missing); assert.equal(row.requested, stock.missing);
+    assert.equal(row.missing, stock.missing);
+    assert.equal(row.requested, Number(stock.survivalMissing || 0) + (gearRequired ? 0 : Number(stock.missing || 0)));
     assert.equal(row.unitPrice, stock.unitPrice); assert.equal(row.wallet, 1000);
 }
 const context = records.find(row => row.phase === 'wish_context');
