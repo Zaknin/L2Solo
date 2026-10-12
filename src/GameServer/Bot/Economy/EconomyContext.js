@@ -21,7 +21,7 @@ function registerProvider(key, provider) {
     if (typeof provider !== 'function') throw new TypeError('invalid_economy_provider');
     extensions.set(key, provider); reset();
 }
-// actorKey -> { key, reads, crowd, plan, stateRef, gearThreat } of bots: bounded
+// actorKey -> { key, reads, plan, stateRef, gearThreat } of bots: bounded
 // (WishNetwork.remember). The plan is data (planOf); a reader gets view().
 // The main thread keeps 64 (its entries hold the graph nodes). The worker
 // keeps one plan per actor (perf C2): a few KB without any state, released
@@ -130,7 +130,7 @@ function inputKey(state, deps = {}) {
         deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
         Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
         Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
-        positive(stats.frustration), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
+        Math.floor(positive(stats.frustration) * 10), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
         stats.generatedCold, stats.race, stats.marketSellRetryAfter,
         Number(stats.marketSellRetryAfter || 0) > Number(deps.timestamp || Date.now()),
         invoke('GameServer/Bot/Economy/ItemDisposition').reservationInputKey(state), JSON.stringify(stats.clanMaterialDemand || null),
@@ -169,16 +169,13 @@ function marketToken(board, id, deps = {}) {
 // of their tokens (`id=token;`): a kept plan holds ~1 KB of ids instead of
 // ~10 KB of token strings (perf C2). Lane a is the market part of the
 // network key; both lanes (64 bits) decide whether the market still holds.
-// A build reads prices thousands of times: membership goes through a Set
-// while it builds; the kept entry drops it (seal) and keeps the ids only.
 class MarketReads {
-    constructor() { this.ids = []; this.seen = new Set(); this.a = 0x811c9dc5; this.b = 0x9e3779b9; }
-    has(id) { return this.seen ? this.seen.has(id) : this.ids.includes(id); }
+    constructor() { this.ids = []; this.a = 0x811c9dc5; this.b = 0x9e3779b9; }
+    has(id) { return this.ids.includes(id); }
     add(id, token) {
         const text = `${id}=${token};`;
-        this.ids.push(id); this.seen?.add(id); this.a = fnv1a32(text, this.a); this.b = fnv1a32(text, this.b);
+        this.ids.push(id); this.a = fnv1a32(text, this.a); this.b = fnv1a32(text, this.b);
     }
-    seal() { this.seen = null; return this; }
     holds(board, deps) {
         let a = 0x811c9dc5, b = 0x9e3779b9;
         for (const id of this.ids) { const text = `${id}=${marketToken(board, id, deps)};`; a = fnv1a32(text, a); b = fnv1a32(text, b); }
@@ -196,44 +193,6 @@ function watchedBoard(board, watch) {
         list: (selfId, ...rest) => { watch(selfId); return board.list(selfId, ...rest); },
         ...(board.heads ? { heads: (selfId, ...rest) => { watch(selfId); return board.heads(selfId, ...rest); } } : {})
     });
-}
-// The spot crowd as an input of one worker plan (perf C2), by the same rule
-// as the market: the spots its build read in the occupancy snapshot, with
-// what the readers use of each entry (SpotEconomics crowd, sourceHasCapacity,
-// hasCapacityForStates). A kept plan serves a caller with occupancy only
-// while every read spot still reads the same; a build that enumerated the
-// snapshot holds for no other one. Exact here; bands are perf C3.
-function crowdToken(entry, self) {
-    if (!entry || typeof entry !== 'object') return String(entry ?? '-');
-    const has = (set, key) => set instanceof Set && set.has(key) ? 1 : 0;
-    return [entry.count, entry.reservedCount, entry.capacity, has(entry.retained, self), has(entry.reservedKeys, self),
-        [...(entry.reservationKeys || [])].join(','), [...(entry.retainedReservationKeys || [])].join(',')].join('/');
-}
-class CrowdReads {
-    constructor(self) { this.self = self; this.ids = []; this.all = false; this.a = 0x811c9dc5; this.b = 0x9e3779b9; }
-    digest(occupancy) {
-        let a = 0x811c9dc5, b = 0x9e3779b9;
-        for (const id of this.ids) { const text = `${id}=${crowdToken(occupancy?.[id], this.self)};`; a = fnv1a32(text, a); b = fnv1a32(text, b); }
-        return [a, b];
-    }
-    holds(occupancy) { if (this.all) return false; const [a, b] = this.digest(occupancy); return a === this.a && b === this.b; }
-    // Reads of the snapshot while `active()`; the snapshot is a plain object
-    // by spot id (SpotProfiles.indexedOccupancy, occupancySnapshot).
-    watch(occupancy, active) {
-        const seen = new Set();
-        const note = key => {
-            if (!active() || typeof key !== 'string' || key === 'get' || key in Object.prototype || seen.has(key)) return;
-            seen.add(key); this.ids.push(key);
-            const text = `${key}=${crowdToken(occupancy[key], this.self)};`;
-            this.a = fnv1a32(text, this.a); this.b = fnv1a32(text, this.b);
-        };
-        return new Proxy(occupancy, {
-            get: (target, key) => { note(key); return target[key]; },
-            has: (target, key) => { note(key); return key in target; },
-            getOwnPropertyDescriptor: (target, key) => { note(key); return Reflect.getOwnPropertyDescriptor(target, key); },
-            ownKeys: target => { if (active()) this.all = true; return Reflect.ownKeys(target); }
-        });
-    }
 }
 function defaultProducerSource(state, board) {
     const index = invoke('GameServer/Bot/Population/ColdOccupationSources').recipeIndex(board);
@@ -474,10 +433,7 @@ function forState(state = {}, deps = {}) {
     // builds unless the held entry kept them (the main thread keeps them).
     // Equal inputs and market tokens serve the kept plan to any state object
     // (perf C2): the plan holds no state, so a new publication is no reason.
-    // A worker caller that gives the spot crowd needs a plan built on the
-    // same crowd (the main thread serves by key, as before).
-    const crowdHolds = isMainThread || !deps.occupancy || held?.crowd?.holds(deps.occupancy) === true;
-    if (held?.key === digest && (!deps.withNodes || held.projection) && crowdHolds && held.reads.holds(sourceBoard, deps)) {
+    if (held?.key === digest && (!deps.withNodes || held.projection) && held.reads.holds(sourceBoard, deps)) {
         if (deps.onSourceRead) for (const id of held.reads.ids) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', 'same_inputs');
@@ -488,13 +444,7 @@ function forState(state = {}, deps = {}) {
         held.gearThreat = gearThreat;
         // The latest state served owns the entry for a release that names
         // its state (a private query snapshot, forgetContext).
-        if (held.stateRef.deref() !== state) {
-            held.stateRef = new WeakRef(state);
-            // The gear plan choice also rests on time gates outside the key
-            // (craft retry cooldown, spot backoffs): in the worker it lives
-            // for one state object, as before perf C2.
-            if (!isMainThread) held.plan.gearPlanMemo = undefined;
-        }
+        if (held.stateRef.deref() !== state) held.stateRef = new WeakRef(state);
         remember(cache, actorKey, held, keptLimit());
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
@@ -506,7 +456,7 @@ function forState(state = {}, deps = {}) {
     // economic event. An input-key mismatch is named as a dependency change;
     // it does not claim which historical event caused it.
     const diagnosticReason = !diagnostic ? null : !held ? 'not_retained' : held.key !== digest
-        ? 'input_dependency_changed' : deps.withNodes && !held.projection ? 'nodes_needed' : !crowdHolds ? 'spot_crowd_changed' : 'used_market_changed';
+        ? 'input_dependency_changed' : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, shadowEntry = null;
     if (diagnostic) {
@@ -525,9 +475,6 @@ function forState(state = {}, deps = {}) {
     }
     const reads = new MarketReads();
     let building = true;
-    const crowd = !isMainThread && deps.occupancy && typeof deps.occupancy === 'object' && !(deps.occupancy instanceof Map)
-        ? new CrowdReads(String(state.characterId || state.name || state.stats?.generatedIndex || '')) : null;
-    const occupancy = crowd ? crowd.watch(deps.occupancy, () => building) : deps.occupancy;
     // MVP-6 Bounds: while a gear candidate's arena is built its reads wait
     // in its own scope; the provider keeps the scopes whose descriptors
     // survive the final cut, so a rejected candidate's items never become
@@ -568,7 +515,7 @@ function forState(state = {}, deps = {}) {
     context.routePending = !deps.tripCost && !context.routeRows;
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
-    context.spotValue = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, occupancy, timestamp, persona, deathHours: context.deathHours });
+    context.spotValue = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, deathHours: context.deathHours });
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
         // settlement/preparation owner. Never replace unknown stock with zero
@@ -594,7 +541,7 @@ function forState(state = {}, deps = {}) {
     context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
-    const projection = Providers.build(state, context, { ...deps, occupancy, nodes: [...(deps.nodes || []), ...extra] });
+    const projection = Providers.build(state, context, { ...deps, nodes: [...(deps.nodes || []), ...extra] });
     context.projection = projection;
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
@@ -652,7 +599,7 @@ function forState(state = {}, deps = {}) {
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        remember(cache, actorKey, { key: digest, reads: reads.seal(), crowd, plan, stateRef: new WeakRef(state), gearThreat,
+        remember(cache, actorKey, { key: digest, reads, plan, stateRef: new WeakRef(state), gearThreat,
             projection: isMainThread ? projection : null }, keptLimit());
     }
     return view(state, plan, deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });

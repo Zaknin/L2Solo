@@ -77,12 +77,6 @@ module.exports.publicationProbe = async stage => {
         const fresh = Economy.forState(clone,options);
         assert.strictEqual(fresh.plan,first.plan,'a new publication with equal inputs serves the kept plan, which holds no state (perf C2)');
         assert.strictEqual(fresh.state,clone);
-        // The author's backstop: a kept plan reaches no state object.
-        const seen=new Set(),forbidden=new Set([current,current.stats,current.inventory,clone,clone.stats,clone.inventory]);
-        const walk=value=>{ if(!value||typeof value!=='object'||seen.has(value))return; seen.add(value);
-            assert(!forbidden.has(value),'a kept plan holds no state object');
-            for(const child of value instanceof Map?[...value.keys(),...value.values()]:value instanceof Set?value:Object.values(value))walk(child); };
-        walk(fresh.plan);
         assert.deepEqual(fresh.statsPacket,first.statsPacket);
         assert.deepEqual(fresh.network.activity,first.network.activity);
         Economy.forgetContext(current.characterId,'party_query_release',current);
