@@ -4,6 +4,8 @@
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
+const SpotIndex = require('../Bot/AI/SpotIndex');
+const EMPTY = Object.freeze([]);
 
 // No spots, no sources. A caller without spots (a default `[]`, a new array
 // each call) must not evict the index built for the real spot list: the
@@ -44,8 +46,9 @@ function sourcesByItem(spots = []) {
     const selectedRewards = new Set();
     const spotByNpc = new Map();
     const spotByName = new Map();
-    // Counts and raid decorations belong to this current selection.
-    // This scratch index dies after construction; records retain two numbers.
+    // Source weights and raid decorations belong to this current selection.
+    // Only these ID joins survive for public topology; physical counts are
+    // read locally from raw entries, without the source-weight fallback.
     const spotCounts = new Map();
     const appendSpot = (index, key, spot) => {
         if (!key || !spot) return;
@@ -137,8 +140,60 @@ function sourcesByItem(spots = []) {
         });
     });
 
-    sourceIndexCache = { spots, rewards, npcs, byItemId };
+    sourceIndexCache = { spots, rewards, npcs, byItemId, spotByNpc };
     return byItemId;
 }
 
-module.exports = { sourcesByItem };
+function rawCounts(spot, npcId) {
+    let count = 0, totalCount = 0, knownCount = true, knownTotal = true, hasNpc = false;
+    for (const entry of spot.npcEntries || []) {
+        const amount = entry.count, valid = Number.isSafeInteger(amount) && amount >= 0;
+        if (!valid || !Number.isSafeInteger(totalCount + amount)) knownTotal = false;
+        else totalCount += amount;
+        if (Number(entry.selfId) !== npcId) continue;
+        hasNpc = true;
+        if (!valid || !Number.isSafeInteger(count + amount)) knownCount = false;
+        else count += amount;
+    }
+    return { count: knownCount ? count : null, totalCount: knownTotal ? totalCount : null, hasNpc };
+}
+
+function selectedNpcSpots(npcId, spots = []) {
+    if (!spots?.length) return EMPTY;
+    sourcesByItem(spots);
+    const id = Number(npcId);
+    if (!Number.isSafeInteger(id) || id < 1) return EMPTY;
+    // A name-only alias cannot prove a physical template ID or its count.
+    // Legacy source joins supply candidate IDs only. Both public directions
+    // resolve duplicate IDs through SpotIndex's canonical last matching row.
+    const rows = [], seen = new Set();
+    for (const spotId of sourceIndexCache.spotByNpc.get(id)?.keys() || []) {
+        const spot = SpotIndex.spotById(spots, spotId);
+        if (!spot || seen.has(spot)) continue;
+        const counts = rawCounts(spot, id);
+        if (!counts.hasNpc) continue;
+        seen.add(spot);
+        rows.push({ spot, npcId: id, count: counts.count, totalCount: counts.totalCount, countKind: 'catalogue_raw_counts' });
+    }
+    return rows;
+}
+
+function selectedSpotNpcs(spotId, spots = []) {
+    if (!spots?.length) return null;
+    sourcesByItem(spots);
+    const spot = SpotIndex.spotById(spots, spotId);
+    return spot ? { spot, npcEntries: spot.npcEntries || EMPTY,
+        totalCount: rawCounts(spot).totalCount, countKind: 'catalogue_raw_counts' } : null;
+}
+
+const spawnRevisions = new WeakMap();
+let nextSpawnRevision = 1;
+function potentialSpawnData() {
+    const groups = DataCache.npcSpawns;
+    if (Array.isArray(groups) && !spawnRevisions.has(groups)) spawnRevisions.set(groups, nextSpawnRevision++);
+    return { kind: 'potential_definitions', origin: 'native', revision: Array.isArray(groups) ? spawnRevisions.get(groups) : null,
+        groups: groups || EMPTY, totalSemantics: 'per_explicit_coordinate_or_random_total_in_bounds',
+        periodSemantics: 'day_or_night_otherwise_always', population: 'definition_only' };
+}
+
+module.exports = { sourcesByItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData };

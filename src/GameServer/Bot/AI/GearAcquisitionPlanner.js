@@ -1,7 +1,7 @@
 const Sources = require('../../Items/ItemAcquisitionCatalog');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
-const SourceCatalog = require('../../Knowledge/SourceCatalog');
+const GameCatalogue = require('../../Knowledge/GameDataCatalogue').native();
 const DataCache = invoke('GameServer/DataCache');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 const C4DualSwordCombinations = invoke('GameServer/Items/C4DualSwordCombinations');
@@ -1927,9 +1927,9 @@ function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options =
 }
 
 // Empty selections preserve the real shared view and its derived caches.
-const NO_SOURCES = SourceCatalog.sourcesByItem();
+const NO_SOURCES = GameCatalogue.sourceIndexFor();
 function sourceIndexFor(spots = []) {
-    const byItemId = SourceCatalog.sourcesByItem(spots);
+    const byItemId = GameCatalogue.sourceIndexFor(spots);
     if (byItemId !== NO_SOURCES && byItemId !== sourceIndexCache.byItemId) {
         sourceIndexCache = { byItemId, resolved: new Map(), yields: new Map(),
             plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };

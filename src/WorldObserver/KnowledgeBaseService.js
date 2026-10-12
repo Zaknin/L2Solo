@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { createExportedCatalogue } = require('../GameServer/Knowledge/ExportedCatalogueAdapter');
 
 const DEFAULT_PAGE_SIZE = 60;
 const MAX_PAGE_SIZE = 100;
@@ -267,7 +268,8 @@ function spawnMapPoints(spawn) {
     }];
 }
 
-function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null } = {}) {
+function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null,
+    catalogueFactory = createExportedCatalogue, nativeCatalogue = null } = {}) {
     if (!dataDir) throw new Error('Knowledge base dataDir is required');
     if (!progressionRates) throw new Error('Knowledge base progressionRates is required');
     let cache = null;
@@ -291,6 +293,7 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
             skillById: new Map(skills.map((skill) => [String(skill.key || `${skill.id}:${skill.level}`), skill])),
             spawnById: new Map(spawns.map((spawn) => [String(spawn.id), spawn]))
         };
+        cache.catalogue = catalogueFactory(cache, { nativeCatalogue });
         return cache;
     }
 
@@ -385,7 +388,7 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
 
     function npcSpawns(npc) {
         const data = load();
-        return (npc?.spawnIds || []).map((id) => data.spawnById.get(String(id))).filter(Boolean).map((spawn) => ({
+        return (npc?.spawnIds || []).map((id) => data.catalogue.spawn(id)).filter(Boolean).map((spawn) => ({
             id: String(spawn.id),
             period: String(spawn.period || 'always'),
             total: Number(spawn.total || 0),
@@ -401,12 +404,12 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
         return (relations || [])
             .map((relation) => Number(relation?.[idField] ?? relation))
             .filter((id) => Number.isSafeInteger(id) && id > 0)
-            .map((id) => npcSummary(data.mobById.get(id) || { id }, data.skillById));
+            .map((id) => npcSummary(data.catalogue.npc(id) || { id }, data.skillById));
     }
 
     function npcDetail(id) {
         const data = load();
-        const npc = data.mobById.get(Number(id));
+        const npc = data.catalogue.npc(id);
         if (!npc) return null;
         const drops = scaledRewardGroups(npc.drops, 'drop', npc.level, progressionRates, iconFor);
         const spoils = scaledRewardGroups(npc.spoils, 'spoil', npc.level, progressionRates, iconFor);
@@ -440,11 +443,11 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
 
     function itemDetail(id) {
         const data = load();
-        const item = data.itemById.get(Number(id));
+        const item = data.catalogue.item(id);
         if (!item) return null;
         const template = item.template || {};
-        const sourceDetails = (kind) => (item?.sources?.[kind] || []).map((source) => {
-            const npc = data.mobById.get(Number(source.mobId));
+        const sourceDetails = (kind) => data.catalogue.sourcesForItem(item.id, { kind }).map((source) => {
+            const npc = data.catalogue.npc(source.mobId);
             if (!npc) return null;
             const groups = scaledRewardGroups(kind === 'drops' ? npc.drops : npc.spoils, kind === 'drops' ? 'drop' : 'spoil', npc.level, progressionRates, iconFor);
             return {
@@ -473,11 +476,13 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
     }
 
     function itemOverview(id) {
-        const item = load().itemById.get(Number(id));
+        const item = load().catalogue.item(id);
         return item ? itemSummary(item, iconFor) : null;
     }
 
-    return Object.freeze({ itemDetail, itemOverview, listItems, listNpcs, meta, npcDetail });
+    return Object.freeze({ itemDetail, itemOverview, listItems, listNpcs, meta, npcDetail,
+        catalogue: () => load().catalogue,
+        relations: (kind, id, options) => load().catalogue.relations(kind, id, options) });
 }
 
 module.exports = {

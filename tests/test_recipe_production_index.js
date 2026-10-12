@@ -61,6 +61,7 @@ Catalog.allowsRecipe = nativeAdmission;
 // independently of production admission and the first-product resolver.
 const NativeRecipes = require('../src/GameServer/Items/C4RecipeItems');
 const Knowledge = require('../src/GameServer/Knowledge/RecipeCatalog');
+const GameCatalogue = require('../src/GameServer/Knowledge/GameDataCatalogue').native();
 const source = NativeRecipes.nativeSource(), expectedByIngredient = new Map(), products = new Map();
 const early = source.rows.find(recipe => recipe.materials.length), originalEarlyAmount = early.materials[0].amount;
 let declaredEarlyInputs;
@@ -96,7 +97,12 @@ assert([...products.values()].some(recipes => recipes.length > 1), 'native data 
 for (const variants of products.values()) {
     assert.equal(NativeRecipes.resolveByProductId(variants[0].productId), variants[0], 'first-product helper remains unchanged');
     assert(variants.every(recipe => Knowledge.rows().includes(recipe)), 'shared knowledge retains every native variant');
+    assert.deepEqual(GameCatalogue.recipesForProduct(variants[0].productId), variants, 'the public product graph preserves all native variants/order');
+    assert.equal(GameCatalogue.recipe(variants[0].recipeId), NativeRecipes.resolveByRecipeId(variants[0].recipeId));
 }
+for (const [id] of expectedByIngredient) assert.equal(GameCatalogue.recipesUsing(id), Knowledge.recipesUsing(id), 'public reverse reuses the same owner rows');
+const graphRecipe = source.rows.find(recipe => recipe.materials.length);
+assert.equal(GameCatalogue.ingredientsForRecipe(graphRecipe.recipeId), Knowledge.ingredientsForRecipe(graphRecipe.recipeId));
 const native = source.rows.find(recipe => recipe !== early && recipe.materials.length), oldAmount = native.materials[0].amount;
 const declared = Knowledge.recipesUsing(native.materials[0].selfId);
 try {
@@ -106,4 +112,4 @@ try {
 } finally { native.materials[0].amount = oldAmount; }
 console.log(JSON.stringify({ nativeRecipeRows: source.rows.length, orderedInputs, normalizedIngredients,
     ingredientKeys: expectedByIngredient.size, orderedAuthorInputReferences: orderedInputs,
-    ingredientReferences: normalizedIngredients * 2, perBotRetainedBytes: 0 }));
+    ingredientReferences: normalizedIngredients * 2, productKeys: products.size, productReferences: source.rows.length, perBotRetainedBytes: 0 }));

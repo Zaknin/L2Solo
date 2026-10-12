@@ -9,8 +9,11 @@ let catalog = null;
 // catalog revision: craft readers see them through their validation fallback.
 function catalogFor(source) {
     if (catalog?.revision === source.revision) return catalog;
-    const inputs = new WeakMap(), byIngredient = new Map();
+    const inputs = new WeakMap(), byIngredient = new Map(), byProduct = new Map();
     for (const recipe of source.rows) {
+        const productId = Number(recipe.productId);
+        if (!byProduct.has(productId)) byProduct.set(productId, []);
+        byProduct.get(productId).push(recipe);
         if (!Array.isArray(recipe.materials)) continue;
         const entries = [], totals = new Map();
         let safe = true;
@@ -37,13 +40,19 @@ function catalogFor(source) {
         inputs.set(recipe, Object.freeze({ entries: Object.freeze(entries), ingredients: Object.freeze(ingredients) }));
     }
     for (const rows of byIngredient.values()) Object.freeze(rows);
+    for (const rows of byProduct.values()) Object.freeze(rows);
     catalog = { revision: source.revision, rows: source.rows,
-        recipeItemRows: Object.freeze(Object.values(source.recipeItems)), inputs, byIngredient };
+        recipeItemRows: Object.freeze(Object.values(source.recipeItems)), inputs, byIngredient, byProduct };
     return catalog;
 }
 
 function rows() { return catalogFor(NativeRecipes.nativeSource()).rows; }
 function recipesUsing(selfId) { return catalogFor(NativeRecipes.nativeSource()).byIngredient.get(Number(selfId)) || EMPTY; }
+function recipesForProduct(selfId) { return catalogFor(NativeRecipes.nativeSource()).byProduct.get(Number(selfId)) || EMPTY; }
+function ingredientsForRecipe(recipeId) {
+    const recipe = NativeRecipes.resolveByRecipeId(recipeId);
+    return recipe ? catalogFor(NativeRecipes.nativeSource()).inputs.get(recipe)?.ingredients || null : null;
+}
 function revision() { return NativeRecipes.nativeSource().revision; }
 function warmup() { catalogFor(NativeRecipes.nativeSource()); }
 
@@ -76,4 +85,4 @@ function inputsFor(recipe) {
     return prepared;
 }
 
-module.exports = { rows, recipesUsing, revision, recipeItemRows, warmup, preparedInputsFor, inputsFor };
+module.exports = { rows, recipesUsing, recipesForProduct, ingredientsForRecipe, revision, recipeItemRows, warmup, preparedInputsFor, inputsFor };

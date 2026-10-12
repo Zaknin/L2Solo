@@ -6,13 +6,24 @@ require('../src/Global');
 
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const { createKnowledgeBaseService, itemCategory, npcCombatTraits, playerFacingItem, spawnMapPoints } = require('../src/WorldObserver/KnowledgeBaseService');
+const { createExportedCatalogue } = require('../src/GameServer/Knowledge/ExportedCatalogueAdapter');
+const { create } = require('../src/GameServer/Knowledge/GameDataCatalogue');
+const DataCache = invoke('GameServer/DataCache'), NativeRecipes = require('../src/GameServer/Items/C4RecipeItems');
+const beforeNative = { items: DataCache.items, npcs: DataCache.npcs, spawns: DataCache.npcSpawns, recipes: NativeRecipes.loadedSource() };
+let ownedExport, itemReads = 0, npcReads = 0;
 
 const previousPreset = process.env.L2NODE_PROGRESSION_RATE;
 const dataDir = path.join(__dirname, '..', 'data', 'KnowledgeBase');
 const service = createKnowledgeBaseService({
     dataDir,
     progressionRates: ProgressionRates,
-    iconFor: (item, id) => ({ url: `/observer/item-icons/${Number(id)}.png` })
+    iconFor: (item, id) => ({ url: `/observer/item-icons/${Number(id)}.png` }),
+    catalogueFactory: (data, options) => {
+        ownedExport = data;
+        const catalogue = createExportedCatalogue(data, options);
+        return { ...catalogue, item: id => { itemReads++; return catalogue.item(id); },
+            npc: id => { npcReads++; return catalogue.npc(id); } };
+    }
 });
 
 try {
@@ -83,6 +94,23 @@ try {
     });
     const blackWolf = shortSword.sources.drops.find((npc) => npc.id === 317);
     assert.strictEqual(blackWolf.chancePercent, 0.6187);
+    const exported = service.catalogue();
+    assert.equal(exported.item(1), ownedExport.itemById.get(1));
+    assert.equal(exported.sourcesForItem(1, { kind: 'drop' }), ownedExport.itemById.get(1).sources.drops);
+    assert.equal(exported.sourcesForItem(1), null);
+    assert.equal(exported.potentialSpawnData().definitions, ownedExport.spawns);
+    assert.deepEqual(service.relations('item', 1, { spots: [] }), { kind: 'item', id: 1, origin: 'exported',
+        recipes: { available: false, producedBy: null, usedBy: null }, selectedSources: { available: false, rows: null } });
+    assert.equal(exported.recipesForProduct(1), null, 'missing recipe data is unavailable, not an empty recipe list');
+    const fixtureRecipes = [{ recipeId: 7, productId: 1 }], fixtureSpots = [{ spot: { id: 'selected' }, count: 0 }];
+    const nativeFixture = create({ origin: 'native-fixture',
+        capabilities: ({ spots } = {}) => ({ recipes: true, selectedSpots: Array.isArray(spots), npcShops: false, potentialSpawns: true }),
+        recipesForProduct: () => fixtureRecipes, recipesUsing: () => [], selectedNpcSpots: () => fixtureSpots,
+        selectedSourcesForItem: () => [] });
+    const combined = createExportedCatalogue(ownedExport, { nativeCatalogue: nativeFixture });
+    assert.equal(combined.recipesForProduct(1), fixtureRecipes);
+    assert.equal(combined.relations('npc', 317, { spots: [] }).selectedSpots.rows, fixtureSpots);
+    assert.equal(combined.item(1), exported.item(1), 'explicit native relations do not replace exported legacy detail rows');
 
     const mobs = require('../data/KnowledgeBase/mobs.json');
     const mobById = new Map(mobs.map(npc => [npc.id, npc]));
@@ -158,6 +186,9 @@ try {
         'NPC detail stat grids must render whole values');
     assert.match(mapHtml, /href="\/observer\/database\/items"/);
     assert.match(mapHtml, /id="npcSpawnLayer"/);
+    assert(itemReads > 1 && npcReads > 1, 'actual reference detail readers call the common interface');
+    assert.deepEqual({ items: DataCache.items, npcs: DataCache.npcs, spawns: DataCache.npcSpawns, recipes: NativeRecipes.loadedSource() }, beforeNative,
+        'standalone exported reference never initializes the native datapack/recipe source');
 } finally {
     if (previousPreset === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
     else process.env.L2NODE_PROGRESSION_RATE = previousPreset;

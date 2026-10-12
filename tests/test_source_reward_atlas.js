@@ -11,9 +11,11 @@ const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const SourceCatalog = require('../src/GameServer/Knowledge/SourceCatalog');
+const GameCatalogue = require('../src/GameServer/Knowledge/GameDataCatalogue').native();
 const ItemTemplateIndex = require('../src/GameServer/Item/ItemTemplateIndex');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const originalRewards = DataCache.npcRewards, originalNpcs = DataCache.npcs;
+const originalSpawns = DataCache.npcSpawns;
 const originalFind = ItemTemplateIndex.find;
 
 // Reference is the pre-atlas algorithm: global reward traversal and current
@@ -131,6 +133,43 @@ try {
     for (const spots of [[normalSpot], [aliasSpot], [raidSpot], [raidSpot, aliasSpot, normalSpot],
         [{ ...raidSpot, raidBoss: false }], [{ ...raidSpot, raidBossTemplateId: normal.selfId }],
         [{ ...normalSpot, raidBoss: true, raidBossTemplateId: normal.selfId }]]) parity(spots);
+    assert.equal(GameCatalogue.item('1869'), originalFind(DataCache.items, 1869));
+    assert.equal(GameCatalogue.npc(String(normal.selfId)), originalFind(originalNpcs, normal.selfId));
+    const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
+    const shopId = shops.npcIds().find(id => shops.fetchForNpc(id).length);
+    const shopItem = shops.fetchForNpc(shopId)[0];
+    assert.equal(GameCatalogue.npcShopRow(String(shopId), String(shopItem.selfId)), shops.rowForNpc(shopId, shopItem.selfId));
+
+    const topology = [normalSpot, aliasSpot,
+        { id: 'zero', npcEntries: [{ selfId: normal.selfId, count: 0 }] },
+        { id: 'unknown', npcEntries: [{ selfId: normal.selfId }] },
+        { id: 'invalid', npcEntries: [{ selfId: normal.selfId, count: -1 }] }];
+    const topologyIndex = Planner.sourceIndexFor(topology);
+    assert.equal(GameCatalogue.sourceIndexFor(topology), topologyIndex);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(normal.selfId, topology).map(row => [row.spot.id, row.count, row.totalCount]),
+        [['normal', 3, 3], ['zero', 0, 0], ['unknown', null, null], ['invalid', null, null]], 'ID counts use raw valid numbers; name-only aliases prove no ID count');
+    assert.equal(GameCatalogue.selectedSpotNpcs('alias', topology).npcEntries, aliasSpot.npcEntries);
+    assert.equal(GameCatalogue.selectedSpotNpcs('unknown', topology).totalCount, null);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(normal.selfId, []), []);
+    assert.equal(Planner.sourceIndexFor(topology), topologyIndex, 'empty topology queries preserve the populated selected view');
+    const legacyZero = [...topologyIndex.values()].flat().find(row => row.spot.id === 'zero');
+    assert.equal(legacyZero.sourceCount, 1, 'planner source weights retain their original fallback');
+    parity(topology);
+    assert.deepEqual(GameCatalogue.sourcesForItem(1869, { spots: topology, kind: 'drop' }), GameCatalogue.sourcesForItem(1869, { spots: topology, kind: 'drops' }));
+    assert.equal(GameCatalogue.sourcesForItem(1869, { spots: topology }), null, 'source kind is required');
+
+    const definitions = [{ bounds: [{ locX: 1, locY: 2, minZ: -4, maxZ: -2 }], spawns: [
+        { selfId: normal.selfId, total: 2, period: 'day', coords: [{ locX: 1, locY: 2 }, { locX: 3, locY: 4 }] },
+        { selfId: normal.selfId, total: 3, period: 'night', coords: [] }] }];
+    DataCache.npcSpawns = definitions;
+    const potential = GameCatalogue.potentialSpawnData();
+    assert.equal(potential.groups, definitions);
+    assert.equal(potential.population, 'definition_only');
+    assert.equal(potential.totalSemantics, 'per_explicit_coordinate_or_random_total_in_bounds');
+    assert.equal(potential.groups[0].spawns[0].total, 2, 'total stays per coordinate, not inferred population');
+    DataCache.npcSpawns = definitions.slice();
+    assert.notEqual(GameCatalogue.potentialSpawnData().revision, potential.revision);
+    DataCache.npcSpawns = originalSpawns;
 
     // Same reward reached through both aliases produces one row per kind;
     // source order follows the catalog, rather than the selected-entry order.
@@ -148,6 +187,17 @@ try {
     parity(aliases);
     const chosen = Planner.sourceIndexFor(aliases).get(1869);
     assert.deepEqual(chosen.map(row => DataCache.npcRewards.indexOf(row.reward)), [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(16, aliases), [], 'the canonical last name-only row proves no NPC16 link');
+    assert.equal(GameCatalogue.selectedSpotNpcs('first', aliases).spot, aliases[2]);
+    const canonicalAliases = [...aliases, { id: 'first', npcEntries: [
+        { selfId: '16', count: 0 }, { selfId: 16, count: 5 }, { selfId: 17, count: 2 }] }];
+    const reverse = GameCatalogue.selectedSpotNpcs('first', canonicalAliases);
+    const forward16 = GameCatalogue.selectedNpcSpots(16, canonicalAliases), forward17 = GameCatalogue.selectedNpcSpots(17, canonicalAliases);
+    assert.equal(forward16.length, 1); assert.equal(forward17.length, 1);
+    assert.equal(forward16[0].spot, reverse.spot); assert.equal(forward17[0].spot, reverse.spot);
+    assert.deepEqual([forward16[0].count, forward17[0].count, forward16[0].totalCount, reverse.totalCount], [5, 2, 7, 7]);
+    assert.equal(reverse.npcEntries, canonicalAliases[3].npcEntries);
+    parity(canonicalAliases);
     parity(structuredClone(aliases));
     DataCache.npcRewards.push(DataCache.npcRewards[0]);
     DataCache.npcRewards = DataCache.npcRewards.slice();
@@ -233,6 +283,7 @@ try {
 } finally {
     ItemTemplateIndex.find = originalFind;
     DataCache.npcRewards = originalRewards; DataCache.npcs = originalNpcs;
+    DataCache.npcSpawns = originalSpawns;
     fs.rmSync(isolated.directory, { recursive: true, force: true });
 }
 process.exit(0);

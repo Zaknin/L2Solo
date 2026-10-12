@@ -1,6 +1,8 @@
 // Shared, bounded caches for immutable catalog results. No player state here.
 const path = require('path');
 const { createKnowledgeBaseService } = require('../../../WorldObserver/KnowledgeBaseService');
+const { createExportedCatalogue } = require('../../Knowledge/ExportedCatalogueAdapter');
+const GameCatalogue = require('../../Knowledge/GameDataCatalogue');
 let knowledge;
 function cachedService(base, rates) {
     let profile;
@@ -23,8 +25,12 @@ function cachedService(base, rates) {
 function service() {
     if (!knowledge) {
         const rates = invoke('GameServer/ProgressionRates');
+        const nativeData = invoke('GameServer/DataCache');
         knowledge = cachedService(createKnowledgeBaseService({
-            dataDir: path.join(__dirname, '../../../../data/KnowledgeBase'), progressionRates: rates
+            dataDir: path.join(__dirname, '../../../../data/KnowledgeBase'), progressionRates: rates,
+            catalogueFactory: createExportedCatalogue,
+            nativeCatalogue: Array.isArray(nativeData.items) && Array.isArray(nativeData.npcs)
+                && require('../../Items/C4RecipeItems').loadedSource() ? GameCatalogue.native() : null
         }), rates);
     }
     return knowledge;
