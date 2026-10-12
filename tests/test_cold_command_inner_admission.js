@@ -321,16 +321,21 @@ async function versionedBookTraining(key, mode) {
     const id = await seed(), Catalog = invoke('GameServer/Skills/SkillBookCatalog');
     const training = Catalog.nextTraining(10, 20, 1184, 0);
     assert(training && training.bookId && training.sp > 0, 'authored first Ice Bolt rank consumes its actual SP/book');
+    const clanId = Number((await Database.createClan({ name: `BookTrainingClan${serial}`, leaderId: id })).insertId);
+    await Database.updateClanLevel(clanId, 1);
+    await Database.updateCharacterClan(id, clanId, 0, 0, 0);
     await Database.updateCharacterClassId(id, 10);
     await Database.setItem(id, { selfId: training.bookId, name: 'Spellbook: Ice Bolt', amount: 1,
         equipped: false, enchant: 0, slot: 0 });
     const initial = Life.snapshot(id);
+    // Joining publishes a real membership revision; compare against that floor.
+    const version = Number(initial.stats[key] || 0);
     assert(await Life.upsertState({ ...initial, level: 20, exp: Number(Data.experience[19]) + 1, sp: training.sp,
         inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
-        stats: { ...initial.stats, classId: 10, [key]: mode === 'stale' ? 0 : 1 } }, 'authored_book_training_fixture'));
+        stats: { ...initial.stats, classId: 10, clanId, [key]: version + (mode === 'stale' ? 0 : 1) } }, 'authored_book_training_fixture'));
     const state = Life.snapshot(id), beforeWrite = Database.createColdTrainingGuard(state, () => {});
     await Database.execute([`UPDATE bot_life_state SET statsJson=json_set(statsJson, '$.${key}', ?) WHERE characterId=?`,
-        [mode === 'lower' ? 0 : 1, id]]);
+        [version + (mode === 'lower' ? 0 : 1), id]]);
     const before = await facts(id), failuresBefore = Database.stats().failures;
     if (mode === 'stale') {
         await assert.rejects(Database.learnBotSkill(id, training.skillId, training.level, { beforeWrite }),
