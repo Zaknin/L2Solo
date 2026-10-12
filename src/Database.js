@@ -138,6 +138,16 @@ function normalizeRow(row) {
     return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeValue(value)]));
 }
 
+function copyNormalizedRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    const copy = { ...row };
+    for (const key of Object.keys(copy)) {
+        if (Buffer.isBuffer(copy[key])) copy[key] = Buffer.from(copy[key]);
+        else if (copy[key] instanceof Uint8Array) copy[key] = new Uint8Array(copy[key]);
+    }
+    return copy;
+}
+
 function normalizeRows(rows) {
     return (rows || []).map(normalizeRow);
 }
@@ -5659,11 +5669,16 @@ const Database = {
                     [change.nextResolveAt, change.statsJson, change.updatedAt, change.spotId ?? null,
                         change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedUpdatedAt]);
                     if (updated.affectedRows !== 1) throw new Error('party conflict: party changed during commit');
+                    let partyRow, partyRowRead = false;
                     for (const request of group) {
                         const result = results.find(result => result.characterId === Number(request.characterId));
                         result.row = coldSimulationRow(result.characterId);
                         result.revision = Number(result.row.simulationRevision);
-                        result.partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                        if (!partyRowRead) {
+                            partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                            partyRowRead = true;
+                        }
+                        result.partyRow = copyNormalizedRow(partyRow);
                     }
                 }
                 const raidCommit = group[0].atomicGroup.raidCommit;
@@ -5677,11 +5692,17 @@ const Database = {
                             ON CONFLICT(npcId) DO UPDATE SET respawnTime=excluded.respawnTime, hp=0, mp=0, updatedAt=excluded.updatedAt`,
                         [defeat.npcId, defeat.respawnTime, now()]);
                     }
+                    let raidRow, raidPartyRow, raidRowsRead = false;
                     for (const request of group) {
                         const result = results.find(result => result.characterId === Number(request.characterId));
-                        result.raidRow = one('SELECT * FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
+                        if (!raidRowsRead) raidRow = one('SELECT * FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
+                        result.raidRow = copyNormalizedRow(raidRow);
                         result.raidRespawnAt = raidCommit.worldDefeat?.respawnTime || null;
-                        result.raidPartyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [changes[0].partyId]);
+                        if (!raidRowsRead) {
+                            raidPartyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [changes[0].partyId]);
+                            raidRowsRead = true;
+                        }
+                        result.raidPartyRow = copyNormalizedRow(raidPartyRow);
                     }
                 }
             }
