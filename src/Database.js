@@ -3593,9 +3593,12 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
                 }
             }
             if (!sourceId && compatibleParts) {
-                const parts = all(`SELECT * FROM items WHERE characterId = ?
+                // Each unused physical row supplies at least one unit; used
+                // IDs may still have stock, so leave room to skip them.
+                const partLimit = Math.min(Number.MAX_SAFE_INTEGER, count + sourceIds.size);
+                const parts = all(`SELECT id, amount FROM items WHERE characterId = ?
                     AND selfId = ? AND enchant = ? AND equipped = 0 AND amount > 0${metadataSql}
-                    ORDER BY id`, [characterId, selfId, enchant, ...metadataValues]);
+                    ORDER BY id LIMIT ?`, [characterId, selfId, enchant, ...metadataValues, partLimit]);
                 let remaining = count;
                 for (const part of parts) {
                     const partId = Number(part.id);

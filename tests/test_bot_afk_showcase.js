@@ -87,6 +87,16 @@ async function groupedReplacement() {
     assert.deepEqual(await bag(), fragments);
     await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
 
+    const partiallyUsed = await item(2);
+    shop = (await publish([line(await item(2), 2)])).shop;
+    shop = (await replace(shop, [line(partiallyUsed, 1), line(shop.lines[0].sourceObjectId, 2)])).shop;
+    assert.deepEqual(shop.lines.map(row => row.count), [1, 2]);
+    assert.deepEqual((await bag()).map(row => [row.id, row.amount]), [[partiallyUsed, 1]],
+        'bounded selection skips a previously consumed ID with stock before taking both returned pieces');
+    await Database.closeAfkTradeShop(partsOwner);
+    assert.equal(total(await bag()), 4, 'skipping the used source preserves its remainder');
+    await Database.execute(['DELETE FROM items WHERE characterId=?', [partsOwner]]);
+
     // A whole but incompatible row must not win the fast path over the
     // compatible one-unit pieces returned by the old shop.
     const otherSlot = await item(2, { slot: 8 });
