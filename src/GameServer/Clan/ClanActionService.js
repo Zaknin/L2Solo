@@ -117,7 +117,7 @@ async function refreshQueueStats() {
 }
 
 function actionTypeFor(clan, goal) {
-    if (!clan || !goal || goal.status === 'completed') return null;
+    if (!clan || !goal || goal.status === 'completed' && !ReviewEvents.cashLevelGoal(clan, goal)) return null;
     if (goal.controlledBy === 'player') return OrderService.actionTypeForGoal(goal);
     // Equipment executes through member lifecycles. Its next review comes
     // from a changed member/warehouse/offer, rather than a polling plan.
@@ -358,7 +358,8 @@ async function schedulePlanAfterMarketMiss(clan, parentAction) {
 
 async function loadClan(clanId) {
     const clan = await GoalService.clanProjectionById(clanId);
-    ReviewEvents.track(clan);
+    if (clan) ReviewEvents.track(clan);
+    else ReviewEvents.untrack(clanId);
     return clan;
 }
 
@@ -524,7 +525,11 @@ async function resolveAction(action, options = {}) {
                 DiagnosticConfig.developerDiagnostics && (metrics.retried += 1);
             } else if (clan && marketMiss) {
                 await schedulePlanAfterMarketMiss(clan, action);
-            } else if (clan && goal && !(String(action.actionType) === ACTION_TYPES.PLAN && goal.status === 'completed')) {
+            } else if (ReviewEvents.cashLevelGoal(clan, goal) && String(action.actionType) === ACTION_TYPES.CONTRIBUTION) {
+                // One native payment attempt per changed input. A warehouse
+                // deposit is progress, but cannot replace missing leader SP.
+            } else if (clan && goal && !(String(action.actionType) === ACTION_TYPES.PLAN && goal.status === 'completed'
+                && !ReviewEvents.cashLevelGoal(clan, goal))) {
                 const productive = ok && workDone(String(action.actionType), result);
                 const autonomous = String(clan.state?.mode || '') === 'autonomous';
                 if (!autonomous || String(action.actionType) === ACTION_TYPES.PLAN && goal.type !== 'equipment' || productive) {

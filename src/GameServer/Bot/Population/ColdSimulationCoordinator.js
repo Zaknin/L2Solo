@@ -1882,7 +1882,7 @@ class ColdSimulationCoordinator {
         }
         const state = LifeState.cachedState(proposal.characterId) || proposal.baseState;
         if (!state) return null;
-        if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, inventory: state.inventory };
+        if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, sp: state.sp, inventory: state.inventory };
         const partyId = String(state.party?.partyId || state.partyId || '');
         if ((partyId && invoke('GameServer/Bot/Population/HotPartyLifecycle').pending.has(partyId))
             || this.visibleToRealPlayer(state)) return null;

@@ -73,6 +73,49 @@ async function main() {
         }
         assert.equal(Events.pending(), 0, 'a thousand native non-member writes retain no detector state');
         assert.equal(wake, 6, 'only startup, item presence and level woke a clan');
+        const cash = { id: clanId, leaderId: 718101, level: 0,
+            state: { mode: 'autonomous', goal: { type: 'level', target: { level: 1 }, status: 'completed' } } };
+        Events.track(cash);
+        for (const [id, before, after] of [[718102, 29999, 30000], [718101, 100, 29999],
+            [718101, 30000, 30001], [718101, 30001, 29999], [718101, undefined, 30000],
+            [718101, NaN, 30000], [718101, 29999, Infinity]]) {
+            assert.equal(Events.leaderSpChanged(id, before, after), false);
+        }
+        const Actor = invoke('GameServer/Model/Actor');
+        new Actor({ id: 718101 }).setSp(30000);
+        assert.equal(Events.pending(), 0, 'initialization, other members, spending and non-crossing awards do not wake');
+        assert(Events.leaderSpChanged(718101, 29999, 30000));
+        assert.deepEqual(await Events.drain({ execute() { throw Error('SP event must not read SQL'); } }),
+            [{ clanId, causes: ['leader_sp'] }]);
+        Events.track({ ...cash, leaderId: 718102 });
+        assert.equal(Events.leaderSpChanged(718101, 29999, 30000), false, 'old leader subscription is removed');
+        assert(Events.leaderSpChanged(718102, 29999, 30000)); await Events.drain();
+        for (const changed of [
+            { ...cash, level: 2 },
+            { ...cash, state: { ...cash.state, mode: 'player_managed' } },
+            { ...cash, state: { ...cash.state, goal: { ...cash.state.goal, controlledBy: 'player' } } },
+            { ...cash, state: { ...cash.state, goal: { ...cash.state.goal, target: { level: 2 } } } },
+            { ...cash, state: { ...cash.state, goal: { type: 'equipment', status: 'completed' } } }
+        ]) {
+            Events.track(cash); Events.track(changed);
+            assert.equal(Events.leaderSpChanged(718101, 29999, 30000), false, 'only the current autonomous cash goal subscribes');
+        }
+        Events.track(cash); Events.untrack(clanId);
+        assert.equal(Events.leaderSpChanged(718101, 29999, 30000), false);
+        Events.track(cash); Events.stop();
+        assert.equal(Events.leaderSpChanged(718101, 29999, 30000), false, 'stop clears leader subscriptions');
+        // A native player-managed sync drops only the cash leader watch;
+        // its existing item/order subscriptions still belong to that clan.
+        const playerId = 718203;
+        await Database.execute(["UPDATE characters SET clanId=? WHERE id=718108", [playerId]]);
+        await Database.execute(["UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.generatedCold',0) WHERE characterId=718103"]);
+        await Database.execute(["UPDATE clan_simulation_clans SET mode='player_managed' WHERE clanId=?", [playerId]]);
+        Events.track({ ...cash, id: playerId, leaderId: 718103, state: { ...cash.state,
+            productionGoal: { type: 'equipment', target: { itemId: 391 } } } });
+        const synced = await Database.syncPlayerManagedClan(playerId);
+        assert.equal(synced.mode, 'player_managed', JSON.stringify(synced));
+        assert.equal(Events.leaderSpChanged(718103, 29999, 30000), false);
+        assert(Events.tracks(playerId, 391), 'player-managed item watches survive SP watch removal');
         const created = await Database.createAutonomousClan({ name: 'NamedFourth', leaderId: 718104,
             memberIds: [718104, 718105, 718106], founderQuorum: 3, maxBotMemberShare: 1 });
         assert(created.ok, JSON.stringify(created));
@@ -86,8 +129,10 @@ async function main() {
         await Events.drain();
         await Database.updateCharacterClan(718107, 718202, 0, 0, 0);
         assert.deepEqual(await Events.drain(), [clanId, 718202].map(id => ({ clanId: id, causes: ['membership'] })));
+        Events.track({ ...cash, id: created.clanId, leaderId: 718104 });
         assert((await Database.dissolveClan({ clanId: created.clanId, leaderId: 718104 })).ok);
         assert.deepEqual(await Events.drain(), [{ clanId: created.clanId, causes: ['membership'] }]);
+        assert.equal(Events.leaderSpChanged(718104, 29999, 30000), false, 'native dissolve removes the leader subscription');
         assert(!(await Database.dissolveClan({ clanId: 999999, leaderId: 718104 })).ok);
         assert.equal(Events.pending(), 0, 'rejected writes emit no membership event');
         const Item = invoke('GameServer/Model/Item');

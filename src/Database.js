@@ -6982,7 +6982,10 @@ const Database = {
                 write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             }
             return results;
-        }, 'clan-warehouse:player-deposit'));
+        }, 'clan-warehouse:player-deposit')).then(results => {
+            if (normalized.some(transfer => transfer.selfId === 57)) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return results;
+        });
     },
 
     transferPlayerInventoryToClanWarehouse({ clanId, characterId, item = {}, amount, resolveKey } = {}) {
@@ -7049,7 +7052,10 @@ const Database = {
                 inventoryId, inventoryAmount, warehouseAmount, enchant: sourceEnchant,
                 petData: source.petData, warehouseRevision: nextRevision, ledgerId: Number(ledger.insertId)
             };
-        }, 'clan-warehouse:player-withdraw'));
+        }, 'clan-warehouse:player-withdraw')).then(result => {
+            if (selfId === 57) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
 
     fetchSavedLocations(characterId) {
@@ -8401,7 +8407,14 @@ const Database = {
             })));
     },
     syncPlayerManagedClan(clanId) {
-        return inTransaction(() => syncPlayerManagedClanUnsafe(clanId), 'clan-simulation:player-managed-sync');
+        return inTransaction(() => syncPlayerManagedClanUnsafe(clanId), 'clan-simulation:player-managed-sync').then(result => {
+            if (result.ok) {
+                const Events = require('./GameServer/Clan/ClanReviewEvents');
+                if (result.disabled || result.code === 'clan_missing') Events.untrack(clanId);
+                else if (result.mode === 'player_managed') Events.untrackLeader(clanId);
+            }
+            return result;
+        });
     },
     ensurePlayerManagedClans(limit = 500) {
         const safeLimit = Math.max(1, Math.min(2000, Math.floor(Number(limit) || 500)));
@@ -8419,10 +8432,7 @@ const Database = {
             LIMIT ${safeLimit}`, [], 'clan-simulation:player-managed-candidates').then(async (rows) => {
             const summary = { attempted: rows.length, created: 0, changed: 0, disabled: 0 };
             for (const row of rows) {
-                const result = await inTransaction(
-                    () => syncPlayerManagedClanUnsafe(row.id),
-                    'clan-simulation:player-managed-sync'
-                );
+                const result = await Database.syncPlayerManagedClan(row.id);
                 if (result.created) summary.created += 1;
                 if (result.changed) summary.changed += 1;
                 if (result.disabled) summary.disabled += 1;
@@ -10111,7 +10121,10 @@ const Database = {
                 state: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [beneficiary])),
                 ledgerId: Number(ledger.insertId)
             };
-        }, 'clan-warehouse:withdraw'));
+        }, 'clan-warehouse:withdraw')).then(result => {
+            if (itemId === 57 && result.ok && result.code === 'warehouse_withdraw_applied') require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     reserveClanWarehouseItem({
         clanId,
@@ -10157,7 +10170,10 @@ const Database = {
             state.warehouseRevision = nextRevision;
             write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             return { ok: true, code: 'warehouse_item_reserved', reservationId: Number(reservation.insertId), warehouseRevision: nextRevision };
-        }, 'clan-warehouse:reserve');
+        }, 'clan-warehouse:reserve').then(result => {
+            if (itemId === 57 && result.ok) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     releaseClanWarehouseReservation({ clanId, selfId, goalKey, expectedWarehouseRevision = null } = {}) {
         const clan = Number(clanId);
@@ -10186,7 +10202,10 @@ const Database = {
             state.warehouseRevision = nextRevision;
             write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             return { ok: true, code: 'warehouse_reservation_released', warehouseRevision: nextRevision };
-        }, 'clan-warehouse:release');
+        }, 'clan-warehouse:release').then(result => {
+            if (itemId === 57 && result.ok && result.warehouseRevision !== undefined) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     advanceAutonomousClanLevel({
         clanId,
@@ -10462,7 +10481,10 @@ const Database = {
                 write('DELETE FROM clans WHERE id = ?', [id]);
                 return { ok: true, clanId: id, memberIds: currentMembers.map((member) => Number(member.id)),
                     membershipRepair: ClanMembership.repairUnsafe(currentMembers.map(member => member.id)) };
-            }, 'clan:dissolve'))).then(result => publishClanMembership({ ...result, previousClanId: id })).then(ClanMembership.publish);
+            }, 'clan:dissolve'))).then(result => {
+                if (result.ok) require('./GameServer/Clan/ClanReviewEvents').untrack(id);
+                return publishClanMembership({ ...result, previousClanId: id });
+            }).then(ClanMembership.publish);
     },
     deleteGearItems(characterId) { return withCharacterFlush(characterId, () => remove('items', 'characterId = ? AND selfId != 57', [characterId], 'item:delete-gear')); },
     setShortcut(characterId, shortcut) { return run(`INSERT INTO shortcuts (id, kind, slot, unknown, characterId) VALUES (?, ?, ?, ?, ?)
