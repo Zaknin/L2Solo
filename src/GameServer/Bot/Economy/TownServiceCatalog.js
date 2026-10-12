@@ -130,8 +130,7 @@ function candidates(role, town, options = {}) {
     const excludedNpcSelfIds = new Set((options.excludedNpcSelfIds || []).map(Number));
     return rowsForTown(town, role)
         .filter((row) => !excludedNpcSelfIds.has(Number(row.npcSelfId)))
-        .filter((row) => ![ROLES.SELLER, ROLES.GENERIC_MERCHANT].includes(role) || !selfId || NpcShopBuyLists.fetchForNpc(row.npcSelfId)
-            .some((item) => Number(item.selfId) === selfId))
+        .filter((row) => ![ROLES.SELLER, ROLES.GENERIC_MERCHANT].includes(role) || !selfId || !!NpcShopBuyLists.rowForNpc(row.npcSelfId, selfId))
         .sort((left, right) => (from ? distance(left, from) - distance(right, from) : 0)
             || Number(left.npcSelfId) - Number(right.npcSelfId));
 }
@@ -190,8 +189,7 @@ function targetNear(role, from, options = {}) {
     const excludedNpcSelfIds = new Set((options.excludedNpcSelfIds || []).map(Number));
     const row = rows(role)
         .filter((candidate) => !excludedNpcSelfIds.has(Number(candidate.npcSelfId)))
-        .filter((candidate) => ![ROLES.SELLER, ROLES.GENERIC_MERCHANT].includes(role) || !selfId || NpcShopBuyLists.fetchForNpc(candidate.npcSelfId)
-            .some((item) => Number(item.selfId) === selfId))
+        .filter((candidate) => ![ROLES.SELLER, ROLES.GENERIC_MERCHANT].includes(role) || !selfId || !!NpcShopBuyLists.rowForNpc(candidate.npcSelfId, selfId))
         .filter((candidate) => distance(candidate, from) <= maxDistance)
         .sort((left, right) => distance(left, from) - distance(right, from))[0] || null;
     return targetFromRow(row, role, options);
