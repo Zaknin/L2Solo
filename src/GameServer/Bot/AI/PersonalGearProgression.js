@@ -1,5 +1,6 @@
 'use strict';
 
+const GearLifecycle = require('./GearLifecycle');
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 function adventurer(state = {}) {
     return !state.stats?.craftStationId
@@ -51,11 +52,22 @@ function assess(state = {}) {
         const reference = Index.find(Data.items, entry.selfId);
         const minScore = level < 20 && reference ? Planner.itemScore(reference, role, classId) : 0;
         const empty = !current;
-        const inadequate = current && (RANKS.indexOf(current.etc?.rank || 'none') < rank
+        // A usable NG weapon still owes its first D upgrade from level 20.
+        // Keep that attainable floor when the bot reaches C+; the common
+        // solver may buy D now or close it directly with a ready higher grade.
+        const missedWeaponGrade = level >= 20 && Compatibility.isWeaponSlot(slot)
+            && (!current || RANKS.indexOf(current.etc?.rank || 'none') < 1);
+        const requiredRank = missedWeaponGrade ? 1 : rank;
+        const inadequate = current && (RANKS.indexOf(current.etc?.rank || 'none') < requiredRank
             || level < 20 && (current.starterKit || starters.has(Number(current.selfId))
                 || Planner.itemScore(current, role, classId) < minScore));
-        if (empty || inadequate) gaps.set(slot, { slot, rank, minScore,
-            priority: empty ? Compatibility.isWeaponSlot(slot) ? 3 : 2 : 1 });
+        // From C expertise, finish the working weapon and armour before
+        // jewellery. Empty jewellery does not outrank an under-grade weapon.
+        const priority = missedWeaponGrade ? 3 : level >= 40
+            ? GearLifecycle.slotPriority(slot)
+            : empty ? Compatibility.isWeaponSlot(slot) ? 3 : 2 : 1;
+        if (empty || inadequate) gaps.set(slot, { slot, rank: requiredRank, minScore,
+            priority });
     }
     return { required: gaps.size > 0, gaps, starters, role, classId };
 }
@@ -67,10 +79,14 @@ function acquisitionRankFor(state = {}, assessment = null) {
     return RANKS.indexOf(rank) > RANKS.indexOf('c') && (assessment || assess(state)).required ? 'c' : rank;
 }
 
-function priority(item, slot, assessment) {
-    const gap = assessment.gaps.get(Number(slot))
-        || (Number(slot) === 15 ? assessment.gaps.get(10) || assessment.gaps.get(11)
+function gapFor(slot, assessment) {
+    return assessment.gaps.get(Number(slot))
+        || (GearLifecycle.slotPriority(slot) === 3 ? assessment.gaps.get(7) || assessment.gaps.get(14)
+            : Number(slot) === 15 ? assessment.gaps.get(10) || assessment.gaps.get(11)
             : [10, 11].includes(Number(slot)) ? assessment.gaps.get(15) : null);
+}
+function priority(item, slot, assessment) {
+    const gap = gapFor(slot, assessment);
     if (!gap) return 0;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     if (RANKS.indexOf(item.etc?.rank || 'none') < gap.rank) return 0;
@@ -110,4 +126,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, acquisitionRankFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition };
+module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition };

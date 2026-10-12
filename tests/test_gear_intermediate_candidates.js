@@ -64,7 +64,7 @@ const tooHigh = Data.items.find(row => row.etc?.rank === 'b' && Planner.suitable
 assert(tooHigh && !Planner.considerable(tooHigh, original));
 const held = { ...original, stats: { ...original.stats, equipmentPlan: { target: { selfId: item.selfId } } } };
 assert([...Providers.gearCandidates(held, context).values()].some(rows => rows.some(row => row.selfId === item.selfId)));
-assert.equal(Economy.forState(original, deps), context, 'same event reuses result and held roll');
+assert.equal(Economy.forState(original, deps).network, context.network, 'same event reuses the decision and held roll');
 // Multiple professions/level bands use the same shortlist owner; an
 // incompatible or over-level item cannot turn its proxy into a purchase.
 for (const classId of [9, 12, 5, 2, 55]) for (const level of [25, 45, 55]) {
@@ -97,8 +97,8 @@ const cheapC = Providers.build(original, ctx, { ...deps, board });
 assert(cheapC.nodes.some(row => row.need === 'power' && row.object?.itemId === c.selfId),
     'a current cheap C offer can beat the intermediate; grade is not the order');
 const gearRoots = cheapC.nodes.filter(row => row.key.startsWith('power:'));
-assert(gearRoots.length && gearRoots.every(row => row.benefitPerHour > 0 && row.horizonHours === gearRoots[0].horizonHours),
-    'MVP-4: gear roots carry a benefit per hour over one horizon H');
+assert(gearRoots.length && gearRoots.every(row => row.progressionPriority > 0 && row.horizonHours === Infinity),
+    'unfinished grade milestones remain required beyond the current XP horizon');
 assert(Planner.marketPlanForTarget(original, d.selfId, exactOptions), 'native recovery accepts own D grade');
 console.log(JSON.stringify({ nativeWish: activeWish.key, selectedItem: item.selfId, grade: item.etc.rank,
     spentQuote: selected.market.price, finalists: [...shortlist.values()].reduce((n, rows) => n + rows.length, 0) }));

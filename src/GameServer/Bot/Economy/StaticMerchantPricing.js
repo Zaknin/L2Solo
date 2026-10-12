@@ -94,12 +94,38 @@ function validPrice(line, minimum = 1) {
     return Number.isSafeInteger(Number(line.price)) && Number(line.price) >= minimum;
 }
 
+// Escrow shops deliver directly. Conditional ads require the player at the
+// meeting point; a remote ad must not establish this merchant's quote.
+function buyOffers(selfId, { actor, viewerId = 0, enchant = 0 } = {}) {
+    const afk = invoke('GameServer/AfkTrade/AfkTradeService');
+    return afk.offers(selfId, BUY, {
+        characterId: actor?.fetchId?.() || viewerId, enchant, limit: 5,
+        accept: offer => ['shop', 'buy_ad'].includes(offer.recordKind) && validPrice(offer)
+            && (!(offer.conditional || offer.store?.conditional) || actor && Math.hypot(
+                Number(actor.fetchLocX?.()) - Number(offer.locX),
+                Number(actor.fetchLocY?.()) - Number(offer.locY),
+                Number(actor.fetchLocZ?.()) - Number(offer.locZ)) <= 200)
+    });
+}
+
+function buyQuote(store, line, options = {}) {
+    const npcPrice = NpcSellRules.npcBuyPrice(basePrice(line.selfId));
+    const offers = buyOffers(line.selfId, options);
+    const price = Math.max(npcPrice, ...offers.map(offer => Number(offer.price)));
+    const count = price === npcPrice ? Number(line.count ?? 1)
+        : offers.filter(offer => Number(offer.price) === price)
+            .reduce((sum, offer) => sum + Number(offer.storeItem.count), 0);
+    return { price, count: Math.min(Number(line.count ?? 1), count), npcPrice,
+        offers: offers.filter(offer => Number(offer.price) === price) };
+}
+
 // The player's static price is read from the one board at the window and
 // transaction, not at spawn. Shops and ads share the same item-side index;
 // orders are another goal and do not establish an ordinary purchase bid.
-function priceFor(store, line, { viewerId = 0 } = {}) {
+function priceFor(store, line, { viewerId = 0, actor = null, enchant = 0 } = {}) {
     const index = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
     if (Number(store.storeType) === BUY) {
+        if (actor) return buyQuote(store, line, { actor, viewerId, enchant }).price;
         const bid = index.first(line.selfId, BUY, {
             excludeOwner: Number(viewerId) || 0,
             accept: candidate => ['shop', 'buy_ad'].includes(candidate.kind) && validPrice(candidate)
@@ -114,4 +140,4 @@ function priceFor(store, line, { viewerId = 0 } = {}) {
     return ask ? Math.max(price, Number(ask.price)) : price;
 }
 
-module.exports = { BUYBACK_RATIO, botPriceFor, cheapestPurchase, botPurchasePrice: id => cheapestPurchase(id, { forBot: true }), priceFor, sellersOf };
+module.exports = { BUYBACK_RATIO, botPriceFor, buyQuote, cheapestPurchase, botPurchasePrice: id => cheapestPurchase(id, { forBot: true }), priceFor, sellersOf };

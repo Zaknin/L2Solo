@@ -22,7 +22,20 @@ function storeItemPrice(store, item, actor = null) {
     if (!source) return Number(item.price);
     const pricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
     return isBotActor(actor) ? pricing.botPriceFor(source.store, source.line)
-        : pricing.priceFor(source.store, source.line, { viewerId: actor?.fetchId?.() || 0 });
+        : pricing.priceFor(source.store, source.line, { viewerId: actor?.fetchId?.() || 0, actor,
+            enchant: Number((actor && Number(store.storeType) === 3
+                ? sellableCopy(actor, item.selfId) : null)?.fetchEnchantLevel?.() || 0) });
+}
+
+function storeSaleQuote(store, item, actor, inventoryItem = null) {
+    const source = item[staticPriceSource];
+    if (!source || isBotActor(actor) || Number(store.storeType) !== 3) {
+        return { price: storeItemPrice(store, item, actor), count: Number(item.count) };
+    }
+    const held = inventoryItem || sellableCopy(actor, item.selfId);
+    return invoke('GameServer/Bot/Economy/StaticMerchantPricing').buyQuote(source.store,
+        { ...source.line, count: item.count }, { actor, viewerId: actor?.fetchId?.() || 0,
+            enchant: Number(held?.fetchEnchantLevel?.() || 0) });
 }
 
 function refreshStorePrices(store, actor = null) {
@@ -441,7 +454,9 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
             if (!storeItem) {
                 throw new Error("Item is not wanted.");
             }
-            let unitPrice = storeItemPrice(store, storeItem, actor);
+            let actorItem = sellableCopy(actor, selfId, options.objectId);
+            const quote = storeSaleQuote(store, storeItem, actor, actorItem);
+            let unitPrice = quote.price;
             if (options.expectedUnitPrice !== undefined && unitPrice !== Number(options.expectedUnitPrice)) {
                 throw new Error('Store price changed.');
             }
@@ -450,12 +465,11 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
             if (!Number.isSafeInteger(requestedQty) || requestedQty <= 0) {
                 throw new Error("Invalid quantity.");
             }
-            let actorItem = sellableCopy(actor, selfId, options.objectId);
             if (!acceptsSellerItem(actor, storeItem, actorItem)) {
                 throw new Error('Static buyer item is unavailable to bots.');
             }
             const actorCount = actorItem ? actorItem.fetchAmount() : 0;
-            let sellQty = Math.min(requestedQty, Number(actorCount), Number(storeItem.count));
+            let sellQty = Math.min(requestedQty, Number(actorCount), quote.count);
             if (!Number.isSafeInteger(sellQty) || sellQty <= 0) {
                 throw new Error("No items to sell.");
             }
@@ -467,10 +481,7 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
                 adQty, adAdena, npcQty, npcAdena });
             if (staticBuyer) {
                 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
-                const ads = AfkTrade.offers(selfId, AfkTrade.BUY, { characterId: actor.fetchId(),
-                    enchant: Number(actorItem.fetchEnchantLevel?.() || 0), limit: 5,
-                    accept: offer => ['shop', 'buy_ad'].includes(offer.recordKind)
-                        && Number.isSafeInteger(offer.price) && offer.price >= 1 });
+                const ads = quote.offers;
                 let left = sellQty;
                 for (const ad of ads) {
                     if (!left) break;
@@ -479,7 +490,7 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
                     try {
                         const paid = await AfkTrade.sellToShop(actor.fetchId(), ad.store, selfId, amount, {
                             lineId: ad.storeItem.afkTradeLineId, objectId: actorItem.fetchId(),
-                            expectedPrice: ad.storeItem.price });
+                            expectedPrice: unitPrice });
                         if (paid.pending) {
                             // Earlier backed sales already moved physical goods. Keep
                             // their result and the merchant's remaining quantity exact.
@@ -494,21 +505,28 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
                         adAdena += paid.totalPrice;
                         left -= paid.amount;
                     } catch (error) {
-                        if (!String(error?.message || error).startsWith('afk_trade_')) throw error;
+                        const message = String(error?.message || error);
+                        if (!message.startsWith('afk_trade_') && ![
+                            'trade_meeting_player_at_point', 'trade_meeting_point_changed',
+                            'trade_meeting_quote_changed', 'trade_meeting_stock_changed',
+                            'trade_meeting_party_busy'
+                        ].includes(message)) throw error;
                     }
                 }
-                // Board deals have committed; only the remainder uses the
-                // merchant's native buy-back and creates new adena.
+                // Never liquidate the remainder below the confirmed price.
+                // A smaller completed sale refreshes the window for the rest.
                 storeItem.count -= adQty;
                 if (storeItem.count <= 0) store.items = store.items.filter(item => item !== storeItem);
                 actorItem = sellableCopy(actor, selfId, options.objectId);
                 sellQty = Math.min(left, Number(actorItem?.fetchAmount() || 0));
+                if (quote.npcPrice !== unitPrice) sellQty = 0;
                 if (!sellQty) {
+                    if (!adQty) throw new Error('Store price changed.');
                     const result = staticResult();
                     await runPostCommitCallback('afterTrade', options.afterTrade, result, storeItem);
                     return result;
                 }
-                unitPrice = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(itemBasePrice(selfId));
+                unitPrice = quote.npcPrice;
             }
 
             const totalEarn = unitPrice * sellQty;
@@ -628,5 +646,6 @@ module.exports = {
     sellInventoryToStore,
     sellToStore,
     sellableCopy,
-    storeItemPrice
+    storeItemPrice,
+    storeSaleQuote
 };

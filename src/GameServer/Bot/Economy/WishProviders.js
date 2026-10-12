@@ -727,6 +727,8 @@ function buildProjection(state, ctx, deps) {
         if (!(value > 0) || !(price(item.selfId) > 0)) continue;
         candidates.push({ item, slot, value, gain, notBeforeHours: early ? horizon : 0,
             horizonHours: early ? horizon + futureHorizon : horizon,
+            firstWeaponGrade: Equipment.isWeaponSlot(slot) && Progression.gapFor(slot, progression)?.rank === 1
+                && Progression.gapFor(slot, progression)?.priority === 3,
             progressionPriority: Progression.priority(item, slot, progression) });
     }
     // MVP-6: every nominated candidate is valued by the same path solver
@@ -769,6 +771,14 @@ function buildProjection(state, ctx, deps) {
     const statusOf = (wish, node) => !wish.plan ? 'no_path'
         : wish.valueHours > 0 && positive(wish.plan.hours) < node.horizonHours ? 'evaluated'
             : wish.fullValueHours > 0 ? 'not_ready' : 'no_path';
+    const readyGear = row => {
+        const acquisition = row.wish.plan?.requirements?.find(requirement => requirement.key === `item:${row.candidate.item.selfId}`)?.plan
+            || row.wish.plan;
+        const command = acquisition?.execution || acquisition;
+        return !!command?.executable && !command.awaitingIncoming && !command.requirements?.length
+            && Number(command.availableUnits ?? Infinity) >= 1
+            && Number(command.price || 0) <= Math.max(0, positive(solverOptions.wallet) - positive(solverOptions.survivalReserve));
+    };
     const evaluate = (row, used) => {
         admission.evaluations++; row.evaluations = (row.evaluations || 0) + 1;
         row.status = 'limit'; row.wish = null; row.claims = null;
@@ -782,15 +792,23 @@ function buildProjection(state, ctx, deps) {
                 : solver.rootWish(row.node.key);
             if (solverOptions.stockFor) { const claims = solver.allocate(wish, used); if (wish.plan) row.claims = claims; }
             row.wish = wish;
+            row.readyGear = readyGear(row);
             row.status = statusOf(wish, row.node);
         } catch (error) {
             if (!SOLVER_LIMITS.has(error?.message)) throw error;
         }
     };
     const score = row => row.wish.valueHours / Math.max(1 / 3600, row.wish.effort);
-    const before = (a, b) => a.node.progressionPriority !== b.node.progressionPriority
-        ? a.node.progressionPriority > b.node.progressionPriority
-        : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+    const before = (a, b) => {
+        // Fundable material errands are not an equipped first-grade weapon.
+        // Compare ready D/higher acquisitions first while that floor is open;
+        // once it closes, the ordinary C weapon/armour/jewellery order resumes.
+        if (a.candidate.firstWeaponGrade && b.candidate.firstWeaponGrade && a.readyGear !== b.readyGear)
+            return a.readyGear;
+        return a.node.progressionPriority !== b.node.progressionPriority
+            ? a.node.progressionPriority > b.node.progressionPriority
+            : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+    };
     const winners = open => {
         const best = new Map();
         for (const row of gear) {
@@ -865,6 +883,7 @@ function buildProjection(state, ctx, deps) {
                 const wish = { key: row.node.key, need: row.node.need, object: row.node.object };
                 const claims = solver.allocate(wish, used);
                 row.wish = wish; row.claims = wish.plan ? claims : null;
+                row.readyGear = readyGear(row);
                 row.status = statusOf(wish, row.node);
                 // Only a root that stays admitted keeps its claim on held stock.
                 if (row.status === 'evaluated') used = claims;
