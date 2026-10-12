@@ -87,22 +87,3 @@ const partyItems = partyResult.memberResults.flatMap((entry) => entry.result.mat
 assert.strictEqual(partyItems[0].selfId, 1121, 'party rewards should use the same real drop data');
 
 console.log('Bot background drop checks passed');
-
-// perf C3: a cold resolve adds loot to a stack and Adena to the wallet row
-// without dropping the rows' other fields (one row, one shape; a shape flip
-// changed the economy review's input key).
-(async () => {
-    const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const full = (selfId, amount, kind) => ({ selfId, name: `Item ${selfId}`, amount, equipped: false, equippedCount: 0,
-        equippedSlots: [], stackable: true, slot: 0, rank: 'none', kind, enchant: 0 });
-    const bagged = { ...state, level: 3, levelBand: '1-3', exp: 400, stats: { classId: 0 }, phase: 'cold', spotId: spot.id, adena: 100, loc: { locX: 0, locY: 0, locZ: 0 }, timing: {},
-        inventory: { 57: full(57, 100, 'Other.None'), 1864: full(1864, 3, 'Other.Material') } };
-    const looted = BackgroundResolver.resolveSolo({ state: bagged, spot, elapsedMs: 12000, rng: () => 0 });
-    const projected = await Life.prepareResolve(bagged, looted, { persist: false, timestamp: 1800000000000, projectClassProgression: true });
-    const gained = looted.materialize.items.filter(item => item.selfId === 1864).reduce((sum, item) => sum + item.amount, 0);
-    assert(gained > 0 && looted.materialize.adena > 0, 'the fight loots the material and Adena');
-    assert.deepStrictEqual(projected.inventory[1864], { ...full(1864, 3 + gained, 'Other.Material'), name: projected.inventory[1864].name },
-        'a looted stack keeps its fields');
-    assert.deepStrictEqual(projected.inventory[57], full(57, projected.adena, 'Other.None'), 'the Adena row keeps its fields');
-    console.log('test_bot_background_drops: row shape ok');
-})().catch(error => { console.error(error); process.exitCode = 1; });

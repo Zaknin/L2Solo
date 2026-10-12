@@ -2,8 +2,6 @@
 // perf C2: a worker keeps one economy plan per actor and serves it to a new
 // state object only on equal inputs. The spot crowd the build read, a key
 // input and the per-state gear plan memo decide whether it still serves.
-// perf C3: night is an input only of a build that read it; mp is no input;
-// a rebuild on a changed crowd or night is a new network, not a cached one.
 const assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const Module = require('node:module');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'economy-kept-plan-'));
@@ -25,13 +23,7 @@ const Economy = loaded.exports;
 const spotId = invoke('GameServer/Bot/AI/SpotValueTable').best('dps', 20, true, 'income').spotId;
 // The build values one spot through its own spot reader, as the wish
 // providers do for a farm source.
-let readsNight = false;
-Economy.registerProvider('kept-plan-probe', (state, context) => {
-    context.spotValue({ id: spotId, density: 1 });
-    // A build power that depends on night reads the game clock (ColdCombatProfile).
-    if (readsNight) invoke('GameServer/Bot/Population/ColdCombatProfile').buildOptions({ night: 1 }, context.timestamp);
-    return [];
-});
+Economy.registerProvider('kept-plan-probe', (state, context) => { context.spotValue({ id: spotId, density: 1 }); return []; });
 const state = { characterId: 901, updatedAt: 10, level: 20, phase: 'cold', activity: 'hunting', adena: 1000,
     stats: { classId: 1, decisionSeq: 2, activityLeaf: 0 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } },
     currentRegion: 'Giran', timing: {}, simulation: { revision: 3 },
@@ -48,7 +40,6 @@ assert.strictEqual(Economy.forState(next(current), deps()).plan, first.plan, 'a 
 current = next(current);
 const crowded = Economy.forState(current, deps({ occupancy: crowd(6) }));
 assert.notStrictEqual(crowded.plan, first.plan, 'another crowd on a spot the build read rebuilds the plan');
-assert.notEqual(crowded.network.inputKey, first.network.inputKey, 'the rebuilt network is keyed by the crowd it read');
 assert.strictEqual(Economy.forState(next(current), deps({ occupancy: { ...crowd(6), other: { count: 9 } } })).plan, crowded.plan,
     'a spot the build never read is not an input');
 
@@ -65,20 +56,4 @@ assert.strictEqual(Economy.forState(current, deps({ occupancy: crowd(6) })).gear
 const later = Economy.forState(next(current), deps({ occupancy: crowd(6) }));
 assert.strictEqual(later.plan, moved.plan);
 assert.equal(later.gearPlanMemo, undefined, 'a new state object chooses its gear plan again (time gates outside the key)');
-
-const GameTime = invoke('GameServer/World/GameTime');
-const dusk = 1e12 + GameTime.msUntilTransition(1e12), before = dusk - 1000, after = dusk + 1000;
-assert.notEqual(GameTime.isNight(before), GameTime.isNight(after));
-current = next(current);
-const day = Economy.forState(current, deps({ timestamp: before }));
-current = next(current); current.vitals.mp = 3;
-assert.strictEqual(Economy.forState(current, deps({ timestamp: after })).plan, day.plan,
-    'a build that read no night is served across a day/night switch, with another mp');
-readsNight = true;
-current = next(current, { decisionSeq: 3 });
-const lit = Economy.forState(current, deps({ timestamp: before }));
-assert.strictEqual(Economy.forState(next(current), deps({ timestamp: before + 500 })).plan, lit.plan);
-const dark = Economy.forState(next(current), deps({ timestamp: after }));
-assert.notStrictEqual(dark.plan, lit.plan, 'a build that read night rebuilds at the switch');
-assert.notEqual(dark.network.inputKey, lit.network.inputKey, 'the rebuilt network is keyed by the night it read');
 console.log('test_economy_context_kept_plan: ok');

@@ -12,8 +12,6 @@ const { fnv1a32 } = require('../Fnv1a');
 const { createHash } = require('node:crypto');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
-const GameTime = invoke('GameServer/World/GameTime');
-const Combat = () => invoke('GameServer/Bot/Population/ColdCombatProfile');
 let routeAnchors = new WeakMap();
 let mainColdForState = null;
 let runtime = {};
@@ -131,7 +129,7 @@ function inputKey(state, deps = {}) {
     return [state.level, stats.classId, state.craftLevel ?? stats.dwarvenCraftLevel, items, positive(state.adena), stats.decisionSeq, stats.activityLeaf, stats.visitEvery?.[0], stats.visitEvery?.[1],
         deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
         Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
-        positive(deps.buyOrderEscrow),
+        Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
         positive(stats.frustration), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
         stats.generatedCold, stats.race, stats.marketSellRetryAfter,
         Number(stats.marketSellRetryAfter || 0) > Number(deps.timestamp || Date.now()),
@@ -140,22 +138,22 @@ function inputKey(state, deps = {}) {
         deps.inputKey || '', deps.mode || '', state.incomingPending, JSON.stringify(state.acceptedIncoming || null), Trip.key(state), deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending', stats.pk, stats.soulCrystalQuest, (stats.hennas || []).join(','),
         Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
         deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled(),
-        stats.production?.crafts || 0,
+        stats.production?.crafts || 0, positive(state.sp),
         (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(','),
         // Read by the build, kept by a worker plan across state objects (perf
         // C2): the role and route mode (spot table, party hunt), the shop town,
         // a craft station's identity, the errands' clan money, own trade
         // experience (price belief), the spot-income learning and own danger
         // sample, the time on the spot; and the reading time where the build
-        // reads it: which hunt samples are inside their window and the effects
-        // still active. Night is a validity token of the plans that read it
-        // (perf C3, forState); mp and sp are read by no part of the build.
+        // reads it: which hunt samples are inside their window, the effects
+        // still active and night (the build's power, ColdCombatProfile).
         state.party?.role, stats.role, stats.routeMode, stats.shopTown?.town, stats.craftStationId, state.accountName,
         JSON.stringify([stats.marketErrand || null, stats.marketErrands || null]),
         JSON.stringify(state.marketTrades || null), stats.lifelongKills, stats.fightsWon,
         JSON.stringify(stats.spotRisk || null), stats.huntClock?.onSpot, stats.huntClock?.total,
         invoke('GameServer/Bot/AI/BotHuntEfficiency').windowMask(state, time),
-        invoke('GameServer/Bot/Population/ColdCombatProfile').effectsKey(state, time)].join('|');
+        invoke('GameServer/Bot/Population/ColdCombatProfile').effectsKey(state, time),
+        invoke('GameServer/World/GameTime').isNight(time)].join('|');
 }
 // The market as an input of one bot: the board lines and the counter of each
 // item its review read, as tokens at the time of reading. The context stays
@@ -479,9 +477,7 @@ function forState(state = {}, deps = {}) {
     // A worker caller that gives the spot crowd needs a plan built on the
     // same crowd (the main thread serves by key, as before).
     const crowdHolds = isMainThread || !deps.occupancy || held?.crowd?.holds(deps.occupancy) === true;
-    // Night is an input only of a plan whose build read it (perf C3).
-    const nightHolds = held?.night == null || held.night === GameTime.isNight(timestamp);
-    if (held?.key === digest && (!deps.withNodes || held.projection) && crowdHolds && nightHolds && held.reads.holds(sourceBoard, deps)) {
+    if (held?.key === digest && (!deps.withNodes || held.projection) && crowdHolds && held.reads.holds(sourceBoard, deps)) {
         if (deps.onSourceRead) for (const id of held.reads.ids) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', 'same_inputs');
@@ -510,8 +506,7 @@ function forState(state = {}, deps = {}) {
     // economic event. An input-key mismatch is named as a dependency change;
     // it does not claim which historical event caused it.
     const diagnosticReason = !diagnostic ? null : !held ? 'not_retained' : held.key !== digest
-        ? 'input_dependency_changed' : deps.withNodes && !held.projection ? 'nodes_needed' : !crowdHolds ? 'spot_crowd_changed'
-        : !nightHolds ? 'night_changed' : 'used_market_changed';
+        ? 'input_dependency_changed' : deps.withNodes && !held.projection ? 'nodes_needed' : !crowdHolds ? 'spot_crowd_changed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, shadowEntry = null;
     if (diagnostic) {
@@ -530,7 +525,6 @@ function forState(state = {}, deps = {}) {
     }
     const reads = new MarketReads();
     let building = true;
-    const nightReads = Combat().nightReadCount();
     const crowd = !isMainThread && deps.occupancy && typeof deps.occupancy === 'object' && !(deps.occupancy instanceof Map)
         ? new CrowdReads(String(state.characterId || state.name || state.stats?.generatedIndex || '')) : null;
     const occupancy = crowd ? crowd.watch(deps.occupancy, () => building) : deps.occupancy;
@@ -605,12 +599,7 @@ function forState(state = {}, deps = {}) {
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
         cycleHours: workshop.cycleHours, repeatable: true });
-    // The network key and the group key carry the plan's validity tokens:
-    // the market it read, and, when its build read them, the spot crowd and
-    // night (a rebuild on a changed token is a new network, not a cached one).
-    const nightRead = () => Combat().nightReadCount() !== nightReads ? GameTime.isNight(timestamp) : null;
-    const night = nightRead();
-    const market = `${reads.a.toString(16)}${crowd?.ids.length || crowd?.all ? `#c${crowd.all ? '*' : crowd.a.toString(16)}` : ''}${night === null ? '' : night ? '#n' : '#d'}`;
+    const market = reads.a.toString(16);
     const networkKey = `${key}#${market}`;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
@@ -663,7 +652,7 @@ function forState(state = {}, deps = {}) {
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        remember(cache, actorKey, { key: digest, reads: reads.seal(), crowd, night: nightRead(), plan, stateRef: new WeakRef(state), gearThreat,
+        remember(cache, actorKey, { key: digest, reads: reads.seal(), crowd, plan, stateRef: new WeakRef(state), gearThreat,
             projection: isMainThread ? projection : null }, keptLimit());
     }
     return view(state, plan, deps, { key, price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
