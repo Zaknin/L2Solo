@@ -360,12 +360,17 @@ const ClanSimulationService = {
                     summary.created += 1;
                     (result.memberIds || [candidate.characterId, ...(result.recruits || []).map((entry) => entry.characterId)])
                         .forEach((id) => reservedIds.add(Number(id)));
+                    const membersById = new Map([candidate, ...(result.recruits || [])]
+                        .map((entry) => [Number(entry.characterId), entry]));
                     clans.push({
                         id: result.clanId,
                         name: '',
                         level: 0,
                         leaderId: candidate.characterId,
-                        members: (result.memberIds || []).map((id) => ({ id, characterId: id }))
+                        members: (result.memberIds || []).map((id) => {
+                            const member = membersById.get(Number(id));
+                            return { id, characterId: id, classId: member.classId, level: member.level };
+                        })
                     });
                 } else summary.blocked += 1;
             }
