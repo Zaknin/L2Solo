@@ -1940,7 +1940,11 @@ BackgroundResolver.resolveSolo = (options = {}) => {
     const result = options.state?.stats?.coldCompetition?.wait && competition.state && competition.elapsedMs === 0
         ? { patch: { stats: competition.state.stats }, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             nextResolveAt: timestamp + 1000, debug: { reason: competitionReason, fights: 0, wins: 0 } }
-        : resolveSolo({ ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp });
+        // Only raw equipment preparation is shared within this synchronous
+        // round. Each fight still reads its current profile, effects and vitals.
+        : ColdCombatProfile.withEquipmentPreparation(() => resolveSolo({
+            ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
+        }));
     if (options.state?.stats?.pveEncounter && !Object.hasOwn(result.debug || {}, 'pendingFight')) {
         result.patch = { ...result.patch, stats: { ...(result.patch?.stats || options.state.stats), pveEncounter: null } };
     }
