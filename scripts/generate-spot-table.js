@@ -523,6 +523,13 @@ function gitRevision() {
     }
 }
 
+function rewardCatalog(profiles) {
+    return { schema: 1, seed: CATALOGUE_SEED, periodMode: PERIOD_MODE,
+        rows: profiles.filter(spot => !spot.raidBoss).map(spot => [spot.id,
+            (spot.npcEntries || []).map(entry => [Number(entry.selfId), Math.max(1, Number(entry.count) || 1)]),
+            Number(spot.rewards?.adenaMin || 0), Number(spot.rewards?.adenaMax || 0)]) };
+}
+
 async function main() {
     const options = args();
     if (options.child) return runChild(options.child);
@@ -629,6 +636,8 @@ async function main() {
         fs.mkdirSync(path.dirname(options.out), { recursive: true });
         const text = `${JSON.stringify(table)}\n`;
         fs.writeFileSync(options.out, text);
+        if (options.out === path.join(root, 'data', 'Bots', 'spot-table.json')) fs.writeFileSync(
+            path.join(root, 'data', 'Bots', 'spot-reward-npcs.json'), `${JSON.stringify(rewardCatalog(spots))}\n`);
         process.stderr.write(`wrote ${path.relative(root, options.out)}: ${spots.length} spots, ${table.header.counts.huntableRows} huntable rows, `
             + `${curveCount} curves, ${(text.length / 1024).toFixed(0)} KB, ${Math.round((Date.now() - started) / 1000)} s\n`);
     } finally {
@@ -642,4 +651,4 @@ if (require.main === module) main().catch((error) => {
     process.exit(1);
 });
 
-module.exports = { hunt, perKill, countNewStacks, runPool, mergeStacks };
+module.exports = { hunt, perKill, countNewStacks, runPool, mergeStacks, buildCatalogue, rewardCatalog };

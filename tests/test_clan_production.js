@@ -56,17 +56,16 @@ async function main() {
         assert(!Policy.isResource(1896));
         assert(!Policy.isResource(1458));
         const items = [{ id: 1, selfId: 1864, amount: 20 }, { id: 2, selfId: 2005, amount: 5 }];
-        assert.deepEqual(WarehousePolicy.depositCandidates({}, items, []).map(item => item.selfId), [1864]);
-        assert.equal(WarehousePolicy.depositCandidates({}, items, [], { demand: { 2005: 2 } })[1].amount, 2);
-        assert.equal(WarehousePolicy.depositCandidates({}, items, [{ selfId: 2005, amount: 2 }], { demand: { 2005: 2 } }).length, 1);
+        assert.deepEqual(WarehousePolicy.depositCandidates({}, items, []), []);
+        assert.equal(WarehousePolicy.depositCandidates({}, items, [], { demand: { 2005: 2 } })[0].amount, 2);
+        assert.equal(WarehousePolicy.depositCandidates({}, items, [{ selfId: 2005, amount: 2 }], { demand: { 2005: 2 } }).length, 0);
         const scrolls = [{ id: 3, selfId: 1786, amount: 5 }];
         assert.equal(WarehousePolicy.depositCandidates({}, scrolls, [], { demand: { 1786: 2 } })[0].amount, 2);
         const personal = { clanId, level: 62, stats: { equipmentPlan: { strategy: 'craft', status: 'active',
             recipeId: 2, materials: [{ selfId: 1869, amount: 18 }] } }, inventory: { 1869: { selfId: 1869, amount: 50 } } };
         assert(Policy.isPersonalCraft(personal));
-        assert(!Craft.beginTravel(personal));
-        assert.equal(Disposition.saleCandidates(personal).length, 0);
-        assert.equal(Planner.finalizePlan(personal, null, personal.stats.equipmentPlan).strategy, 'none');
+        assert.equal(Disposition.saleCandidates(personal).find(row => row.selfId === 1869).count, 32);
+        assert.equal(Planner.finalizePlan(personal, null, personal.stats.equipmentPlan).strategy, 'craft');
 
         // ARCH-NOTE: Shared raw inputs are allocated once. The approved
         // physical-input rule includes crystals and gemstones in full demand.
@@ -89,15 +88,20 @@ async function main() {
         const pooled = Policy.stockInventory({}, [{ selfId: 1869, kind: 'Other.Material', amount: 20, reservedAmount: 3 }]);
         assert.equal(pooled[1869].amount, 17);
 
-        // Level zero and level four both collect resources. Party membership and
+        // Level zero keeps personal stock; an active craft at level four collects
+        // only its inputs. Party membership and
         // worker ownership must survive an atomic, revision-fenced deposit.
         await add(ids[2], 1864, 20);
         await add(ids[2], 2005, 5);
         let clan = await projection();
-        assert((await Warehouse.resolveClan(clan, { batchSize: 8 })).deposited > 0);
-        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1864).amount, 20);
+        assert.equal((await Warehouse.resolveClan(clan, { batchSize: 8 })).skipped, true);
+        assert(!(await Database.fetchClanWarehouseItems(clanId)).some(row => row.selfId === 1864));
         assert.equal((await Database.fetchItems(ids[2])).find(row => row.selfId === 2005).amount, 5);
         await query('UPDATE clans SET level = 4 WHERE id = ?', [clanId]);
+        const supplies = { goalKey: 'supply-test', type: 'equipment', status: 'executing', required: 1, progress: 0,
+            target: { memberId: ids[0], itemId: 3 }, policy: { strategy: 'craft' },
+            plan: { craft: { materials: [{ selfId: 1864, required: 57 }, { selfId: 1870, required: 30 }, { selfId: 1865, required: 11 }] } } };
+        await query("UPDATE clan_simulation_clans SET stateJson = json_set(stateJson, '$.productionGoal', json(?)) WHERE clanId = ?", [JSON.stringify(supplies), clanId]);
         await add(ids[2], 1870, 30);
         await query("UPDATE bot_life_state SET partyId = 'production-party' WHERE characterId = ?", [ids[2]]);
         clan = await projection();

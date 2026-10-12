@@ -263,7 +263,9 @@ function bestUpgradeSlot(actor, item, plannedScores) {
 
 function findBestUpgrades(session) {
     const actor = session?.actor;
-    const items = actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : [];
+    const items = (actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : []).filter(item => item.fetchEquipped()
+        || !session.coldLifeState?.stats?.equipmentPlan?.materials?.some(row => Number(row.selfId) === Number(item.fetchSelfId())
+            && session.coldLifeState.stats.equipmentPlan.strategy === 'luxury_exchange'));
     const suitableItems = items.filter((item) => isSuitableItem(actor, item));
     const torsoUpgrades = findTorsoUpgrades(actor, suitableItems);
     const plannedScores = new Map();

@@ -445,12 +445,12 @@ async function main() {
             fetchName: () => 'Galladucci', fetchTitle: () => 'Trader' };
         NpcTalk(visitor, galladucci);
         await settle(visitor);
-        assert.match(html(visitor), /exchange-shop npc/);
+        assert.match(html(visitor), /multisell 7097/);
         assert.match(html(visitor), /sell-shop/);
         assert.match(html(visitor), /html 7097-quest/);
         assert.doesNotMatch(html(visitor), /Available quests/);
-        NpcTalkResponse(visitor, { link: 'exchange-shop npc' });
-        assert.match(html(visitor), /exchange-shop buy/);
+        NpcTalkResponse(visitor, { link: 'multisell 7097' });
+        assert.equal(visitor.packets.at(-2)[0], 0xd0, 'buying opens the native C4 multisell window');
         NpcTalkResponse(visitor, { link: 'sell-shop' });
         assert(visitor.activeNpcSellShop, 'selling remains reachable');
         NpcTalkResponse(visitor, { link: 'html 7097-quest' });
@@ -471,7 +471,7 @@ async function main() {
         assert.equal(count(visitor, 7563), 1, 'recovery does not duplicate orders');
         NpcTalk(visitor, galladucci);
         await settle(visitor);
-        assert.match(html(visitor), /exchange-shop npc/, 'active quests also preserve trading');
+        assert.match(html(visitor), /multisell 7097/, 'active quests also preserve trading');
         for (const [npc, event] of [[7094, 'hilt'], [7097, 'order2'], [7090, 'powder'],
             [7097, 'order3'], [7116, 'necklace'], [7097, 'reward']]) {
             await talk(visitor, npc);

@@ -83,6 +83,7 @@ function stateForActor(actor, session = actor?.session) {
     }
     const hotKit = invoke('GameServer/Bot/Population/ColdCombatProfile').capture(actor);
     const state = { ...stored, characterId: actor.fetchId?.(), level: actor.fetchLevel?.(), inventory, physicalInventory,
+        clanId: Number(actor.fetchClanId?.() ?? stored.clanId ?? stored.stats?.clanId ?? 0),
         craftLevel: actor.backpack?.fetchDwarvenCraftLevel?.(actor) ?? stored.craftLevel,
         acceptedIncoming: current?.acceptedIncoming || stored.acceptedIncoming || {},
         incomingPending: current ? current.incomingPending === true : stored.incomingPending === true,
@@ -118,11 +119,14 @@ function inputKey(state, deps = {}) {
     return [state.level, stats.classId, state.craftLevel ?? stats.dwarvenCraftLevel, items, positive(state.adena), stats.decisionSeq, stats.activityLeaf, stats.visitEvery?.[0], stats.visitEvery?.[1],
         deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
         Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
+        Number(stats.shotRecipeDemand?.at) + 30 * 60 * 1000 > Number(deps.timestamp || Date.now())
+            ? Number(stats.shotRecipeDemand.itemId) : 0,
         Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
         Math.floor(positive(stats.frustration) * 10), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
         stats.generatedCold, stats.race, stats.marketSellRetryAfter,
         Number(stats.marketSellRetryAfter || 0) > Number(deps.timestamp || Date.now()),
         invoke('GameServer/Bot/Economy/ItemDisposition').reservationInputKey(state), JSON.stringify(stats.clanMaterialDemand || null),
+        invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').version(state),
         state.spotId, deps.gearThreatMask ?? GearThreat.maskFor(state, deps), stats.huntEfficiency?.[0]?.at, deps.memory?.revision || stats.memoryRevision || 0,
         deps.inputKey || '', deps.mode || '', state.incomingPending, JSON.stringify(state.acceptedIncoming || null), Trip.key(state), deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending', stats.pk, stats.soulCrystalQuest, (stats.hennas || []).join(','),
         Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
@@ -297,13 +301,21 @@ function foundation(state, deps, persona, timestamp, price) {
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const role = state.party?.role || state.stats?.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(state.stats?.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
-    const hunt = Hunt.huntIncome(state, timestamp, deps.mode);
+    let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
+    const incomeRoute = require('./EquipmentIncomeRoute').select(state, { ...deps, timestamp, price,
+        required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
+    if (incomeRoute) {
+        const row = incomeRoute.row;
+        hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
+            expPerHour: row.exp * Hunt.onSpotShare(state), source: 'route', spotId: incomeRoute.spot.id,
+            progressSpotId: incomeRoute.spot.id, useShots: row.useShots };
+    }
     const lostGearHours = hunt.perHour > 0 ? Valuation.pkDropValue(state, price) / hunt.perHour : 0;
     const bestSpotId = hunt.spotId || state.spotId;
     const walkBackHours = invoke('GameServer/Bot/Economy/WalkBack').hours(bestSpotId, state, deps.spots || invoke('GameServer/Bot/AI/SpotService').spots);
     const deathHours = Valuation.deathHours(state, { ...hunt, lostGearHours, walkBackHours });
-    const spotTable = bestSpotId ? Table.value(bestSpotId, tableRole, state.level, true) : null;
-    const bestTable = spotTable || Table.best(tableRole, state.level, true);
+    const spotTable = bestSpotId ? Table.value(bestSpotId, tableRole, state.level, hunt.useShots !== false) : null;
+    const bestTable = spotTable || Table.best(tableRole, state.level, hunt.useShots !== false);
     const ShotStock = invoke('GameServer/Inventory/ShotStock');
     const shotPlan = ShotStock.planForState(state);
     const shotItemId = shotPlan.selfId;
@@ -482,7 +494,7 @@ function forState(state = {}, deps = {}) {
     context.routePending = !deps.tripCost && !context.routeRows;
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
-    context.spotValue = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, deathHours: context.deathHours });
+    context.spotValue = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
         // settlement/preparation owner. Never replace unknown stock with zero
@@ -582,7 +594,7 @@ function forState(state = {}, deps = {}) {
 // npcOwnsPurchase, WishProviders.personalCraftPlan. Shared nodes stay shared.
 // A requirement row without its plan is looked up by key in network.plans
 // (personalCraftPlan); `unresolved` collects those keys for the kept map.
-const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement'];
+const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement', 'batches'];
 const NO_REQUIREMENTS = Object.freeze([]);
 function planTrimmer(unresolved = new Set()) {
     const seen = new Map();
@@ -596,7 +608,10 @@ function planTrimmer(unresolved = new Set()) {
         if (plan.workshop) out.workshop = { characterId: plan.workshop.characterId, price: plan.workshop.price,
             loc: plan.workshop.loc, townName: plan.workshop.townName };
         seen.set(plan, out);
+        if (plan.grossRequirements) out.grossRequirements = plan.grossRequirements.map(row => ({ key: row.key,
+            amount: row.amount, ...(row.once ? { once: true } : {}) }));
         if (plan.intentionPath !== undefined) out.intentionPath = trim(plan.intentionPath);
+        if (plan.execution) out.execution = { ...trim(plan.execution), availableUnits: plan.execution.availableUnits };
         if (plan.requirements) out.requirements = !plan.requirements.length ? NO_REQUIREMENTS : plan.requirements.map(row => {
             if (!row.plan) unresolved.add(row.key);
             return { key: row.key, amount: row.amount, plan: trim(row.plan) };
@@ -653,8 +668,9 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
 // What a review's stock reader, usefulness, worth and purchase budget read:
 // one copy for the build and every later view of its plan.
 function stockReader(state, rootItem) {
+    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state);
     return (id, rootKey) => ({ owned: rootKey.startsWith('stock:') && rootItem(rootKey) === id
-        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}),
+        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}, reserved),
     incoming: positive(state.acceptedIncoming?.[id]) });
 }
 function valueReaders(state, network, values, persona, knowledgeEnabled, kitCost, money) {

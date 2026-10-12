@@ -75,6 +75,47 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         assert(boughtAd, 'main publishes the worker quoted buy ad');
         assert.equal(boughtAd.lines[0].count, 5); assert.equal(boughtAd.lines[0].price, 110);
         assert.equal(funded.state.adena + boughtAd.escrowAdena, walletBefore, 'native writer conserves wallet plus escrow');
+        await Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [], buyAds: [[1867, 5, 100]],
+            buyCaps: [105], travel: null }, { step: work => work() });
+        assert.equal(Afk.ownerRecords(id).find(row => row.kind === 'buy_ad').lines[0].price, 100,
+            'a same-quantity standing bid cannot retain a price above the worker prepared purchase limit');
+        await assert.rejects(Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [],
+            buyAds: [[1867, 5, 110]], buyCaps: [105], travel: null }, { step: work => work() }),
+        /economy_plan_bid_cap/, 'native publication rejects a quote above its prepared limit');
+        const standing = Afk.ownerRecords(id).find(row => row.kind === 'buy_ad');
+        const bid = standing.lines[0];
+        await Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [], travel: null,
+            bidLimits: [[bid.id, standing.id, standing.revision, bid.count, bid.price, 95]] },
+        { reviewGoal: false, step: work => work() });
+        assert.equal(Afk.ownerRecords(id).find(row => row.id === standing.id).lines[0].price, 95,
+            'a native shopping decision corrects an old bid independently of the current buy watch');
+        await assert.rejects(Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [], travel: null,
+            bidLimits: [[bid.id, standing.id, standing.revision, bid.count, bid.price, 90]] },
+        { reviewGoal: false, step: work => work() }), /afk_trade_shop_changed/,
+        'an old quantity/price/revision cannot re-author a correction after the quote changed');
+        stub(invoke('GameServer/Bot/Economy/MarketOpportunity'), 'npcOffersAll', selfId => selfId === 1867
+            ? [{ sourceType: 'npc', town: standing.town, price: 80 }] : []);
+        const Meeting = invoke('GameServer/AfkTrade/TradeMeetingService'), preparation = Meeting.hasPreparation;
+        let nativeReview;
+        try {
+            Meeting.hasPreparation = () => true;
+            nativeReview = await Market.reconcileBuyAds(Life.cachedState(id), null,
+                [{ type: 'buy_craft_material', target: { itemId: 1867 },
+                    plan: { expectedBenefit: 'market_buy_craft_material' } }]);
+        } finally { Meeting.hasPreparation = preparation; }
+        assert.equal(nativeReview.changed, true);
+        assert.equal(Afk.ownerRecords(id).find(row => row.id === standing.id).lines[0].price, 80,
+            'an unaccepted meeting preparation cannot freeze an overpriced standing bid at a native visit');
+        assert.equal(Life.cachedState(id).adena, walletBefore,
+            'lowering a conditional standing bid does not invent escrow or move the wallet');
+        let repriced = Afk.ownerRecords(id).find(row => row.id === standing.id);
+        await Afk.repriceBot(id, repriced.lines[0].id, 95, repriced.revision);
+        state = await Life.upsertState({ ...Life.cachedState(id), activity: 'resting' }, 'resting_bid_fixture');
+        await coordinator.afterCommit({ ...result, nextState: state, proposal: { ...proposal,
+            nextState: state, market: undefined, economyPlan: undefined, economyEdges: 0 } });
+        assert.equal(Afk.ownerRecords(id).find(row => row.id === standing.id).lines[0].price, 80,
+            'an ordinary resting commit corrects a standing bid even without a wish plan or new market event');
+        assert.equal(Life.cachedState(id).adena, walletBefore);
         const prepared = Life.cachedState(id);
         await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=?', [id]]);
         const actual = Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0]);

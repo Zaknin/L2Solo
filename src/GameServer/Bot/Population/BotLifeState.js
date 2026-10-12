@@ -391,6 +391,18 @@ function hasIncompatibleShield(state = {}) {
     return incompatiblePlan || incompatibleEquippedShield;
 }
 
+function hasConflictingWeapons(state = {}) {
+    let weapons = 0;
+    for (const item of Object.values(state.inventory || {})) {
+        const template = itemTemplate(item?.selfId);
+        if (!String(template?.template?.kind || item?.kind || '').startsWith('Weapon.')) continue;
+        weapons += GearAcquisitionPlanner.equippedSlotsFor(item, template?.etc?.slot || item.slot)
+            .filter((slot) => slot === 7 || slot === 14).length;
+        if (weapons > 1) return true;
+    }
+    return false;
+}
+
 function reconcileIncompatibleShieldState(state = {}) {
     const reconciledEquipment = reconcileEquipmentInventory(state);
     const stats = { ...(reconciledEquipment.stats || {}) };
@@ -417,10 +429,14 @@ function marketPurchaseBlocker(state = {}, offer = {}, qty = 1) {
     const combinationAmount = (state.stats?.equipmentPlan?.combine?.requirements || [])
         .filter((requirement) => Number(requirement.selfId) === selfId)
         .reduce((sum, requirement) => sum + Number(requirement.amount || 0), 0);
-    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount);
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+    const crystalWorn = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(state.inventory?.[String(selfId)] || {}, slot).length : 0;
+    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount, crystalInput + crystalWorn);
     const owned = Math.max(0, Number(state.inventory?.[String(selfId)]?.amount || 0));
     if (owned + count > capacity) return 'already_owned';
-    if (slot === 8 && hasEquippedTwoHandedWeapon(state)) return 'incompatible_loadout';
+    const loadout = template.etc?.rank === 'c' && Number(state.level) < 40
+        ? invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state : state;
+    if (!crystalInput && slot === 8 && hasEquippedTwoHandedWeapon(loadout)) return 'incompatible_loadout';
     return null;
 }
 
@@ -1575,24 +1591,26 @@ function discardFulfilledEquipmentPlans() {
     });
 }
 
-function reconcileIncompatibleShields() {
-    const affected = [...cache.values()].filter(hasIncompatibleShield);
+function reconcilePersistedLoadouts() {
+    // Startup runs before workers/actors publish: repair legacy hand conflicts
+    // through the same class-aware optimizer used by normal cold equipment.
+    const affected = [...cache.values()].filter((state) => hasIncompatibleShield(state) || hasConflictingWeapons(state));
     let reconciledCount = 0;
     return affected.reduce((chain, state) => chain.then(() => {
         const reconciled = reconcileIncompatibleShieldState(state);
         const row = rowFromState(reconciled);
         return save(row)
-            .then(() => syncInventorySummary(row.characterId, reconciled.inventory, 'shield_reconcile'))
+            .then(() => syncInventorySummary(row.characterId, reconciled.inventory, 'loadout_reconcile'))
             .then(() => {
                 cache.set(row.characterId, normalize(row));
                 reconciledCount += 1;
             })
             .catch((err) => {
-                utils.infoWarn('BotLife', 'failed shield reconciliation for %d: %s', row.characterId, err.message);
+                utils.infoWarn('BotLife', 'failed loadout reconciliation for %d: %s', row.characterId, err.message);
             });
     }), Promise.resolve()).then(() => {
         if (reconciledCount > 0) {
-            utils.infoWarn('BotLife', 'reconciled %d incompatible persisted shield loadouts or plans on startup', reconciledCount);
+            utils.infoWarn('BotLife', 'reconciled %d conflicting persisted weapons or incompatible shield loadouts on startup', reconciledCount);
         }
         return reconciledCount;
     });
@@ -1625,6 +1643,7 @@ const BotLifeState = {
             // even when its wall-clock lease had time remaining. Reclaim the
             // rows before any legacy startup repair can touch them.
             .then(() => invoke('GameServer/Bot/Population/ColdSimulationOwner').recoverStartupLeases())
+            .then(() => invoke('GameServer/Clan/ClanSupplyPolicy').init())
             .then(() => Database.reconcileBotClanMembership()).then(({ repairedMembers, repairedParties }) => {
                 if (repairedMembers || repairedParties) {
                     utils.infoWarn('BotLife', 'reconciled clan membership and crafting goals: bots=%d parties=%d', repairedMembers, repairedParties);
@@ -1652,10 +1671,13 @@ const BotLifeState = {
                         locZ: row.locZ
                     }))
                     .then(() => {
-                        cache.set(state.characterId, state);
+                        // Publish the saved checkpoint, including its new
+                        // updatedAt. The pre-save state makes every native
+                        // worker command stale against the repaired SQL row.
+                        cache.set(state.characterId, normalize(row));
                     });
             }), Promise.resolve())
-                .then(() => reconcileIncompatibleShields())
+                .then(() => reconcilePersistedLoadouts())
                 .then(() => count);
         }).then((count) => {
             initialized = true;
@@ -3316,15 +3338,17 @@ const BotLifeState = {
         const template = itemTemplate(selfId);
         if (!template) return Promise.resolve(null);
         const slot = Number(template.etc?.slot || 0);
+        const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+        const wearable = !crystalInput && GearAcquisitionPlanner.equipmentCandidate(template, state);
         const pairSlots = [1, 2].includes(slot) ? [1, 2] : [4, 5].includes(slot) ? [4, 5] : [];
-        if (slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
+        if (!crystalInput && slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
         if (marketPurchaseBlocker(state, offer, count)) return Promise.resolve(null);
         const inventory = Object.fromEntries(Object.entries(state.inventory || {}).map(([key, item]) => [key, {
             ...item,
             ...(Array.isArray(item?.equippedSlots) ? { equippedSlots: [...item.equippedSlots] } : {})
         }]));
-        let purchaseSlots = [];
-        if (pairSlots.length) {
+        let purchaseSlots = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot) : [];
+        if (wearable && pairSlots.length) {
             const requestedSlot = Number(offer?.equipSlot || 0);
             const existingSlots = GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot);
             const occupied = new Set(Object.values(inventory).flatMap((item) => GearAcquisitionPlanner.equippedSlotsFor(item, item.slot)));
@@ -3347,7 +3371,7 @@ const BotLifeState = {
                 };
             }));
             purchaseSlots = [...new Set([...existingSlots, ...purchaseSlots])].slice(0, pairSlots.length).sort((a, b) => a - b);
-        } else if (slot) {
+        } else if (wearable && slot) {
             Object.keys(inventory).forEach((key) => {
                 if (GearAcquisitionPlanner.equippedSlotsFor(inventory[key], inventory[key]?.slot).includes(slot)) {
                     inventory[key] = { ...inventory[key], equipped: false, equippedCount: 0, equippedSlots: [] };
@@ -3360,9 +3384,9 @@ const BotLifeState = {
             selfId,
             name: template.template?.name || offer.itemName || itemName(selfId),
             amount: Number(inventory[String(selfId)]?.amount || 0) + count,
-            equipped: pairSlots.length ? purchaseSlots.length > 0 : slot > 0,
-            equippedCount: pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0,
-            equippedSlots: pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [],
+            equipped: crystalInput ? purchaseSlots.length > 0 : wearable && (pairSlots.length ? purchaseSlots.length > 0 : slot > 0),
+            equippedCount: crystalInput ? purchaseSlots.length : wearable ? pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0 : 0,
+            equippedSlots: crystalInput ? purchaseSlots : wearable ? pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [] : [],
             stackable: slot === 0 || !!inventory[String(selfId)]?.stackable,
             slot,
             rank: template.etc?.rank || 'none',
@@ -3731,6 +3755,10 @@ const BotLifeState = {
                 || (state.activity === 'crafting' && state.stats?.craftShop)) {
                 return;
             }
+            // An arrived trader waits on the native meeting event; its old
+            // resolve deadline is not a task waiting in the worker's heap.
+            if (state.stats?.tradeMeeting
+                && require('./ColdSimulationKernel').lifecycleKind(state) === 'event_driven') return;
 
             const nextResolveAt = Number(state.timing?.nextResolveAt || 0);
             if (nextResolveAt > timestamp && !hasStaleRateModelPlan(state)) return;

@@ -46,6 +46,19 @@ assert.deepStrictEqual(found.basket.purchases.map((purchase) => [purchase.selfId
     [[1876, 2, 'Giran'], [1881, 1, 'Giran']], 'one purchase per input, in its town');
 assert.strictEqual(found.expectedProfit, netProfit(recipe, exit.price, 27000, 0));
 assert.strictEqual(found.expectedProfit, 21000, 'the original basket also pays its 2000 labour');
+const bulk = { ...recipe, productCount: 156 };
+const bulkExit = { ...exit, price: 100, count: 312 };
+const cheapOwned = id => id === recipe.productId ? null : ({ count: 1000, unitValue: 1 });
+const reserved = Policy.opportunityFor(state, bulk, planFor, [bulkExit], cheapOwned,
+    { ...paid, outputReserve: 300 });
+assert.strictEqual(reserved.batches, 4,
+    'the profitable sale batch includes 300 personal shots before the 312-unit order');
+assert.strictEqual(reserved.expectedSold, 312);
+assert.strictEqual(reserved.margin.expectedRevenue, 31200,
+    'personal ammunition creates no external sale receipts');
+assert.strictEqual(Policy.opportunityFor({ ...state, vitals: { mp: 20 } }, bulk, planFor,
+    [{ ...bulkExit, trial: true }], cheapOwned, { ...paid, outputReserve: 300 }), null,
+    'a trial wholly absorbed by the personal reserve cannot claim sales');
 // The trips of the purchases and of the sale are costs of the craft (group C item 7).
 trip = 2000;
 const landed = Policy.opportunityFor(state, recipe, planFor, [{ ...exit, trip: 3000 }], undefined, paid);

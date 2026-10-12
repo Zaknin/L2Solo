@@ -1,7 +1,8 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const npcGoal = goal => goal?.plan?.sourceType === 'npc';
+const { isNativeSource } = require('./TradeIntent');
+const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
 function templateFor(selfId) {
     return ItemTemplateIndex.find(DataCache.items, selfId) || null;
@@ -21,9 +22,9 @@ function goalMoney(state, goal, escrow = 0, economy = null) {
 }
 
 function bidFor(state, goal, { money = Infinity, ...options } = {}) {
-    // The selected goal already has an NPC executor. It cannot re-enter the
+    // The selected goal already has a native store executor. It cannot re-enter the
     // public projection through a caller's legacy goal fallback.
-    if (npcGoal(goal)) return null;
+    if (nativeGoal(goal)) return null;
     const selfId = Number(goal?.target?.itemId || 0);
     const template = templateFor(selfId);
     const basePrice = Number(template?.template?.price || 0);
@@ -56,7 +57,11 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
     // one unit: a bot short of the whole amount asks for fewer units.
     const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
     const PriceBelief = invoke('GameServer/Bot/Economy/PriceBelief');
-    const ctx = invoke('GameServer/Bot/Economy/MarketListingPolicy').traderContext(state, options);
+    // Production preparation may pass only the towns used by its recipe.
+    // WTB compares all purchases over the wish's completed route table.
+    const ctx = invoke('GameServer/Bot/Economy/MarketListingPolicy').traderContext(state, {
+        ...options, tripCost: options.economy?.trip || options.tripCost
+    });
     let worth = goal.intent?.key && ctx.economy.moneyPrice > 0
         ? goal.intent.valueHours / Math.max(1, goal.intent.amount) / ctx.economy.moneyPrice
         : ctx.economy.worth(selfId) ?? requestedPrice;
@@ -66,11 +71,13 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         worth = Math.exp(belief.mu);
     }
     const cap = Math.floor(Math.min(worth, spendable));
+    const town = options.town || invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, [{ selfId }]);
     const chosen = MarketPricing.bid(selfId, ctx, { units: requestedCount, worth, cap,
+        money: spendable, town,
         rollKey: ['bid', Number(state.characterId || 0), selfId, Number(goal.createdAt || goal.id || 0)] });
     if (!chosen) return null;
     const price = Math.floor(chosen.price);
-    const count = Math.min(requestedCount, Math.floor(spendable / price));
+    const count = Math.min(requestedCount, chosen.count ?? requestedCount, Math.floor(spendable / price));
     if (count <= 0) return null;
     return {
         selfId,
@@ -79,6 +86,7 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         rank: template.etc?.rank || 'none',
         price,
         count,
+        purchaseCap: chosen.purchaseCap,
         survivalCost: kit,
         pricing: chosen.pricing
     };
@@ -88,21 +96,33 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     const goals = (watchList || require('../Population/ColdEconomyDecision').economyFor(state).watchList).map(row => ({ type: 'buy_craft_material',
         target: { itemId: row.itemId, amount: row.amount },
         intent: row, plan: { estimatedCost: row.worth, purpose: row.kind, valueRate: row.valueRate } }));
-    if (!npcGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
+    if (!nativeGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
-    const lines = [];
-    for (const candidate of goals.slice(0, 3)) {
-        const bid = bidFor({ ...state, adena: wallet }, candidate, { money: candidate.intent?.key ? Infinity : money, ...options });
-        if (!bid) continue;
-        const item = ItemTemplateIndex.find(DataCache.items, bid.selfId);
-        lines.push({ selfId: Number(bid.selfId), name: bid.name, count: Number(bid.count), price: Number(bid.price),
-            enchant: 0, slot: Number(item?.etc?.slot || 0), stackable: item?.etc?.stackable === true, pricing: bid.pricing,
-            ...(bid.survivalCost ? { survivalCost: bid.survivalCost } : {}),
-            ...(candidate.intent?.key ? { intent: { ...candidate.intent, price: bid.price, amount: bid.count } } : {}) });
-        // Conditional alternatives hold no cash until a native agreement.
+    const candidates = goals.slice(0, 3);
+    const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
+    let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));
+    // Rejected lines can change the grade/town of a mixed order. Price the
+    // final town too, before publication; this loop only removes candidates.
+    for (let pass = 0; pass <= 3; pass++) {
+        const lines = [];
+        for (const candidate of candidates) {
+            const bid = bidFor({ ...state, adena: wallet }, candidate, { money: candidate.intent?.key ? Infinity : money, ...options, town });
+            if (!bid) continue;
+            const item = ItemTemplateIndex.find(DataCache.items, bid.selfId);
+            lines.push({ selfId: Number(bid.selfId), name: bid.name, count: Number(bid.count), price: Number(bid.price),
+                enchant: 0, slot: Number(item?.etc?.slot || 0), stackable: item?.etc?.stackable === true, pricing: bid.pricing,
+                purchaseCap: bid.purchaseCap,
+                ...(bid.survivalCost ? { survivalCost: bid.survivalCost } : {}),
+                ...(candidate.intent?.key ? { intent: { ...candidate.intent, price: bid.price, amount: bid.count } } : {}) });
+            // Conditional alternatives hold no cash until a native agreement.
+        }
+        if (!lines.length || townFor(lines) === town) return lines;
+        const ids = new Set(lines.map(line => line.selfId));
+        for (let at = candidates.length - 1; at >= 0; at--) if (!ids.has(Number(candidates[at].target.itemId))) candidates.splice(at, 1);
+        town = townFor(lines);
     }
-    return lines;
+    return [];
 }
 
 module.exports = { survivalCost, goalMoney, bidFor, linesFor };

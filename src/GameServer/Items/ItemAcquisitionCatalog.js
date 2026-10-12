@@ -114,6 +114,8 @@ function nativeInputs(Data) {
     const spawnedIds = new Set((Data.npcSpawns || []).flatMap(region => (region.spawns || []).filter(row => positive(row.total)).map(row => Number(row.selfId))));
     const saStations = new Set([...spawnedIds].map(id => SA.station(id)).filter(Boolean));
     const transformations = [];
+    for (const recipe of require('../Bot/Economy/BotLuxuryExchange').recipes().values())
+        transformations.push({ inputs: ids(recipe.materials), outputs: [recipe.itemId] });
     for (const row of SA.recipes) if (row.operation === 'install' && saStations.has(row.station))
         transformations.push({ inputs: [Number(row.sourceId), ...ids(SA.costs(row))], outputs: [row.productId] });
     if (spawnedIds.has(require('../World/GiranMammon').npcId)) for (const row of require('./C4Unseal').recipes)

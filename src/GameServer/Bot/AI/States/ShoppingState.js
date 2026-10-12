@@ -105,7 +105,8 @@ function clearCompletedMarketPlan(session, bot, purchase) {
     const componentPurchase = combineResultId > 0
         && Number(equipmentPlan?.target?.selfId || 0) !== combineResultId;
     const stats = { ...(state.stats || {}) };
-    if (!componentPurchase) delete stats.equipmentPlan;
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, purchase.selfId);
+    if (!componentPurchase && !crystalInput) delete stats.equipmentPlan;
     session.coldLifeState = {
         ...state,
         adena: Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || state.adena || 0),
@@ -264,7 +265,8 @@ function prepareEquipmentMarketStop(session, bot, town, BotAI) {
 function prepareWarehouseStop(session, bot, town, BotAI) {
     if (session.shoppingServicePhase === 'warehouse') return true;
     if (session.shoppingWarehouseDone || !usesWarehouseStop(session)) return false;
-    if (!BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
+    if (!BotWarehouse.hasActorWithdrawalCandidates(bot, session.coldLifeState)
+        && !BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
         session.shoppingWarehouseDone = true;
         return false;
     }

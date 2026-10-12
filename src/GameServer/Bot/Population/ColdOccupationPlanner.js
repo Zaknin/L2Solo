@@ -13,10 +13,11 @@ const CURSOR_FIELDS = ['stage', 'row', 'ingredient', 'quote', 'edge', 'recipe', 
 class ColdOccupationPlanner {
     constructor({ capture, create, step, result, ownCurrent = () => true, sameInput = (left, right) => left === right,
         sourceToken, sourceScope = () => null, sourceScopeToken = () => 0,
-        onSlots = () => {}, publish = () => {}, onPublishError = () => {}, now = () => performance.now(),
+        onSlots = () => {}, onWorking = () => {}, publish = () => {}, onPublishError = () => {}, now = () => performance.now(),
         schedule = callback => setImmediate(callback) } = {}) {
-        Object.assign(this, { capture, create, step, result, ownCurrent, sameInput, sourceToken, sourceScope, sourceScopeToken, onSlots, publish, onPublishError, now, schedule });
+        Object.assign(this, { capture, create, step, result, ownCurrent, sameInput, sourceToken, sourceScope, sourceScopeToken, onSlots, onWorking, publish, onPublishError, now, schedule });
         this.slots = new Map(); this.waiting = new Map(); this.ready = new Set(); this.dependencies = new Map();
+        this.workingContexts = 0;
         this.scopes = new Map();
         this.scopeDependencies = new Map();
         // Meeting readers share one representative item per category: their
@@ -166,6 +167,7 @@ class ColdOccupationPlanner {
                 this.release(victim);
             }
             this.waiting.delete(id); this.slots.set(id, entry); this.ready.add(id);
+            this.onWorking(++this.workingContexts);
             this.onSlots(this.slots.size); admitted++;
         }
     }
@@ -183,6 +185,9 @@ class ColdOccupationPlanner {
         if (entry.done || this.slots.get(entry.id) !== entry) return;
         entry.done = true; entry.value = value ?? (entry.input.mode === 'action' ? null : unknownWorkshop());
         entry.work = null; entry.captured = null; entry.validation = null;
+        // A completed route/workshop keeps compact evidence, no scratch graph.
+        // Release its graph allowance while retaining the bounded scalar card.
+        this.onWorking(--this.workingContexts);
         // Completion retains compact scalar evidence only, never an owner
         // inventory/recipe graph. The input reference is native lifetime-bound.
         entry.resolve(entry.value); entry.resolve = null; entry.promise = null;
@@ -258,6 +263,7 @@ class ColdOccupationPlanner {
         const entry = this.slots.get(id);
         if (!entry) return;
         this.removeDependencies(entry); this.slots.delete(id); this.ready.delete(id);
+        if (!entry.done) this.onWorking(--this.workingContexts);
         this.onSlots(this.slots.size);
     }
     cancelState(id, state) {
@@ -278,7 +284,7 @@ class ColdOccupationPlanner {
         for (const id of [...this.slots.keys(), ...this.waiting.keys()]) this.cancel(id);
         this.ready.clear(); this.dependencies.clear(); this.scopes.clear(); this.scopeDependencies.clear(); this.representatives.clear();
     }
-    snapshot() { if (!DiagnosticConfig.developerDiagnostics) return { enabled: false }; return { ...this.stats, contexts: this.slots.size, pending: this.waiting.size,
+    snapshot() { if (!DiagnosticConfig.developerDiagnostics) return { enabled: false }; return { ...this.stats, contexts: this.slots.size, working: this.workingContexts, pending: this.waiting.size,
         active: this.ready.size, dependencies: this.dependencies.size, cursorBytes: (this.slots.size + this.waiting.size) * 128 }; }
 }
 

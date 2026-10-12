@@ -53,6 +53,14 @@ try {
 
     // Hunt rules: level band, occupancy, solo safety; raids are not a solo farm.
     assert.equal(byKind(facts({ ...warsmith, level: 50 })).drop.reason, 'level_band');
+    const deepBlue = { ...warsmith, level: 49 };
+    assert.equal(byKind(facts(deepBlue)).drop.reason, 'level_band');
+    const earning = byKind(facts(deepBlue, { economicLower: true }));
+    assert.equal(earning.drop.status, 'ready', 'an equipment earning route admits the wider band');
+    assert(earning.drop.perHour < own.drop.perHour, 'the wider band retains the native deep-blue drop penalty');
+    assert(earning.spoil.perHour < own.spoil.perHour, 'the wider band retains the native deep-blue spoil penalty');
+    assert.equal(byKind(facts({ ...warsmith, level: 56 }, { economicLower: true })).drop.reason, 'level_band',
+        'equipment income does not widen the band beyond fifteen levels');
     assert.equal(byKind(facts(warsmith, { occupancy: { 'facts-test': { count: 9, capacity: 9 } } })).drop.reason, 'occupied');
     assert.equal(byKind(facts({ ...warsmith, inventory: {} })).drop.reason, 'party_needed');
     const raid = drain(Planner.sourceFacts(warsmith, 99101, 1, { spotValue, timestamp: 1,

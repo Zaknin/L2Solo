@@ -153,7 +153,9 @@ async function clanProjection(clanId = null) {
         };
         if (!ClanSimulationPolicy.isStaticService(member)) byId.get(clanId).members.push(member);
     });
-    return [...byId.values()];
+    const projection = [...byId.values()];
+    for (const clan of projection) require('./ClanSupplyPolicy').publish(clan);
+    return projection;
 }
 
 async function clanProjectionById(clanId) {

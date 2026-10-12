@@ -20,6 +20,7 @@ process.env.L2NODE_PROGRESSION_RATE = 'x1';
 const spots = [{ id: 'S', avgLevel: 18, density: 30, npcEntries: [
     { selfId: 39, name: 'Scavenger Wererat', level: 18, count: 3 },
     { selfId: 40, name: 'Sukar Wererat', level: 18, count: 1 }] }];
+Table.useSpots(spots);
 const reward = DataCache.npcRewards.find((entry) => Number(entry.selfId) === 39);
 const dropIds = new Set((reward.rewards || []).flatMap((group) => (group.items || []).map((item) => Number(item.selfId))));
 const itemId = 1924;

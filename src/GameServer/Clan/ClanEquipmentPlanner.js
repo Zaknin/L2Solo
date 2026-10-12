@@ -77,8 +77,9 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
         ...member,
         stats: { ...(member?.stats || {}), equipmentPlan: undefined }
     } : member;
-    const existing = existingPlanFor(planningMember);
     const state = plannerState(planningMember);
+    const retained = existingPlanFor(planningMember);
+    const existing = GearAcquisitionPlanner.acquisitionTargetAllowed(state, retained) ? retained : null;
     const marketBudget = clanBudget(state, options);
     const plannerOptions = {
         spots,
@@ -237,6 +238,7 @@ function planForMember(member, spots = [], warehouseRows = [], options = {}) {
     const state = { ...member, inventory: pooled, stats: { ...(member.stats || {}) } };
     if (previous?.strategy === 'craft') delete state.stats.equipmentPlan;
     const retainedRecipe = previous?.strategy === 'craft' && previous.status !== 'blocked' && !options.ignoreExistingPlan
+        && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previous)
         && !(options.excludedTargetIds || []).map(Number).includes(Number(previous.target?.selfId))
         ? Number(previous.recipeId) : null;
     const plan = calculate(state, spots, [], { ...options, recipeId: retainedRecipe });

@@ -111,6 +111,19 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
+let starterItemsSource = null;
+let starterItemIds = new Set();
+
+function isStarterEquipment(item, template = templateFor(item?.selfId)) {
+    const source = DataCache.newbieItems;
+    if (starterItemsSource !== source) {
+        starterItemsSource = source;
+        starterItemIds = new Set((source || []).flatMap(row => row.items || [])
+            .map(grant => Number(grant.selfId)));
+    }
+    return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
+}
+
 function isSkillBookItem(item, template = templateFor(item?.selfId)) {
     const kind = kindFor(item, template);
     const name = String(item?.name || template?.template?.name || '').toLowerCase();
@@ -176,9 +189,12 @@ function isSpareConsumable(item, template = templateFor(item?.selfId)) {
     return basePrice(item, template) > 0;
 }
 
-function isNpcOnlyItem(item, template = templateFor(item?.selfId)) {
+function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null) {
     if (isQuestItem(item, template)) return false;
+    if (isStarterEquipment(item, template)) return true;
     if (isEquipmentItem(item, template)) return false;
+    if (state && invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state) && (isSkillBookItem(item, template)
+        || invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId)))) return true;
     if (invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId))) return false;
     if (isMarketRecipeItem(item)) return false;
     const kind = kindFor(item, template);
@@ -237,11 +253,11 @@ function liquidationSlotCount(state, predicate, candidates = saleCandidates(stat
 }
 
 function npcOnlySlotCount(state = {}, candidates) {
-    return liquidationSlotCount(state, isNpcOnlyItem, candidates);
+    return liquidationSlotCount(state, item => isNpcOnlyItem(item, undefined, state), candidates);
 }
 
 function skillBookSlotCount(state = {}, candidates) {
-    return liquidationSlotCount(state, (item) => isSkillBookItem(item) && isNpcOnlyItem(item), candidates);
+    return liquidationSlotCount(state, (item) => isSkillBookItem(item) && isNpcOnlyItem(item, undefined, state), candidates);
 }
 
 function soloSaleSlotLimit(state = {}, timestamp = Date.now()) {
@@ -257,8 +273,11 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     const candidates = saleCandidates(state, { unlimited: true });
     const npcOnlySlots = npcOnlySlotCount(state, candidates);
     const skillBookSlots = skillBookSlotCount(state, candidates);
+    // Replaced creation gear goes to the NPC without waiting for a full bag.
+    // The shared sale candidates already protect worn and reserved copies.
+    const unusedStarterGear = candidates.some(item => isStarterEquipment(item));
     const overCapacity = slots > INVENTORY_SLOT_LIMIT;
-    const accumulatedNpcOnly = skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
+    const accumulatedNpcOnly = unusedStarterGear || skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
     const surplusGearSlots = slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
         ? candidates.reduce((total, item) => {
             const lowGradeGear = (String(item.kind || '').startsWith('Weapon.')
@@ -368,20 +387,26 @@ function reservedUpgradeAmounts(state) {
     return reserved;
 }
 
-function reservedEquipmentAmounts(state) {
+function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
     const craft = reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
     const upgrades = reservedUpgradeAmounts(state);
+    const exchange = state.stats?.equipmentPlan;
+    if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
+        for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
+    for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const book of invoke('GameServer/Skills/SkillBookCatalog').requiredBooks(state)) {
         upgrades[book.selfId] = Math.max(Number(upgrades[book.selfId] || 0), 1);
     }
     const targetId = Number(state?.stats?.equipmentPlan?.target?.selfId || 0);
     if (targetId && Number(state?.inventory?.[targetId]?.amount || 0) > 0
         && !state.inventory[targetId].equipped) upgrades[targetId] = 1;
-    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades)])].reduce((reserved, selfId) => {
+    const clan = options.clan === false ? {} : invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades), ...Object.keys(clan)])].reduce((reserved, selfId) => {
         reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0),
-            Number(upgrades[selfId] || 0));
+            Number(upgrades[selfId] || 0)) + Number(clan[selfId] || 0);
         return reserved;
     }, {});
 }
@@ -402,7 +427,9 @@ function reservationInputKey(state = {}) {
             state.inventory?.[row.selfId]?.amount == null ? Number(row.owned || 0) : null]);
     const combine = plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)
         ? quantities(plan.combine.requirements) : null;
-    return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine]);
+    return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
+        plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -444,7 +471,7 @@ function protectedStarterLootAmount(item, kind) {
 function saleFreeAmount(state, item, reserved = {}) {
     if (!item) return 0;
     const template = templateFor(item.selfId), kind = kindFor(item, template);
-    const protectedAmount = isNpcOnlyItem(item, template) ? 0 : protectedStarterLootAmount(item, kind);
+    const protectedAmount = isNpcOnlyItem(item, template, state) ? 0 : protectedStarterLootAmount(item, kind);
     const rawEquippedCount = Number(item.equippedCount ?? (item.equipped ? 1 : 0));
     const equippedCount = Math.max(0, Number.isFinite(rawEquippedCount) ? rawEquippedCount : 0);
     // Sale-specific starter cleanup is preserved; customer, clan and explicit
@@ -455,13 +482,17 @@ function saleFreeAmount(state, item, reserved = {}) {
         equippedCount, starterMobLootAmount: protectedAmount }, reserved));
 }
 
+const { selectedCraftAmounts } = require('./CraftInputReservations');
 function saleCandidates(state, options = {}) {
     const limit = options.unlimited
         ? Number.MAX_SAFE_INTEGER
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
-    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)), ...(options.reserved || {}) };
-    // The healing potions, the bot's own shots and the Scrolls of Escape a bot
-    // spends are kept up to their restock targets; a surplus is sold.
+    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)) };
+    const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    for (const [id, amount] of Object.entries(options.reserved || {}))
+        reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
+    // Potions, crafter ammunition and travel scrolls use restock reserves.
+    // Ordinary bots retain their current ammunition independently of forecasts.
     const basics = options.keptAmounts ? null
         : invoke('GameServer/Bot/Economy/EconomyContext').basics(state, { saleReservations: reserved });
     const kept = options.keptAmounts || {
@@ -469,12 +500,13 @@ function saleCandidates(state, options = {}) {
         ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, basics),
         ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) };
     for (const [selfId, amount] of Object.entries(kept)) {
-        reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount);
+        reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount + Number(clan[selfId] || 0));
     }
     const candidatesFor = (item) => {
         const selfId = Number(item?.selfId || 0);
-        if (ClanCrafting.clanIdFor(state) && (ClanCrafting.isResource(selfId)
-            || Number(state.stats?.clanMaterialDemand?.[selfId] || 0) > 0)) return [];
+        // Prepared reserves can describe only the bag while this projection
+        // also includes warehouse or escrow stock. Personal shots stay owned.
+        if (invoke('GameServer/Inventory/ShotStock').isPersonalShot(state, selfId)) return [];
         const sellableAmount = saleFreeAmount(state, item, reserved);
         if (!selfId || selfId === 57 || BeginnerShots.isRestricted(selfId) || sellableAmount <= 0) return [];
 
@@ -484,7 +516,7 @@ function saleCandidates(state, options = {}) {
         if (isQuestItem(item, template)
             || !invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(selfId)) return [];
         const kind = kindFor(item, template);
-        const npcOnly = isNpcOnlyItem(item, template);
+        const npcOnly = isNpcOnlyItem(item, template, state);
         if (options.onlyNpc === true && !npcOnly) return [];
         const clanProgression = isClanProgressionItem(item);
         if (!npcOnly && !clanProgression && !isMarketRecipeItem(item)
@@ -588,6 +620,9 @@ function isWarehouseCandidate(item, template = templateFor(item?.selfId)) {
 }
 
 function warehouseCandidates(state) {
+    // Personal surplus finances equipment. Craft inputs and accepted native
+    // obligations are already protected by reservations, not spare storage.
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return [];
     const reserved = reservedEquipmentAmounts(state);
     return Object.values(state?.inventory || {}).flatMap((item) => {
         const equipped = Math.max(0, Number(item.equippedCount ?? (item.equipped ? 1 : 0)) || 0);
@@ -629,6 +664,7 @@ module.exports = {
     isMarketRecipeItem,
     isShotRecipeItem,
     isSkillBookItem,
+    isStarterEquipment,
     inventoryCleanupNeed,
     inventorySlotCount,
     soloSaleSlotLimit,
@@ -645,6 +681,7 @@ module.exports = {
     reservedEquipmentAmounts,
     reservationInputKey,
     saleCandidates,
+    selectedCraftAmounts,
     saleFreeAmount,
     saleSummary,
     isSpareConsumable,

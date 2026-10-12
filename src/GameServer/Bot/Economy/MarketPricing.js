@@ -9,6 +9,7 @@ const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
 const PriceLearning = invoke('GameServer/Bot/Economy/PriceLearning');
 const Valuation = require('./EconomicValuation');
 const Profit = require('./CraftProfitPolicy');
+const BidPurchaseAlternative = require('./BidPurchaseAlternative');
 const { npcOwnsPurchase } = require('./TradeIntent');
 const { MAX_INSPECTED } = require('./ReadyTradeChoice');
 
@@ -28,7 +29,38 @@ function traderContext(state, deps = {}) {
     const trader = PriceDecision.traderOf(persona, { hourAdena: hour, moneyPrice: economy.moneyPrice, gapHorizonHours: economy.gapHorizonHours });
     // The bot's own trip to a town: none to the town it is shopping in.
     const here = state?.activity === 'shopping' ? state.currentRegion || null : null;
+    const demandFor = (id, enchant, town, askingPrice) => {
+        const demand = !enchant ? require('./ShotTradeDemand').forecast(id, town, timestamp) : null;
+        if (!demand || !(askingPrice > 0)) return demand;
+        const board = deps.board || economy.board;
+        const belief = PriceBelief.prior(id, { board, characterId: Number(state.characterId),
+            timestamp, understanding: trader.understanding, marketTrades: state.marketTrades || {} });
+        if (!belief) return null;
+        const market = PriceDecision.marketFor(id, { board, ownerId: state.characterId, town, timestamp,
+            tripCost: trip, npcOffers: deps.npcOffersFor?.(id) || [], demand });
+        return { ...demand, willingUnits: PriceDecision.willingUnitsAt(belief, trader,
+            { price: askingPrice, applicableUnits: demand.applicableUnits,
+                landed: askingPrice + market.ownTrip, npcLanded: market.npcLanded }) };
+    };
+    let saleAmounts = null;
+    const saleCount = line => {
+        // Accepted custody keeps its advertised remainder until completion.
+        if (line.storeType !== SELL || line.custodyPolicy !== 1 || state.stats?.tradeMeeting)
+            return line.count;
+        if (!saleAmounts) {
+            const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+            const candidates = Disposition.saleCandidates(state, { unlimited: true,
+                keptAmounts: {
+                    ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, economy),
+                    ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: economy.stock('potions').target }),
+                    ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state)
+                }, reserved: economy.craftReservations || Disposition.selectedCraftAmounts(state, economy.network) });
+            saleAmounts = new Map(candidates.map(item => [`${item.selfId}:${item.enchant || 0}`, item.count]));
+        }
+        return Math.min(line.count, saleAmounts.get(`${line.selfId}:${line.enchant || 0}`) || 0);
+    };
     return {
+        state,
         characterId: Number(state?.characterId || 0),
         understanding: trader.understanding,
         persona,
@@ -51,12 +83,17 @@ function traderContext(state, deps = {}) {
         timestamp,
         board: deps.board || economy.board,
         npcOffersFor: deps.npcOffersFor || (() => []),
-        demandFor: deps.demandFor || economy.demandFor || null,
+        purchaseNpcOffersFor: deps.purchaseNpcOffersFor || deps.npcOffersFor || (() => []),
+        demandFor: deps.demandFor || economy.demandFor || demandFor,
         ownStock: deps.ownStock || economy.ownStock || null,
         canSell: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
+            && !invoke('GameServer/Bot/Economy/ItemDisposition').isStarterEquipment(line)
+            // Also withdraw legacy backed stock, which is no longer in the bag.
+            && (state.stats?.tradeMeeting || !invoke('GameServer/Inventory/ShotStock').isPersonalShot(state, line.selfId))
             && deps.canSell?.(line) !== false,
         canBuy: line => invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)
             && (Number(line.enchant || 0) > 0 || !npcOwnsPurchase(economy, line.selfId)),
+        saleCount: deps.saleCount || (typeof economy.stock === 'function' ? saleCount : null),
         derivedDemandValue: deps.derivedDemandValue ?? economy.derivedDemandValue,
         derivedDemandSupported: deps.derivedDemandSupported ?? economy.derivedDemandSupported,
         tripCost: trip || null,
@@ -129,7 +166,7 @@ function marketFor(selfId, ctx, { town = null, units = 1, enchant = 0 } = {}) {
     return PriceDecision.marketFor(selfId, {
         board: ctx.board, ownerId: ctx.characterId, town, units, enchant, tripCost: ctx.tripCost,
         npcOffers: ctx.npcOffersFor(selfId), timestamp: ctx.timestamp,
-        demand: ctx.demandFor?.(Number(selfId), Number(enchant)) || null,
+        demand: ctx.demandFor?.(Number(selfId), Number(enchant), town) || null,
         ownUnits: stock?.units ?? units,
         // Different accepted own asks have no declared common exposure. A
         // failed physical preparation cannot become a smaller profitable lot.
@@ -178,8 +215,8 @@ function disposition(item, ctx, { town = null, room = 1, stockQuote = false, sta
     const { market, belief } = priced;
     // A free conditional offer retains these same physical goods. It is not
     // a forecast: neither income nor a buyer/arrival/lifetime is invented.
-    // Only the field advert owner enables this option; shops and production
-    // continue to require the ordinary supported outcome.
+    // The listing owner enables this option before choosing its storefront
+    // or board advertisement. Production still needs a supported outcome.
     const quotePrice = stockQuotePrice(belief, market,
         stockQuote && room > 0 && ctx.ownStock?.known !== false);
     const quote = quotePrice !== null;
@@ -225,14 +262,29 @@ function disposition(item, ctx, { town = null, room = 1, stockQuote = false, sta
 }
 
 // A buy ad keeps authored worth with its line; the next ad starts fresh.
-function bid(selfId, ctx, { units = 1, worth, cap, rollKey }) {
+function bid(selfId, ctx, { units = 1, worth, cap, money = ctx.adena, town = null, rollKey }) {
     if (ctx.canBuy?.({ selfId, enchant: 0 }) === false) return null;
     const belief = PriceBelief.prior(selfId, ctx);
     if (!belief) return null;
     worth = ctx.economy?.worth(selfId) ?? worth;
-    const chosen = PriceDecision.chooseBid(belief, marketFor(selfId, ctx, { units }), ctx.trader, { worth, cap }, rollKey);
-    return chosen ? { ...chosen, pricing: lineState(selfId, ctx, { price: chosen.price, storeType: BUY, worth,
-        count: units, sigma: PriceBelief.sigma(belief) }) } : null;
+    const meeting = ctx.travelDetails?.(town);
+    if (town && !meeting?.known) return null;
+    const spendable = Number.isFinite(money) ? Math.max(0, money - (meeting?.known ? meeting.fees : 0)) : money;
+    cap = Math.min(cap, spendable);
+    // A short wallet may reduce the order. Compare alternatives for that
+    // actual quantity too; scarce cheap stock can cover the smaller order.
+    for (let pass = 0; pass < 4; pass++) {
+        const market = marketFor(selfId, ctx, { units, town });
+        market.purchaseCap = BidPurchaseAlternative.cap(selfId, ctx, { units, town, money });
+        const chosen = PriceDecision.chooseBid(belief, market, ctx.trader, { worth, cap }, rollKey);
+        if (!chosen) return null;
+        const count = Number.isFinite(spendable) ? Math.min(units, Math.floor(spendable / chosen.price)) : units;
+        if (count === units) return { ...chosen, count, purchaseCap: market.purchaseCap, pricing: lineState(selfId, ctx, { price: chosen.price, storeType: BUY, worth,
+            count, sigma: PriceBelief.sigma(belief) }) };
+        if (!(count > 0)) return null;
+        units = count;
+    }
+    return null;
 }
 
 // Only lines selected by the owner's shared attention roll reach this choice.
@@ -251,6 +303,13 @@ function look(state, lines, ctx) {
         if (!invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(line.selfId)) {
             withdrawals.push(move); continue;
         }
+        const count = ctx.saleCount?.(line);
+        if (line.storeType === SELL && line.custodyPolicy === 1 && Number.isSafeInteger(count) && count < line.count) {
+            if (!count) withdrawals.push(move);
+            else reprices.push({ ...move, price: line.price, count,
+                pricing: { ...line.pricing, seenCount: count } });
+            continue;
+        }
         const counter = MarketCounters.counter(MarketCounters.counterOf(line.selfId), ctx.timestamp);
         const reason = Number(ctx.reviewReasons?.get(line.lineId) || 0);
         const forced = Boolean(reason & 14);
@@ -261,6 +320,8 @@ function look(state, lines, ctx) {
         if (!belief) continue;
         PriceBelief.learn(belief, PriceBelief.lineObservations(line, belief, ctx));
         const market = marketFor(line.selfId, ctx, { town: line.town, units: line.count, enchant: line.enchant || 0 });
+        if (line.storeType === BUY) market.purchaseCap = ctx.purchaseCaps?.get(line.lineId)
+            ?? BidPurchaseAlternative.forLine(line, ctx);
         const acceptedSigma = line.pricing.sigma > 0 ? line.pricing.sigma : PriceBelief.sigma(belief);
         // Keep the accepted baseline through noise: new observations refresh
         // evidence, but never turn every small quote move into another roll.
@@ -269,7 +330,7 @@ function look(state, lines, ctx) {
         const movement = rival?.price > 0 && line.pricing.rival > 0
             ? Math.abs(Math.log(rival.price / line.pricing.rival))
             : Math.abs(belief.mu - Math.log(line.pricing.price || line.price));
-        if (!forced && reason & 1 && movement < acceptedSigma) continue;
+        if (!forced && reason & 1 && movement < acceptedSigma && !(line.price > market.purchaseCap)) continue;
         const rollKey = [line.storeType === BUY ? 'bid' : 'ask', ctx.characterId,
             line.lineId, line.selfId, counter.deals, line.fills || 0];
         let chosen;
@@ -277,10 +338,19 @@ function look(state, lines, ctx) {
         if (line.storeType === BUY) {
             worth = Object.hasOwn(ctx, 'preparedWorth') ? ctx.preparedWorth?.(line.selfId) ?? NaN
                 : typeof ctx.economy?.worth === 'function' ? ctx.economy.worth(line.selfId) : worth;
-            // An incomplete prepared graph cannot justify withdrawal or spend.
-            if (!Number.isFinite(worth) || worth < 0) continue;
-            const cap = Math.floor(Math.min(worth, line.price + ctx.adena / Math.max(1, line.count)));
-            chosen = PriceDecision.chooseBid(belief, market, ctx.trader, { worth, cap }, rollKey, line.price);
+            const cashCap = BidPurchaseAlternative.cashCap(line, ctx);
+            if (!Number.isFinite(worth) || worth < 0) {
+                // Unknown new usefulness cannot author additional spend. A
+                // confirmed cheaper purchase/funding limit can still reduce
+                // an old bid while its original authored worth is retained.
+                const ceiling = Math.min(market.purchaseCap, cashCap);
+                if (!(ceiling >= 0 && ceiling < line.price)) continue;
+                worth = line.pricing.worth;
+                chosen = ceiling >= 1 ? { price: Math.floor(ceiling) } : null;
+            } else {
+                const cap = Math.floor(Math.min(worth, cashCap));
+                chosen = PriceDecision.chooseBid(belief, market, ctx.trader, { worth, cap }, rollKey, line.price);
+            }
             if (!chosen) { withdrawals.push(move); continue; }
         }
         else {

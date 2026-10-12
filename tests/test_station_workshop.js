@@ -91,6 +91,24 @@ const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
         assert.equal(held(ownerItems, recipe.productId), 0, 'the station holds no goods');
         const after = Life.cachedState(owner.characterId);
         assert.strictEqual(await Workshop.review(after), after, 'fills and earnings do not republish the station');
+        // Early preparation has the same native paid executor and accounting.
+        // Expertise still controls wearing the result, independently of craft.
+        const dKit = invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 10, level: 20 }).items;
+        let early = await seed('bot_station_early', 'EarlyCustomer', 10, 33,
+            [item(57, 1000000), ...[...inputs].map(([id, amount]) => item(id, amount)),
+                ...dKit.map(row => ({ ...item(row.selfId, 1), slot: row.slot, equipped: true }))]);
+        assert(invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(early));
+        early = await Life.upsertState({ ...early, stats: { ...early.stats, equipmentPlan: { status: 'ready_to_craft',
+            strategy: 'craft', recipeId: 198, target: { selfId: recipe.productId },
+            craftProviders: { 198: { workshop: true, characterId: owner.characterId, price: fee, known: true } } } } }, 'early_station_plan');
+        const earlyResult = await Crafting.craft(early, () => 0);
+        assert.equal(earlyResult.crafted, true, earlyResult.reason);
+        const earlyItems = await Database.fetchItems(early.characterId);
+        assert.equal(held(earlyItems, recipe.productId), 1);
+        assert.equal(held(earlyItems, 57), 1000000 - fee);
+        assert(earlyItems.filter(row => row.selfId === recipe.productId).every(row => !row.equipped),
+            'the physical C staff waits in inventory until expertise');
+        assert.equal(held(await Database.fetchItems(owner.characterId), 57), 1000 + 2 * fee);
         console.log('PASS station workshop: published list, public index, paid craft, MP kept', JSON.stringify({ fee }));
     } finally {
         await Database.close();

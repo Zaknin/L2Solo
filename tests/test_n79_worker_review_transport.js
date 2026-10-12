@@ -20,9 +20,11 @@ invoke('GameServer/Bot/Population/BackgroundResolver').resolveSolo = ({ timestam
 invoke('GameServer/Bot/Population/BotLifeState').prepareResolve = async (state, result, opts) =>
     ({ ...state, updatedAt: opts.timestamp });
 invoke('GameServer/Bot/AI/TendencyRoll').roll = () => 0;
-invoke('GameServer/Bot/Economy/MarketPricing').traderContext = (state, opts) => ({
-    ...opts, hour: 0, understanding: .3
-});
+invoke('GameServer/Bot/Economy/MarketPricing').traderContext = (state, opts) => {
+    parentPort.postMessage({ trace: 'npcOptions', gear: opts.purchaseNpcOffersFor(413).length,
+        scroll: opts.purchaseNpcOffersFor(736).length });
+    return { ...opts, hour: 0, understanding: .3 };
+};
 invoke('GameServer/Bot/Economy/MarketPricing').look = (state, lines, ctx) => {
     parentPort.postMessage({ trace: 'look', ownerId: state.characterId });
     return workerData.unchanged ? null : { reprices: [{ recordId: lines[0].recordId,
@@ -96,6 +98,9 @@ async function check(unchanged) {
         const proposal = (await until(message => message.type === 'proposal_batch')).payload.proposals[0];
         assert.equal(proposal.token.characterId, 4242);
         assert.equal(received.filter(message => message.trace === 'look').length, 1);
+        const npcOptions = received.find(message => message.trace === 'npcOptions');
+        assert(npcOptions.gear > 0 && npcOptions.scroll > 0,
+            `WTB review sees actual NPC gear and scrolls beyond the gear-only planning catalog: ${JSON.stringify(npcOptions)}`);
         assert.equal(received.some(message => message.type === 'command_request'), false, 'board looks use no command');
         assert.equal(Object.hasOwn(proposal, 'market'), !unchanged);
         if (!unchanged) {

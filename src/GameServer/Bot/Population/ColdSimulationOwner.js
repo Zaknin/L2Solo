@@ -315,8 +315,14 @@ function commitAndReleaseBatch(entries = [], options = {}) {
         const canonicalInventory = InventorySummary.canonicalize(nextState.inventory);
         const canonicalState = { ...nextState, inventory: canonicalInventory };
         states.set(Number(token.characterId), canonicalState);
-        const inventoryChanged = JSON.stringify(InventorySummary.canonicalize(entry.proposal?.baseState?.inventory))
-            !== JSON.stringify(canonicalInventory);
+        const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
+        const inventoryChanged = JSON.stringify(previousInventory) !== JSON.stringify(canonicalInventory);
+        // The physical writer needs explicit removals even though persisted
+        // summaries omit empty stacks. Only remove items owned by this proposal.
+        const physicalInventory = { ...canonicalInventory };
+        Object.entries(previousInventory).forEach(([key, item]) => {
+            if (!canonicalInventory[key]) physicalInventory[key] = { ...item, amount: 0 };
+        });
         requests.push({
             characterId: Number(token.characterId),
             expectedRevision: Number(token.revision),
@@ -337,7 +343,7 @@ function commitAndReleaseBatch(entries = [], options = {}) {
                 } : {}),
                 ...(entry.proposal?.durable?.pvpKills ? { pvpKills: entry.proposal.durable.pvpKills } : {}),
                 ...(entry.proposal?.durable?.soulCrystals?.length ? { soulCrystals: entry.proposal.durable.soulCrystals } : {}),
-                ...(inventoryChanged ? { inventory: canonicalInventory } : {})
+                ...(inventoryChanged ? { inventory: physicalInventory } : {})
             },
             allowParty: entry.options?.allowParty === true || options.allowParty === true,
             allowLifecycle: entry.options?.allowLifecycle === true || options.allowLifecycle === true,

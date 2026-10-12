@@ -1,3 +1,8 @@
+function magicFailureThreshold(attackerLevel, targetLevel, magicLevel) {
+    const effectiveMagicLevel = Number(magicLevel) > 0 ? Number(magicLevel) : (Number(attackerLevel) || 1);
+    return Math.round(Math.pow(1.3, (Number(targetLevel) || 1) - effectiveMagicLevel) * 100);
+}
+
 const Formulas = {
     SHIELD_DEFENSE_FAILED: 0,
     SHIELD_DEFENSE_SUCCEED: 1,
@@ -454,9 +459,7 @@ const Formulas = {
     // Lisvus calcMagicSuccess: this older C4 failure roll is separate from
     // effect land-rate/resistance calculations and is used by Spoil handlers.
     calcMagicSuccess({ attackerLevel = 1, targetLevel = 1, magicLevel = 0 } = {}, rng = Math.random) {
-        const effectiveMagicLevel = Number(magicLevel) > 0 ? Number(magicLevel) : (Number(attackerLevel) || 1);
-        const levelDifference = (Number(targetLevel) || 1) - effectiveMagicLevel;
-        const failureThreshold = Math.round(Math.pow(1.3, levelDifference) * 100);
+        const failureThreshold = magicFailureThreshold(attackerLevel, targetLevel, magicLevel);
         return Math.floor(rng() * 10000) > failureThreshold;
     },
 
@@ -467,6 +470,12 @@ const Formulas = {
     calcSpoilSuccess({ skillId, skillLevel = 1, attackerLevel = 1, targetLevel = 1 } = {}, rng = Math.random) {
         const semantic = invoke('GameServer/Skills/C4SkillRules').resolveCached({ selfId: Number(skillId), level: Number(skillLevel) || 1 });
         return Formulas.calcMagicSuccess({ attackerLevel, targetLevel, magicLevel: semantic.magicLevel }, rng);
+    },
+
+    spoilSuccessChance({ skillId, skillLevel = 1, attackerLevel = 1, targetLevel = 1 } = {}) {
+        const semantic = invoke('GameServer/Skills/C4SkillRules').resolveCached({ selfId: Number(skillId), level: Number(skillLevel) || 1 });
+        const threshold = magicFailureThreshold(attackerLevel, targetLevel, semantic.magicLevel);
+        return Math.max(0, Math.min(1, (9999 - threshold) / 10000));
     },
 
     // Lisvus C4 Formulas.calcSkillSuccess. C4SkillEffects supplies the

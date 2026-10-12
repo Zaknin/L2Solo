@@ -89,12 +89,8 @@ function readyRecipeFor(state, recipe, visited = new Set()) {
     return null;
 }
 
-function publicCraftPlan(state) {
-    const plan = state?.stats?.equipmentPlan;
-    return !!plan?.craftProviders?.[plan.recipeId]?.workshop;
-}
 function beginTravel(state, timestamp = Date.now()) {
-    if (Karma.closesTowns(state?.stats?.karma) || (!Production.buyersDisabled() && ClanCrafting.isPersonalCraft(state) && !publicCraftPlan(state))) return null;
+    if (Karma.closesTowns(state?.stats?.karma)) return null;
     const plan = state?.stats?.equipmentPlan;
     if (!state || state.activity === 'traveling' || !['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) || plan.strategy !== 'craft') return null;
     const finalRecipe = C4RecipeItems.resolveByRecipeId(plan.recipeId)
@@ -241,7 +237,7 @@ async function craft(state, random = Math.random) {
         || C4DualSwordCombinations.resolveByRecipeId(plan?.recipeId);
     let recipe = readyRecipeFor(state, finalRecipe);
     const station = stationForRecipe(recipe?.recipeId, state);
-    if (!state || (!Production.buyersDisabled() && ClanCrafting.isPersonalCraft(state) && !publicCraftPlan(state)) || state.activity !== 'crafting' || !recipe || !station) {
+    if (!state || state.activity !== 'crafting' || !recipe || !station) {
         return { state, crafted: false, reason: 'not_ready' };
     }
     if (C4DualSwordCombinations.isCombination(recipe)) {

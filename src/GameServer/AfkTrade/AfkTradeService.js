@@ -741,6 +741,7 @@ async function publishBot(ownerId, config) {
         throw new Error('invalid_bot_afk_trade');
     }
     const result = await Database.createAfkTradeShop(characterId, { ...config, kind, replace: kind === 'shop' });
+    (result.closedRecords || []).forEach(refreshRecord);
     await syncOwnerAfterMove(characterId, result, 'bot_afk_trade_published');
     if (kind === 'shop') spawnProjection(result.shop);
     else refreshRecord(result.shop);

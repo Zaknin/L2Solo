@@ -73,6 +73,12 @@ try {
     assert.deepEqual(Walk.summary(), { size: 0, builds: 0, missing: 0, buildMs: 0 });
     Walk.hours(profiles[0].id, {}, profiles);
     assert.equal(Walk.summary().builds, 1, 'reset discards all catalog tables');
+    const expectedHours = Walk.hours(profiles[0].id, {}, profiles);
+    for (let i = 0; i < 16; i++) {
+        assert.equal(Walk.hours(profiles[0].id, {}, null), 0, 'a missing worker World still has no route');
+        assert.equal(Walk.hours(profiles[0].id, {}, profiles), expectedHours);
+    }
+    assert.equal(Walk.summary().builds, 2, 'the absent World catalogue is built once alongside the planning catalogue');
     console.log(JSON.stringify({ profiles: profiles.length, raw: raw.length, exactNativeComparisons: compared,
         alternatingBuilds: 2, nativePlanCalls: warmedCalls, reset: true }));
 } finally {

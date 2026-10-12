@@ -499,9 +499,10 @@ async function buyNpcStack(state, selfId, amount, unitPrice, funding = {}, origi
     if (!seller) {
         // Configured town merchants retain their native singleton owner;
         // they cannot be attributed to a physical NPC's shop list.
-        const configured = () => MarketOpportunity.fixedStoreOffers(selfId).some(offer =>
+        const configured = () => MarketOpportunity.fixedStoreOffers(selfId).find(offer =>
             offer.town === state.currentRegion && Number(offer.price) === unitPrice);
-        if (!configured()) return null;
+        const offer = configured();
+        if (!offer) return null;
         const Commit = require('./EconomyCommit');
         const template = require('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(selfId));
         const previousGoal = GoalState.snapshot(state.characterId);
@@ -519,7 +520,7 @@ async function buyNpcStack(state, selfId, amount, unitPrice, funding = {}, origi
         }); } finally { Commit.finish(state.characterId, admitted.command); }
         if (!result?.ok) return null;
         const current = Basket.acceptResult(admitted.state, result, previousGoal);
-        if (!result.replayed) observePurchase({ sourceType: 'configured_store', selfId, price: unitPrice }, result.amount, current);
+        if (!result.replayed) observePurchase(offer, result.amount, current);
         return { ...result, state: current, units: Number(result.amount),
             economyCommand: admitted.command, hot: !!LifeState.hotRow(state.characterId) };
     }

@@ -32,9 +32,17 @@ module.exports.marketOriginProbe = async id => {
     entry.context.goalReviewAt = timestamp;
     const projected = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [] },
         debug: {}, events: [], nextResolveAt: timestamp + 60000 }, timestamp);
+    const resting = { ...projected.state, activity: 'resting',
+        timing: { ...projected.state.timing, lastResolvedAt: timestamp },
+        stats: { ...projected.state.stats, restUntil: timestamp } };
+    kernel.upsert({ state: resting, context: { ...entry.context, goalReviewAt: timestamp - 60000 } });
+    const recoveredAt = timestamp + 1000;
+    const recovery = await kernel.projectResolve(resting,
+        BackgroundResolver.resolveRest(resting, 1000, recoveredAt), recoveredAt);
     const findSpot = id => planningSpots.find(spot => String(spot.id) === String(id));
     const seedTown = invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, [{ selfId: 1869 }], { findSpot });
     return { plan: projected.economyPlan, edges: projected.economyEdges, seedTown,
+        recovery: { activity: recovery.state.activity, edges: recovery.economyEdges, plan: recovery.economyPlan },
         forbiddenLoaded: Object.keys(require.cache).filter(key => /\/Database\.js$|\/Network\/|\/World\/World\.js$/.test(key)) };
 };`;
 const wrapper = String.raw`
@@ -78,6 +86,9 @@ parentPort.on('message', message => {
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);
         assert(response.value.edges & 8);
         assert(response.value.plan.sell.some(row => row[0] === 1869 || row[0] === 1870), 'a real no-grade bag produces a sale plan');
+        assert.equal(response.value.recovery.activity, 'hunting');
+        assert(response.value.recovery.edges & 8, 'a real rest resolve restores the missed economic review');
+        assert(response.value.recovery.plan, 'native action preparation resumes after recovery');
         assert.equal(response.value.seedTown, 'Elven Village', 'the farm centre chooses its village despite a Giran position');
         assert.equal(response.value.plan.sell.find(row => row[0] === 1869)[3], 'Giran', 'an existing own ad keeps its captured town');
         assert.deepEqual(response.value.forbiddenLoaded, [], 'the native sale resolve loads no World, network or database implementation');

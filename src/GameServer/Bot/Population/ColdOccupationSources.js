@@ -74,11 +74,13 @@ function initialise() {
 }
 
 function* reservations(state) {
-    const reserved = {}, plan = state.stats?.equipmentPlan;
+    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state), plan = state.stats?.equipmentPlan;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
+    if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')
+        for (const row of plan.materials || []) reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount));
     const equipped = new Map(), staged = new Map();
     for (const key in state.inventory || {}) {
         const item = state.inventory[key], template = ItemIndex.find(Data.items, Number(item.selfId));
@@ -155,10 +157,10 @@ const { regionalTown, details: tripDetails } = EconomicTrip;
 function recipeIndex(board) {
     initialise();
     return invoke('GameServer/Bot/Economy/RecipeProductionIndex').forBoard(board, {
-        accept: recipe => !String(ItemIndex.find(Data.items, recipe.productId)?.template?.kind || '').startsWith('Other.Shot'),
         fixedBuyer: recipe =>
-        !Production.buyersDisabled() && String(ItemIndex.find(Data.items, recipe.productId)?.template?.kind || '').startsWith('Other.Material')
-        && !!fixedBuy.get(Number(recipe.productId))?.length });
+        !!require('../Economy/ShotTradeDemand').forecast(recipe.productId)
+        || !Production.buyersDisabled() && String(ItemIndex.find(Data.items, recipe.productId)?.template?.kind || '').startsWith('Other.Material')
+            && !!fixedBuy.get(Number(recipe.productId))?.length });
 }
 
 // The same enabled fixed material buyers feed production actions and the
@@ -270,6 +272,15 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
             Object.assign(exit, Price.prospectiveExit(state, exit, { board, timestamp }));
             yield 'exit';
         }
+        const own = ownStock.get(Number(recipe.productId));
+        result.push(...yield* require('../Economy/ShotSalePolicy').exits(state, recipe, { board, timestamp,
+            trip, prepareTrip: ensureTrip, npcOffersFor: id => npcByItem.get(Number(id)) || [], read,
+            reserve: Number(stock?.itemId) === Number(recipe.productId)
+                ? Math.max(0, Number(stock.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
+                    - Number(state.acceptedIncoming?.[recipe.productId] || 0)) : 0,
+            existing: Number(own?.count || 0) + Number(state.acceptedIncoming?.[recipe.productId] || 0)
+                + (board.ownerLines(state.characterId) || []).filter(line => line.storeType === 1
+                    && line.custodyPolicy !== 1 && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + line.count, 0) }));
         return result;
     };
     const preparePurchase = function* (owner, id, amount, query = {}) {

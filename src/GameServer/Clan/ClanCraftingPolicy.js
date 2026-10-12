@@ -13,8 +13,7 @@ const clanIdFor = (state) => Number(state?.clanId ?? state?.stats?.clanId ?? 0);
 const resolveRecipe = (id) => Recipes.resolveByRecipeId(id) || DualSwords.resolveByRecipeId(id);
 const isPersonalCraft = (state, plan = state?.stats?.equipmentPlan) => clanIdFor(state) > 0
     && plan?.strategy === 'craft' && Number(plan.clanGoal?.clanId) !== clanIdFor(state)
-    // Emergency NPC exchanges consume already owned/bought blades. Ordinary
-    // personal crafting and long component-farming chains stay clan-managed.
+    // Emergency NPC exchanges consume already owned/bought blades.
     && !(plan.weaponBridge === true && DualSwords.resolveByRecipeId(plan.recipeId));
 
 function stockInventory(inventory = {}, rows = []) {

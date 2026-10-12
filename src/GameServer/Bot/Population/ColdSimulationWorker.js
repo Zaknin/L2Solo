@@ -122,6 +122,7 @@ let safetyStateRepairs = 0;
 let safetyOrphanRepairs = 0;
 let previousElu = null;
 let planningSpots = [];
+invoke('GameServer/Bot/AI/SpotValueTable').useSpots(() => planningSpots);
 let planningNpcOfferRows = [];
 const tables = new TableMirror({ actorProjectorRole: workerProjectorRole });
 // Planning producers import this same collector; its worker cap is64 rows.
@@ -187,7 +188,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         : kernel?.states.get(id)?.state === input.sourceState),
     sameInput: (left, right) => left.mode === 'wish' || right.mode === 'wish'
         ? left.mode === right.mode && left.sourceState === right.sourceState && left.routeKey === right.routeKey
-        : left.state.updatedAt === right.state.updatedAt
+        : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
         && ColdEconomyDecision.stateKey(left.state) === ColdEconomyDecision.stateKey(right.state)
         && left.state.simulation?.revision === right.state.simulation?.revision
         && left.state.simulation?.ownerId === right.state.simulation?.ownerId
@@ -198,7 +199,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         && left.sourceReady === right.sourceReady
         && left.routeKey === right.routeKey
         && left.mode === right.mode && left.buyOrderEscrow === right.buyOrderEscrow,
-    onSlots: count => invoke('GameServer/Bot/Economy/EconomyContext').setPlanningContexts?.(count),
+    onWorking: count => invoke('GameServer/Bot/Economy/EconomyContext').setPlanningContexts?.(count),
     capture: (id, input, read, readScope) => {
         const book = invoke('GameServer/Bot/Economy/RecipeBookCodec').unpack(input.recipeBook);
         return { state: input.state, board: boardReady(), timestamp: input.timestamp, read, readScope,
@@ -209,6 +210,12 @@ const occupationPlanner = new ColdOccupationPlanner({
     },
     create: input => ({ iterator: (function* () {
         if (input.mode === 'wish') return yield* EconomicTrip.prepare(input.state);
+        if (input.mode === 'showcase') return { economyPlan:
+            yield* invoke('GameServer/Bot/Population/ColdEconomyPlan').prepare(input.state, input.economy, {
+                showcaseOnly: true, now: input.timestamp, board: input.board, tripCost: input.economy.trip,
+                npcOffersFor: OccupationSources.npcOffersFor,
+                findSpot: id => SpotIndex.spotById(planningSpots, id)
+            }) };
         if (input.mode === 'meeting') {
             const request = input.meeting, ownId = Number(input.state.characterId);
             const side = request.actorA === ownId ? 0 : 1, own = request.parties[side];
@@ -253,6 +260,10 @@ const occupationPlanner = new ColdOccupationPlanner({
                     survival.set(line.selfId, Math.round(economy.kitCost?.(line.selfId, line.price) || 0));
                     total += line.count * line.price;
                 } else {
+                    // An old own SELL quote must not bypass personal stock
+                    // protection when preparing a new meeting.
+                    if (invoke('GameServer/Inventory/ShotStock').isPersonalShot(input.state, line.selfId))
+                        throw Error('trade_meeting_protected_stock');
                     const item = input.state.inventory?.[line.selfId];
                     const free = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(input.state, item || {});
                     if (free < sold.get(line.selfId)) throw Error('trade_meeting_protected_stock');
@@ -275,6 +286,11 @@ const occupationPlanner = new ColdOccupationPlanner({
                 input.buyOrderEscrow || 0, { r: valueRate, survivalCost: own.survivalCost }) : Infinity;
             if (!Number.isSafeInteger(total) || total > spendable || own.route.fee > Number(input.state.adena || 0))
                 throw Error('trade_meeting_funding');
+            invoke('GameServer/Bot/Economy/BidPurchaseAlternative').assertMeetingPurchase(request.lines, side, request.town, {
+                state: input.state, characterId: ownId, adena: Number(input.state.adena || 0), hour: economy.hourAdena,
+                economy, board: input.board, travelDetails: economy.trip.details,
+                npcOffersFor: OccupationSources.npcOffersFor
+            }, Math.min(spendable, Number(input.state.adena || 0)));
             request.dependencies = [...occupationPlanner.slots.get(ownId).reads.keys()].map(id => {
                 const scope = MarketCounters.counterOf(id);
                 return [id, `g:${input.board.groupFingerprint(scope)}`, MarketCounters.revisionOf(scope).split('.').slice(1).join('.'),
@@ -294,6 +310,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
             input.state = { ...input.state, stats: { ...input.state.stats, ...input.economy.statsPacket } };
+            input.stock = input.economy.stock('shots');
             yield 'candidate';
         }
         if (input.mode === 'occupation') {
@@ -349,7 +366,10 @@ const occupationPlanner = new ColdOccupationPlanner({
             const cursor = Shots.createShot(input.state, input.knownRecipes, prepared.context, options);
             while (!Shots.stepShot(cursor)) yield cursor.stage;
             const value = Shots.resultShot(cursor);
-            if (value && cursor.selectedValueHours > selectedValue) selected = value;
+            // Consumable production is the crafter's primary earning route.
+            // The same positive finite value gate still rejects unprofitable
+            // production; other crafts remain the fallback when shots cannot sell.
+            if (value && cursor.selectedValueHours > 0) selected = value;
         }
         const economyPlan = input.economy ? yield* invoke('GameServer/Bot/Population/ColdEconomyPlan').prepare(input.state, input.economy, {
             ...prepared.options, now: input.timestamp, board: input.board, persona: BotPersona.of(input.state),
@@ -415,12 +435,12 @@ const occupationPlanner = new ColdOccupationPlanner({
         }
         // The action result is the existing compact native plan. Its derived
         // network is needed while preparing it, never by the completed cache.
-        if (input.mode === 'action') input.economy = null;
+        if (input.mode === 'action' || input.mode === 'showcase') input.economy = null;
         if (shuttingDown || kernel?.states.get(id)?.state !== input.sourceState) return;
         if (meta.stale) {
             send('ready', { phase: 'economy_workshop_stale', characterId: id,
                 updatedAt: Number(input.state.updatedAt || 0), key: ColdEconomyDecision.stateKey(input.state) });
-        } else if (input.mode !== 'action' && input.state.phase === 'hot') {
+        } else if (input.mode !== 'action' && input.mode !== 'showcase' && input.state.phase === 'hot') {
             const decision = ColdEconomyDecision.capture({ workshop }, input.state);
             send('ready', { phase: 'economy_decided', characterId: id, economyDecision: decision });
         }
@@ -447,7 +467,7 @@ function occupationFor(state, timestamp, context = {}, mode = 'occupation') {
         routeRequests.set(id, input);
         return occupationPlanner.request(-id, input);
     }
-    return occupationPlanner.request(id, { state, sourceState, timestamp, buyOrderEscrow: context.buyOrderEscrow || 0,
+    return occupationPlanner.request(id, { state, sourceState, timestamp, assetsKey: assetsKey(state), buyOrderEscrow: context.buyOrderEscrow || 0,
         knownShotRecipes: context.knownShotRecipes || [], recipeBook: context.recipeBook, stock: context.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
@@ -473,6 +493,10 @@ function requestRoute(payload) {
     occupationPlanner.request(-id, input, { awaitResult: false });
 }
 const refreshedStates = new WeakSet();
+function assetsKey(state) {
+    return `${invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').version(state)}:${
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)}`;
+}
 const economyPlanHash = plan => require('../Fnv1a').fnv1a32(JSON.stringify(plan));
 function occupationOwnerChanged(id, refresh = false) {
     const entry = kernel?.states.get(Number(id));
@@ -480,7 +504,7 @@ function occupationOwnerChanged(id, refresh = false) {
     // One economy refresh per native state object.
     if (refresh && refreshedStates.has(entry.state)) return;
     if (refresh) refreshedStates.add(entry.state);
-    occupationPlanner.request(id, { state: entry.state, sourceState: entry.state,
+    occupationPlanner.request(id, { state: entry.state, sourceState: entry.state, assetsKey: assetsKey(entry.state),
         timestamp: Date.now(), mode: refresh ? 'refresh' : 'occupation', pending: entry.context.economyPending || 0,
         buyOrderEscrow: entry.context.buyOrderEscrow || 0,
         knownShotRecipes: entry.context.knownShotRecipes || [],
@@ -530,12 +554,46 @@ MarketCounters.useSpots(() => planningSpots);
 tables.watch('market', {
     reset: () => { occupationPlanner.resetSources(); kernel?.lookSeen.clear(); },
     put: key => {
+        if (String(key).startsWith('h:')) {
+            const id = Number(String(key).slice(2));
+            for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
+            occupationPlanner.sourceChanged(id);
+        }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     },
     remove: key => {
+        if (String(key).startsWith('h:')) {
+            const id = Number(String(key).slice(2));
+            for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
+            occupationPlanner.sourceChanged(id);
+        }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
+    }
+});
+tables.watch('personal_warehouse', {
+    reset: () => {},
+    put: key => occupationOwnerChanged(Number(key)),
+    remove: key => occupationOwnerChanged(Number(key))
+});
+tables.watch('clan_supplies', {
+    reset: () => {},
+    put: key => {
+        // Only the bounded retained contexts can carry an obsolete hot card.
+        // Cold owners notice the version at their next natural resolve.
+        for (const entry of occupationPlanner.slots.values()) {
+            const state = entry.input.state;
+            if (state.phase === 'hot' && Number(state.clanId ?? state.stats?.clanId) === Number(key))
+                occupationOwnerChanged(entry.id);
+        }
+    },
+    remove: key => {
+        for (const entry of occupationPlanner.slots.values()) {
+            const state = entry.input.state;
+            if (state.phase === 'hot' && Number(state.clanId ?? state.stats?.clanId) === Number(key))
+                occupationOwnerChanged(entry.id);
+        }
     }
 });
 function boardReady() {
@@ -631,6 +689,8 @@ let planningOccupancyCachedAt = 0;
 // Personas come from the main thread's 'personas' table (BotPersona.loadAll).
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 BotPersona.useRowSource((characterId) => tables.rows('personas').get(characterId));
+invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
 let eventLoopDelay = null;
 
 // The owner notices moved counters only during its own natural resolve.
@@ -643,6 +703,7 @@ function reviewMarket(state, timestamp, economy) {
     const ctx = MarketPricing.traderContext(state, {
         timestamp, board, economy, persona: BotPersona.of(state),
         npcOffersFor: (selfId) => planningNpcCatalog.offersFor(selfId),
+        purchaseNpcOffersFor: OccupationSources.npcOffersFor,
         findSpot: (spotId) => SpotIndex.spotById(planningSpots, spotId),
         canSell: invoke('GameServer/Bot/Economy/BoardLook').feasibilityPredicate(state, lines, economy?.workshop?.feasibility)
     });
@@ -772,7 +833,8 @@ function requestPartyGoals(payload, msgId, admitted = false) {
                 occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
                 rememberContext: kernel.states.get(member.characterId)?.state === member,
                 buyOrderEscrow: context.buyOrderEscrow, caller: 'workerPartyGoal', withNodes: true });
-        }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy && partyMembersAvailable(members));
+        }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy
+            && partyMembersAvailable(members), { spots: planningSpots });
         if (!shuttingDown && !kernel.stopping && Date.now() < payload.replyBy)
             send('party_goal_result', { ok: true, joint, sources: Calculation.sources(members) }, msgId);
     }).catch(error => {
@@ -962,7 +1024,10 @@ function startKernel(config = {}) {
                 stats: plannedStats
             };
             const routedState = beginHuntingTrip(plannedState, context?.route, timestamp) || plannedState;
+            const showcase = routedState.activity === 'shopping'
+                ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             return {
+                ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,
@@ -1026,7 +1091,7 @@ function startKernel(config = {}) {
         const entry = kernel.states.get(id);
         const side = meeting.actorA === id ? 0 : 1;
         const state = meeting.incoming ? { ...entry.state, acceptedIncoming: meeting.incoming[side], incomingPending: false } : entry.state;
-        return occupationPlanner.request(id, { state, sourceState: entry.state, timestamp: Date.now(),
+        return occupationPlanner.request(id, { state, sourceState: entry.state, timestamp: Date.now(), assetsKey: assetsKey(state),
             mode: 'meeting', meeting, recipeBook: entry.context.recipeBook, buyOrderEscrow: entry.context.buyOrderEscrow || 0,
             routeKey: EconomicTrip.key(entry.state), sourceReady: tables.ready('board') && tables.ready('market') }).then(result => {
                 if (!result?.token) throw Error(result?.reason || 'trade_meeting_preparation_pending');

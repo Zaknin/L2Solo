@@ -21,6 +21,8 @@ const starterWeapon = (DataCache.newbieItems || [])
     .map((item) => DataCache.items.find((entry) => Number(entry.selfId) === Number(item.selfId)))
     .find((item) => item?.template?.kind?.startsWith('Weapon.'));
 const starterIds = new Set((DataCache.newbieItems || []).flatMap((row) => (row.items || []).map((item) => Number(item.selfId))));
+const starterGear = DataCache.items.filter(item => starterIds.has(Number(item.selfId))
+    && /^(Weapon|Armor)\./.test(item.template?.kind));
 const lowGradeGear = DataCache.items.find((item) => (
     (item?.template?.kind?.startsWith('Weapon.') || item?.template?.kind?.startsWith('Armor.'))
     && ItemDisposition.gradeIndex(item.etc?.rank) < ItemDisposition.gradeIndex('c')
@@ -47,8 +49,15 @@ function atRate(rate, work) {
 
 // Hard rules.
 assert.deepStrictEqual(MarketListingPolicy.classify(seller, saleItem(starterWeapon)),
-    { action: 'market', reason: 'market' }, 'owned creation-origin surplus uses the shared market decision');
+    { action: 'npc', reason: 'npc_only_item' }, 'unused starter gear goes directly to the NPC');
 for (const rate of ['x1', 'x10', 'x50']) {
+    for (const item of starterGear) {
+        for (const enchant of [0, 6]) assert.deepStrictEqual(atRate(rate,
+            () => MarketListingPolicy.classify(seller, { ...saleItem(item), enchant })),
+        { action: 'npc', reason: 'npc_only_item' }, `${item.template.name} stays NPC-only at ${rate} and +${enchant}`);
+        assert(ItemDisposition.isNpcOnlyItem({ selfId: item.selfId }), 'canonical starter kind works without a saved kind');
+        assert.strictEqual(ItemDisposition.isWarehouseCandidate({ selfId: item.selfId, amount: 1 }), false);
+    }
     assert.strictEqual(atRate(rate, () => MarketListingPolicy.classify(seller, saleItem(lowGradeGear)).action), 'market',
         'low-grade gear uses the same market decision at every rate');
 }
@@ -66,7 +75,7 @@ const cheapCPlus = { ...saleItem(lowGradeGear), rank: 'c', basePrice: 1000 };
 assert.strictEqual(MarketListingPolicy.classify(seller, cheapCPlus).action, 'market',
     'cheap C+ gear reaches shared valuation');
 assert.strictEqual(MarketListingPolicy.classify(seller, { ...saleItem(starterWeapon), enchant: 6 }).action,
-    'market', 'enchanted creation-origin surplus retains its legitimate source');
+    'npc', 'enchanting a starter item does not admit it to the market');
 for (const count of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     assert.strictEqual(MarketListingPolicy.classify(seller, { ...saleItem(lowGradeGear), count }).action,
         'ignore', 'invalid physical counts never enter valuation');
@@ -75,12 +84,11 @@ for (const count of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
 // A small world: an empty board index and counters for the items below.
 const items = [1864, 1865, 1866, 1867, 1868, 1869, 1870, 1871, 1872, 1873];
 const bag = Object.fromEntries(items.map((selfId) => [selfId, { selfId, amount: 100, kind: 'Other.Material' }]));
-const state = { characterId: 4242, level: 40, adena: 50000, stats: { generatedCold: true }, inventory: bag };
+const state = { characterId: 4242, level: 40, adena: 50000, stats: { generatedCold: true, craftStationId: 1 }, inventory: bag };
 const now = 1800000000000;
 const board = new BoardIndex({ groupOf: MarketCounters.counterOf });
 const options = (extra = {}) => ({ now, board, persona: null, npcOffersFor: () => [], findSpot: () => null, ...extra });
-// The native inventory path nominates a spare starter weapon and a one-unit
-// material; valuation can still keep or liquidate them when demand is absent.
+// Only the spare starter copy is liquidated; normal materials keep valuation.
 const spareStarter = { ...state, inventory: {
     [starterWeapon.selfId]: { selfId: Number(starterWeapon.selfId), amount: 2,
         equippedCount: 1, enchant: 6, kind: starterWeapon.template.kind },
@@ -89,11 +97,73 @@ const spareStarter = { ...state, inventory: {
 const admitted = MarketListingPolicy.evaluate(spareStarter, options({ keptAmounts: {}, preparedReservations: {} }));
 const starterDecision = admitted.decisions.find(decision => decision.item.selfId === Number(starterWeapon.selfId));
 assert.strictEqual(starterDecision?.item.count, 1, 'only the spare creation-origin weapon reaches shared disposition');
-assert.strictEqual(starterDecision.priced, null, 'creation origin invents no price for an unobserved enchant');
-assert.strictEqual(starterDecision.action, 'warehouse', 'unknown enchanted value retains the physical spare');
+assert.strictEqual(starterDecision.priced, undefined, 'starter gear bypasses price valuation');
+assert.strictEqual(starterDecision.action, 'npc', 'a spare starter weapon is always NPC stock');
+assert.strictEqual(admitted.npc.find(item => item.selfId === Number(starterWeapon.selfId)).count, 1);
 assert(admitted.decisions.some(decision => decision.item.selfId === 1865 && decision.item.count === 1
     && decision.priced), 'a single material reaches shared valuation');
 assert.strictEqual(spareStarter.inventory[starterWeapon.selfId].amount, 2, 'nomination never moves physical items');
+
+const starterShirt = DataCache.items.find(item => Number(item.selfId) === 1146);
+const wornStarter = { ...state, phase: 'cold', activity: 'hunting', currentRegion: 'Cruma Tower',
+    loc: { locX: 14500, locY: 114000, locZ: -2400 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
+    inventory: { 1146: {
+        selfId: 1146, name: starterShirt.template.name, kind: starterShirt.template.kind,
+        stackable: false, amount: 1, equipped: true, equippedCount: 1,
+        instances: [{ id: 9060000, amount: 1, equipped: true, slot: starterShirt.etc.slot }]
+    } }, stats: { classId: 0, marketSellRetryAfter: now + 60000 } };
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed(wornStarter, { now }), null,
+    'worn starter equipment does not cause a town trip');
+const spareShirt = { ...wornStarter, inventory: { 1146: { ...wornStarter.inventory[1146], amount: 2,
+    instances: [...wornStarter.inventory[1146].instances,
+        { id: 9060001, amount: 1, equipped: false, slot: 0, enchant: 6 }]
+} } };
+assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(spareShirt, { now }), {
+    reason: 'npc_only_inventory', slots: 2, npcOnlySlots: 1, limit: ItemDisposition.INVENTORY_SLOT_LIMIT
+}, 'a single unused starter piece starts NPC cleanup despite the market cooldown');
+assert.strictEqual(invoke('GameServer/Bot/Population/PopulationService').prepareInventoryCleanupProposal(spareShirt, now)
+    ?.stats.forcedMarketCleanup.cleanupReason, 'npc_only_inventory',
+    'the cold resolve turns an unused starter piece into an NPC cleanup trip');
+
+const starterBoard = new BoardIndex({ groupOf: MarketCounters.counterOf });
+for (const [index, item] of starterGear.entries()) starterBoard.put({ id: 970000 + index,
+    kind: 'buy_ad', storeType: 3, ownerId: 980000 + index, town: 'Giran',
+    lines: [{ lineId: 990000 + index, selfId: Number(item.selfId), count: 1, price: 1000000, enchant: 0 }] });
+const starterBag = { ...state, inventory: Object.fromEntries(starterGear.map(item => [item.selfId,
+    { selfId: Number(item.selfId), kind: item.template.kind, amount: 1 }])) };
+const starterOptions = options({ board: starterBoard, keptAmounts: {}, preparedReservations: {},
+    kept: new Map(starterGear.map(item => [Number(item.selfId), 1000000])) });
+const starterSale = MarketListingPolicy.evaluate(starterBag, starterOptions);
+assert.strictEqual(starterSale.npc.length, starterGear.length, 'every unused starter item goes to NPC');
+assert.deepStrictEqual(starterSale.listings, [], 'old kept lines cannot re-admit starter equipment');
+assert.deepStrictEqual(starterSale.answers, [], 'even a profitable buyer cannot acquire starter gear from a bot');
+assert.deepStrictEqual(starterSale.warehouse, []);
+const starterCtx = MarketListingPolicy.traderContext(starterBag, starterOptions);
+const legacyLines = starterGear.map((item, index) => ({ ownerId: state.characterId,
+    lineId: 991000 + index, recordId: 992000 + index, selfId: Number(item.selfId), storeType: 1,
+    count: 1, price: 1000000, revision: 1, pricing: { seenCounter: 0, seenAt: now } }));
+const seenStarters = new (invoke('GameServer/Bot/Economy/BoardLook').SeenLines)();
+const withdrawnStarters = new Set();
+for (let step = 0; step < 2; step++) {
+    const reviewStarters = invoke('GameServer/Bot/Economy/MarketPricing').lookOwn(starterBag, legacyLines,
+        starterCtx, seenStarters);
+    for (const move of reviewStarters?.withdrawals || []) withdrawnStarters.add(move.selfId);
+}
+assert.strictEqual(withdrawnStarters.size, starterGear.length,
+    'a natural board review withdraws legacy starter sell lines without waiting for deals');
+
+const equippedRows = starterGear.map((item, index) => ({ id: 993000 + index,
+    selfId: Number(item.selfId), name: item.template.name, amount: 1,
+    equipped: true, slot: item.etc.slot, enchant: 0 }));
+const hotRows = [...equippedRows, ...equippedRows.map(row => ({ ...row, id: row.id + 100,
+    equipped: false, slot: 0, enchant: 6 }))];
+const hotSale = MarketListingPolicy.npcSaleForActor({ actor: {
+    fetchId: () => state.characterId, fetchLevel: () => 40, fetchClassId: () => 0,
+    backpack: { fetchItems: () => hotRows }
+} });
+assert.deepStrictEqual([...hotSale].sort((a, b) => a[0] - b[0]),
+    starterGear.map(item => [Number(item.selfId), 1]).sort((a, b) => a[0] - b[0]),
+    'the hot town visit sells each spare and protects every worn copy');
 
 MarketCounters.reset();
 // The same tiny physical lot answers a nearby public buyer. Changing only

@@ -154,6 +154,7 @@ function depositActor(actor, state = null, session = null) {
 // The actor's warehouse candidates and the amount of each that may be stored:
 // what the town visit sells to the NPC (npcSale, by selfId) stays in the bag for that sale.
 function storableActorItems(actor, state = null, npcSale = null) {
+    if (state && invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return [];
     const selling = new Map(npcSale || []);
     const rows = [];
     for (const source of ItemDisposition.unreservedActorItems(state, actor?.backpack?.fetchItems?.().slice() || [])) {
@@ -187,7 +188,45 @@ function depositActorAtWarehouse(actor, state, session, target) {
     if (!isAtWarehouseService(actor, target)) {
         return Promise.reject(new Error('warehouse NPC is no longer active'));
     }
-    return depositActor(actor, state, session);
+    return serializeDeposit(actor.fetchId(), async () => {
+        const released = await releaseActorAtWarehouse(actor, state, session, target);
+        if (released.length) session.shoppingNpcSale = invoke('GameServer/Bot/Economy/MarketListingPolicy').npcSaleForActor(session);
+        const deposited = await depositActorUnlocked(actor, state, session);
+        return { ...deposited, released };
+    });
+}
+
+function hasActorWithdrawalCandidates(actor, state) {
+    return invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)
+        && Object.keys(invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').inventory({ characterId: actor?.fetchId?.() })).length > 0;
+}
+async function releaseActorAtWarehouse(actor, state, session, target) {
+    if (!hasActorWithdrawalCandidates(actor, state)) return [];
+    const id = Number(actor.fetchId()), rows = await Database.fetchWarehouseItems(id);
+    const current = invoke('GameServer/Bot/Economy/MarketListingPolicy').actorState(session);
+    const requests = marketRequests(current, rows), released = [];
+    const validate = () => {
+        if (session.actor !== actor || actor.isDead?.() || !isAtWarehouseService(actor, target)
+            || session.activeTrade || session.trade || session.activeNegotiation || actor.fetchPrivateStoreType?.())
+            throw new Error('warehouse_actor_changed');
+    };
+    for (const request of requests.slice(0, 16)) {
+        let left = request.amount;
+        for (const row of rows.filter(row => Number(row.selfId) === request.selfId
+            && Number(row.enchant || 0) === Number(request.enchant || 0))) {
+            if (!(left > 0)) break;
+            const item = { ...row, amount: Math.min(left, Number(row.amount)), stackable: templateFor(row.selfId)?.etc?.stackable === true };
+            validate();
+            const moved = await Database.transferWarehouseToInventory(id, item, { validate });
+            const held = actor.backpack.fetchItemRaw(moved.inventoryId);
+            if (held) held.setAmount(moved.inventoryAmount);
+            else actor.backpack.insertItem(moved.inventoryId, row.selfId, { amount: moved.inventoryAmount,
+                enchant: moved.enchant, petData: moved.petData, equipped: false, slot: 0 });
+            row.amount -= item.amount; left -= item.amount;
+            released.push({ selfId: row.selfId, amount: item.amount, reason: 'market' });
+        }
+    }
+    return released;
 }
 
 async function depositColdUnlocked(state, candidates) {
@@ -414,13 +453,12 @@ function craftRequests(state, warehouseItems) {
     const plan = state?.stats?.equipmentPlan;
     if (!['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) || plan.strategy !== 'craft') return [];
     const Crafting = require('../../Clan/ClanCraftingPolicy');
-    if (Crafting.isPersonalCraft(state)) return [];
     return Crafting.warehouseMaterials(plan, state.inventory || {}, warehouseItems || [])
         .map(item => ({ ...item, reason: 'craft' }));
 }
 
 function marketRequests(state, warehouseItems, reserved = new Map(), options = {}) {
-    const stored = storedAmounts(warehouseItems);
+    const economy = options.economy || require('../Population/ColdEconomyDecision').economyFor(state);
     const inventory = { ...(state.inventory || {}) };
     const summary = LifeState.inventorySummaryFromItems(warehouseItems);
     for (const [key, item] of Object.entries(summary)) {
@@ -434,9 +472,10 @@ function marketRequests(state, warehouseItems, reserved = new Map(), options = {
     // Warehouse units in this temporary bag are not counted again as occupied
     // room. Only the stock reserved to remain there limits the E keep option.
     const decision = invoke('GameServer/Bot/Economy/BotAfkMarketService').saleDecision(
-        { ...state, inventory }, { ...options, stored: reserved });
-    const inBag = new Map(ItemDisposition.saleCandidates(state, { unlimited: true })
-        .map((item) => [Number(item.selfId), Number(item.count)]));
+        { ...state, inventory }, { ...options, economy, stored: reserved });
+    const inBag = new Map(ItemDisposition.saleCandidates(state, { unlimited: true,
+        reserved: economy.craftReservations || ItemDisposition.selectedCraftAmounts(state, economy.network) })
+        .map((item) => [`${Number(item.selfId)}:${Number(item.enchant || 0)}`, Number(item.count)]));
     const choices = [
         ...decision.listings,
         ...decision.npc,
@@ -444,9 +483,12 @@ function marketRequests(state, warehouseItems, reserved = new Map(), options = {
     ];
     return choices.flatMap((item) => {
         const selfId = Number(item.selfId);
-        const available = Math.max(0, (stored.get(selfId) || 0) - (reserved.get(selfId) || 0));
-        const amount = Math.min(available, Math.max(0, Number(item.count) - (inBag.get(selfId) || 0)));
-        return amount > 0 ? [{ selfId, amount, reason: 'market', town: item.town || null }] : [];
+        const enchant = Number(item.enchant || 0);
+        const stored = warehouseItems.filter(row => Number(row.selfId) === selfId && Number(row.enchant || 0) === enchant)
+            .reduce((sum, row) => sum + Number(row.amount), 0);
+        const available = Math.max(0, stored - (reserved.get(selfId) || 0));
+        const amount = Math.min(available, Math.max(0, Number(item.count) - (inBag.get(`${selfId}:${enchant}`) || 0)));
+        return amount > 0 ? [{ selfId, amount, enchant, reason: 'market', town: item.town || null }] : [];
     });
 }
 
@@ -460,7 +502,7 @@ function materialRequests(state, warehouseItems) {
     // the same recipe gap. Reserve/withdraw that gap once across both readers.
     const merged = new Map();
     for (const request of [...craftRequests(state, warehouseItems), ...ColdSafeEnchantService.warehouseRequests(state, warehouseItems)]) {
-        const key = `${request.selfId}:${request.reason}`;
+        const key = `${request.selfId}:${request.reason}${request.reason === 'market' ? `:${Number(request.enchant || 0)}` : ''}`;
         const previous = merged.get(key);
         merged.set(key, previous ? { ...previous, amount: Math.max(previous.amount, request.amount) } : request);
     }
@@ -508,7 +550,7 @@ async function releaseRequests(state, warehouseItems, requested, options = {}) {
     if (!canRelease(current, options) || current !== state) return { state: current, released: false, items: [], reason: 'economy_state_changed' };
     const recordStage = (stage, startedAt) => options.onStage?.(stage, Date.now() - startedAt);
     const requests = requested.reduce((merged, request) => {
-        const key = `${request.selfId}:${request.reason}`;
+        const key = `${request.selfId}:${request.reason}${request.reason === 'market' ? `:${Number(request.enchant || 0)}` : ''}`;
         const previous = merged.get(key);
         merged.set(key, previous ? { ...previous, amount: previous.amount + request.amount } : request);
         return merged;
@@ -539,7 +581,7 @@ async function releaseRequests(state, warehouseItems, requested, options = {}) {
                 // The requests are tied to this planning snapshot. A changed
                 // goal between rows waits for another bounded release attempt.
                 if (!canRelease(latest, options) || latest !== state) return stopped();
-                const key = `${Number(row.selfId)}:${reason}`;
+                const key = `${Number(row.selfId)}:${reason}${reason === 'market' ? `:${Number(row.enchant || 0)}` : ''}`;
                 const remaining = Number(remainingByRequest.get(key) || 0);
                 if (remaining <= 0 || Number(row.amount || 0) <= 0) continue;
                 const amount = Math.min(remaining, Number(row.amount));
@@ -622,6 +664,7 @@ function withdrawalRecord(items, at) {
 }
 
 module.exports = {
+    hasActorWithdrawalCandidates,
     MAX_GEAR_COPIES_PER_TYPE,
     depositActor,
     depositActorAtWarehouse,

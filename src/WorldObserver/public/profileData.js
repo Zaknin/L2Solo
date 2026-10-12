@@ -11,9 +11,18 @@
     const source = value => ({ liquidate: 'Sell surplus items', money: 'Hunt for income', drop: 'Monster drops', spoil: 'Spoil monsters',
         market: 'Player market', npc: 'NPC shop', craft: 'Craft item', warehouse: 'Withdraw from warehouse' })[value] || label(value);
     const item = row => row ? `<a class="inspector-link" href="/observer/database/items/${Number(row.selfId)}" data-app-route>${escape(row.name)}</a>` : 'Unknown';
-    const wish = row => row?.item ? item(row.item) : escape(({ stock: 'Restock', henna: 'Install henna', enchant: 'Enchant equipment',
-        sa: 'Install special ability', book: 'Learn skill', level: 'Reach level', care: 'Help character', scores: 'Settle score' })[row?.kind] || label(row?.kind))
-        + (row?.name || row?.reference ? `${row?.kind === 'stock' ? ' ' : ' · '}${escape(row.name || row.reference)}` : '');
+    const wish = row => {
+        if (row?.kind === 'enchant') {
+            const level = row.qualifier == null || row.qualifier === '' ? NaN : Number(row.qualifier);
+            return `Enchant ${row.item ? item(row.item) : 'equipment'}`
+                + (Number.isSafeInteger(level) && level > 0 ? ` to +${level}` : '');
+        }
+        const action = ({ stock: 'Restock', henna: 'Install henna', sa: 'Install special ability',
+            book: 'Learn skill', level: 'Reach level', care: 'Help character', scores: 'Settle score' })[row?.kind];
+        if (row?.item) return (action ? `${escape(action)} · ` : '') + item(row.item);
+        return escape(action || label(row?.kind))
+            + (row?.name || row?.reference ? `${row?.kind === 'stock' ? ' ' : ' · '}${escape(row.name || row.reference)}` : '');
+    };
     const wholeNumber = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
     const adena = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${wholeNumber.format(Number(value))} <span class="economy-unit">A</span>`;
     const reason = value => ({ superseded: 'Replaced by a newer wish', source_unavailable: 'No source available',

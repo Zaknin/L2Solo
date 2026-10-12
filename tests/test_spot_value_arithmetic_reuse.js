@@ -6,7 +6,7 @@ const Table = invoke('GameServer/Bot/AI/SpotValueTable');
 const filename = require.resolve('../src/GameServer/Bot/AI/SpotValueTable');
 const source = fs.readFileSync(filename, 'utf8');
 // Bypass only local scalar reuse in the native table evaluator.
-const scalarPattern = /const expRatio = ratio\('exp'\), busyRatio = ratio\('busy'\), adenaRatio = ratio\('adena'\);\s*const gapFactor = expGapFactor\(gap\), lootFactor = lootRateFactor\(t.spots\[s\], rates.drop\);/;
+const scalarPattern = /const expRatio = ratio\('exp'\), busyRatio = ratio\('busy'\);\s*const gapFactor = expGapFactor\(gap\), lootFactor = lootRateFactor\(t.spots\[s\], rates.drop\);/;
 assert(scalarPattern.test(source));
 let old = source.replace(scalarPattern, '');
 old = old.replace(/\bexpRatio\b/g, "ratio('exp')").replace(/\bbusyRatio\b/g, "ratio('busy')")
@@ -47,8 +47,8 @@ try {
     currentCounted.useFile(fixtureFile); oldCounted.useFile(fixtureFile);
     process.env.L2NODE_PROGRESSION_RATE = 'x50';
     assert.deepEqual(currentCounted.value('S', 'dps', 24), oldCounted.value('S', 'dps', 24));
-    assert.equal(counts.current, 10, 'four ratios plus two death interpolation reads');
-    assert.equal(counts.reference, 18, 'eight repeated ratios plus two death reads');
+    assert.equal(counts.current, 8, 'three combat ratios plus two death interpolation reads');
+    assert.equal(counts.reference, 14, 'six repeated combat ratios plus two death reads');
     const a = Table.value('-15_42', 'dps', 5), b = Table.value('-15_42', 'dps', 5);
     assert.notEqual(a, b, 'each caller still owns a fresh row');
     const expected = structuredClone(b); a.kills = -1;

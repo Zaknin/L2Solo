@@ -54,6 +54,53 @@ async function run() {
     }
     await Database.setItem(95, { selfId: 57, name: 'Adena', amount: 500 });
     await Database.setItem(95, { selfId: spellbook.selfId, name: spellbook.template.name, amount: 1 });
+
+    // Use the real town visit and writers to prove starter copy identity and payout.
+    await native.character(Database, 96, 'StarterCleanupSeller', 'bot_starter_cleanup');
+    await Database.setItem(96, { selfId: 57, name: 'Adena', amount: 500 });
+    const starter = DataCache.items.find(item => Number(item.selfId) === 1146);
+    const wornId = Number((await Database.setItem(96, { selfId: starter.selfId,
+        name: starter.template.name, amount: 1, equipped: true, slot: starter.etc.slot, enchant: 0 })).insertId);
+    const spareId = Number((await Database.setItem(96, { selfId: starter.selfId,
+        name: starter.template.name, amount: 1, equipped: false, slot: 0, enchant: 6 })).insertId);
+    const starterState = await LifeState.upsertState({ characterId: 96, accountName: 'bot_starter_cleanup',
+        name: 'StarterCleanupSeller', level: 40, phase: 'cold', activity: 'shopping', adena: 500,
+        currentRegion: 'Giran', loc: { locX: 82698, locY: 148638, locZ: -3473 },
+        vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 }, timing: {},
+        inventory: LifeState.inventorySummaryFromItems(await Database.fetchItems(96)), stats: { classId: 0 }
+    }, 'starter_npc_fixture');
+    const cleanupOptions = { now: 1000, forcedCleanup: { cleanupReason: 'npc_only_inventory' } };
+    const spareSale = await ListingService.open(starterState, cleanupOptions);
+    const npcPrice = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(starter.template.price);
+    assert.strictEqual(spareSale.reason, 'pre_trade_npc_cleanup');
+    assert.strictEqual(spareSale.listed, false);
+    const afterSpare = await Database.fetchItems(96);
+    assert(afterSpare.some(row => Number(row.id) === wornId && row.equipped), 'the worn starter identity survives');
+    assert(!afterSpare.some(row => Number(row.id) === spareId), 'the enchanted spare physically leaves the bag');
+    assert.strictEqual(native.amount(afterSpare, starter.selfId), 1);
+    assert.strictEqual(native.amount(afterSpare, 57), 500 + npcPrice);
+
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+    const replacement = DataCache.items.find(item => Number(item.etc?.slot) === Number(starter.etc.slot)
+        && item.etc?.rank === 'd' && Planner.suitable(item, starterState, 'dps', 'd'));
+    assert(replacement, 'a compatible non-starter chest upgrade exists');
+    await Database.updateItemEquipState(96, wornId, false, 0);
+    const replacementId = Number((await Database.setItem(96, { selfId: replacement.selfId,
+        name: replacement.template.name, amount: 1, equipped: true, slot: replacement.etc.slot, enchant: 0 })).insertId);
+    const replacedState = await LifeState.upsertState({ ...spareSale.state, activity: 'shopping',
+        inventory: LifeState.inventorySummaryFromItems(await Database.fetchItems(96)) }, 'starter_replaced_fixture');
+    assert.strictEqual(ItemDisposition.inventoryCleanupNeed(replacedState, { now: 1001 })?.reason, 'npc_only_inventory');
+    const replacedSale = await ListingService.open(replacedState, { ...cleanupOptions, now: 1001 });
+    const afterReplacement = await Database.fetchItems(96);
+    assert.strictEqual(replacedSale.listed, false);
+    assert.strictEqual(native.amount(afterReplacement, starter.selfId), 0, 'the replaced starter is sold to NPC');
+    assert.strictEqual(native.amount(afterReplacement, 57), 500 + 2 * npcPrice, 'each sold copy pays exactly once');
+    assert(afterReplacement.some(row => Number(row.id) === replacementId && row.equipped), 'the new chest remains equipped');
+    assert.strictEqual((await Database.fetchWarehouseItems(96)).length, 0, 'starter gear never reaches the warehouse');
+    assert.strictEqual(invoke('GameServer/AfkTrade/AfkTradeService').ownerRecords(96).length, 0,
+        'NPC cleanup creates no board records');
+    console.log('Native starter NPC cleanup: spare +6 and replaced shirt sold, worn identities and Adena conserved');
+
     Database.reconcileBotClanMembership = async () => ({ repairedMembers: 0, repairedParties: 0 });
     Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
     Database.execute = () => Promise.resolve([]);
@@ -259,7 +306,8 @@ async function run() {
 
     const remoteBuyerState = { ...buyerRoutedState, characterId: 86, currentRegion: 'Giran' };
     const remoteBuyer = await ListingService.open(remoteBuyerState, { now: 1000, durationMs: 60000 });
-    assert.strictEqual(remoteBuyer.state.stats.lastNpcLiquidation, undefined, 'a bot must not sell to a buyer in another town before travelling there');
+    assert.deepStrictEqual(remoteBuyer.state.stats.lastNpcLiquidation.sold, [[1864, 10, 50]],
+        'a personal bot liquidates unwanted stock at the local NPC when the remote buyer trip is not worthwhile');
 
     const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const SpotService = invoke('GameServer/Bot/AI/SpotService');

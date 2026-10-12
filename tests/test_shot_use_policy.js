@@ -28,7 +28,8 @@ try {
     assert.equal(stock.target, 200);
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const offers = Disposition.saleCandidates(state, { keptAmounts: Shots.keptAmounts(state, { stock: () => stock }), unlimited: true });
-    assert.equal(offers.find(row => row.selfId === 1835).count, 800, 'only surplus beyond useful owned stock is sellable');
+    assert.equal(offers.find(row => row.selfId === 1835), undefined,
+        'a smaller forecast cannot turn personal ammunition into sale stock');
     assert.equal(stock.survivalMissing, 0);
     assert.equal(stock.missing, 0, 'expensive replacement cannot become a new wish');
     const small = { ...state, inventory: { ...state.inventory, 1835: { selfId: 1835, amount: 20 } } };
@@ -114,6 +115,8 @@ try {
     stock = Economy.basics(state, deps).stock('shots');
     assert.equal(stock.target, 0);
     assert.equal(Shots.usePolicy(state).usePerHour, 0);
+    assert.equal(Shots.keptAmounts(state, { stock: () => stock })[1835], 1000,
+        'temporarily disabling shot use keeps compatible stock for a future hunt');
     const cheap = Shots.usePolicy(state, { plan: Shots.planForState(state), bestTable: Table.value('policy', 'dps', 7, true),
         withoutShots: Table.value('policy', 'dps', 7, false), hourAdena: 10000, unitPrice: .1 });
     assert.equal(cheap.purchaseUsePerHour, 0, 'a consumption wish cannot buy shots it would immediately reject for use');

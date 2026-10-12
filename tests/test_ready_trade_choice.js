@@ -66,3 +66,50 @@ try {
 } finally { Survival.forState = oldFloor;
     invoke('GameServer/Bot/Economy/MarketListingPolicy').evaluate = oldEvaluate; }
 console.log('PASS ready trade selection');
+
+// Surplus sales may interrupt a prepared personal purchase, while the wish
+// and its selected quote remain ready after the physical sale is fulfilled.
+const Listing = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const evaluate = Listing.evaluate;
+const buying = structuredClone(economy);
+buying.network.focus = ['power:283:14', 1, 0, 0, 0];
+const original = structuredClone(buying);
+board.put({ id: 88, ownerId: 100, kind: 'buy_ad', custodyPolicy: 1, revision: 2,
+    storeType: 3, town: 'Dwarven Village', lines: [{ lineId: 89, selfId: 1864, count: 2, price: 100 }] });
+const bid = board.first(1864, 3);
+try {
+    Listing.evaluate = input => ({ listings: [], answers: Number(input.inventory?.[1864]?.amount) > 0
+        ? [{ line: bid, count: 2 }] : [] });
+    const prepare = input => {
+        const iterator = Plan.prepare(input, buying, { board });
+        let next; do { next = iterator.next(); } while (!next.done);
+        return next.value;
+    };
+    for (const phase of ['hot', 'cold']) {
+        const seller = { ...state, phase, activity: 'hunting', inventory: { 1864: { amount: 2 } } };
+        assert.deepEqual(prepare(seller).take, [3, 1864, 2, 88, 89, 2, 100],
+            'the profitable surplus sale is allowed while the personal purchase is selected');
+        assert.deepEqual(prepare({ ...seller, inventory: {} }).take, [1, 1869, 2, 77, 78, 4, 237],
+            'after the sale the same personal purchase resumes');
+        assert.deepEqual(buying, original, 'the temporary deal never replaces the wish or selected purchase');
+    }
+} finally { Listing.evaluate = evaluate; }
+console.log('PASS trade detour preserves and resumes the selected purchase');
+
+const Pricing = invoke('GameServer/Bot/Economy/MarketPricing');
+const stockState = { ...state, level: 30, activity: 'hunting', stats: {},
+    inventory: { 1463: { selfId: 1463, amount: 100, kind: 'Other.Shot' } } };
+const stockEconomy = { hourAdena: 1000, moneyPrice: .001, persona: { traits: {}, understanding: .3 },
+    network: {}, stock: kind => kind === 'shots' ? { itemId: 1463, target: 60 }
+        : { itemId: 1060, target: 0 } };
+const trip = () => 0; trip.details = () => ({ known: true, fees: 0, hours: 0 });
+const context = input => Pricing.traderContext(input, { economy: stockEconomy, board, tripCost: trip });
+const advertised = { storeType: 1, custodyPolicy: 1, selfId: 1463, count: 100, enchant: 0 };
+assert.equal(context(stockState).saleCount(advertised), 40, 'the board offers only surplus over personal ammunition');
+assert.equal(context({ ...stockState, inventory: { 1463: { ...stockState.inventory[1463], amount: 20 } } })
+    .saleCount(advertised), 0, 'consumed stock below the personal reserve has no saleable remainder');
+assert.equal(context({ ...stockState, stats: { tradeMeeting: [1, 1] } }).saleCount(advertised), 100,
+    'accepted meeting custody keeps its quote until completion');
+assert.equal(context(stockState).saleCount({ ...advertised, custodyPolicy: 0 }), 100,
+    'backed shop stock is independent of ammunition still in the bag');
+console.log('PASS own conditional quantities respect current ammunition and accepted custody');

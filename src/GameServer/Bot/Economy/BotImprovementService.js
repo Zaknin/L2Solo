@@ -11,6 +11,17 @@ function inTown(state) {
     const town = invoke('GameServer/World/TownRespawn').getClosestTown(state.loc?.locX || 0, state.loc?.locY || 0, state.loc?.locZ || 0);
     return town.name === state.currentRegion && Math.hypot(state.loc?.locX - town.locX, state.loc?.locY - town.locY) <= 7500;
 }
+function acquisitionTravel(state, leaf, timestamp = Date.now()) {
+    if (leaf?.activity !== 'improving' || !['crystallize', 'luxury_exchange'].includes(leaf.improvement?.kind)
+        || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)
+        || state.party?.partyId || state.partyId || state.stats?.pveEncounter || state.stats?.pvpEncounter
+        || !['hunting', 'resting', 'party_wait'].includes(state.activity)
+        || state.currentRegion === 'Giran' && inTown(state)) return null;
+    return invoke('GameServer/Bot/Goals/GoalExecutor').beginMarketTravel(state, {
+        type: 'improving', target: { improvement: leaf.improvement },
+        plan: { marketTown: 'Giran', expectedBenefit: 'improvement' }
+    }, timestamp);
+}
 // options.decide(): the worker's decision made on exactly this state, or null
 // (L25); without one the wish network is built here.
 async function reviewCold(state, options = {}) {
@@ -27,6 +38,7 @@ async function reviewCold(state, options = {}) {
         : null;
     const improvement = chosen(state, context);
     if (!improvement || improvement.kind !== 'enchant' && !inTown(state)) return Promise.resolve({state,changed:false});
+    if (['luxury_exchange', 'crystallize'].includes(improvement.kind) && state.currentRegion !== 'Giran') return { state, changed: false };
     const original = Life.cachedState(state.characterId);
     const work = invoke('Database').applyBotImprovement(state.characterId, {
         ...improvement, lossHours: improvement.riskHours * context.riskWeight
@@ -83,6 +95,7 @@ function reviewHot(session, context = null) {
             quest.state = 'started'; quest.variables = {cond:'1'};
         }
         if (result.hennas) { session.hennas = result.hennas; invoke('GameServer/Henna/HennaService').refreshHennaStats(session); }
+        if (result.result === 'luxury_exchange') invoke('GameServer/Bot/AI/BotEquipmentUpgrade').applyBestUpgrades(session, { force: true });
         invoke('GameServer/Skills/ToggleSkills').syncEquipment(session,actor);
         invoke(path.actor).calculateStats(session,actor);
         backpack.visibleLook = null; backpack.inventoryRevision = Number(backpack.inventoryRevision || 0) + 1;
@@ -93,6 +106,7 @@ function reviewHot(session, context = null) {
     pendingHot.set(actor,work); return work;
 }
 function stationMatches(npc, improvement) {
+    if (['luxury_exchange', 'crystallize'].includes(improvement.kind)) return Number(npc.fetchSelfId()) === Number(improvement.npcId);
     if (improvement.kind === 'sa') return [7300,7471,7678,7688,7846,7898,8271,8316].includes(npc.fetchSelfId());
     if (improvement.kind === 'crystal_quest') return [7115,7194,7856].includes(npc.fetchSelfId());
     return /symbol maker/i.test(String(npc.fetchTitle?.() || ''));
@@ -105,5 +119,5 @@ function stationTarget(actor, improvement) {
     return npc ? { npcId:npc.fetchId(), npcSelfId:npc.fetchSelfId(), name:npc.fetchName(), town:town.name,
         locX:npc.fetchLocX(),locY:npc.fetchLocY(),locZ:npc.fetchLocZ(),head:npc.fetchHead?.() } : null;
 }
-module.exports = { reviewCold, reviewHot, chosen, inTown, Policy, stationTarget,
+module.exports = { reviewCold, reviewHot, chosen, inTown, acquisitionTravel, Policy, stationTarget,
     summary: () => DiagnosticConfig.developerDiagnostics ? ({ improvementDeferred }) : { enabled: false } };

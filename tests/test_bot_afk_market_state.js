@@ -594,9 +594,8 @@ async function run() {
     await AfkTrade.publishBot(recipeSellerId, { storeType: AfkTrade.SELL, title: 'Materials',
         town: 'Giran', locX: 81100, locY: 148000, locZ: -3466,
         appearance: { model: character('RecipeSeller') }, lines: materialRows });
-    // Recipes come first no more (group E): items take the shop's lines by
-    // their gain over the NPC. The materials sell at their price on the
-    // board; the recipe nobody trades is worth no line and stays in the bag.
+    // The most valuable unit asks keep the showcase. A recipe without an
+    // existing buyer may still wait in a conditional overflow advertisement.
     try {
         for (let deal = 0; deal < 30; deal++) {
             for (const row of materialRows) MarketCounters.deal(row.selfId, 100000, 10, Date.now() - (30 - deal) * 60000, 999);
@@ -605,8 +604,9 @@ async function run() {
         const shopLines = AfkTrade.findOwnerProjection(recipeSellerId).shop.lines.filter((line) => Number(line.count) > 0);
         assert(shopLines.length && !shopLines.some((line) => Number(line.selfId) === 3033), 'the recipe takes no line first');
         assert.strictEqual(amount(await Database.fetchItems(recipeSellerId), 3033), 1, 'the recipe nobody trades stays in the bag');
-        assert(!AfkTrade.ownerRecords(recipeSellerId).some((record) => (record.lines || [])
-            .some((line) => Number(line.selfId) === 3033)), 'nor in a sell ad');
+        assert(AfkTrade.ownerRecords(recipeSellerId).some((record) => record.kind === 'sell_ad'
+            && record.custodyPolicy === 1 && (record.lines || []).some((line) => Number(line.selfId) === 3033)),
+        'the recipe can await a buyer on the board without losing physical stock');
     } finally {
         MarketCounters.reset();
     }

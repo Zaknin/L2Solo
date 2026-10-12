@@ -5,14 +5,15 @@
 const roots = [null, 'power', 'stock', 'book', 'enchant', 'sa', 'henna', 'status', 'resale'];
 const stockKinds = [null, 'shots', 'potions', 'scrolls'];
 const integer = n => Number.isSafeInteger(n) && n >= 0;
-// A selected executable NPC quote already has a native purchase owner.
-// Public BUY ads describe alternative player supply, not a duplicate NPC job.
-const nativeNpc = plan => plan?.sourceType === 'npc' && plan.quoted === true && plan.executable === true;
+// Selected NPC and configured shot quotes already have a native purchase owner.
+// Public BUY ads describe alternative player supply, not a duplicate store job.
+const isNativeSource = source => source === 'npc' || source === 'configured_store';
+const nativePurchase = plan => isNativeSource(plan?.sourceType) && plan.quoted === true && plan.executable === true;
 // Only completed preparation can retire public supply. A different root may
 // still project player supply for the same item, so keep that alternative.
 function npcOwnsPurchase(economy, selfId) {
     return !economy?.intentPending && !economy?.routePending
-        && nativeNpc(economy?.network?.plans?.get?.(`item:${Number(selfId)}`))
+        && nativePurchase(economy?.network?.plans?.get?.(`item:${Number(selfId)}`))
         && Array.isArray(economy.watchList)
         && !economy.watchList.some(row => Number(row.itemId) === Number(selfId));
 }
@@ -67,18 +68,20 @@ function preparedProject(network, worth, limit) {
         const visit = (key, plan, value, recipeId = 0, depth = 0) => {
             if (!plan || depth > 4 || !(plan.missingAmount > 0)) return;
             const id = key.startsWith('item:') ? Number(key.slice(5)) : 0;
-            if (id && value > 0 && !nativeNpc(plan)) {
+            if (id && value > 0 && !nativePurchase(plan)) {
                 const previous = rows.get(id);
                 rows.set(id, { itemId: id, amount: plan.missingAmount + (previous?.amount || 0), worth: worth(id),
                     kind: wish.object?.kind, key: wish.key, recipeId, valueHours: value + (previous?.valueHours || 0), valueRate: wish.ratio });
             }
-            const path = plan.intentionPath || plan, requirements = path.requirements || [];
+            const path = plan.intentionPath || plan, command = path.execution || path;
+            const requirements = command.requirements || [];
+            const share = path.execution ? Math.min(1, Number(command.availableUnits) / plan.missingAmount) : 1;
             const total = requirements.reduce((sum, row) => sum + row.amount, 0);
-            for (const row of requirements) visit(row.key, row.plan, value * row.amount / Math.max(1, total), path.recipeId || recipeId, depth + 1);
+            for (const row of requirements) visit(row.key, row.plan, value * share * row.amount / Math.max(1, total), path.recipeId || recipeId, depth + 1);
         };
         visit(wish.key, wish.plan, wish.valueHours);
         for (const [id, row] of rows) if (!watched.has(id)) { watched.add(id); result.push(row); }
     }
     return result.slice(0, limit);
 }
-module.exports = { rootTuple, rootKey, encode, decode, project, npcOwnsPurchase };
+module.exports = { rootTuple, rootKey, encode, decode, project, npcOwnsPurchase, isNativeSource };
