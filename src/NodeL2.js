@@ -104,6 +104,7 @@ Database.init(() => {
             utils.infoSuccess('BotPersona', 'loaded %d personas', count);
         }).catch((error) => utils.infoWarn('BotPersona', 'persona load failed: %s', error.message));
 
+        invoke('GameServer/Knowledge/RecipeCatalog').warmup();
         invoke('GameServer/World/Generics/NativeKnowledgeBase').warmup();
 
         new Server('AuthServer', options.default.AuthServer, (socket) => {

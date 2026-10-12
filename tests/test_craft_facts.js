@@ -60,4 +60,57 @@ const basket = Basket.basketFor(recipe, (id, amount) => {
 }, () => null, 3, { recipeInput: 9001, recipeStock: { count: 0 } });
 assert.ok(basket);
 assert.deepEqual([...asked], [...Profit.craftFacts(recipe, { batches: 3, recipeInput: 9001, mpPerHour: 600 }).gross]);
+
+// The shared native preparation and the original non-native path must return
+// the same facts and generator steps, including large-batch overflow reasons.
+const NativeRecipes = require('../src/GameServer/Items/C4RecipeItems');
+const RecipeKnowledge = require('../src/GameServer/Knowledge/RecipeCatalog');
+function drainedFacts(recipe, options) {
+    const steps = [], iterator = Profit.prepareCraftFacts(recipe, options);
+    let step;
+    do { step = iterator.next(); if (!step.done) steps.push(step.value); } while (!step.done);
+    return { steps, facts: step.value };
+}
+const nativeRows = NativeRecipes.nativeSource().rows.filter(row => row.materials.length > 1).slice(0, 4);
+assert(nativeRows.length > 0);
+assert.equal(RecipeKnowledge.preparedInputsFor(nativeRows[0]), null, 'an unprimed craft read does not build the whole catalog');
+assert.equal(RecipeKnowledge.inputsFor(nativeRows[0]), null, 'the aggregate reader also falls back without hidden catalog construction');
+assert.deepEqual(drainedFacts(nativeRows[0], { batches: 2, mpPerHour: 600 }),
+    drainedFacts(structuredClone(nativeRows[0]), { batches: 2, mpPerHour: 600 }));
+assert.equal(RecipeKnowledge.preparedInputsFor(nativeRows[0]), null, 'craft facts keep the unprimed fallback');
+RecipeKnowledge.warmup();
+assert(RecipeKnowledge.preparedInputsFor(nativeRows[0]), 'explicit startup preparation enables the native path');
+for (const native of nativeRows) for (const batches of [0, 1, 64, Number.MAX_SAFE_INTEGER]) {
+    for (const executor of ['cold', 'hot', 'workshop']) {
+        const options = { batches, executor, mpPerHour: 600, mpCapacity: Infinity, capacityBatches: 5,
+            recipeInput: native.materials[0].selfId, fee: 15 };
+        assert.deepEqual(drainedFacts(native, options), drainedFacts(structuredClone(native), options));
+    }
+}
+const native = nativeRows[0], originalAmount = native.materials[1].amount;
+try {
+    const options = { batches: 2, mpPerHour: 600 };
+    native.materials[1].amount = .5;
+    assert.deepEqual(drainedFacts(native, options), drainedFacts(structuredClone(native), options), 'changed native inputs use original validation');
+    native.materials[1].amount = originalAmount;
+    // A mutable author row changed between scheduled steps is also read fresh.
+    const live = Profit.prepareCraftFacts(native, options), fallbackRecipe = structuredClone(native);
+    const fallback = Profit.prepareCraftFacts(fallbackRecipe, options);
+    assert.deepEqual(live.next(), fallback.next());
+    native.materials[1].amount = fallbackRecipe.materials[1].amount = originalAmount + 2;
+    let step, expected;
+    do { step = live.next(); expected = fallback.next(); assert.deepEqual(step, expected); } while (!step.done);
+} finally { native.materials[1].amount = originalAmount; }
+const originalInputs = native.materials.slice();
+try {
+    for (const mutate of [inputs => inputs.push({ ...inputs[0] }), inputs => inputs.splice(1, 1), inputs => inputs.reverse()]) {
+        native.materials.splice(0, native.materials.length, ...originalInputs);
+        const options = { batches: 2, mpPerHour: 600 }, fallbackRecipe = structuredClone(native);
+        const live = Profit.prepareCraftFacts(native, options), fallback = Profit.prepareCraftFacts(fallbackRecipe, options);
+        assert.deepEqual(live.next(), fallback.next());
+        mutate(native.materials); mutate(fallbackRecipe.materials);
+        let step, expected;
+        do { step = live.next(); expected = fallback.next(); assert.deepEqual(step, expected); } while (!step.done);
+    }
+} finally { native.materials.splice(0, native.materials.length, ...originalInputs); }
 console.log('test_craft_facts: ok');

@@ -1,5 +1,6 @@
 'use strict';
 const Valuation = require('./EconomicValuation');
+const RecipeCatalog = require('../../Knowledge/RecipeCatalog');
 
 function successProbability(recipe) {
     const rate = Number(recipe?.successRate);
@@ -63,6 +64,17 @@ function inputValue(id, state, context = {}) {
 }
 function requirements(recipe, batches = 1) {
     if (!Number.isSafeInteger(batches) || batches < 1 || batches > 64) return null;
+    const prepared = RecipeCatalog.inputsFor(recipe);
+    if (prepared) {
+        const required = new Map();
+        let safe = true;
+        for (const input of prepared.ingredients) {
+            const amount = input.quantity * batches;
+            if (!Number.isSafeInteger(amount)) { safe = false; break; }
+            required.set(input.selfId, amount);
+        }
+        if (safe) return required;
+    }
     const required = new Map();
     for (const input of recipe?.materials || []) {
         const id = Number(input.selfId), amount = Number(input.amount) * batches;
@@ -102,10 +114,16 @@ function* prepareCraftFacts(recipe, { output, batches, executor = 'cold', mpCapa
     const gross = new Map(), once = new Set();
     const entry = Number(recipeInput || 0);
     if (entry > 0) { gross.set(entry, 1); once.add(entry); }
+    const prepared = RecipeCatalog.preparedInputsFor(recipe);
     let rows = 0;
     for (const input of recipe.materials || []) {
-        const id = Number(input.selfId), amount = Number(input.amount) * count;
-        if (!Number.isSafeInteger(id) || id < 1 || !(Number(input.amount) > 0) || !Number.isSafeInteger(amount))
+        // Keep the native row order, yields and overflow reason. A mutation
+        // between generator steps also falls back to the current raw input.
+        const normalized = prepared?.entries[rows];
+        const same = normalized && input === normalized.input && input.selfId === normalized.selfId && input.amount === normalized.amount;
+        const id = same ? normalized.selfId : Number(input.selfId);
+        const amount = (same ? normalized.amount : Number(input.amount)) * count;
+        if (!Number.isSafeInteger(id) || id < 1 || !(same ? normalized.amount > 0 : Number(input.amount) > 0) || !Number.isSafeInteger(amount))
             return { status: 'unknown', reason: 'recipe' };
         const total = Number(gross.get(id) || 0) + amount;
         if (!Number.isSafeInteger(total)) return { status: 'unknown', reason: 'quantity' };

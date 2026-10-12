@@ -56,3 +56,54 @@ index.update(101); assert.deepEqual(ids(index, 2), [1], 'snapshot replacement re
 console.log('PASS public recipe admission, skill bounds, reverse removal, membership-only revisions and fixed buyer');
 
 Catalog.allowsRecipe = nativeAdmission;
+
+// The shared graph indexes the declared native source at first build,
+// independently of production admission and the first-product resolver.
+const NativeRecipes = require('../src/GameServer/Items/C4RecipeItems');
+const Knowledge = require('../src/GameServer/Knowledge/RecipeCatalog');
+const source = NativeRecipes.nativeSource(), expectedByIngredient = new Map(), products = new Map();
+const early = source.rows.find(recipe => recipe.materials.length), originalEarlyAmount = early.materials[0].amount;
+let declaredEarlyInputs;
+try {
+    // Source objects are mutable: an edit before lazy construction is what
+    // that revision's public index observes. It is not a clone of CSV bytes.
+    early.materials[0].amount++;
+    declaredEarlyInputs = early.materials.map(input => ({ selfId: input.selfId, amount: input.amount }));
+    Knowledge.warmup();
+} finally { early.materials[0].amount = originalEarlyAmount; }
+assert.equal(Knowledge.revision(), source.revision, 'an undeclared in-place edit does not replace the source revision');
+assert.equal(Knowledge.inputsFor(early), null, 'restored raw values differ from the preparation first observed');
+let orderedInputs = 0, normalizedIngredients = 0;
+assert.deepEqual(Knowledge.recipeItemRows(), Object.values(NativeRecipes.loadRecipeItems()), 'production keeps existing source ordering');
+for (const recipe of source.rows) {
+    if (!products.has(recipe.productId)) products.set(recipe.productId, []);
+    products.get(recipe.productId).push(recipe);
+    const totals = new Map();
+    for (const input of recipe === early ? declaredEarlyInputs : recipe.materials) {
+        assert(Number.isSafeInteger(input.selfId) && input.selfId > 0 && Number.isSafeInteger(input.amount) && input.amount > 0);
+        totals.set(input.selfId, (totals.get(input.selfId) || 0) + input.amount);
+        orderedInputs++;
+    }
+    for (const [selfId, quantity] of totals) {
+        if (!expectedByIngredient.has(selfId)) expectedByIngredient.set(selfId, []);
+        expectedByIngredient.get(selfId).push({ selfId, recipeId: recipe.recipeId, quantity });
+        normalizedIngredients++;
+    }
+}
+for (const [selfId, expected] of expectedByIngredient) assert.deepEqual(Knowledge.recipesUsing(String(selfId)), expected);
+assert(source.rows.some(recipe => recipe.type === 'common'), 'native knowledge retains common recipes');
+assert([...products.values()].some(recipes => recipes.length > 1), 'native data includes alternate recipes for a product');
+for (const variants of products.values()) {
+    assert.equal(NativeRecipes.resolveByProductId(variants[0].productId), variants[0], 'first-product helper remains unchanged');
+    assert(variants.every(recipe => Knowledge.rows().includes(recipe)), 'shared knowledge retains every native variant');
+}
+const native = source.rows.find(recipe => recipe !== early && recipe.materials.length), oldAmount = native.materials[0].amount;
+const declared = Knowledge.recipesUsing(native.materials[0].selfId);
+try {
+    native.materials[0].amount = oldAmount + 1;
+    assert.equal(Knowledge.inputsFor(native), null, 'author object mutation is not reused as native preparation');
+    assert.equal(Knowledge.recipesUsing(native.materials[0].selfId), declared, 'public reverse remains the declared first-build data');
+} finally { native.materials[0].amount = oldAmount; }
+console.log(JSON.stringify({ nativeRecipeRows: source.rows.length, orderedInputs, normalizedIngredients,
+    ingredientKeys: expectedByIngredient.size, orderedAuthorInputReferences: orderedInputs,
+    ingredientReferences: normalizedIngredients * 2, perBotRetainedBytes: 0 }));

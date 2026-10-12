@@ -13,4 +13,11 @@ assert.equal(Profit.craftableBatches([{ ...items[1], equipped: true }, items[0]]
 assert.equal(Profit.craftableBatches([{ ...items[1], protected: true }, items[0]], recipe, 3), 0);
 assert.deepEqual(Profit.materials(items, recipe, 3), [{ id: 1, selfId: 202, amount: 6 }, { id: 2, selfId: 202, amount: 24 }]);
 assert.equal(Profit.materials([{ ...items[1], amount: 23 }, items[0]], recipe, 3), null, 'one missing material refuses the entire native batch');
+// Non-native quantities are validated before repeated ingredients combine:
+// half a unit times two is allowed, but two half-unit rows times one are not.
+const fractional = { materials: [{ selfId: 202, amount: .5 }] };
+assert.deepEqual([...Profit.requirements(fractional, 2)], [[202, 1]]);
+assert.equal(Profit.requirements({ materials: [{ selfId: 202, amount: .5 }, { selfId: 202, amount: .5 }] }), null);
+fractional.materials[0].amount = 3;
+assert.deepEqual([...Profit.requirements(fractional, 2)], [[202, 6]], 'mutable synthetic inputs stay fresh');
 console.log('Shared recipe batches: output rounding, repeated inputs, split stacks, protection and native limit passed');

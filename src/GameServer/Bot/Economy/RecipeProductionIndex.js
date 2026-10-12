@@ -1,5 +1,6 @@
 'use strict';
 const Sources = require('../../Items/ItemAcquisitionCatalog');
+const RecipeCatalog = require('../../Knowledge/RecipeCatalog');
 
 // Public candidate admission only. Prices, ownership, funds and executable
 // demand are still evaluated through the existing per-item quote readers.
@@ -8,7 +9,7 @@ let catalog = null;
 function recipeCatalog() {
     if (!catalog) {
         const unique = new Map();
-        for (const recipe of Object.values(invoke('GameServer/Items/C4RecipeItems').loadRecipeItems() || {})) {
+        for (const recipe of RecipeCatalog.recipeItemRows(invoke('GameServer/Items/C4RecipeItems'))) {
             if (!Sources.allowsRecipe(recipe) || recipe?.type !== 'dwarven' || !Number.isInteger(Number(recipe.level))
                 || recipe.level < 1 || recipe.level > 9 || !(recipe.recipeItemId > 0) || !(recipe.productId > 0)) continue;
             unique.set(Number(recipe.recipeId), recipe);
