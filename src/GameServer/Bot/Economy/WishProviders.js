@@ -348,6 +348,7 @@ function buildProjection(state, ctx, deps) {
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);
     const sourceTrips = new Map(), farmFacts = new Map();
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, occupancy: deps.occupancy });
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
@@ -370,7 +371,7 @@ function buildProjection(state, ctx, deps) {
             const diagnostic = Diagnostics.active(), reasons = diagnostic ? new Map() : null;
             const steps = Planner.sourceFacts(state, id, 1, { spots: deps.spots, spotValue, occupancy: deps.occupancy,
                 trips: sourceTrips, trip: deps.tripCost || ctx.trip || { details: () => ({ known: false }) }, spoiler, timestamp,
-                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons });
+                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons, routeAllowed });
             let step;
             do step = steps.next(); while (!step.done);
             let best = null;

@@ -23,7 +23,7 @@ const adapters = {
     'GameServer/DataCache': { items: [item] },
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn() },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), buildGainsFor: () => ({}),
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
