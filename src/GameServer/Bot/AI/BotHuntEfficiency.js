@@ -109,20 +109,12 @@ function recordRound(state, result, { spotId, exp = 0, timestamp = Date.now(), s
     });
     return { ...life, huntEfficiency, huntClock };
 }
-// A sample counts from its record until it is MAX_AGE_MS old.
-const inWindow = (row, timestamp) => timestamp>=row.at && timestamp-row.at<MAX_AGE_MS;
 function sampledRows(state, timestamp, mode) {
     const rows = state.stats?.huntEfficiency;
     if (!Array.isArray(rows) || !rows.length) return [];
     const key = signature(state,mode);
-    return rows.filter(row => row.signature===key && row.samples>=3 && inWindow(row, timestamp)
+    return rows.filter(row => row.signature===key && row.samples>=3 && timestamp>=row.at && timestamp-row.at<MAX_AGE_MS
             && Number.isFinite(row.exp) && Number.isFinite(row.cycleMs) && row.cycleMs>0);
-}
-// Which samples are inside their window at `timestamp`: the only way the
-// reading time enters sampledRows (an economy input key part, perf C2).
-function windowMask(state, timestamp) {
-    const rows = state.stats?.huntEfficiency;
-    return Array.isArray(rows) ? rows.map(row => inWindow(row, timestamp) ? 1 : 0).join('') : '';
 }
 function scores(state, timestamp = Date.now(), mode) {
     const rows = sampledRows(state, timestamp, mode);
@@ -185,4 +177,4 @@ function hourValue(state, timestamp = Date.now(), mode) {
 function observe() {}
 function resetLevelBands() {}
 module.exports = { record, recordRound, scores, signature, situationOf, lootValue, hourValue, onSpotShare, observe,
-    resetLevelBands, huntHour, huntIncome, estimate: huntIncome, sampledRows, windowMask, bestIncome, MAX_SPOTS, MAX_AGE_MS, SERVER_STARTED_AT };
+    resetLevelBands, huntHour, huntIncome, estimate: huntIncome, sampledRows, bestIncome, MAX_SPOTS, MAX_AGE_MS, SERVER_STARTED_AT };
