@@ -5,6 +5,8 @@ require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Catalog = invoke('GameServer/Items/ItemAcquisitionCatalog');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const Gear = invoke('GameServer/Bot/AI/BotGear');
+const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const FirstPrice = invoke('GameServer/Bot/Economy/FirstPrice');
 const Wishes = invoke('GameServer/Bot/Economy/WishProviders');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
@@ -15,8 +17,18 @@ const suspects = require('./fixtures/source_less_c4_gear.json');
 assert.equal(suspects.length, 392);
 const forbidden = new Set(suspects);
 const nominated = new Set();
+function cInventory(classId) {
+    const inventory = {};
+    for (const entry of Gear.planFor({ classId, level: 40 }).items) {
+        const old = inventory[entry.selfId], equippedSlots = [...(old?.equippedSlots || []), entry.slot];
+        inventory[entry.selfId] = { ...entry, amount: Number(old?.amount || 0) + 1,
+            equipped: true, equippedCount: equippedSlots.length, equippedSlots };
+    }
+    return inventory;
+}
 for (let classId = 0; classId <= 118; classId++) {
-    const state = { characterId: 990000 + classId, level: 78, stats: { classId }, inventory: {} };
+    const state = { characterId: 990000 + classId, level: 78, stats: { classId }, inventory: cInventory(classId) };
+    assert.equal(Progression.assess(state).required, false, `class ${classId} owns its full usable C kit`);
     for (const items of Wishes.gearCandidates(state).values()) for (const item of items) {
         assert(!forbidden.has(Number(item.selfId)), `class ${classId} nominated source-less ${item.selfId}`);
         nominated.add(Number(item.selfId));
@@ -75,11 +87,13 @@ assert(Catalog.hasSource(raidId)); assert.equal(Catalog.hasNonRaidSource(raidId)
 assert(FirstPrice.firstPrice(raidId, { spots: [] }), 'raid loot retains a legal market valuation');
 function raidReview(supply) {
     const state = structuredClone(fixture), raidBoard = new BoardIndex();
-    state.level = 78; state.adena = 1000000000; state.inventory = {};
+    state.level = 78; state.adena = 1000000000; state.inventory = cInventory(90);
     state.stats = { classId: 90, equipmentPlan: { target: { selfId: raidId } }, wishFocus: [`power:${raidId}:7`] };
     if (supply.startsWith('quote')) raidBoard.put({ id: 990100, storeType: 1, ownerId: 500, town: 'Giran',
         botOwned: false, lines: [{ id: 1, selfId: raidId, count: 1, price: 1 }] });
-    if (supply === 'owned') state.inventory[raidId] = { selfId: raidId, amount: 1, equipped: true, slot: 7 };
+    if (supply === 'owned') state.inventory = Planner.equipInventoryUpgrades(state, {
+        ...state.inventory, [raidId]: { selfId: raidId, amount: 1, equipped: false, slot: 7 } });
+    assert.equal(Progression.assess(state).required, false, 'raid supply controls start after the usable C milestone');
     Economy.reset();
     return Economy.forState(state, { board: raidBoard, spots: [], timestamp: 1791335800000,
         npcOffersFor: () => [], routeRows: supply === 'quote_unknown' ? routes.map(() => [false, null, null]) : routes, knownRecipes: [],
