@@ -9,15 +9,22 @@
 // sourcesForItem requires kind 'drops'/'spoils' ('drop'/'spoil' aliases work).
 // It returns borrowed origin-specific source records, not a normalized schema.
 // Importing this module/factory never loads native data or exported JSON.
+// Direct optional queries do not load missing datasets: null = unavailable,
+// [] = available but no matching rows. sourceIndexFor is the legacy planner
+// Map reader and keeps its empty-selection sentinel for the hot caller.
+// Revisions are process-local source labels, not cross-process world versions.
+const { revisionOf } = require('./CatalogueRevision');
 const EMPTY = Object.freeze([]);
 
 function create(adapter) {
     const api = {
         origin: adapter.origin,
         capabilities: (options = {}) => adapter.capabilities(options),
+        datasetInfo: (options = {}) => adapter.datasetInfo?.(options) || {},
         item: id => adapter.item?.(Number(id)) ?? null,
         npc: id => adapter.npc?.(Number(id)) ?? null,
         spawn: id => adapter.spawn?.(String(id)) ?? null,
+        spawnsForNpc: id => adapter.spawnsForNpc?.(Number(id)) ?? null,
         recipe: id => adapter.recipe?.(Number(id)) ?? null,
         recipesForProduct: id => adapter.recipesForProduct?.(Number(id)) ?? null,
         ingredientsForRecipe: id => adapter.ingredientsForRecipe?.(Number(id)) ?? null,
@@ -36,15 +43,24 @@ function create(adapter) {
     };
     api.relations = (kind, id, options = {}) => {
         const capabilities = api.capabilities(options);
+        const info = api.datasetInfo(options);
+        const selectedAvailable = capabilities.selectedSources ?? capabilities.selectedSpots;
+        const section = (name, available) => ({ available: !!available,
+            origin: info[name] ? info[name].origin : api.origin, revision: info[name]?.revision ?? null });
         if (kind === 'item') return { kind, id: Number(id), origin: api.origin,
-            recipes: { available: capabilities.recipes, producedBy: capabilities.recipes ? api.recipesForProduct(id) : null,
+            recipes: { ...section('recipes', capabilities.recipes), producedBy: capabilities.recipes ? api.recipesForProduct(id) : null,
                 usedBy: capabilities.recipes ? api.recipesUsing(id) : null },
-            selectedSources: { available: capabilities.selectedSpots,
-                ...(capabilities.selectedSpots ? { countKind: 'planner_source_weights' } : {}),
-                rows: capabilities.selectedSpots ? api.selectedSourcesForItem(id, options.spots) : null } };
+            sources: { ...section('sources', capabilities.sources),
+                drops: capabilities.sources ? api.sourcesForItem(id, { kind: 'drops' }) : null,
+                spoils: capabilities.sources ? api.sourcesForItem(id, { kind: 'spoils' }) : null },
+            selectedSources: { ...section('selectedSources', selectedAvailable),
+                ...(selectedAvailable ? { countKind: 'planner_source_weights' } : {}),
+                rows: selectedAvailable ? api.selectedSourcesForItem(id, options.spots) : null } };
         if (kind === 'npc') return { kind, id: Number(id), origin: api.origin,
-            selectedSpots: { available: capabilities.selectedSpots,
-                rows: capabilities.selectedSpots ? api.selectedNpcSpots(id, options.spots) : null } };
+            selectedSpots: { ...section('selectedSpots', capabilities.selectedSpots),
+                rows: capabilities.selectedSpots ? api.selectedNpcSpots(id, options.spots) : null },
+            potentialSpawns: { ...section('potentialSpawns', capabilities.potentialSpawns),
+                population: 'definition_only', rows: capabilities.potentialSpawns ? api.spawnsForNpc(id) : null } };
         return null;
     };
     return Object.freeze(api);
@@ -53,32 +69,44 @@ function create(adapter) {
 let nativeCatalogue;
 function native() {
     if (nativeCatalogue) return nativeCatalogue;
-    let dataOwner, recipeOwner, sourceOwner, itemOwner, shopOwner, nativeRecipeOwner;
+    let dataOwner, recipeOwner, sourceOwner, itemOwner, shopOwner, nativeRecipeOwner, spawnOwner;
     const data = () => dataOwner ||= invoke('GameServer/DataCache');
     const recipes = () => recipeOwner ||= require('./RecipeCatalog');
     const sources = () => sourceOwner ||= require('./SourceCatalog');
     const items = () => itemOwner ||= require('../Item/ItemTemplateIndex');
     const shops = () => shopOwner ||= invoke('GameServer/World/Generics/NpcShopBuyLists');
     const nativeRecipes = () => nativeRecipeOwner ||= require('../Items/C4RecipeItems');
+    const spawns = () => spawnOwner ||= require('./SpawnCatalog');
+    const hasRecipes = () => !!nativeRecipes().loadedSource();
+    const hasSources = () => Array.isArray(data().npcRewards);
+    const hasSelectedSources = spots => Array.isArray(spots) && hasSources() && Array.isArray(data().npcs);
     nativeCatalogue = create({ origin: 'native',
-        capabilities: ({ spots } = {}) => ({ recipes: !!nativeRecipes().loadedSource(),
-            selectedSpots: Array.isArray(spots), npcShops: true, potentialSpawns: Array.isArray(data().npcSpawns) }),
+        capabilities: ({ spots } = {}) => ({ recipes: hasRecipes(), sources: hasSources(),
+            selectedSpots: Array.isArray(spots), selectedSources: hasSelectedSources(spots),
+            npcShops: true, potentialSpawns: Array.isArray(data().npcSpawns) }),
+        datasetInfo: ({ spots } = {}) => ({
+            recipes: { origin: 'native', revision: revisionOf(nativeRecipes().loadedSource()?.rows) },
+            sources: { origin: 'native', revision: revisionOf(data().npcRewards) },
+            selectedSources: { origin: 'native', revision: { spots: revisionOf(spots),
+                rewards: revisionOf(data().npcRewards), npcs: revisionOf(data().npcs) } },
+            selectedSpots: { origin: 'native', revision: revisionOf(spots) },
+            potentialSpawns: { origin: 'native', revision: revisionOf(data().npcSpawns) }
+        }),
         item: id => items().find(data().items, id) || null,
         npc: id => items().find(data().npcs, id) || null,
-        recipe: id => nativeRecipes().resolveByRecipeId(id),
-        recipesForProduct: id => recipes().recipesForProduct(id),
-        ingredientsForRecipe: id => recipes().ingredientsForRecipe(id),
-        recipesUsing: id => recipes().recipesUsing(id),
+        spawn: id => spawns().spawn(id),
+        spawnsForNpc: id => spawns().spawnsForNpc(id),
+        recipe: id => hasRecipes() ? nativeRecipes().resolveByRecipeId(id) : null,
+        recipesForProduct: id => hasRecipes() ? recipes().recipesForProduct(id) : null,
+        ingredientsForRecipe: id => hasRecipes() ? recipes().ingredientsForRecipe(id) : null,
+        recipesUsing: id => hasRecipes() ? recipes().recipesUsing(id) : null,
         npcShopRow: (npcId, itemId) => shops().rowForNpc(npcId, itemId),
         sourceIndexFor: spots => sources().sourcesByItem(spots),
-        sourcesForItem: (id, { spots, kind } = {}) => {
-            const rows = sources().sourcesByItem(spots).get(id) || EMPTY;
-            return kind ? rows.filter(row => row.kind === (kind === 'drops' ? 'drop' : kind === 'spoils' ? 'spoil' : kind)) : rows;
-        },
-        selectedSourcesForItem: (id, spots) => sources().sourcesByItem(spots).get(id) || EMPTY,
-        selectedNpcSpots: (id, spots) => sources().selectedNpcSpots(id, spots),
-        selectedSpotNpcs: (id, spots) => sources().selectedSpotNpcs(id, spots),
-        potentialSpawnData: () => sources().potentialSpawnData()
+        sourcesForItem: (id, { kind } = {}) => sources().rawSourcesForItem(id, kind),
+        selectedSourcesForItem: (id, spots) => hasSelectedSources(spots) ? sources().sourcesByItem(spots).get(id) || EMPTY : null,
+        selectedNpcSpots: (id, spots) => Array.isArray(spots) ? sources().selectedNpcSpots(id, spots) : null,
+        selectedSpotNpcs: (id, spots) => Array.isArray(spots) ? sources().selectedSpotNpcs(id, spots) : null,
+        potentialSpawnData: () => spawns().potentialSpawnData()
     });
     return nativeCatalogue;
 }

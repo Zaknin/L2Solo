@@ -16,7 +16,8 @@ let sourceIndexCache = { spots: null, rewards: null, npcs: null, byItemId: NO_SO
 // releases the previous atlas; it never retains actors, clans or selected spots.
 let sourceRewardAtlas = { rewards: null, npcs: null, byNpc: new Map(), byName: new Map() };
 function sourceRewardAtlasFor(rewards, npcs) {
-    if (sourceRewardAtlas.rewards === rewards && sourceRewardAtlas.npcs === npcs) return sourceRewardAtlas;
+    if (sourceRewardAtlas.rewards === rewards && sourceRewardAtlas.npcs === npcs
+        && sourceRewardAtlas.rewardsLength === rewards.length && sourceRewardAtlas.npcsLength === npcs?.length) return sourceRewardAtlas;
     const byNpc = new Map();
     const byName = new Map();
     const append = (index, key, row) => {
@@ -31,14 +32,46 @@ function sourceRewardAtlasFor(rewards, npcs) {
         append(byNpc, Number(reward.selfId), row);
         append(byName, String(reward.template?.name || '').trim().toLowerCase(), row);
     });
-    sourceRewardAtlas = { rewards, npcs, byNpc, byName };
+    sourceRewardAtlas = { rewards, npcs, rewardsLength: rewards.length, npcsLength: npcs?.length, byNpc, byName };
     return sourceRewardAtlas;
+}
+
+// All declared reward sources, independent of planner spots and raid access.
+// This lazy reverse belongs to the existing reward atlas. One borrowed record
+// per reward/kind is shared by its item lists; every original group is retained.
+function rawSourcesForItem(itemId, kind) {
+    if (!Array.isArray(DataCache.npcRewards)) return null;
+    const atlas = sourceRewardAtlasFor(DataCache.npcRewards, DataCache.npcs);
+    if (!atlas.rawByKind) {
+        atlas.rawByKind = { drops: new Map(), spoils: new Map() };
+        for (const reward of atlas.rewards) {
+            for (const [field, rowKind] of [['drops', 'drop'], ['spoils', 'spoil']]) {
+                const index = atlas.rawByKind[field], seen = new Set();
+                const row = Object.freeze({ reward, npcId: Number(reward.selfId), kind: rowKind });
+                for (const group of reward[field === 'drops' ? 'rewards' : 'spoils'] || []) {
+                    for (const item of group.items || []) {
+                        const id = Number(item.selfId);
+                        if (!Number.isSafeInteger(id) || id < 1 || seen.has(id)) continue;
+                        seen.add(id);
+                        if (!index.has(id)) index.set(id, []);
+                        index.get(id).push(row);
+                    }
+                }
+            }
+        }
+        for (const index of Object.values(atlas.rawByKind)) {
+            for (const rows of index.values()) Object.freeze(rows);
+        }
+    }
+    return atlas.rawByKind[kind]?.get(Number(itemId)) || EMPTY;
 }
 function sourcesByItem(spots = []) {
     if (!spots?.length) return NO_SOURCES;
     const rewards = DataCache.npcRewards || [];
     const npcs = DataCache.npcs;
-    if (sourceIndexCache.spots === spots && sourceIndexCache.rewards === rewards && sourceIndexCache.npcs === npcs) {
+    if (sourceIndexCache.spots === spots && sourceIndexCache.rewards === rewards && sourceIndexCache.npcs === npcs
+        && sourceIndexCache.spotsLength === spots.length && sourceIndexCache.rewardsLength === rewards.length
+        && sourceIndexCache.npcsLength === npcs?.length) {
         return sourceIndexCache.byItemId;
     }
 
@@ -47,8 +80,7 @@ function sourcesByItem(spots = []) {
     const spotByNpc = new Map();
     const spotByName = new Map();
     // Source weights and raid decorations belong to this current selection.
-    // Only these ID joins survive for public topology; physical counts are
-    // read locally from raw entries, without the source-weight fallback.
+    // Physical topology belongs to SpotIndex, not to planner source weights.
     const spotCounts = new Map();
     const appendSpot = (index, key, spot) => {
         if (!key || !spot) return;
@@ -140,7 +172,8 @@ function sourcesByItem(spots = []) {
         });
     });
 
-    sourceIndexCache = { spots, rewards, npcs, byItemId, spotByNpc };
+    sourceIndexCache = { spots, rewards, npcs, spotsLength: spots.length, rewardsLength: rewards.length,
+        npcsLength: npcs?.length, byItemId };
     return byItemId;
 }
 
@@ -160,19 +193,11 @@ function rawCounts(spot, npcId) {
 
 function selectedNpcSpots(npcId, spots = []) {
     if (!spots?.length) return EMPTY;
-    sourcesByItem(spots);
     const id = Number(npcId);
     if (!Number.isSafeInteger(id) || id < 1) return EMPTY;
-    // A name-only alias cannot prove a physical template ID or its count.
-    // Legacy source joins supply candidate IDs only. Both public directions
-    // resolve duplicate IDs through SpotIndex's canonical last matching row.
-    const rows = [], seen = new Set();
-    for (const spotId of sourceIndexCache.spotByNpc.get(id)?.keys() || []) {
-        const spot = SpotIndex.spotById(spots, spotId);
-        if (!spot || seen.has(spot)) continue;
+    const rows = [];
+    for (const spot of SpotIndex.spotsForNpc(spots, id) || EMPTY) {
         const counts = rawCounts(spot, id);
-        if (!counts.hasNpc) continue;
-        seen.add(spot);
         rows.push({ spot, npcId: id, count: counts.count, totalCount: counts.totalCount, countKind: 'catalogue_raw_counts' });
     }
     return rows;
@@ -180,20 +205,13 @@ function selectedNpcSpots(npcId, spots = []) {
 
 function selectedSpotNpcs(spotId, spots = []) {
     if (!spots?.length) return null;
-    sourcesByItem(spots);
     const spot = SpotIndex.spotById(spots, spotId);
     return spot ? { spot, npcEntries: spot.npcEntries || EMPTY,
         totalCount: rawCounts(spot).totalCount, countKind: 'catalogue_raw_counts' } : null;
 }
 
-const spawnRevisions = new WeakMap();
-let nextSpawnRevision = 1;
 function potentialSpawnData() {
-    const groups = DataCache.npcSpawns;
-    if (Array.isArray(groups) && !spawnRevisions.has(groups)) spawnRevisions.set(groups, nextSpawnRevision++);
-    return { kind: 'potential_definitions', origin: 'native', revision: Array.isArray(groups) ? spawnRevisions.get(groups) : null,
-        groups: groups || EMPTY, totalSemantics: 'per_explicit_coordinate_or_random_total_in_bounds',
-        periodSemantics: 'day_or_night_otherwise_always', population: 'definition_only' };
+    return require('./SpawnCatalog').potentialSpawnData();
 }
 
-module.exports = { sourcesByItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData };
+module.exports = { sourcesByItem, rawSourcesForItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData };

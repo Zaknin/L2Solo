@@ -8,15 +8,24 @@ const EMPTY = Object.freeze([]);
 
 function createExportedCatalogue(data, { nativeCatalogue = null } = {}) {
     const hasRecipes = () => !!nativeCatalogue?.capabilities().recipes;
+    const exportedInfo = () => ({ origin: 'exported', revision: data.manifest?.generatedAt || null });
     return create({ origin: 'exported',
         capabilities: (options = {}) => {
             const native = nativeCatalogue?.capabilities(options);
-            return { recipes: !!native?.recipes, selectedSpots: !!native?.selectedSpots,
+            return { recipes: !!native?.recipes, sources: true, selectedSpots: !!native?.selectedSpots,
+                selectedSources: !!(native?.selectedSources ?? native?.selectedSpots),
                 npcShops: !!native?.npcShops, potentialSpawns: true };
+        },
+        datasetInfo: (options = {}) => {
+            const native = nativeCatalogue?.datasetInfo?.(options) || {};
+            const borrowed = name => native[name] || { origin: nativeCatalogue?.origin || null, revision: null };
+            return { sources: exportedInfo(), potentialSpawns: exportedInfo(), recipes: borrowed('recipes'),
+                selectedSources: borrowed('selectedSources'), selectedSpots: borrowed('selectedSpots') };
         },
         item: id => data.itemById.get(id) || null,
         npc: id => data.mobById.get(id) || null,
         spawn: id => data.spawnById.get(id) || null,
+        spawnsForNpc: id => (data.mobById.get(id)?.spawnIds || []).map(key => data.spawnById.get(String(key))).filter(Boolean),
         sourcesForItem: (id, { kind } = {}) => {
             const sources = data.itemById.get(id)?.sources;
             return sources?.[kind] || EMPTY;
@@ -26,6 +35,7 @@ function createExportedCatalogue(data, { nativeCatalogue = null } = {}) {
         ingredientsForRecipe: id => hasRecipes() ? nativeCatalogue.ingredientsForRecipe(id) : null,
         recipesUsing: id => hasRecipes() ? nativeCatalogue.recipesUsing(id) : null,
         npcShopRow: (npcId, itemId) => nativeCatalogue?.npcShopRow(npcId, itemId) ?? null,
+        sourceIndexFor: spots => nativeCatalogue?.sourceIndexFor?.(spots) ?? null,
         selectedSourcesForItem: (id, spots) => nativeCatalogue?.selectedSourcesForItem(id, spots) ?? null,
         selectedNpcSpots: (id, spots) => nativeCatalogue?.selectedNpcSpots(id, spots) ?? null,
         selectedSpotNpcs: (id, spots) => nativeCatalogue?.selectedSpotNpcs(id, spots) ?? null,

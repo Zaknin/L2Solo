@@ -100,7 +100,10 @@ try {
     assert.equal(exported.sourcesForItem(1), null);
     assert.equal(exported.potentialSpawnData().definitions, ownedExport.spawns);
     assert.deepEqual(service.relations('item', 1, { spots: [] }), { kind: 'item', id: 1, origin: 'exported',
-        recipes: { available: false, producedBy: null, usedBy: null }, selectedSources: { available: false, rows: null } });
+        recipes: { available: false, origin: null, revision: null, producedBy: null, usedBy: null },
+        sources: { available: true, origin: 'exported', revision: ownedExport.manifest?.generatedAt || null,
+            drops: ownedExport.itemById.get(1).sources.drops, spoils: ownedExport.itemById.get(1).sources.spoils },
+        selectedSources: { available: false, origin: null, revision: null, rows: null } });
     assert.equal(exported.recipesForProduct(1), null, 'missing recipe data is unavailable, not an empty recipe list');
     const fixtureRecipes = [{ recipeId: 7, productId: 1 }], fixtureSpots = [{ spot: { id: 'selected' }, count: 0 }];
     const nativeFixture = create({ origin: 'native-fixture',

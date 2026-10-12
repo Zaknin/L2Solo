@@ -23,4 +23,15 @@ spots.push({ id: '7_18', name: 'again' });
 assert.strictEqual(SpotIndex.spotById(spots, '7_18'), spots[3]);
 assert.strictEqual(SpotIndex.tableFor(spots), SpotIndex.tableFor(spots), 'a repeated id does not rebuild the table');
 
+const topology = [{ id: 'same', npcEntries: [{ selfId: 1, count: 8 }] },
+    { id: 'same', npcEntries: [{ name: 'alias', count: 3 }] },
+    { id: 'other', npcEntries: [{ selfId: 1, count: 0 }, { selfId: '1', count: 2 }] }];
+const npcSpots = SpotIndex.spotsForNpc(topology, 1);
+assert.deepStrictEqual(npcSpots, [topology[2]], 'canonical rows only; aliases and duplicate NPC entries add no false links');
+assert.strictEqual(SpotIndex.spotsForNpc(topology, '1'), npcSpots, 'numeric NPC lookup shares prepared rows');
+topology.push({ id: 'new', npcEntries: [{ selfId: 1, count: 4 }] });
+assert.deepStrictEqual(SpotIndex.spotsForNpc(topology, 1), [topology[2], topology[3]], 'grown list refreshes both directions');
+assert.strictEqual(SpotIndex.spotsForNpc(null, 1), null);
+assert.deepStrictEqual(SpotIndex.spotsForNpc(topology, 9999), []);
+
 console.log('spot index tests passed');
