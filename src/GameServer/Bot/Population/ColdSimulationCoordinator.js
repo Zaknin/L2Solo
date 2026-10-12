@@ -251,6 +251,7 @@ class ColdSimulationCoordinator {
                 && Number(Metrics.currentEventLoopLag()) < 40
         });
         this.commandInflight = new Map();
+        this.commitAcknowledgements = new Map();
         this.fencedBots = new Set();
         this.pauseReasons = new Set();
         this.snapshotQueue = new ColdSnapshotQueue({
@@ -316,7 +317,7 @@ class ColdSimulationCoordinator {
             onResults: (results) => {
                 const startedAt = Config.developerDiagnostics ? Date.now() : 0;
                 this.handleCommitResults(results)
-                    .catch((error) => this.recordError(error))
+                    .catch((error) => { this.finishCommitAcknowledgements(results, false); this.recordError(error); })
                     .finally(() => { if (Config.developerDiagnostics) this.queue.recordStage('ackBuild', Date.now() - startedAt); });
             },
             onPause: () => this.setPauseReason('commit_queue_high_water', true),
@@ -494,10 +495,15 @@ class ColdSimulationCoordinator {
         if (held) held.meetingPending = promise; else this.commandInflight.set(id, promise);
         // This call may originate inside a lifecycle command. Its ACK must
         // release the worker owner before the read-only preparation starts.
-        this.commandTail.then(() => {
+        // A postcommit market review can start consent before its resolver's
+        // commit_ack clears in_flight in the worker. Wait for this owner's ACK,
+        // independently of unrelated commits and the lifecycle command tail.
+        const commitAck = this.commitAcknowledgements.get(id)?.promise;
+        Promise.all([this.commandTail, commitAck]).then(([, acknowledged]) => {
             if (promise.settled) return;
+            if (acknowledged === false) throw Error('trade_meeting_source_retired');
             if (!this.commandInflight.has(id)) this.commandInflight.set(id, promise);
-            if (this.commandInflight.get(id) !== promise || this.worker !== worker || this.workerEpoch !== epoch)
+            if (this.commandInflight.get(id) !== promise || this.worker !== worker || this.workerEpoch !== epoch || this.stopping)
                 throw Error('trade_meeting_source_retired');
             const state = LifeState.cachedState(id);
             if (!state) throw Error('trade_meeting_missing_state');
@@ -1871,9 +1877,34 @@ class ColdSimulationCoordinator {
             }
             const queued = this.queue.enqueue(proposal, Array.isArray(sizes) ? sizes[index] : null);
             if (!queued.ok) rejected.push({ ok: false, characterId: proposal.characterId, reason: queued.reason, proposal });
-            else Metrics.recordColdOwnerResolved();
+            else {
+                this.trackCommitAcknowledgement(proposal, source);
+                Metrics.recordColdOwnerResolved();
+            }
         });
         if (rejected.length) this.handleCommitResults(rejected).catch((error) => this.recordError(error));
+    }
+
+    trackCommitAcknowledgement(proposal, source) {
+        const id = Number(proposal.characterId), previous = this.commitAcknowledgements.get(id);
+        if (previous?.proposalId === proposal.proposalId && previous.source.worker === source.worker
+            && previous.source.epoch === source.epoch) return;
+        previous?.resolve(false);
+        let resolve;
+        const promise = new Promise(done => { resolve = done; });
+        // One small waiter per admitted queue owner; no retained state copy.
+        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve });
+    }
+
+    finishCommitAcknowledgements(results, acknowledged = true) {
+        for (const result of results) {
+            const id = Number(result.characterId), held = this.commitAcknowledgements.get(id);
+            const source = result.proposal?.[PROPOSAL_SOURCE];
+            if (!held || held.proposalId !== result.proposal?.proposalId
+                || source && (held.source.worker !== source.worker || held.source.epoch !== source.epoch)) continue;
+            this.commitAcknowledgements.delete(id);
+            held.resolve(acknowledged);
+        }
     }
 
     async prepareProposal(proposal) {
@@ -2154,7 +2185,8 @@ class ColdSimulationCoordinator {
         });
         // Table changes reach the worker before the commits that made them.
         this.tableChannel.flush();
-        this.postCollections('commit_ack', { results: acknowledgements });
+        const sent = this.postCollections('commit_ack', { results: acknowledgements });
+        this.finishCommitAcknowledgements(results, sent > 0);
     }
 
     async handleReleaseRequest(message) {
@@ -2475,6 +2507,8 @@ class ColdSimulationCoordinator {
 
     onWorkerExit(code, worker = this.worker, epoch = this.workerEpoch) {
         if (this.worker !== worker || this.workerEpoch !== epoch) return;
+        for (const held of this.commitAcknowledgements.values()) held.resolve(false);
+        this.commitAcknowledgements.clear();
         for (const [id, held] of this.commandInflight) {
             const preparation = held.meetingToken ? held : held.meetingPending;
             if (preparation) this.finishMeetingPreparation(id, preparation, null, Error('trade_meeting_worker_exited'));
@@ -2529,6 +2563,8 @@ class ColdSimulationCoordinator {
         this.stopDiagnosticSelection = null;
         this.cancelLeaseRenewalRound();
         this.cancelSafety();
+        for (const held of this.commitAcknowledgements.values()) held.resolve(false);
+        this.commitAcknowledgements.clear();
         this.projectionRetention.reset();
         this.economyDecisions.clear();
         this.economyRoutes.clear();

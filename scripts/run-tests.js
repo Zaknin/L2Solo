@@ -964,6 +964,7 @@ const tests = [
     'tests/test_meeting_lifecycle_pending.js',
     'tests/test_meeting_snapshot_refresh.js',
     'tests/test_meeting_worker_transport.js',
+    'tests/test_meeting_commit_ack_order.js',
     'tests/test_trade_meeting_pages.js',
     'tests/test_wish_purchase_supply.js',
     'tests/test_wish_static_shot_supply.js',
