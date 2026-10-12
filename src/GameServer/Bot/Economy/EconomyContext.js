@@ -5,12 +5,16 @@ const GearThreat = require('./GearThreat');
 const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Providers = require('./WishProviders');
-const { WishNetwork, remember, admitRoots, remainingQuantity } = require('./WishNetwork');
+const Sections = require('./DecisionSections');
+const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
 const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
+const FENCE_BYTES = 4096;
+const SOURCE_MEMO_LIMIT = 8;
+const fenceEncoder = new TextEncoder(), fenceDecoder = new TextDecoder();
 let routeAnchors = new WeakMap();
 let mainColdForState = null;
 let runtime = {};
@@ -134,6 +138,150 @@ function inputKey(state, deps = {}) {
         stats.production?.crafts || 0, positive(state.sp),
         (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')].join('|');
 }
+// Every section keeps only its used inputs. Current combat resources and
+// financial facts do not invalidate a sword's benefit or its source graph.
+function sectionKeys(state, deps = {}, bands = []) {
+    const stats = state.stats || {}, inventory = { ...state.inventory };
+    const role = state.party?.role || stats.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(stats.classId || 0);
+    const partyId = Number(state.party?.partyId || state.partyId || 0);
+    delete inventory[57];
+    for (const [id, low, high, original] of bands) {
+        const row = inventory[id], amount = Number(row?.amount);
+        if (!row || !(amount >= low) || high !== null && !(amount <= high)) continue;
+        const template = ItemIndex.find(invoke('GameServer/DataCache').items, Number(id));
+        // The native loot projection omits a free stack's default metadata;
+        // DB publication restores it. Its actual flags and ownership remain
+        // inputs, while absent false/zero fields describe the same stack.
+        inventory[id] = { ...row, amount: original,
+            equipped: !!row.equipped, equippedCount: Number(row.equippedCount || 0),
+            slot: Number(row.slot || 0), enchant: row.enchant === null ? null : Number(row.enchant || 0),
+            stackable: row.stackable ?? template?.etc?.stackable,
+            ...(row.instances ? { instances: row.instances.map(item => ({ ...item,
+                amount: Number(item.amount) >= low && (high === null || Number(item.amount) <= high) ? original : item.amount })) } : {}) };
+    }
+    const plan = stats.equipmentPlan;
+    // The planner publishes this known empty result after the wish review.
+    // It names no target, reservation or next action. Unknown plan fields
+    // keep the exact dependency instead of being treated as an empty plan.
+    const emptyPlan = plan?.status === 'deferred' && plan.strategy === 'none'
+        && plan.next == null && plan.reason === 'wish_focus'
+        && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
+    const calculationPlan = emptyPlan ? null : plan;
+    const stable = { ...state, adena: 0, sp: 0, inventory,
+        party: partyId ? { ...state.party, partyId, role } : null, partyId,
+        clanId: Number(state.clanId ?? stats.clanId ?? 0),
+        vitals: { ...state.vitals, mp: 0 },
+        stats: { ...stats, role, clanId: Number(stats.clanId ?? state.clanId ?? 0),
+            karma: stats.karma ?? 0, decisionSeq: 0, activityLeaf: 0, exp: 0, huntEfficiency: [] } };
+    const build = Sections.capability(state, deps.timestamp);
+    const structural = `${inputKey(stable, deps)}|${build}|${JSON.stringify([
+        calculationPlan, stats.craftStationId, stats.persona, Number(stats.spotRisk?.windowDeaths || 0),
+        state.marketTrades, stats.marketTrades, stats.relations,
+        stats.production, role, state.accountName])}`;
+    const sourceStable = { ...stable, inventory: Object.fromEntries(Object.entries(inventory)
+        .filter(([, row]) => row.equipped || row.equippedCount)), stats: { ...stable.stats, memoryRevision: 0 } };
+    const sourceKey = `${inputKey(sourceStable, { ...deps, memory: null })}|${build}|${Sections.hash([
+        calculationPlan, stats.craftStationId, stats.persona, state.marketTrades, stats.marketTrades,
+        role, state.accountName,
+        stats.huntEfficiency, stats.huntClock, stats.spotRisk,
+        stats.money ? [stats.money[0], Number(stats.money[3]) > 0] : stats.wishFocus?.[2],
+        stats.exp ?? state.exp,
+        Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0])}`;
+    return { build, structural, sources: sourceKey };
+}
+function decisionHolds(state, held, keys, timestamp, deps) {
+    if (!held || held.sections?.structural !== keys.structural || held.plan.pending
+        || extensions.size || deps.nodes?.length || deps.withNodes && !held.projection) return false;
+    const stats = state.stats || {}, baseline = held.plan.statsPacket.wishSections;
+    const sameDecision = Number(stats.decisionSeq || 0) === Number(held.plan.statsPacket.decisionSeq || 0)
+        || held.key === inputKey(state, { ...deps, timestamp });
+    return sameDecision && !stats.wishDirty && !Sections.meaningfulMoney(state, baseline)
+        && !Sections.observationChanged(state, baseline, timestamp, deps.mode)
+        && !Sections.horizonChanged(state, baseline, held.plan.hunt.expPerHour, held.plan.persona)
+        && (!(Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0)
+            || Number(state.vitals?.mp) === held.mp);
+}
+function occupancyToken(deps, id) {
+    const row = deps.occupancy?.get?.(id) || deps.occupancy?.[id];
+    return `${Number(row?.reservedCount ?? row?.count) || 0}`;
+}
+function spotsHold(deps, reads = []) {
+    for (const [id, token] of reads) if (occupancyToken(deps, id) !== token) return false;
+    return true;
+}
+function quantityBands(state, context, projection) {
+    const bands = [], stock = new Map();
+    for (const kind of ['shots', 'potions', 'scrolls']) {
+        const row = context.stock(kind);
+        if (row?.itemId && row.target > 0) stock.set(Number(row.itemId), Math.max(1, Math.ceil(row.target - positive(row.beginnerCurrent))));
+    }
+    const reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(state);
+    const used = new Set((projection?.nodes || []).filter(node => node.key.startsWith('item:')).map(node => Number(node.key.slice(5))));
+    const error = Sections.incomeError(state, context.persona);
+    for (const [id, row] of Object.entries(state.inventory || {})) {
+        const amount = positive(row.amount), itemId = Number(id), template = ItemIndex.find(invoke('GameServer/DataCache').items, itemId);
+        if (!amount || row.equipped || row.equippedCount || row.protected || row.protectedAmount || row.reservedAmount
+            || row.acceptedCustomer || row.assignedClan || row.available === false || positive(reserved[id])
+            || (row.stackable ?? template?.etc?.stackable) !== true) continue;
+        if (stock.has(itemId)) {
+            const target = stock.get(itemId);
+            if (amount >= target) bands.push([itemId, target, null, amount]);
+            continue;
+        }
+        // Only existing free stacks absent from every admitted requirement.
+        // A book, recipe, target, new stack or unknown item keeps exact facts.
+        const kind = String(template?.template?.kind || row.kind || '');
+        if (used.has(itemId) || state.clanId || state.stats?.clanId || positive(state.stats?.karma)
+            || !/^Other\.(Material|Arrow)/.test(kind)) continue;
+        const unitValue = positive(context.buyback(itemId));
+        if (!(unitValue > 0)) continue;
+        const allowance = Math.floor(positive(context.hourAdena) * error / unitValue);
+        bands.push([itemId, kind.startsWith('Other.Arrow') ? 1 : amount, amount + allowance, amount]);
+    }
+    return bands;
+}
+function bagSafety(state, timestamp) {
+    const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
+    const bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
+    const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
+    return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
+}
+function calculationFence(state, sections, reads, spots, deps, bands = [], safety = null) {
+    if (extensions.size || deps.nodes?.length || deps.workshops && !deps.workshopRevision && !deps.inputKey) return null;
+    const tokens = [], indexes = new Map(), items = [];
+    for (const [id, token] of reads) {
+        if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
+        items.push(id, indexes.get(token));
+    }
+    const bytes = fenceEncoder.encode(JSON.stringify([sectionKeys(state, deps, bands).structural,
+        [tokens, items], [...spots], bands, safety]));
+    return bytes.byteLength <= FENCE_BYTES ? bytes : null;
+}
+function calculationHolds(state, fence, deps = {}) {
+    if (!(fence instanceof Uint8Array) || fence.byteLength > FENCE_BYTES || extensions.size || deps.nodes?.length) return false;
+    deps = resolved(state, deps);
+    if (deps.workshops && !deps.workshopRevision && !deps.inputKey) return false;
+    let fields;
+    try { fields = JSON.parse(fenceDecoder.decode(fence)); } catch (_) { return false; }
+    if (!Array.isArray(fields) || fields.length !== 5 || !Array.isArray(fields[3])) return false;
+    if (!Array.isArray(fields[1]) || fields[1].length !== 2 || !Array.isArray(fields[1][0])
+        || !Array.isArray(fields[1][1]) || fields[1][1].length % 2 || !Array.isArray(fields[2])
+        || fields[3].some(row => !Array.isArray(row) || row.length !== 4
+            || !(Number(row[1]) >= 1) || !(Number(row[3]) >= row[1])
+            || row[2] !== null && !(Number(row[2]) >= row[1]))) return false;
+    const [key, [tokens, items], spots, bands, safety] = fields;
+    for (const [id, low, high] of bands) {
+        const amount = Number(state.inventory?.[id]?.amount);
+        if (!(amount >= low) || high !== null && !(amount <= high)) return false;
+    }
+    const sections = sectionKeys(state, deps, bands), reads = new Map();
+    for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
+    if (safety) {
+        const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
+        if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;
+    }
+    return key === sections.structural && marketHolds(deps.board, reads, deps) && spotsHold(deps, spots);
+}
 // The market as an input of one bot: the board lines and the counter of each
 // item its review read, as tokens at the time of reading. The context stays
 // valid while every token holds; a deal or a line of another item, anywhere
@@ -219,10 +367,12 @@ function pricing(state, persona, board, timestamp, deps, read = () => {}, prices
     const knowledgeEnabled = deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled();
     const priceCtx = { characterId: state.characterId, understanding: persona.understanding ?? 0.3,
         marketTrades: state.marketTrades, knowledgeEnabled, board, timestamp };
-    return { knowledgeEnabled, prices, price: id => {
+    const beliefs = new Map();
+    return { knowledgeEnabled, prices, beliefs, price: id => {
         read(id);
         if (!prices.has(Number(id))) {
             const belief = Belief.prior(id, priceCtx);
+            if (belief) beliefs.set(Number(id), belief);
             prices.set(Number(id), belief ? Math.exp(belief.mu) : 0);
         }
         return prices.get(Number(id));
@@ -411,10 +561,11 @@ function forState(state = {}, deps = {}) {
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
     const key = inputKey(state, { ...deps, timestamp });
+    const sections = sectionKeys(state, { ...deps, timestamp });
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
-    if (held?.key === key && (isMainThread || held.stateRef.deref() === state) && (!deps.withNodes || held.projection)
-        && marketHolds(sourceBoard, held.reads, deps)) {
+    if ((held?.key === key || decisionHolds(state, held, sections, timestamp, deps)) && (!deps.withNodes || held.projection)
+        && marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads)) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', 'same_inputs');
@@ -423,11 +574,13 @@ function forState(state = {}, deps = {}) {
             if (last) last.at = Date.now();
         }
         held.gearThreat = gearThreat;
+        held.stateRef = new WeakRef(state);
         remember(cache, actorKey, held);
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
             held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
-        return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection });
+        return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
+            fenceData: { sections: held.sections, reads: held.reads, spots: held.spotReads } });
     }
     const started = diagnostic ? performance.now() : 0;
     // Identity replacement is the worker's technical safety backstop, not an
@@ -459,7 +612,12 @@ function forState(state = {}, deps = {}) {
     // survive the final cut, so a rejected candidate's items never become
     // inputs of the review.
     let scope = null;
-    const read = id => { id = Number(id); if (reads.has(id)) return;
+    const nodeScopes = [];
+    const spotReads = new Map();
+    const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
+    const read = id => { id = Number(id);
+        for (const local of nodeScopes) local.items.set(id, marketToken(sourceBoard, id, deps));
+        if (reads.has(id)) return;
         if (scope) { if (!scope.has(id)) scope.set(id, marketToken(sourceBoard, id, deps)); return; }
         reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
     };
@@ -467,10 +625,11 @@ function forState(state = {}, deps = {}) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const persona = personaOf(state, deps);
+    const cash = Sections.bounds(positive(state.adena));
     const board = watchedBoard(sourceBoard, watch);
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
-    const { price, prices, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
+    const { price, prices, beliefs, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
     const base = foundation(state, deps, persona, timestamp, price);
     const own = Hunt.sampledRows(state, timestamp, deps.mode);
     const calibrations = own.flatMap(row => {
@@ -482,6 +641,23 @@ function forState(state = {}, deps = {}) {
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
+        walletBoundary: cash.watch,
+        sourceSpot: id => { spotReads.set(id, occupancyToken(deps, id));
+            for (const local of nodeScopes) local.spots.set(id, occupancyToken(deps, id)); },
+        nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
+            end: () => nodeScopes.pop(),
+            bag: id => { if (!(Number(id) > 0)) return;
+                for (const local of nodeScopes) local.bag.set(Number(id), bagToken(id)); },
+            wholeBag: () => { for (const id of Object.keys(state.inventory || {})) if (Number(id) !== 57) context.nodeInputs.bag(id);
+                for (const local of nodeScopes) local.bag.set(-1, JSON.stringify(Object.keys(state.inventory || {}).filter(id => Number(id) !== 57).sort())); },
+            holds: input => (!deps.workshops || !!deps.workshopRevision || !!deps.inputKey)
+                && marketHolds(sourceBoard, new Map(input.items), deps)
+                && input.spots.every(([id, token]) => occupancyToken(deps, id) === token)
+                && (input.bag || []).every(([id, token]) => id === -1
+                    ? JSON.stringify(Object.keys(state.inventory || {}).filter(key => Number(key) !== 57).sort()) === token : bagToken(id) === token),
+            keep: input => { for (const [id] of input.items) read(id);
+                for (const [id] of input.spots) context.sourceSpot(id);
+                for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
         readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
             keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); } } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
@@ -494,7 +670,8 @@ function forState(state = {}, deps = {}) {
     context.routePending = !deps.tripCost && !context.routeRows;
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
-    context.spotValue = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
+    const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
+    context.spotValue = (spot, ...args) => { context.sourceSpot(spot.id); return readSpot(spot, ...args); };
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
         // settlement/preparation owner. Never replace unknown stock with zero
@@ -520,7 +697,9 @@ function forState(state = {}, deps = {}) {
     context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
-    const projection = Providers.build(state, context, { ...deps, nodes: [...(deps.nodes || []), ...extra] });
+    const sourceSections = held?.sections?.sources === sections.sources
+        ? held.sourceSections : null;
+    const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra] });
     context.projection = projection;
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
@@ -532,6 +711,7 @@ function forState(state = {}, deps = {}) {
         stockFor: context.stockFor,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
+        preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0,
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,
@@ -553,7 +733,14 @@ function forState(state = {}, deps = {}) {
     const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
     context.statsPacket = { wishFocus: network.focus, dormantWishes: network.dormant,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
-        money: Funding.packetFor(network, context.hourAdena, base.survivalReserve) };
+        money: Funding.packetFor(network, context.hourAdena, base.survivalReserve), wishDirty: 0 };
+    let cumulative = base.survivalReserve;
+    for (const wish of network.queue) { cumulative += cashCharge(wish); cash.watch(cumulative); }
+    const watchedWish = network.gap || network.queue.find(wish => wish.key === network.focus?.[0]);
+    const belief = beliefs.get(Number(watchedWish?.object?.itemId));
+    const moneyError = belief ? knowledgeEnabled
+        ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
+    context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode);
     building = false;
 
     if (diagnostic) {
@@ -571,6 +758,9 @@ function forState(state = {}, deps = {}) {
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0] });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
+    plan.quantityBands = quantityBands(state, context, projection);
+    plan.bagSafety = bagSafety(state, timestamp);
+    plan.calculationFence = calculationFence(state, sections, reads, spotReads, deps, plan.quantityBands, plan.bagSafety);
     if (deps.rememberContext !== false && planningContexts < 64) {
         if (diagnostic && !cache.has(actorKey) && cache.size >= 64 - planningContexts) {
             Diagnostics.count('context', 'eviction', 'capacity');
@@ -578,10 +768,16 @@ function forState(state = {}, deps = {}) {
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        remember(cache, actorKey, { key, reads, plan, stateRef: new WeakRef(state), gearThreat,
+        const sourceSections = projection.sourceSections;
+        projection.sourceSections = null;
+        remember(cache, actorKey, { key, reads, spotReads, plan, stateRef: new WeakRef(state), gearThreat, sections,
+            sourceSections, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, 64 - planningContexts);
+        let retainedSources = 0;
+        for (const entry of [...cache.values()].reverse()) if (entry.sourceSections && ++retainedSources > SOURCE_MEMO_LIMIT) entry.sourceSections = null;
     }
-    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
+    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
+        fenceData: { sections, reads, spots: spotReads } });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -627,7 +823,9 @@ function planTrimmer(unresolved = new Set()) {
 function compactNetwork(network) {
     const unresolved = new Set(), trim = planTrimmer(unresolved);
     const row = wish => ({ key: wish.key, need: wish.need, object: wish.object, price: wish.price, reserved: wish.reserved,
-        valueHours: wish.valueHours, ratio: wish.ratio, funded: wish.funded, plan: trim(wish.plan) });
+        valueHours: wish.valueHours, ratio: wish.ratio, funded: wish.funded,
+        supported: wish.supported, resolved: wish.resolved, progressionPriority: wish.progressionPriority,
+        plan: trim(wish.plan) });
     const queue = (network.queue || []).map(row);
     const at = network.gap ? (network.queue || []).indexOf(network.gap) : -1;
     const leaf = network.activity;
@@ -704,7 +902,13 @@ function view(state, plan, deps, built = {}) {
     const price = built.price || pricing(state, plan.persona, built.board, plan.timestamp, deps, built.read, new Map(plan.prices)).price;
     const { stock, kitCost } = built.kit || kitReader(plan.kit, price,
         () => plan.kit.scrollHours ??= scrollHoursFor(state, deps.spots, plan.bestSpotId));
-    const network = plan.network;
+    // Reprice funding against this physical wallet. Reuse of benefit/source
+    // calculations is never a retained permission to spend an old balance.
+    const funding = moneyQueue(plan.network.queue, positive(state.adena) + positive(deps.buyOrderEscrow),
+        plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
+    const network = { ...plan.network, ...funding };
+    const statsPacket = plan.pending ? plan.statsPacket : { ...plan.statsPacket,
+        money: invoke('GameServer/Bot/Economy/PurchaseFunding').packetFor(network, plan.hourAdena, plan.survivalReserve) };
     const context = { inputKey: plan.market === null ? plan.key : `${plan.key}#${plan.market}`, actorKey: plan.actorKey, state,
         timestamp: plan.timestamp, gearThreatMask: plan.gearThreatMask, persona: plan.persona, board: built.board, hunt: plan.hunt,
         price, buyback, calibration: plan.calibration, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
@@ -714,17 +918,20 @@ function view(state, plan, deps, built = {}) {
         routePending: plan.routePending,
         trip: built.trip || deps.tripCost || Trip.preparedReader(plan.routeRows || [], { hourAdena: plan.tripHour }),
         spotValue: built.spotValue || lazySpotValue(state, plan, deps),
-        network, moneyPrice: plan.moneyPrice, gapHorizonHours: plan.gapHorizonHours, watchList: plan.watchList,
-        intentPending: plan.intentPending, statsPacket: plan.statsPacket };
+        network, moneyPrice: network.moneyPrice, gapHorizonHours: plan.gapHorizonHours, watchList: plan.watchList,
+        intentPending: plan.intentPending, statsPacket };
     // The plan is the identity of one decision for memos kept beside it
     // (a refused trip, the gear plan choice), not this view object.
     Object.defineProperty(context, 'plan', { value: plan });
+    Object.defineProperty(context, 'calculationFence', { get: () => built.fenceData
+        ? calculationFence(state, built.fenceData.sections, built.fenceData.reads, built.fenceData.spots, deps,
+            plan.quantityBands, plan.bagSafety) : plan.calculationFence });
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
         return context;
     }
-    context.wallet = plan.wallet;
+    context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => plan.stockRoots.get(rootKey));
     // A later view has the usefulness values only; a group solve that needs
     // the members' nodes rebuilds them (forGroup).
@@ -855,8 +1062,12 @@ function forgetContext(id, reason = 'explicit_invalidation', expectedState = nul
     id = Number(id);
     const key = `character:${id}`;
     if (expectedState && cache.get(key)?.stateRef.deref() !== expectedState) return;
-    if (cache.delete(key) && Diagnostics.active()) { Diagnostics.count('context', 'eviction', reason); noteRelease(key, reason); }
-    engine.forget(key, reason);
+    // Publication replaces the facts object, not the economic decision. The
+    // next reader validates semantic section keys and all watched sources.
+    if (reason !== 'state_publication') {
+        if (cache.delete(key) && Diagnostics.active()) { Diagnostics.count('context', 'eviction', reason); noteRelease(key, reason); }
+        engine.forget(key, reason);
+    }
     for (const [groupKey, held] of groups) {
         if (held.ids.includes(id)) {
             groups.delete(groupKey);
@@ -875,6 +1086,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

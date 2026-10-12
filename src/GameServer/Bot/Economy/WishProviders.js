@@ -94,6 +94,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
             if (acquisitionAllowed && !acquisitionAllowed(item.selfId)) continue;
             const price = Number(ctx.price(item.selfId));
             if (!(price > 0) || Number(current?.selfId) === Number(item.selfId)) continue;
+            ctx.walletBoundary?.(price + Number(ctx.survivalReserve || 0));
             const score = kit.scores[at];
             const row = { item, price, score, ratio: Math.max(0, score - before) / price };
             if (Number(item.selfId) === target || Number(item.selfId) === Number(held?.[1])) retained = row;
@@ -296,7 +297,13 @@ function buildProjection(state, ctx, deps) {
     // arenas and the real graph, so a witness and its expanded root read
     // identical nodes. ARCH-NOTE: dies at return; at most the 64-node cap
     // per target, no owner store.
-    const descriptors = new Map();
+    // Sources are plain descriptors, independent of the wallet-dependent
+    // arena admission below. Only the previous final cut (<=40 nodes) is
+    // kept by EconomyContext's existing bounded owner. A missing/evicted
+    // descriptor is calculated normally; this never limits alternatives.
+    const keptSources = (deps.sourceSections?.nodes || []).filter(row => ctx.nodeInputs?.holds(row.inputs));
+    const descriptors = new Map(keptSources.map(row => [row.node.key, row.node]));
+    const descriptorInputs = new Map(keptSources.map(row => [row.node.key, row.inputs]));
     // The read scope of the candidate whose arena built each descriptor;
     // only scopes with a descriptor in the final cut become inputs.
     const builtBy = new Map();
@@ -337,6 +344,7 @@ function buildProjection(state, ctx, deps) {
     // existing 16,384-entry yield bound and atlas counts, no per-bot retention.
     // Shared-host offline result only; not a live throughput/budget claim.
     const spotValue = spot => {
+        ctx.sourceSpot?.(spot.id);
         if (!sourceValues.has(spot)) sourceValues.set(spot, ctx.spotValue(spot));
         return sourceValues.get(spot);
     };
@@ -403,6 +411,7 @@ function buildProjection(state, ctx, deps) {
         if (recipe && (ownCapable || workshop) && nodes.length + recipe.materials.length < 36) {
             const freeAmount = need('./WealthCraftDecision').freeAmount;
             const learned = !!workshop || dual || knownRecipes.has(Number(recipe.recipeId));
+            ctx.nodeInputs?.bag(recipe.recipeItemId);
             let scrollAvailable = learned || freeAmount(state, state.inventory?.[recipe.recipeItemId] || {}) > 0;
             const scrollBoard = ctx.board || deps.board;
             if (!scrollAvailable && scrollBoard) {
@@ -449,6 +458,10 @@ function buildProjection(state, ctx, deps) {
         // A candidate's scratch arena copies it whole, so its witness reads
         // the real graph's descriptors; the arena bound is the evaluation's.
         if (descriptors.has(key)) {
+            if (descriptorInputs.has(key)) {
+                ctx.nodeInputs.keep(descriptorInputs.get(key));
+                if (scratch && readScope) builtBy.set(key, readScope);
+            }
             const missing = new Set();
             const collect = at => {
                 if (missing.has(at) || nodes.some(node => node.key === at) || !descriptors.has(at)) return;
@@ -462,6 +475,9 @@ function buildProjection(state, ctx, deps) {
             if (!scratch && nodes.length + missing.size > 36) return null;
             include(key); return key;
         }
+        const local = ctx.nodeInputs?.begin();
+        try {
+        ctx.nodeInputs?.bag(id);
         const observed = observedPurchase(id);
         // A raid origin belongs to the clan's prepared roster. A personal
         // wish needs actual owned stock or a finite supplier, not a price.
@@ -473,6 +489,7 @@ function buildProjection(state, ctx, deps) {
             ...(observed || { availableUnits: 0 }) }];
         const drop = sourcePath(id);
         if (drop) paths.push(drop);
+        if (invoke('GameServer/Items/SoulCrystalProgression').catalog.crystals[id]) ctx.nodeInputs?.wholeBag();
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
         const recipe = Recipes.resolveByProductId(id) || invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
@@ -489,6 +506,7 @@ function buildProjection(state, ctx, deps) {
                 improvement: { kind: 'luxury_exchange', ...exchange }, grossRequirements: requirements });
         }
         if (luxury && Number(id) === 1458) {
+            ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
             for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
@@ -515,10 +533,12 @@ function buildProjection(state, ctx, deps) {
         }
         const node = { key, object: Number(id), price: price(id), ...(exitValue === undefined ? {} : { exitValue }), paths: paths.slice(0, 4) };
         descriptors.set(key, node);
+        if (local) descriptorInputs.set(key, { items: [...local.items], spots: [...local.spots], bag: [...local.bag] });
         if (scratch && readScope) builtBy.set(key, readScope);
         add(node);
         preparingItems.delete(key);
         return key;
+        } finally { if (local) ctx.nodeInputs.end(); }
     };
     // A finite earning goal uses the existing resale certificate and input
     // graph. The finished product is output, never a preparatory BUY leaf.
@@ -691,6 +711,7 @@ function buildProjection(state, ctx, deps) {
             .map(material => ({ key: itemNode(material.selfId), amount: material.missing }));
         if (requirements.some(row => !row.key)) continue;
         const ready = !requirements.length && positive(state.adena) >= positive(improvement.fee);
+        ctx.walletBoundary?.(positive(improvement.fee));
         root({ key: improvement.key, need: 'power', object: { ...improvement, kind: 'improvement' },
             valueHours: improvement.valueHours, price: improvement.price,
             paths: [{ activity: ready ? 'improving' : null, kind: improvement.kind,
@@ -1013,6 +1034,7 @@ function buildProjection(state, ctx, deps) {
         for (const town of need('./EconomicTrip').towns) {
             if (!need('../Population/ColdOccupationSources').hasNpcSellerInTown(town)) continue;
             const route = ctx.trip?.details?.(town);
+            if (route?.known) ctx.walletBoundary?.(route.fees);
             if (!route?.known || route.fees > Number(state.adena || 0)) continue;
             const cost = route.fees + route.hours * Math.max(1, ctx.hunt.perHour);
             if (!best || cost < best.cost) best = { town, route, cost };
@@ -1042,7 +1064,16 @@ function buildProjection(state, ctx, deps) {
         Diagnostics.count('provider', 'admission', 'gear_root', admittedGear.length);
         for (const row of admission.pending) Diagnostics.count('provider', 'admission_pending', row.reason);
     }
-    return { nodes: nodes.filter(node => cut.kept.has(node.key)), roots: cut.roots, values, moneyPaths, horizon, admission };
+    const keptNodes = nodes.filter(node => cut.kept.has(node.key));
+    let sourceSections = null;
+    // structuredClone rejects an extension that supplied a function/closure;
+    // such an input falls back to calculation instead of retaining a caller.
+    try {
+        const candidate = { nodes: keptNodes.filter(node => node.key.startsWith('item:') && descriptorInputs.has(node.key))
+            .map(node => ({ node, inputs: descriptorInputs.get(node.key) })) };
+        if (Buffer.byteLength(JSON.stringify(candidate)) <= 8192) sourceSections = structuredClone(candidate);
+    } catch (_) {}
+    return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
 }
 // Only public recipe rows and a prepared route can prove a usable service.
 // This bounded indexed read is shared by visible and distant bots. No private

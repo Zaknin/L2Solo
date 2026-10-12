@@ -424,12 +424,25 @@ async function run() {
     const resolveOptions = { persist: false, projectClassProgression: true, timestamp: Date.now() };
     const prepared = await Life.prepareResolve(resolveInput, resolveResult, resolveOptions);
     const retried = await Life.prepareResolve(resolveInput, resolveResult, resolveOptions);
-    assert.equal(prepared.stats.decisionSeq, 10);
+    assert.equal(prepared.stats.decisionSeq, 9, 'an ordinary round records facts without renewing the accepted decision');
     assert.equal(retried.stats.decisionSeq, prepared.stats.decisionSeq);
     assert.equal(retried.stats.activityLeaf, prepared.stats.activityLeaf);
     assert.equal(resolveInput.stats.decisionSeq, 9, 'projection does not mutate its decision source');
     assert.equal(prepared.stats.wishFocus?.length, 3);
     assert.equal(prepared.inventory[1].amount, 1);
+    const interrupted = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        patch: { activity: 'hunting', vitals: { mp: 50 }, stats: { targetCombat: { targetId: 1001, hp: 20 } } } }, resolveOptions);
+    assert.equal(interrupted.stats.decisionSeq, 9, 'an unfinished fight updates current combat facts without changing the strategic decision');
+    assert.equal(interrupted.vitals.mp, 50, 'current combat resources remain authoritative');
+    const actualDeath = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        patch: { activity: 'dead' } }, resolveOptions);
+    assert.equal(actualDeath.stats.decisionSeq, 10, 'actual death creates one meaningful decision');
+    assert.equal(actualDeath.stats.activityLeaf, 0);
+    const levelExpGain = Math.max(1, Data.experience[base.level] - resolveInput.exp + 1);
+    const levelGain = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        materialize: { ...resolveResult.materialize, exp: levelExpGain } }, resolveOptions);
+    assert(levelGain.level > resolveInput.level, 'the fixture really earns a new level');
+    assert.equal(levelGain.stats.decisionSeq, 10, 'actual level gain updates dependent calculations once');
     assert.equal(Database.isReady(), false);
     assert.deepEqual(fs.readdirSync(dir), ['config.ini']);
     console.log('PASS actual needs hookup / hard survival floor / no SQL or saves');

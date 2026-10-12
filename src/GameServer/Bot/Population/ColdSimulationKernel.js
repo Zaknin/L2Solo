@@ -445,6 +445,20 @@ class RetainedStateMap extends Map {
             }
             throw error;
         }
+        // Worker calculation advice belongs to this existing native owner.
+        // Publication replaces transport context, but is not a new decision.
+        // Keep advice off enumerable state/context DTOs; readers still prove
+        // every dependency before reuse, and retirement releases the owner.
+        const publishedContext = this.get(id)?.context;
+        const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
+        const wishAdvisory = supplied ? entry.context.wishAdvisory : current?.context?.wishAdvisory;
+        if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
+            && Object.isExtensible(publishedContext)) {
+            Reflect.defineProperty(publishedContext, 'wishAdvisory', {
+                value: entry.state?.phase === 'cold' ? wishAdvisory : null,
+                writable: true, configurable: true, enumerable: false
+            });
+        }
         if (this.#skillDtos) {
             let staged;
             try {

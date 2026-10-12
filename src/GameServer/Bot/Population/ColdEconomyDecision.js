@@ -47,6 +47,7 @@ const SHOT = 32768;
 const FEASIBILITY = 65536;
 const URGENCY_STAGE = 1, URGENCY_SHOTS = 2, URGENCY_POTIONS = 3;
 const MAX_BYTES = 800, MAX_SHOT_BYTES = 128;
+const MAX_ADVISORY_BYTES = 4096;
 const COMMAND_HEADER_BYTES = Buffer.byteLength(JSON.stringify(['00000000-0000-0000-0000-000000000000', 5, Number.MAX_SAFE_INTEGER]));
 const MAX_SHOT_PAYLOAD_BYTES = MAX_SHOT_BYTES - COMMAND_HEADER_BYTES;
 function workshopValues(value) {
@@ -363,6 +364,50 @@ function economyFor(state, deps = {}) {
         (deps.decisions || invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions).decided(state), deps);
     return invoke('GameServer/Bot/Economy/EconomyContext').forState(state, deps);
 }
+// A compact accepted decision is advisory calculation data, never a lease,
+// quote or permission to spend. Keep it at the existing worker entry owner;
+// there is no saved per-bot graph and no second decision map.
+function advisory(economy, state) {
+    const card = capture(economy, state);
+    const fence = economy?.calculationFence;
+    if (!(fence instanceof Uint8Array)) return null;
+    if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
+    return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
+        activityLeaf: Number(state.stats?.activityLeaf || 0) };
+}
+function canReuse(state, accepted, deps = {}) {
+    if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
+        || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
+        || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
+    // The ordinary fight path resumes hunting. Commands, unknown sources and
+    // completed/impossible targets go through the full native preparation.
+    const leaf = accepted.card.activity;
+    if (!leaf || leaf.activity !== 'hunting' || state.activity !== 'hunting' || state.incomingPending) return false;
+    const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
+    const baseline = state.stats.wishSections;
+    if (Sections.meaningfulMoney(state, baseline) || Sections.observationChanged(state, baseline, timestamp, deps.mode)
+        || Sections.capability(state, timestamp) !== baseline.build) return false;
+    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
+    if (Sections.horizonChanged(state, baseline, baseline.expHour, persona)) return false;
+    return invoke('GameServer/Bot/Economy/EconomyContext').calculationHolds(state, accepted.fence, deps);
+}
+function refreshAdvisory(state, accepted, deps = {}) {
+    if (!canReuse(state, accepted, deps)) return null;
+    // This new result is fenced to the actual publication, wallet and MP;
+    // never relax ColdEconomyDecisions.matches or any native write guard.
+    const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
+        key: stateKey(state), flags: 0 });
+    const economy = view(state, decision, deps);
+    economy.inputKey = String(decision.inputHash);
+    economy.wallet = require('../Economy/PurchaseFunding').budget(state, deps.buyOrderEscrow);
+    economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
+        decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
+        wishSections: state.stats.wishSections, wishDirty: 0 };
+    Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
+        decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
+    Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });
+    return { economy, decision, advisory: { ...accepted, card: decision } };
+}
 
 // Compare the existing compact economic output, without decoding it or
 // keeping another per-owner snapshot. Input digest, publication clock and
@@ -480,5 +525,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, kindCode, kindFor, compact, workshopValues,
-    unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, canReuse, refreshAdvisory, kindCode, kindFor, compact, workshopValues,
+    unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

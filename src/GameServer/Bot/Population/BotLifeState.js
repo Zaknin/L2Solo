@@ -2717,22 +2717,22 @@ const BotLifeState = {
             updatedAt: timestamp
         };
         // ARCH-NOTE: C1 lifecycle packets precede their fight; accept the
-        // worker's focus event before E4 raises the completed-round event.
+        // worker's focus event before classifying actual changed sections.
         // Direct projections receive an already projected packet as before.
         const beforeResolvePacket = isMainThread && options.statsPacketBeforeResolve === true && options.statsPacket;
         if (beforeResolvePacket) Object.assign(nextState.stats, beforeResolvePacket);
         if (state.activity === 'hunting') {
-            // Derive from the input so retrying this projection cannot raise twice.
-            const inputDecisionSeq = Math.max(0, Math.trunc(Number(state.stats?.decisionSeq) || 0));
-            const plannedDecisionSeq = beforeResolvePacket
-                ? Math.max(0, Math.trunc(Number(beforeResolvePacket.decisionSeq) || 0)) : inputDecisionSeq;
-            nextState.stats.decisionSeq = Math.max(inputDecisionSeq, plannedDecisionSeq) + 1;
-            nextState.stats.activityLeaf = 0;
+            // A round records its rewards/resources/sample immediately. It
+            // renews the decision only for a meaningful dependent event; a
+            // retry derives that one event from the same accepted input.
+            invoke('GameServer/Bot/AI/DecisionEvents').reconcile(state, nextState, timestamp);
         }
         if (!isMainThread) {
             const economyDeps = typeof options.economyDepsFor === 'function'
                 ? await options.economyDepsFor(nextState) : options.economyDeps || {};
-            const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(nextState, { ...economyDeps, timestamp });
+            const calculationDeps = { ...economyDeps, timestamp };
+            const advised = typeof options.economyFor === 'function' ? await options.economyFor(nextState, calculationDeps) : null;
+            const economy = advised || invoke('GameServer/Bot/Economy/EconomyContext').forState(nextState, calculationDeps);
             Object.assign(nextState.stats, economy.statsPacket);
             if (typeof options.onEconomy === 'function') options.onEconomy(economy, nextState);
         } else if (options.statsPacket && !beforeResolvePacket) Object.assign(nextState.stats, options.statsPacket);

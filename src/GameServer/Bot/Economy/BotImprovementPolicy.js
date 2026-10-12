@@ -130,7 +130,11 @@ function opportunities(state, ctx) {
                     * (ctx.price(item.selfId) + stuckOnce());
                 return [{ scrollId: Number(id), scrollType: rule.scrollType, cost,
                     price: price * cost.count, riskHours: ctx.hunt.perHour > 0 ? loss / ctx.hunt.perHour : Infinity }];
-            }).filter(row => row.price <= positive(state.adena) + positive(state.inventory?.[row.scrollId]?.amount) * ctx.price(row.scrollId));
+            }).filter(row => {
+                const cash = row.price - positive(state.inventory?.[row.scrollId]?.amount) * ctx.price(row.scrollId);
+                ctx.walletBoundary?.(cash);
+                return cash <= positive(state.adena);
+            });
             if (!alternatives.length) continue;
             // The attempt alternatives share one tendency roll including stop;
             // low-score risks keep the same nonzero tendency floor.

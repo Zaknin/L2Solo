@@ -695,6 +695,17 @@ let eventLoopDelay = null;
 
 // The owner notices moved counters only during its own natural resolve.
 const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
+function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
+    if (!owner?.context || !Object.isExtensible(owner.context)) return;
+    const current = kernel.states.get(Number(owner.state.characterId));
+    if (current?.state !== owner.state || current.context !== owner.context) return;
+    if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
+        .calculationHolds(seen, advisory.fence, deps))) advisory = null;
+    Reflect.defineProperty(owner.context, 'wishAdvisory', {
+        value: advisory, writable: true, configurable: true, enumerable: false
+    });
+}
+
 function reviewMarket(state, timestamp, economy) {
     const board = boardReady();
     if (!board || state?.phase !== 'cold') return null;
@@ -926,7 +937,8 @@ function startKernel(config = {}) {
             buyOrderEscrow: kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow
         }),
         projectResolve: async (state, result, timestamp) => {
-            let economy = null, seenKey = null;
+            const owner = kernel.states.get(Number(state.characterId));
+            let economy = null, seenKey = null, refreshed = null, observedDeps = null;
             const resolved = await LifeStateProjector.prepareResolve(state, result, {
                 persist: false,
                 timestamp,
@@ -937,9 +949,22 @@ function startKernel(config = {}) {
                     const routeRows = await occupationFor(projected, timestamp, context, 'wish');
                     const workshop = await occupationFor(projected, timestamp,
                         { ...context, routeRows, routeKey: EconomicTrip.key(projected) });
-                    return { occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows };
+                    return { spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
+                        board: boardReady(), buyOrderEscrow: context.buyOrderEscrow };
                 },
-                onEconomy: (built, seen) => { economy = built; seenKey = ColdEconomyDecision.stateKey(seen); }
+                economyFor: (projected, deps) => {
+                    observedDeps = deps;
+                    const action = invoke('GameServer/Bot/Population/ColdEconomyPlan')
+                        .edges(state, projected, owner?.context || {}, timestamp);
+                    refreshed = !action && !projected.party?.partyId && !projected.partyId
+                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps) : null;
+                    return refreshed?.economy || invoke('GameServer/Bot/Economy/EconomyContext').forState(projected, deps);
+                },
+                onEconomy: (built, seen) => {
+                    economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
+                    rememberWishAdvisory(owner, refreshed?.advisory || ColdEconomyDecision.advisory(built, seen),
+                        refreshed ? null : seen, observedDeps);
+                }
             });
             const projected = resolved;
             const beforeLevel = Number(state.stats?.classProgressionLevel || 0);
@@ -970,8 +995,10 @@ function startKernel(config = {}) {
                 buffOffer: invoke('GameServer/Bot/Economy/ColdBuffOffer').project(projected,
                     kernel.occupancy.members(projected.spotId, 'physical'), timestamp),
                 // Main reads this instead of building the network again.
-                ...(economy && projected ? { economyDecision: { ...ColdEconomyDecision.capture({ ...economy,
-                    shot: economyPlan?.shot || null }, projected), key: seenKey } } : {})
+                ...(economy && projected ? { economyDecision: refreshed
+                    ? { ...refreshed.decision, updatedAt: Number(projected.updatedAt || 0), key: seenKey }
+                    : { ...ColdEconomyDecision.capture({ ...economy,
+                        shot: economyPlan?.shot || null }, projected), key: seenKey } } : {})
             };
         },
         planPartyRequirement: ({ state, context, timestamp }) => invoke('GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
@@ -990,8 +1017,26 @@ function startKernel(config = {}) {
             const workshop = await occupationFor(state, timestamp,
                 { ...context, routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-            const preparedEconomy = Economy.forState(state, { spots, occupancy, timestamp, board: boardReady(),
-                buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows });
+            const deps = { spots, occupancy, timestamp, board: boardReady(),
+                buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
+            // A proved ordinary solo round keeps its accepted native plan.
+            // Party waiting, failed targets and excluded grounds still take
+            // the existing planner; no new choice is made from a thin card.
+            const excluded = invoke('GameServer/Bot/Population/SpotRiskPolicy').excludedSpotIdsForStates([state], timestamp);
+            const refreshed = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
+                && !state.stats?.lastResolveDebug?.failed
+                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps) : null;
+            if (refreshed && !excluded.has(String(refreshed.economy.network.activity?.spotId))) {
+                const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
+                rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
+                const leaf = refreshed.economy.network.activity;
+                return { statsPacket: refreshed.economy.statsPacket,
+                    activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
+                    economyDecision: refreshed.decision, previousPlan, acquisitionPlan: previousPlan,
+                    partyRequest: null, reusablePartyRequest: false, replanFailure: null,
+                    targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState };
+            }
+            const preparedEconomy = Economy.forState(state, deps);
             const selectedAcquisition = GearPlanSelection
                 .selectAcquisitionPlan(state, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy,
@@ -1010,7 +1055,7 @@ function startKernel(config = {}) {
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
-            const plannedStats = { ...(state.stats || {}), equipmentPlan: acquisitionPlan };
+            const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };
             if (partyRequest) plannedStats.partyRequest = partyRequest;
             else delete plannedStats.partyRequest;
             // A waiter that is resting finishes its rest first.
@@ -1026,6 +1071,8 @@ function startKernel(config = {}) {
             const routedState = beginHuntingTrip(plannedState, context?.route, timestamp) || plannedState;
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
+            const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
+            rememberWishAdvisory(kernel.states.get(Number(state.characterId)), ColdEconomyDecision.advisory(economy, seen), seen, deps);
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,

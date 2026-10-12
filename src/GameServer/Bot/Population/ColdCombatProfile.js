@@ -845,11 +845,11 @@ function releaseBuild(key) {
         if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
     }
 }
-function powerKey(state = {}, timestamp = Date.now()) {
+function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
     const saved = state.stats?.coldCombat || {};
     const worn = state.inventory && typeof state.inventory === 'object'
         ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
-            row.enchant, (row.equippedSlots || []).join('.'), (row.instances || []).filter((item) => item.equipped)
+            row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
     const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
@@ -860,6 +860,12 @@ function powerKey(state = {}, timestamp = Date.now()) {
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
+}
+function buildInputKey(state = {}, timestamp = Date.now()) {
+    // Lifecycle may publish the implicit worn slot explicitly. That is the
+    // same build, although the internal raw cache key can be reconstructed.
+    const text = powerKey(state, timestamp, true), entry = buildGainsFor(state, timestamp);
+    return entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
 }
 function powerFor(state = {}, timestamp = Date.now(), options = {}) {
     const profile = profileFor(state, timestamp, options);
@@ -960,7 +966,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add
