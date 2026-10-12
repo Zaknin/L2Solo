@@ -2578,8 +2578,7 @@ const BotLifeState = {
             // every other writer of a bag row does: one row, one shape (perf
             // C3: a shape flip changed the review's input key). An item row
             // with instances is rebuilt as before.
-            const previous = itemStackable(item.selfId, item) ? { ...(inventory[key] || {}) } : {};
-            delete previous.starterMobLootAmount;
+            const { starterMobLootAmount: _starter, ...previous } = itemStackable(item.selfId, item) ? inventory[key] || {} : {};
             inventory[key] = {
                 ...previous,
                 selfId: item.selfId,
