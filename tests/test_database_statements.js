@@ -32,6 +32,12 @@ Statements.prepare(db, put).run(1, 10);
 Statements.prepare(db, put).run(2, 20);
 assert.strictEqual(Statements.prepare(db, get).get(1).amount, 10);
 assert.strictEqual(Statements.prepare(db, get).get(2).amount, 20, 'bindings cannot leak across calls');
+const bigintRead = Statements.prepare(db, get, true);
+assert.strictEqual(bigintRead.get(1).amount, 10n);
+assert.strictEqual(Statements.prepare(db, get).get(1).amount, 10,
+    'BigInt readers must not change the integer mode of ordinary cached readers');
+assert.strictEqual(Statements.prepare(db, get, true), bigintRead,
+    'each integer mode reuses its own native statement');
 assert.strictEqual(Statements.prepare(db, get).get(), undefined, 'missing bindings must not reuse a prior ID');
 assert.throws(() => Statements.prepare(db, put).run(3, -1), /constraint/i);
 Statements.prepare(db, put).run(3, 30);

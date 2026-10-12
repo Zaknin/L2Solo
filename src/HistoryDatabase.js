@@ -228,12 +228,12 @@ async function stop() {
 
 function all(sql, params = []) {
     if (!reader) throw new Error('History database is not open');
-    return Statements.prepare(reader, sql).all(...params).map(normalizeRow);
+    return Statements.prepare(reader, sql, true).all(...params).map(normalizeRow);
 }
 
 function one(sql, params = []) {
     if (!reader) throw new Error('History database is not open');
-    return normalizeRow(Statements.prepare(reader, sql).get(...params));
+    return normalizeRow(Statements.prepare(reader, sql, true).get(...params));
 }
 
 function stats() {

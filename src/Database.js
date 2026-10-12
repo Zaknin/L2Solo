@@ -279,7 +279,9 @@ function run(sql, params = [], operation, readOverride = null, onTiming = null) 
     const read = readOverride === null ? isReadStatement(sql) : !!readOverride;
     return enqueue(() => {
         if (!connection) throw new Error(`SQLite is not initialized (${operation || operationName(sql)})`);
-        const statement = Statements.prepare(connection, sql);
+        // Read integers as BigInts before existing Number normalization.
+        // Never retry RETURNING: a retry could repeat the physical write.
+        const statement = Statements.prepare(connection, sql, read);
         if (!isReadStatement(sql)) checkMutationAdmission();
         if (read) return normalizeRows(statement.all(...params));
         const result = statement.run(...params);
@@ -1694,12 +1696,12 @@ function applySchemaMigrations() {
 
 function one(sql, params = []) {
     if (!isReadStatement(sql)) checkMutationAdmission();
-    return normalizeRow(Statements.prepare(connection, sql).get(...params));
+    return normalizeRow(Statements.prepare(connection, sql, true).get(...params));
 }
 
 function all(sql, params = []) {
     if (!isReadStatement(sql)) checkMutationAdmission();
-    return normalizeRows(Statements.prepare(connection, sql).all(...params));
+    return normalizeRows(Statements.prepare(connection, sql, true).all(...params));
 }
 
 function write(sql, params = []) {

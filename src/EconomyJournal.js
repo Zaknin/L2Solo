@@ -146,7 +146,7 @@ let attachedTables = new Set();
 // Registers economy_flow() on a new connection, then the triggers.
 function attach(connection) {
     attachedTables = new Set();
-    connection.function('economy_flow', (store, selfId, delta) => {
+    connection.function('economy_flow', { useBigIntArguments: true }, (store, selfId, delta) => {
         record(store, selfId, delta);
         return null;
     });
