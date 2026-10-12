@@ -184,8 +184,14 @@ assert.strictEqual(ItemDisposition.reservedEquipmentAmounts(stagedArmor)[45], 1)
 assert.strictEqual(ItemDisposition.saleCandidates(stagedArmor, { unlimited: true })
     .find((item) => item.selfId === 432)?.count, 1,
     'only duplicate tunics can be sold while one is staged for the next armor kit');
-assert.strictEqual(ItemDisposition.warehouseCandidates(stagedArmor)
-    .find((item) => item.selfId === 432)?.amount, 1);
+assert.deepStrictEqual(ItemDisposition.warehouseCandidates(stagedArmor), [],
+    'ordinary staged armor stays under personal disposition rather than warehouse storage');
+const craftStation = invoke('GameServer/Bot/Economy/CraftShopService').stationForSlot(0);
+const stationArmor = { ...stagedArmor,
+    stats: { ...stagedArmor.stats, craftStationId: craftStation.id } };
+assert.strictEqual(ItemDisposition.warehouseCandidates(stationArmor)
+    .find((item) => item.selfId === 432)?.amount, 1,
+    'a native infrastructure owner can warehouse only the duplicate staged tunic');
 assert.strictEqual(BuyStoreService.bidFor(stagedArmor, {
     type: 'upgrade_gear', target: { itemId: 432, itemName: 'Cursed Tunic', adena: 100000 }, plan: {}
 }), null, 'an owned piece must not receive another AFK buy order');
@@ -267,10 +273,11 @@ const scrollState = {
 assert(ItemDisposition.saleCandidates(scrollState).some((item) => Number(item.selfId) === Number(dEnchantScroll.selfId)),
     'valuable scroll surplus must enter the sale/disposition lifecycle');
 assert.strictEqual(ItemDisposition.isWarehouseCandidate(scrollState.inventory[dEnchantScroll.selfId]), true,
-    'valuable scrolls without demand must be removable from the backpack into the warehouse');
+    'the scroll itself is eligible for an infrastructure owner\'s warehouse');
 // Enchant scrolls are valuable market goods, not NPC-only junk. The
-// unchanged cold input has native own worth above today's NPC sale utility,
-// even before this kind has buyers. Its fixed decision point keeps the stock.
+// cold input still has native own worth above today's NPC sale utility and
+// unknown demand. Ordinary surplus finances progression through NPC sale;
+// the separate infrastructure owner below retains warehouse stock.
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
 const PriceBelief = invoke('GameServer/Bot/Economy/PriceBelief');
 const PriceDecision = invoke('GameServer/Bot/Economy/PriceDecision');
@@ -292,14 +299,26 @@ assert.strictEqual(originalScrollDisposition.decisions[0].priced.market.known, f
     'absent supported item demand remains unknown rather than proving there are no buyers');
 assert(Number.isNaN(originalScrollDisposition.decisions[0].priced.market.buyersPerHour));
 assert.strictEqual(originalScrollDisposition.decisions[0].priced.market.buyback, npcPrice);
-assert.strictEqual(originalScrollDisposition.warehouse[0]?.selfId, dEnchantScroll.selfId,
-    'the original native choice retains the valuable enchant scroll');
-assert.strictEqual(originalScrollDisposition.warehouse[0].count, 81, 'all original scrolls are retained');
-assert.deepStrictEqual(originalScrollDisposition.npc, [], 'no forced NPC liquidation is invented');
+assert.deepStrictEqual(originalScrollDisposition.warehouse, [],
+    'an ordinary adventurer does not warehouse personal surplus');
+assert.strictEqual(originalScrollDisposition.npc[0]?.selfId, dEnchantScroll.selfId);
+assert.strictEqual(originalScrollDisposition.npc[0]?.count, 81,
+    'all unreserved ordinary scroll surplus finances personal progression');
 assert.deepStrictEqual(scrollState, scrollBefore, 'a disposition quote never mutates the bag');
+const stationScrolls = { ...scrollState,
+    stats: { ...scrollState.stats, craftStationId: craftStation.id } };
+const stationScrollBefore = structuredClone(stationScrolls);
+const stationDisposition = MarketListingPolicy.evaluate(stationScrolls, { now });
+assert.strictEqual(stationDisposition.warehouse[0]?.selfId, dEnchantScroll.selfId,
+    'the separate native infrastructure owner retains valuable scroll stock');
+assert.strictEqual(stationDisposition.warehouse[0]?.count, 81);
+assert.deepStrictEqual(stationDisposition.npc, []);
+assert.deepStrictEqual(stationScrolls, stationScrollBefore);
 for (let deal = 0; deal < 12; deal++) MarketCounters.deal(dEnchantScroll.selfId, 6000, 1, now - (12 - deal) * 300000, 999999);
-assert.strictEqual(MarketListingPolicy.evaluate(scrollState, { now, slots: 0 }).warehouse[0]?.selfId, dEnchantScroll.selfId,
-    'scroll cleanup must choose warehouse retention when the board has buyers but no slot');
+assert.deepStrictEqual(MarketListingPolicy.evaluate(scrollState, { now, slots: 0 }).warehouse, [],
+    'no board slot does not authorise ordinary warehouse storage');
+assert.strictEqual(MarketListingPolicy.evaluate(stationScrolls, { now, slots: 0 }).warehouse[0]?.selfId, dEnchantScroll.selfId,
+    'infrastructure scroll cleanup retains stock when the board has no slot');
 MarketCounters.reset();
 // Native town travel reserves ten Scrolls of Escape (H13); only its surplus
 // is NPC junk. A party resurrection remains a cast without an item.
@@ -407,13 +426,24 @@ const chantDisposition = MarketListingPolicy.evaluate(chantState);
 assert.strictEqual(chantDisposition.candidates.length, 1);
 assert.strictEqual(chantDisposition.candidates[0].count, 1, 'the original single book reaches disposition unchanged');
 assert.deepStrictEqual(MarketListingPolicy.classify(chantState, chantDisposition.candidates[0]),
-    { action: 'market', reason: 'market' }, 'the original mapped amulet remains available to the native market decision');
-assert(chantDisposition.decisions.every(row => ['expected_value', 'no_board_slot'].includes(row.reason)),
-    'market value and the native roll choose disposition; mapped books never inherit the NPC-only hard rule');
-assert.strictEqual(ItemDisposition.npcOnlySlotCount(chantState), 0);
-assert.strictEqual(ItemDisposition.inventoryCleanupNeed(chantState, { now }), null,
-    'one preserved training book does not mandate an NPC cleanup trip');
+    { action: 'npc', reason: 'npc_only_item' }, 'an ordinary personal owner sells even mapped amulets to the NPC');
+assert(chantDisposition.decisions.every(row => row.reason === 'npc_only_item'));
+assert.strictEqual(ItemDisposition.npcOnlySlotCount(chantState), 1);
+assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(chantState, { now }), {
+    reason: 'npc_only_inventory', slots: 1, npcOnlySlots: 1, limit: ItemDisposition.INVENTORY_SLOT_LIMIT
+}, 'one ordinary NPC-only training book activates the native book cleanup rule');
 assert.deepStrictEqual(chantState, chantBefore, 'classification and listing cannot alter the original book');
+const stationChant = { ...chantState, stats: { ...chantState.stats, craftStationId: craftStation.id } };
+const stationChantBefore = structuredClone(stationChant);
+const stationChantDisposition = MarketListingPolicy.evaluate(stationChant);
+assert.strictEqual(stationChantDisposition.candidates[0]?.count, 1);
+assert.deepStrictEqual(MarketListingPolicy.classify(stationChant, stationChantDisposition.candidates[0]),
+    { action: 'market', reason: 'market' }, 'the mapped amulet is available to the native infrastructure market decision');
+assert(stationChantDisposition.decisions.every(row => ['expected_value', 'no_board_slot'].includes(row.reason)),
+    'market value and the native roll choose disposition for the allowed mapped-book owner');
+assert.strictEqual(ItemDisposition.npcOnlySlotCount(stationChant), 0);
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed(stationChant, { now }), null);
+assert.deepStrictEqual(stationChant, stationChantBefore, 'the infrastructure quote retains original physical ownership');
 const npcState = {
     ...state,
     inventory: Object.fromEntries(npcFixtures.map((item, index) => [String(item.selfId), {
@@ -456,24 +486,33 @@ assert.strictEqual(
 const expectedNpcBookFixtures = npcFixtures.filter(item => !mappedBookIds.has(Number(item.selfId)));
 assert(expectedNpcBookFixtures.length > 0 && expectedNpcBookFixtures.length < npcFixtures.length,
     'the unchanged 21-item mixed bag contains both NPC junk and mapped training books');
-// This quotation helper also exposes cheap goods, including mapped books,
-// while the actual listing policy applies their native expected-value choice.
+// The quotation helper exposes cheap mapped books too. Personal owners sell
+// them to the NPC; infrastructure owners use the native market decision.
 assert(npcFixtures.every(item => !mappedBookIds.has(Number(item.selfId))
     || Number(item.template.price) <= ItemDisposition.NPC_LIQUIDATION_MAX_UNIT_PRICE),
     'the reachable bag combines explicit NPC junk and cheap mapped books');
 assert.strictEqual(ItemDisposition.npcLiquidationCandidates(npcState).length, npcFixtures.length);
 const mixedBookDisposition = MarketListingPolicy.evaluate(npcState);
+const stationMixedState = { ...npcState, stats: { ...npcState.stats, craftStationId: craftStation.id } };
+const stationMixedBefore = structuredClone(stationMixedState);
+const stationMixedDisposition = MarketListingPolicy.evaluate(stationMixedState);
 for (const item of expectedNpcBookFixtures) {
     assert(mixedBookDisposition.npc.some(row => Number(row.selfId) === Number(item.selfId)),
         `original NPC junk ${item.selfId} retains its liquidation route`);
 }
 for (const item of npcFixtures.filter(item => mappedBookIds.has(Number(item.selfId)))) {
     const candidate = mixedBookDisposition.candidates.find(row => Number(row.selfId) === Number(item.selfId));
-    assert(candidate, 'an original mapped book remains a market candidate');
-    assert.deepStrictEqual(MarketListingPolicy.classify(npcState, candidate), { action: 'market', reason: 'market' });
+    assert(candidate, 'an original mapped book remains a physical disposition candidate');
+    assert.deepStrictEqual(MarketListingPolicy.classify(npcState, candidate), { action: 'npc', reason: 'npc_only_item' });
     assert(mixedBookDisposition.decisions.filter(row => Number(row.item.selfId) === Number(item.selfId))
+        .every(row => row.reason === 'npc_only_item'), 'ordinary mapped books follow the personal NPC policy');
+    const stationCandidate = stationMixedDisposition.candidates.find(row => Number(row.selfId) === Number(item.selfId));
+    assert(stationCandidate, 'the same mapped stock remains available to the infrastructure owner');
+    assert.deepStrictEqual(MarketListingPolicy.classify(stationMixedState, stationCandidate), { action: 'market', reason: 'market' });
+    assert(stationMixedDisposition.decisions.filter(row => Number(row.item.selfId) === Number(item.selfId))
         .every(row => row.reason !== 'npc_only_item'), 'native expected value decides the mapped book disposition');
 }
+assert.deepStrictEqual(stationMixedState, stationMixedBefore, 'the mixed infrastructure quote preserves physical stock');
 const protectedNpcState = {
     ...npcState,
     inventory: {

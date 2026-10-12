@@ -116,7 +116,17 @@ function fixture(predicate, description) {
     assert.strictEqual(result.state.stats.lastSafeEnchant.operations, 8);
 
     const weaponRow = physical.find((row) => Number(row.selfId) === Number(weapon.selfId));
-    const deposited = await BotWarehouseService.depositCold(second.state);
+    assert.deepStrictEqual(invoke('GameServer/Bot/Economy/ItemDisposition').warehouseCandidates(second.state), [],
+        'ordinary safe-enchanted stock is not a warehouse deposit');
+    const station = invoke('GameServer/Bot/Economy/CraftShopService').stationForSlot(0);
+    const warehouseOwner = await LifeState.upsertState({ ...second.state,
+        stats: { ...second.state.stats, craftStationId: station.id }
+    }, 'cold_safe_enchant_infrastructure_owner');
+    assert.strictEqual(warehouseOwner.characterId, character.id,
+        'the warehouse lifecycle keeps the same physical inventory owner');
+    assert.strictEqual(LifeState.cachedState(character.id).stats.craftStationId, station.id,
+        'the native persisted owner, including its current revision, carries the infrastructure role');
+    const deposited = await BotWarehouseService.depositCold(warehouseOwner);
     assert(deposited.items.some((item) => item.selfId === 955 && item.amount === 2),
         'unused D weapon scrolls should enter the normal warehouse lifecycle');
     await Database.execute(['UPDATE items SET enchant = 0 WHERE id = ? AND characterId = ?', [weaponRow.id, character.id]]);

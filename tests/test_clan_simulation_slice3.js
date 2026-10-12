@@ -93,16 +93,62 @@ async function main() {
         const [contributions] = await Database.execute(['SELECT COUNT(*) AS entries, SUM(amount) AS amount FROM clan_contributions WHERE clanId = ? AND targetLevel = 1', [created.clanId]]);
         assert.strictEqual(Number(contributions.amount), 2800000);
 
-        const warehouse = await Database.fetchClanWarehouseItems(created.clanId);
-        const adena = warehouse.find((item) => Number(item.selfId) === 57);
-        const stems = warehouse.find((item) => Number(item.selfId) === 1864);
-        const recipe = warehouse.find((item) => Number(item.selfId) === 5339);
+        const levelWarehouse = await Database.fetchClanWarehouseItems(created.clanId);
+        const adena = levelWarehouse.find((item) => Number(item.selfId) === 57);
         // Level 1 Adena was collected in the clan warehouse; the level-up spent 2.5M of it.
         assert.strictEqual(Number(adena.amount), 300000, 'the level-up spends the collected Adena');
         const [spent] = await Database.execute([`SELECT amount FROM clan_warehouse_ledger
             WHERE clanId = ? AND selfId = 57 AND operation = 'level_up_consume'`, [created.clanId]]);
         assert.strictEqual(Number(spent.amount), 2500000);
-        assert.strictEqual(Number(stems.amount), 15, 'free material surplus must be deposited atomically');
+        // Level 2 supplies need active native item goals. Keep the preceding
+        // goal:null dues/level-up case independent from paid physical delivery.
+        const GoalPolicy = invoke('GameServer/Clan/ClanGoalPolicy');
+        const Warehouse = invoke('GameServer/Clan/ClanWarehouseService');
+        const stemTemplate = DataCache.items.find(item => Number(item.selfId) === 1864);
+        const recipeTemplate = DataCache.items.find(item => Number(item.selfId) === 5339);
+        const supplyClan = (await ClanEconomyService.clanProjection()).find(row => row.id === created.clanId);
+        assert.strictEqual(supplyClan.level, 2);
+        supplyClan.state.goal = { ...GoalPolicy.buildGoal(supplyClan, {
+            itemId: 1864, itemName: stemTemplate.template.name, required: 15, progress: 0
+        }), goalKey: `slice3-supply:${created.clanId}:1864` };
+        supplyClan.state.productionGoal = { ...GoalPolicy.buildGoal(supplyClan, {
+            itemId: 5339, itemName: recipeTemplate.template.name, required: 1, progress: 0
+        }), goalKey: `slice3-supply:${created.clanId}:5339` };
+        for (const goal of [supplyClan.state.goal, supplyClan.state.productionGoal]) {
+            assert.strictEqual(goal.type, 'item');
+            assert(['preparing', 'executing'].includes(goal.status));
+        }
+        await Database.execute(['UPDATE clan_simulation_clans SET stateJson = ? WHERE clanId = ?',
+            [JSON.stringify(supplyClan.state), created.clanId]]);
+        const wallet = async id => Number((await Database.fetchItems(id)).find(row => Number(row.selfId) === 57)?.amount || 0);
+        const rewards = [[4300002, 500], [4300003, 250], [4300004, 1]];
+        const beforeDelivery = new Map();
+        for (const [id] of rewards) beforeDelivery.set(id, await wallet(id));
+        const freshClan = (await ClanEconomyService.clanProjection()).find(row => row.id === created.clanId);
+        const delivery = await Warehouse.resolveClan(freshClan, { batchSize: 4 });
+        assert.strictEqual(delivery.deposited, 3, 'both active goals consume only the three real item rows');
+        const warehouse = await Database.fetchClanWarehouseItems(created.clanId);
+        const stems = warehouse.find((item) => Number(item.selfId) === 1864);
+        const recipe = warehouse.find((item) => Number(item.selfId) === 5339);
+        assert.strictEqual(Number(warehouse.find(item => Number(item.selfId) === 57).amount), 299249,
+            'the treasury pays 15 native Stem buybacks at 50 plus one recipe buyback at 1');
+        for (const [id, reward] of rewards) {
+            const paid = beforeDelivery.get(id) + reward;
+            assert.strictEqual(await wallet(id), paid, 'delivery pays each physical owner exactly once');
+            const [saved] = await Database.execute(['SELECT adena, inventorySummary FROM bot_life_state WHERE characterId = ?', [id]]);
+            assert.strictEqual(Number(saved.adena), paid);
+            assert.strictEqual(Number(JSON.parse(saved.inventorySummary)[57].amount), paid,
+                'the saved wallet matches the physical delivery payment');
+        }
+        assert.strictEqual(300000 - 299249, rewards.reduce((total, [, reward]) => total + reward, 0),
+            'all treasury spending reaches the original item owners');
+        const replayClan = (await ClanEconomyService.clanProjection()).find(row => row.id === created.clanId);
+        assert.strictEqual((await Warehouse.resolveClan(replayClan, { batchSize: 4 })).deposited, 0,
+            'filled goals cannot take duplicate stock or repeat payment');
+        assert.strictEqual(Number((await Database.fetchClanWarehouseItems(created.clanId))
+            .find(item => Number(item.selfId) === 57).amount), 299249);
+        for (const [id, reward] of rewards) assert.strictEqual(await wallet(id), beforeDelivery.get(id) + reward);
+        assert.strictEqual(Number(stems.amount), 15, 'the active goal receives all owned Stem stock atomically');
         assert.strictEqual(Number(recipe.amount), 1, 'the clan warehouse keeps one recipe instance');
 
         const [leaderAdena] = await Database.execute(['SELECT amount FROM items WHERE characterId = ? AND selfId = 57', [4300001]]);
