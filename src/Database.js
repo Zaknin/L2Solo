@@ -2264,9 +2264,11 @@ function fenceLeasedColdInventoryUnsafe(characterId, changedIds) {
 // next simulationRevision, for a row its caller has checked.
 function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = null, statsPatch = null) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    const physical = LifeState.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ?', [Number(characterId)]));
+    const ids = [...new Set([57, ...changedIds].map(Number))];
+    const physical = LifeState.inventorySummaryFromItems(all(`SELECT * FROM items
+        WHERE characterId = ? AND selfId IN (${ids.map(() => '?').join(',')})`, [Number(characterId), ...ids]));
     const inventory = jsonObject(row.inventorySummary);
-    for (const id of new Set([57, ...changedIds].map(Number))) {
+    for (const id of ids) {
         if (physical[id]) inventory[id] = physical[id];
         else delete inventory[id];
     }
@@ -2276,7 +2278,7 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
     [JSON.stringify(inventory), adena, mp, statsPatch ? JSON.stringify(statsPatch) : null,
         statsPatch ? JSON.stringify(statsPatch) : null, now(), Number(characterId)]);
-    const inventoryPatch = Object.fromEntries([...new Set([57, ...changedIds].map(Number))]
+    const inventoryPatch = Object.fromEntries(ids
         .map(id => [id, physical[id] || null]));
     return { ...normalizeRow(coldSimulationRow(characterId)), inventoryPatch };
 }
@@ -6809,7 +6811,8 @@ const Database = {
         });
     },
 
-    transferInventoryToWarehouse(characterId, item) {
+    transferInventoryToWarehouse(characterId, item, { coldState = null } = {}) {
+        if (coldState && Number(coldState.characterId) !== Number(characterId)) return Promise.reject(new Error('economy_state_changed'));
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const source = one('SELECT id, amount, enchant FROM items WHERE id = ? AND characterId = ?', [item.id, characterId]);
             if (!source || Number(source.amount) < Number(item.amount)) throw new Error('inventory item changed');
@@ -6824,7 +6827,9 @@ const Database = {
             const inventoryAmount = Number(source.amount) - Number(item.amount);
             if (inventoryAmount <= 0) write('DELETE FROM items WHERE id = ? AND characterId = ?', [item.id, characterId]);
             else write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [inventoryAmount, item.id, characterId]);
-            return { warehouseId: Number(warehouseId), warehouseAmount, inventoryAmount, enchant: sourceEnchant };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [item.selfId]);
+            return { warehouseId: Number(warehouseId), warehouseAmount, inventoryAmount, enchant: sourceEnchant,
+                ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'warehouse:deposit')).then(result => {
             invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result;
         });

@@ -29,6 +29,7 @@ const originals = {
     execute: Database.execute,
     refreshInventory: LifeState.refreshInventory,
     upsertState: LifeState.upsertState,
+    acceptInventoryProjection: LifeState.acceptInventoryProjection,
     applyNpcLiquidation: LifeState.applyNpcLiquidation,
     applyWarehouseGearCleanup: LifeState.applyWarehouseGearCleanup,
     findByCharacterId: LifeState.findByCharacterId,
@@ -45,6 +46,18 @@ const originals = {
 };
 
 async function run() {
+    // The native warehouse boundary now owns the returned physical projection.
+    const projection = (state, item) => {
+        const held = state.inventory[item.selfId];
+        const inventory = { ...state.inventory, [item.selfId]: { ...held,
+            amount: held.amount - item.amount,
+            ...(held.instances ? { instances: held.instances.map(instance => Number(instance.id) === Number(item.id)
+                ? { ...instance, amount: instance.amount - item.amount } : instance).filter(instance => instance.amount > 0) } : {})
+        } };
+        return { state: { ...state, inventory, simulation: { ...state.simulation,
+            ownerId: 'legacy_main', revision: Number(state.simulation?.revision || 0) + 1 } } };
+    };
+    LifeState.acceptInventoryProjection = row => row.state;
     const material = { selfId: 1870, name: 'Animal Bone', amount: 20, kind: 'Other.Material', rank: 'none' };
     const trash = { selfId: 1, name: 'Short Sword', amount: 1, kind: 'Weapon.Sword', rank: 'none' };
     const usefulGear = { selfId: 2, name: 'Long Sword', amount: 1, kind: 'Weapon.Sword', rank: 'none' };
@@ -59,9 +72,10 @@ async function run() {
         { id: 33, selfId: 94, amount: 1, equipped: false },
         { id: 34, selfId: 94, amount: 1, equipped: false }
     ]);
-    Database.transferInventoryToWarehouse = (characterId, item) => {
+    Database.transferInventoryToWarehouse = (characterId, item, { coldState } = {}) => {
         calls.push({ characterId, ...item });
-        return Promise.resolve({ inventoryAmount: 0, warehouseAmount: item.amount });
+        return Promise.resolve({ inventoryAmount: 0, warehouseAmount: item.amount,
+            ...(coldState ? { coldLifeRow: projection(coldState, item) } : {}) });
     };
     Database.fetchWarehouseItems = () => Promise.resolve([]);
     LifeState.applyNpcLiquidation = (coldState, candidates, options) => Promise.resolve({
@@ -163,7 +177,7 @@ async function run() {
         ? [{ id: 38, selfId: 1870, amount: physicalMaterial, equipped: false }]
         : []);
     Database.fetchWarehouseItems = () => Promise.resolve([]);
-    Database.transferInventoryToWarehouse = async (_characterId, item) => {
+    Database.transferInventoryToWarehouse = async (_characterId, item, { coldState } = {}) => {
         transferAttempts += 1;
         activeDeposits += 1;
         maxActiveDeposits = Math.max(maxActiveDeposits, activeDeposits);
@@ -171,7 +185,8 @@ async function run() {
         try {
             if (physicalMaterial < item.amount) throw new Error('inventory item changed');
             physicalMaterial -= item.amount;
-            return { inventoryAmount: physicalMaterial, warehouseAmount: item.amount };
+            return { inventoryAmount: physicalMaterial, warehouseAmount: item.amount,
+                ...(coldState ? { coldLifeRow: projection(coldState, item) } : {}) };
         } finally {
             activeDeposits -= 1;
         }
@@ -429,6 +444,7 @@ run().catch((err) => {
     Database.execute = originals.execute;
     LifeState.refreshInventory = originals.refreshInventory;
     LifeState.upsertState = originals.upsertState;
+    LifeState.acceptInventoryProjection = originals.acceptInventoryProjection;
     LifeState.applyNpcLiquidation = originals.applyNpcLiquidation;
     LifeState.applyWarehouseGearCleanup = originals.applyWarehouseGearCleanup;
     LifeState.findByCharacterId = originals.findByCharacterId;
