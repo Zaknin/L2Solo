@@ -52,6 +52,16 @@ async function main() {
         assert.equal(Drops.expectedValue({ karma: 1, pk: 5, inventory: [bag] }, () => 100), 0);
         for (const protectedItem of [item(57, 'Etc.Adena'), item(5575, 'Etc.Adena'), item(10, 'Weapon.Sword'),
             item(6611, 'Weapon.Sword'), item(300, 'Other.Quest'), { ...bag, shadow: true }]) assert.equal(Drops.eligible(protectedItem), false);
+        for (const selfId of [5789, 5790]) {
+            for (const beginner of [item(selfId, 'Other.Soulshot'), { model: item(selfId, 'Other.Soulshot') },
+                { fetchSelfId: () => selfId, fetchAmount: () => 600 }]) {
+                assert.equal(Drops.eligible(beginner), false, 'beginner shots cannot leave their owner on PK death');
+                const state = { karma: 100, pk: 6, inventory: [beginner] };
+                assert.deepEqual(Drops.rollPlan(state, () => 0), []);
+                assert.equal(Drops.expectedValue(state, () => 100), 0);
+            }
+        }
+        assert.equal(Drops.eligible(item(1835, 'Other.Soulshot')), true, 'ordinary shots remain droppable');
         assert.equal(Drops.chance(weapon), 0.1); assert.equal(Drops.chance(armor), 0.4);
         done('ordered shared PK rolls, valuation, ten cap and protected items');
 

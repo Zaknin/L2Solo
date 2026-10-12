@@ -522,6 +522,7 @@ function saleCandidates(state, options = {}) {
         if (!npcOnly && !clanProgression && !isMarketRecipeItem(item)
             && !invoke('GameServer/Skills/SkillBookCatalog').isBook(selfId)
             && !isEnchantScroll(item)
+            && !CRYSTALS.has(selfId)
             && !SELLABLE_KINDS.some((prefix) => kind.startsWith(prefix))) return [];
 
         // NPC-only recipes and unmapped books are explicit cleanup targets. They

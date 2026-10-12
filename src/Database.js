@@ -2255,6 +2255,10 @@ function prepareCraftReservationsUnsafe(step, recipe) {
 function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (!step) return;
     const stats = jsonObject(step.row.statsJson), inventory = jsonObject(step.row.inventorySummary);
+    // Bilateral market acceptance also rechecks the current gear/craft/clan
+    // reserves inside its transaction, without a prepared economy command.
+    step.reserved ??= invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts({
+        level: Number(step.row.level), phase: step.row.phase, stats, inventory });
     const item = inventory[selfId] || {};
     if (item.protected || item.acceptedCustomer || item.assignedClan || item.available === false) throw Error('economy_material_protected');
     const goalReserve = stats.equipmentPlan?.status === 'active' && Number(stats.equipmentPlan.target?.selfId) === Number(selfId) ? 1 : 0;
@@ -6478,12 +6482,11 @@ const Database = {
         return inTransaction(() => {
             const character = one('SELECT id FROM characters WHERE username=? COLLATE NOCASE AND name=? COLLATE NOCASE', [username, name]);
             if (!character) return { affectedRows: 0 };
-            const slot = one('SELECT meetingId FROM board_trade_participants WHERE characterId=?', [character.id]);
-            if (slot?.meetingId) {
-                const result = TradeMeetings.terminal(slot.meetingId, false, 'character_deleted');
+            for (const meeting of TradeMeetings.active(character.id, true)) {
+                const result = TradeMeetings.terminal(meeting.id, false, 'character_deleted');
                 const row = result.meeting;
-                // Final credit is already durable. Remove the deleted actor's
-                // claim without erasing the surviving actor's acknowledgement.
+                // Refunds and completed deliveries are already durable. Clear
+                // every reference, retaining the survivor's replay receipt.
                 TradeMeetings.acknowledge(row.id, row.actorA);
                 TradeMeetings.acknowledge(row.id, row.actorB);
             }

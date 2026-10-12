@@ -20,6 +20,7 @@ class DueHeap {
         this.positions = new WeakMap();
         this.decisionHeads = [];
         this.playerHeads = [];
+        this.meetingHeads = [];
     }
 
     set(index, entry) {
@@ -34,14 +35,18 @@ class DueHeap {
         while (index >= 0) {
             let best = this.values[index]?.alarmKind === 'decision' ? this.values[index] : null;
             let player = this.values[index]?.playerWaiting ? this.values[index] : null;
+            let meeting = this.values[index]?.meetingTravel ? this.values[index] : null;
             for (const child of [index * 2 + 1, index * 2 + 2]) {
                 const candidate = child < this.values.length ? this.decisionHeads[child] : null;
                 if (candidate && (!best || this.compare(candidate, best) < 0)) best = candidate;
                 const waiting = child < this.values.length ? this.playerHeads[child] : null;
                 if (waiting && (!player || this.compare(waiting, player) < 0)) player = waiting;
+                const transit = child < this.values.length ? this.meetingHeads[child] : null;
+                if (transit && (!meeting || this.compare(transit, meeting) < 0)) meeting = transit;
             }
             this.decisionHeads[index] = best;
             this.playerHeads[index] = player;
+            this.meetingHeads[index] = meeting;
             if (!index) break;
             index = Math.floor((index - 1) / 2);
         }
@@ -49,6 +54,7 @@ class DueHeap {
 
     peekDecision() { return this.decisionHeads[0] || null; }
     peekPlayer() { return this.playerHeads[0] || null; }
+    peekMeeting() { return this.meetingHeads[0] || null; }
 
     up(index) {
         const entry = this.values[index];
@@ -96,6 +102,7 @@ class DueHeap {
         this.refreshDecision(this.values.length);
         this.decisionHeads.length = this.values.length;
         this.playerHeads.length = this.values.length;
+        this.meetingHeads.length = this.values.length;
         if (index < this.values.length) {
             this.set(index, last);
             const parent = Math.floor((index - 1) / 2);
@@ -341,11 +348,17 @@ function playerWaitingTransition(state, context) {
         && lifecycleKind(state, context) === 'resolver';
 }
 
+function meetingTravelTransition(state, context) {
+    return state?.activity === 'traveling' && !!state.stats?.tradeMeeting
+        && lifecycleKind(state, context) === 'resolver';
+}
+
 function priorityForResult(state, result) {
     const activity = String(result?.patch?.activity || state?.activity || '');
     if (activity === 'dead' || state?.activity === 'dead' || (result?.events || []).some((event) => (
         ['death', 'respawn', 'resurrection'].includes(String(event?.type || ''))
     ))) return 'P0';
+    if (state?.stats?.tradeMeeting) return 'P1';
     if ((result?.materialize?.items || []).some((item) => Number(item.selfId) !== 57 && Number(item.amount || 0) !== 0)) {
         return 'P1';
     }
@@ -759,7 +772,8 @@ class ColdSimulationKernel {
         const token = this.nextScheduleToken++;
         const heapEntry = { characterId: id, version: Number(version),
             dueAt: Number(dueAt || this.now()), scheduleToken: token,
-            playerWaiting: playerWaitingTransition(this.states.get(id)?.state, this.states.get(id)?.context) };
+            playerWaiting: playerWaitingTransition(this.states.get(id)?.state, this.states.get(id)?.context),
+            meetingTravel: meetingTravelTransition(this.states.get(id)?.state, this.states.get(id)?.context) };
         this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
         this.heap.push(heapEntry);
     }
@@ -942,7 +956,8 @@ class ColdSimulationKernel {
         }
         if (this.hasNormalCoverage(id)) {
             const scheduled = this.scheduleTokens.get(id);
-            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context)) {
+            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context)
+                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context)) {
                 this.schedule(id, current.version, scheduled.dueAt);
             }
             return false;
@@ -968,9 +983,14 @@ class ColdSimulationKernel {
         const limit = Math.max(0, Math.min(this.maxBatch, Number(capacity) || 0));
         const candidates = [];
         let commandsSelected = 0;
+        let meetingSelected = false;
         while (candidates.length + commandsSelected < limit && this.heap.size > 0) {
             const waiting = this.heap.peekPlayer();
-            const head = waiting && waiting.dueAt <= timestamp ? waiting : this.heap.peek();
+            const transit = !meetingSelected && this.heap.peekMeeting();
+            // One due paid arrival goes ahead of the ordinary hunt backlog;
+            // the rest of this batch keeps its existing deadline order.
+            const head = waiting && waiting.dueAt <= timestamp ? waiting
+                : transit && transit.dueAt <= timestamp ? transit : this.heap.peek();
             if (head.kind === 'alarm') {
                 if (head.dueAt > timestamp) break;
                 if (head.alarmKind === 'decision') {
@@ -987,6 +1007,7 @@ class ColdSimulationKernel {
             }
             if (Number(head.dueAt || 0) > timestamp) break;
             const entry = head;
+            if (entry.meetingTravel) meetingSelected = true;
             this.heap.remove(entry);
             this.consumeHeapEntry(entry);
             const id = Number(entry.characterId);

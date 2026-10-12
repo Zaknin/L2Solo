@@ -88,6 +88,14 @@ function townPlan(state, to) {
     };
 }
 
+// A newly accepted meeting waits for an already paid journey to finish.
+// Reserve its fare from that journey's physical destination, retaining the
+// current wallet and remaining scrolls (the previous journey is already paid).
+function meetingTownPlan(state, to) {
+    const destination = state.activity === 'traveling' ? state.stats?.travel?.to : null;
+    return townPlan(destination ? { ...state, loc: destination } : state, to);
+}
+
 // A trip into a town; the scroll and the fee are debited at once. Null when
 // no gatekeeper route leads there or the bot cannot pay the fee.
 function toTown(state, travel, timestamp = Date.now(), extraStats = {}) {
@@ -172,5 +180,5 @@ function travellerAnswers(state) {
 
 module.exports = {
     AUTHOR_TRIP_MS, RUN_SPEED, TOWN_RADIUS, HOP_MS,
-    honest, authorWalkMs, runMs, point, townPlan, toTown, toSpot, spotPlan, spotTripMs, positionAt, travellerAnswers
+    honest, authorWalkMs, runMs, point, townPlan, meetingTownPlan, toTown, toSpot, spotPlan, spotTripMs, positionAt, travellerAnswers
 };

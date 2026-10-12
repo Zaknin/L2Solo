@@ -3,6 +3,7 @@
 // The same ordered C4 policy drives physical death drops and their valuation.
 const CONTINUE_CHANCE = 0.4;
 const MAX_DROPS = 10;
+const BeginnerShots = require('./Items/C4BeginnerShots');
 const STARTER_IDS = new Set(require('../../data/Templates/Items/items.json')
     .flatMap(row => row.items.map(item => Number(item.selfId))));
 const HERO_IDS = new Set(Array.from({ length: 11 }, (_, i) => 6611 + i));
@@ -15,6 +16,7 @@ function eligible(item) {
     const kind = String(value(item, 'fetchKind', 'kind', ''));
     const data = item?.model || item || {};
     return id > 0 && ![57, 5575].includes(id) && !STARTER_IDS.has(id) && !HERO_IDS.has(id)
+        && !BeginnerShots.isRestricted(id)
         && !/quest|shadow|hero/i.test(kind) && !data.quest && !data.questItem
         && !data.shadow && !data.hero && !data.starter && !data.newbie
         && data.droppable !== false && !value(item, 'fetchPetLocked', 'petLocked', false)

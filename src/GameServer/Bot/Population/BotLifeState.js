@@ -2729,7 +2729,7 @@ const BotLifeState = {
             nextState.stats.decisionSeq = Math.max(inputDecisionSeq, plannedDecisionSeq) + 1;
             nextState.stats.activityLeaf = 0;
         }
-        if (!isMainThread) {
+        if (!isMainThread && !state.stats?.tradeMeeting) {
             const economyDeps = typeof options.economyDepsFor === 'function'
                 ? await options.economyDepsFor(nextState) : options.economyDeps || {};
             const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(nextState, { ...economyDeps, timestamp });

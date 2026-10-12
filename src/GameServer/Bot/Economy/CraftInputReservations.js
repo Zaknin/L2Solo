@@ -1,6 +1,6 @@
 'use strict';
 
-// Retain only physical inputs of the currently selected native craft DAG.
+// Retain physical inputs of the selected native craft or equipment exchange DAG.
 // A missing recipe/material remains an errand; it does not release the
 // ingredients already collected toward that profitable equipment funding.
 function selectedCraftAmounts(state, network) {
@@ -10,7 +10,7 @@ function selectedCraftAmounts(state, network) {
     function visit(node) {
         if (!node || visited.has(node)) return;
         visited.add(node);
-        if (node.kind === 'craft') for (const row of node.grossRequirements || node.requirements || []) {
+        if (node.kind === 'craft' || node.kind === 'luxury_exchange') for (const row of node.grossRequirements || node.requirements || []) {
             const id = Number(String(row.key).replace(/^item:/, ''));
             if (!id) continue;
             const count = Number(row.amount || 0) * (row.once ? 1 : Math.max(1, Number(node.batches || 1)));

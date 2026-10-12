@@ -49,6 +49,7 @@ const tests = [
     'tests/test_town_npc_immortality.js',
     'tests/test_player_transition_recovery.js',
     'tests/test_player_meeting_priority.js',
+    'tests/test_trade_meeting_scheduling.js',
     'tests/test_trade_meeting_chat.js',
     'tests/test_player_meeting_notifications.js',
     'tests/test_heine_npcs.js',
@@ -174,6 +175,7 @@ const tests = [
     'tests/test_item_acquisition_catalog.js',
     'tests/test_item_source_wishes.js',
     'tests/test_item_source_market_admission.js',
+    'tests/test_crystal_surplus_market.js',
     'tests/test_background_candidate_queue.js',
     'tests/test_cold_commit_admission.js',
     'tests/test_cold_message_pages.js',
@@ -760,6 +762,7 @@ const tests = [
     'tests/test_party_client_loot_distribution.js',
     'tests/test_party_combat_loot.js',
     'tests/test_ground_item_pickup_race.js',
+    'tests/test_pk_drop_pickup_enchant.js',
     'tests/test_pickup_session_lifecycle.js',
     'tests/test_pickup_c4_timing.js',
     'tests/test_npc_reward_non_stackable_amount.js',
@@ -951,8 +954,10 @@ const tests = [
     'tests/test_board_trade_meeting.js',
     'tests/test_trade_meeting_service.js',
     'tests/test_same_point_trade_meetings.js',
+    'tests/test_delete_character_trade_meetings.js',
     'tests/test_same_point_meeting_service.js',
     'tests/test_trade_meeting_worker_prepare.js',
+    'tests/test_trade_meeting_future_route.js',
     'tests/test_native_meeting_arrival_publication.js',
     'tests/test_cold_meeting_travel.js',
     'tests/test_bot_meeting_travel.js',
@@ -1146,6 +1151,8 @@ const optionalGeodataTests = new Set([
 const geodataOnly = process.argv.includes('--geodata');
 // Disposable recovery and market fixtures use the default configuration.
 const defaultConfigTests = new Set([
+    'tests/test_pk_drop_pickup_enchant.js',
+    'tests/test_delete_character_trade_meetings.js',
     'tests/test_bot_source_assessment_scope.js',
     'tests/test_wish_source_assessment_scope.js',
     'tests/test_bot_wtb_cached_survival_floor.js',

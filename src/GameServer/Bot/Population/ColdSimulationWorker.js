@@ -235,7 +235,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             const intents = invoke('GameServer/Bot/Economy/TradeIntent').project(input.state, economy.network, economy.projection,
                 id => economy.worth(id) ?? economy.price(id), 40);
             if (!intents) throw Error('trade_meeting_preparation_pending');
-            const routePlan = invoke('GameServer/Bot/Population/ColdTrip').townPlan(input.state, request.point);
+            const routePlan = invoke('GameServer/Bot/Population/ColdTrip').meetingTownPlan(input.state, request.point);
             if (!routePlan) throw Error('trade_meeting_route');
             const shared = /^meeting:([1-9][0-9]*)$/.exec(own.route.method);
             if (shared && Number(shared[1]) !== Number(input.state.stats?.tradeMeeting?.[0])) throw Error('trade_meeting_route_changed');
@@ -952,6 +952,10 @@ function startKernel(config = {}) {
                 ...(progressionChanged ? { classId: afterClassId } : {}),
                 ...(result.soulCrystals?.length ? { soulCrystals: result.soulCrystals } : {})
             };
+            // Accepted custody owns the next physical transition. Resume the
+            // original economic plan after the meeting releases the actor.
+            if (state.stats?.tradeMeeting) return { state: projected,
+                durable: Object.keys(durable).length ? durable : null };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
             const planner = invoke('GameServer/Bot/Population/ColdEconomyPlan');
             const economyEdges = planner.edges(state, projected, context, timestamp);
@@ -979,6 +983,7 @@ function startKernel(config = {}) {
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
         }),
         planLifecycle: async ({ state, context, timestamp }) => {
+            if (state.stats?.tradeMeeting) return null;
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
             if (karmaPlan) return karmaPlan;
             const previousPlan = state.stats?.equipmentPlan || null;
