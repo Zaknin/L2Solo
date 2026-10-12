@@ -181,7 +181,7 @@ async function run() {
         { spotId: 'danger', exp: -100, cycleMs: 10000, timestamp: at });
     assert(Efficiency.scores(losing, at).get('danger') < 0, 'an exclusively losing history still lowers its route score');
     const legacy = { ...losing, stats: { ...losing.stats, huntEfficiency: losing.stats.huntEfficiency
-        .map(row => ({ ...row, signature: row.signature.replace('net-xp-v1:', ''), exp: 10000 })) } };
+        .map(row => ({ ...row, signature: row.signature.replace('net-income-v3:', 'net-xp-v1:'), exp: 10000 })) } };
     assert.strictEqual(Efficiency.scores(legacy, at).size, 0, 'legacy gross-reward samples cannot bias net-XP routing');
     console.log('Solo survival, safer routing, cross-window deaths, persistent recovery and net death XP passed');
 }
