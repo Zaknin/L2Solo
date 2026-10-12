@@ -31,12 +31,12 @@ function state(characterId, classId, spotId = 'test-spot') {
     };
 }
 
-async function character(account, name) {
+async function character(account, name, initialAdena = 20000) {
     await Database.createAccount(account, 'secret');
     await Database.createCharacter(account, { name, race: 0, classId: 0, maxHp: 100, maxMp: 2000,
         sex: 0, face: 0, hair: 0, hairColor: 0, locX: 0, locY: 0, locZ: 0 });
     const id = Number((await Database.fetchCharacterName(name))[0].id);
-    await Database.setItem(id, { selfId: 57, name: 'Adena', amount: 20000, equipped: false, slot: 0 });
+    await Database.setItem(id, { selfId: 57, name: 'Adena', amount: initialAdena, equipped: false, slot: 0 });
     return id;
 }
 async function persistState(current) {
@@ -115,8 +115,9 @@ async function persistState(current) {
         Coordinator.markDirty = originalMarkDirty;
     }
 
-    const hotProviderId = await character('buff_service_hot_seller', 'HotBuffSeller');
-    const playerId = await character('buff_service_hot_buyer', 'HotBuffBuyer');
+    const initialProviderAdena = 20000, initialBuyerAdena = 30000;
+    const hotProviderId = await character('buff_service_hot_seller', 'HotBuffSeller', initialProviderAdena);
+    const playerId = await character('buff_service_hot_buyer', 'HotBuffBuyer', initialBuyerAdena);
     const skill = {
         fetchSelfId: () => 1040, fetchLevel: () => 3, fetchName: () => 'Shield',
         fetchConsumedMp: () => 20, fetchSpell: () => true,
@@ -124,8 +125,8 @@ async function persistState(current) {
         fetchSemantic: () => ({ effectType: 'buff', target: 'friendly', effect: 'shield' }),
         fetchTargetKind: () => 'friendly'
     };
-    function hotActor(id, name) {
-        const adena = { fetchSelfId: () => 57, fetchAmount() { return this.amount; }, setAmount(amount) { this.amount = amount; }, amount: 20000 };
+    function hotActor(id, name, initialAdena = 20000) {
+        const adena = { fetchSelfId: () => 57, fetchAmount() { return this.amount; }, setAmount(amount) { this.amount = amount; }, amount: initialAdena };
         const backpack = { items: [adena], fetchItemFromSelfId: () => backpack.items.find(item => item.fetchSelfId() === 57),
             fetchItems: () => backpack.items, insertItem: (_id, _selfId, data) => backpack.items.push({ ...adena, amount: data.amount }) };
         return { backpack, fetchId: () => id, fetchName: () => name, fetchLevel: () => 55,
@@ -134,9 +135,9 @@ async function persistState(current) {
             fetchMaxMp: () => 2000, mp: 2000, fetchMp() { return this.mp; }, setMp(mp) { this.mp = mp; },
             statusUpdateVitals: () => {} };
     }
-    const hotProvider = hotActor(hotProviderId, 'HotBuffSeller');
+    const hotProvider = hotActor(hotProviderId, 'HotBuffSeller', initialProviderAdena);
     hotProvider.skillset = { fetchSkill: () => skill };
-    const hotPlayer = hotActor(playerId, 'HotBuffBuyer');
+    const hotPlayer = hotActor(playerId, 'HotBuffBuyer', initialBuyerAdena);
     let inventoryPackets = 0;
     const providerSession = { actor: hotProvider, dataSendToMeAndOthers: () => {}, dataSendToMe: () => { inventoryPackets += 1; } };
     const playerSession = { actor: hotPlayer, dataSendToMe: () => { inventoryPackets += 1; } };
@@ -167,17 +168,19 @@ async function persistState(current) {
         assert.strictEqual(result.applied, 1);
         assert.strictEqual(result.paid, quote.price);
         assert.strictEqual(hotProvider.fetchMp(), 1980);
-        assert.strictEqual(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount(), 20000 - quote.price);
-        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, 20000 + quote.price);
+        assert.strictEqual(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount(), initialBuyerAdena - quote.price);
+        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, initialProviderAdena + quote.price);
         assert.strictEqual(inventoryPackets, 2, 'both inventories refresh after payment');
         Effects.execute = () => ({ effect: null });
         const failedQuote = Hot.quote(playerSession, providerSession);
-        const failed = await Hot.buy(playerSession, { wait: async () => {} });
         assert(failedQuote.ok);
-        assert.strictEqual(failed.applied, 0);
+        assert(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount() >= failedQuote.price,
+            'the physical buyer wallet funds the intended null-effect attempt');
+        const failed = await Hot.buy(playerSession, { wait: async () => {} });
+        assert.strictEqual(failed.applied, 0, `the intended null-effect attempt returned ${JSON.stringify(failed)}`);
         assert.strictEqual(failed.paid, 0, 'a rejected effect is refunded');
-        assert.strictEqual(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount(), 20000 - quote.price);
-        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, 20000 + quote.price);
+        assert.strictEqual(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount(), initialBuyerAdena - quote.price);
+        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, initialProviderAdena + quote.price);
         assert.strictEqual(inventoryPackets, 6, 'payment and refund both refresh inventories');
         hotPlayer.fetchLocX = () => 500;
         const distantQuote = Hot.buildQuote(playerSession, providerSession);
@@ -193,20 +196,35 @@ async function persistState(current) {
         const unaffordable = await Hot.buy(playerSession);
         assert.strictEqual(unaffordable.ok, false);
         assert.match(unaffordable.reason, /need .* Adena/);
-        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, 20000 + quote.price);
-        // The E1 native hour can price this package above a quarter of the old 20k fixture wallet.
-        await Database.execute(['UPDATE items SET amount=50000 WHERE characterId=? AND selfId=57', [playerId]]);
-        hotPlayer.backpack.fetchItemFromSelfId(57).setAmount(50000);
+        assert.strictEqual((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount, initialProviderAdena + quote.price);
         Effects.execute = () => ({ effect: { key: 'shield' } });
         Policy.serviceClass = actor => actor === hotProvider;
         Manager.sessions = [providerSession, playerSession];
+        const autoQuote = Hot.buildQuote(playerSession, providerSession);
+        assert(autoQuote.ok && autoQuote.price > 0);
+        const autoIncomeBudget = Policy.incomeForTenMinutes(hotPlayer) * 0.8;
+        assert(autoQuote.price <= autoIncomeBudget,
+            `native auto quote ${autoQuote.price} fits this buyer's hunting-income budget ${autoIncomeBudget}`);
+        // This separate auto case funds the native quarter-wallet guard at
+        // the real quote, in both physical persistence and the live bag.
+        const autoBuyerAdena = Math.max(50000, Math.ceil(autoQuote.price / 0.25));
+        await Database.execute(['UPDATE items SET amount=? WHERE characterId=? AND selfId=57', [autoBuyerAdena, playerId]]);
+        hotPlayer.backpack.fetchItemFromSelfId(57).setAmount(autoBuyerAdena);
+        assert(autoQuote.price <= hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount() * 0.25);
+        assert.strictEqual((await Database.fetchItems(playerId)).find(item => item.selfId === 57).amount, autoBuyerAdena);
         const sellerBeforeAuto = (await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount;
         assert.strictEqual(Hot.maybeAutoBuy(playerSession), true, 'a nearby solo bot requests a useful buff');
         for (let attempt = 0; playerSession.buffServicePending && attempt < 100; attempt++) {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
         assert.strictEqual(playerSession.buffServicePending, false);
-        assert((await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount > sellerBeforeAuto);
+        const sellerAfterAuto = (await Database.fetchItems(hotProviderId)).find(item => item.selfId === 57).amount;
+        const buyerAfterAuto = (await Database.fetchItems(playerId)).find(item => item.selfId === 57).amount;
+        assert.strictEqual(sellerAfterAuto, sellerBeforeAuto + autoQuote.price);
+        assert.strictEqual(buyerAfterAuto, autoBuyerAdena - autoQuote.price);
+        assert.strictEqual(hotPlayer.backpack.fetchItemFromSelfId(57).fetchAmount(), buyerAfterAuto);
+        assert.strictEqual(sellerAfterAuto + buyerAfterAuto, sellerBeforeAuto + autoBuyerAdena,
+            'native auto purchase conserves both physical wallets');
     } finally {
         Policy.hotSkills = originals.skills; Policy.serviceClass = originals.serviceClass;
         Manager.sessions = originals.sessions; Planner.needsSkill = originals.needs;
