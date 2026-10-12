@@ -360,8 +360,7 @@ async function run() {
     const paid = Catalog.applyTraining(withBook, { spentSp: valuable.sp, consumedBooks: [{ selfId: valuable.selfId, amount: 1 }] });
     assert.equal(paid.sp, withBook.sp - valuable.sp);
     assert.equal(paid.inventory[valuable.selfId].amount, 1);
-    // No part of the review reads sp (perf C3): it is out of the key.
-    assert.equal(Economy.inputKey(mage), Economy.inputKey({ ...mage, sp: mage.sp + 1 }));
+    assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, sp: mage.sp + 1 }));
     assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, stats: { ...mage.stats,
         coldCombat: { ...mage.stats.coldCombat, skills: [{ selfId: valuable.skillId, level: 1 }] } } }));
     const artisan = Economy.forState({ ...base, characterId: 904, level: 70, adena: 1e6,
