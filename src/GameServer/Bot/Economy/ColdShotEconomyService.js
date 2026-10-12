@@ -78,6 +78,7 @@ function recheck(state, selected) {
         } else if (recordId === -2 && Number.isSafeInteger(lineId) && price > 0 && revision > 0) {
             exit = require('./ShotSalePolicy').exit(state, Number(recipe.productId), { board,
                 town: Policy.townForCode(lineId), trip, current: price, lot: Number(recipe.productCount),
+                productionUnits: batches * Number(recipe.productCount),
                 reserve: Math.max(0, Number(selected.ownReserve || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
                     - Number(state.acceptedIncoming?.[recipe.productId] || 0)),
                 npcOffers: Source.npcOffersFor(Number(recipe.productId)),

@@ -419,7 +419,7 @@ function canResumeWarehouseMarketSale(state) {
 
 // cleanupNeed: the member's bag need when the caller already has it.
 function canTakePartyMarketBreak(party, members, member, timestamp = Date.now(), cleanupNeed = undefined, goal = null) {
-    if (!PartyMarketBreak.allowed(party, member, timestamp, cleanupNeed)) return false;
+    if (!PartyMarketBreak.allowed(party, member, timestamp, cleanupNeed, goal)) return false;
     if (PartyMarketBreak.clanDuty(party)) return members.length > 1;
     if (!PartyMarketBreak.sessionReady(party, member, goal, timestamp, Config)) return false;
     const role = PartyComposition.roleForState(member);

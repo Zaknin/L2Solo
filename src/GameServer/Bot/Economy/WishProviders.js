@@ -925,9 +925,11 @@ function buildProjection(state, ctx, deps) {
     }
     for (const kind of ['shots', 'potions', 'scrolls']) {
         const stock = ctx.stock(kind);
-        // One missing amount (MVP-3): the survival tranche and the rest, as
-        // every restock executor buys them.
-        const amount = Number(stock?.survivalMissing || 0) + (progression.required ? 0 : Number(stock?.missing || 0));
+        // A necessary refill covers the planned outing in the same purchase.
+        // Only the survival shortfall outranks unfinished equipment; once that
+        // floor is filled, optional stock cannot keep the kit on hold.
+        const amount = Number(stock?.survivalMissing || 0)
+            + (progression.required && kind !== 'shots' ? 0 : Number(stock?.missing || 0));
         if (Diagnostics.active() && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
             caller: deps.caller || 'wish_provider', trigger: 'projection_build',
             phase: 'wish_need', reason: !(amount > 0) ? 'target_satisfied' : !(stock.unitPrice > 0)
