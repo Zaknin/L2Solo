@@ -31,6 +31,7 @@ const adapters = {
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveByProductId: id => allowCraft && id === 101 ? recipe : null, resolveByRecipeId: id => id === 301 ? recipe : null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => true },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
     'GameServer/Bot/Economy/MarketCounters': { moveOf: () => 0, counterOf: () => 'armor c' },

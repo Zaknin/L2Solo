@@ -117,6 +117,8 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         const deadline = Date.now() + 15000;
         while (!received.some(predicate)) {
             if (workerError) throw workerError;
+            const failure = received.find(message => message.type === 'fault');
+            if (failure) throw Error(JSON.stringify(failure));
             if (Date.now() >= deadline) throw Error(`worker escrow timeout: ${JSON.stringify(received.map((m) => m.type))}`);
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
@@ -176,6 +178,8 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         const deadline = Date.now() + 15000;
         while ([7, 8, 20, 30].some((id) => !proposals.has(id))) {
             if (workerError) throw workerError;
+            const failure = received.find(message => message.type === 'fault');
+            if (failure) throw Error(JSON.stringify(failure));
             if (Date.now() >= deadline) throw Error(`worker escrow proposals: ${JSON.stringify(received.map((m) => m.type))}`);
             for (const message of received.filter((m) => m.type === 'proposal_batch')) {
                 for (const proposal of message.payload.proposals) proposals.set(Number(proposal.characterId), proposal);
