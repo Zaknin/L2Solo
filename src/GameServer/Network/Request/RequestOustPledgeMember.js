@@ -1,11 +1,6 @@
 const ReceivePacket = invoke('Packet/Receive');
-const World = invoke('GameServer/World/World');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const ServerResponse = invoke('GameServer/Network/Response');
-
-function onlineSessionByActorId(id) {
-    return (World.user?.sessions || []).find((session) => Number(session.actor?.fetchId?.()) === Number(id));
-}
 
 function requestOustPledgeMember(session, buffer) {
     const packet = new ReceivePacket(buffer);
@@ -27,7 +22,7 @@ function consume(session, data) {
     }
 
     const member = clan.members.find((entry) => entry.name.toLowerCase() === String(data.name || '').toLowerCase());
-    const targetSession = member ? onlineSessionByActorId(member.id) : null;
+    const targetSession = member ? ClanService.onlineSessionByActorId(member.id) : null;
     if (!member || Number(member.id) === Number(actor.fetchId())) {
         session.dataSendToMe(ServerResponse.actionFailed());
         return Promise.resolve({ ok: false, code: member ? 'leader_cannot_leave' : 'not_member' });

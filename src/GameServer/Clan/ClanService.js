@@ -567,6 +567,7 @@ const ClanService = {
         return { clan, member };
     },
 
+    onlineSessionByActorId,
     onlineSessions: clanOnlineSessions,
     broadcastAppearance: broadcastClanAppearance
 };
