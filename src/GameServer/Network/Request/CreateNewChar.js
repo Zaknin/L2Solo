@@ -26,7 +26,7 @@ function createNewChar(session, buffer) {
         .readD()  // Hair Color
         .readD(); // Face
 
-    consume(session, {
+    return consume(session, {
              name: packet.data[ 0],
              race: packet.data[ 1],
               sex: packet.data[ 2],
@@ -38,7 +38,7 @@ function createNewChar(session, buffer) {
 }
 
 function consume(session, data) {
-    Database.fetchCharacterName(data.name).then((rows) => {
+    return Database.fetchCharacterName(data.name).then((rows) => {
         if (rows[0]) {
             return session.dataSendToMe(
                 ServerResponse.charCreateFail(0x02)
@@ -54,15 +54,19 @@ function consume(session, data) {
             };
 
             return Database.createCharacter(session.accountId, data).then((packet) => {
+                // Success is reported once the starter kit is written; a
+                // failed write reaches the catch below instead.
+                const charId = Number(packet.insertId);
+                return Promise.all([
+                    awardBaseSkills   (charId, data.classId),
+                    awardBaseGear     (charId, data.classId),
+                    awardBaseShots    (charId, data.classId),
+                    awardBaseShortcuts(charId, data.classId)
+                ]);
+            }).then(() => {
                 session.dataSendToMe(
                     ServerResponse.charCreateSuccess()
                 );
-
-                const charId = Number(packet.insertId);
-                awardBaseSkills   (charId, data.classId);
-                awardBaseGear     (charId, data.classId);
-                awardBaseShots    (charId, data.classId);
-                awardBaseShortcuts(charId, data.classId);
 
                 return Shared.fetchCharacters(session.accountId).then((characters) => {
                     Shared.enterCharacterHall(session, characters);
@@ -85,6 +89,7 @@ function fetchSpawnPoints(classId) {
 }
 
 function awardBaseSkills(id, classId) {
+    const writes = [];
     DataCache.fetchSkillTreeFromClassId(classId, (skillTree) => {
         const skills = skillTree.skills;
         const level1 = skills?.filter((ob) => ob.levels.find((ob) => ob.pLevel === 1)) ?? [];
@@ -93,31 +98,30 @@ function awardBaseSkills(id, classId) {
             skill.levels = skill.levels.filter((ob) => ob.pLevel === 1);
             DataCache.fetchSkillFromSelfId(skill.selfId, (skillDetails) => {
                 skill = { ...utils.crushOb(skill), passive: skillDetails.template?.passive ?? false };
-                Database.setSkill(skill, id);
+                writes.push(Database.setSkill(skill, id));
             });
         });
     });
+    return Promise.all(writes);
 }
 
 function awardBaseGear(id, classId) {
     const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items;
 
-    (items ?? []).forEach((item) => {
+    return Promise.all((items ?? []).map((item) => {
         item.slot = ItemTemplateIndex.findStrict(DataCache.items, item.selfId)?.etc?.slot ?? 0;
-        Database.setItem(id, item);
-    });
+        return Database.setItem(id, item);
+    }));
 }
 
 function awardBaseShots(id, classId) {
-    ShotStock.ensureCharacterStock(id, { classId, targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT })
+    return ShotStock.ensureCharacterStock(id, { classId, targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT })
         .catch((err) => utils.infoWarn('Character', 'failed to award starter shots: %s', err.message));
 }
 
 function awardBaseShortcuts(id, classId) {
     const shortcuts = ClassProgression.firstClassRow(DataCache.newbieShortcuts, classId, 'strict')?.shortcuts ?? [];
-    shortcuts.forEach((shortcut) => {
-        Database.setShortcut(id, shortcut);
-    });
+    return Promise.all(shortcuts.map((shortcut) => Database.setShortcut(id, shortcut)));
 }
 
 module.exports = createNewChar;
