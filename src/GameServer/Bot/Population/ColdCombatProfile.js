@@ -525,7 +525,38 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
         : state.characterId || saved ? [] : skillsFromTree(classId, level);
 }
 
+// One economy build (EconomyContext.forState) is synchronous and reads the
+// bot's own profile at one timestamp up to three times: the income route's
+// target matchup, the gear source facts and the bag safety (L75). Nothing in
+// the build writes the profile's inputs (inventory rows, coldCombat, level,
+// class, hennas); the planners work on copies. The scope holds that one
+// profile until the build returns; another state, timestamp or any option
+// (a night probe) builds as before. Equipment preparation only shares item
+// rows and never changes a profile's values. Each caller gets its own
+// top-level copy, as from a fresh build.
+let profileScope = null;
+function withProfileScope(state, work) {
+    const outer = profileScope;
+    profileScope = { state, timestamp: NaN, profile: null };
+    try { return work(); }
+    finally { profileScope = outer; }
+}
+function noOptions(options) {
+    for (const _ in options) return false;
+    return true;
+}
+
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
+    const scope = profileScope !== null && profileScope.state === state && noOptions(options) ? profileScope : null;
+    if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
+    const profile = buildProfile(state, timestamp, options);
+    if (scope === null) return profile;
+    scope.timestamp = timestamp;
+    scope.profile = profile;
+    return { ...profile };
+}
+
+function buildProfile(state, timestamp, options) {
     const saved = state.stats?.coldCombat;
     const classId = number(saved?.classId, number(state.stats?.classId, number(state.classId)));
     const template = classTemplate(classId);
@@ -969,7 +1000,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

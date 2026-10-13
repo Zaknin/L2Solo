@@ -713,7 +713,14 @@ function basics(state = {}, deps = {}) {
     return { persona, price, timestamp, ...foundation(state, deps, persona, timestamp, price) };
 }
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
+// The build reads the bot's own combat profile several times at one
+// timestamp; one build of it serves them (ColdCombatProfile.withProfileScope).
+let CombatProfile = null;
 function forState(state = {}, deps = {}) {
+    return (CombatProfile ||= invoke('GameServer/Bot/Population/ColdCombatProfile'))
+        .withProfileScope(state, () => buildForState(state, deps));
+}
+function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('context', 'request');
     if (diagnostic && isMainThread && state.phase === 'cold') {

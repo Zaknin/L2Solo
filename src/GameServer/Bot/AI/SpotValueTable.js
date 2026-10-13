@@ -50,9 +50,10 @@ function useSpots(source) {
     spotSource = typeof source === 'function' ? source : () => source || EMPTY_SPOTS;
 }
 
-function refreshCatalog() {
+// rates: the profile the caller has just read (one rate read per call, L75).
+function refreshCatalog(rates = ProgressionRates.profile()) {
     const spots = spotSource() || EMPTY_SPOTS;
-    const revision = Rewards.revision();
+    const revision = Rewards.revision(rates);
     if (spots !== rewardSpots || spots.length !== rewardSpotCount || revision !== rewardRevision) {
         rewardSpots = spots; rewardSpotCount = spots.length;
         rewardRevision = revision;
@@ -183,7 +184,7 @@ const expGapFactor = require('../../Progression/MobExperience').gapFactor;
 // alone there at this level.
 function value(spotId, role, level, shots = true, rewardOptions = {}) {
     const t = load(), rates = ProgressionRates.profile();
-    refreshCatalog();
+    refreshCatalog(rates);
     refreshValueMemo(t, rates);
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
     // Callers own the result: a copy, never the remembered row.
@@ -266,8 +267,8 @@ function referenceLevel(spotId, role, shots = true) {
 // Static role/level/shot result, shared by every bot of that role. Built
 // once per game-data combination, never by walking the population.
 function best(role, level, shots = true, metric = 'exp') {
-    refreshCatalog();
     const t = load(), rates = ProgressionRates.profile();
+    refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
         bestRows.clear(); incomeRows.clear();
@@ -288,7 +289,7 @@ function best(role, level, shots = true, metric = 'exp') {
 // on every actor tick. Final safety, occupancy and travel remain actor facts.
 function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
     const t = load(), rates = ProgressionRates.profile();
-    refreshCatalog();
+    refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
         incomeRows.clear(); bestRows.clear(); valueMemo.clear();
