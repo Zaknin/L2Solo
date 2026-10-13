@@ -343,6 +343,31 @@ function fakeActor(id, name, options = {}) {
         assert.strictEqual(heldMember.fetchClanId(), 0, 'the dissolved clan member is cleared');
         assert.strictEqual(heldLeader.fetchClanId(), 0, 'the leader is cleared');
         assert.deepStrictEqual(heldResult.sessions, [heldLeaderSession], 'dissolve UI goes only to sessions still on a dissolved member');
+
+        // E265: the member connection switches to an alt of the SAME clan during
+        // the write; the alt is a member of the dissolved clan and is cleared too.
+        Database.fetchClanCharacters = () => Promise.resolve(managedMembers);
+        await ClanService.reload();
+        const altClan = ClanService.findById(managedClanRow.id);
+        const altLeader = fakeActor(2000010, 'Warden', { clanId: altClan.id, clanPrivileges: ClanRules.CP_ALL, title: 'Chief' });
+        const altFirst = fakeActor(2000011, 'ColdMina', { clanId: altClan.id, title: 'Scout' });
+        const altSecond = fakeActor(2000013, 'MinaAlt', { clanId: altClan.id, clanPrivileges: 8, title: 'Alt' });
+        const altLeaderSession = new PlayerSession(altLeader);
+        const altMemberSession = new PlayerSession(altFirst);
+        World.user = { sessions: [altLeaderSession, altMemberSession] };
+        let releaseAlt;
+        Database.dissolveClan = () => new Promise((resolve) => {
+            releaseAlt = () => resolve({ ok: true, memberIds: [2000010, 2000011, 2000013] });
+        });
+        const altDissolve = ClanService.dissolve(altLeader);
+        altMemberSession.actor = altSecond;
+        releaseAlt();
+        const altResult = await altDissolve;
+        assert.strictEqual(altSecond.fetchClanId(), 0, 'an alt of the dissolved clan selected during the write is cleared');
+        assert.strictEqual(altSecond.fetchTitle(), '', 'the alt loses the clan title');
+        assert.strictEqual(altSecond.fetchClanPrivileges(), 0, 'the alt loses the clan privileges');
+        assert.strictEqual(altFirst.fetchClanId(), 0, 'the remembered member is cleared');
+        assert.deepStrictEqual(altResult.sessions, [altLeaderSession, altMemberSession], 'the alt session gets the dissolve UI');
     } finally {
         Database.fetchClans = originalFetchClans;
         Database.fetchClanCharacters = originalFetchClanCharacters;
