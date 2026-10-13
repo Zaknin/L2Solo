@@ -90,13 +90,20 @@ async function renderNative(session, open = false, message = '') {
 function handler(session, parts) {
     const mode = parts[1] || 'friends';
     if (mode === 'request' && parts[2]) {
-        return LifeState.findByName(parts[2]).then((state) => BotFriendship.request(session, state).then((result) => {
-            const name = state?.name || parts[2];
-            const message = result.ok
-                ? `${name} accepted your friend request.`
-                : `${name} declined the request: ${requestReasonText(result.reason)}.`;
-            return render(session, 'add', parts[3], { ok: result.ok, message });
-        }));
+        // The friendship is the character's that asked; a character selected
+        // during the lookup or the write neither owns it nor gets the page.
+        const actor = session.actor;
+        return LifeState.findByName(parts[2]).then((state) => {
+            if (session.actor !== actor) return;
+            return BotFriendship.request(session, state).then((result) => {
+                if (session.actor !== actor) return;
+                const name = state?.name || parts[2];
+                const message = result.ok
+                    ? `${name} accepted your friend request.`
+                    : `${name} declined the request: ${requestReasonText(result.reason)}.`;
+                return render(session, 'add', parts[3], { ok: result.ok, message });
+            });
+        });
     }
     if (mode === 'remove' && parts[2]) {
         return BotFriendship.remove(session, parts[2]).then((result) => render(session, 'friends', parts[3], {

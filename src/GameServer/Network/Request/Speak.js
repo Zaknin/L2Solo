@@ -94,7 +94,10 @@ function handlePrivateTell(session, data) {
     // a valid private-tell target. Resolve that identity before rejecting the
     // tell so the message can enter the same cold LLM dialogue path.
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const actor = session.actor;
     return LifeState.findByName(target).then((state) => {
+        // A character selected during the lookup does not send this tell.
+        if (session.actor !== actor) return false;
         if (!state) {
             return World.messageBotByName(session, session.actor, target, text, 'client_tell');
         }

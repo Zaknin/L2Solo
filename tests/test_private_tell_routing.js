@@ -98,6 +98,19 @@ try {
     assert.deepStrictEqual(decode(packets.at(-1)), [2000001, 2, '->OtherPlayer', 'hello human']);
     assert.deepStrictEqual(decode(incoming[0]), [2000001, 2, 'Slava', 'hello human'], 'recipient still sees the actual sender');
 
+    // E252: the cold tell waits for the bot lookup; a character selected
+    // meanwhile neither sends the tell nor gets its echo.
+    let releaseCold;
+    LifeState.findByName = () => new Promise((resolve) => { releaseCold = () => resolve({ name: 'HeldBot' }); });
+    World.user.sessions = [];
+    routedTell = null;
+    const echoed = packets.length;
+    await SpeakRequest(playerSession, privateTellBuffer('held tell', 'heldbot'));
+    playerSession.actor = actor('Replacement', 2000009);
+    releaseCold();
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(routedTell, null, 'a tell is not sent as another character');
+    assert.strictEqual(packets.length, echoed, 'no echo reaches another character');
 } finally {
     LifeState.findByName = originalFindCold;
     World.user = originalUsers;
