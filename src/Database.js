@@ -356,7 +356,9 @@ function historyOutboxUnsafe(kind, payload) {
 }
 
 // The history thread moved the outbox rows up to `upTo`; delete them from the
-// world through the write queue, one delete at a time.
+// world through the write queue, one delete at a time. A failed delete is not
+// repeated at once (a lasting fault would loop in microtasks): the next report
+// from the history thread retries it, up to the highest id reported.
 let outboxDeletedUpTo = 0;
 let outboxDeleteWanted = 0;
 let outboxDeleting = false;
@@ -366,12 +368,11 @@ function deleteMovedOutbox(upTo) {
     outboxDeleting = true;
     const target = outboxDeleteWanted;
     enqueue(() => write('DELETE FROM history_outbox WHERE id <= ?', [target]), { operation: 'history:outbox-delete' })
-        .then(() => { outboxDeletedUpTo = target; })
-        .catch(() => null)
-        .finally(() => {
+        .then(() => {
+            outboxDeletedUpTo = target;
             outboxDeleting = false;
             if (outboxDeleteWanted > outboxDeletedUpTo) deleteMovedOutbox(outboxDeleteWanted);
-        });
+        }, () => { outboxDeleting = false; });
 }
 
 // Waits until every write queued before the call is committed and moved into
