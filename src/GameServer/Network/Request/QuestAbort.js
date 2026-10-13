@@ -7,8 +7,11 @@ function questAbort(session, buffer) {
     const questId = Number(packet.data[0]);
     const QuestService = invoke('GameServer/Quest/QuestService');
 
+    const actor = session.actor;
     return QuestService.mutate(session, async () => {
+        if (session.actor !== actor) return;
         await QuestService.ensureLoaded(session);
+        if (session.actor !== actor) return;
         const state = session.questStates?.get(questId);
         if (state?.isStarted()) {
             if (state.quest.onAbort) await state.quest.onAbort(state);
