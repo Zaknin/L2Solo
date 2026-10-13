@@ -149,6 +149,42 @@ function fakeActor(id, name, options = {}) {
         BotManager.botTell = originalBotTell;
     }
 
+    // E255: the invite belongs to the invited character, not to the connection.
+    // After Restart and another character, an answer must not join that character.
+    {
+        const RequestAnswerJoinPledge = invoke('GameServer/Network/Request/RequestAnswerJoinPledge');
+        const invitedPlayer = fakeActor(2000003, 'Invited', { level: 22 });
+        const replacement = fakeActor(2000004, 'Replacement', { level: 22 });
+        const inviterSession = new PlayerSession(leader);
+        const invitedSession = new PlayerSession(invitedPlayer);
+        let added = 0;
+        try {
+            World.user = { sessions: [inviterSession, invitedSession] };
+            ClanService.findById = (id) => (Number(id) === Number(clan.id) ? clan : null);
+            ClanService.canInvite = (requestor, target) => (
+                requestor === leader && (target === invitedPlayer || target === replacement)
+                    ? { ok: true, clan }
+                    : { ok: false, code: 'unexpected_invite' }
+            );
+            ClanService.addMember = () => { added += 1; return Promise.resolve({ ok: true, clan, member: {} }); };
+            ClanService.onlineSessions = () => [];
+
+            RequestJoinPledge.consume(inviterSession, { targetId: invitedPlayer.fetchId() });
+            assert.ok(invitedSession.pendingClanInvite, 'player target should get a pending invite');
+            invitedSession.actor = replacement;
+            const answer = await RequestAnswerJoinPledge.consume(invitedSession, { answer: 1 });
+            assert.strictEqual(answer.code, 'missing_invite', 'an answer from another character is refused like an expired invite');
+            assert.strictEqual(added, 0, 'the replacement character must not join the clan');
+            assert.strictEqual(invitedSession.pendingClanInvite, null, 'the stale invite is consumed');
+        } finally {
+            World.user = { sessions: originalWorldSessions || [] };
+            ClanService.findById = originalFindById;
+            ClanService.canInvite = originalCanInvite;
+            ClanService.addMember = originalAddMember;
+            ClanService.onlineSessions = originalOnlineSessions;
+        }
+    }
+
     const originalFetchClans = Database.fetchClans;
     const originalFetchClanCharacters = Database.fetchClanCharacters;
     const originalUpdateCharacterTitle = Database.updateCharacterTitle;

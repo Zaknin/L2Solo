@@ -29,8 +29,11 @@ function consume(session, data) {
         return;
     }
 
+    // The invite belongs to the invited character: after Restart the same
+    // connection may answer for another one.
     targetSession.pendingClanInvite = {
         requestorSession: session,
+        invitedActor: target,
         clanId: allowed.clan.id
     };
 

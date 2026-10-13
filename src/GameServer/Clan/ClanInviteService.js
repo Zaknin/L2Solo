@@ -28,7 +28,7 @@ function accept(session, options = {}) {
     const invite = session.pendingClanInvite;
     session.pendingClanInvite = null;
 
-    if (!invite?.requestorSession?.actor) {
+    if (!invite?.requestorSession?.actor || invite.invitedActor !== session.actor) {
         session.dataSendToMe(ServerResponse.actionFailed());
         return Promise.resolve({ ok: false, code: 'missing_invite' });
     }
