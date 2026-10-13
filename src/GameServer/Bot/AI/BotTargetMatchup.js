@@ -79,6 +79,10 @@ function coldProfiles(profile, state = {}, timestamp = Date.now()) {
         if (skill) profiles.push({ ...invoke('GameServer/Bot/Population/ColdSummonProfile')(profile, Cold.summonDetails(skill)),
             role: 'dps', skills: [], soloDamageReceiver: false });
     }
+    if ((profile.role || Roles.combatRoleFor(profile)) === 'mage') {
+        profiles[0].soloAttackScores = invoke('GameServer/Bot/Population/ColdClassPolicy')
+            .soloAttackScores(profiles[0], { summon: profiles.length > 1 });
+    }
     return profiles;
 }
 
@@ -160,6 +164,7 @@ function channels(profile, target) {
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
             : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef);
         result.push({ weight, modifier: modifier(target, semantic, magic, kind), magic,
+            soloScore: profile.soloAttackScores?.[skill.selfId],
             survivalWeight: Math.min(weight, hitDamage / Math.max(0.25, number(skill.reuse, 0) / 1000)),
             damageBudget: number(skill.mp, 0) > 0
                 ? Math.floor(number(profile.maxMp, 0) / skill.mp) * hitDamage : Infinity });
@@ -194,12 +199,27 @@ function soloSurvival(profiles, target, minimum = 1.5) {
     }
     const lifetime = Math.max(...receivers.map(profile => profile.maxHp
         / (70 * target.pAtk / profile.pDef * positive(target.atkSpd || 253) / 500)));
-    const damage = profiles.reduce((sum, profile) => sum + Math.max(0, ...channels(profile, target)
+    const damage = profiles.reduce((sum, profile) => sum + Math.max(0, ...soloChannels(profile, target)
         .map(attack => Math.min((attack.survivalWeight ?? attack.weight) * lifetime,
             attack.damageBudget ?? Infinity) * attack.modifier)), 0);
     const survivalRatio = damage / target.maxHp;
     return { eligible: survivalRatio >= minimum, survivalRatio,
         reason: survivalRatio >= minimum ? 'solo_survival_ready' : 'insufficient_survival_margin' };
+}
+
+function soloChannels(profile, target) {
+    const attacks = channels(profile, target);
+    if (!profile.soloAttackScores) return attacks;
+    // The executor chooses by native skill priority, not maximum DPS. Do not
+    // admit a fight on a fast spell the bot would never select at full HP.
+    let best = null, score = -Infinity;
+    for (const attack of attacks) {
+        if (!Number.isFinite(attack.soloScore)) continue;
+        const current = attack.soloScore + Math.round(180 * Math.log2(
+            Math.max(0.01, Math.min(2, attack.modifier))));
+        if (current > score) { best = attack; score = current; }
+    }
+    return best ? [best] : [];
 }
 
 function soloCanHunt(profiles, target, { maxTargetLevel, npcLevel } = {}) {
@@ -329,6 +349,10 @@ function profileFingerprint(profile) {
             skill.distance, semantic.skillType, semantic.target, semantic.notUsedInC4, semantic.undeadOnly,
             semantic.requires?.weaponsAllowed, semantic.castRange, semantic.power, semantic.trait]
             .map(fingerprintValue));
+    }
+    if (profile.soloAttackScores) {
+        parts.push('solo-priority');
+        for (const [id, score] of Object.entries(profile.soloAttackScores)) parts.push(id, fingerprintValue(score));
     }
     return parts.join(',');
 }

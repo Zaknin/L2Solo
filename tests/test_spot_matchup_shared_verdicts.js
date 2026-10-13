@@ -109,6 +109,11 @@ assert.deepStrictEqual(Matchup.spotMatchup(spot, nativePair, { soloSafety: true 
     referenceMatchup(spot, nativePair, { soloSafety: true }));
 assert.deepStrictEqual(Matchup.spotMatchup(spot, coldPair, { soloSafety: true }),
     referenceMatchup(spot, coldPair, { soloSafety: true }), 'cold summons cannot reuse native tanking verdicts');
+const scored = fighter({ soloAttackScores: {} });
+assert.notDeepStrictEqual(referenceMatchup(spot, [scored], { soloSafety: true }),
+    referenceMatchup(spot, [fighter()], { soloSafety: true }), 'native attack priorities change this fixture');
+assert.deepStrictEqual(Matchup.spotMatchup(spot, [scored], { soloSafety: true }),
+    referenceMatchup(spot, [scored], { soloSafety: true }), 'native priorities cannot reuse theoretical attack verdicts');
 
 // The shared cache is bounded: thousands of distinct profiles evict the oldest.
 for (let i = 0; i < Matchup.VERDICT_PROFILE_LIMIT + 50; i++) {
