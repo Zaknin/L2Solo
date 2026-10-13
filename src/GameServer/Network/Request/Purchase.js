@@ -63,11 +63,20 @@ async function consume(session, data) {
         return;
     }
     if (store && store.storeType === 1) {
+        const bought = [];
+        let socialRecorded = false;
+        // One social event for the lines that completed, whether the list ended
+        // whole or a later line failed (E253); never one event per line.
+        const recordBought = () => {
+            if (socialRecorded || bought.length === 0) return;
+            socialRecorded = true;
+            const detail = bought.map((item) => `${item.qty} ${item.name}`).join(', ');
+            BotSocialMemory.recordTradeCompleted(session, trade.merchant, `bought ${detail}`);
+        };
         try {
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1)) {
                 throw new Error("Store listing changed.");
             }
-            const bought = [];
             const sellerSession = BotManager.sessions.find((candidate) => candidate.actor === trade.merchant);
             for (const item of data.list) {
                 const quote = trade.prices?.[Number(item.selfId)];
@@ -92,10 +101,7 @@ async function consume(session, data) {
                 });
             }
 
-            if (bought.length > 0) {
-                const detail = bought.map((item) => `${item.qty} ${item.name}`).join(', ');
-                BotSocialMemory.recordTradeCompleted(session, trade.merchant, `bought ${detail}`);
-            }
+            recordBought();
 
             session.dataSendToMe(ServerResponse.userInfo(session.actor));
             session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
@@ -112,6 +118,7 @@ async function consume(session, data) {
             trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
         } catch (err) {
             utils.infoWarn('Purchase', 'merchant purchase error: %s', err.message || err);
+            recordBought();
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1) || /changed/i.test(String(err.message || err))) {
                 session.activeMerchantTrade = null;
                 session.viewedPrivateStoreSeller = null;
