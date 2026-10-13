@@ -1363,35 +1363,8 @@ function refreshUserInfo(session, target) {
 }
 
 function refreshEffects(session, target) {
-    // NPC cast sessions forward to a nearby player; their actor is not the receiver.
-    // Personal effect packets must never describe an NPC, including summons.
-    const owner = !target?.fetchKind && (target?.session?.dataSendToMe
-        ? target.session : session?.actor === target ? session : null);
-    const packet = ServerResponse.abnormalStatusUpdate.fromActor(target);
-    if (owner?.dataSendToMe) {
-        owner.dataSendToMe(packet);
-        owner.dataSendToMe(ServerResponse.shortBuffStatusUpdate.fromActor(target));
-    }
-
-    if (target?.session?.dataSendToMe && target?.backpack?.fetchPaperdollSelfId) {
-        target.session.dataSendToMe(ServerResponse.userInfo(target));
-    }
-
-    // MagicEffectIcons has no object id and is only valid for the receiver's
-    // own effect bar. For NPCs, C4 renders persistent abnormal states from the
-    // abnormal-effect mask embedded in NpcInfo instead.
-    if (target?.fetchKind && session?.dataSendToMeAndOthers) {
-        session.dataSendToMeAndOthers(ServerResponse.npcInfo(target), target);
-    } else if (target?.session?.dataSendToOthers && target?.backpack?.fetchPaperdollSelfId) {
-        target.session.dataSendToOthers(ServerResponse.charInfo(target), target);
-    }
-
-    try {
-        const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
-        if (target?.session) PartyCompanionService.updateActorEffects(target.session);
-    } catch (err) {
-        utils.infoWarn('SkillEffects', 'party effect refresh failed: %s', err.message);
-    }
+    // One refresh for skills and expiry: EffectTicker also skips NpcInfo for dead/removed NPCs.
+    EffectTicker.refreshEffects(session, target);
 }
 
 function refreshStats(session, target) {
