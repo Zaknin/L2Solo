@@ -351,7 +351,7 @@ function view(state, decision, deps = {}) {
             ? base.stock('shots').targetHours : decision.urgency === URGENCY_POTIONS
                 ? base.stock('potions').targetHours
                 : invoke('GameServer/Bot/Economy/EconomicValuation').stageHours(state, base.hunt.expPerHour, base.persona),
-        board: deps.board || invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(),
+        board: deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null),
         network: { activity }, activity, wish,
         craftReservations: Object.fromEntries(activity?.craftReservations || []),
         watchList: (decision?.watch || []).map(row => ({ itemId: row[0], amount: row[1], worth: row[2], kind: kindFor(row[3]) })),
