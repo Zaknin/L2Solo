@@ -24,6 +24,9 @@ function open() {
 const dump = (db) => JSON.stringify(db.prepare('SELECT characterId, slot, kind, id, unknown FROM shortcuts ORDER BY characterId, slot').all());
 const rows = [];
 for (const characterId of [1, 2]) for (const slot of [0, 5, 11, 12, 23, 24, 35, 47, 59, 71, 143]) rows.push([characterId, slot]);
+// fetchShortcuts has no ORDER BY: it reads through an index, so a kept rowid (UPSERT) or a fresh one (DELETE + INSERT) cannot change the order.
+const plan = open().prepare('EXPLAIN QUERY PLAN SELECT * FROM shortcuts WHERE characterId = ?').all(1).map((row) => row.detail).join(' | ');
+assert(/USING (COVERING )?INDEX|USING PRIMARY KEY/.test(plan), `characterId lookup must not scan the table: ${plan}`);
 let seed = 7;
 const rand = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
 for (let round = 0; round < 40; round++) {
