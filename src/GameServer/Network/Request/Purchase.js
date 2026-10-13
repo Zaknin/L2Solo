@@ -43,7 +43,9 @@ function purchase(session, buffer) {
         list.push({ selfId: packet.data[2 + (i * 2)], amount: packet.data[3 + (i * 2)] });
     }
 
-    consume(session, {
+    // Server.js drops the connection when this Promise rejects; left
+    // unreturned, the rejection would end the process.
+    return consume(session, {
         listId: packet.data[0],
           list: list
     });
