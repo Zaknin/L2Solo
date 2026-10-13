@@ -352,7 +352,7 @@ function calculationHolds(state, fence, deps = {}) {
 }
 // A retained leaf is calculation data. Recheck its native source, physical
 // resources and funding now; execution still uses the existing command/CAS.
-function acceptedActivityHolds(state, leaf, deps = {}) {
+function acceptedActivityHolds(state, leaf, deps = {}, current = null) {
     if (leaf.activity === 'hunting') return true;
     deps = resolved(state, deps, false);
     const trip = deps.tripCost || Trip.preparedReader(deps.routeRows || [], { hourAdena: positive(state.stats?.money?.[0]) });
@@ -370,7 +370,7 @@ function acceptedActivityHolds(state, leaf, deps = {}) {
     }
     if (leaf.activity === 'selling' && leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
         && invoke('GameServer/Bot/Population/ColdOccupationSources').hasNpcSellerInTown(leaf.town)) {
-        return Providers.liquidationCandidates(state, basics(state, deps)).some(row => leaf.items.includes(Number(row.selfId)));
+        return Providers.liquidationCandidates(state, current ? current() : basics(state, deps)).some(row => leaf.items.includes(Number(row.selfId)));
     }
     return false;
 }
@@ -710,7 +710,7 @@ function forState(state = {}, deps = {}) {
     const read = id => { id = Number(id);
         for (const local of nodeScopes) local.items.set(id, marketToken(sourceBoard, id, deps));
         if (reads.has(id)) return;
-        if (scope) { if (!scope.items.has(id)) scope.items.set(id, marketToken(sourceBoard, id, deps)); return; }
+        if (scope) { if (!scope.has(id)) scope.set(id, marketToken(sourceBoard, id, deps)); return; }
         reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
@@ -734,7 +734,8 @@ function forState(state = {}, deps = {}) {
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
-        sourceSpot: id => { (scope?.spots || spotReads).set(id, occupancyToken(deps, id));
+        // Every evaluated source participates in admission/ranking, including a losing candidate.
+        sourceSpot: id => { spotReads.set(id, occupancyToken(deps, id));
             for (const local of nodeScopes) local.spots.set(id, occupancyToken(deps, id)); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
@@ -750,11 +751,8 @@ function forState(state = {}, deps = {}) {
             keep: input => { for (const [id] of input.items) read(id);
                 for (const [id] of input.spots) context.sourceSpot(id);
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
-        readScope: { open: () => (scope = { items: new Map(), spots: new Map() }), close: () => { scope = null; },
-            keep: kept => {
-                for (const [id, token] of kept.items) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); }
-                for (const [id, token] of kept.spots) if (!spotReads.has(id)) spotReads.set(id, token);
-            } } };
+        readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
+            keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); } } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
         ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };

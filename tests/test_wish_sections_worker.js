@@ -55,7 +55,15 @@ module.exports.wishSectionsProbe = async id => {
         simulationLeaseId: state.simulation?.leaseId, simulationLeaseUntil: state.simulation?.leaseUntil });
     const original = Providers.build;
     let builds = 0;
-    Providers.build = (...args) => { builds++; return original(...args); };
+    const observedSources = new Map();
+    Providers.build = (...args) => {
+        builds++;
+        const [subject, ctx] = args, read = ctx.sourceSpot, inputs = new Set();
+        ctx.sourceSpot = id => { inputs.add(id); return read(id); };
+        const projection = original(...args);
+        observedSources.set(subject.characterId, inputs);
+        return projection;
+    };
     try {
         let state = kernel.states.get(id).state, clock = Number(state.updatedAt);
         state = { ...publication(state), classId: state.stats.classId };
@@ -205,11 +213,26 @@ module.exports.wishSectionsProbe = async id => {
             assert(selectedProbability > 0, 'the native positive-probability choice was observed');
             candidate = prepared.state;
             const accepted = prepared.advice, leaf = accepted.card.activity;
+            const nativeReads = observedSources.get(candidate.characterId),
+                proofSources = new Map(Economy.decodeCalculationFence(accepted.fence)[2]);
+            assert(nativeReads && nativeReads.size, 'the native graph evaluated real source dependencies');
+            for (const source of nativeReads) assert(proofSources.has(source),
+                'every source read by native ranking/admission survives graph pruning');
+            const source = nativeReads.values().next().value, changedOccupancy = {
+                get: id => id === source ? { reservedCount: Number(proofSources.get(source)) + 1 }
+                    : prepared.deps.occupancy?.get?.(id) || prepared.deps.occupancy?.[id]
+            };
+            assert.equal(Economy.calculationHolds(candidate, accepted.fence,
+                { ...prepared.deps, occupancy: changedOccupancy }), false,
+                'an actual native evaluated source change invalidates the retained decision');
             assert.equal(leaf.activity, activity, 'the fixture selects its real native economic leaf: ' + JSON.stringify(leaf));
             assert.equal(leaf.kind, activity === 'shopping' ? 'buy' : 'liquidate');
             if (activity === 'shopping') assert(leaf.rootKey.startsWith('power:'), 'the actual funded equipment wish remains the purchase owner');
+            const foundationsBefore = globalThis.wishSectionBasicsCalls || 0;
             assert(ColdEconomyDecision.refreshAdvisory(candidate, accepted, prepared.deps),
                 'current native resources and observed source prove this economic leaf');
+            assert.equal(globalThis.wishSectionBasicsCalls - foundationsBefore, 1,
+                'the source/resource guard and resumed view share one current native foundation');
             const before = builds, focus = candidate.stats.wishFocus, seq = candidate.stats.decisionSeq;
             for (let at = 0; at < 4; at++) {
                 Economy.forgetContext(id);
@@ -416,6 +439,12 @@ const { parentPort, workerData } = require('node:worker_threads');
 // Resource/ownership normalization runs its actual code and dependencies.
 const loadJS = Module._extensions['.js'];
 Module._extensions['.js'] = (loaded, filename) => {
+    if (filename.endsWith('/Economy/EconomyContext.js')) {
+        const source = fs.readFileSync(filename, 'utf8'), marker = 'function basics(state = {}, deps = {}) {';
+        if (!source.includes(marker)) throw Error('native economy foundation missing');
+        return loaded._compile(source.replace(marker, marker
+            + '\n    globalThis.wishSectionBasicsCalls = (globalThis.wishSectionBasicsCalls || 0) + 1;'), filename);
+    }
     if (filename.endsWith('/Economy/WishNetwork.js')) {
         const source = fs.readFileSync(filename, 'utf8'), marker = 'function choose(rows, weight, roll) {';
         if (!source.includes(marker)) throw Error('native wish choose function missing');

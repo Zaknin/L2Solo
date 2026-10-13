@@ -284,8 +284,8 @@ try {
             assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
         }
     } finally { Providers.build = nativeProviders; Tendency.roll = heldRoll; }
-    // Scope pruning keeps common inputs and both admitted alternatives, not
-    // only the winner; discarded arenas cannot bloat or invalidate the card.
+    // A losing/discarded candidate can become better after an occupancy change.
+    // Preserve every evaluated source as well as both retained alternatives.
     const scopedProvider = Providers.build;
     Providers.build = (bot, ctx, options) => {
         ctx.sourceSpot('scope-common');
@@ -302,12 +302,10 @@ try {
         assert(fields, 'the scoped proof remains bounded');
         const sources = new Map(fields[2]);
         for (const id of ['scope-common', 'scope-first', 'scope-second']) assert(sources.has(id));
-        assert.equal(sources.has('scope-discarded'), false);
-        for (const id of ['scope-common', 'scope-first', 'scope-second']) assert.equal(Economy.calculationHolds(subject,
+        assert(sources.has('scope-discarded'), 'losing admission/ranking inputs remain watched');
+        for (const id of ['scope-common', 'scope-first', 'scope-second', 'scope-discarded']) assert.equal(Economy.calculationHolds(subject,
             scoped.calculationFence, { ...deps, occupancy: new Map([[id, { count: 1 }]]) }), false,
-            'a change to any retained competing source forces native reconsideration');
-        assert(Economy.calculationHolds(subject, scoped.calculationFence,
-            { ...deps, occupancy: new Map([['scope-discarded', { count: 1 }]]) }));
+            'a change to a retained or losing source forces native reconsideration');
     } finally { Providers.build = scopedProvider; }
     Economy.forget(state.characterId);
     assert.equal(Profile.size().ownerBuilds >= 0, true);

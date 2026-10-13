@@ -331,9 +331,9 @@ function preparedCardWorth(decision, id, state, moneyPrice, understanding, enabl
     return NaN;
 }
 
-function view(state, decision, deps = {}) {
+function view(state, decision, deps = {}, preparedBase = null) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const base = Economy.basics(state, deps), packet = state.stats?.money;
+    const base = preparedBase || Economy.basics(state, deps), packet = state.stats?.money;
     const valid = Array.isArray(packet) && packet.length >= 4;
     const hourAdena = valid ? Number(packet[0]) : base.hourAdena;
     const moneyPrice = valid ? Number(packet[1]) : hourAdena > 0 ? 1 / hourAdena : 0;
@@ -375,7 +375,7 @@ function advisory(economy, state) {
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
         activityLeaf: Number(state.stats?.activityLeaf || 0) };
 }
-function canReuse(state, accepted, deps = {}) {
+function canReuse(state, accepted, deps = {}, current = null) {
     if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
         || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
         || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
@@ -392,15 +392,17 @@ function canReuse(state, accepted, deps = {}) {
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
     if (Sections.horizonChanged(state, baseline, baseline.expHour, persona)) return false;
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    return Economy.calculationHolds(state, accepted.fence, deps) && Economy.acceptedActivityHolds(state, leaf, deps);
+    return Economy.calculationHolds(state, accepted.fence, deps) && Economy.acceptedActivityHolds(state, leaf, deps, current);
 }
 function refreshAdvisory(state, accepted, deps = {}) {
-    if (!canReuse(state, accepted, deps)) return null;
+    let base;
+    const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
+    if (!canReuse(state, accepted, deps, current)) return null;
     // This new result is fenced to the actual publication, wallet and MP;
     // never relax ColdEconomyDecisions.matches or any native write guard.
     const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
         key: stateKey(state), flags: 0 });
-    const economy = view(state, decision, deps);
+    const economy = view(state, decision, deps, current());
     economy.inputKey = String(decision.inputHash);
     economy.wallet = require('../Economy/PurchaseFunding').budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
