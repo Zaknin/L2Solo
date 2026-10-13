@@ -51,6 +51,9 @@ async function sellJunk(session) {
     let totalAdenaPayout = 0;
     let soldDetails = [];
 
+    // Every write is kept so that its failure reaches the handler's log below
+    // instead of rejecting unhandled; the writes still start in the same order.
+    const writes = [];
     const soldItemIds = new Set();
     sales.forEach(({ item, amount }) => {
         const price = item.fetchPrice();
@@ -62,19 +65,21 @@ async function sellJunk(session) {
         
         const left = item.fetchAmount() - amount;
         if (left > 0) {
-            Database.updateItemAmount(session.actor.fetchId(), item.fetchId(), left);
+            writes.push(Database.updateItemAmount(session.actor.fetchId(), item.fetchId(), left));
             item.setAmount(left);
             return;
         }
-        Database.deleteItem(session.actor.fetchId(), item.fetchId());
+        writes.push(Database.deleteItem(session.actor.fetchId(), item.fetchId()));
         soldItemIds.add(Number(item.fetchId()));
     });
 
     backpack.items = backpack.items.filter((item) => !soldItemIds.has(Number(item.fetchId())));
 
-    backpack.stackableExists(57).then((adenaItem) => {
+    // An existing Adena stack is updated; only a missing one gets a new stack
+    // (a failed update must not fall through to a second, new stack).
+    writes.push(backpack.stackableExists(57).then((adenaItem) => {
         const total = adenaItem.fetchAmount() + totalAdenaPayout;
-        Database.updateItemAmount(session.actor.fetchId(), adenaItem.fetchId(), total).then(() => {
+        return Database.updateItemAmount(session.actor.fetchId(), adenaItem.fetchId(), total).then(() => {
             adenaItem.setAmount(total);
             session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
             session.dataSendToMe(ServerResponse.userInfo(session.actor));
@@ -82,8 +87,8 @@ async function sellJunk(session) {
             session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
             session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
         });
-    }).catch(() => {
-        Database.setItem(session.actor.fetchId(), {
+    }, () => {
+        return Database.setItem(session.actor.fetchId(), {
             selfId: 57,
             name: "Adena",
             amount: totalAdenaPayout,
@@ -97,7 +102,9 @@ async function sellJunk(session) {
             session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
             session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
         });
-    });
+    }));
+
+    return Promise.all(writes);
 }
 
 // The NPC dialog does not await its handlers: a failure is logged here.
