@@ -702,8 +702,11 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
     if (!owner?.context || !Object.isExtensible(owner.context)) return;
     const current = kernel.states.get(Number(owner.state.characterId));
     if (current?.state !== owner.state || current.context !== owner.context) return;
+    // The fence must describe this exact state (activity included). A read
+    // market token already deferred by the reused plan stays soft (L70).
     if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
-        .calculationHolds(seen, advisory.fence, deps))) advisory = null;
+        .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections,
+            timestamp: Number(deps.timestamp || Date.now()) }))) advisory = null;
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
     });
@@ -958,7 +961,7 @@ function startKernel(config = {}) {
                 economyFor: (projected, deps) => {
                     observedDeps = deps;
                     refreshed = !projected.party?.partyId && !projected.partyId
-                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps) : null;
+                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true }) : null;
                     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
                     // Both native stock gates read one prepared foundation;
                     // the same edges also drive the action after projection.

@@ -373,9 +373,13 @@ function advisory(economy, state) {
     if (!(fence instanceof Uint8Array)) return null;
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
-        activityLeaf: Number(state.stats?.activityLeaf || 0) };
+        activityLeaf: Number(state.stats?.activityLeaf || 0), activity: state.activity };
 }
-function canReuse(state, accepted, deps = {}, current = null) {
+const FIELD_ACTIVITIES = ['hunting', 'resting', 'traveling'];
+// Before an action the card is executed (activityPick), so only a hunter
+// reuses it. After a result it is only restamped and published: the bot's
+// own hunting/resting/travelling inside one decision is not an event (L70).
+function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
         || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
         || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
@@ -384,20 +388,22 @@ function canReuse(state, accepted, deps = {}, current = null) {
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
     if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
-        || state.activity !== 'hunting' || state.incomingPending) return false;
+        || !(options.afterResult ? FIELD_ACTIVITIES.includes(state.activity) : state.activity === 'hunting')
+        || state.incomingPending) return false;
     const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
-    if (Sections.meaningfulMoney(state, baseline) || Sections.observationChanged(state, baseline, timestamp, deps.mode)
+    if (Sections.moneyEvent(state, baseline, timestamp) || Sections.observationEvent(state, baseline, timestamp, deps.mode)
         || Sections.capability(state, timestamp) !== baseline.build) return false;
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
-    if (Sections.horizonChanged(state, baseline, baseline.expHour, persona)) return false;
+    if (Sections.horizonEvent(state, baseline, baseline.expHour, persona, timestamp)) return false;
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    return Economy.calculationHolds(state, accepted.fence, deps) && Economy.acceptedActivityHolds(state, leaf, deps, current);
+    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, baseline, timestamp })
+        && Economy.acceptedActivityHolds(state, leaf, deps, current);
 }
-function refreshAdvisory(state, accepted, deps = {}) {
+function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     let base;
     const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
-    if (!canReuse(state, accepted, deps, current)) return null;
+    if (!canReuse(state, accepted, deps, current, options)) return null;
     // This new result is fenced to the actual publication, wallet and MP;
     // never relax ColdEconomyDecisions.matches or any native write guard.
     const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
