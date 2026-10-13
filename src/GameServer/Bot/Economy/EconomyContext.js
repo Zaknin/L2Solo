@@ -163,10 +163,7 @@ function sectionKeys(state, deps = {}, bands = []) {
     // The planner publishes this known empty result after the wish review.
     // It names no target, reservation or next action. Unknown plan fields
     // keep the exact dependency instead of being treated as an empty plan.
-    const emptyPlan = plan?.status === 'deferred' && plan.strategy === 'none'
-        && plan.next == null && plan.reason === 'wish_focus'
-        && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
-    const calculationPlan = emptyPlan ? null : plan;
+    const calculationPlan = Sections.isEmptyWishPlan(plan) ? null : plan;
     const stable = { ...state, adena: 0, sp: 0, inventory,
         party: partyId ? { ...state.party, partyId, role } : null, partyId,
         clanId: Number(state.clanId ?? stats.clanId ?? 0),
@@ -706,12 +703,27 @@ function forState(state = {}, deps = {}) {
         cycleHours: workshop.cycleHours, repeatable: true });
     const market = marketKey(reads);
     const networkKey = `${key}#${market}`;
+    const choiceBands = quantityBands(state, context, projection);
+    // Above a native stock target, exact quantities are execution facts.
+    // Unused free loot is compared with the last decision's own value/error,
+    // while required materials retain their exact quantities in the key.
+    const choiceShape = sectionKeys(state, deps, choiceBands.map(([id, low, high]) => [id, low, high, high === null ? low : 1]));
+    const bagValue = choiceBands.reduce((value, [id, , high]) => value + (high === null ? 0
+        : positive(state.inventory[id]?.amount) * positive(context.buyback(id))), 0);
+    const acceptedSections = state.stats?.wishSections;
+    context.choiceInputs = Sections.hash([choiceShape.structural,
+        [...reads].sort(([a], [b]) => a - b), [...spotReads].sort(([a], [b]) => String(a).localeCompare(String(b)))]);
+    const unchangedChoice = Number(acceptedSections?.choices) === context.choiceInputs
+        && Number.isFinite(acceptedSections?.bagValue)
+        && Math.abs(bagValue - acceptedSections.bagValue) <= positive(context.hourAdena) * positive(acceptedSections.incomeError)
+        && (!held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads));
+    context.choiceBagValue = unchangedChoice ? acceptedSections.bagValue : bagValue;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
-        preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0,
+        preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0 && unchangedChoice,
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,
@@ -758,9 +770,13 @@ function forState(state = {}, deps = {}) {
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0] });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
-    plan.quantityBands = quantityBands(state, context, projection);
+    plan.quantityBands = choiceBands;
     plan.bagSafety = bagSafety(state, timestamp);
     plan.calculationFence = calculationFence(state, sections, reads, spotReads, deps, plan.quantityBands, plan.bagSafety);
+    // Source memo belongs only to the bounded cache owner. A planning view
+    // or a group closure must never retain a second copy outside that cap.
+    const retainedSourceMemo = projection.sourceSections;
+    projection.sourceSections = null;
     if (deps.rememberContext !== false && planningContexts < 64) {
         if (diagnostic && !cache.has(actorKey) && cache.size >= 64 - planningContexts) {
             Diagnostics.count('context', 'eviction', 'capacity');
@@ -768,10 +784,8 @@ function forState(state = {}, deps = {}) {
         }
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
-        const sourceSections = projection.sourceSections;
-        projection.sourceSections = null;
         remember(cache, actorKey, { key, reads, spotReads, plan, stateRef: new WeakRef(state), gearThreat, sections,
-            sourceSections, mp: Number(state.vitals?.mp),
+            sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, 64 - planningContexts);
         let retainedSources = 0;
         for (const entry of [...cache.values()].reverse()) if (entry.sourceSections && ++retainedSources > SOURCE_MEMO_LIMIT) entry.sourceSections = null;

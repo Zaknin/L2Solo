@@ -67,6 +67,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode) {
     const profileKey = invoke('GameServer/Bot/Population/ColdCombatProfile').buildInputKey(state, context.timestamp);
     const night = profileKey.endsWith('|n') ? 1 : profileKey.endsWith('|d') ? 0 : -1;
     return { wallet: positive(state.adena), cashBounds, funding: fundingMark(actual), moneyError, night,
+        choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...semanticFacts(state, context.timestamp), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
         incomeError: incomeError(state, persona), sample: sample(state, context.timestamp, mode) };
@@ -88,6 +89,11 @@ function horizonChanged(state, baseline, expPerHour, persona) {
     const horizon = require('./EconomicValuation').stageHours(state, expPerHour, persona);
     return Math.abs(horizon - Number(baseline.horizon || 0)) > Math.abs(Number(baseline.horizon || 0)) * positive(baseline.incomeError);
 }
+function isEmptyWishPlan(plan) {
+    return plan?.status === 'deferred' && plan.strategy === 'none'
+        && plan.next == null && plan.reason === 'wish_focus'
+        && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
+}
 function events(before, after, timestamp = Date.now()) {
     const sections = new Set();
     // Main may replay a validated worker packet that already describes this
@@ -96,18 +102,20 @@ function events(before, after, timestamp = Date.now()) {
     const represented = Number(after.stats?.decisionSeq || 0) > Number(before.stats?.decisionSeq || 0)
         ? after.stats?.wishSections : null;
     const previous = represented || before.stats?.wishSections || {};
-    const original = semanticFacts(before, Number(before.timing?.lastResolvedAt || before.updatedAt || timestamp));
+    let original;
+    const previousFact = key => previous[key] ?? (original ||= semanticFacts(before,
+        Number(before.timing?.lastResolvedAt || before.updatedAt || timestamp)))[key];
     const current = semanticFacts(after, timestamp);
-    if (!(previous.dead ?? original.dead) && current.dead) sections.add('combat');
-    if ((previous.build ?? original.build) !== current.build) { sections.add('build'); sections.add('benefits'); sections.add('sources'); }
+    if (!previousFact('dead') && current.dead) sections.add('combat');
+    if (previousFact('build') !== current.build) { sections.add('build'); sections.add('benefits'); sections.add('sources'); }
     const oldStats = before.stats || {};
-    if ((previous.relations ?? original.relations) !== current.relations) sections.add('relations');
+    if (previousFact('relations') !== current.relations) sections.add('relations');
     if (meaningfulMoney(after, represented || oldStats.wishSections)
         || !previous.funding && fundingMark(before) !== fundingMark(after)) sections.add('funding');
-    if ((previous.occupation ?? original.occupation) !== current.occupation && after.activity !== 'resting') sections.add('occupation');
-    if (current.riskDeaths > (previous.riskDeaths ?? original.riskDeaths)) { sections.add('combat'); sections.add('occupation'); }
+    if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') sections.add('occupation');
+    if (current.riskDeaths > previousFact('riskDeaths')) { sections.add('combat'); sections.add('occupation'); }
     // Physical exhaustion is never hidden by economic uncertainty.
-    if ((previous.supply ?? original.supply) !== current.supply) sections.add('supply');
+    if (previousFact('supply') !== current.supply) sections.add('supply');
     return [...sections];
 }
-module.exports = { capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError, sample, bounds, snapshot, semanticFacts, events, hash };
+module.exports = { capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError, sample, bounds, snapshot, semanticFacts, events, hash, isEmptyWishPlan };

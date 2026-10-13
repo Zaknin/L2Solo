@@ -8,8 +8,8 @@ const path = require('node:path'), { Worker } = require('node:worker_threads');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const spots = invoke('GameServer/Bot/Population/SpotProfiles').ensure();
-const spot = spots.find(row => row.center);
+const spots = require('./helpers/wishSectionSpots')();
+const spot = spots.find(row => row.npcEntries?.some(entry => entry.selfId === 414));
 const timestamp = Date.now(), id = 92081;
 const state = { characterId: id, level: 35, exp: Number(Data.experience[34]), sp: 0,
     adena: 50, phase: 'cold', activity: 'hunting', updatedAt: timestamp, spotId: String(spot.id),
@@ -96,6 +96,59 @@ module.exports.wishSectionsProbe = async id => {
         }
         assert.equal(builds, before, 'ordinary consuming rounds do not reconstruct providers after cache eviction');
         const ordinaryBuilds = builds - before;
+        // A still-valid calculation never suppresses the native route-failure
+        // counter, including with developer diagnostics disabled.
+        const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+        const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
+        const acquisitionState = state;
+        const ownedItems = Object.values(acquisitionState.inventory).filter(row => row.amount > 0)
+            .map(row => DataCache.items.find(item => item.selfId === row.selfId)).filter(Boolean);
+        let target, source;
+        for (const item of DataCache.items) {
+            if (!Planner.considerable(item, acquisitionState)
+                || !Planner.isSlotUpgrade(item, ownedItems, Planner.roleFor(acquisitionState), acquisitionState.stats.classId)) continue;
+            const route = Planner.sourceForItem(item.selfId, planningSpots, acquisitionState)
+                .find(row => Planner.isPlanSourceViableForState(acquisitionState, { next: row }));
+            if (route) { target = item; source = route; break; }
+        }
+        assert(source, 'native catalogue supplies an actual upgrade with an eligible drop source');
+        let active = { ...acquisitionState, stats: { ...acquisitionState.stats, equipmentPlan: {
+            status: 'active', strategy: 'direct_drop',
+            grade: invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(acquisitionState),
+            plannedForLevel: acquisitionState.level, plannedForGrade: Planner.gradeForLevel(acquisitionState.level), startedAt: clock,
+            rateModelVersion: Planner.RATE_MODEL_VERSION, rateProfileSignature: Planner.rateProfileSignature(),
+            target: { selfId: target.selfId, slot: target.etc.slot },
+            next: { ...source, itemId: target.selfId },
+            targetProgress: { npcId: source.npcId, resolves: 0, targetKills: 0 },
+            progressionBaseline: { level: acquisitionState.level, exp: acquisitionState.exp }, recoveryTargets: []
+        }, targetCombat: { populationTargets: { [source.npcId]: { resolves: 0, targetKills: 0 } } } } };
+        const routeRows = await occupationFor(active, clock, kernel.states.get(id).context, 'wish');
+        const workshop = await occupationFor(active, clock, { ...kernel.states.get(id).context,
+            routeRows, routeKey: EconomicTrip.key(active) });
+        const deps = { spots: planningSpots, occupancy: currentPlanningOccupancy(clock), timestamp: clock,
+            board: boardReady(), routeRows, workshop };
+        const prepared = Economy.forState(active, deps);
+        active = { ...active, stats: { ...active.stats, ...prepared.statsPacket } };
+        const advice = ColdEconomyDecision.advisory(prepared, active);
+        const failed = { ...active, stats: { ...active.stats,
+            targetCombat: { populationTargets: { [source.npcId]: {
+                resolves: Planner.DIRECT_FAILURE_RESOLVE_LIMIT, targetKills: 0 } } } } };
+        assert.equal(Planner.replanContextFor(failed, failed.stats.equipmentPlan, clock).failure.reason, 'combat_unviable');
+        assert(ColdEconomyDecision.refreshAdvisory(failed, advice, deps),
+            'failure counters alone leave the expensive calculation proof valid');
+        const nativeSelection = Selection.selectAcquisitionPlan;
+        let failureChecked = false;
+        Selection.selectAcquisitionPlan = (...args) => {
+            assert.equal(args[2].preparedReplanContext.failure.reason, 'combat_unviable');
+            failureChecked = true; return nativeSelection(...args);
+        };
+        try {
+            await kernel.planLifecycle({ state: failed, context: { ...kernel.states.get(id).context,
+                wishAdvisory: advice }, timestamp: clock });
+            assert(failureChecked, 'the native lifecycle bypasses thin reuse on a failed acquisition route');
+        } finally { Selection.selectAcquisitionPlan = nativeSelection; }
+        kernel.states.set(id, { ...kernel.states.get(id), state, context: { wishAdvisory: accepted } });
+        const beforeLearning = builds;
         const learned = await kernel.projectResolve(state, {
             patch: { inventory: { ...state.inventory, 1835: { ...state.inventory[1835], amount: state.inventory[1835].amount - 1 } } },
             materialize: { exp: 1, sp: 1, adena: 1, items: [{ selfId: 1869, amount: 1 }] },
@@ -103,7 +156,7 @@ module.exports.wishSectionsProbe = async id => {
         }, ++clock);
         state = learned.state;
         assert(state.stats.wishSections.sample.length > 0, 'the third native sample creates usable own knowledge');
-        assert(builds > before, 'new usable income knowledge remains a real calculation trigger');
+        assert(builds > beforeLearning, 'new usable income knowledge remains a real calculation trigger');
         kernel.states.set(id, { ...kernel.states.get(id), state });
         const currentSeq = state.stats.decisionSeq;
         const dead = { ...state, activity: 'dead', stats: { ...state.stats, deaths: Number(state.stats.deaths || 0) + 1 } };

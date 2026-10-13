@@ -26,9 +26,11 @@ let state = { characterId: 92001, level: 35, phase: 'cold', activity: 'hunting',
     timing: { lastResolvedAt: deps.timestamp }, updatedAt: deps.timestamp,
     vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
 const originalBuild = Providers.build, originalRoll = Tendency.roll;
-let builds = 0, sourceReuse = 0, rolls = 0;
+let builds = 0, sourceReuse = 0, rolls = 0, producedSourceMemos = 0;
 Providers.build = (bot, context, options) => { builds++; if (options.sourceSections) sourceReuse++;
-    return originalBuild(bot, context, options); };
+    const projection = originalBuild(bot, context, options);
+    if (projection.sourceSections) producedSourceMemos++;
+    return projection; };
 Tendency.roll = (...args) => { if (args.at(-1) === 'activity' || args.at(-1) === 'focus') rolls++;
     return originalRoll(...args); };
 try {
@@ -124,6 +126,11 @@ try {
     assert.equal(builds, beforeConsumingBuilds);
     assert.equal(consumingView.economy.stock('shots').current, 99999);
     assert.equal(consumingView.decision.key, Decisions.stateKey(consumed));
+    const fullConsuming = Economy.forState(consumed, deps);
+    assert.deepEqual(fullConsuming.network.focus, stockContext.network.focus,
+        'a full reconstruction after ordinary quantity changes also retains the accepted focus');
+    assert.equal(fullConsuming.statsPacket.activityLeaf, stockContext.statsPacket.activityLeaf);
+    assert.equal(fullConsuming.statsPacket.decisionSeq, stockContext.statsPacket.decisionSeq);
     const projectedLoot = { ...consumed, stats: { ...consumed.stats, karma: 0, spotRisk: { windowDeaths: 0 },
         equipmentPlan: { status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus' } },
         inventory: { ...consumed.inventory, 1869: { selfId: 1869, amount: 100001,
@@ -164,6 +171,8 @@ try {
         exp: huge, adena: huge, loot: huge, costs: 0, cycleMs: 1 })) } };
     const worst = Sections.snapshot(wide, { ...first, horizonHours: huge, hunt: { ...first.hunt, expPerHour: huge } },
         [Number.MAX_SAFE_INTEGER, huge], huge);
+    worst.choices = 0xffffffff;
+    worst.bagValue = huge;
     assert.equal(worst.sample.length, Hunt.MAX_SPOTS);
     assert(Buffer.byteLength(JSON.stringify({ wishSections: worst, wishDirty: 255 })) <= 1024,
         'the complete saved section delta remains bounded with all eight observation rows');
@@ -178,6 +187,21 @@ try {
     Events.reconcile(state, after, deps.timestamp);
     assert.equal(after.stats.decisionSeq, state.stats.decisionSeq, 'ordinary round keeps the decision');
     assert.equal(after.stats.activityLeaf, state.stats.activityLeaf);
+    const nativeBuildInput = Profile.buildInputKey;
+    let previousBuildReads = 0;
+    Profile.buildInputKey = (subject, timestamp) => {
+        if (subject === state) previousBuildReads++;
+        return nativeBuildInput(subject, timestamp);
+    };
+    try {
+        Sections.events(state, after, deps.timestamp);
+        assert.equal(previousBuildReads, 0, 'a saved semantic baseline does not rebuild the previous combat profile');
+        const saved = state.stats.wishSections;
+        state.stats.wishSections = { ...saved, build: undefined };
+        Sections.events(state, after, deps.timestamp);
+        assert.equal(previousBuildReads, 1, 'an unknown previous build still gets its conservative native fact');
+        state.stats.wishSections = saved;
+    } finally { Profile.buildInputKey = nativeBuildInput; }
     const levelled = { ...state, level: state.level + 1, stats: { ...state.stats } };
     assert(Events.reconcile(state, levelled, deps.timestamp).includes('build'));
     assert.equal(levelled.stats.decisionSeq, state.stats.decisionSeq + 1);
@@ -195,6 +219,56 @@ try {
     const deceased = { ...state, activity: 'dead', stats: { ...state.stats } };
     assert(Events.reconcile(state, deceased, deps.timestamp).includes('combat'));
     assert.equal(deceased.stats.decisionSeq, state.stats.decisionSeq + 1, 'simultaneous death changes coalesce');
+    Economy.setPlanningContexts(64);
+    try {
+        const beforeMemos = producedSourceMemos;
+        const members = [92951, 92952].map(characterId => ({ ...state, characterId }));
+        const memberViews = members.map(member => Economy.forState(member, { ...deps, withNodes: true }));
+        assert(producedSourceMemos > beforeMemos, 'the native provider produced a real bounded source memo');
+        assert(memberViews.every(view => view.projection.sourceSections === null),
+            'pool64 member views cannot retain a source memo outside the cache owner');
+        const group = Economy.forGroup({ id: 'source-cap64', adena: 100 }, members, { ...deps, memberContexts: memberViews });
+        assert.equal(group.projection.sourceSections, null, 'the retained group has no copied source memo');
+        assert(Number.isFinite(group.itemUsefulness(1)), 'the group still uses its member results');
+        assert.equal(Economy.size().context, 0, 'all member cache slots remain assigned to the planning pool');
+        Economy.forgetGroup('source-cap64');
+    } finally { Economy.setPlanningContexts(0); }
+    const nativeProviders = Providers.build, heldRoll = Tendency.roll;
+    try {
+        const sourceBoard = new (invoke('GameServer/AfkTrade/BoardIndex').BoardIndex)();
+        const nativeRevision = sourceBoard.itemRevision.bind(sourceBoard);
+        let quoteMove = 0;
+        sourceBoard.itemRevision = id => `${nativeRevision(id)}:${Number(id) === 1 ? quoteMove : 0}`;
+        Providers.build = (subject, context, options) => {
+            const projection = originalBuild(subject, context, options);
+            context.price(1); // an actual watched source input
+            const better = quoteMove > 0 || Number(subject.inventory[1869]?.amount) > 1;
+            return { ...projection, roots: ['held', 'challenger'], nodes: [
+                { key: 'item:1869', price: 1, object: { itemId: 1869, amount: 1 }, paths: [{ activity: 'hunting', costHours: 1 }] },
+                { key: 'held', need: 'power', valueHours: 1, paths: [{ activity: 'hunting', costHours: 1 }] },
+                { key: 'challenger', need: 'power', valueHours: better ? 1e9 : .1,
+                    paths: [{ activity: 'hunting', costHours: 1, requirements: [{ key: 'item:1869', amount: 2 }] }] }] };
+        };
+        Tendency.roll = (...args) => args.at(-1) === 'focus' ? .99 : heldRoll(...args);
+        for (const [at, event] of ['quote', 'material'].entries()) {
+            quoteMove = 0;
+            let subject = { ...state, characterId: 92961 + at,
+                inventory: { ...state.inventory, 1869: { selfId: 1869, amount: 1 } },
+                stats: { ...state.stats, wishFocus: ['held', 0, 0], activityLeaf: 0, wishSections: undefined } };
+            const options = { ...deps, board: sourceBoard };
+            const chosen = Economy.forState(subject, options);
+            subject = { ...subject, stats: { ...subject.stats, ...chosen.statsPacket } };
+            assert.equal(chosen.network.focus[0], 'held');
+            Economy.forgetContext(subject.characterId);
+            const restored = Economy.forState(subject, options);
+            assert.equal(restored.network.focus[0], 'held', 'technical eviction retains the accepted focus');
+            assert.equal(restored.statsPacket.decisionSeq, chosen.statsPacket.decisionSeq);
+            if (event === 'quote') quoteMove++;
+            else subject = { ...subject, inventory: { ...subject.inventory, 1869: { selfId: 1869, amount: 2 } } };
+            const changed = Economy.forState(subject, options);
+            assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
+        }
+    } finally { Providers.build = nativeProviders; Tendency.roll = heldRoll; }
     Economy.forget(state.characterId);
     assert.equal(Profile.size().ownerBuilds >= 0, true);
     console.log('PASS money/XP/combat reuse, fresh funding, source sections, publication/eviction, accumulation/loss, coalesced level/death and untouched expiry');

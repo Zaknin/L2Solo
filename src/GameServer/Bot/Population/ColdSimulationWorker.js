@@ -938,7 +938,7 @@ function startKernel(config = {}) {
         }),
         projectResolve: async (state, result, timestamp) => {
             const owner = kernel.states.get(Number(state.characterId));
-            let economy = null, seenKey = null, refreshed = null, observedDeps = null;
+            let economy = null, seenKey = null, refreshed = null, observedDeps = null, economyEdges = null;
             const resolved = await LifeStateProjector.prepareResolve(state, result, {
                 persist: false,
                 timestamp,
@@ -954,11 +954,17 @@ function startKernel(config = {}) {
                 },
                 economyFor: (projected, deps) => {
                     observedDeps = deps;
-                    const action = invoke('GameServer/Bot/Population/ColdEconomyPlan')
-                        .edges(state, projected, owner?.context || {}, timestamp);
-                    refreshed = !action && !projected.party?.partyId && !projected.partyId
+                    refreshed = !projected.party?.partyId && !projected.partyId
                         ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps) : null;
-                    return refreshed?.economy || invoke('GameServer/Bot/Economy/EconomyContext').forState(projected, deps);
+                    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+                    // Both native stock gates read one prepared foundation;
+                    // the same edges also drive the action after projection.
+                    const stock = refreshed?.economy || Economy.basics(projected, deps);
+                    economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
+                        .edges(state, projected, owner?.context || {}, timestamp,
+                            { stockFor: (_state, kind) => stock.stock(kind) });
+                    if (economyEdges) refreshed = null;
+                    return refreshed?.economy || Economy.forState(projected, deps);
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
@@ -978,8 +984,6 @@ function startKernel(config = {}) {
                 ...(result.soulCrystals?.length ? { soulCrystals: result.soulCrystals } : {})
             };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
-            const planner = invoke('GameServer/Bot/Population/ColdEconomyPlan');
-            const economyEdges = planner.edges(state, projected, context, timestamp);
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
             const economyPlan = preparedAction?.economyPlan || null;
@@ -1019,12 +1023,23 @@ function startKernel(config = {}) {
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
             const deps = { spots, occupancy, timestamp, board: boardReady(),
                 buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
+            const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
+            const retainedPlan = previousPlan?.status === 'active' && nativeReplan.routeCurrent
+                && !nativeReplan.failure && !nativeReplan.invalidSource
+                ? GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp)
+                : previousPlan;
+            // Failure counters and recovery deadlines are live native facts,
+            // even when the expensive wish calculation still holds.
+            const planHolds = !previousPlan
+                || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
+                || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
+                    && JSON.stringify(retainedPlan) === JSON.stringify(previousPlan);
             // A proved ordinary solo round keeps its accepted native plan.
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             const excluded = invoke('GameServer/Bot/Population/SpotRiskPolicy').excludedSpotIdsForStates([state], timestamp);
             const refreshed = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
-                && !state.stats?.lastResolveDebug?.failed
+                && planHolds && !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery
                 ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps) : null;
             if (refreshed && !excluded.has(String(refreshed.economy.network.activity?.spotId))) {
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
@@ -1039,7 +1054,7 @@ function startKernel(config = {}) {
             const preparedEconomy = Economy.forState(state, deps);
             const selectedAcquisition = GearPlanSelection
                 .selectAcquisitionPlan(state, previousPlan, {
-                    spots, occupancy, timestamp, preparedEconomy,
+                    spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
                     planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
                 });
             const { replanContext, reusablePartyRequest, excludedSpotIds, economy } = selectedAcquisition;

@@ -38,13 +38,20 @@ function marksFor(session, actor) {
         session.decisionSkillsMark = Sections.hash((skills || []).map(skill => [skill.fetchSelfId?.(), skill.fetchLevel?.()]));
     }
     const timestamp = Date.now();
+    const level = Number(actor.fetchLevel?.() || 0), exp = actor.fetchExp?.();
+    const baseline = stats.wishSections;
+    // Progress is one scalar native read. Reuse the accepted horizon/error;
+    // no actor capture, bag scan or new estimate is needed on an AI action.
+    const progress = { characterId: actor.fetchId?.(), level, stats: { exp }, persona: session.coldLifeState?.persona };
+    const horizon = !!baseline && Number.isFinite(Number(exp)) && Sections.horizonChanged(progress,
+        baseline, baseline.expHour, invoke('GameServer/Bot/AI/BotPersona').of(progress));
     const build = Sections.hash([actor.fetchClassId?.(), actor.fetchClanId?.(), actor.hennaStats,
         session.decisionEquipmentMark, session.decisionSkillsMark,
         Number(stats.wishSections?.night) >= 0 ? Number(invoke('GameServer/World/GameTime').isNight(timestamp)) : -1,
         Object.values(actor.effects || {}).filter(effect => !effect.expiresAt || effect.expiresAt > timestamp)
             .map(effect => [effect.id, effect.key, effect.stats]), stats.recipes, stats.workshop]);
-    return { level: Number(actor.fetchLevel?.() || 0), weight: bag.weight, bag: bag.full,
-        build, money: Sections.fundingMark(physical), meaningfulMoney: Sections.meaningfulMoney(physical),
+    return { level, weight: bag.weight, bag: bag.full,
+        build, horizon, money: Sections.fundingMark(physical), meaningfulMoney: Sections.meaningfulMoney(physical),
         relations: Sections.hash([stats.memoryRevision, stats.relations, session.hotBackgroundPartyId, stats.clanId]) };
 }
 function observe(session, actor) {
@@ -55,6 +62,7 @@ function observe(session, actor) {
         if (marks.weight !== prior.weight) changed.push('weight');
         if (marks.bag > prior.bag) changed.push('bag');
         if (marks.build !== prior.build) changed.push('build');
+        if (marks.horizon && !prior.horizon) changed.push('benefits');
         if (marks.relations !== prior.relations) changed.push('relations');
         if (marks.money !== prior.money || marks.meaningfulMoney) changed.push('money');
         if (changed.length) {
@@ -63,7 +71,7 @@ function observe(session, actor) {
             for (const reason of changed.slice(1)) { stats.wishDirty = (Number(stats.wishDirty) || 0) | (sectionBits[reason] || 0);
                 if (DiagnosticConfig.developerDiagnostics) reasons[reason]++; }
         }
-    }
+    } else if (marks.horizon) raiseDecision(session, 'benefits');
     session.decisionMarks = marks;
 }
 function prepared(session) {
