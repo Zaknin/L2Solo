@@ -71,7 +71,8 @@ async function run() {
     offers = []; failed.clear();
 
     const dPlan = Shot.planForKind('soulshot', 'd');
-    let cold = { characterId: 100, level: 30, phase: 'cold', spotId: '-10_30', adena: 51000,
+    const economicSpot = require('./fixtures/profitable_stock_state').spotFor('7_20');
+    let cold = { characterId: 100, level: 30, phase: 'cold', spotId: economicSpot.id, adena: 51000,
         stats: { classId: 0, money: [10000, .0001, 7500, 0, .001, 60000, 1463, .001, 61400, 1061] },
         inventory: { 1463: { selfId: 1463, amount: 200 } } };
     const hot = actor(0, 51000, 7500); hot.fetchLevel = () => 30;
@@ -82,8 +83,16 @@ async function run() {
     hot.backpack.fetchItems = () => [fetch(57), held];
     // Mirror the native hot kit, not an unrelated empty cold combat profile.
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const mirrored = Economy.stateForActor(hot);
-    const packet = Economy.forState(mirrored).statsPacket;
+    const mirrored = { ...Economy.stateForActor(hot) };
+    delete mirrored.physicalInventory;
+    // The worker receives the native plain inventory projection; hot Item
+    // methods belong only to the main-thread actor.
+    const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(mirrored);
+    assert.equal(hunt.spotId, economicSpot.id); assert(hunt.perHour > 0);
+    const captured = await require('./helpers/workerEconomyDecision')(mirrored, { nativeRoutes: true });
+    const packet = captured.statsPacket;
+    assert(captured.reserveInputs.stocks.find(row => row.selfId === 1061)?.perHour > 0,
+        'the unarmed native economic snapshot still has real healing demand');
     cold = { ...mirrored, phase: 'cold', stats: { ...mirrored.stats, ...packet } };
     hot.session.coldLifeState = { ...cold, phase: 'hot' };
     const options = { plan: dPlan, targetAmount: 3000, unitPrice: 20, potionUnitPrice: 200,

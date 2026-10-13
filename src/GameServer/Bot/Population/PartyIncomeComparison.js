@@ -181,9 +181,8 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
 function itemHours(state, spot, kills, goal, members, agreement) {
     const npcId = Number(goal?.npcId), itemId = Number(goal?.itemId);
     if (!spot || !npcId || !itemId || !(kills > 0)) return null;
-    const Data = invoke('GameServer/DataCache');
-    const reward = (Data.npcRewards || []).find(row => Number(row.selfId) === npcId);
-    const npc = (Data.npcs || []).find(row => Number(row.selfId) === npcId);
+    const Catalogue = require('../../Knowledge/GameDataCatalogue').native();
+    const reward = Catalogue.rewardForNpc(npcId), npc = Catalogue.npc(npcId);
     if (!reward || !npc) return null;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const next = state.stats?.equipmentPlan?.next;
@@ -192,9 +191,7 @@ function itemHours(state, spot, kills, goal, members, agreement) {
     const killerLevel = Math.max(...members.map(member => Number(member.level)));
     const expected = Planner.itemDropYield(reward, itemId, spoil ? 'spoil' : 'drop',
         { npcLevel: Number(npc.template?.level || spot.avgLevel), killerLevel }).expectedYield;
-    const entries = spot.npcEntries || [];
-    const total = entries.reduce((sum, entry) => sum + positive(entry.count), 0);
-    const count = entries.filter(entry => Number(entry.selfId) === npcId).reduce((sum, entry) => sum + positive(entry.count), 0);
+    const { count, totalCount: total } = Catalogue.spotNpcWeights(spot, npcId);
     // Only a funded escrow promises a personal item. Before funding, even
     // required requests and a proposed 'need' agreement get the random share.
     const reserved = agreement?.help?.status === 'funded' && Number(agreement.help.payerId) === Number(state.characterId)

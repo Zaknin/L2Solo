@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const BeginnerShots = require('../../Items/C4BeginnerShots');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const DataCache = invoke('GameServer/DataCache');
@@ -33,16 +34,9 @@ const SHOT_PRODUCT_RANK = Object.freeze({
     3948: 'd', 3949: 'c', 3950: 'b', 3951: 'a', 3952: 's'
 });
 
-let templateIndexSource = null;
-let templateIndex = new Map();
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (templateIndexSource !== items) {
-        templateIndexSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 // Canonical quest classification cannot be overridden by a saved gear kind.
@@ -112,16 +106,11 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
-let starterItemsSource = null;
-let starterItemIds = new Set();
+let StarterItemCatalog = null; // loaded on first use, as the inline require did, then kept
 
 function isStarterEquipment(item, template = templateFor(item?.selfId)) {
-    const source = DataCache.newbieItems;
-    if (starterItemsSource !== source) {
-        starterItemsSource = source;
-        starterItemIds = new Set((source || []).flatMap(row => row.items || [])
-            .map(grant => Number(grant.selfId)));
-    }
+    StarterItemCatalog ||= require('../../Knowledge/StarterItemCatalog');
+    const starterItemIds = StarterItemCatalog.snapshotIds(DataCache.newbieItems, isStarterEquipment);
     return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
 }
 
@@ -543,13 +532,14 @@ function saleCandidates(state, options = {}) {
         reserved[id] = Math.max(Number(reserved[id] || 0), amount + Number(clan[id] || 0));
     for (const [id, amount] of Object.entries(options.reserved || {}))
         reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
-    // Potions, crafter ammunition and travel scrolls use restock reserves.
+    // Potions, crafter ammunition and travel scrolls use restock reserves:
+    // the held plan's published targets (L72), else the foundation.
     // Ordinary bots retain their current ammunition independently of forecasts.
-    const basics = options.keptAmounts ? null
-        : invoke('GameServer/Bot/Economy/EconomyContext').basics(state, { saleReservations: reserved });
+    const targets = options.keptAmounts ? null
+        : invoke('GameServer/Bot/Economy/EconomyContext').keptTargets(state, { saleReservations: reserved });
     const kept = options.keptAmounts || {
-        ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: basics.stock('potions').target }),
-        ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, basics),
+        ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: targets.potions }),
+        ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, null, targets.shots),
         ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) };
     for (const [selfId, amount] of Object.entries(kept)) {
         reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount + Number(clan[selfId] || 0));

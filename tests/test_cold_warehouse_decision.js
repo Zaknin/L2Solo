@@ -31,9 +31,17 @@ const id = 730180;
     try {
         await Life.init();
         await Database.setItem(id, { selfId: 57, name: 'Adena', amount: 10000000, slot: 0 });
-        const weapon = Data.items.find(row => row.etc.rank === 'd' && String(row.template.kind).startsWith('Weapon.') && row.etc.slot === 7);
-        assert(weapon, 'an actual authored D-grade weapon is required');
-        await Database.setItem(id, { selfId: weapon.selfId, name: weapon.template.name, amount: 1, equipped: true, slot: 7, enchant: 0 });
+        const kit = require('./fixtures/profitable_stock_state').kitFor(56, 30);
+        const nativeWeapon = kit.entries.find(item => [7, 14].includes(Number(item.slot)));
+        const weapon = Data.items.find(row => Number(row.selfId) === Number(nativeWeapon?.selfId));
+        assert(weapon && weapon.etc.rank === 'd', 'an actual authored native D-grade weapon is required');
+        const insertedWeapon = await Database.setItem(id, { selfId: weapon.selfId, name: weapon.template.name,
+            amount: 1, equipped: true, slot: Number(nativeWeapon.slot), enchant: 0 });
+        for (const item of kit.entries.filter(row => ![7, 14].includes(Number(row.slot)))) {
+            const authored = Data.items.find(row => Number(row.selfId) === Number(item.selfId));
+            await Database.setItem(id, { selfId: Number(item.selfId), name: authored.template.name,
+                amount: 1, equipped: true, slot: Number(item.slot), enchant: 0 });
+        }
         // The ordinary D weapon scroll: since 82e5323c an item without a world
         // source (the D crystal scroll 957) is never an enchant alternative.
         for (const [selfId, amount] of [[955, 2]]) {
@@ -48,37 +56,101 @@ const id = 730180;
             inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
             vitals: { hp: 187, maxHp: 187, mp: 74, maxMp: 74 }, timing: {},
             stats: { classId: 56, classProgressionClassId: 56, classProgressionLevel: 30 } }, 'warehouse_decision_fixture');
-        const probe = await nativeDecision(state);
+        const originalWeapon = (await Database.fetchItems(id)).find(row => Number(row.id) === Number(insertedWeapon.insertId));
+        assert(originalWeapon && originalWeapon.selfId === weapon.selfId && originalWeapon.enchant === 0,
+            'adding physical armour preserves the original weapon object and enchant');
+        const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+        assert(Gear.suitable(weapon, state, Gear.roleFor(state), 'd'), 'the native weapon is compatible with its actual class');
+        assert.strictEqual(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required, false,
+            'the physical native D kit has no progression equipment gap');
+        const timestamp = Date.now();
+        const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, timestamp);
+        assert(hunt.perHour > 0 && hunt.spotId, `native warehouse-owner profitable hunt: ${JSON.stringify(hunt)}`);
+        state = await Life.upsertState({ ...state, spotId: hunt.spotId }, 'warehouse_native_hunt_fixture');
+        const spots = [require('./fixtures/profitable_stock_state').spotFor(state.spotId)];
+        const stock = Economy.stockFor(state, 'shots', { timestamp, spots });
+        if (stock.survivalMissing > 0) {
+            assert(Number.isFinite(stock.survivalMissing) && Number.isInteger(stock.survivalMissing));
+            assert.strictEqual(stock.itemId, invoke('GameServer/Inventory/ShotStock').planForState(state).selfId);
+            assert.strictEqual(stock.ownedUsePerHour, stock.usePerHour);
+            const current = Number(state.inventory[stock.itemId]?.amount || 0);
+            assert.strictEqual(stock.current, current);
+            const template = Data.items.find(row => Number(row.selfId) === stock.itemId);
+            await Database.setItem(id, { selfId: stock.itemId, name: template.template.name,
+                amount: stock.survivalMissing, slot: 0 });
+            state = await Life.upsertState({ ...state,
+                inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)) }, 'warehouse_native_stock_fixture');
+            const freshStock = Economy.stockFor(state, 'shots', { timestamp, spots });
+            assert.strictEqual(freshStock.survivalMissing, 0);
+            assert.strictEqual(freshStock.current, current + stock.survivalMissing);
+        }
+        const probe = await nativeDecision(state, { timestamp, nativeRoutes: true });
         console.log(JSON.stringify({ nativeMaterials: probe.materials, queue: probe.queue }));
         const selectedScroll = 955;
-        assert.deepEqual(probe.materials, [[selectedScroll, 3]],
-            'the actual worker selects the native D weapon scroll for the equipped weapon');
+        const goals = probe.queue.filter(row => row.object?.kind === 'improvement'
+            && row.object.objectId === originalWeapon.id && row.object.from === 0 && row.object.scrollId === selectedScroll);
+        assert(goals.length > 0, 'the actual worker admits an enchant goal for the original weapon');
+        const goal = goals.reduce((best, row) => row.object.to > best.object.to ? row : best);
+        const nativeNeed = goal.object.to - goal.object.from;
+        const safeMax = Number(invoke('GameServer/Items/C4EnchantRules').configWith(options.default.Enchant).safeMax);
+        assert(Number.isInteger(nativeNeed) && nativeNeed > 0 && goal.object.to <= safeMax);
+        assert.strictEqual(goal.object.itemId, weapon.selfId, 'the native goal names the same physical weapon template');
+        assert.strictEqual(goal.key, `enchant:${originalWeapon.id}:${goal.object.to}`);
+        assert.deepEqual(goal.object.materials, [{ selfId: selectedScroll, amount: nativeNeed }]);
+        const scrollMaterials = probe.materials.filter(([selfId]) => selfId === selectedScroll);
+        assert.strictEqual(scrollMaterials.length, 1, 'the full capture has one material row for the one physical weapon');
+        assert.strictEqual(scrollMaterials[0][1], nativeNeed, 'captured scroll units match the maximum actual weapon goal');
+        const expectedEnchantWithdrawal = Math.min(nativeNeed, 2);
+        assert(expectedEnchantWithdrawal >= 1 && expectedEnchantWithdrawal <= 2, 'the actual need exercises a nonempty bounded warehouse withdrawal');
         Coordinator.economyDecisions.accept(id, probe.decision);
         const originalFull = Economy.forState;
         Economy.forState = () => { throw Error('main_cold_forState_forbidden'); };
         try {
             const warehouseBefore = await Database.fetchWarehouseItems(id);
+            assert.equal(warehouseBefore.filter(row => Number(row.selfId) === selectedScroll)
+                .reduce((amount, row) => amount + Number(row.amount), 0), 2, 'the original owner still has exactly two stored scrolls');
             const requests = Enchant.warehouseRequests(state, warehouseBefore);
-            assert(requests.some(row => row.selfId === selectedScroll && row.amount === 2 && row.reason === 'enchant'),
+            assert(requests.every(row => row.selfId === selectedScroll && row.reason === 'enchant'));
+            assert.equal(requests.reduce((amount, row) => amount + row.amount, 0), expectedEnchantWithdrawal,
                 'a worker scroll material must reach the native immediate-enchant path');
+            const nativeReleaseOptions = { inTown: true, now: 1800000000000 };
+            const predictedMarket = Warehouse.marketRequests(state, warehouseBefore,
+                new Map([[selectedScroll, expectedEnchantWithdrawal]]), nativeReleaseOptions);
+            assert(predictedMarket.every(row => row.selfId === selectedScroll && row.reason === 'market'
+                && Number.isInteger(row.amount) && row.amount >= 0));
+            const marketAmount = predictedMarket.reduce((amount, row) => amount + row.amount, 0);
+            assert(marketAmount <= 2 - expectedEnchantWithdrawal, 'the market reader cannot take scrolls reserved for the native enchant goal');
+            const expectedTotal = expectedEnchantWithdrawal + marketAmount;
+            assert(expectedTotal > 0 && expectedTotal <= 2 && expectedTotal <= safeMax - goal.object.from);
+            const expectedConsumed = Math.min(expectedTotal, safeMax - goal.object.from);
+            const scrollName = warehouseBefore.find(row => Number(row.selfId) === selectedScroll).name;
+            const expectedItems = [...requests, ...predictedMarket].map(row => ({
+                selfId: row.selfId, name: scrollName, amount: row.amount, reason: row.reason
+            }));
             const before = await Database.fetchItems(id);
             const beforeMoney = before.find(row => Number(row.selfId) === 57).amount;
-            const released = await Warehouse.releaseCold(state, { inTown: true });
+            const released = await Warehouse.releaseCold(state, nativeReleaseOptions);
+            console.log(JSON.stringify({ nativeNeed, requestedEnchant: requests, predictedMarket, released: released.items }));
             assert(released.released);
-            assert(released.items.some(row => row.selfId === selectedScroll && row.amount === 2 && row.reason === 'enchant'));
+            assert.deepEqual(released.items, expectedItems, 'the full withdrawal vector agrees with both native readers at the same decision point');
+            assert.equal(released.items.filter(row => row.reason === 'enchant').reduce((amount, row) => amount + row.amount, 0), expectedEnchantWithdrawal);
+            assert.equal(released.items.filter(row => row.reason === 'market').reduce((amount, row) => amount + row.amount, 0), marketAmount);
             const after = await Database.fetchItems(id), stored = await Database.fetchWarehouseItems(id);
-            assert.equal(after.find(row => Number(row.selfId) === weapon.selfId).enchant, 2,
-                'both native warehouse scrolls enchant immediately within the same town tail');
-            assert.equal(after.some(row => Number(row.selfId) === selectedScroll), false, 'both physical scrolls are consumed');
-            assert.equal(stored.some(row => Number(row.selfId) === selectedScroll && row.amount > 0), false);
+            assert.equal(after.find(row => Number(row.id) === originalWeapon.id).enchant, goal.object.from + expectedConsumed,
+                'the safe batch consumes all physically released D scrolls before sale, within the native safe limit');
+            assert.equal(after.some(row => Number(row.selfId) === selectedScroll), false, 'all withdrawn physical scrolls are consumed');
+            assert.equal(stored.filter(row => Number(row.selfId) === selectedScroll)
+                .reduce((amount, row) => amount + Number(row.amount), 0), 2 - expectedTotal,
+            'unused physical scrolls remain in the same owner warehouse');
             assert.equal(after.find(row => Number(row.selfId) === 57).amount, beforeMoney, 'no warehouse withdrawal invents Adena');
-            assert.equal(released.state.stats.lastSafeEnchant.operations, 2);
+            assert.equal(released.state.stats.lastSafeEnchant.operations, expectedConsumed);
             const row = (await Database.execute(['SELECT adena, inventorySummary, statsJson FROM bot_life_state WHERE characterId=?', [id]]))[0];
             assert.equal(row.adena, beforeMoney);
-            assert.equal(JSON.parse(row.inventorySummary)[weapon.selfId].enchant, 2);
-            assert.equal(JSON.parse(row.statsJson).lastSafeEnchant.operations, 2);
+            assert.equal(JSON.parse(row.inventorySummary)[weapon.selfId].enchant, goal.object.from + expectedConsumed);
+            assert.equal(JSON.parse(row.statsJson).lastSafeEnchant.operations, expectedConsumed);
             assert.deepEqual(Economy.summary().mainColdForState, {}, 'town readers never build a main cold network');
-            console.log(JSON.stringify({ native: true, requests, weaponEnchant: 2, consumedScrolls: 2,
+            console.log(JSON.stringify({ native: true, requests, nativeNeed,
+                weaponEnchant: goal.object.from + expectedConsumed, consumedScrolls: expectedConsumed,
                 wallet: beforeMoney, mainColdForState: 0 }));
 
             // Separate captured-wire control: the real Steel recipe's legacy

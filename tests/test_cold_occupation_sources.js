@@ -15,6 +15,19 @@ function drain(iterator) {
 }
 assert(Sources.npcOffersFor(1785).length > 0);
 assert(Sources.npcOffersFor(1785).every(row => row.sourceId > 0 && row.town && row.price > 0));
+const Catalogue = require('../src/GameServer/Knowledge/GameDataCatalogue').native();
+const startupOffers = Sources.npcOffersFor(1785), sharedView = Catalogue.npcTownOffers();
+assert.strictEqual(startupOffers, sharedView.offersFor(1785), 'cold reader borrows the shared item/town stock');
+const originalRate = process.env.L2NODE_PROGRESSION_RATE;
+try {
+    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    assert.notStrictEqual(Catalogue.npcTownOffers(), sharedView, 'a current shared query can read a revised rate');
+    assert.strictEqual(Sources.npcOffersFor(1785), startupOffers,
+        'the cold occupation contract retains its original startup-time prices');
+} finally {
+    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+}
 assert(Object.isFrozen(Towns.regionIndex.zones[0].points[0]));
 for (const loc of [Towns.towns.giran_town, Towns.towns.floran_village,
     { locX: 112000, locY: -15000, locZ: 0 }, { locX: 0, locY: 240000, locZ: -4000 },

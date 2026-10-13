@@ -484,7 +484,7 @@ class WishNetwork {
     // caller that holds the result itself, or a one-off proposal).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
-        caller = 'wish_network', trigger = 'request', stockFor = null }) {
+        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false }) {
         const diagnostic = Diagnostics.active();
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
@@ -555,7 +555,7 @@ class WishNetwork {
         const score = wish => wish.valueHours / Math.max(1 / 3600, wish.effort);
         const held = focusWishes.find(wish => wish.key === previous.focus?.[0]);
         const challenger = focusWishes.reduce((best, wish) => !best || score(wish) > score(best) ? wish : best, null);
-        const focused = held && (!challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
+        const focused = held && (preserveFocus || !challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
             : choose(focusWishes, score, roll('focus'));
         const focus = focused ? [focused.key, held === focused ? previous.focus[1] : playedHours,
             nonnegative(focused.price)] : null;
@@ -655,6 +655,11 @@ class WishNetwork {
         // A cheap intermediate material cannot claim the whole upgrade's
         // benefit as an instantaneous income. Use the complete chosen path.
         const heldActivity = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
+        if (individual && activityLeaf && !heldActivity && decisionSeq === inputDecisionSeq) {
+            // Completion or an impossible accepted step is a real event;
+            // rebuilding the same valid step is not another tendency roll.
+            decisionSeq++; activityLeaf = 0;
+        }
         const activity = heldActivity || choose(candidates, leaf => leaf.valueHours / Math.max(1 / 3600, leaf.effort),
             roll('activity'));
         const result = { inputKey, queue, moneyPrice, available, gap, hourAdena,

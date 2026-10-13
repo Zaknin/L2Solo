@@ -9,7 +9,7 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
-let fundingPacket = null;
+const nativeGearEconomy = require('./fixtures/native_gear_economy');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpcPlanningCatalog');
 const { ColdSimulationCoordinator, npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
@@ -33,32 +33,61 @@ const base = (characterId, adena) => ({
     inventory: { [weapon.selfId]: { selfId: Number(weapon.selfId), amount: 1, equippedCount: 1, equipped: 1 },
         1463: { selfId: 1463, amount: 2000 } }, adena,
     vitals: { hp: 2000, maxHp: 2000, mp: 1000, maxMp: 1000 },
-    stats: { ...([7, 8].includes(characterId) ? fundingPacket : null), hennas: [1, 13, 17], generatedCold: true, classId: 1, role: 'dps', build: { grade: 'd', classId: 1, level: 30 }, equipment: [] }
+    stats: { hennas: [1, 13, 17], generatedCold: true, classId: 1, role: 'dps', build: { grade: 'd', classId: 1, level: 30 }, equipment: [] }
 });
-// With prepared routes the cheapest useful D piece leads the queue; this wallet
-// funds it but, once its bid sits in escrow, no longer covers it.
-const wallet = 60000;
-// A purchase is executable only over prepared town routes (5e91bb1c). The
-// worker prepares them before its wish review; this main-thread review reads
-// the same EconomicTrip rows for the bot's own position.
-const EconomicTrip = require('../src/GameServer/Bot/Economy/EconomicTrip');
-const routeRows = (state) => { const steps = EconomicTrip.prepare(state); let next;
-    do next = steps.next(); while (!next.done); return next.value; };
-const select = (state) => Selection.selectAcquisitionPlan(state, null, { spots: [], planningOptions: plannerOptions,
-    preparedEconomy: invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { spots: [], routeRows: routeRows(state) }) });
-const nativePosting = select(base(7, wallet));
-const posting = nativePosting.acquisitionPlan;
-fundingPacket = nativePosting.economy.statsPacket;
-assert(fundingPacket.money.slice(4).includes(posting.target.selfId), 'the native queue packet funds the selected item');
-assert.strictEqual(posting?.strategy, 'market', 'the fixture must plan a purchase');
-const price = Number(posting.market.price);
-const afterPosting = wallet - price;
-const unfunded = select(base(7, afterPosting));
-assert.strictEqual(unfunded.economy.network.activity.funding, true, 'without escrow its selected gear wish must earn money first');
 const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) / 3) }, (_, i) => packet[6 + i * 3]);
-assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.selfId), 'unfunded target has no spending ratio');
 
 (async () => {
+    // The original incomplete kit and 60k wallet do not prove a funded gear
+    // purchase. Keep that actor's native defer result before reading a target.
+    const original = base(7, 60000);
+    const originalSelection = Selection.selectAcquisitionPlan(original, null, { spots: [], planningOptions: plannerOptions,
+        preparedEconomy: invoke('GameServer/Bot/Economy/EconomyContext').forState(original,
+            { spots: [], routeRows: nativeGearEconomy.prepareRoutes(original) }) });
+    assert.strictEqual(originalSelection.acquisitionPlan.status, 'deferred',
+        `original weapon-only buyer: ${nativeGearEconomy.describe(originalSelection.economy)}`);
+
+    const native = nativeGearEconomy({ characterId: 7 });
+    const posting = native.plan;
+    const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+    const price = Number(posting.market.price);
+    const accepted = { ...native.member, stats: { ...native.member.stats, ...native.economy.statsPacket } };
+    const available = Funding.spendable(accepted, 0, { itemId: posting.target.selfId });
+    assert(available >= price, 'the selected native item is admitted at its actual NPC quote');
+    const plentifulAfter = { ...accepted, adena: accepted.adena - price,
+        inventory: { ...accepted.inventory, 57: { ...accepted.inventory[57], amount: accepted.adena - price } } };
+    assert.strictEqual(Funding.spendable(plentifulAfter, price, { itemId: posting.target.selfId })
+        - Funding.spendable(plentifulAfter, 0, { itemId: posting.target.selfId }), price,
+    'own escrow adds exactly the physically posted quote to the native available funds');
+    // Derive the scarce boundary from the native reserve and higher-priority
+    // commitments, rather than choosing an amount until the test passes.
+    const mandatory = accepted.adena - available;
+    const wallet = Math.ceil(price + mandatory), afterPosting = wallet - price;
+    assert(price > 0 && afterPosting >= 0);
+    const beforePosting = { ...native.member, adena: wallet,
+        inventory: { ...native.member.inventory, 57: { ...native.member.inventory[57], amount: wallet } } };
+    const boundary = native.review(beforePosting);
+    const chosen = boundary.network.queue.find(wish => wish.key === boundary.network.activity?.rootKey);
+    assert(boundary.network.activity?.activity === 'shopping' && !boundary.network.activity.funding
+        && chosen?.funded && chosen.object?.itemId === posting.target.selfId,
+    `native derived cash boundary (${price}+${mandatory}=${wallet}): ${nativeGearEconomy.describe(boundary)}`);
+    const captured = await require('./helpers/workerEconomyDecision')(beforePosting, { nativeRoutes: true });
+    const fundingPacket = captured.statsPacket;
+    assert(Array.isArray(fundingPacket.money));
+    assert(fundedIds(fundingPacket.money).includes(posting.target.selfId),
+        `the actual worker funds the selected NPC item: ${JSON.stringify(captured.decision)}`);
+    const soloBase = (characterId, adena) => ({ ...native.member, characterId,
+        name: `Buyer${characterId}`, accountName: `bot_${characterId}`,
+        inventory: { ...structuredClone(native.member.inventory),
+            57: { ...native.member.inventory[57], amount: adena } }, adena,
+        stats: { ...native.member.stats, ...fundingPacket } });
+    assert.strictEqual(soloBase(7, afterPosting).inventory[57].amount + price, wallet,
+        'the posted bid moves exactly the native quote from the same physical wallet to escrow');
+    const unfunded = native.review(soloBase(7, afterPosting));
+    assert.strictEqual(unfunded.network.activity.funding, true,
+        `without own escrow the purchase must earn money: ${nativeGearEconomy.describe(unfunded)}; quote=${price}; wallet=${afterPosting}`);
+    assert(!fundedIds(unfunded.statsPacket.money).includes(posting.target.selfId), 'unfunded target has no spending ratio');
+
     const originalProjection = AfkTrade.ownerRecords;
     const originalCachedState = LifeState.cachedState;
     try {
@@ -67,9 +96,9 @@ assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.se
         LifeState.cachedState = () => null;
         const coordinator = new ColdSimulationCoordinator();
         const index = { spots: new Map(), parties: new Map(), occupancy: {} };
-        assert.strictEqual(coordinator.contextFor(base(7, afterPosting), index).buyOrderEscrow, price,
+        assert.strictEqual(coordinator.contextFor(soloBase(7, afterPosting), index).buyOrderEscrow, price,
             'the resolve context carries the bot\'s own buy-order escrow');
-        assert.strictEqual(coordinator.contextFor(base(8, afterPosting), index).buyOrderEscrow, 0);
+        assert.strictEqual(coordinator.contextFor(soloBase(8, afterPosting), index).buyOrderEscrow, 0);
     } finally {
         AfkTrade.ownerRecords = originalProjection;
         LifeState.cachedState = originalCachedState;
@@ -88,6 +117,8 @@ assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.se
         const deadline = Date.now() + 15000;
         while (!received.some(predicate)) {
             if (workerError) throw workerError;
+            const failure = received.find(message => message.type === 'fault');
+            if (failure) throw Error(JSON.stringify(failure));
             if (Date.now() >= deadline) throw Error(`worker escrow timeout: ${JSON.stringify(received.map((m) => m.type))}`);
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
@@ -134,8 +165,8 @@ assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.se
         assert(unfundedWallet < bridgePrice + Number(bridge.market.reserve),
             'the fixture bridge must need the escrow once the bid is posted');
         send('snapshot_page', { done: true, rows: [
-            { state: { ...base(7, afterPosting), timing }, context: { buyOrderEscrow: price } },
-            { state: { ...base(8, afterPosting), timing }, context: {} },
+            { state: { ...soloBase(7, afterPosting), timing }, context: { buyOrderEscrow: price } },
+            { state: { ...soloBase(8, afterPosting), timing }, context: {} },
             ...partyRows('escrow-party', 20, unfundedWallet, bridgePrice),
             ...partyRows('wallet-party', 30, unfundedWallet, 0)
         ] });
@@ -147,6 +178,8 @@ assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.se
         const deadline = Date.now() + 15000;
         while ([7, 8, 20, 30].some((id) => !proposals.has(id))) {
             if (workerError) throw workerError;
+            const failure = received.find(message => message.type === 'fault');
+            if (failure) throw Error(JSON.stringify(failure));
             if (Date.now() >= deadline) throw Error(`worker escrow proposals: ${JSON.stringify(received.map((m) => m.type))}`);
             for (const message of received.filter((m) => m.type === 'proposal_batch')) {
                 for (const proposal of message.payload.proposals) proposals.set(Number(proposal.characterId), proposal);
@@ -161,7 +194,6 @@ assert(!fundedIds(unfunded.economy.statsPacket.money).includes(posting.target.se
         const fundedDecision = compact(proposals.get(7).economyDecision), unfundedDecision = compact(proposals.get(8).economyDecision);
         assert(fundedDecision.activity, 'worker supplies its new native wish after the fight');
         assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId));
-        const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
         assert(Funding.spendable(proposals.get(7).nextState, price, { itemId: posting.target.selfId }) >= price,
             'current native funded ratio plus own escrow can pay the actual NPC offer');
         assert(Funding.spendable(proposals.get(8).nextState, 0, { itemId: posting.target.selfId }) < price,

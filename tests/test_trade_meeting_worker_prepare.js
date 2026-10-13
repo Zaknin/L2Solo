@@ -9,27 +9,32 @@ const Data = invoke('GameServer/DataCache'); Data.init();
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const spots = invoke('GameServer/Bot/Population/SpotProfiles').ensure();
-const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
-const village = Town.NO_GRADE_MARKETS.find(row => row.name === 'Elven Village');
-const spot = spots.filter(row => row.center).sort((a, b) =>
-    Math.hypot(a.center.locX - village.locX, a.center.locY - village.locY)
-    - Math.hypot(b.center.locX - village.locX, b.center.locY - village.locY))[0];
-assert(spot);
+const stock = require('./fixtures/profitable_stock_state');
+const kit = stock.kitFor(0, 30);
+const lookup = invoke('GameServer/Bot/Population/ColdNpcPlanningCatalog').createLookup(npcPlanningCatalogRows());
+const missing = kit.entries.find(item => Number(item.slot) === 6 && kit.inventory[item.selfId].amount === 1
+    && lookup.offersFor(item.selfId).length > 0);
+assert(missing, 'the authored D kit has one canonical NPC headwear gap');
+const spot = stock.spotFor('7_20');
+const physicalKit = kit.entries.filter(item => item.selfId !== missing.selfId).map((item, index) => ({
+    id: 710104 + index, selfId: item.selfId, amount: 1, equipped: 1, slot: item.slot, enchant: 0
+}));
 const now = Date.now(), id = 710051;
-const state = { characterId: id, name: 'OriginSeller', level: 20, exp: Number(Data.experience[19]), sp: 0,
+const state = { characterId: id, name: 'OriginSeller', level: 30, exp: Number(Data.experience[29]), sp: 0,
     adena: 1000000, phase: 'cold', activity: 'hunting', currentRegion: 'Giran', spotId: String(spot.id), updatedAt: now,
     loc: { locX: 83396, locY: 147904, locZ: -3400 },
     vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 },
     inventory: invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems([
-        { id: 710101, selfId: 1, amount: 1, equipped: 1, slot: 7 },
+        { id: 710101, selfId: 57, amount: 1000000, equipped: 0, slot: 0 },
+        ...physicalKit,
         { id: 710102, selfId: 1869, amount: 1000000, equipped: 0, slot: 0 },
         { id: 710103, selfId: 1870, amount: 1000000, equipped: 0, slot: 0 }]),
-    stats: { classId: 0, generatedCold: true, classProgressionClassId: 0, classProgressionLevel: 20 },
+    stats: { classId: 0, generatedCold: true, classProgressionClassId: 0, classProgressionLevel: 30 },
     timing: { lastResolvedAt: now - 1000, nextResolveAt: now + 60000 } };
 const observer = String.raw`
 module.exports.meetingPrepareProbe = async id => {
     const state = kernel.states.get(id).state, authority = require('../Economy/EconomyCommit').authority(state);
-    boardIndex.put({ id: 710057, kind: 'sell_ad', storeType: 1, ownerId: id+1, botOwned: true, town: 'Giran', revision: 1, custodyPolicy: 1, lines: [{ id: 710058, selfId: 48, enchant: 0, count: 1, price: 1 }] });
+    boardIndex.put({ id: 710057, kind: 'sell_ad', storeType: 1, ownerId: id+1, botOwned: true, town: 'Giran', revision: 1, custodyPolicy: 1, lines: [{ lineId: 710058, selfId: 48, enchant: 0, count: 1, price: 1 }] });
     const request = { token: 'actual-meeting-prepare', actorA: id, actorB: id+1, seqA: 0, seqB: 0,
         town: 'Giran', point: { locX: 83396, locY: 147904, locZ: -3400 },
         parties: [0,1].map(() => ({ ...authority, sequence: 0, needRevision: authority.revision,
@@ -37,8 +42,11 @@ module.exports.meetingPrepareProbe = async id => {
         lines: [{ payer: 1, itemId: 710102, selfId: 1869, enchant: 0, count: 1, price: 100,
             adId: 710052, adRevision: 1, certificate: null }] };
     const result = await kernel.prepareMeeting(id, request);
+    const ownLines = boardIndex.records.get(710052);
+    const ownRecord = { ...ownLines[0], id: ownLines[0].recordId, lines: ownLines };
+    boardIndex.remove(710052);
     const routeRows = await occupationFor(state, Date.now(), kernel.states.get(id).context, 'wish');
-    const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { board: boardReady(), routeRows,
+    let economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { board: boardReady(), routeRows,
         workshop: { known: true, recipeId: 0, incomePerHour: 0 }, timestamp: Date.now() });
     const Intent = require('../Economy/TradeIntent');
     // A seller answering somebody else's BUY goes through the real disposition
@@ -52,19 +60,33 @@ module.exports.meetingPrepareProbe = async id => {
     sellRequest.token = 'actual-positive-seller';
     sellRequest.lines[0].adId = 710060; sellRequest.lines[0].count = 1000000; sellRequest.lines[0].price = 1000;
     const seller = await kernel.prepareMeeting(id, sellRequest);
+    const selectedGear = economy.network.queue.find(wish => wish.key === economy.network.activity?.rootKey);
+    if (!selectedGear?.funded || !Number.isInteger(selectedGear.object?.itemId) || selectedGear.object.itemId <= 0)
+        throw Error('fixture_has_no_native_funded_gear_root');
+    boardIndex.put({ id: 710057, kind: 'sell_ad', storeType: 1, ownerId: id+1, botOwned: true,
+        town: 'Giran', revision: 1, custodyPolicy: 1,
+        lines: [{ lineId: 710058, selfId: selectedGear.object.itemId, enchant: 0, count: 1, price: 1 }] });
+    economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { board: boardReady(), routeRows,
+        workshop: { known: true, recipeId: 0, incomePerHour: 0 }, timestamp: Date.now() });
     // Runs inside the worker: forState hands TradeIntent a stock-prepared network.
     if (economy.network.quantityPrepared !== true) throw Error('trade_intent_network_unprepared');
     const wanted = Intent.project(state, economy.network, economy.projection, itemId => economy.worth(itemId) ?? economy.price(itemId), 40)
         .find(row => row.amount >= 1 && row.worth >= 1);
-    if (!wanted) throw Error('fixture_has_no_real_buy_wish');
+    if (!wanted) {
+        console.error('Native meeting buy-wish context:', JSON.stringify({ activity: economy.network.activity,
+            queue: economy.network.queue.slice(0, 6).map(wish => [wish.key, wish.object?.itemId,
+                wish.object?.slot, wish.funded, wish.price]), money: economy.statsPacket.money }));
+        throw Error('fixture_has_no_real_buy_wish');
+    }
     const record = { id: 710054, kind: 'sell_ad', storeType: 1, ownerId: id+1, botOwned: true, town: 'Giran',
-        revision: 1, custodyPolicy: 1, lines: [{ id: 710055, selfId: wanted.itemId, enchant: 0, count: wanted.amount, price: 1 }] };
+        revision: 1, custodyPolicy: 1, lines: [{ lineId: 710055, selfId: wanted.itemId, enchant: 0, count: wanted.amount, price: 1 }] };
     boardIndex.put(record);
     const buyerRequest = JSON.parse(JSON.stringify(request));
     buyerRequest.token = 'actual-positive-buyer'; buyerRequest.seqA = buyerRequest.parties[0].sequence = 1; buyerRequest.seqB = buyerRequest.parties[1].sequence = 1;
     buyerRequest.lines = [{ payer: 0, itemId: 710056, selfId: wanted.itemId, enchant: 0, count: 1, price: 1, adId: record.id,
         adRevision: 1, certificate: null }];
     const buyer = await kernel.prepareMeeting(id, buyerRequest);
+    boardIndex.put(ownRecord);
     state.stats.tradeMeeting = [42, 1];
     const sharedRequest = JSON.parse(JSON.stringify(request));
     sharedRequest.token = 'actual-shared-meeting'; sharedRequest.parties[0].route.method = 'meeting:42';

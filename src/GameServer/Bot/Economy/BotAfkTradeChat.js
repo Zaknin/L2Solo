@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Negotiation = invoke('GameServer/Bot/Economy/BotNegotiationService');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
@@ -131,7 +132,7 @@ function intentForAction(state, playerSession, action, data = {}) {
 }
 
 function buyPriceLimit(line) {
-    const template = DataCache.items.find((item) => Number(item.selfId) === Number(line.selfId));
+    const template = ItemTemplateIndex.findRequired(DataCache.items, line.selfId);
     const reference = BotMarketPricing.referencePrice({
         selfId: line.selfId, basePrice: Number(template?.template?.price || line.price),
         enchant: line.enchant

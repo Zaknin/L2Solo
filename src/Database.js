@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('./GameServer/Item/ItemTemplateIndex');
 const BeginnerShots = require('./GameServer/Items/C4BeginnerShots');
 const fs = require('fs');
 const DiagnosticConfig = require('./GameServer/Bot/Population/PopulationConfig');
@@ -12,6 +13,7 @@ function checkMutationAdmission() {
 const Statements = require('./DatabaseStatements');
 const MarketTradeOverview = require('./MarketTradeOverview');
 const EconomyJournal = require('./EconomyJournal');
+const ClanReviewInputs = require('./GameServer/Clan/ClanReviewEvents');
 const PvpJournal = require('./PvpJournal');
 const CheckpointCoordinator = require('./DatabaseCheckpointCoordinator');
 const HistoryStore = require('./HistoryStore');
@@ -137,6 +139,16 @@ function normalizeRow(row) {
     return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeValue(value)]));
 }
 
+function copyNormalizedRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    const copy = { ...row };
+    for (const key of Object.keys(copy)) {
+        if (Buffer.isBuffer(copy[key])) copy[key] = Buffer.from(copy[key]);
+        else if (copy[key] instanceof Uint8Array) copy[key] = new Uint8Array(copy[key]);
+    }
+    return copy;
+}
+
 function normalizeRows(rows) {
     return (rows || []).map(normalizeRow);
 }
@@ -242,13 +254,18 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
         const startedAt = timed ? now() : 0;
         const wait = startedAt - queuedAt;
         EconomyJournal.begin(operation);
+        const candidateCheckpoint = connection?.isTransaction ? ClanReviewInputs.candidateCheckpoint() : null;
+        if (!connection?.isTransaction) ClanReviewInputs.beginCandidateCommit();
         try {
             const result = work();
             EconomyJournal.commit();
+            if (!connection?.isTransaction) ClanReviewInputs.commitCandidateInputs();
             if (timed) record(operation, wait, now() - startedAt, read);
             return result;
         } catch (error) {
             EconomyJournal.discard();
+            if (connection?.isTransaction) ClanReviewInputs.restoreCandidateCheckpoint(candidateCheckpoint);
+            else ClanReviewInputs.discardCandidateCommit();
             if (timed) record(operation, wait, now() - startedAt, read, true);
             throw error;
         } finally {
@@ -279,10 +296,13 @@ function run(sql, params = [], operation, readOverride = null, onTiming = null) 
     const read = readOverride === null ? isReadStatement(sql) : !!readOverride;
     return enqueue(() => {
         if (!connection) throw new Error(`SQLite is not initialized (${operation || operationName(sql)})`);
-        const statement = Statements.prepare(connection, sql);
+        // Read integers as BigInts before existing Number normalization.
+        // Never retry RETURNING: a retry could repeat the physical write.
+        const statement = Statements.prepare(connection, sql, read);
         if (!isReadStatement(sql)) checkMutationAdmission();
         if (read) return normalizeRows(statement.all(...params));
         const result = statement.run(...params);
+        if (/^\s*ROLLBACK\s*(?:TRANSACTION\s*)?;?\s*$/i.test(sql)) ClanReviewInputs.discardCandidateCommit();
         return {
             affectedRows: Number(result.changes || 0),
             insertId: Number(result.lastInsertRowid || 0)
@@ -463,12 +483,14 @@ function performTransaction(work, operation) {
             const result = work();
             phase = 'commit';
             connection.exec('COMMIT');
+            ClanReviewInputs.commitCandidateInputs();
             publishNativeDiagnostics();
             return result;
         } catch (error) {
             reportTransactionSqliteFailure(operation, phase, error);
             try {
                 connection.exec('ROLLBACK');
+                ClanReviewInputs.discardCandidateCommit();
             } finally {
                 boardDealCountsReady = false;
                 boardCounterCountsReady = false;
@@ -543,13 +565,16 @@ async function inPreparedTransactionBatch(items, prepare, hooks, operation) {
             try {
                 if (index > 0) syncPreparedHook(before, id);
                 EconomyJournal.begin(operation);
+                ClanReviewInputs.beginCandidateCommit();
                 const prepared = prepare(id, index === 0 ? firstTimestamp : Date.now());
                 if (prepared && typeof prepared.then === 'function')
                     throw new TypeError('prepared_transaction_must_be_synchronous');
                 value = typeof prepared === 'function' ? performTransaction(prepared, operation) : prepared;
                 EconomyJournal.commit();
+                ClanReviewInputs.commitCandidateInputs();
             } catch (error) {
                 EconomyJournal.discard();
+                ClanReviewInputs.discardCandidateCommit();
                 syncPreparedHook(failed, id, error);
                 throw error;
             }
@@ -1672,6 +1697,7 @@ function applySchemaMigrations() {
         const shops = connection.prepare('DELETE FROM afk_trade_shops WHERE id = ?');
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
+    migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -1694,12 +1720,12 @@ function applySchemaMigrations() {
 
 function one(sql, params = []) {
     if (!isReadStatement(sql)) checkMutationAdmission();
-    return normalizeRow(Statements.prepare(connection, sql).get(...params));
+    return normalizeRow(Statements.prepare(connection, sql, true).get(...params));
 }
 
 function all(sql, params = []) {
     if (!isReadStatement(sql)) checkMutationAdmission();
-    return normalizeRows(Statements.prepare(connection, sql).all(...params));
+    return normalizeRows(Statements.prepare(connection, sql, true).all(...params));
 }
 
 function write(sql, params = []) {
@@ -2284,9 +2310,11 @@ function fenceLeasedColdInventoryUnsafe(characterId, changedIds) {
 // next simulationRevision, for a row its caller has checked.
 function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = null, statsPatch = null) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    const physical = LifeState.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ?', [Number(characterId)]));
+    const ids = [...new Set([57, ...changedIds].map(Number))];
+    const physical = LifeState.inventorySummaryFromItems(all(`SELECT * FROM items
+        WHERE characterId = ? AND selfId IN (${ids.map(() => '?').join(',')})`, [Number(characterId), ...ids]));
     const inventory = jsonObject(row.inventorySummary);
-    for (const id of new Set([57, ...changedIds].map(Number))) {
+    for (const id of ids) {
         if (physical[id]) inventory[id] = physical[id];
         else delete inventory[id];
     }
@@ -2296,7 +2324,7 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
     [JSON.stringify(inventory), adena, mp, statsPatch ? JSON.stringify(statsPatch) : null,
         statsPatch ? JSON.stringify(statsPatch) : null, now(), Number(characterId)]);
-    const inventoryPatch = Object.fromEntries([...new Set([57, ...changedIds].map(Number))]
+    const inventoryPatch = Object.fromEntries(ids
         .map(id => [id, physical[id] || null]));
     return { ...normalizeRow(coldSimulationRow(characterId)), inventoryPatch };
 }
@@ -2721,14 +2749,26 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
         const outcome = Native.outcomeFor(rule, crystal.stage, step.npcId, step.roll);
         const targetId = outcome === 'success' ? crystal.nextId : outcome === 'broken' ? crystal.brokenId : null;
         if (!targetId || targetId !== step.toId) throw Error('cold_soul_crystal_outcome_changed');
-        const target = invoke('GameServer/DataCache').items.find(row => row.selfId === targetId);
+        const target = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, targetId);
         if (!target) throw Error('cold_soul_crystal_template_missing');
         guard();
         write('UPDATE items SET selfId = ?, name = ? WHERE id = ? AND characterId = ?', [targetId,target.template.name,item.id,characterId]);
     }
 }
 
-function applyColdPhysicalStateUnsafe(characterId, physical = {}) {
+// Diagnostics only: time spent in each part of one bot's cold commit; no clock
+// read and no allocation while developer diagnostics are off.
+function coldCommitParts() {
+    if (!DiagnosticConfig.developerDiagnostics) return null;
+    let last = performance.now();
+    const spent = {};
+    return {
+        lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
+        done() { for (const part in spent) Diagnostics.duration(`commit_${part}`, spent[part]); }
+    };
+}
+
+function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) {
     const before = one('SELECT hp,karma,pk FROM characters WHERE id = ?', [characterId]);
     // Use the persisted XP delta inside the fenced transaction: unchanged
     // snapshots cannot wash karma twice, and non-combat updates grant none.
@@ -2753,7 +2793,10 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}) {
         ]);
     });
     if (physical.soulCrystals?.length) applySoulCrystalStepsUnsafe(characterId, physical.soulCrystals);
+    parts?.lap('physical');
     if (physical.inventory) syncInventorySummaryUnsafe(characterId, physical.inventory);
+    parts && Diagnostics.count('commit_inventory', physical.inventory ? 'sent' : 'absent');
+    parts?.lap('inventory');
     if (physical.pvpKills?.length) {
         if (physical.pvpKills.length > 18) throw Error('cold PvP: too many kills');
         const current = one('SELECT level, pvp, pk, karma FROM characters WHERE id = ?', [characterId]);
@@ -3553,6 +3596,8 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
     // A replaced shop or an ad may name a stack the bag has merged since: the
     // same item from another stack serves. A player's new shop names its own.
     const flexible = !!active || kind !== 'shop';
+    const compatibleParts = !!active && Number(active.storeType) === BoardRules.SELL
+        && active.custodyPolicy !== 1 && kind === 'shop' && storeType === BoardRules.SELL && !conditional;
     const sourceIds = new Set();
     const botOwned = isBotOwnerUnsafe(characterId);
     rows.forEach((line) => {
@@ -3574,21 +3619,47 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
         let source = null;
         if (storeType === BoardRules.SELL) {
             let sourceId = Number(line.objectId || line.sourceObjectId || 0);
+            // Returned nonstackable stock is one physical row per unit. Keep
+            // the logical lot's metadata even when another row serves it.
+            const metadataSql = compatibleParts ? ' AND slot = ? AND petData IS ?' : '';
+            const metadataValues = compatibleParts ? [Number(line.slot || 0),
+                line.petData ? (typeof line.petData === 'string' ? line.petData : JSON.stringify(line.petData)) : null] : [];
             if (flexible) {
                 const preferred = one(`SELECT id FROM items WHERE id = ? AND characterId = ?
-                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?`,
-                [sourceId, characterId, selfId, enchant, count]);
+                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?${metadataSql}`,
+                [sourceId, characterId, selfId, enchant, count, ...metadataValues]);
                 if (!preferred || sourceIds.has(sourceId)) {
                     const candidates = all(`SELECT id FROM items WHERE characterId = ?
-                        AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?
-                        ORDER BY id`, [characterId, selfId, enchant, count]);
+                        AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?${metadataSql}
+                        ORDER BY id`, [characterId, selfId, enchant, count, ...metadataValues]);
                     sourceId = Number(candidates.find((candidate) => !sourceIds.has(Number(candidate.id)))?.id || 0);
                 }
             }
-            if (!sourceId || sourceIds.has(sourceId)) throw new Error('invalid_afk_trade_source');
-            sourceIds.add(sourceId);
-            source = conditional ? one('SELECT * FROM items WHERE id=? AND characterId=?', [sourceId, characterId])
-                : afkTradeTakeItemUnsafe(characterId, sourceId, selfId, enchant, count);
+            if (!sourceId && compatibleParts) {
+                // Each unused physical row supplies at least one unit; used
+                // IDs may still have stock, so leave room to skip them.
+                const partLimit = Math.min(Number.MAX_SAFE_INTEGER, count + sourceIds.size);
+                const parts = all(`SELECT id, amount FROM items WHERE characterId = ?
+                    AND selfId = ? AND enchant = ? AND equipped = 0 AND amount > 0${metadataSql}
+                    ORDER BY id LIMIT ?`, [characterId, selfId, enchant, ...metadataValues, partLimit]);
+                let remaining = count;
+                for (const part of parts) {
+                    const partId = Number(part.id);
+                    if (sourceIds.has(partId)) continue;
+                    const partCount = Math.min(remaining, Number(part.amount));
+                    const taken = afkTradeTakeItemUnsafe(characterId, partId, selfId, enchant, partCount);
+                    sourceIds.add(partId);
+                    if (!source) source = taken;
+                    remaining -= partCount;
+                    if (remaining === 0) break;
+                }
+                if (remaining > 0) throw new Error('invalid_afk_trade_source');
+            } else {
+                if (!sourceId || sourceIds.has(sourceId)) throw new Error('invalid_afk_trade_source');
+                sourceIds.add(sourceId);
+                source = conditional ? one('SELECT * FROM items WHERE id=? AND characterId=?', [sourceId, characterId])
+                    : afkTradeTakeItemUnsafe(characterId, sourceId, selfId, enchant, count);
+            }
             if (!conditional) changedIds.push(selfId);
         }
         write(`INSERT INTO afk_trade_lines(
@@ -3873,6 +3944,119 @@ function commitColdInteractionMemoryUnsafe(request) {
 }
 
 const ClanMembership = require('./GameServer/Clan/ClanMembershipRepository')({ all, write, inTransaction, now });
+function recruitmentRows(where, params) {
+    return all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
+        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationOwner,l.simulationRevision,l.inventorySummary,l.statsJson,
+        COALESCE(p.joinAvailability,0) AS joinAvailability,
+        (EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
+            OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS recruitmentReserved
+        FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
+        LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id WHERE ${where}`, params).map(row => ({ ...row,
+            phase: row.phase || '', activity: row.activity || '', spotId: row.spotId || null, partyId: row.partyId || null,
+            simulationOwner: row.simulationOwner || 'legacy_main', stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
+}
+function recruitmentSourceCurrent(source) {
+    if (source?.kind === 'economic') {
+        const Demand = require('./GameServer/Clan/ClanRosterDemand');
+        if (!Demand.economicSourceCurrent(source) || source.raid && !recruitmentSourceCurrent(source.raid)) return false;
+        const pairs = source.recipeProviders || [];
+        if (new Set(pairs.map(row => row[0])).size > 9) return false;
+        const known = pairs.map(([characterId, recipeId]) => [characterId, recipeId,
+            !!one('SELECT 1 FROM character_recipes WHERE characterId=? AND recipeId=?', [characterId, recipeId])]);
+        return Demand.hash(known) === source.knowledge;
+    }
+    const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
+    const spot = Catalog.findById(source.id);
+    if (!spot) return false;
+    const current = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(spot);
+    return current.raidWorldAvailable && require('./GameServer/Clan/ClanRosterDemand').sourceFingerprint(current) === source.fingerprint;
+}
+function clanRaidOwner(marker) {
+    const Roster = require('./GameServer/Clan/ClanRaidRoster');
+    if (!Roster.valid(marker)) return null;
+    const row = one(`SELECT s.mode,c.level,json_extract(s.stateJson,'$.${marker.ownerSection}.fullRoster') AS markerJson,
+        json_extract(s.stateJson,'$.${marker.ownerSection}.status') AS goalStatus,
+        json_extract(s.stateJson,'$.${marker.ownerSection}.controlledBy') AS controlledBy
+        FROM clan_simulation_clans s JOIN clans c ON c.id=s.clanId WHERE s.clanId=?`, [marker.clanId]);
+    const members = all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
+        (COALESCE(p.ordinaryEligible,0)=0
+            OR EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
+            OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS reserved
+        FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
+        LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id
+        WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
+    return { mode: row?.mode, level: Number(row?.level), marker: !['completed', 'cancelled', 'failed', 'abandoned'].includes(row?.goalStatus)
+        && row?.controlledBy !== 'player' ? jsonObject(row?.markerJson) : null,
+    members: members.map(member => [member.characterId, member.classId, member.clanId, member.level, !!member.reserved]) };
+}
+function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = null, openingAtImpact = false) {
+    const Roster = require('./GameServer/Clan/ClanRaidRoster');
+    const party = { ...partyRow, memberIds: JSON.parse(partyRow.memberIdsJson || '[]'), stats: jsonObject(partyRow.statsJson) };
+    const marker = Roster.markerFor(party);
+    if (!marker) return null;
+    const proof = nextStats.raidAdmission;
+    if (Roster.held(party)) {
+        return JSON.stringify(proof) === JSON.stringify(party.stats.raidAdmission)
+            && Roster.same(nextStats.objective?.fullRoster, marker)
+            && (!raidCommit || raidCommit.snapshot?.raidInstanceId === marker.raidInstanceId) ? null : 'raid_roster_held_changed';
+    }
+    // Waiting/preparation may commit without opening. They may never smuggle
+    // an active fight or a victory through the ordinary seven-member path.
+    if (!proof) return nextStats.raidEncounter?.encounter || nextStats.raidEncounter?.status === 'defeated'
+        ? 'raid_roster_not_opened' : null;
+    if (!Roster.admitted({ ...party, stats: nextStats }) || !Roster.exact(party.memberIds, marker.memberIds)
+        || !Roster.same(nextStats.objective?.fullRoster, marker)) return 'raid_roster_incomplete';
+    if (hotMembers && Roster.admitted(party) && proof.startedAt > 0 && !party.stats.raidAdmission.startedAt) {
+        const { startedAt, execution, ...next } = proof;
+        const previous = { ...party.stats.raidAdmission };
+        delete previous.startedAt;
+        if (!openingAtImpact || JSON.stringify(next) !== JSON.stringify(previous)
+            || execution?.at !== startedAt || !marker.memberIds.includes(execution?.attackerId)
+            || execution?.targetId <= 0 || execution?.bossId <= 0 || execution?.raidInstanceId !== marker.raidInstanceId)
+            return 'raid_roster_not_opened';
+    }
+    if (raidCommit && (proof.startedAt <= 0 || raidCommit.snapshot?.participants?.[party.partyId] !== proof.startedAt))
+        return 'raid_roster_not_opened';
+    const owner = clanRaidOwner(marker);
+    if (!owner || owner.mode !== 'autonomous' || !Roster.same(owner.marker, marker)) return 'raid_roster_owner_changed';
+    const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
+    const source = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(Catalog.findById(marker.sourceId));
+    if (!source?.raidWorldAvailable || source.raidInstanceId !== marker.raidInstanceId
+        || Number(source.raidBossTemplateId) !== marker.npcId
+        || raidCommit && raidCommit.snapshot?.raidInstanceId !== marker.raidInstanceId) return 'raid_roster_source_changed';
+    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase,
+        l.simulationOwner,l.simulationLeaseId FROM characters c JOIN bot_life_state l ON l.characterId=c.id
+        WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds)
+        : recruitmentRows(`c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
+    if (rows.length !== 9 || proof.members.some(([id, classId, level, fingerprint]) => {
+        const row = rows.find(member => member.characterId === id);
+        const input = hotMembers?.find(member => member.characterId === id) || row;
+        return !row || row.clanId !== marker.clanId || row.classId !== classId || row.level !== level
+            || owner.members.find(member => member[0] === id)?.[4]
+            || openingAtImpact && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId)
+            || row.recruitmentReserved || row.partyId !== party.partyId || Roster.inputFingerprint(input) !== fingerprint;
+    })) return 'raid_roster_member_changed';
+    return null;
+}
+function recruitmentProofCurrent(clanId, level, state, proof) {
+    if (!proof || !recruitmentSourceCurrent(proof.source)) return false;
+    const Demand = require('./GameServer/Clan/ClanRosterDemand');
+    if (proof.ownerSection && Demand.goalFingerprint(state[proof.ownerSection]) !== proof.ownerGoal) return false;
+    const rows = recruitmentRows('c.clanId=?', [clanId]);
+    if (rows.length > 40) return false;
+    const members = rows.filter(member => !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member));
+    if (Demand.ownFingerprint({ id: clanId, level, state, physicalMemberCount: rows.length, members }) !== proof.ownFingerprint) return false;
+    if (proof.rows.length > 9 || !proof.rows.length) return false;
+    const selected = recruitmentRows(`c.id IN (${proof.rows.map(() => '?').join(',')})`, proof.rows.map(row => row[0]));
+    return proof.rows.every(row => selected.some(member => member.characterId === row[0] && Demand.memberFingerprint(member) === row[4]
+        && (Number(member.clanId) === clanId || Number(member.clanId) === 0 && recruitmentAvailable(member))));
+}
+function recruitmentAvailable(member) {
+    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && member.simulationOwner === 'legacy_main' && !member.partyId
+        && !member.recruitmentReserved && !member.stats?.tradeMeeting
+        && !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member)
+        && !one("SELECT characterId FROM clan_operation_members WHERE characterId=? AND status='active' LIMIT 1", [member.characterId]);
+}
 function publishClanMembership(result) {
     const { previousClanId, nextClanId, ...value } = result || {};
     if (result?.ok || Number(result?.affectedRows) > 0) {
@@ -3884,6 +4068,34 @@ function publishClanMembership(result) {
 
 
 const Database = {
+    openClanRaidPartyAtImpact(request) {
+        // The offensive callback cannot await our queue: its registered roster
+        // could change meanwhile. Abort this native action when another write
+        // or raw transaction owns the connection; ordinary action retry owns
+        // the next attempt. Never let an outer rollback erase a dealt hit.
+        const Roster = require('./GameServer/Clan/ClanRaidRoster');
+        if (!Roster.isNativeImpact(request.nativeImpact)) return { ok: false, reason: 'raid_roster_not_opened' };
+        if (!connection || connection.isTransaction || metrics.pending > 0) return { ok: false, reason: 'database_busy' };
+        try {
+            return performTransaction(() => {
+                const row = one('SELECT * FROM bot_background_parties WHERE partyId=?', [request.partyId]);
+                if (!row || row.status !== 'hot' || Number(row.updatedAt) !== Number(request.expectedUpdatedAt))
+                    return { ok: false, reason: 'party_changed' };
+                const party = { ...row, memberIds: JSON.parse(row.memberIdsJson), stats: jsonObject(row.statsJson) };
+                if (!Roster.admitted(party) || Roster.held(party) || !Roster.exact(request.members?.map(member => member.characterId), party.memberIds))
+                    return { ok: false, reason: 'raid_roster_not_opened' };
+                const at = Math.max(now(), Number(row.updatedAt) + 1);
+                const proof = { ...party.stats.raidAdmission, startedAt: at,
+                    execution: { at, attackerId: request.attackerId, targetId: request.targetId, bossId: request.bossId, raidInstanceId: request.raidInstanceId } };
+                const stats = { ...party.stats, raidAdmission: proof };
+                const reason = raidRosterCommitReason(row, stats, null, request.members, true);
+                if (reason) return { ok: false, reason };
+                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=? WHERE partyId=? AND updatedAt=?',
+                    [JSON.stringify(stats), at, row.partyId, row.updatedAt]);
+                return { ok: true, party: one('SELECT * FROM bot_background_parties WHERE partyId=?', [row.partyId]) };
+            }, 'party:marked-raid-impact');
+        } catch (_) { return { ok: false, reason: 'party_opening_rollback' }; }
+    },
     reconcileBotClanMembership: ClanMembership.reconcile,
     reconcileBotClanGoals: ClanMembership.reconcileGoals,
     init(callback = () => {}) {
@@ -3914,6 +4126,7 @@ const Database = {
             History.start({ worldPath: databasePath, historyPath, onMoved: deleteMovedOutbox,
                 transferMs: Number(options.default.Database?.historyTransferMs) || 200 });
             startEconomyJournal();
+            ClanReviewInputs.attach(connection);
             CheckpointCoordinator.start(databasePath, {
                 intervalMs: Number(options.default.Database?.checkpointIntervalMs) || 5000,
                 minWalBytes: Number(options.default.Database?.checkpointMinWalBytes) || (4 * 1024 * 1024)
@@ -5036,6 +5249,11 @@ const Database = {
     saveBackgroundParty(row) {
         return inTransaction(() => {
             const previous = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [row.partyId]);
+            const proof = jsonObject(row.statsJson).raidAdmission;
+            const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
+            if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
+                || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
+                return { affectedRows: 0 };
             if (previous?.status === 'hot' || Number(jsonObject(previous?.statsJson).clanGoalInvalidationVersion || 0)
                 > Number(jsonObject(row.statsJson).clanGoalInvalidationVersion || 0)) return { affectedRows: 0 };
             const payment = partyAgreementUnsafe(previous, row);
@@ -5071,6 +5289,11 @@ const Database = {
             return Promise.resolve({ ok: false, reason: 'invalid_party_goals' });
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
+            const previousStats = jsonObject(party?.statsJson), proposedStats = jsonObject(statsJson);
+            if (previousStats.objective?.fullRoster && (!require('./GameServer/Clan/ClanRaidRoster').same(
+                previousStats.objective.fullRoster, proposedStats.objective?.fullRoster)
+                || JSON.stringify(previousStats.raidAdmission) !== JSON.stringify(proposedStats.raidAdmission)))
+                return { ok: false, reason: 'party_roster_changed' };
             if (party?.status !== 'active' || Number(party.updatedAt) !== expectedUpdatedAt
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
@@ -5101,6 +5324,7 @@ const Database = {
         if (!party?.partyId || !characterIds.length || characterIds.length !== batch.length) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_membership' });
         }
+        if (jsonObject(party.statsJson).raidAdmission) return Promise.resolve({ ok: false, reason: 'raid_roster_not_opened' });
 
         return inTransaction(() => {
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
@@ -5488,6 +5712,12 @@ const Database = {
                 }
                 if (failure) reason = 'party_context_changed';
             }
+            if (!failure && raidCommit) {
+                const change = group[0].atomicGroup.partyChanges[0];
+                const party = one('SELECT * FROM bot_background_parties WHERE partyId=?', [change.partyId]);
+                const rosterReason = raidRosterCommitReason(party, jsonObject(change.statsJson), raidCommit);
+                if (rosterReason) { failure = true; reason = rosterReason; }
+            }
             if (failure) atomicGroupFailures.set(groupId, reason || 'party_group_aborted');
             else if (raidCommit) validatedRaidKeys.add(raidCommit.key);
         });
@@ -5512,12 +5742,15 @@ const Database = {
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
             if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
+            const parts = coldCommitParts();
             const row = coldSimulationRow(characterId);
             const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
+            parts?.lap('row_read');
             if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
             const { patch, stats, deathExperience } = preserveColdVersionedStatsParsed(row, requestedPatch);
             const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
             const partition = coldSimulationPartition(proposed, request, stats);
+            parts?.lap('stats_merge');
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
             const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
             const revision = expectedRevision + 1;
@@ -5542,9 +5775,11 @@ const Database = {
                     reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp)
                 };
             }
+            parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
-            const pkDrops = physical ? applyColdPhysicalStateUnsafe(characterId, physical) : [];
+            const pkDrops = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : [];
+            parts?.lap('physical');
             // What deals and closed records left for the bot on the board while
             // the worker held it reaches its bag with this save.
             EconomyJournal.detail('board_settlement');
@@ -5554,6 +5789,11 @@ const Database = {
             // Persist the entitlement under the same lease fence and transaction
             // as EXP. Cold-to-hot resurrection reads this durable record.
             syncColdDeathExperienceUnsafe(characterId, deathExperience, timestamp);
+            const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
+            parts?.lap('settle');
+            const committedRow = coldSimulationRow(characterId);
+            parts?.lap('reread');
+            parts?.done();
             return {
                 ok: true,
                 characterId,
@@ -5563,16 +5803,19 @@ const Database = {
                 leaseUntil: 0,
                 reason: 'committed_released',
                 ...(pkDrops.length ? { pkDrops } : {}),
-                ...(request.memoryEvents !== undefined ? { memorySnapshots: commitColdInteractionMemoryUnsafe(request) || [] } : {}),
+                ...(memorySnapshots !== undefined ? { memorySnapshots } : {}),
                 ...(settled ? { settled: true } : {}),
-                row: coldSimulationRow(characterId)
+                row: committedRow
             };
         });
         return inTransaction(() => {
             // Validate all participants after earlier queued writes have settled.
             // Preflight outside this transaction could allow half an encounter.
+            const groupClock = atomicGroups.size && DiagnosticConfig.developerDiagnostics ? performance.now() : null;
             validateAtomicGroups();
+            if (groupClock !== null) Diagnostics.duration('commit_groups', performance.now() - groupClock);
             const results = commitBatch();
+            const partyClock = groupClock !== null ? performance.now() : null;
             for (const [groupId, group] of atomicGroups) {
                 if (atomicGroupFailures.has(groupId)) continue;
                 const changes = group[0].atomicGroup.partyChanges || [];
@@ -5590,11 +5833,16 @@ const Database = {
                     [change.nextResolveAt, change.statsJson, change.updatedAt, change.spotId ?? null,
                         change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedUpdatedAt]);
                     if (updated.affectedRows !== 1) throw new Error('party conflict: party changed during commit');
+                    let partyRow, partyRowRead = false;
                     for (const request of group) {
                         const result = results.find(result => result.characterId === Number(request.characterId));
                         result.row = coldSimulationRow(result.characterId);
                         result.revision = Number(result.row.simulationRevision);
-                        result.partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                        if (!partyRowRead) {
+                            partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                            partyRowRead = true;
+                        }
+                        result.partyRow = copyNormalizedRow(partyRow);
                     }
                 }
                 const raidCommit = group[0].atomicGroup.raidCommit;
@@ -5608,14 +5856,22 @@ const Database = {
                             ON CONFLICT(npcId) DO UPDATE SET respawnTime=excluded.respawnTime, hp=0, mp=0, updatedAt=excluded.updatedAt`,
                         [defeat.npcId, defeat.respawnTime, now()]);
                     }
+                    let raidRow, raidPartyRow, raidRowsRead = false;
                     for (const request of group) {
                         const result = results.find(result => result.characterId === Number(request.characterId));
-                        result.raidRow = one('SELECT * FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
+                        if (!raidRowsRead) raidRow = one('SELECT * FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
+                        result.raidRow = copyNormalizedRow(raidRow);
                         result.raidRespawnAt = raidCommit.worldDefeat?.respawnTime || null;
-                        result.raidPartyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [changes[0].partyId]);
+                        if (!raidRowsRead) {
+                            raidPartyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [changes[0].partyId]);
+                            raidRowsRead = true;
+                        }
+                        result.raidPartyRow = copyNormalizedRow(raidPartyRow);
                     }
                 }
             }
+            if (partyClock !== null) Diagnostics.duration('commit_party_raid', performance.now() - partyClock);
+            DiagnosticConfig.developerDiagnostics && Diagnostics.count('commit_batch', 'bots', 'all', batch.length);
             return results;
         }, 'bot-life:cold-owner-commit-release-batch');
     },
@@ -5811,6 +6067,10 @@ const Database = {
         }, 'bot-life:pvp-encounter-lifecycle');
     },
 
+    // Compact, addressed context for a marked group. The main process owns
+    // the native SQLite connection; workers receive only these nine scalars.
+    clanRaidOwner,
+
     transitionBackgroundParty(request = {}) {
         const members = request.members || [];
         const ids = members.map(m => Number(m.characterId));
@@ -5841,6 +6101,12 @@ const Database = {
                 }
             }
             const timestamp = Math.max(now(), Number(party.updatedAt) + 1);
+            if (jsonObject(request.statsJson).raidAdmission || jsonObject(party.statsJson).raidAdmission) {
+                const snapshots = members.map(member => ({ characterId: member.characterId, level: member.patch.level,
+                    classId: jsonObject(member.patch.statsJson).classId, inventory: jsonObject(member.patch.inventorySummary), stats: jsonObject(member.patch.statsJson) }));
+                const reason = raidRosterCommitReason(party, jsonObject(request.statsJson), null, snapshots);
+                if (reason) return { ok: false, reason };
+            }
             for (let i = 0; i < members.length; i++) {
                 const m = members[i], row = rows[i];
                 const entries = Object.entries(preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp }));
@@ -6582,9 +6848,9 @@ const Database = {
             if (Number(known?.level || 0) >= Number(skillLevel)) return { learned: false, reason: 'already_known' };
             const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
             const training = Catalog.nextTraining(character.classId, character.level, skillSelfId, known?.level || 0);
-            const definition = invoke('GameServer/DataCache').skills.find((row) => Number(row.selfId) === Number(skillSelfId));
+            const definition = ItemTemplateIndex.findRequired(invoke('GameServer/DataCache').skills, skillSelfId);
             if (!training || training.level !== Number(skillLevel)
-                || !definition?.levels?.some((row) => Number(row.level) === training.level)) {
+                || definition?.levels == null || !require('./GameServer/Skills/SkillRankIndex').has(definition.levels, training.level)) {
                 return { learned: false, reason: 'ineligible_rank' };
             }
             // Static workshops are authored infrastructure, rather than a
@@ -6632,7 +6898,9 @@ const Database = {
         if (item.petData) values.petData = typeof item.petData === 'string' ? item.petData : JSON.stringify(item.petData);
         return withCharacterFlush(characterId, () => insert('items', values, 'item:insert'));
     },
-    fetchItems(characterId) {
+    // caller: a static tag of the call site, counted for developer diagnostics only.
+    fetchItems(characterId, caller = 'untagged') {
+        DiagnosticConfig.developerDiagnostics && Diagnostics.count('item_list', 'call', caller);
         return withCharacterFlush(characterId, () => select('items', ['*'], 'characterId = ? AND amount > 0', [characterId], 'item:list'));
     },
     updateItemAmount(characterId, id, amount) {
@@ -6816,7 +7084,8 @@ const Database = {
         });
     },
 
-    transferInventoryToWarehouse(characterId, item) {
+    transferInventoryToWarehouse(characterId, item, { coldState = null } = {}) {
+        if (coldState && Number(coldState.characterId) !== Number(characterId)) return Promise.reject(new Error('economy_state_changed'));
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const source = one('SELECT id, amount, enchant FROM items WHERE id = ? AND characterId = ?', [item.id, characterId]);
             if (!source || Number(source.amount) < Number(item.amount)) throw new Error('inventory item changed');
@@ -6831,7 +7100,9 @@ const Database = {
             const inventoryAmount = Number(source.amount) - Number(item.amount);
             if (inventoryAmount <= 0) write('DELETE FROM items WHERE id = ? AND characterId = ?', [item.id, characterId]);
             else write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [inventoryAmount, item.id, characterId]);
-            return { warehouseId: Number(warehouseId), warehouseAmount, inventoryAmount, enchant: sourceEnchant };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [item.selfId]);
+            return { warehouseId: Number(warehouseId), warehouseAmount, inventoryAmount, enchant: sourceEnchant,
+                ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'warehouse:deposit')).then(result => {
             invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result;
         });
@@ -6989,7 +7260,10 @@ const Database = {
                 write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             }
             return results;
-        }, 'clan-warehouse:player-deposit'));
+        }, 'clan-warehouse:player-deposit')).then(results => {
+            if (normalized.some(transfer => transfer.selfId === 57)) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return results;
+        });
     },
 
     transferPlayerInventoryToClanWarehouse({ clanId, characterId, item = {}, amount, resolveKey } = {}) {
@@ -7056,7 +7330,10 @@ const Database = {
                 inventoryId, inventoryAmount, warehouseAmount, enchant: sourceEnchant,
                 petData: source.petData, warehouseRevision: nextRevision, ledgerId: Number(ledger.insertId)
             };
-        }, 'clan-warehouse:player-withdraw'));
+        }, 'clan-warehouse:player-withdraw')).then(result => {
+            if (selfId === 57) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
 
     fetchSavedLocations(characterId) {
@@ -7091,11 +7368,11 @@ const Database = {
     },
     exchangeDimensionalDiamond(characterId, itemId) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const recipe = require('../data/Items/dimensional_diamond_exchanges.json').recipes.find(row => row.itemId === itemId);
+            const recipe = require('./GameServer/Items/DimensionalDiamondCatalog').recipe(itemId);
             if (!recipe) throw new Error('Invalid dimensional diamond exchange');
             const diamonds = all('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 7562 AND equipped = 0 ORDER BY id', [characterId]);
             if (diamonds.reduce((sum, item) => sum + item.amount, 0) < recipe.cost) throw new Error('Not enough dimensional diamonds');
-            const template = require('./GameServer/DataCache').items.find(item => item.selfId === itemId);
+            const template = ItemTemplateIndex.findStrictRequired(require('./GameServer/DataCache').items, itemId);
             if (!template?.etc.stackable) throw new Error('Missing teleport scroll template');
             const changed = new Set();
             let remaining = recipe.cost;
@@ -7115,7 +7392,7 @@ const Database = {
     },
     completeSecondProfession(characterId, expectedClassId, targetClassId) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const route = require('../data/Templates/second_profession_trials.json').find(row => row.classId === targetClassId);
+            const route = require('./GameServer/SecondProfessionCatalog').routeForClass(targetClassId);
             const character = one('SELECT classId, level, race FROM characters WHERE id = ?', [characterId]);
             if (!route || character?.classId !== expectedClassId || character.level < 40 || character.race !== route.race
                 || !require('./GameServer/ClassProgression').secondProfMap[expectedClassId]?.includes(targetClassId)) {
@@ -7608,7 +7885,7 @@ const Database = {
             validate();
             const catalog = invoke('GameServer/Items/C4WeaponSAExchange');
             const recipe = catalog.resolve(npcId, recipeId);
-            const target = recipe && invoke('GameServer/DataCache').items.find(item => item.selfId === recipe.productId);
+            const target = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
             const weapon = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceObjectId, characterId]);
             if (!recipe || !target || !weapon || weapon.selfId !== expectedSelfId || weapon.selfId !== recipe.sourceId
                 || weapon.enchant !== expectedEnchant || weapon.amount !== 1 || weapon.equipped) throw Error('weapon_sa_source_changed');
@@ -7642,7 +7919,7 @@ const Database = {
             validate?.();
             const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             const recipe = row && invoke('GameServer/Items/C4Unseal').resolve(row.selfId, productId);
-            const item = recipe && invoke('GameServer/DataCache').items.find(i => i.selfId === recipe.productId);
+            const item = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
             if (!item || Number(row.amount) !== 1 || Number(row.equipped) !== 0) throw Error('unseal_source_changed');
             // Update in place: enchant and all other instance metadata survive.
             write('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -7864,7 +8141,7 @@ const Database = {
                     throw Error('improvement_source_changed');
                 const claimed = new Set(), selected = []; let total = 0;
                 for (const input of inputs) {
-                    const id = Number(input.selfId), count = Number(input.amount), template = invoke('GameServer/DataCache').items.find(row => row.selfId === id);
+                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id);
                     if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !Crystals.reward(template)
                         || Crystals.free(source, id) < count || selected.length + count > Crystals.BATCH_LIMIT)
                         throw Error('improvement_source_changed');
@@ -7879,7 +8156,7 @@ const Database = {
                 for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
                 if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
                 else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(1458,?,?,0,0,?)',
-                    [invoke('GameServer/DataCache').items.find(row => row.selfId === 1458).template.name, amount, characterId]);
+                    [ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, 1458).template.name, amount, characterId]);
                 changedIds.push(...claimed, 1458); result = 'crystallize';
             } else if (proposal.kind === 'luxury_exchange') {
                 const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
@@ -7908,7 +8185,7 @@ const Database = {
                         throw Error('improvement_missing_materials');
                     consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
                 }
-                const product = invoke('GameServer/DataCache').items.find(row => row.selfId === recipe.itemId);
+                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.itemId);
                 for (let count = 0; count < recipe.amount; count++) mutate(
                     'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
                     [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
@@ -7922,7 +8199,7 @@ const Database = {
                 if (recipe?.station !== 'blacksmith' || recipe.operation !== 'install' || !item || item.amount !== 1
                     || recipe.sourceId !== item.selfId || item.selfId !== proposal.itemId
                     || item.enchant !== proposal.from) throw Error('improvement_source_changed');
-                const product = invoke('GameServer/DataCache').items.find(row => row.selfId === recipe.productId);
+                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
                 if (!product) throw Error('improvement_missing_template');
                 for (const cost of SA.costs(recipe)) { consume(cost.selfId, cost.amount); changedIds.push(cost.selfId); }
                 mutate('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -7939,7 +8216,7 @@ const Database = {
                     ON CONFLICT(characterId,questId) DO UPDATE SET state='started',variables=excluded.variables`, [characterId]);
                 if (!held.length || [4662,4663,4664].includes(held[0].selfId)) {
                     if (held[0]) { consume(held[0].selfId, 1); changedIds.push(held[0].selfId); }
-                    const source = invoke('GameServer/DataCache').items.find(row => row.selfId === proposal.starterId);
+                    const source = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, proposal.starterId);
                     mutate('INSERT INTO items(selfId,name,amount,characterId) VALUES(?,?,1,?)', [source.selfId,source.template.name,characterId]);
                     changedIds.push(proposal.starterId);
                 }
@@ -7947,7 +8224,7 @@ const Database = {
             } else if (proposal.kind === 'henna') {
                 const Henna = invoke('GameServer/Henna/HennaRules');
                 const character = one('SELECT classId FROM characters WHERE id = ?', [characterId]);
-                const symbol = Henna.availableForClass(character?.classId).find(row => row.id === proposal.symbolId);
+                const symbol = Henna.symbolForClass(character?.classId, proposal.symbolId);
                 const rows = all('SELECT slot, symbolId FROM character_hennas WHERE characterId = ?', [characterId]);
                 const slot = [1,2,3].find(value => !rows.some(row => row.slot === value));
                 if (!symbol || !slot || rows.length >= Henna.slotsForClass(character.classId)) throw Error('invalid_bot_henna');
@@ -8412,7 +8689,14 @@ const Database = {
             })));
     },
     syncPlayerManagedClan(clanId) {
-        return inTransaction(() => syncPlayerManagedClanUnsafe(clanId), 'clan-simulation:player-managed-sync');
+        return inTransaction(() => syncPlayerManagedClanUnsafe(clanId), 'clan-simulation:player-managed-sync').then(result => {
+            if (result.ok) {
+                const Events = require('./GameServer/Clan/ClanReviewEvents');
+                if (result.disabled || result.code === 'clan_missing') Events.untrack(clanId);
+                else if (result.mode === 'player_managed') Events.untrackLeader(clanId);
+            }
+            return result;
+        });
     },
     ensurePlayerManagedClans(limit = 500) {
         const safeLimit = Math.max(1, Math.min(2000, Math.floor(Number(limit) || 500)));
@@ -8430,10 +8714,7 @@ const Database = {
             LIMIT ${safeLimit}`, [], 'clan-simulation:player-managed-candidates').then(async (rows) => {
             const summary = { attempted: rows.length, created: 0, changed: 0, disabled: 0 };
             for (const row of rows) {
-                const result = await inTransaction(
-                    () => syncPlayerManagedClanUnsafe(row.id),
-                    'clan-simulation:player-managed-sync'
-                );
+                const result = await Database.syncPlayerManagedClan(row.id);
                 if (result.created) summary.created += 1;
                 if (result.changed) summary.changed += 1;
                 if (result.disabled) summary.disabled += 1;
@@ -9137,13 +9418,35 @@ const Database = {
         clanId,
         characterId,
         memberLimit = 10,
-        maxBotMemberShare = 0.70
+        maxBotMemberShare = 0.70,
+        expectedDemandGeneration = null,
+        candidateFingerprint = null
     } = {}) {
         const id = Number(characterId);
         const targetClanId = Number(clanId);
         return inTransaction(() => {
             const simulation = one("SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ? AND mode = 'autonomous'", [targetClanId]);
             if (!simulation) return { ok: false, code: 'target_not_autonomous' };
+            if (expectedDemandGeneration) {
+                const state = jsonObject(simulation.stateJson), demand = state.recruitmentDemand;
+                const goal = state[demand?.ownerSection];
+                if (demand?.generation !== expectedDemandGeneration || goal?.goalKey !== demand.goalKey || goal?.status === 'completed'
+                    || goal?.controlledBy === 'player' || !demand.newMemberIds.includes(id) || !recruitmentSourceCurrent(demand.source)) {
+                    return { ok: false, code: 'recruitment_owner_changed' };
+                }
+                const [member] = recruitmentRows('c.id=?', [id]);
+                if (!member || !recruitmentAvailable(member) || require('./GameServer/Clan/ClanRosterDemand').memberFingerprint(member) !== candidateFingerprint) {
+                    return { ok: false, code: 'recruitment_candidate_changed' };
+                }
+                if (demand.source.kind === 'economic') {
+                    const Demand = require('./GameServer/Clan/ClanRosterDemand');
+                    const ownRows = recruitmentRows('c.clanId=?', [targetClanId]);
+                    const clanLevel = one('SELECT level FROM clans WHERE id=?', [targetClanId]).level;
+                    const own = ownRows.filter(row => !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(row));
+                    if (ownRows.length > 40 || Demand.ownJoinFingerprint({ id: targetClanId, level: clanLevel, state,
+                        physicalMemberCount: ownRows.length, members: own }) !== demand.proof.ownJoinFingerprint) return { ok: false, code: 'recruitment_snapshot_changed' };
+                }
+            }
 
             const memberCount = Number(one('SELECT COUNT(*) AS count FROM characters WHERE clanId = ?', [targetClanId]).count || 0);
             if (memberCount >= Math.max(1, Number(memberLimit) || 10)) {
@@ -9223,22 +9526,41 @@ const Database = {
         goal = null,
         expectedUpdatedAt = null,
         eventType = 'goal_updated',
-        reasonCode = ''
+        reasonCode = '',
+        ownerSection = 'goal',
+        recruitmentDemand,
+        recruitmentScan,
+        rosterProof = null
     } = {}) {
         const clan = Number(clanId);
         if (!clan) return Promise.resolve({ ok: false, code: 'target_not_autonomous' });
         return inTransaction(() => {
-            const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
-            const clanRow = one('SELECT leaderId FROM clans WHERE id = ?', [clan]);
+            const simulation = one('SELECT clanId, mode, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
+            const clanRow = one('SELECT leaderId,level FROM clans WHERE id = ?', [clan]);
             if (!simulation || !clanRow) return { ok: false, code: 'target_not_autonomous' };
             const previousState = jsonObject(simulation.stateJson);
             const currentUpdatedAt = Number(previousState.updatedAt || 0);
             if (expectedUpdatedAt !== null && currentUpdatedAt !== Number(expectedUpdatedAt)) {
                 return { ok: false, code: 'ownership_conflict', updatedAt: currentUpdatedAt };
             }
+            if (!['goal', 'productionGoal'].includes(ownerSection)) return { ok: false, code: 'invalid_goal_owner' };
+            if (rosterProof && (simulation.mode !== 'autonomous'
+                || !recruitmentProofCurrent(clan, clanRow.level, previousState, rosterProof))) return { ok: false, code: 'recruitment_snapshot_changed' };
             const timestamp = now();
             const state = simulationState(simulation.stateJson, clan, clanRow.leaderId, previousState.memberIds || [], timestamp);
-            state.goal = goal || null;
+            state[ownerSection] = goal || null;
+            if (recruitmentDemand !== undefined) state.recruitmentDemand = recruitmentDemand;
+            else if (state.recruitmentDemand?.ownerSection === ownerSection && (!goal || goal.status === 'completed'
+                || goal.controlledBy === 'player' || goal.goalKey !== state.recruitmentDemand.goalKey
+                || Number(goal.plan?.sourceId) !== Number(state.recruitmentDemand.source?.npcId))) state.recruitmentDemand = null;
+            if (recruitmentScan !== undefined) state.recruitmentScan = recruitmentScan;
+            if (!goal || goal.status === 'completed' || goal.controlledBy === 'player') {
+                if (state.recruitmentDemand?.ownerSection === ownerSection) state.recruitmentDemand = null;
+                if (state.recruitmentScan?.ownerSection === ownerSection && (goal || recruitmentScan === undefined)) state.recruitmentScan = null;
+            }
+            if (Buffer.byteLength(JSON.stringify({ recruitmentDemand: state.recruitmentDemand, recruitmentScan: state.recruitmentScan,
+                economicRequirements: [state.goal?.plan?.economicRequirements, state.productionGoal?.plan?.economicRequirements] })) > 2048)
+                return { ok: false, code: 'recruitment_metadata_bound' };
             state.updatedAt = timestamp;
             const updated = write(`UPDATE clan_simulation_clans
                 SET updatedAt = ?, stateJson = ? WHERE clanId = ?`, [timestamp, JSON.stringify(state), clan]);
@@ -9254,9 +9576,12 @@ const Database = {
                     occurredAt: timestamp
                 });
             }
-            return { ok: true, clanId: clan, goal: state.goal, updatedAt: timestamp,
+            return { ok: true, clanId: clan, goal: state[ownerSection], state, updatedAt: timestamp,
                 membershipRepair: ClanMembership.repairGoalsUnsafe([clan]) };
-        }, 'clan-goal:update').then(ClanMembership.publish);
+        }, 'clan-goal:update').then(ClanMembership.publish).then(result => {
+            if (result.ok) ClanReviewInputs.syncRecruitment({ id: clan, state: result.state });
+            return result;
+        });
     },
     recordClanGoalEvent({ clanId, eventType, goalType = '', plan = '', reasonCode = '', payload = {} } = {}) {
         if (!Number(clanId) || !String(eventType || '').trim()) return Promise.resolve({ ok: false, code: 'invalid_goal_event' });
@@ -10122,7 +10447,10 @@ const Database = {
                 state: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [beneficiary])),
                 ledgerId: Number(ledger.insertId)
             };
-        }, 'clan-warehouse:withdraw'));
+        }, 'clan-warehouse:withdraw')).then(result => {
+            if (itemId === 57 && result.ok && result.code === 'warehouse_withdraw_applied') require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     reserveClanWarehouseItem({
         clanId,
@@ -10168,7 +10496,10 @@ const Database = {
             state.warehouseRevision = nextRevision;
             write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             return { ok: true, code: 'warehouse_item_reserved', reservationId: Number(reservation.insertId), warehouseRevision: nextRevision };
-        }, 'clan-warehouse:reserve');
+        }, 'clan-warehouse:reserve').then(result => {
+            if (itemId === 57 && result.ok) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     releaseClanWarehouseReservation({ clanId, selfId, goalKey, expectedWarehouseRevision = null } = {}) {
         const clan = Number(clanId);
@@ -10197,7 +10528,10 @@ const Database = {
             state.warehouseRevision = nextRevision;
             write('UPDATE clan_simulation_clans SET updatedAt = ?, stateJson = ? WHERE clanId = ?', [timestamp, JSON.stringify(state), clan]);
             return { ok: true, code: 'warehouse_reservation_released', warehouseRevision: nextRevision };
-        }, 'clan-warehouse:release');
+        }, 'clan-warehouse:release').then(result => {
+            if (itemId === 57 && result.ok && result.warehouseRevision !== undefined) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'warehouse');
+            return result;
+        });
     },
     advanceAutonomousClanLevel({
         clanId,
@@ -10473,7 +10807,10 @@ const Database = {
                 write('DELETE FROM clans WHERE id = ?', [id]);
                 return { ok: true, clanId: id, memberIds: currentMembers.map((member) => Number(member.id)),
                     membershipRepair: ClanMembership.repairUnsafe(currentMembers.map(member => member.id)) };
-            }, 'clan:dissolve'))).then(result => publishClanMembership({ ...result, previousClanId: id })).then(ClanMembership.publish);
+            }, 'clan:dissolve'))).then(result => {
+                if (result.ok) require('./GameServer/Clan/ClanReviewEvents').untrack(id);
+                return publishClanMembership({ ...result, previousClanId: id });
+            }).then(ClanMembership.publish);
     },
     deleteGearItems(characterId) { return withCharacterFlush(characterId, () => remove('items', 'characterId = ? AND selfId != 57', [characterId], 'item:delete-gear')); },
     setShortcut(characterId, shortcut) { return run(`INSERT INTO shortcuts (id, kind, slot, unknown, characterId) VALUES (?, ?, ?, ?, ?)

@@ -1,3 +1,6 @@
+const DiamondCatalog = require('../Items/DimensionalDiamondCatalog');
+const destinationIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['0'], rows =>
+    new Set(rows.map(([id]) => id)));
 const DESTINATIONS = {
     30: [48736, 248463, -6162, 0],
     131: [43799, -47727, -798, 150],
@@ -36,7 +39,20 @@ const LISTS = {
 };
 
 function destination(npcId, id) {
-    if (!LISTS[npcId]?.some(([candidate]) => candidate === Number(id))) return null;
+    const rows = LISTS[npcId];
+    if (rows == null) return null;
+    let allowed;
+    if (id && ['object', 'function'].includes(typeof id)) {
+        allowed = rows.some(([candidate]) => candidate === Number(id));
+    } else {
+        const index = destinationIndex(rows);
+        if (!index) allowed = rows.some(([candidate]) => candidate === Number(id));
+        else if (rows.length) {
+            const numericId = Number(id);
+            allowed = !Number.isNaN(numericId) && index.has(numericId);
+        }
+    }
+    if (!allowed) return null;
     const data = DESTINATIONS[id];
     if (!data) return null;
     const [locX, locY, locZ, price] = data;
@@ -59,7 +75,7 @@ function menu(npcId, hasQuest) {
     const quest = hasQuest
         ? '<a action="bypass -h gatekeeper-quest">Quest</a><br1>'
         : '';
-    const diamonds = require('../../../data/Items/dimensional_diamond_exchanges.json').npcs.includes(Number(npcId))
+    const diamonds = DiamondCatalog.hasNpc(Number(npcId))
         ? '<a action="bypass -h diamond-exchange">Exchange Dimensional Diamonds</a><br1>' : '';
     return `<html><body>How can I help you?<br><br><a action="bypass -h gatekeeper-teleport">Teleport</a><br1>${diamonds}${quest}</body></html>`;
 }

@@ -204,7 +204,7 @@ async function execute(state, opportunity, options = {}) {
         return { state, crafted: false, reason: 'mp_changed' };
     }
     if (opportunity.basket.owned.length) {
-        const physical = await Database.fetchItems(state.characterId);
+        const physical = await Database.fetchItems(state.characterId, 'wealth_craft_physical');
         if (opportunity.basket.owned.some((stock) => physical
             .filter((item) => Number(item.selfId) === Number(stock.selfId) && !item.equipped)
             .reduce((count, item) => count + Number(item.amount || 0), 0) < Number(stock.count))) {
@@ -245,7 +245,7 @@ async function execute(state, opportunity, options = {}) {
             crafted: false, reason: 'purchase_failed' };
     }
 
-    const items = await Database.fetchItems(current.characterId);
+    const items = await Database.fetchItems(current.characterId, 'wealth_craft_items');
     const materials = materialRows(items, recipe, batches);
     if (!materials) {
         const failed = withOutcome(current, opportunity, 'materials_changed', { spent });
@@ -340,7 +340,7 @@ async function execute(state, opportunity, options = {}) {
                 && Number(entry.price) === Number(exit.price)
                 && Number(entry.count) > 0);
         const saleCount = Math.min(units, Number(offer?.count || 0));
-        const productRow = (await Database.fetchItems(current.characterId))
+        const productRow = (await Database.fetchItems(current.characterId, 'wealth_craft_product'))
             .find((item) => Number(item.selfId) === Number(recipe.productId)
                 && Number(item.amount) >= saleCount && !item.equipped);
         if (offer && productRow) {

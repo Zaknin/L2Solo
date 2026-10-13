@@ -124,7 +124,8 @@ try {
     assert.equal(actor.autoSoulshots.size, 0, 'a denied use clears a previously enabled compatible shot');
     // Actual solo/party charge sites: a real fixed monster and native weapon.
     Profiles.npcForSpot = () => ({ selfId: 456, level: 5, maxHp: 100000, pAtk: 1, pAtkRnd: 0,
-        pDef: 20, mDef: 10, accur: 1, evasion: 0, critical: 0, atkSpd: 500 });
+        pDef: 20, mDef: 10, accur: 1, evasion: 0, critical: 0, atkSpd: 500,
+        aggressiveInterruption: true });
     const spot = { id: 'policy', minLevel: 5, maxLevel: 5, avgLevel: 5, density: 1,
         rewards: { exp: 100, sp: 1, adenaMin: 1, adenaMax: 1 } };
     const make = () => { const s = structuredClone(state); const profile = Profiles.profileFor(s, deps.timestamp);

@@ -200,12 +200,6 @@ function projectedActorLoc(actor) {
     return { locX: Number(actor.fetchLocX?.() ?? 0), locY: Number(actor.fetchLocY?.() ?? 0), locZ: 0 };
 }
 
-function usableProjection(actor) {
-    if (typeof actor.fetchLocX !== 'function' || typeof actor.fetchLocY !== 'function') return false;
-    const loc = projectedActorLoc(actor);
-    return Number.isFinite(loc.locX) && Number.isFinite(loc.locY);
-}
-
 function actorIdForTarget(target) {
     return Number(target?.actor?.fetchId?.() || target?.characterId || target?.coldLifeState?.characterId || 0);
 }

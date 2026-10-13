@@ -191,7 +191,7 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
             || expectedRevision !== null && Number(expectedRevision) !== Number(crafter.simulation?.revision || 0)) {
             throw new Error('workshop price changed');
         }
-        const materials = Profit.materials(await database.fetchItems(customerId), recipe, batches);
+        const materials = Profit.materials(await database.fetchItems(customerId, 'workshop_craft'), recipe, batches);
         if (!materials) throw new Error('workshop materials missing');
         const template = invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, recipe.productId);
         if (!template) throw new Error('workshop product missing');

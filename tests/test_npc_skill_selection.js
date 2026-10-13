@@ -5,8 +5,18 @@ require('../src/Global');
 const DataCache = invoke('GameServer/DataCache');
 const EffectStore = invoke('GameServer/Effects/EffectStore');
 const Npc = invoke('GameServer/Npc/Npc');
+const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 
 DataCache.init();
+
+const strongTemplate = DataCache.npcs.find(row => Number(row.selfId) === 37);
+const strongReference = { fetchSelfId: () => 37, fetchSummonSkillId: () => Number(strongTemplate.summonSkillId || 0) };
+assert.strictEqual(NpcSkills.maxHpMultiplierFor(strongReference), 2, 'Strong Type still resolves native passive MAX_HP math');
+assert.strictEqual(NpcSkills.templateMaxHpMultiplierFor(strongTemplate), NpcSkills.maxHpMultiplierFor(strongReference));
+assert.strictEqual(NpcSkills.templateMaxHpMultiplierFor({ selfId: '37', get summonSkillId() { throw Error('snapshot rebuilt'); } }), 2,
+    'template projection keeps the original first snapshot per numeric ID across replacement rows');
+assert.strictEqual(NpcSkills.templateMaxHpMultiplierFor(null), 1);
+assert.strictEqual(NpcSkills.templateMaxHpMultiplierFor({ selfId: 0 }), 1);
 
 function npc(selfId, objectId = 9900000 + selfId) {
     const template = DataCache.npcs.find((entry) => Number(entry.selfId) === Number(selfId));

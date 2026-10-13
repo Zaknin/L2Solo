@@ -137,7 +137,7 @@ async function resolveClan(clan) {
 
 // The member's purchase goes to the clan warehouse and advances its goal.
 async function deposit(clan, goal, itemId, buyer, purchase, offer, { playerControlled, order }) {
-    const inventoryRows = await Database.fetchItems(buyer.characterId);
+    const inventoryRows = await Database.fetchItems(buyer.characterId, 'clan_market_deposit');
     const item = (inventoryRows || []).find((row) => Number(row.selfId) === itemId && Number(row.amount) > 0);
     if (!item) {
         metrics.blocked += 1;

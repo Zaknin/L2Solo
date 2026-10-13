@@ -80,7 +80,7 @@ function* forwardTrip(state, from, to) {
 }
 
 
-function* returnMs(state, from, to) {
+function* returnMs(state, from, to, tailScope = null) {
     if (!Trip.honest()) return Trip.AUTHOR_TRIP_MS;
     let best = Trip.runMs(from, to);
     if (Karma.closesTowns(state.stats?.karma)) return best;
@@ -88,14 +88,38 @@ function* returnMs(state, from, to) {
     if (!start) return NaN;
     const lead = Math.hypot(from.locX - start.locX, from.locY - start.locY) <= Trip.TOWN_RADIUS
         ? Trip.runMs(from, start) : Payment.SCROLL_CAST_MS;
-    for (const teleport of Routes.teleportPoints()) {
+    const teleports = Routes.teleportPoints();
+    if (tailScope) {
+        const x = Number(to?.locX || 0), y = Number(to?.locY || 0);
+        if (tailScope.points !== teleports || !Object.is(tailScope.x, x) || !Object.is(tailScope.y, y)) {
+            tailScope.points = teleports; tailScope.x = x; tailScope.y = y;
+            tailScope.durations = null; tailScope.ready = null;
+        }
+    }
+    let index = 0;
+    for (const teleport of teleports) {
         const hops = teleport.hops[townKeys.get(start)];
-        if (hops !== undefined) best = Math.min(best, lead + hops * Trip.HOP_MS + Trip.runMs(teleport, to));
+        if (hops !== undefined) {
+            let tail;
+            if (tailScope) {
+                if (!tailScope.ready) {
+                    tailScope.durations = new Float64Array(teleports.length);
+                    tailScope.ready = new Uint8Array(teleports.length);
+                }
+                if (!tailScope.ready[index]) {
+                    tailScope.durations[index] = Trip.runMs(teleport, to);
+                    tailScope.ready[index] = 1;
+                }
+                tail = tailScope.durations[index];
+            } else tail = Trip.runMs(teleport, to);
+            best = Math.min(best, lead + hops * Trip.HOP_MS + tail);
+        }
+        index++;
         yield 'edge';
     }
     return best;
 }
-function* details(state, town, { origin = null } = {}) {
+function* details(state, town, { origin = null } = {}, tailScope = null) {
     const to = townByName.get(town);
     if (!state || !to || Karma.closesTowns(state.stats?.karma) && town !== Karma.TOWN_NAME) return unknown();
     const accepted = state.activity === 'traveling' && state.stats?.travel?.arrivalActivity === 'shopping'
@@ -109,8 +133,8 @@ function* details(state, town, { origin = null } = {}) {
     if (returning && !validPoint(returning)) return unknown();
     const plan = yield* forwardTrip(state, from, to);
     if (!plan) return unknown();
-    const back = returning ? yield* returnMs(state, to, returning) : 0;
-    const baseline = continuingVisit && returning ? yield* returnMs(state, from, returning) : 0;
+    const back = returning ? yield* returnMs(state, to, returning, tailScope) : 0;
+    const baseline = continuingVisit && returning ? yield* returnMs(state, from, returning, tailScope) : 0;
     const hours = Math.max(0, plan.durationMs + back - baseline) / 3600000;
     const fees = Number(plan.route.fee || 0);
     return Number.isFinite(hours) && Number.isFinite(fees) && fees >= 0 ? { known: true, hours, fees } : unknown();
@@ -139,9 +163,11 @@ function* prepare(state) {
         preparedTables.delete(routeKey); preparedTables.set(routeKey, previous);
         return previous;
     }
-    const rows = [];
+    // Only this preparation miss retains tail times. Buffers are allocated
+    // on the first reachable teleport and replaced if the return point changes.
+    const rows = [], tailScope = {};
     for (const town of towns) {
-        const value = yield* details(captured, town);
+        const value = yield* details(captured, town, undefined, tailScope);
         rows.push(Object.freeze(value.known ? [true, value.hours, value.fees] : [false, null, null]));
         yield 'trip';
     }

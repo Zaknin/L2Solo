@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { randomBytes } = require('node:crypto');
 const Catalog = require('./C4WeaponSAExchange');
 const NpcIndex = require('../World/NpcObjectIndex');
@@ -6,7 +7,7 @@ const Database = invoke('Database');
 const Response = invoke('GameServer/Network/Response');
 const World = invoke('GameServer/World/World');
 const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const template = id => Data.items.find(item => item.selfId === Number(id));
+const template = id => ItemTemplateIndex.findStrictRequired(Data.items, Number(id));
 const itemName = id => template(id)?.template.name || `Item ${id}`;
 
 function nearby(session) {

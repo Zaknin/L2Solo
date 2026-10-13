@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
@@ -102,7 +103,7 @@ function snapshot() {
 }
 
 function cachedItemsById() {
-    return new Map((DataCache.items || []).map((item) => [Number(item.selfId), item]));
+    return ItemTemplateIndex.currentLastIndex(DataCache.items);
 }
 
 function itemMeta(selfId, itemsById = cachedItemsById()) {

@@ -22,13 +22,18 @@ const filename = require.resolve('../src/GameServer/Bot/Economy/WishProviders');
 const reference = new Module(filename, module);
 reference.filename = filename; reference.paths = Module._nodeModulePaths(path.dirname(filename));
 const memoized = `    const spotValue = spot => {
+        ctx.sourceSpot?.(spot.id);
         if (!sourceValues.has(spot)) sourceValues.set(spot, ctx.spotValue(spot));
         return sourceValues.get(spot);
     };
 `;
 const providerSource = fs.readFileSync(filename, 'utf8');
 assert(providerSource.includes(memoized), 'the oracle bypasses the actual spot-value memo');
-reference._compile(providerSource.replace(memoized, '    const spotValue = spot => ctx.spotValue(spot);\n'), filename);
+reference._compile(providerSource.replace(memoized, `    const spotValue = spot => {
+        ctx.sourceSpot?.(spot.id);
+        return ctx.spotValue(spot);
+    };
+`), filename);
 
 const originalRandom = Math.random;
 let seed = 20261005;

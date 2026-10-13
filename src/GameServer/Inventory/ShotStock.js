@@ -186,9 +186,10 @@ function isPersonalShot(state, selfId) {
         && !invoke('GameServer/Bot/Economy/CraftEligibility').isServiceCrafter(state);
 }
 
-function keptAmounts(state, basics = null) {
-    // The stock rule needs no wish network (L25).
-    const stock = (basics || invoke('GameServer/Bot/Economy/EconomyContext').basics(state)).stock('shots');
+function keptAmounts(state, basics = null, row = null) {
+    // The stock rule needs no wish network (L25); row: a shots stock row
+    // already read (itemId, target, beginnerCurrent).
+    const stock = row || (basics || invoke('GameServer/Bot/Economy/EconomyContext').basics(state)).stock('shots');
     const kept = { [stock.itemId]: Math.max(0, stock.target - (stock.beginnerCurrent || 0)) };
     const plan = planForState(state);
     if (isPersonalShot(state, plan.selfId)) {
@@ -371,7 +372,7 @@ function ensureCharacterStock(characterId, options = {}) {
     if (!id) return Promise.resolve({ changed: false, reason: 'missing_character' });
 
     const targetAmount = Number(options.targetAmount || DEFAULT_TARGET_AMOUNT);
-    return persistenceDatabase().fetchItems(id).then((rows) => {
+    return persistenceDatabase().fetchItems(id, 'shot_stock').then((rows) => {
         const plan = options.plan || planForRows(rows || [], options.classId ?? characterId?.classId);
         const current = existingRow(rows, plan.selfId);
         const currentAmount = Number(current?.amount || 0);

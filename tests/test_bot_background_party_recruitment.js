@@ -1,4 +1,7 @@
 const assert = require('assert');
+const world = require('./fixtures/native_stock_world')();
+const previousRate = process.env.L2NODE_PROGRESSION_RATE;
+process.env.L2NODE_PROGRESSION_RATE = 'x10';
 
 require('../src/Global');
 
@@ -19,6 +22,10 @@ const World = invoke('GameServer/World/World');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const ClanService = invoke('GameServer/Clan/ClanService');
+const Data = invoke('GameServer/DataCache');
+const Database = invoke('Database');
+const Spots = invoke('GameServer/Bot/Population/SpotProfiles');
+const originalCatalog = { spots: SpotService.spots, profiles: Spots.cache };
 
 const originals = {
     active: PartyState.active,
@@ -54,6 +61,65 @@ const originalFormationState = {
 };
 
 async function run() {
+    Data.init(); Database.init();
+    assert(Database.isReady());
+    // A unit world with one available authored ordinary camp. Its actual NPC
+    // mix and center are borrowed from canonical data, never invented combat.
+    const NATIVE_SPOT = '-1_10';
+    const source = require('../data/Bots/spot-reward-npcs.json').rows.find(row => row[0] === NATIVE_SPOT);
+    const cell = require('../data/Bots/spot-table.json').spots.find(row => row[0] === NATIVE_SPOT);
+    assert(source && cell);
+    const camp = { id: NATIVE_SPOT, avgLevel: cell[1], density: cell[2],
+        npcEntries: source[1].map(([selfId, count]) => ({ selfId, count })),
+        npcSelfIds: source[1].map(([selfId]) => selfId), tags: [], tagsAuthoritative: true };
+    camp.center = source[1].flatMap(([selfId]) => invoke('GameServer/Knowledge/SpawnCatalog').spawnsForNpc(selfId)
+        .flatMap(row => [...(row.definition.coords || []), ...(row.group.bounds || [])
+            .map(point => ({ locX: point.locX, locY: point.locY, locZ: point.maxZ }))]))
+        .find(loc => SpotService.findCurrentSpot(loc, [camp]) === camp);
+    assert(camp.center, 'a published spawn coordinate or boundary belongs to this actual camp');
+    const levels = source[1].map(([selfId]) => Number(Data.npcs.find(row => row.selfId === selfId).template.level));
+    camp.minLevel = Math.min(...levels); camp.maxLevel = Math.max(...levels);
+    SpotService.spots = [invoke('GameServer/World/WorldAreaCatalog').decorateSpot(camp)]; Spots.reset();
+    const nativeSpot = invoke('GameServer/Bot/AI/SpotIndex').spotById(Spots.ensure(), NATIVE_SPOT);
+    assert(nativeSpot && !nativeSpot.raidBoss);
+    assert.deepStrictEqual(nativeSpot.npcEntries, camp.npcEntries);
+    async function nativeMember(id, name, classId, level, role) {
+        const account = `bot_party_fixture_${id}`, Actor = invoke('GameServer/Actor/Actor');
+        await Database.createAccount(account, 'fixture');
+        const created = await Database.createCharacter(account, { name, race: classId === 49 ? 3 : 0, classId,
+            maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, ...nativeSpot.center });
+        // Preserve the original ownership IDs in the isolated native database;
+        // the character allocator normally starts at 2000000.
+        await Database.execute(['UPDATE characters SET id = ? WHERE id = ?', [id, Number(created.insertId)]]);
+        const Catalog = invoke('GameServer/Skills/SkillBookCatalog'), ranks = [];
+        for (const entry of Catalog.entries(classId)) {
+            let learned = 0, training;
+            while ((training = Catalog.nextTraining(classId, level, entry.selfId, learned))) {
+                ranks.push(training); learned = training.level;
+            }
+        }
+        await Database.execute(['UPDATE characters SET level = ?, exp = ?, sp = ? WHERE id = ?',
+            [level, Data.experience[level - 1], ranks.reduce((sum, rank) => sum + rank.sp, 0), id]]);
+        for (const rank of ranks) assert((await Database.learnBotSkill(id, rank.skillId, rank.level)).learned);
+        // This promoted character still owns the authored kit from milestone10;
+        // it has not acquired its current level20 equipment milestone yet.
+        for (const entry of require('./fixtures/profitable_stock_state').kitFor(classId, 10).entries)
+            await Database.setItem(id, { selfId: entry.selfId, name: entry.name, amount: 1, equipped: true, slot: entry.slot });
+        const items = await Database.fetchItems(id), paperdoll = Array.from({ length: 16 }, () => ({}));
+        for (const row of items.filter(row => row.equipped)) paperdoll[row.slot] = { id: row.id, selfId: row.selfId };
+        const session = { accountId: account, currentSpot: nativeSpot, plan: 'hunting', dataSendToMe() {}, dataSendToOthers() {} };
+        session.actor = new Actor(session, { ...(await Database.fetchCharacters(account))[0],
+            ...utils.crushOb(Data.classTemplates.find(row => row.classId === classId)), items, paperdoll });
+        session.actor.skillset.populateSnapshot(await Database.fetchSkills(id));
+        invoke(global.path.actor).calculateStats(session, session.actor);
+        session.actor.setHp(session.actor.fetchMaxHp()); session.actor.setMp(session.actor.fetchMaxMp());
+        const state = invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(session.actor);
+        return { ...state, name, phase: 'cold', party: { role }, stats: { ...state.stats, role } };
+    }
+    // Knight and Cleric are available from level20; raise the original fixture
+    // by five levels while retaining its +1 recruit and +10 excluded candidate.
+    const nativeRows = [await nativeMember(1, 'Tank', 4, 20, 'tank'), await nativeMember(2, 'Healer', 15, 20, 'healer'),
+        await nativeMember(3, 'Buffer', 49, 20, 'buffer'), await nativeMember(4, 'Dps', 0, 21, 'dps')];
     // Ownership/party fixtures use synthetic coordinates on an open plane.
     Geo.getCellData = (x, y, z) => ({ z, nswe: 15 });
     Geo.getHeight = (x, y, z) => z;
@@ -85,16 +151,12 @@ async function run() {
     LifeState.cachedStatesForParties = originals.cachedStatesForParties;
     LifeState.coldPartyCandidateProjections = originals.coldPartyCandidateProjections;
 
-    const party = { partyId: 'bgp_1', leaderId: 1, memberIds: [1, 2], spotId: 'cruma', stats: {} };
-    const members = [
-        { characterId: 1, name: 'Tank', level: 15, party: { role: 'tank' } },
-        { characterId: 2, name: 'Healer', level: 15, party: { role: 'healer' } }
-    ];
+    const party = { partyId: 'bgp_1', leaderId: 1, memberIds: [1, 2], spotId: NATIVE_SPOT, stats: {} };
+    const members = nativeRows.slice(0, 2);
     const candidates = [
-        { characterId: 3, name: 'Buffer', level: 15, spotId: 'cruma', party: { role: 'buffer' } },
-        { characterId: 4, name: 'Dps', level: 16, spotId: 'cruma', party: { role: 'dps' } },
-        { characterId: 5, name: 'FarAway', level: 25, spotId: 'cruma', party: { role: 'buffer' } },
-        { characterId: 6, name: 'OtherSpot', level: 15, spotId: 'dion', party: { role: 'buffer' } }
+        ...nativeRows.slice(2),
+        { characterId: 5, name: 'FarAway', level: 30, spotId: NATIVE_SPOT, party: { role: 'buffer' } },
+        { characterId: 6, name: 'OtherSpot', level: 20, spotId: 'dion', party: { role: 'buffer' } }
     ];
     const assigned = [];
     const events = [];
@@ -116,6 +178,31 @@ async function run() {
         return Promise.resolve(null);
     };
 
+    const Income = invoke('GameServer/Bot/Population/PartyIncomeComparison');
+    const prepared = Income.prepare(nativeRows, { party });
+    const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
+    const unbuffedGroup = Match.spotMatchup(nativeSpot, Match.stateProfiles(nativeRows[0],
+        { timestamp: prepared.timestamp, capacityStates: nativeRows, mode: 'party' }), { soloSafety: true });
+    const profiles = nativeRows.map(row => {
+        const own = Match.stateProfiles(row, { timestamp: prepared.timestamp });
+        return { characterId: row.characterId, classId: row.stats.classId, level: row.level,
+            skillSource: row.stats.coldCombat.skillSource, learnedRanks: row.stats.coldCombat.skills.length,
+            equipped: Object.values(row.inventory).filter(item => item.equipped).map(item => item.selfId),
+            combat: own.map(profile => ({ maxHp: profile.maxHp, pDef: profile.pDef, pAtk: profile.pAtk, mAtk: profile.mAtk })),
+            solo: Match.spotMatchup(nativeSpot, own, { soloSafety: true }) };
+    });
+    const comparisons = nativeRows.map(row => ({ characterId: row.characterId,
+        ...Income.compare(row, nativeRows.filter(peer => peer !== row), { party, prepared }) }));
+    const diagnostics = { unbuffedGroup, profiles, comparisons };
+    require('node:fs').mkdirSync(require('node:path').resolve(__dirname, '../tmp/ci-repair'), { recursive: true });
+    require('node:fs').writeFileSync(require('node:path').resolve(__dirname, '../tmp/ci-repair/party-prior10-native-input.json'),
+        JSON.stringify({ ...diagnostics, spot: nativeSpot, states: nativeRows.map(row => ({ ...row, physicalInventory: undefined })) }, null, 2));
+    console.log('Native ordinary profile:', JSON.stringify(diagnostics));
+    if (!comparisons.every(row => row.accept)) console.error('Native ordinary admission:', JSON.stringify(comparisons));
+    assert(comparisons.every(row => row.accept), 'the unchanged native comparison admits every member before recruitment');
+    // Native physical preparation ends here; the original ownership checks
+    // below use mocked assignments, not persisted cold-life membership rows.
+    await Database.close();
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);
@@ -124,7 +211,7 @@ async function run() {
     assert.strictEqual(saved.leaderId, 1, 'recruitment must preserve an attached party leader');
     assert.strictEqual(events.length, 1);
 
-    const staleLeaderParty = { partyId: 'bgp_stale_leader', leaderId: 999, memberIds: [1, 2], spotId: 'cruma', stats: {} };
+    const staleLeaderParty = { partyId: 'bgp_stale_leader', leaderId: 999, memberIds: [1, 2], spotId: NATIVE_SPOT, stats: {} };
     let staleLeaderSaved = null;
     PartyState.active = () => [staleLeaderParty];
     LifeState.cachedStatesForParties = () => Promise.resolve(new Map([['bgp_stale_leader', members]]));
@@ -133,7 +220,7 @@ async function run() {
         return Promise.resolve(nextParty);
     };
     await PopulationService.recruitBackgroundMembers([
-        { characterId: 7, name: 'StaleLeaderRecruit', level: 15, spotId: 'cruma', party: { role: 'dps' } }
+        { ...nativeRows[3], characterId: 7, name: 'StaleLeaderRecruit' }
     ]);
     assert.strictEqual(staleLeaderSaved.leaderId, 1,
         'recruitment must re-elect an attached member when the stored leader has already departed');
@@ -144,17 +231,14 @@ async function run() {
     );
 
     const sharedParties = [
-        { partyId: 'bgp_shared_a', leaderId: 50, memberIds: [50, 51, 52, 53], spotId: 'cruma', stats: {} },
-        { partyId: 'bgp_shared_b', leaderId: 54, memberIds: [54, 55, 56, 57], spotId: 'cruma', stats: {} }
+        { partyId: 'bgp_shared_a', leaderId: 50, memberIds: [50, 51, 52, 53], spotId: NATIVE_SPOT, stats: {} },
+        { partyId: 'bgp_shared_b', leaderId: 54, memberIds: [54, 55, 56, 57], spotId: NATIVE_SPOT, stats: {} }
     ];
     const sharedMembers = new Map(sharedParties.map((sharedParty) => [
         sharedParty.partyId,
         sharedParty.memberIds.map((characterId, index) => ({
-            characterId,
+            ...nativeRows[index], characterId,
             name: `Member${characterId}`,
-            level: 15,
-            spotId: 'cruma',
-            party: { role: ['tank', 'healer', 'buffer', 'dps'][index] }
         }))
     ]));
     const sharedAssignments = [];
@@ -165,8 +249,8 @@ async function run() {
         return Promise.resolve(state);
     };
     const sharedCandidates = await PopulationService.recruitBackgroundMembers([
-        { characterId: 60, name: 'SharedOne', level: 15, spotId: 'cruma', party: { role: 'dps' } },
-        { characterId: 61, name: 'SharedTwo', level: 15, spotId: 'cruma', party: { role: 'dps' } }
+        { ...nativeRows[3], characterId: 60, name: 'SharedOne' },
+        { ...nativeRows[3], characterId: 61, name: 'SharedTwo' }
     ]);
     assert.deepStrictEqual([...sharedCandidates].sort((a, b) => a - b), [60, 61], 'a candidate must be claimed by only one active party per formation pass');
     assert.deepStrictEqual(sharedAssignments.map((entry) => entry.characterId).sort((a, b) => a - b), [60, 61]);
@@ -548,7 +632,10 @@ async function run() {
 run().catch((err) => {
     console.error(err);
     process.exitCode = 1;
-}).finally(() => {
+}).finally(async () => {
+    SpotService.spots = originalCatalog.spots; Spots.cache = originalCatalog.profiles;
+    if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = previousRate;
     Object.assign(Geo, originalGeo);
     PartyState.active = originals.active;
     PartyState.counts = originals.counts;
@@ -575,4 +662,5 @@ run().catch((err) => {
     Config.maxBackgroundParties = originals.maxBackgroundParties;
     Config.partyFormationBatchSize = originals.partyFormationBatchSize;
     Object.assign(PopulationService, originalFormationState);
+    await world.close();
 });

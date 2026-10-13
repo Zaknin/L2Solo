@@ -18,8 +18,10 @@ near(Providers.rotationRate(100, []), 100);
 near(Providers.rotationRate(100, [{ skillId: 3, damage: 20, castSeconds: .1, periodSeconds: .1 }]), 200);
 assert(Providers.rotationRate(100, [a, b]) / Providers.rotationRate(100, [a]) - 1 > .5);
 
+// Clan training keeps attack-book wishes once the clan owns a warehouse.
+invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 1, level: 1, state: {} }, []);
 const mage = { characterId: 990013, phase: 'cold', activity: 'hunting', level: 45, adena: 0, sp: 1e6,
-    inventory: {}, vitals: {}, stats: { classId: 12, exp: Data.experience[44], coldCombat: {
+    inventory: {}, vitals: {}, stats: { classId: 12, clanId: 1, exp: Data.experience[44], coldCombat: {
         classId: 12, skillSource: 'database', skills: Profile.skillSnapshotsFromRecords([{ selfId: 1230, level: 1 }])
     }, persona: { understanding: .8, traits: { commitment: .5, caution: .5, resilience: .5,
         ambition: .5, empathy: .5, sociability: .5, assertiveness: .5 } } } };

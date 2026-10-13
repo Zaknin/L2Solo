@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const Utility = invoke('GameServer/Bot/AI/BotCombatUtility');
 const ClassPolicy = invoke('GameServer/Bot/AI/BotClassPolicy');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
@@ -15,8 +17,8 @@ const activeServitor = Object.freeze({ isDead: () => false });
 function skillModel(record) {
     const key=JSON.stringify(record);
     if (skillModels.has(key)) return skillModels.get(key);
-    const source=DataCache.skills?.find(s=>s.selfId===record.selfId);
-    const definition=source?.levels?.find(s=>s.level===record.level) || {};
+    const source=ItemTemplateIndex.findStrictRequired(DataCache.skills ?? [], record.selfId);
+    const definition=SkillRankIndex.findStrict(source?.levels ?? [], record.level) || {};
     const skill=new SkillModel({...utils.crushOb(source || {}),...definition,...record,
         spell:definition.spell??source?.template?.spell??record.spell,
         hitTime:record.hitTime||definition.hitTime||source?.time?.hitTime||0,

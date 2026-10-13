@@ -77,13 +77,18 @@ async function player(name, { bot = false } = {}) {
 }
 
 let bidSequence = 0;
-async function fundedBid(price) {
+async function fundedBid(price, count = 10) {
     // Display-only index rows cannot fund a deal; accepted sales use real escrow.
     // A bot buy ad holds no escrow and pays only at a meeting (E115,
     // 540ce2aa), so the escrow-held bid a seller fills in place is a player's.
     const owner = await player(`FFillBid${++bidSequence}`);
+    if (price * count > wallet(owner)) {
+        const adena = owner.actor.backpack.fetchItemFromSelfId(57);
+        await Database.updateItemAmount(owner.actor.fetchId(), adena.fetchId(), price * count);
+        adena.setAmount(price * count);
+    }
     const created = await Database.createAfkTradeShop(owner.actor.fetchId(), { kind: 'buy_ad', storeType: 3, town: 'Giran',
-        lines: [{ selfId: MATERIAL, name: 'Stem', count: 10, price, stackable: true }] });
+        lines: [{ selfId: MATERIAL, name: 'Stem', count, price, stackable: true }] });
     AfkTrade.refreshRecord(created.shop);
     return created.shop;
 }
@@ -190,7 +195,7 @@ test('native packet omits an oversized quote and cannot execute it; HTML retains
     assert.strictEqual(persisted.find(item => item.selfId === 57).amount, money);
     assert.strictEqual(persisted.find(item => item.selfId === MATERIAL).amount, 20);
     const buyerStore = staticStore(Configs['4manda']);
-    line(16, 3, 5000000000);
+    const oversizedBid = await fundedBid(5000000000, 1);
     const buyerStub = ServerResponse.privateStoreListBuy;
     try {
         ServerResponse.privateStoreListBuy = responses.privateStoreListBuy;
@@ -207,6 +212,8 @@ test('native packet omits an oversized quote and cannot execute it; HTML retains
     session.viewedPrivateStoreSeller = seller;
     await BuyHtml(session, ['buy-merchant-item']);
     assert(session.sent.at(-1).args[1].includes('5,000,000,000a'), 'HTML shows the exact safe integer price');
+    const closed = await Database.closeBoardRecord(oversizedBid.ownerId, oversizedBid.id);
+    AfkTrade.refreshRecord(closed.record);
 });
 
 test('spawned and spread-cloned rows retain source identity through window and trade', async () => {
@@ -240,18 +247,16 @@ test('native buyer window uses current bid and rejects stale native sale', async
     const session = await player('FNativeBuyer');
     const store = staticStore(Configs['4manda']);
     const buyer = merchant(store, 82001, '4manda');
-    line(30, 3, 501);
+    await fundedBid(501);
     open(session, buyer);
     assert.strictEqual(session.sent.find(packet => packet.kind === 'privateStoreListBuy').args[1][0].price, 501);
     const item = session.actor.backpack.fetchItemFromSelfId(MATERIAL);
-    line(30, 3, 502);
+    await fundedBid(502);
     const money = wallet(session);
     await Sell.consumeMerchant(session, [{ objectId: item.fetchId(), selfId: MATERIAL, amount: 1, price: 501 }], { native: true });
     assert.strictEqual(wallet(session), money);
     assert.strictEqual(item.fetchAmount(), 20);
     assert.strictEqual(records.length, 0);
-    board.remove(30);
-    await fundedBid(502);
     open(session, buyer);
     await Sell.consumeMerchant(session, [{ objectId: item.fetchId(), selfId: MATERIAL, amount: 1, price: 502 }], { native: true });
     assert.strictEqual(wallet(session), money + 502);
@@ -275,10 +280,9 @@ test('HTML windows and both trades read current prices and journal executed pric
     assert.strictEqual(records[0].unitPrice, configured + 124);
     const buyerStore = staticStore(Configs['4manda']);
     session.viewedPrivateStoreSeller = merchant(buyerStore, 82001, '4manda');
-    line(41, 3, 701);
+    await fundedBid(701);
     await SellHtml(session, ['sell-to-merchant-item']);
     assert(session.sent.at(-1).args[1].includes('701a'));
-    board.remove(41);
     await fundedBid(702);
     await SellHtml(session, ['sell-to-merchant-item', String(MATERIAL), '1']);
     assert.strictEqual(wallet(session), money - configured - 124 + 702);

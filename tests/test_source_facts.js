@@ -10,7 +10,7 @@ function drain(iterator) {
     do { next = iterator.next(); if (!next.done) stages.push(next.value); } while (!next.done);
     return { value: next.value, stages };
 }
-const saved = { items: Data.items, npcs: Data.npcs, rewards: Data.npcRewards };
+const saved = { items: Data.items, npcs: Data.npcs, rewards: Data.npcRewards, rate: process.env.L2NODE_PROGRESSION_RATE };
 try {
     Data.items = [...saved.items, { selfId: 99101, template: { name: 'Facts Test Stem', kind: 'Other.Material' }, etc: { stackable: true } }];
     Data.npcs = [...saved.npcs, { selfId: 99001, template: { name: 'Facts Test Mob', level: 40, kind: 'Monster' } }];
@@ -133,5 +133,72 @@ try {
     // A travelling bot's spot is its destination, as PopulationService reads it.
     const travelling = byKind(facts({ ...warsmith, spotId: 'elsewhere', stats: { ...warsmith.stats, travel: { spotId: 'facts-test' } } })).drop;
     assert.equal(travelling.tripHours, 0, 'the destination spot needs no further trip');
+
+    // Static refusal buckets and live candidates interleave. Both ready paths
+    // preserve the unchanged full view, including first reason-key order when
+    // learned Spoil overrides a level/hunt refusal, but never a raid refusal.
+    const mixedNpcs = [
+        { selfId: 99010, clanName: 'Siege Guard', template: { name: 'Mixed Guard A', level: 42, kind: 'Monster' } },
+        { selfId: 99011, template: { name: 'Mixed Occupied', level: 42, kind: 'Monster' } },
+        { selfId: 99012, template: { name: 'Mixed Low', level: 30, kind: 'Monster' } },
+        { selfId: 99013, template: { name: 'Mixed Raid', level: 42, kind: 'Monster', raidBoss: true } },
+        { selfId: 99014, template: { name: 'Mixed Ready', level: 42, kind: 'Monster' } },
+        { selfId: 99015, clanName: 'Siege Guard', template: { name: 'Mixed Guard B', level: 42, kind: 'Monster' } },
+        { selfId: 99016, template: { name: 'Mixed Invisible', level: 42, kind: 'Monster' } }
+    ];
+    Data.npcs = [...saved.npcs, ...mixedNpcs];
+    const mixedRewards = mixedNpcs.map(npc => ({ selfId: npc.selfId, template: npc.template,
+        rewards: [{ overall: 100, items: [{ selfId: 99101, chance: npc.selfId === 99016 ? 0 : 100, min: 1, max: 1 }] }],
+        spoils: [{ overall: 100, items: [{ selfId: 99101, chance: npc.selfId === 99016 ? 0 : 100, min: 2, max: 2 }] }] }));
+    const mixedSpots = mixedNpcs.map(npc => ({ ...spots[0], id: `mixed-${npc.selfId}`, avgLevel: npc.template.level,
+        raidBoss: npc.template.raidBoss === true, raidBossTemplateId: npc.template.raidBoss ? npc.selfId : null,
+        npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] }));
+    const checkMixed = (state, extra = {}) => {
+        const options = { spots: mixedSpots, spotValue, timestamp: 1,
+            occupancy: { 'mixed-99011': { count: 9, capacity: 9 } },
+            trip: { details: () => ({ known: true, hours: .25, fees: 0 }) }, ...extra };
+        const all = drain(Planner.sourceFacts(state, 99101, 50, options)).value;
+        const expected = new Map();
+        for (const row of all) {
+            const key = row.status === 'ready' ? 'ready' : row.reason;
+            expected.set(key, (expected.get(key) || 0) + 1);
+        }
+        const counts = new Map();
+        const ready = drain(Planner.sourceFacts(state, 99101, 50, { ...options, counts })).value;
+        assert.deepEqual([...counts], [...expected]);
+        assert.deepEqual(ready, all.filter(row => row.status === 'ready'));
+        assert.deepEqual(drain(Planner.sourceFacts(state, 99101, 50, { ...options, readyOnly: true })).value, ready);
+        assert(!all.some(row => row.npcId === 99016), 'no-chance rows are neither returned nor counted');
+        return { all, counts };
+    };
+    for (const order of [mixedRewards, mixedRewards.slice().reverse()]) {
+        Data.npcRewards = order;
+        for (const rate of ['x1', 'x50']) {
+            process.env.L2NODE_PROGRESSION_RATE = rate;
+            for (const state of [warsmith, noSpoil]) {
+                checkMixed(state);
+                checkMixed(state, { economicLower: true });
+                checkMixed(state, { spotValue: () => null });
+            }
+        }
+    }
+    Data.npcRewards = mixedRewards;
+    const beforeReplacement = checkMixed(warsmith);
+    assert.deepEqual([...beforeReplacement.counts.keys()], ['cannot_hunt', 'occupied', 'level_band', 'raid', 'ready']);
+    assert.deepEqual([...checkMixed(noSpoil).counts.keys()], ['cannot_hunt', 'spoil_skill', 'occupied', 'level_band', 'raid', 'ready']);
+    // Replacing NPC/reward/spot tables invalidates prepared ordinals as well
+    // as the old expected yields; later personal availability remains live.
+    Data.npcs = Data.npcs.map(npc => npc.selfId === 99012 ? { ...npc, template: { ...npc.template, level: 42 } } : npc);
+    assert(!checkMixed(warsmith).counts.has('level_band'));
+    Data.npcRewards = mixedRewards.map(reward => reward.selfId === 99014 ? { ...reward, rewards: [
+        { overall: 100, items: [{ selfId: 99101, chance: 100, min: 5, max: 5 }] }] } : reward);
+    const changed = checkMixed(warsmith);
+    assert(changed.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield
+        > beforeReplacement.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield);
+    checkMixed(warsmith, { spots: structuredClone(mixedSpots), occupancy: {} });
     console.log('test_source_facts: ok');
-} finally { Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards; }
+} finally {
+    Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards;
+    if (saved.rate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = saved.rate;
+}

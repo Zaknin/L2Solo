@@ -12,6 +12,9 @@ function meetingPending(members) {
 }
 
 function ready(party, members, spot) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (Roster.markerFor(party) && !Roster.held(party, spot)
+        && !Roster.exact(members.map(member => Number(member.characterId)), Roster.markerFor(party).memberIds)) return false;
     // Non-grid profiles have caller-defined geometry. Production hunting
     // sectors use the shared grid and dungeon partition classification.
     if (!/^(-?\d+)_(-?\d+)(?::.+)?$/.test(String(spot?.id || '')) && spot?.raidBoss !== true) return true;

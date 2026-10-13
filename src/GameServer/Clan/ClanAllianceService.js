@@ -115,7 +115,7 @@ async function snapshot(session) {
 }
 async function syncInventory(session) {
     if (!online(session)) return;
-    const rows = await Database.fetchItems(idOf(session));
+    const rows = await Database.fetchItems(idOf(session), 'clan_alliance_sync');
     const bag = session.actor.backpack;
     const managed = new Set(Object.keys(Rules.ITEMS).map(Number));
     bag.items = bag.items.filter(item => !managed.has(Number(item.fetchSelfId())));

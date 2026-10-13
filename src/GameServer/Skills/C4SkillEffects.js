@@ -784,7 +784,7 @@ function fetchSummonNpcData(skill) {
 }
 
 function fetchSummonNpcFallback(DataCache, skill) {
-    const skillData = DataCache.skills?.find((entry) => Number(entry.selfId) === Number(skill.fetchSelfId?.()));
+    const skillData = DataCache.skills == null ? undefined : ItemTemplateIndex.findRequired(DataCache.skills, skill.fetchSelfId?.());
     const currentLevel = Number(skill.fetchLevel?.()) || 1;
     const levelCandidates = (skillData?.levels || [])
         .map((level) => ({
@@ -1347,15 +1347,6 @@ function refreshUserInfo(session, target) {
     if (target?.session?.dataSendToMe) {
         target.session.dataSendToMe(packet);
     } else if (target === session?.actor && session?.dataSendToMe) {
-        session.dataSendToMe(packet);
-    }
-}
-
-function refreshEtcStatus(session, actor) {
-    const packet = ServerResponse.etcStatusUpdate(actor);
-    if (actor?.session?.dataSendToMe) {
-        actor.session.dataSendToMe(packet);
-    } else if (actor === session?.actor && session?.dataSendToMe) {
         session.dataSendToMe(packet);
     }
 }

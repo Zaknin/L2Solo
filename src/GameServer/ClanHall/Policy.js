@@ -1,4 +1,14 @@
 const catalog = require('../../../data/ClanHalls/catalog.json');
+const hallIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['managerIds', 'doormanIds'], halls => {
+    const byNpc = new Map();
+    for (const hall of halls) {
+        if (!Array.isArray(hall.managerIds) || hall.doormanIds != null && !Array.isArray(hall.doormanIds))
+            throw Error('invalid hall NPC list');
+        for (const npcId of [...hall.managerIds, ...hall.doormanIds || []])
+            if (!byNpc.has(npcId)) byNpc.set(npcId, hall);
+    }
+    return { byNpc };
+});
 const DAY = 86400000;
 const WEEK = 7 * DAY;
 const AUCTION_DURATION = DAY;
@@ -40,7 +50,18 @@ const functions = {
 };
 const integer = (value) => Math.max(0, Math.floor(Number(value) || 0));
 function definition(id) {
-    return catalog.halls.find((h) => h.id === Number(id));
+    return catalog.halls.find(h => h.id === Number(id));
+}
+function hallForNpc(id, halls) {
+    if (arguments.length < 2) halls = catalog.halls;
+    if (!Array.isArray(halls))
+        return halls.find(h => h.managerIds.includes(Number(id)) || h.doormanIds?.includes(Number(id)));
+    if (!halls.length) return undefined;
+    if (id && ['object', 'function'].includes(typeof id))
+        return halls.find(h => h.managerIds.includes(Number(id)) || h.doormanIds?.includes(Number(id)));
+    const index = hallIndex(halls);
+    return index ? index.byNpc.get(Number(id))
+        : halls.find(h => h.managerIds.includes(Number(id)) || h.doormanIds?.includes(Number(id)));
 }
 function fee(hall, kind, level) {
     if (!Object.hasOwn(functions, kind)) return null;
@@ -121,6 +142,7 @@ function target(lots, members, rng = Math.random) {
     return comparable[Math.min(comparable.length - 1, Math.floor(Math.max(0, Number(rng()) || 0) * comparable.length))];
 }
 module.exports = {
+    hallForNpc,
     DAY,
     WEEK,
     AUCTION_DURATION,

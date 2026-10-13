@@ -1,11 +1,10 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const SendPacket = invoke('Packet/Send');
 const DataCache = invoke('GameServer/DataCache');
 const WireD = invoke('Packet/WireD');
 
 function referencePrice(item) {
-    const template = (DataCache.items || []).find((entry) => (
-        Number(entry.selfId) === Number(item.fetchSelfId())
-    ));
+    const template = ItemTemplateIndex.findRequired(DataCache.items || [], item.fetchSelfId());
     const templatePrice = WireD.isRepresentable(template?.template?.price)
         ? Number(template.template.price)
         : null;

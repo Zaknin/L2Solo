@@ -25,8 +25,7 @@ function assess(state = {}) {
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
     const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : level < 40 ? 20 : 40 });
-    const starters = new Set((Data.newbieItems || []).flatMap(row => row.items || [])
-        .filter(row => row.equipped).map(row => Number(row.selfId)));
+    const starters = require('../../Knowledge/StarterItemCatalog').ids(Data.newbieItems, true);
     const equipped = new Map();
     for (const row of Object.values(state.inventory || {})) {
         const item = Index.find(Data.items, row.selfId);

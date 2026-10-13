@@ -47,7 +47,8 @@ assert(WEAPON_SLOTS.has(Number(poorKit?.target?.slot)) && Number(poorKit.market.
     'fixture: the kit saves for the unfunded D weapon');
 const poorBridge = Gear.npcWeaponBridgePlan(poor);
 assert.strictEqual(poorBridge?.weaponBridge, true);
-assert(Number(poorBridge.market.price) <= spendable(poor),
+assert.strictEqual(Number(poorBridge.market.reserve), 0, 'emergency arming uses the whole wallet');
+assert(Number(poorBridge.market.price) <= poor.adena,
     'a bot that cannot pay for the D weapon must bridge with a weapon it can buy now');
 assert.notStrictEqual(rank(poorBridge.target.selfId), 'd');
 assert.strictEqual(Gear.combatReadiness(armed(poor, poorBridge.target.selfId)).hasWeapon, true,
@@ -69,7 +70,8 @@ assert(!WEAPON_SLOTS.has(Number(armourKit?.target?.slot)) && Number(armourKit.ma
 const armourBridge = Gear.npcWeaponBridgePlan(armour);
 assert(armourBridge?.weaponBridge && WEAPON_SLOTS.has(Number(armourBridge.target.slot)),
     'a bot without a usable weapon buys a weapon before armour');
-assert(Number(armourBridge.market.price) <= spendable(armour), 'the weapon it buys first is affordable');
+assert.strictEqual(Number(armourBridge.market.reserve), 0, 'the weapon before armour uses the same emergency budget');
+assert(Number(armourBridge.market.price) <= armour.adena, 'the weapon it buys first does not overspend the wallet');
 
 // The bridge keeps no level reserve: the level term (250 per level) is a
 // consumables cushion for a bot that earns, and an unarmed bot earns nothing

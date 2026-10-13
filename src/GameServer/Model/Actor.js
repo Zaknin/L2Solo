@@ -109,7 +109,9 @@ class ActorModel extends CreatureModel {
     }
 
     setSp(data) {
+        const previous = this.model.sp;
         this.model.sp = data;
+        require('../Clan/ClanReviewEvents').leaderSpChanged(this.fetchId(), previous, data);
     }
 
     setCp(data) {

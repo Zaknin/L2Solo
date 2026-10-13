@@ -6,10 +6,12 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-founder-budget');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-founder-budget.sqlite');
+const databasePath = isolated.world;
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const ClanSimulationService = invoke('GameServer/Clan/ClanSimulationService');
@@ -49,7 +51,6 @@ function seedDatabase() {
 async function main() {
     DataCache.init();
     seedDatabase();
-    options.default.Database.path = path.relative(rootDir, databasePath);
     Database.init();
     ClanSimulationService.resetMetrics();
 
@@ -61,6 +62,31 @@ async function main() {
         return execute(...args);
     };
     try {
+        // The cold first candidate loads the shared recruitment/gear readers.
+        // Pin the budget fence independently of machine-dependent import time;
+        // this still executes its real eligibility and must stop before candidate2.
+        const policy = ClanSimulationService.policy;
+        const eligibility = policy.founderEligibility, nativeNow = Date.now;
+        let clock = nativeNow(), evaluations = 0;
+        Date.now = () => clock;
+        policy.founderEligibility = (...args) => {
+            const result = eligibility(...args);
+            evaluations += 1;
+            clock += budgetMs;
+            return result;
+        };
+        try {
+            const stopped = await ClanSimulationService.resolveBatch(16, { budgetMs });
+            assert.strictEqual(evaluations, 1, 'one real eligibility consumes the controlled loop budget');
+            assert.strictEqual(stopped.attempted, 1);
+            assert.strictEqual(stopped.blocked, 1);
+            assert.strictEqual(stopped.created, 0);
+            assert.strictEqual(stopped.budgetStopped, true, 'native loop respects the elapsed budget');
+        } finally {
+            policy.founderEligibility = eligibility;
+            Date.now = nativeNow;
+        }
+        ClanSimulationService.resetMetrics();
         const summary = await ClanSimulationService.resolveBatch(16, { budgetMs });
         // The reads before the loop are not counted, and a blocked candidate needs no further read: the whole
         // page is evaluated inside the budget (before: attempted 0, then 1 with the thresholds read per candidate).
@@ -72,6 +98,7 @@ async function main() {
         Database.execute = execute;
         await Database.close();
         removeDatabaseFiles();
+        fs.rmSync(isolated.directory, { recursive: true, force: true });
     }
 }
 

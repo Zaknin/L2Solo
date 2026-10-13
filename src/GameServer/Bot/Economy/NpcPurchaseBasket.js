@@ -126,7 +126,7 @@ async function purchaseForActor(actor, options = {}) {
     const result = await purchase(state, options);
     if (!result.ok) return result;
     try {
-        const rows = await invoke('Database').fetchItems(actor.fetchId());
+        const rows = await invoke('Database').fetchItems(actor.fetchId(), 'npc_purchase_basket');
         if (session.actor !== actor || !Life.hotRow(actor.fetchId())) {
             if (Diagnostics.active()) diagnostic(result.state, result.economyCommand, 'npc_delivery', 'actor_changed', resultFields(result, requestSeller));
             return result;

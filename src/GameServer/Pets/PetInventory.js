@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Rules = require('./PetRules');
 const { gear } = require('../../../data/Pets/c4-gear.json');
 const Database = invoke('Database');
@@ -79,7 +80,7 @@ function transfer(session, itemId, amount, direction) {
 function foodValue(itemId) {
     const itemSkill = invoke('GameServer/Items/C4ItemSkills').resolve(itemId);
     if (!itemSkill) return 0;
-    const template = DataCache.skills.find(skill => skill.selfId === itemSkill.skillId);
+    const template = ItemTemplateIndex.findStrictRequired(DataCache.skills, itemSkill.skillId);
     if (!template) return 0;
     const Skill = invoke('GameServer/Model/Skill');
     return Number(new Skill({ ...utils.crushOb(template), ...template.levels[0] }).fetchSemantic().feed) || 0;

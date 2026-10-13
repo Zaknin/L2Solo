@@ -178,6 +178,7 @@ class ColdSimulationCoordinator {
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = 0;
+        this.lastWatchdogAt = 0;
         this.lastWorkerSnapshot = {};
         this.partyReviews = { committed: 0, departed: 0, dissolved: 0, reasons: {}, recent: [] };
         this.workerMaxInFlight = null;
@@ -1274,6 +1275,8 @@ class ColdSimulationCoordinator {
                 : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null,
             isPartyLeader: !!party,
             party,
+            ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
+                ? { raidOwner: invoke('Database').clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
             route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })
@@ -1920,7 +1923,7 @@ class ColdSimulationCoordinator {
         }
         const state = LifeState.cachedState(proposal.characterId) || proposal.baseState;
         if (!state) return null;
-        if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, inventory: state.inventory };
+        if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, sp: state.sp, inventory: state.inventory };
         const partyId = String(state.party?.partyId || state.partyId || '');
         if ((partyId && invoke('GameServer/Bot/Population/HotPartyLifecycle').pending.has(partyId))
             || this.visibleToRealPlayer(state)) return null;
@@ -2159,6 +2162,15 @@ class ColdSimulationCoordinator {
         }
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
+        const cancelled = new Set();
+        for (const result of results) {
+            if (!['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(result.detail)) continue;
+            const change = result.proposal?.atomicGroup?.partyChanges?.[0];
+            if (!change || cancelled.has(change.partyId)) continue;
+            cancelled.add(change.partyId);
+            const party = BackgroundPartyState.find(change.partyId);
+            if (party?.updatedAt === change.expectedUpdatedAt) await require('../../Clan/ClanRaidRoster').cancelUnopened(party, result.detail);
+        }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
             this.tableChannel.flush();
             return;
@@ -2358,7 +2370,13 @@ class ColdSimulationCoordinator {
     watchdog() {
         if (!this.worker || this.stopping) return;
         this.syncWorkerPressure();
-        const age = Date.now() - this.lastHeartbeatAt;
+        const now = Date.now();
+        // While the main thread itself stood still (the Mac slept, a long pause)
+        // it could receive no heartbeat, so that time is no evidence against the worker.
+        const stalled = this.lastWatchdogAt ? now - this.lastWatchdogAt - 1000 : 0;
+        this.lastWatchdogAt = now;
+        if (stalled > 1000) this.lastHeartbeatAt = Math.min(now, this.lastHeartbeatAt + stalled);
+        const age = now - this.lastHeartbeatAt;
         if (age <= Math.max(5000, Number(Config.coldWorkerUnhealthyMs) || 5000)) {
             this.setPauseReason('heartbeat_stale', false);
             return;

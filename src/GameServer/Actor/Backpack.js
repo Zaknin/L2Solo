@@ -1,3 +1,4 @@
+const SkillRankIndex = require('../Skills/SkillRankIndex');
 const BeginnerShots = require('../Items/C4BeginnerShots');
 const DiagnosticConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const ConsumptionDiagnostics = require('../Bot/Economy/ConsumptionDiagnostics');
@@ -1326,13 +1327,13 @@ class Backpack extends BackpackModel {
     }
 
     buildItemSkill(itemSkill) {
-        const skillData = DataCache.skills.find((ob) => ob.selfId === itemSkill.skillId);
+        const skillData = ItemTemplateIndex.findStrictRequired(DataCache.skills, itemSkill.skillId);
         if (!skillData) {
             return null;
         }
 
         const level = Number(itemSkill.level) || 1;
-        const levelData = skillData.levels?.find((entry) => entry.level === level) || {};
+        const levelData = SkillRankIndex.findStrict(skillData.levels ?? [], level) || {};
         return new SkillModel({
             ...utils.crushOb(skillData),
             ...levelData,

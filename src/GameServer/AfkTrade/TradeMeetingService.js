@@ -115,7 +115,7 @@ async function syncActors(row) {
         session.tradeMeetingPresence = anchor ? { id: anchor.id,
             locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null } : undefined;
         if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
-        await afk().syncOnlineInventory(id, await db().fetchItems(id));
+        await afk().syncOnlineInventory(id, await db().fetchItems(id, 'trade_meeting_sync'));
         if (!life().cachedState(id)) {
             try { require('./PlayerMeetingNotifications').notify(session, row); }
             catch (error) { utils.infoWarn('AfkTrade', 'meeting chat presentation: %s', error.message); }

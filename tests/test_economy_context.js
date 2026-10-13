@@ -25,6 +25,7 @@ async function run() {
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+    const Supply = invoke('GameServer/Clan/ClanSupplyPolicy');
     const capture = Profile.capture;
     try {
         Profile.capture = () => ({});
@@ -44,8 +45,14 @@ async function run() {
         const gearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
         assert.equal(gearProgression.assess(learned).required, true,
             'a hot clan member still needs its own working kit');
-        assert.equal(gearProgression.personal(learned), false,
-            'native hot membership retains clan custody of surplus');
+        // Clan custody needs a clan warehouse (clan level 1+), not membership alone.
+        assert.equal(gearProgression.personal(learned), true,
+            'membership in a clan without a warehouse keeps personal custody');
+        Supply.useRowSource(id => id === 9 ? [9, 1, [], 1] : undefined);
+        try {
+            assert.equal(gearProgression.personal(learned), false,
+                'native hot membership retains clan custody of surplus');
+        } finally { Supply.useRowSource(null); }
         assert.notEqual(Economy.inputKey(unlearned), Economy.inputKey(learned), 'learning invalidates the planning inputs');
         assert.notEqual(Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
             Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));
@@ -69,6 +76,14 @@ async function run() {
     assert.equal(waiting.statsPacket.decisionSeq, 7);
     assert.equal(waiting.statsPacket.activityLeaf, 88, 'unknown incoming does not renew the tendency roll');
     assert.deepEqual(waiting.statsPacket.wishFocus, ['power:101:7', 1, 50]);
+    const immutableState = { ...base, characterId: 990011 };
+    const immutableContext = Economy.forState(immutableState, {
+        incoming: ['power:101:7', 1, 50], money: [0, 1, 10, 40]
+    });
+    Object.freeze(immutableContext.plan);
+    assert.throws(() => { immutableContext.gearPlanMemo = {}; }, TypeError,
+        'the actual gear-plan setter preserves strict-mode writes to a frozen plan');
+    Economy.forget(immutableState.characterId);
     if (process.argv.includes('--producer-status')) {
         const Life = invoke('GameServer/Bot/Population/BotLifeState');
         const Craft = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
@@ -183,6 +198,7 @@ async function run() {
     // MVP-6 Bounds: a gear candidate's reads wait in its scope; only a kept
     // scope becomes an input, so a rejected candidate's market cannot rebuild.
     const ScopedProviders = invoke('GameServer/Bot/Economy/WishProviders');
+    const MARKET_DELAY = invoke('GameServer/Bot/Economy/DecisionSections').SOFT_DELAY.market;
     const build = ScopedProviders.build;
     try {
         ScopedProviders.build = (state, ctx, deps) => {
@@ -199,7 +215,11 @@ async function run() {
         revisions.set(990002, 1);
         assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a rejected candidate\'s market change keeps the context');
         revisions.set(990001, 1);
-        assert.notEqual(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'an admitted candidate\'s source becoming known rebuilds');
+        // L70: a read market token is soft; it is re-examined once the
+        // market delay since the last actual decision has passed.
+        assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a moved source waits for the market delay');
+        assert.notEqual(Economy.forState(scoped, { ...scopedDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, scopedContext.plan,
+            'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
     // An item the purchase reader finds no offer for is still an input: the
@@ -221,7 +241,8 @@ async function run() {
         assert.equal(Economy.forState(absent, absentDeps()).plan, absentContext.plan, 'no offer change keeps the context');
         absentBoard.put({ id: 1, ownerId: 77, storeType: 1, custodyPolicy: 1, revision: 1, town: 'Giran',
             lines: [{ lineId: 2, selfId: ABSENT, count: 1, price: 100 }] });
-        assert.notEqual(Economy.forState(absent, absentDeps()).plan, absentContext.plan, 'a first offer for an absent item rebuilds');
+        assert.notEqual(Economy.forState(absent, { ...absentDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, absentContext.plan,
+            'a first offer for an absent item rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS absent item is an input');
     const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
@@ -244,7 +265,8 @@ async function run() {
         assert.equal(Economy.forState(base, shopDeps()).plan, shopContext.plan,
             'a workshop owner save without an offer change keeps the customer cache hit');
         shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 2 } });
-        assert.notEqual(Economy.forState(base, shopDeps()).plan, shopContext.plan, 'halved capacity is an offer change');
+        assert.notEqual(Economy.forState(base, { ...shopDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, shopContext.plan,
+            'halved capacity is an offer change');
     } finally { Workshop.remove(shopOwner.characterId); }
     const physicalSpot = { id: 'gear-physical', npcEntries: [{ selfId: 130 }] };
     const mixedSpot = { id: 'gear-mixed', npcEntries: [{ selfId: 130 }, { selfId: 264 }] };
@@ -365,6 +387,8 @@ async function run() {
         stockFor: id => id === 990002 ? { owned: 4 } : {}, remembered: false });
     assert.equal(closureNetwork.plans.get(ownedCraftRoot.key).requirements.length, 0,
         'physical owned ingredients remain executable after native provider pruning');
+    // Clan 1 has a warehouse, so the mage's skill books stay outside personal custody.
+    Supply.useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
     const mage = { ...base, characterId: 903, level: 40, sp: 100000,
         stats: { ...base.stats, clanId: 1, classId: 14, exp: Data.experience[39], coldCombat: { classId: 14, skillSource: 'database', skills: [] } } };
     const missing = Catalog.missingBooks(mage);
@@ -389,6 +413,7 @@ async function run() {
         const valued = context.spotValue(realSpot);
         assert.equal(score.efficiencyAdjustment, valued.valueHours * 100, 'route and wish readers share the same native table valuation');
     }
+    Supply.useRowSource(null);
     console.log('PASS actual book gain/provider/paid delta and skill/SP event key');
 
     const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
@@ -414,12 +439,25 @@ async function run() {
     const resolveOptions = { persist: false, projectClassProgression: true, timestamp: Date.now() };
     const prepared = await Life.prepareResolve(resolveInput, resolveResult, resolveOptions);
     const retried = await Life.prepareResolve(resolveInput, resolveResult, resolveOptions);
-    assert.equal(prepared.stats.decisionSeq, 10);
+    assert.equal(prepared.stats.decisionSeq, 9, 'an ordinary round records facts without renewing the accepted decision');
     assert.equal(retried.stats.decisionSeq, prepared.stats.decisionSeq);
     assert.equal(retried.stats.activityLeaf, prepared.stats.activityLeaf);
     assert.equal(resolveInput.stats.decisionSeq, 9, 'projection does not mutate its decision source');
     assert.equal(prepared.stats.wishFocus?.length, 3);
     assert.equal(prepared.inventory[1].amount, 1);
+    const interrupted = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        patch: { activity: 'hunting', vitals: { mp: 50 }, stats: { targetCombat: { targetId: 1001, hp: 20 } } } }, resolveOptions);
+    assert.equal(interrupted.stats.decisionSeq, 9, 'an unfinished fight updates current combat facts without changing the strategic decision');
+    assert.equal(interrupted.vitals.mp, 50, 'current combat resources remain authoritative');
+    const actualDeath = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        patch: { activity: 'dead' } }, resolveOptions);
+    assert.equal(actualDeath.stats.decisionSeq, 10, 'actual death creates one meaningful decision');
+    assert.equal(actualDeath.stats.activityLeaf, 0);
+    const levelExpGain = Math.max(1, Data.experience[base.level] - resolveInput.exp + 1);
+    const levelGain = await Life.prepareResolve(resolveInput, { ...resolveResult,
+        materialize: { ...resolveResult.materialize, exp: levelExpGain } }, resolveOptions);
+    assert(levelGain.level > resolveInput.level, 'the fixture really earns a new level');
+    assert.equal(levelGain.stats.decisionSeq, 10, 'actual level gain updates dependent calculations once');
     assert.equal(Database.isReady(), false);
     assert.deepEqual(fs.readdirSync(dir), ['config.ini']);
     console.log('PASS actual needs hookup / hard survival floor / no SQL or saves');

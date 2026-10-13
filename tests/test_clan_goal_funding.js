@@ -3,7 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-goal-funding');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 // A clan production goal is a purchase the member and the clan can pay now:
 // the member's funds above its reserve plus the clan's free money. The clan funds
@@ -13,7 +15,7 @@ require('../src/Global');
 // saving target) is no clan route, so the goal does not lock on it. A finished
 // goal picks the next one at once.
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-goal-funding.sqlite');
+const databasePath = isolated.world;
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -95,7 +97,6 @@ async function main() {
         seed.prepare(`INSERT INTO items(selfId, name, amount, enchant, equipped, slot, characterId) VALUES (?, 'Weapon', 1, 0, 1, 7, ?)`).run(weapon, id);
     }
     seed.close();
-    options.default.Database.path = path.relative(rootDir, databasePath);
     Database.init();
     await Database.initClanHalls();
     await LifeState.init();
@@ -214,11 +215,14 @@ async function main() {
             priority: 100, payload: { reason: 'equipment_goal_completed', goalKey: result.goal.goalKey } });
         const claim = await Database.claimClanAction({});
         const advanced = await Actions.resolveAction(claim.action);
-        assert.notStrictEqual(advanced.result?.level, 2, 'not the level goal');
-        assert(Object.hasOwn(advanced.result || {}, 'goal') || advanced.result?.reason, 'the production review ran');
+        assert.strictEqual(advanced.result?.level, 2, 'the same PLAN reviews the native main level goal before production');
+        assert.strictEqual(advanced.result?.production?.ownerSection, 'productionGoal', 'the production review still runs after the main goal');
+        assert.strictEqual(await owned(), 1, 'the completed purchase remains delivered through the combined review');
+        assert.strictEqual(await blades(), 2, 'the two-blade production purchase remains delivered');
         console.log('Clan goal funding checks passed');
     } finally {
         await Database.close();
+        fs.rmSync(isolated.directory, { recursive: true, force: true });
     }
 }
 

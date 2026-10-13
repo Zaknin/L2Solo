@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { isAutomaticArenaBuff } = require('./ArenaBuffEligibility');
 const Database = invoke('Database');
@@ -24,12 +25,8 @@ let active = null;
 let monitor = null;
 let selectionInFlight = false;
 
-function actorOf(session) {
-    return session?.actor || null;
-}
-
 function className(classId) {
-    return DataCache.classTemplates?.find((entry) => Number(entry.classId) === Number(classId))?.template?.class
+    return (DataCache.classTemplates == null ? undefined : ClassProgression.firstClassRow(DataCache.classTemplates, classId))?.template?.class
         || `Class ${classId}`;
 }
 
@@ -157,10 +154,10 @@ async function makeSnapshot(candidate) {
     const character = await loadColdCharacter(sourceId);
     if (!character) return null;
     const [items, skills] = await Promise.all([
-        Database.fetchItems(sourceId),
+        Database.fetchItems(sourceId, 'arena_snapshot'),
         Database.fetchSkills(sourceId)
     ]);
-    const classInfo = DataCache.classTemplates?.find((entry) => Number(entry.classId) === Number(character.classId)) || {};
+    const classInfo = (DataCache.classTemplates == null ? undefined : ClassProgression.firstClassRow(DataCache.classTemplates, character.classId)) || {};
     const filteredItems = snapshotItems(hydrateItemRows(items));
     return {
         character,

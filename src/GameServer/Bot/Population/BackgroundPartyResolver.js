@@ -143,7 +143,7 @@ const BackgroundPartyResolver = {
     },
 
     resolve({ party, members, spot, pressure = {}, targetNpcId = 0, elapsedMs = 60000, rng = Math.random, timestamp = Date.now(),
-        episodeId = null, assessRelationship = null }) {
+        episodeId = null, assessRelationship = null, raidOwner = null }) {
         const meeting = BackgroundPartyResolver.resolveMeetingLifecycle({ party, members, timestamp, episodeId, assessRelationship });
         if (meeting) return meeting;
         if (!party || !members?.length || !spot) {
@@ -160,6 +160,19 @@ const BackgroundPartyResolver = {
             && party.stats?.objective?.sourceKind === 'raid'
             && Number(party.stats.objective.raidBossTemplateId || party.stats.objective.npcId)
                 === Number(spot.raidBossTemplateId);
+        const Roster = require('../../Clan/ClanRaidRoster');
+        const marked = !!Roster.markerFor(party);
+        const admission = marked ? Roster.admission(party, members, spot, { owner: raidOwner, timestamp,
+            arrived: require('./PartyHuntingAssembly').ready(party, members, spot) }) : null;
+        if (marked && (!admission.ok || !admission.held && party.stats?.raidEncounter?.status === 'defeated')) {
+            const reason = admission.reason || 'raid_roster_not_opened';
+            const cancelled = ['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(reason);
+            const nextResolveAt = cancelled ? null : timestamp + 30000;
+            return { atomic: true, memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt } })), events: [], nextResolveAt,
+            partyPatch: { ...(cancelled ? { status: 'dissolved' } : {}), stats: { assemblyWait: require('./PartyAssemblyRecovery').record(party, timestamp),
+                lastResolveAt: timestamp, ...(cancelled ? { partyBreakReason: reason, dissolvedAt: timestamp } : {}) } }, debug: { reason, fights: 0, wins: 0 } };
+        }
         const raidCombatActive = raidObjective
             && party.stats?.raidEncounter?.status === 'active'
             && !!party.stats.raidEncounter.encounter;
@@ -281,11 +294,11 @@ const BackgroundPartyResolver = {
 
         const raid = raidObjective;
         const raidComposition = raid ? ClanRaidPolicy.composition(members) : null;
-        const understaffed = party.stats?.objective?.clanGoalKey
+        const understaffed = !admission?.held && party.stats?.objective?.clanGoalKey
             && members.length < Math.max(2, Number(party.stats.objective.minPartySize) || 3);
-        const raidRosterIncomplete = raid && !raidComposition.ready;
-        const assemblyMembers = raidCombatActive
-            ? members.map((member) => ({ ...member, activity: 'grouped' }))
+        const raidRosterIncomplete = raid && !admission?.held && !raidComposition.ready;
+        const assemblyMembers = raidCombatActive || admission?.held
+            ? members.filter(member => !admission?.held || Number(member.vitals?.hp) > 0).map((member) => ({ ...member, activity: 'grouped' }))
             : members;
         if (understaffed || raidRosterIncomplete || !require('./PartyHuntingAssembly').ready(party, assemblyMembers, spot)) {
             // No route may mean admission is temporarily unavailable. Do not
@@ -686,6 +699,7 @@ const BackgroundPartyResolver = {
                     ...(lootDistribution.agreement ? { agreement: lootDistribution.agreement } : {}),
                     pveEncounter: raid ? null : pending,
                     ...(raid ? { raidEncounter: raidSnapshot } : {}),
+                    ...(marked && attemptedFights > 0 ? { raidAdmission: admission.proof } : {}),
                     assemblyWait: null,
                     fightsResolved: Number(party.stats?.fightsResolved || 0) + fights,
                     fightsWon: Number(party.stats?.fightsWon || 0) + wins,

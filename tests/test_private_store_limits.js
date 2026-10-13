@@ -6,6 +6,25 @@ const Store = invoke('GameServer/PrivateStore');
 const sellRequest = invoke('GameServer/Network/Request/PrivateStoreListSell');
 const buyRequest = invoke('GameServer/Network/Request/PrivateStoreListBuy');
 const Send = invoke('Packet/Send');
+const DataCache = invoke('GameServer/DataCache');
+
+const originalItems = DataCache.items;
+const referenceItem = { fetchId: () => 1, fetchSelfId: () => 700001, fetchPrice: () => 55,
+    isWearable: () => false, fetchClass2: () => 0 };
+const referencePacket = () => Response.privateStoreListBuy({ fetchId: () => 2 },
+    [{ item: referenceItem, amount: 1, price: 2 }], 20);
+try {
+    DataCache.items = undefined;
+    assert.strictEqual(referencePacket().readInt32LE(27), 55, 'an absent optional catalog keeps the item-price fallback');
+    DataCache.items = [{ selfId: 700001, template: { price: 10 } }, { selfId: '700001', template: { price: 99 } }];
+    assert.strictEqual(referencePacket().readInt32LE(27), 10, 'reference prices keep numeric FIRST');
+    DataCache.items = [null];
+    assert.throws(referencePacket, TypeError, 'malformed optional catalog rows retain find errors');
+    DataCache.items = Array(1);
+    assert.throws(referencePacket, TypeError, 'the optional numeric find still visits sparse holes');
+} finally {
+    DataCache.items = originalItems;
+}
 
 for (const [race, sell, buy] of [[0, 3, 4], [1, 3, 4], [2, 3, 4], [3, 3, 4], [4, 4, 5]]) {
     for (const level of [0, 3, 8]) {

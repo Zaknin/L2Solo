@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
@@ -18,7 +19,7 @@ function recipeFor(state, plan = state.stats?.equipmentPlan) {
     const classId = Roles.classIdOf(state);
     if (!recipe || !Compatibility.profileFor(role,classId).weaponKinds.includes('Weapon.Dual')) return null;
     const ranks = ['none','d','c','b','a','s'];
-    const item = DataCache.items.find(item => Number(item.selfId) === recipe.productId);
+    const item = ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId);
     const rank = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').gradeForLevel(state.level);
     return item && ranks.indexOf(item.etc.rank) <= ranks.indexOf(rank) ? recipe : null;
 }
@@ -78,7 +79,7 @@ function plan(session, bot, town, state, candidate = state.stats?.equipmentPlan)
     const target = stationTarget(recipe,town);
     const refreshed = { ...candidate, status:missing.length ? 'active' : 'ready_to_craft',
         strategy:'craft',recipeId:recipe.recipeId,
-        target:{selfId:recipe.productId,name:DataCache.items.find(i=>Number(i.selfId)===recipe.productId)?.template?.name,slot:14},
+        target:{selfId:recipe.productId,name:ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId)?.template?.name,slot:14},
         combine:{type:'dual_sword',resultId:recipe.productId,requirements:recipe.materials},
         materials:recipe.materials.map(m=>({...m,owned:count(state.inventory,m.selfId),missing:Math.max(0,m.amount-count(state.inventory,m.selfId))})) };
     session.coldLifeState = { ...state,stats:{...state.stats,equipmentPlan:refreshed} };
@@ -139,7 +140,7 @@ async function execute(session,bot,errand) {
         }
         let product = bot.backpack.fetchItemFromSelfId(recipe.productId);
         if (!product) {
-            const template = DataCache.items.find(i=>Number(i.selfId)===recipe.productId);
+            const template = ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId);
             // Same bot-only atomic combination and fee policy as cold crafting.
             const result = await Database.combineInventoryItems(bot.fetchId(),{
                 ingredients:recipe.materials,product:{selfId:recipe.productId,name:template.template.name,amount:1,slot:14},

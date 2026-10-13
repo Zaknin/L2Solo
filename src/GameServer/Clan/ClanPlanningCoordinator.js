@@ -165,6 +165,7 @@ class ClanPlanningCoordinator {
     }
 
     async plan(payload, catalogs, spotCatalog = catalogs.spots || EMPTY_SPOTS) {
+        if (this.activeJob && payload.jobKey !== this.activeJob) throw new Error('clan planning worker job busy');
         await this.ready(catalogs);
         const writer = await this.ensureSpotCatalog(spotCatalog);
         if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
@@ -173,6 +174,28 @@ class ClanPlanningCoordinator {
         DiagnosticConfig.developerDiagnostics && (this.stats.completed++);
         DiagnosticConfig.developerDiagnostics && (this.stats.maxRunMs = Math.max(this.stats.maxRunMs, result.durationMs));
         return result.plan;
+    }
+
+    async withJob(deadlineAt, catalogs, work) {
+        if (this.activeJob || this.pending.size >= this.maxPending) throw new Error('clan planning worker job busy');
+        const jobKey = `raid-plan:${++this.sequence}`;
+        this.activeJob = jobKey;
+        try {
+            await this.ready(catalogs);
+            if (Date.now() >= deadlineAt) throw new Error('clan planning deadline');
+            return await work(jobKey);
+        } finally {
+            if (this.worker && !this.closed) await this.send('end_planning_job', { jobKey }).catch(() => {});
+            if (this.activeJob === jobKey) this.activeJob = null;
+        }
+    }
+
+    async prepareRaids(payload, catalogs, spotCatalog) {
+        if (!this.activeJob || payload.jobKey !== this.activeJob) throw new Error('clan planning job not admitted');
+        const writer = await this.ensureSpotCatalog(spotCatalog);
+        if (Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
+        this.tableChannel.flush();
+        return this.send('prepare_raids', { payload: writer.pack(payload) });
     }
 
     async shutdown() {
@@ -211,7 +234,7 @@ async function context() {
     const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
-    const items = (cache.items || []).filter((item) => Number(item.etc?.slot) > 0);
+    const items = invoke('GameServer/Bot/AI/BotGear').currentWearableRows(cache.items);
     const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
     if (!staticMarkets.has(rate)) {
         if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {
@@ -220,7 +243,18 @@ async function context() {
                 npcOffers.push(...market.npcOffersAll(items[i].selfId).map(offerRow));
                 if (i % 8 === 7) await yieldLoop();
             }
-            return { npcOffers, towns: market.TOWN_NPC_SELLERS, shopEntries: shops.allEntries().map(({ selfId }) => ({ selfId })) };
+            const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
+            const wearableIds = new Set(items.map(item => Number(item.selfId)));
+            const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+            const npcPriceRows = [];
+            // FirstPrice also needs native NPC floors for crafting inputs and
+            // consumables. Scalar quotes do not add sources to MarketOpportunity.
+            for (const selfId of new Set(shopEntries.map(entry => Number(entry.selfId)))) {
+                if (wearableIds.has(selfId)) continue;
+                const price = pricing.npcPrice({ selfId });
+                if (Number.isFinite(price) && price > 0) npcPriceRows.push({ selfId, price });
+            }
+            return { npcOffers, npcPriceRows, towns: market.TOWN_NPC_SELLERS, shopEntries };
         })());
         try { staticMarkets.set(rate, await staticMarketBuilds.get(rate)); }
         finally { staticMarketBuilds.delete(rate); }
@@ -243,6 +277,8 @@ module.exports = {
     enabled: () => enabled,
     context,
     plan: (payload) => coordinator.plan(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
+    withJob: (deadlineAt, work) => coordinator.withJob(deadlineAt, invoke('GameServer/DataCache'), work),
+    prepareRaids: payload => coordinator.prepareRaids(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
     metrics: () => coordinator?.metrics() || { running: false, pending: 0 },
     shutdown: () => coordinator?.shutdown()
 };

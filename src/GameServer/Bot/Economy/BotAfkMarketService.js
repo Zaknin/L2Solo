@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Database = invoke('Database');
@@ -129,8 +130,7 @@ function rememberInventory(ownerId, state) {
 }
 
 function appearance(row, items) {
-    const classInfo = (DataCache.classTemplates || [])
-        .find((entry) => Number(entry.classId) === Number(row.classId));
+    const classInfo = ClassProgression.firstClassRow(DataCache.classTemplates || [], row.classId);
     return {
         model: { ...row, ...utils.crushOb(classInfo || {}) },
         paperdoll: utils.tupleAlloc(16, {}),
@@ -563,7 +563,7 @@ async function reconcileSellShop(state, goal) {
     if (review?.signature === signature && stock.lines.every(viableSellLine)) return { state, changed: false };
     const [characters, inventory] = await Promise.all([
         Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner'),
-        Database.fetchItems(ownerId)
+        Database.fetchItems(ownerId, 'market_reconcile_shop')
     ]);
     const row = characters[0];
     if (!row || !String(row.username || '').startsWith('bot_')) return { state, changed: false };
@@ -641,7 +641,7 @@ async function listOnBoard(state, options = {}) {
     const stock = Number(current?.storeType) === AfkTrade.SELL ? current : null;
     const [characters, inventory] = await Promise.all([
         Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner'),
-        Database.fetchItems(ownerId)
+        Database.fetchItems(ownerId, 'market_list_on_board')
     ]);
     const row = characters[0];
     if (!row) return { state, listed: 0, reason: 'owner_missing' };
@@ -873,7 +873,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 return { state, reason: 'shop_visit_changed' };
             return listOnBoard(state, { decided: { listings }, planTowns });
         }
-        const inventory = await Database.fetchItems(ownerId);
+        const inventory = await Database.fetchItems(ownerId, 'market_execute_plan');
         return listSellAds(ownerId, state, listings, shop, inventory,
             { planTowns });
     });

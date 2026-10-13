@@ -80,6 +80,32 @@ async function sharedModulesStayPure() {
 async function parityAndIntegration() {
     DataCache.init();
     const context = await Runtime.context();
+    const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+    const wearableIds = new Set(DataCache.items.filter(item => Number(item.etc?.slot) > 0)
+        .map(item => Number(item.selfId)));
+    const expectedPrices = [...new Set(invoke('GameServer/World/Generics/NpcShopBuyLists').allEntries()
+        .map(entry => Number(entry.selfId)))].filter(id => !wearableIds.has(id))
+        .map(selfId => ({ selfId, price: pricing.npcPrice({ selfId }) }))
+        .filter(row => Number.isFinite(row.price) && row.price > 0);
+    assert.deepEqual(context.npcPriceRows, expectedPrices,
+        'the compact snapshot covers every native positive nonwearable NPC quote');
+    assert.equal((await Runtime.context()).npcPriceRows, context.npcPriceRows,
+        'scalar NPC quotes reuse the existing static rate cache');
+    const ore = DataCache.items.find(item => Number(item.selfId) === 1785);
+    const orePrice = pricing.npcPrice({ selfId: 1785 });
+    assert(orePrice > invoke('GameServer/Items/NpcSellRules').npcBuyPrice(ore.template.price),
+        'Soul Ore needs its real NPC purchase floor rather than the lower NPC sale value');
+    for (const selfId of [1785, 1061]) {
+        const price = pricing.npcPrice({ selfId });
+        assert(Number.isFinite(price) && price > 0);
+        assert.equal(context.npcPriceRows.find(row => row.selfId === selfId)?.price, price,
+            `native material/consumable price ${selfId} must reach the worker snapshot`);
+    }
+    assert.equal(pricing.npcPrice({ selfId: 1464 }), Infinity,
+        'C shots have no canonical NPC purchase price');
+    assert.equal(context.npcPriceRows.some(row => row.selfId === 1464), false,
+        'a compact price snapshot must not invent an NPC C-shot source');
+    assert.equal(context.shopEntries.some(row => Number(row.selfId) === 1464), false);
     const worker = new ClanPlanningCoordinator();
     try {
         for (const [classId, level] of [[4, 20], [15, 40], [55, 52], [21, 61]]) {
@@ -113,12 +139,20 @@ async function parityAndIntegration() {
             const swordLine = { selfId: 79, price: 78600000, count: 1 };
             AfkTrade._resetForTests();
             record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
+            const swordInventory = {};
+            for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 21, level: 40 }).items) {
+                const old = swordInventory[entry.selfId], equippedSlots = [...(old?.equippedSlots || []), entry.slot];
+                swordInventory[entry.selfId] = { ...entry, amount: Number(old?.amount || 0) + 1,
+                    equipped: true, equippedCount: equippedSlots.length, equippedSlots };
+            }
             const swordMember = { characterId: 990003, level: 55, classId: 21, phase: 'cold',
-                adena: 20000000, inventory: {}, stats: { classId: 21, equipmentPlan: {
+                adena: 20000000, inventory: swordInventory, stats: { classId: 21, equipmentPlan: {
                     status: 'active', strategy: 'market', target: { selfId: 79, slot: 7 },
                     market: { town: 'Heine', price: 78600000, sourceType: 'afk_player_store' },
                     clanGoal: { clanId: 77, goalKey: 'clan-equipment:77:990003:79:7' }
                 } } };
+            assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(swordMember).required, false,
+                'held B sword market controls start after the full usable C kit');
             const swordContext = await Runtime.context();
             const unfunded = planForMember(swordMember);
             assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,
@@ -240,18 +274,43 @@ parentPort.on('message', (m) => {
         await assert.rejects(worker.plan({ crash: true }, {}), /exited/);
         assert.deepEqual(await worker.plan({}, {}), { ok: true }, 'worker must restart after a crash');
 
+
+        const sent = [], originalSend = worker.send.bind(worker);
+        worker.send = async (...args) => { sent.push(args[0]); return originalSend(...args); };
+        let admit, release, hydrated = 0;
+        const admitted = new Promise(resolve => { admit = resolve; });
+        const held = new Promise(resolve => { release = resolve; });
+        const active = worker.withJob(Date.now() + 1000, {}, async jobKey => { hydrated++; admit(jobKey); await held; return 42; });
+        const jobKey = await admitted;
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, () => { hydrated++; }), /job busy/);
+        await assert.rejects(worker.plan({}, {}), /job busy/);
+        assert.equal(hydrated, 1, 'busy admission rejects before candidate hydration');
+        assert.equal(worker.activeJob, jobKey);
+        release(); assert.equal(await active, 42);
+        assert.equal(worker.activeJob, null); assert.equal(worker.pending.size, 0);
+        assert.equal(sent.filter(type => type === 'end_planning_job').length, 1, 'success waits for native end acknowledgement');
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, async () => { throw Error('fixture work failed'); }), /fixture work failed/);
+        assert.equal(worker.activeJob, null);
+        await assert.rejects(worker.withJob(Date.now() - 1, {}, () => { hydrated++; }), /deadline/);
+        assert.equal(hydrated, 1); assert.equal(worker.activeJob, null);
+        assert.equal(sent.filter(type => type === 'end_planning_job').length, 3, 'error and deadline release the current worker job');
+
         let ticks = 0;
         const timer = setInterval(() => ticks++, 5);
         try { await worker.plan({ busyMs: 200 }, {}); }
         finally { clearInterval(timer); }
         assert(ticks >= 5, 'CPU-bound worker calculation must allow the game thread to keep processing timers');
 
-        const stopped = assert.rejects(worker.plan({ hang: true }, {}), /stopped/);
+        const stopped = assert.rejects(worker.withJob(Date.now() + 1000, {},
+            jobKey => worker.plan({ hang: true, jobKey }, {})), /stopped/);
         await new Promise((resolve) => setImmediate(resolve));
         await worker.shutdown();
         await stopped;
         assert.equal(worker.metrics().pending, 0);
         await assert.rejects(worker.plan({}, {}), /stopped/);
+        assert.equal(worker.activeJob || null, null);
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, () => {}), /stopped/);
+        assert.equal(worker.activeJob, null, 'shutdown during admission releases the job');
     } finally {
         await worker.shutdown();
         fs.rmSync(directory, { recursive: true, force: true });
@@ -259,6 +318,11 @@ parentPort.on('message', (m) => {
 }
 
 (async () => {
+    if (process.argv.includes('--job-lifecycle')) {
+        await workerLifecycle();
+        console.log('Clan planning worker job admission, end ACK, error/deadline/shutdown checks passed');
+        return;
+    }
     await sharedModulesStayPure();
     await parityAndIntegration();
     await workerLifecycle();

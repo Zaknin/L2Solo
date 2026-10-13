@@ -79,6 +79,10 @@ async function main() {
     const clanEvents = originalInvoke('GameServer/Clan/ClanReviewEvents');
     replace(clanEvents, 'start', async () => true);
     replace(clanEvents, 'stop', () => {});
+    // SQL projections are startup prerequisites; this fixture controls their
+    // completion while keeping the native Population readiness promise.
+    replace(originalInvoke('GameServer/Bot/Economy/PersonalWarehouseIndex'), 'init', async () => {});
+    replace(originalInvoke('GameServer/Clan/ClanGoalService'), 'clanProjection', async () => []);
     const flags = ['backgroundResolverEnabled', 'warehouseCleanupEnabled', 'stateRetentionEnabled',
         'backgroundPartyEnabled', 'phasePolicyEnabled'];
     for (const flag of flags) replace(Config, flag, false);

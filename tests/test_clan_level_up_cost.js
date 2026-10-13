@@ -44,6 +44,7 @@ function seedDatabase() {
 async function main() {
     seedDatabase();
     options.default.Database.path = path.relative(rootDir, databasePath);
+    options.default.Database.historyPath = `${databasePath}.history`;
     Database.init();
     const level = async (clanId) => Number((await Database.execute(['SELECT level FROM clans WHERE id = ?', [clanId]]))[0].level);
     const sp = async (id) => Number((await Database.execute(['SELECT sp FROM characters WHERE id = ?', [id]]))[0].sp);

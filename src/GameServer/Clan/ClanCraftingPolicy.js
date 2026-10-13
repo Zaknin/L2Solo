@@ -28,21 +28,26 @@ function stockInventory(inventory = {}, rows = []) {
     return result;
 }
 
+function recipeForProvider(recipe, provider, batches = 1) {
+    if (!provider || provider.known) return recipe;
+    const materials = recipe.materials.map(row => ({ ...row }));
+    const scroll = materials.find(row => Number(row.selfId) === Number(recipe.recipeItemId));
+    if (scroll) scroll.amount += 1 / batches;
+    else materials.push({ selfId: Number(recipe.recipeItemId), amount: 1 / batches });
+    return { ...recipe, materials };
+}
+
 // Allocate each owned unit once across the entire recipe tree. Demand includes
 // intermediates AND their missing inputs, so stock can shorten either route.
-function requirements(recipe, inventory = {}, allowedRecipeIds = null, count = 1, providers = {}, componentRecipes = {}) {
+function requirements(recipe, inventory = {}, allowedRecipeIds = null, count = 1, providers = {}, componentRecipes = {}, usedRecipes = null) {
     const owned = new Map(Object.values(inventory).map(item => [Number(item.selfId), Number(item.amount || 0)]));
     const demand = new Map();
     const visit = (current, batches, ancestors) => {
         if (!current || ancestors.has(Number(current.recipeId))) return;
+        usedRecipes?.add(Number(current.recipeId));
         const seen = new Set(ancestors).add(Number(current.recipeId));
-        const materials = (current.materials || []).map(row => ({ ...row }));
         const provider = providers[current.recipeId];
-        if (provider && !provider.known) {
-            const scroll = materials.find(row => Number(row.selfId) === Number(current.recipeItemId));
-            if (scroll) scroll.amount += 1 / batches;
-            else materials.push({ selfId: Number(current.recipeItemId), amount: 1 / batches });
-        }
+        const materials = recipeForProvider(current, provider, batches).materials || [];
         for (const material of materials) {
             const id = Number(material.selfId);
             if (isSupplement(id)) continue;
@@ -81,4 +86,4 @@ function warehouseMaterials(plan, inventory, rows) {
     })).filter(item => item.amount > 0);
 }
 
-module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, requirements, warehouseMaterials };
+module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, requirements, warehouseMaterials, recipeForProvider };

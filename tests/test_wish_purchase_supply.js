@@ -23,6 +23,7 @@ const adapters = {
     'GameServer/DataCache': { items: [item] },
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
+    'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
     'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn(),
         equipmentCandidate: () => true, equipmentItemBetter: (item, current) => !current },
@@ -33,6 +34,7 @@ const adapters = {
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? recipeVariants : [],
         resolveByRecipeId: id => recipeVariants.find(row => row.recipeId === Number(id)) || null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => false },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
     'GameServer/Bot/Economy/MarketCounters': { moveOf: () => 0, counterOf: () => 'armor c' },
@@ -91,7 +93,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), acquisitionRankFor: () => 'c', gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name.endsWith('BoardIndex')) return { SELL: 1 };
@@ -196,7 +198,8 @@ assert.equal(expensive.queue[0].price, 1200, 'observed ask replaces the optimist
 assert.equal(expensive.queue[0].funded, false);
 assert.equal(expensive.activity, null, 'an unaffordable actual ask cannot execute shopping');
 const paidTrip = town => town === 'Giran' ? 6 : Infinity;
-paidTrip.details = town => ({ known: town === 'Giran', hours: 2, fees: 400 });
+// The road inside the horizon: a path past it waits (E212), this case is the fees.
+paidTrip.details = town => ({ known: town === 'Giran', hours: 0.5, fees: 400 });
 const travelTooDear = run(false, { wallet: 1500, context: { trip: paidTrip, wallet: 1500, persona: { ...persona, traits: { ...persona.traits, commitment: 0.5 } } } });
 assert.equal(travelTooDear.queue[0].price, 1600, 'the purse includes actual future road fees');
 assert.equal(travelTooDear.queue[0].funded, false);

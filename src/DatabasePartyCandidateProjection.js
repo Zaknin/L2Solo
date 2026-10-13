@@ -45,4 +45,77 @@ function install(connection) {
     `);
 }
 
-module.exports = { install, createIndex };
+function upgradeRecruitment(connection) {
+    const payload = `json_extract(life.statsJson, ${paths.map(path => `'${path}'`).join(', ')})`;
+    const ordinary = `CASE WHEN (c.username LIKE 'bot_pop_%' OR c.username LIKE 'bot_scale_%'
+            OR life.accountName LIKE 'bot_pop_%' OR life.accountName LIKE 'bot_scale_%'
+            OR CAST(json_extract(life.statsJson, '$.generatedCold') AS INTEGER) = 1)
+        AND c.username NOT LIKE 'bot_craft_%' AND COALESCE(life.accountName, '') NOT LIKE 'bot_craft_%'
+        AND json_extract(life.statsJson, '$.craftStationId') IS NULL
+        AND json_extract(life.statsJson, '$.craftShop') IS NULL
+        AND json_extract(life.statsJson, '$.playerPartyTakeover') IS NULL THEN 1 ELSE 0 END`;
+    const availability = (life, eligible) => `CASE WHEN ${eligible} = 1 AND ${life}.phase = 'cold'
+        AND ${life}.simulationOwner = 'legacy_main' AND (${life}.partyId IS NULL OR ${life}.partyId = '')
+        AND ${life}.spotId IS NOT NULL AND ${life}.activity IN ('hunting','resting','party_wait') THEN 1 ELSE 0 END`;
+    const select = `SELECT life.characterId, ${payload},
+        COALESCE(c.classId, CAST(json_extract(life.statsJson, '$.classId') AS INTEGER), 0),
+        life.level, COALESCE(c.clanId, 0), ${ordinary}, ${availability('life', `(${ordinary})`)}
+        FROM bot_life_state life INNER JOIN characters c ON c.id = life.characterId`;
+    const insert = where => `INSERT INTO ${table}(characterId,payloadJson,classId,level,clanId,ordinaryEligible,joinAvailability)
+        ${select} WHERE ${where}
+        ON CONFLICT(characterId) DO UPDATE SET payloadJson=excluded.payloadJson, classId=excluded.classId,
+            level=excluded.level, clanId=excluded.clanId, ordinaryEligible=excluded.ordinaryEligible, joinAvailability=excluded.joinAvailability
+        WHERE payloadJson IS NOT excluded.payloadJson OR classId IS NOT excluded.classId
+            OR level IS NOT excluded.level OR clanId IS NOT excluded.clanId
+            OR ordinaryEligible IS NOT excluded.ordinaryEligible
+            OR joinAvailability IS NOT excluded.joinAvailability;`;
+    const updateOrdinary = id => `UPDATE ${table} SET ordinaryEligible = (
+        SELECT ${ordinary} FROM bot_life_state life INNER JOIN characters c ON c.id = life.characterId
+        WHERE life.characterId = ${id}) WHERE characterId = ${id};`;
+    const flagPaths = ['$.generatedCold', '$.craftStationId', '$.craftShop', '$.playerPartyTakeover'];
+    const flags = prefix => `json_extract(${prefix}.statsJson,${flagPaths.map(path => `'${path}'`).join(',')})`;
+    connection.exec(`
+        ALTER TABLE ${table} ADD COLUMN classId INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE ${table} ADD COLUMN level INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE ${table} ADD COLUMN clanId INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE ${table} ADD COLUMN joinAvailability INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE ${table} ADD COLUMN ordinaryEligible INTEGER NOT NULL DEFAULT 0;
+        DROP TRIGGER bot_party_candidate_insert;
+        DROP TRIGGER bot_party_candidate_payload;
+        ${insert('1')}
+        CREATE INDEX bot_party_candidate_recruitment
+            ON ${table}(joinAvailability,clanId,classId,level,characterId);
+        CREATE TRIGGER bot_party_candidate_insert AFTER INSERT ON bot_life_state BEGIN
+            ${insert('life.characterId = NEW.characterId')}
+        END;
+        CREATE TRIGGER bot_party_candidate_payload AFTER UPDATE OF statsJson ON bot_life_state
+        WHEN OLD.statsJson IS NOT NEW.statsJson BEGIN
+            INSERT INTO ${table}(characterId,payloadJson)
+            VALUES(NEW.characterId,json_extract(NEW.statsJson,${paths.map(path => `'${path}'`).join(',')}))
+            ON CONFLICT(characterId) DO UPDATE SET payloadJson=excluded.payloadJson
+            WHERE payloadJson IS NOT excluded.payloadJson;
+        END;
+        CREATE TRIGGER bot_party_candidate_metadata AFTER UPDATE OF level,phase,simulationOwner,partyId,activity,spotId ON bot_life_state BEGIN
+            UPDATE ${table} SET level=NEW.level,joinAvailability=${availability('NEW', 'ordinaryEligible')}
+            WHERE characterId=NEW.characterId
+                AND (level IS NOT NEW.level OR joinAvailability IS NOT ${availability('NEW', 'ordinaryEligible')});
+        END;
+        CREATE TRIGGER bot_party_candidate_identity AFTER UPDATE OF statsJson ON bot_life_state
+        WHEN ${flags('OLD')} IS NOT ${flags('NEW')} BEGIN ${updateOrdinary('NEW.characterId')} END;
+        CREATE TRIGGER bot_party_candidate_account AFTER UPDATE OF accountName ON bot_life_state
+        WHEN OLD.accountName IS NOT NEW.accountName BEGIN ${updateOrdinary('NEW.characterId')} END;
+        CREATE TRIGGER bot_party_candidate_ordinary AFTER UPDATE OF ordinaryEligible ON ${table}
+        WHEN OLD.ordinaryEligible IS NOT NEW.ordinaryEligible BEGIN
+            UPDATE ${table} SET joinAvailability=(SELECT ${availability('life', 'NEW.ordinaryEligible')}
+                FROM bot_life_state life WHERE life.characterId=NEW.characterId) WHERE characterId=NEW.characterId;
+        END;
+        CREATE TRIGGER bot_party_candidate_character AFTER UPDATE OF classId,clanId ON characters
+        WHEN OLD.classId IS NOT NEW.classId OR OLD.clanId IS NOT NEW.clanId BEGIN
+            UPDATE ${table} SET classId=COALESCE(NEW.classId,0),clanId=COALESCE(NEW.clanId,0) WHERE characterId=NEW.id;
+        END;
+        CREATE TRIGGER bot_party_candidate_username AFTER UPDATE OF username ON characters
+        WHEN OLD.username IS NOT NEW.username BEGIN ${updateOrdinary('NEW.id')} END;
+    `);
+}
+
+module.exports = { install, createIndex, upgradeRecruitment };

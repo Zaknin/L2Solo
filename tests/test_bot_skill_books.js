@@ -41,7 +41,7 @@ async function main() {
             assert(learned.learned, 'support training spends SP without a spellbook');
             assert.deepEqual(learned.consumedBooks, []);
         }
-        const bishopState = { level: 45, inventory: {}, stats: { clanId: 1, classId: 16, coldCombat: { skills: [] } } };
+        const bishopState = { level: 45, clanLevel: 1, inventory: {}, stats: { clanId: 1, classId: 16, coldCombat: { skills: [] } } };
         for (const book of Catalog.missingBooks(bishopState)) {
             assert(Profile.isAttackSkill(Profile.skillSnapshotsFromRecords([{ selfId: book.skillId, level: 1 }])[0]));
         }
@@ -57,6 +57,8 @@ async function main() {
         assert((await Database.fetchSkills(songs)).some(row => row.selfId === 267), 'Song of Warding is learned without its book');
         const sorcerer = await supportId('bot_sorcerer_books', 12);
         const clanId = Number((await Database.createClan({ name: 'TrainingFixture', leaderId: sorcerer })).insertId);
+        await Database.updateClanLevel(clanId, 1);
+        await invoke('GameServer/Clan/ClanSupplyPolicy').init();
         await Database.updateCharacterClan(sorcerer, clanId, 0, 0, 0);
         assert.equal((await Database.learnBotSkill(sorcerer, 1184, 1)).reason, 'missing_book', 'attack training still needs Ice Bolt');
         const supportInventory = { ...bishopState, inventory: { 1152: { selfId: 1152, amount: 2, kind: 'Other.Spellbook', rank: 'none', basePrice: 100 } } };

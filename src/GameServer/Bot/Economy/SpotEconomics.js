@@ -1,4 +1,6 @@
 'use strict';
+// Resolved at the first call (cycles); a require per call is a path lookup (L73).
+let SpotRewardExpectation = null;
 // Shared table evaluation. It depends on native facts and own samples,
 // never on Context or pricing, so route and wish readers cannot recurse.
 function moneyWeight(state) {
@@ -32,7 +34,7 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
     deathHours ??= Valuation.deathHours(state, hunt);
     const riskWeight = Valuation.riskWeight(state, persona);
     const costs = Hunt.consumablePrices(state, price);
-    const rewardOptions = { spoilSkillLevel: require('./SpotRewardExpectation').spoilSkillLevel(state) };
+    const rewardOptions = { spoilSkillLevel: (SpotRewardExpectation ||= require('./SpotRewardExpectation')).spoilSkillLevel(state) };
     const own = Hunt.sampledRows(state, timestamp, mode);
     const calibrations = own.flatMap(row => {
         const base = Table.value(row.spotId, tableRole, state.level, true, rewardOptions);

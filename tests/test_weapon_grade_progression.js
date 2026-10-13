@@ -15,6 +15,7 @@ const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const timestamp = 1791801314861;
 const byId = id => Data.items.find(row => Number(row.selfId) === Number(id));
+let actorSequence = 0;
 function archer(level, adena = 7023276) {
     const inventory = {};
     // The x50 archer's worn D kit and working NG bow, including both rings.
@@ -26,7 +27,8 @@ function archer(level, adena = 7023276) {
     }
     for (const selfId of [1835, 1463, 1464, 1341, 1342, 1343, 1061, 736])
         inventory[selfId] = { selfId, amount: 1000000 };
-    return { characterId: 990987 + level, name: `WeaponGrade${level}`, accountName: `bot_weapon_grade_${level}`,
+    // Separate scenarios must not inherit another actor's held economic decision.
+    return { characterId: 990987 + ++actorSequence, name: `WeaponGrade${level}`, accountName: `bot_weapon_grade_${level}`,
         level, adena, phase: 'cold', activity: 'hunting', currentRegion: 'Giran',
         loc: { locX: 83396, locY: 147904, locZ: -3404 }, timing: {},
         vitals: { hp: 1200, maxHp: 1200, mp: 1000, maxMp: 1000 }, inventory,

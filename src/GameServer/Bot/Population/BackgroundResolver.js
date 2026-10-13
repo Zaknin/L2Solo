@@ -24,13 +24,6 @@ function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-function midpointBand(levelBand) {
-    if (!levelBand) return 1;
-    const parts = String(levelBand).split('-').map((value) => Number(value));
-    if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return Number(parts[0]) || 1;
-    return Math.round((parts[0] + parts[1]) / 2);
-}
-
 function botCombatStats(state, timestamp = Date.now()) {
     return ColdCombatProfile.profileFor(state, timestamp);
 }
@@ -203,9 +196,15 @@ function resolveRest(state, elapsedMs, timestamp, options = {}) {
     };
 }
 
+// A trip record the background step resolves as travel (no fight); the held
+// economy card (ColdEconomyDecision.canReuse) reads the same rule.
+function travelRecord(travel) {
+    return !!(travel?.to && travel.arrivalAt);
+}
+
 function resolveTravel(state, timestamp = Date.now()) {
     const travel = state.stats?.travel;
-    if (!travel?.to || !travel?.arrivalAt) return null;
+    if (!travelRecord(travel)) return null;
     const isLegacyGiranMarketTrip = travel.townName === 'Giran'
         && ['market_sale_inventory', 'market_search_for_weapon', 'market_search_for_gear'].includes(travel.reason)
         && !['soe_gatekeeper', 'walk_gatekeeper'].includes(travel.method);
@@ -1573,6 +1572,7 @@ function huntCycleDelayMs(roll) {
 
 const BackgroundResolver = {
     soloFightCount,
+    travelRecord,
     huntCycleDelayMs,
     combat: { chooseSkill, chooseChargeSkill, coldChargeState, expireCharges, addCharges, consumeCharges,
         spendSkill, settleCharges, attackDamage,
@@ -1965,7 +1965,11 @@ BackgroundResolver.resolveSolo = (options = {}) => {
     const result = options.state?.stats?.coldCompetition?.wait && competition.state && competition.elapsedMs === 0
         ? { patch: { stats: competition.state.stats }, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             nextResolveAt: timestamp + 1000, debug: { reason: competitionReason, fights: 0, wins: 0 } }
-        : resolveSolo({ ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp });
+        // Only raw equipment preparation is shared within this synchronous
+        // round. Each fight still reads its current profile, effects and vitals.
+        : ColdCombatProfile.withEquipmentPreparation(() => resolveSolo({
+            ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
+        }));
     if (options.state?.stats?.pveEncounter && !Object.hasOwn(result.debug || {}, 'pendingFight')) {
         result.patch = { ...result.patch, stats: { ...(result.patch?.stats || options.state.stats), pveEncounter: null } };
     }

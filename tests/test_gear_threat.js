@@ -95,9 +95,11 @@ check('same native build caches distinct physical/magic gains in both orders', (
         assert.equal(values.get(1).attack, values.get(3).attack);
     }
 });
-check('saved level-19 build restores armour roots on physical hunt and keeps jewellery for magic', () => {
+check('saved level-19 build: survival shots, then armour gaps; empty jewel slots take owned jewellery', () => {
     // Recorded build, not a reconstruction of its historical purchase order.
-    // Empty jewellery is a controlled variant; prices/offers are native x10.
+    // Prices/offers are native x10. The bot misses its NG kit milestone
+    // (PersonalGearProgression): the survival shot tranche leads, then only
+    // gap-closing pieces compete; threat masks still shape gear value above.
     const fixture = require('./fixtures/facada-gear-threat.json');
     const Sources = invoke('GameServer/Bot/Population/ColdOccupationSources');
     const { BoardIndex } = invoke('GameServer/AfkTrade/BoardIndex');
@@ -108,19 +110,30 @@ check('saved level-19 build restores armour roots on physical hunt and keeps jew
     const deps = { timestamp: fixture.timestamp, board: new BoardIndex(), spots: [hunt],
         tripCost: trip, npcOffersFor: id => Sources.npcOffersFor(id), knowledgeEnabled: false };
     const bot = structuredClone(fixture.state);
-    for (const row of Object.values(bot.inventory)) if (row.kind === 'Armor.Jewel') {
-        row.equipped = false; row.equippedCount = 0; row.equippedSlots = [];
-    }
+    const unarmed = Economy.forState(bot, deps);
+    assert.equal(unarmed.gearThreatMask, 1);
+    assert.deepEqual(unarmed.network.queue.map(wish => wish.key), ['stock:shots'],
+        'the missing survival shot tranche leads the kit');
+    Economy.reset();
+    bot.inventory[1835] = { selfId: 1835, amount: 20000, kind: 'Other.Shot' };
     const physical = Economy.forState(bot, deps);
     assert.equal(physical.gearThreatMask, 1);
     const physicalGear = physical.network.queue.filter(wish => wish.need === 'power' && wish.object?.itemId);
     assert.ok(physicalGear.some(wish => [42, 51, 38, 34].includes(wish.object.itemId)), 'armour competes in the existing queue');
     assert.ok(!physicalGear.some(wish => [1, 2, 3, 4, 5].includes(wish.object.slot)), 'absent magic is not a defensive gain');
+    Economy.reset();
+    for (const row of Object.values(bot.inventory)) if (row.kind === 'Armor.Jewel') {
+        row.equipped = false; row.equippedCount = 0; row.equippedSlots = [];
+    }
     bot.stats.targetCombat.lastDefeatedNpcIds = [93, 398, 264];
     const magical = Economy.forState(bot, deps);
     assert.equal(magical.gearThreatMask, 3);
-    assert.ok(magical.network.queue.some(wish => wish.key === 'power:116:4'));
-    assert.ok(magical.network.queue.some(wish => wish.key === 'power:118:3'));
+    const jewelRoots = magical.projection.roots.filter(key => /^power:\d+:[1-5]$/.test(key));
+    assert.ok(jewelRoots.length > 0, 'empty jewel slots are kit gaps');
+    assert.ok(jewelRoots.every(key => Number(bot.inventory[key.split(':')[1]]?.amount) > 0),
+        'owned jewellery closes the gaps before purchases');
+    assert.ok(!magical.projection.roots.some(key => ['power:116:4', 'power:118:3'].includes(key)),
+        'jewellery below the NG milestone does not close a kit gap');
     Economy.reset();
 });
 if (failures) process.exitCode = 1;

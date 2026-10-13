@@ -1,3 +1,4 @@
+const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
@@ -106,7 +107,7 @@ function profileForIndex(index, base = baseForIndex(index), seedProfile = null) 
 }
 
 function classInfo(classId) {
-    return DataCache.classTemplates.find((template) => template.classId === classId) || null;
+    return ClassProgression.firstClassRow(DataCache.classTemplates, classId, 'strict') || null;
 }
 
 function vitalsFor(template, level) {
@@ -249,14 +250,14 @@ function migratePopulationAppearances(states = []) {
 }
 
 function awardBaseGear(characterId, classId) {
-    const items = DataCache.newbieItems.find((row) => row.classId === classId)?.items || [];
+    const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items || [];
     const starterTemplates = items.filter((item) => item.equipped === true)
         .map((item) => ItemTemplateIndex.findStrict(DataCache.items, item.selfId));
     const hasTwoHandedWeapon = starterTemplates.some((template) => (
         Number(template?.etc?.slot || 0) === 14 &&
         String(template?.template?.kind || '').startsWith('Weapon.')
     ));
-    return Database.fetchItems(characterId).then((existing) => {
+    return Database.fetchItems(characterId, 'seeder_base_gear').then((existing) => {
         const existingIds = new Set((existing || []).map((item) => Number(item.selfId)));
         return Promise.all(items
             .filter((item) => !existingIds.has(Number(item.selfId)))
@@ -277,7 +278,7 @@ function awardBaseGear(characterId, classId) {
 }
 
 function awardBaseSkills(characterId, classId) {
-    const skillTree = DataCache.skillTree.find((row) => row.classId === classId);
+    const skillTree = ClassProgression.firstClassRow(DataCache.skillTree, classId, 'strict');
     const skills = skillTree?.skills || [];
     const levelOne = skills.filter((skill) => skill.levels.find((level) => level.pLevel === 1));
     return Database.fetchSkills(characterId).then((existing) => {
@@ -285,7 +286,7 @@ function awardBaseSkills(characterId, classId) {
         return Promise.all(levelOne
             .filter((skill) => !existingIds.has(Number(skill.selfId)))
             .map((skill) => {
-                const details = DataCache.skills.find((row) => row.selfId === skill.selfId);
+                const details = ItemTemplateIndex.findStrictRequired(DataCache.skills, skill.selfId);
                 if (!details) return Promise.resolve(null);
                 const owned = {
                     ...skill,
@@ -308,7 +309,7 @@ function awardProfileSkills(characterId, classId, level) {
 }
 
 function ensureAdena(characterId, amount) {
-    return Database.fetchItems(characterId).then((existing) => {
+    return Database.fetchItems(characterId, 'seeder_adena').then((existing) => {
         const adena = (existing || []).find((item) => Number(item.selfId) === 57);
         if (adena) return null;
         return Database.setItem(characterId, {

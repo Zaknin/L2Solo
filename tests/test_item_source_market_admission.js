@@ -43,7 +43,8 @@ async function run() {
         const held = { ...stock(id), amount: 1, count: 1, kind: template.template.kind };
         const free = { ...state, inventory: { [id]: held } };
         const saleOptions = { ...options, preparedReservations: {} };
-        assert.equal(Listing.classify(free, held).action, 'market', `real creation-origin stock can be offered ${id}`);
+        assert.deepEqual(Listing.classify(free, held), { action: 'npc', reason: 'npc_only_item' },
+            `native creation gear remains NPC-only ${id}`);
         assert.equal(Market.viableSellLine(held), true, `native quote admission reuses the source ${id}`);
         assert.equal(Disposition.saleCandidates(free, saleOptions)[0]?.count, 1, `only physical surplus can be sold ${id}`);
         assert.equal(Disposition.saleCandidates({ ...free, inventory: { [id]: { ...held, equipped: true } } }, saleOptions).length,
@@ -52,6 +53,16 @@ async function run() {
             0, `creation-origin admission cannot sell a reserved weapon ${id}`);
         assert.deepEqual(free.inventory[id], held, 'admission does not issue another item');
     }
+    const varnish = Data.items.find(item => Number(item.selfId) === 1865);
+    const material = { selfId: 1865, name: varnish.template.name, kind: varnish.template.kind,
+        amount: 2, count: 2, price: varnish.template.price, rank: varnish.etc?.rank || 'none',
+        equipped: false, stackable: true };
+    const materialState = { ...state, inventory: { 1865: material } };
+    assert.deepEqual(Listing.classify(materialState, material), { action: 'market', reason: 'market' },
+        'real free Varnish surplus supplies the positive market admission case');
+    assert.equal(Market.viableSellLine(material), true);
+    assert.equal(Disposition.saleCandidates(materialState, { ...options, preparedReservations: {} })[0]?.count, 2);
+    assert.deepEqual(materialState.inventory[1865], material, 'market admission retains physical ownership');
     for (const id of [5789, 5790]) assert.equal(Listing.classify(state, { ...stock(id), count: 600 }).reason,
         'beginner_shot', 'creation-source support does not admit restricted beginner consumables');
     const quest = Data.items.find(item => item.template.kind === 'Other.Quest');

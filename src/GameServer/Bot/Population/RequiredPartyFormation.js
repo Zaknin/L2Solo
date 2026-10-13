@@ -94,10 +94,11 @@ function proposalFromStates(states = [], options = {}) {
             });
             const anchorLevel = Number(anchor.state.level || 1);
             const compatible = anchors
+                .filter(({ state }) => !anchor.objective.fullRoster || anchor.objective.fullRoster.memberIds.includes(Number(state.characterId)))
                 .filter(({ state }) => Math.abs(Number(state.level || 1) - anchorLevel) <= levelRange)
                 .slice(0, candidateLimit)
                 .map(({ state }) => state);
-            if (PartyComposition.selectMembers(compatible, { minSize, maxSize, levelRange }).length < minSize) continue;
+            if (require('../../Clan/ClanRaidRoster').selectMembers(compatible, anchor.objective, { minSize, maxSize, levelRange }).length < minSize) continue;
             return {
                 requiredCount,
                 spotId: selectedGroup.spotId,
@@ -105,6 +106,7 @@ function proposalFromStates(states = [], options = {}) {
                 minSize,
                 maxSize,
                 levelRange,
+                ...(anchor.objective.fullRoster ? { fullRoster: anchor.objective.fullRoster } : {}),
                 candidates: compatible.map((state) => ({
                     characterId: Number(state.characterId),
                     updatedAt: Number(state.updatedAt || 0),

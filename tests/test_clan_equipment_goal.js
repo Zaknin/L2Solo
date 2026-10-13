@@ -3,10 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-equipment-goal');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-equipment-goal.sqlite');
+const databasePath = isolated.world;
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -52,7 +54,7 @@ function seedDatabase() {
 
 async function main() {
     seedDatabase();
-    options.default.Database.path = path.relative(rootDir, databasePath);
+    isolated.assertConfigured(options.default);
     Database.init();
     await LifeState.init();
 
@@ -201,6 +203,7 @@ async function main() {
         GearAcquisitionPlanner.planFor = originalPlanFor;
         SpotProfiles.ensure = originalSpotEnsure;
         await Database.close();
+        fs.rmSync(isolated.directory, { recursive: true, force: true });
         [databasePath, `${databasePath}-wal`, `${databasePath}-shm`].forEach((file) => fs.rmSync(file, { force: true }));
     }
 }

@@ -86,4 +86,34 @@ const partyResult = BackgroundPartyResolver.resolve({
 const partyItems = partyResult.memberResults.flatMap((entry) => entry.result.materialize.items);
 assert.strictEqual(partyItems[0].selfId, 1121, 'party rewards should use the same real drop data');
 
+const originalRewards = DataCache.npcRewards, originalNpcs = DataCache.npcs;
+try {
+    const first = { selfId: 910001, template: { name: ' Shared ' }, rewards: [{}] };
+    const second = { selfId: 910002, template: { name: 'SHARED' }, spoils: [{}] };
+    DataCache.npcRewards = [{ selfId: 910000, template: { name: 'shared' }, rewards: [] }, first, second, first];
+    DataCache.npcs = [{ selfId: 910010, template: { name: 'Shared' } }];
+    const named = { npcNames: ['shared', ' SHARED '] };
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(named, () => 0), first);
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(named, () => 0.5), second,
+        'empty rows do not enter cold candidates; duplicate source rows retain their ordinal weight');
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(named, () => 0.9), first,
+        'a repeated reward reference still contributes a separate cold candidate');
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(named, () => { throw Error('unexpected roll'); }, 910010), first,
+        'a defeated world NPC alias resolves the first matching named reward without rolling');
+    const weighted = { ...named, npcEntries: [{ selfId: 910001, count: 4 }] };
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(weighted, () => 0.79), first);
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(weighted, () => 0.81), second,
+        'known IDs exclude all matching name duplicates; ID counts retain their original candidate weight');
+    const appended = { selfId: 910003, template: { name: 'shared' }, rewards: [{}] };
+    DataCache.npcRewards.push(appended);
+    assert.strictEqual(BackgroundDropResolver.rewardDataForSpot(named, () => 0.99), appended,
+        'growth of the reward source refreshes the common name relation');
+} finally { DataCache.npcRewards = originalRewards; DataCache.npcs = originalNpcs; }
+
+const strongNpc = DataCache.npcs.find(row => Number(row.selfId) === 37);
+const strongProgression = BackgroundDropResolver.progressionForFight({ spot, npcSelfId: 37, rng: () => 0 });
+assert.strictEqual(strongProgression.exp, strongNpc.template.level ** 2 * strongNpc.rewards.exp * 2,
+    'cold experience uses the NPC owner\'s permanent Strong Type multiplier');
+assert.strictEqual(strongProgression.sp, strongNpc.rewards.sp * 2);
+
 console.log('Bot background drop checks passed');

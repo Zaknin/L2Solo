@@ -133,7 +133,7 @@ function allocationGroups(states = [], physicalKeys = new Set()) {
 }
 
 function occupancySnapshot(profiles, states = BotLifeState.allStates(PopulationConfig.maxPlayingPopulation)) {
-    const byId = new Map((profiles || []).map((profile) => [profile.id, profile]));
+    const byId = SpotIndex.strictTableFor(profiles);
     const physicalMembers = {};
     const reservedMembers = {};
     const append = (entries, spotId, state) => {

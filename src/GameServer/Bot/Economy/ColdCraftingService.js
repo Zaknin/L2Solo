@@ -54,11 +54,7 @@ function componentFor(state, selfId) {
 function recipeForState(state, recipe) {
     const provider = state?.stats?.equipmentPlan?.craftProviders?.[recipe?.recipeId];
     if (!recipe || !provider || provider.known || provider.workshop) return recipe;
-    const materials = recipe.materials.map(row => ({ ...row }));
-    const scroll = materials.find(row => Number(row.selfId) === Number(recipe.recipeItemId));
-    if (scroll) scroll.amount += 1;
-    else materials.push({ selfId: Number(recipe.recipeItemId), amount: 1 });
-    return { ...recipe, materials };
+    return ClanCrafting.recipeForProvider(recipe, provider);
 }
 
 function hasMaterials(state, recipe) {
@@ -187,7 +183,7 @@ function hasCombinationIngredients(items, recipe) {
 }
 
 async function combineDualSword(state, recipe, station) {
-    const items = await Database.fetchItems(state.characterId);
+    const items = await Database.fetchItems(state.characterId, 'cold_craft_dual_sword');
     if (!hasCombinationIngredients(items, recipe)) {
         return { state: await refreshPhysicalInventory(state), crafted: false, reason: 'materials_changed' };
     }
@@ -289,7 +285,7 @@ async function craft(state, random = Math.random) {
     }
 
     const componentCraft = Number(recipe.recipeId) !== Number(finalRecipe?.recipeId);
-    const customerItems = await Database.fetchItems(state.characterId);
+    const customerItems = await Database.fetchItems(state.characterId, 'cold_craft');
     const requestedBatch = !learning ? requiredCraftCount(finalRecipe, recipe, state) : 1;
     const materialBatch = craftableBatchCount(customerItems, recipe, Math.min(64, requestedBatch));
     const batchCount = station.clan || station.workshop ? Math.min(materialBatch, Math.floor(crafterMp / Math.max(1, Number(recipe.mpCost)))) : materialBatch;

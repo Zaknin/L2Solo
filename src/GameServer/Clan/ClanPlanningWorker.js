@@ -16,6 +16,7 @@ const catalogs = { items: [], npcs: [], npcRewards: [], npcSpawns: [], newbieIte
 Object.assign(invoke('GameServer/DataCache'), catalogs);
 let context = {};
 let planner;
+let raidJob = null;
 let fixedOffers = new Map();
 let npcOffers = new Map();
 // Tables from the main thread's ColdTableChannel; pages are not answered.
@@ -93,6 +94,26 @@ parentPort.on('message', (message) => {
             require('../Items/ItemAcquisitionCatalog').reset();
         } else if (message.type === 'spot_catalog') {
             spotCatalog.apply(message.page);
+        } else if (message.type === 'end_planning_job') {
+            if (raidJob?.key === message.jobKey) raidJob = null;
+        } else if (message.type === 'prepare_raids') {
+            const payload = spotCatalog.restore(message.payload);
+            if (payload.context) {
+                context = payload.context;
+                global.options.default.General = context.general;
+                global.options.default.Progression = context.progression;
+                if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+                else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
+            }
+            if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw Error('clan planning deadline');
+            if (raidJob?.key !== payload.jobKey) raidJob = { key: payload.jobKey, readiness: new Map() };
+            raidJob.clan = payload.clan; raidJob.prospects = payload.prospects;
+            raidJob.prepared = require('./ClanRosterDemand').prepare(payload.clan,
+                payload.spots, payload.prospects, payload.previousGoal, raidJob.readiness);
+            raidJob.prepared.economicProspects = require('./ClanRosterDemand').retainedEconomicProspects(payload.prospects,
+                payload.economicRequirements, raidJob.prepared.retainedProspects);
+            parentPort.postMessage({ id: message.id, result: raidJob.prepared });
+            return;
         } else if (message.type === 'plan') {
             const payload = spotCatalog.restore(message.payload);
             context = payload.context;
@@ -102,14 +123,19 @@ parentPort.on('message', (message) => {
             else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
             fixedOffers = indexOffers(context.fixedOffers);
             npcOffers = indexOffers(context.npcOffers);
-            invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot(context.npcOffers);
+            invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot([
+                ...(context.npcOffers || []), ...(context.npcPriceRows || [])
+            ]);
             planner ||= require('./ClanEquipmentPlanner');
             const forbidden = Object.keys(require.cache).some((filename) =>
                 /[\\/]src[\\/]Database\.js$|[\\/]World[\\/]World\.js$|[\\/]Bot[\\/]BotManager\.js$/.test(filename));
             if (forbidden) throw new Error('clan planning worker loaded a live runtime dependency');
             const startedAt = workerData?.developerDiagnostics ? performance.now() : 0;
             const { member, spots, warehouseRows, options } = payload;
-            const plan = planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
+            if (options.economicMode && raidJob?.key !== payload.jobKey) throw Error('economic planning job missing');
+            const plan = options.economicMode ? require('./ClanRosterDemand').economicPlan(planner.planForMember, raidJob,
+                member, spots, warehouseRows, { ...options, throwOnError: true })
+                : planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
             parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt } : {}) } });
             return;
         } else {

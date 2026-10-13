@@ -1,3 +1,5 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
+const ItemTemplateIndex = require('../GameServer/Item/ItemTemplateIndex');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -8,6 +10,8 @@ const ITEM_ICON_MANIFEST_PATH = path.join(ITEM_ICON_CATALOG_DIR, 'index.json');
 const KNOWLEDGE_BASE_DIR = path.join(__dirname, '..', '..', 'data', 'KnowledgeBase');
 const { searchPlayers } = require('./CharacterSearch');
 const { createKnowledgeBaseService } = require('./KnowledgeBaseService');
+const { createExportedCatalogue } = require('../GameServer/Knowledge/ExportedCatalogueAdapter');
+const GameCatalogue = require('../GameServer/Knowledge/GameDataCatalogue');
 const { createJsonResponseCache, sendCachedJson } = require('./JsonResponseCache');
 const marketJson = createJsonResponseCache(() => marketSnapshot());
 const ActorEconomy = require('./ActorEconomyProjection');
@@ -87,19 +91,7 @@ const REGION_LABELS = [
 ];
 
 function raidBossCatalog() {
-    const templates = new Map((DataCache.npcs || [])
-        .filter((npc) => npc?.template?.raidBoss === true)
-        .map((npc) => [Number(npc.selfId), npc]));
-    const seen = new Set();
-    return (DataCache.npcSpawns || [])
-        .flatMap((group) => group?.spawns || [])
-        .map((spawn) => ({ spawn, npc: templates.get(Number(spawn?.selfId)) }))
-        .filter(({ spawn, npc }) => {
-            const id = Number(spawn?.selfId || 0);
-            if (!npc || !Number.isInteger(id) || id <= 0 || seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        })
+    return (GameCatalogue.native().raidBossDefinitions() || [])
         .map(({ spawn, npc }) => ({
             id: Number(npc.selfId),
             name: npc.template.name || spawn.name || `Raid boss ${npc.selfId}`,
@@ -218,19 +210,12 @@ function normalizedClassId(value) {
 function className(value) {
     const classId = normalizedClassId(value);
     if (classId === null) return null;
-    return (DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === classId)
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId)
         ?.template?.class || null;
 }
 
 function classCatalog() {
-    return (DataCache.classTemplates || [])
-        .map((template) => ({
-            classId: normalizedClassId(template.classId),
-            className: template.template?.class || null
-        }))
-        .filter((entry) => entry.classId !== null && entry.className)
-        .sort((left, right) => left.className.localeCompare(right.className, 'en', { sensitivity: 'base' }));
+    return ClassProgression.classDirectory(DataCache.classTemplates || []);
 }
 
 const RACE_NAMES = Object.freeze({
@@ -248,8 +233,7 @@ function normalizedRaceId(value, classId = null) {
     }
     const normalized = normalizedClassId(classId);
     if (normalized === null) return null;
-    const raceId = Number((DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === normalized)
+    const raceId = Number(ClassProgression.firstClassRow(DataCache.classTemplates || [], normalized)
         ?.template?.race);
     return Number.isInteger(raceId) && RACE_NAMES[raceId] ? raceId : null;
 }
@@ -470,8 +454,6 @@ function equipmentSlot(slot) {
     return EQUIPMENT_SLOTS[Number(slot)] || (slot ? `slot ${slot}` : 'other');
 }
 
-let itemTemplateIndex = null;
-let itemTemplateSource = null;
 let itemIconCatalogCache = null;
 let knowledgeBaseServiceCache = null;
 let clanOrderItemCatalogSource = null;
@@ -1300,7 +1282,10 @@ function knowledgeBaseService() {
         knowledgeBaseServiceCache = createKnowledgeBaseService({
             dataDir: KNOWLEDGE_BASE_DIR,
             progressionRates: ProgressionRates,
-            iconFor: itemIconFor
+            iconFor: itemIconFor,
+            catalogueFactory: createExportedCatalogue,
+            nativeCatalogue: Array.isArray(DataCache.items) && Array.isArray(DataCache.npcs)
+                && require('../GameServer/Items/C4RecipeItems').loadedSource() ? GameCatalogue.native() : null
         });
     }
     return knowledgeBaseServiceCache;
@@ -1320,12 +1305,7 @@ function itemIconFilePath(fileName) {
 }
 
 function itemTemplate(selfId) {
-    const items = DataCache.items || [];
-    if (!itemTemplateIndex || itemTemplateSource !== items) {
-        itemTemplateSource = items;
-        itemTemplateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return itemTemplateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, itemTemplate) || null;
 }
 
 function liveEquippedItems(actor) {
@@ -1783,7 +1763,7 @@ async function persistedPlayerDetail(characterId) {
             WHERE c.id = ?
             LIMIT 1
         `, [id], { read: true }], 'observer:player-detail'),
-        Database.fetchItems(id)
+        Database.fetchItems(id, 'observer_player_detail')
     ]);
     const row = rows[0];
     if (!row || Number(row.isBot) === 1) return null;

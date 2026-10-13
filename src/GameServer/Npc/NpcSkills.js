@@ -1,3 +1,4 @@
+const SkillRankIndex = require('../Skills/SkillRankIndex');
 const SkillModel = invoke('GameServer/Model/Skill');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
 
@@ -139,8 +140,7 @@ function instantiate(row) {
     }
 
     const levels = template.levels || [];
-    const level = levels.find((entry) => Number(entry.level) === row.level)
-        || levels[Math.max(0, Math.min(levels.length - 1, row.level - 1))];
+    const level = SkillRankIndex.findOrPosition(levels, row.level);
 
     if (!level) {
         return null;
@@ -220,6 +220,23 @@ function maxHpMultiplierFor(npc) {
     }, 1);
 }
 
+// Cold combat has datapack templates rather than live NPCs. Preserve its
+// first permanent-skill projection per numeric NPC ID for this process;
+// live pets/servitors still resolve their current skills through forNpc.
+const templateMaxHpMultipliers = new Map();
+function templateMaxHpMultiplierFor(npc) {
+    const npcId = Number(npc?.selfId || 0);
+    if (!npcId) return 1;
+    if (!templateMaxHpMultipliers.has(npcId)) {
+        const reference = {
+            fetchSelfId: () => npcId,
+            fetchSummonSkillId: () => Number(npc?.summonSkillId || 0)
+        };
+        templateMaxHpMultipliers.set(npcId, maxHpMultiplierFor(reference));
+    }
+    return templateMaxHpMultipliers.get(npcId);
+}
+
 module.exports = {
     prepareThreats,
     threatFor,
@@ -227,5 +244,6 @@ module.exports = {
     forNpc,
     combatSkillsFor,
     passiveSkillsFor,
-    maxHpMultiplierFor
+    maxHpMultiplierFor,
+    templateMaxHpMultiplierFor
 };

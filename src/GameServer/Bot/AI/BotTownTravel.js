@@ -206,7 +206,7 @@ async function requestMeeting(session, bot, meeting, side) {
         const sequence = saved?.legId === legId ? saved.sequence : latest[`nextLeg${suffix}`];
         const paid = await Database.payTradeMeetingLeg(meeting.id, side, sequence, legId, fee, scroll);
         const row = paid.coldLifeRows?.[bot.fetchId()]; if (row) Life.acceptLifecycleRow(row);
-        await invoke('GameServer/AfkTrade/AfkTradeService').syncOnlineInventory(bot.fetchId(), await Database.fetchItems(bot.fetchId()));
+        await invoke('GameServer/AfkTrade/AfkTradeService').syncOnlineInventory(bot.fetchId(), await Database.fetchItems(bot.fetchId(), 'town_travel_meeting'));
         return sequence;
     };
     const finish = () => {

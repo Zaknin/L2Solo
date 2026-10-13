@@ -105,7 +105,7 @@ async function resolve(clanId, options) {
             if (!['hot', 'cold'].includes(member.phase)) continue;
             if (Identity.isStaticService({ ...member, stats: Goals.memberJson(Number(member.id), 'stats', member.statsJson) })) continue;
             const inventory = member.phase === 'hot' && session?.actor?.backpack
-                ? liveRows(session.actor) : await Database.fetchItems(member.id);
+                ? liveRows(session.actor) : await Database.fetchItems(member.id, 'clan_warehouse_equipment');
             inspected += 1;
             if (!Policy.plan(member, inventory, item)) continue;
             if (member.phase === 'hot' ? !available(session, clanId)

@@ -5,6 +5,7 @@ const EffectStats = invoke('GameServer/Effects/EffectStats');
 const BOW_ATTACK_RANGE = 700;
 const MELEE_ATTACK_RANGE = 40;
 const POLEARM_ATTACK_RANGE = 66;
+const npcRadiusMaxima = new WeakMap();
 
 function equippedWeapon(actor) {
     return actor?.backpack?.fetchEquippedWeapon?.() || null;
@@ -89,11 +90,17 @@ function isWithinRange(source, target, attackRange) {
 }
 
 function maxKnownTargetRadius() {
-    if (!Array.isArray(DataCache.npcs)) {
+    const npcs = DataCache.npcs;
+    if (!Array.isArray(npcs)) {
         return 0;
     }
-
-    return DataCache.npcs.reduce((max, npc) => Math.max(max, collisionRadius(npc)), 0);
+    let prepared = npcRadiusMaxima.get(npcs);
+    if (!prepared || prepared.length !== npcs.length) {
+        prepared = { length: npcs.length,
+            maximum: npcs.reduce((max, npc) => Math.max(max, collisionRadius(npc)), 0) };
+        npcRadiusMaxima.set(npcs, prepared);
+    }
+    return prepared.maximum;
 }
 
 function targetQueryRadius(source, attackRange) {
@@ -111,6 +118,7 @@ module.exports = {
     distance2d,
     fetchNormalAttackRange,
     isWithinRange,
+    maxKnownTargetRadius,
     targetQueryRadius,
     weaponKind,
 };

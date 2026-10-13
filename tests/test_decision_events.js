@@ -25,7 +25,7 @@ assert.equal(Funding.moneyReached({ adena: 1235000, stats: { money } }), true);
 assert.equal(Funding.moneyReached({ adena: 9999999, stats: {} }), false);
 assert.equal(Funding.moneyReached({ adena: 9999999, stats: { money: [1, 1, 1, 0] } }), false);
 
-World.user = { sessions: [] }; World.npc = { spawns: [] };
+World.user = { sessions: [] }; World.npc = { spawns: [], grid: {} };
 invoke('GameServer/Bot/AI/HotTownRebuff').syncVisit = () => null;
 invoke('GameServer/Bot/AI/HotTownRebuff').needsVisit = () => false;
 invoke('GameServer/Bot/AI/BotBuffs').needsNewbieRefresh = () => false;
@@ -95,10 +95,66 @@ session.coldLifeState.stats.money = money; wallet = 1234999;
 Events.observe(session, actor);
 wallet++; tick(); assert.equal(builds, 3, 'reaching the funded-prefix plus gap raises once');
 tick(); assert.equal(builds, 3, 'the next packet resets the threshold mark');
+session.coldLifeState.stats.money = money; wallet = 1235000;
+Events.observe(session, actor);
+const beforeLoss = session.coldLifeState.stats.decisionSeq;
+wallet = 34999;
+level++;
+Events.observe(session, actor);
+assert.equal(session.coldLifeState.stats.decisionSeq, beforeLoss + 1,
+    'a funded-prefix loss and level event coalesce into one decision');
+assert.equal(Events.held(session), null, 'the native hot holder notices loss as well as gain');
+const Data = invoke('GameServer/DataCache'); Data.init();
+const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+const Valuation = invoke('GameServer/Bot/Economy/EconomicValuation');
+const persona = { understanding: .8, traits: { commitment: .5 } };
+level = 39;
+let experience = Number(Data.experience[38]);
+const stageRemaining = Number(Data.experience[39]) - experience;
+actor.fetchExp = () => experience;
+const progressSession = { accountId: 'bot_progress', actor, plan: 'hunting',
+    spotRelocation: { method: 'clan_hall', arrivalPending: true, startedAt: Date.now() },
+    coldLifeState: { persona, stats: { decisionSeq: 50, activityLeaf: 0, exp: 0 } } };
+const priorEconomyForActor = Economy.forActor;
+Economy.forActor = (bot, current) => {
+    const context = priorEconomyForActor(bot, current);
+    if (current === progressSession) {
+        const progress = { level: bot.fetchLevel(), adena: wallet, stats: { exp: bot.fetchExp(), money: context.statsPacket.money } };
+        context.statsPacket.wishSections = { at: Date.now(), wallet, cashBounds: [-1, null], moneyError: -1,
+            funding: Sections.fundingMark(progress), expHour: 1000,
+            horizon: Valuation.stageHours(progress, 1000, persona), incomeError: Sections.incomeError(progress, persona) };
+    }
+    return context;
+};
+const progressTick = () => Hunting.tick(progressSession, actor, {}, { say() {} });
+// L70: the horizon is a soft change; the last actual decision is aged past
+// its 5 min delay instead of waiting in real time.
+const ageDecision = () => { progressSession.coldLifeState.stats.wishSections.at -= Sections.SOFT_DELAY.horizon; };
+progressTick();
+const progressBuilds = builds, progressSeq = progressSession.coldLifeState.stats.decisionSeq;
+assert(.2 > progressSession.coldLifeState.stats.wishSections.incomeError);
+experience += stageRemaining * .02;
+progressTick();
+assert.equal(builds, progressBuilds, 'small native XP reuses the accepted horizon');
+experience += stageRemaining * .18;
+progressTick();
+assert.equal(builds, progressBuilds, 'a horizon change inside 5 min of the decision raises no benefits event');
+ageDecision();
+progressTick();
+assert.equal(level, 39);
+assert.equal(builds, progressBuilds + 1, '20% less remaining stage at the same level refreshes the hot decision');
+assert.equal(progressSession.coldLifeState.stats.decisionSeq, progressSeq + 1);
+progressTick();
+assert.equal(builds, progressBuilds + 1, 'the accepted new horizon is the next anchor, with no repeated roll');
+experience += stageRemaining * .2;
+ageDecision();
+progressTick();
+assert.equal(builds, progressBuilds + 2, 'later meaningful XP is compared with the last accepted horizon');
+Economy.forActor = priorEconomyForActor;
 const fallback = { actor, plan: 'hunting' };
 Events.raiseDecision(fallback, 'revived');
 Hunting.economyForHunt(fallback, actor);
-assert.deepEqual(Object.keys(fallback.decisionStats).sort(), ['activityLeaf', 'decisionSeq']);
+assert.deepEqual(Object.keys(fallback.decisionStats).sort(), ['activityLeaf', 'decisionSeq', 'wishDirty']);
 assert(Events.summary(1, Date.now() + 60000).total >= 6);
 DiagnosticConfig.developerDiagnostics = false;
 const observedClock = Date.now;

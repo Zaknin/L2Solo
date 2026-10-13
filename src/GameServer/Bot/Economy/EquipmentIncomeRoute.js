@@ -1,4 +1,6 @@
 'use strict';
+// Resolved at the first call (cycles); a require per call is a path lookup (L73).
+let SpotEconomics = null;
 
 // Only economic errands may deliberately hunt below the ordinary XP band.
 // Deep-blue drop/spoil penalties still apply in the native reward facts.
@@ -25,28 +27,41 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const costs = Hunt.consumablePrices(state, price);
     const tableRole = spoiler ? 'spoiler' : role === 'melee' || role === 'crafter' ? 'dps' : role === 'nuker' ? 'mage' : role;
-    const evaluate = require('./SpotEconomics').create(state, { timestamp, occupancy, price, moneyWeight: 1 });
+    const evaluate = (SpotEconomics ||= require('./SpotEconomics')).create(state, { timestamp, occupancy, price, moneyWeight: 1 });
     const excluded = Risk.excludedSpotIdsForStates([state], timestamp);
     const options = { timestamp, mode: 'solo', occupancy, matchupProfiles: Match.stateProfiles(state, { timestamp }) };
     const survives = Match.soloSpotUpperBound(options.matchupProfiles);
     const origin = Index.spotById(spots, state.spotId)?.center || state.loc;
     const ids = new Set([state.spotId, ...Hunt.sampledRows(state, timestamp).map(row => row.spotId)]);
     const minGap = -15;
+    // Search-local: null rejects a spot; undefined awaits its first walk factor.
+    const spotFactors = new Map();
     const candidates = shots => {
         for (const row of Table.rankedIncome(tableRole, state.level, costs, minGap, shots,
             { spoilSkillLevel: spoiler?.skillLevel || 0 })) ids.add(row.spotId);
-        return [...ids].map(id => Index.spotById(spots, id)).filter(spot => spot && !spot.raidBoss
-            && Number(spot.avgLevel || spot.minLevel || 1) - state.level >= minGap
-            && !excluded.has(String(spot.id)) && survives(spot)
-            && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot))
-            && Profiles.hasCapacityForStates(spot, [state], occupancy))
+        return [...ids].map(id => Index.spotById(spots, id)).filter(spot => {
+            if (!spot) return false;
+            if (spotFactors.has(spot)) return spotFactors.get(spot) !== null;
+            const allowed = !spot.raidBoss
+                && Number(spot.avgLevel || spot.minLevel || 1) - state.level >= minGap
+                && !excluded.has(String(spot.id)) && survives(spot)
+                && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot))
+                && Profiles.hasCapacityForStates(spot, [state], occupancy);
+            spotFactors.set(spot, allowed ? undefined : null);
+            return allowed;
+        })
             .map(spot => {
                 const row = evaluate(spot, shots);
-                const walkHours = origin && spot.center ? Math.hypot(origin.locX - spot.center.locX,
-                    origin.locY - spot.center.locY) / (120 * 3600) : 0;
+                let walkFactor = spotFactors.get(spot);
+                if (walkFactor === undefined) {
+                    const walkHours = origin && spot.center ? Math.hypot(origin.locX - spot.center.locX,
+                        origin.locY - spot.center.locY) / (120 * 3600) : 0;
+                    walkFactor = 1 + walkHours / 0.5;
+                    spotFactors.set(spot, walkFactor);
+                }
                 // Amortize relocation over a half-hour earning visit. Actual
                 // town fees/time are still charged by the common wish paths.
-                return { spot, row, score: (row?.valueHours || 0) / (1 + walkHours / 0.5) };
+                return { spot, row, score: (row?.valueHours || 0) / walkFactor };
             }).filter(row => row.row?.income > 0 && row.score > 0)
             .sort((a, b) => b.score - a.score || String(a.spot.id).localeCompare(String(b.spot.id)));
     };

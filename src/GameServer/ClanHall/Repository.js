@@ -348,12 +348,6 @@ module.exports = function ({
             protected: c ? protectedAmount(c) : 0
         };
     }
-    function saveGoal(id, goal) {
-        write(
-            `INSERT INTO clan_hall_finances(clanId,stateJson) VALUES (?,?) ON CONFLICT(clanId) DO UPDATE SET stateJson=excluded.stateJson`,
-            [id, JSON.stringify(goal)]
-        );
-    }
     function bid(c, h, amount, timestamp) {
         if (!c || n(c.level) < 2 || n(c.dissolvingExpiryTime) > 0) return { ok: false, code: 'clan_ineligible' };
         if (!h || h.ownerId || h.auctionEndsAt <= timestamp) return { ok: false, code: 'auction_closed' };

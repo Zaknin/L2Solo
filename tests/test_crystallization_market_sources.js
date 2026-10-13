@@ -85,14 +85,17 @@ const crystalPaths = context => context.projection.nodes.find(row => row.key ===
 assert(crystalPaths(expensive).some(row => row.improvement.sourceSelfId === 90));
 offer(166, 206926);
 const cheaper = Economy.forState(state, deps);
-assert(crystalPaths(cheaper).some(row => row.improvement.sourceSelfId === 166),
-    'a newly listed cheap input invalidates the cached review without changing the bot');
-assert(cheaper.network.queue.some(row => {
+assert.deepEqual(cheaper.network.queue, expensive.network.queue,
+    'a new unrelated quote waits through the held decision market delay');
+const refreshed = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 1 });
+assert(crystalPaths(refreshed).some(row => row.improvement.sourceSelfId === 166),
+    'the newly listed cheap input enters at the next decision after the market delay');
+assert(refreshed.network.queue.some(row => {
     const old = expensive.network.queue.find(other => other.key === row.key);
     return old && row.price < old.price;
 }), 'the native full C-goal estimate falls, rather than just a single-batch price');
 offer(166, 206926, 0);
-const depleted = Economy.forState(state, deps);
+const depleted = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 2 });
 assert(!crystalPaths(depleted).some(row => row.improvement.sourceSelfId === 166),
     'quote depletion invalidates the selected crystal path');
 assert.deepEqual(state, before);
