@@ -74,9 +74,10 @@ function initialise() {
 }
 
 function* reservations(state) {
-    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state), plan = state.stats?.equipmentPlan;
+    const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state);
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+    const plan = Disposition.equipmentInputPlan(state);
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
     if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')

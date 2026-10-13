@@ -59,7 +59,9 @@ const DEFAULTS = {
     coldWorkerSnapshotLagAbortMs: 120,
     coldWorkerQueueMaxEntries: 1024,
     coldWorkerQueueMaxBytes: 4 * 1024 * 1024,
-    coldWorkerHeapMb: 256,
+    // A full 1,700-bot world with warm economic caches exceeds 256 MiB
+    // after major GC. Leave headroom for transient planning/clone allocations.
+    coldWorkerHeapMb: 512,
     // Protect the player-facing loop immediately and keep it protected for a
     // short window after disconnect/relog. SimPlayer/BotSession instances do
     // not contribute to this signal.

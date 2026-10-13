@@ -952,6 +952,8 @@ const tests = [
     'tests/test_gear_shot_refill_batch.js',
     'tests/test_shot_craft_demand_batch.js',
     'tests/test_shot_trade_demand.js',
+    'tests/test_trade_intent.js',
+    'tests/test_selected_purchase_meeting.js',
     'tests/test_board_trade_meeting.js',
     'tests/test_trade_meeting_service.js',
     'tests/test_same_point_trade_meetings.js',

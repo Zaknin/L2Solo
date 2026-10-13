@@ -41,6 +41,26 @@ async function run() {
         0, 'an incomplete exchange cannot sell its collected crystals');
     assert.equal(count(state(1458, { equipmentPlan: { strategy: 'craft', status: 'active',
         materials: [{ selfId: 1458, amount: 6 }] } })), 14, 'equipment craft inputs stay reserved');
+    const paused = { ...exchange, status: 'deferred', strategy: 'none', reason: 'wish_focus',
+        target: { selfId: 76, slot: 7 }, exchange: { kind: 'luxury_exchange' } };
+    assert.equal(count(state(1458, { equipmentPlan: paused, wishFocus: ['stock:scrolls', 0, 100] })), 8,
+        'a temporary scroll restock preserves the unfinished personal exchange reserve');
+    assert.equal(count(state(1458, { equipmentPlan: { ...paused, materials: [{ selfId: 1458, amount: 25 }] } })), 0,
+        'all collected crystals remain reserved while a deferred exchange is incomplete');
+    assert.equal(count(state(1458, { equipmentPlan: { ...paused, reason: 'cancelled' } })), 20,
+        'a cancelled plan releases its inputs');
+    assert.equal(count(state(1458, { equipmentPlan: { ...paused, target: { selfId: 80, slot: 7 } } })), 20,
+        'a deferred higher-grade target blocked by the C milestone releases its old reservation');
+    const resumedCraft = { strategy: 'none', status: 'deferred', reason: 'wish_focus', recipeId: 1,
+        target: { selfId: 76, slot: 7 }, materials: [{ selfId: 1458, amount: 6 }] };
+    assert.equal(count(state(1458, { equipmentPlan: resumedCraft })), 14, 'deferred personal craft retains its collected inputs');
+    const sourceIterator = invoke('GameServer/Bot/Population/ColdOccupationSources').reservations(
+        state(1458, { equipmentPlan: paused }));
+    let sourceStep; do { sourceStep = sourceIterator.next(); } while (!sourceStep.done);
+    assert.equal(sourceStep.value[1458], 12, 'worker stock feasibility uses the same deferred exchange reserve');
+    assert.equal(Disposition.reservationInputKey(state(1458, { equipmentPlan: paused })),
+        Disposition.reservationInputKey(state(1458, { equipmentPlan: { ...paused, strategy: 'luxury_exchange', status: 'active' } })),
+        'temporary activity changes do not invalidate the physical input reservation');
     assert.equal(count(state(), { reserved: { 1458: 7 } }), 13, 'selected production inputs stay reserved');
     const stock = state(); stock.inventory[1458].reservedAmount = 9;
     assert.equal(count(stock), 11, 'explicit physical reservations stay owned');
@@ -65,7 +85,7 @@ async function run() {
     await Database.setItem(sellerId, { selfId: 1458, name: 'Crystal: D-Grade', amount: 20, stackable: true });
     for (const id of [sellerId, buyerId]) await Life.upsertState({ ...state(), characterId: id,
         accountName: `bot_crystal_${id}`, inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
-        stats: { classId: 0, money: [1000, 0, 0, 0], ...(id === sellerId ? { equipmentPlan: exchange } : {}) },
+        stats: { classId: 0, money: [1000, 0, 0, 0], ...(id === sellerId ? { equipmentPlan: paused } : {}) },
         vitals: { hp: 100, maxHp: 100 } }, 'fixture');
     async function accept(amount, token) {
         const old = (await Database.fetchAfkTradeShops(buyerId)).filter(row => row.kind === 'buy_ad');

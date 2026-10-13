@@ -414,7 +414,7 @@ class ColdSimulationCoordinator {
         const worker = new this.WorkerClass(this.workerPath, {
             workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true },
             name: 'l2node-cold-simulation',
-            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 256) }
+            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) }
         });
         this.worker = worker;
         Metrics.beginColdSafetyEpoch(this.workerEpoch);

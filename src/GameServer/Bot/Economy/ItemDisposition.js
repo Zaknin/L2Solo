@@ -313,8 +313,23 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     };
 }
 
-function reservedCraftAmounts(state) {
+// A restock pauses execution, not ownership of inputs already collected for
+// the unfinished kit. Legacy paused plans retain their exchange/recipe/combine
+// metadata even though GearPlanSelection records strategy='none'. Resolve a
+// reservation-only view; never reactivate their travel or crafting action.
+function equipmentInputPlan(state) {
     const plan = state?.stats?.equipmentPlan;
+    if (plan?.status !== 'deferred' || plan.reason !== 'wish_focus') return plan;
+    const strategy = plan.exchange?.kind === 'luxury_exchange' ? 'luxury_exchange'
+        : plan.recipeId ? 'craft' : plan.combine ? 'market' : null;
+    if (!strategy || !Number(plan.target?.selfId)) return plan;
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+    const target = templateFor(plan.combine?.resultId || plan.target.selfId);
+    if (!target || !Planner.considerable(target, state) || Planner.equipmentTargetFulfilled(state, plan)) return plan;
+    return { ...plan, strategy, status: 'active' };
+}
+
+function reservedCraftAmounts(state, plan = equipmentInputPlan(state)) {
     if (!['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) || plan.strategy !== 'craft') return {};
     if (plan.clanGoal?.clanId && plan.recipeId) return Object.fromEntries(ClanCrafting.requirements(
         ClanCrafting.resolveRecipe(plan.recipeId), state.inventory, null, 1, plan.craftProviders, plan.componentRecipes));
@@ -336,8 +351,7 @@ function reservedCraftAmounts(state) {
     return reserved;
 }
 
-function reservedCombinationAmounts(state) {
-    const plan = state?.stats?.equipmentPlan;
+function reservedCombinationAmounts(state, plan = equipmentInputPlan(state)) {
     if (!plan?.combine || !['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)) return {};
     return (plan.combine.requirements || []).reduce((reserved, requirement) => {
         const selfId = Number(requirement.selfId || 0);
@@ -391,10 +405,10 @@ function reservedUpgradeAmounts(state) {
 
 function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
-    const craft = options.craft === false ? {} : reservedCraftAmounts(state);
-    const combination = reservedCombinationAmounts(state);
+    const exchange = equipmentInputPlan(state);
+    const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
+    const combination = reservedCombinationAmounts(state, exchange);
     const upgrades = reservedUpgradeAmounts(state);
-    const exchange = state.stats?.equipmentPlan;
     if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
         for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
     for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
@@ -416,7 +430,7 @@ function reservedEquipmentAmounts(state, options = {}) {
 // Only fields read by the reservation owners above. Plan descriptions,
 // observed prices, travel, progress and timestamps cannot change this input.
 function reservationInputKey(state = {}) {
-    const plan = state.stats?.equipmentPlan;
+    const plan = equipmentInputPlan(state);
     const craft = ['active', 'component_ready', 'ready_to_craft'].includes(plan?.status)
         && plan.strategy === 'craft';
     const quantities = rows => (rows || []).map(row => [Number(row.selfId || 0), Number(row.amount || 0)]);
@@ -682,6 +696,7 @@ module.exports = {
     reservedCombinationAmounts,
     reservedCraftAmounts,
     reservedEquipmentAmounts,
+    equipmentInputPlan,
     reservationInputKey,
     saleCandidates,
     selectedCraftAmounts,

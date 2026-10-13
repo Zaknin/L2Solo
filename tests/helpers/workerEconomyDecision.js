@@ -19,6 +19,14 @@ module.exports.nativeTownVisit = async (id, timestamp) => {
     const plan = await kernel.planLifecycle({ state: entry.state, context: entry.context, timestamp });
     return { plan, forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };
+module.exports.nativeMeetingPreparation = async (id, timestamp, request) => {
+    const state = kernel.states.get(Number(id)).state;
+    const own = request.actorA === Number(id) ? 0 : 1;
+    Object.assign(request.parties[own], require('../Economy/EconomyCommit').authority(state));
+    request.parties[own].needRevision = request.parties[own].revision;
+    return { request: await kernel.prepareMeeting(Number(id), request), forbiddenLoaded: Object.keys(require.cache)
+        .filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
+};
 module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = false) => {
     const state = kernel.states.get(Number(id)).state;
     const routeRows = nativeRoutes ? await occupationFor(state, timestamp, kernel.states.get(Number(id)).context, 'wish') : undefined;
@@ -52,12 +60,12 @@ loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.obse
 parentPort.on('message', async message => {
     if (!message.nativeEconomyDecision) return;
     try { parentPort.postMessage({ probeId: message.msgId,
-        value: await loaded.exports[message.townVisit ? 'nativeTownVisit' : message.recipeEarning ? 'nativeRecipeEarning' : 'nativeEconomyDecision'](message.characterId, message.timestamp, message.recipeEarning ? message.refreshEconomy : message.nativeRoutes) }); }
+        value: await loaded.exports[message.meetingRequest ? 'nativeMeetingPreparation' : message.townVisit ? 'nativeTownVisit' : message.recipeEarning ? 'nativeRecipeEarning' : 'nativeEconomyDecision'](message.characterId, message.timestamp, message.meetingRequest || (message.recipeEarning ? message.refreshEconomy : message.nativeRoutes)) }); }
     catch (error) { parentPort.postMessage({ probeId: message.msgId, error: error.stack }); }
 });`;
 
 module.exports = async function workerEconomyDecision(state, { context = {}, timestamp = Date.now(),
-    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false } = {}) {
+    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false, meetingRequest = null } = {}) {
     const epoch = `native:economy-decision:${state.characterId}`;
     const messages = [];
     const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
@@ -96,7 +104,7 @@ module.exports = async function workerEconomyDecision(state, { context = {}, tim
         send('snapshot_page', { rows: [{ state, context }, ...extraStates], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'native-economy'), nativeEconomyDecision: true,
-            characterId: state.characterId, timestamp, recipeEarning, refreshEconomy, nativeRoutes, townVisit });
+            characterId: state.characterId, timestamp, recipeEarning, refreshEconomy, nativeRoutes, townVisit, meetingRequest });
         const response = await wait(message => message.probeId === 'native-economy');
         if (response.error) throw Error(response.error);
         assert.deepEqual(response.value.forbiddenLoaded, [], 'native economy worker loads no World actor/network/database implementation');

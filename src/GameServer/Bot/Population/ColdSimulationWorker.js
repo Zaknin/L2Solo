@@ -249,9 +249,18 @@ const occupationPlanner = new ColdOccupationPlanner({
             for (const line of request.lines) {
                 input.read(line.selfId);
                 if (line.payer === side) {
-                    const intent = intents.find(row => row.itemId === line.selfId && row.amount >= required.get(line.selfId)
-                        && Number(row.worth) >= line.price);
+                    const intent = invoke('GameServer/Bot/Economy/TradeIntent').meetingPurchase(economy.network, intents,
+                        { selfId: line.selfId, count: required.get(line.selfId), price: line.price,
+                            town: request.town, enchant: Number(line.enchant || 0) }, input.state);
                     if (!intent) throw Error('trade_meeting_need_changed');
+                    if (economyDiagnostics.active() && !intents.some(row => row.itemId === line.selfId
+                        && row.amount >= required.get(line.selfId) && Number(row.worth) >= line.price)) {
+                        economyDiagnostics.count('meeting', 'purchase_consent', 'selected_quote');
+                        if (economyDiagnostics.enabled(ownId)) economyDiagnostics.push({ owner: ownId,
+                            trigger: request.token, phase: 'meeting_consent', reason: 'selected_quote',
+                            wishKey: intent.key, item: line.selfId, requested: line.count, unitPrice: line.price,
+                            quote: intents.find(row => row.itemId === line.selfId)?.worth || 0 });
+                    }
                     line.certificate = invoke('GameServer/Bot/Economy/TradeIntent').encode({ ...intent, amount: line.count, price: line.price, valueHours: intent.valueHours * line.count / intent.amount });
                     line.needAdId = line.needAdRevision = 0; own.needRevision = own.revision;
                     // Survival first (each item's kit cost once), the rest by the

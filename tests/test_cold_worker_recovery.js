@@ -45,6 +45,8 @@ function wait(ms) {
         const firstEpoch = coordinator.workerEpoch;
         assert(first, 'coordinator must create one long-lived worker');
         assert.strictEqual(first.options.name, 'l2node-cold-simulation');
+        assert.strictEqual(first.options.resourceLimits.maxOldGenerationSizeMb, 512,
+            'the full-world worker must leave headroom above its retained state and caches');
 
         first.emit('exit', 1);
         assert.strictEqual(coordinator.snapshot().workerRestarts, 1);

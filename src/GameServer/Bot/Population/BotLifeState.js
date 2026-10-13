@@ -1517,6 +1517,10 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
 
 function discardInvalidEquipmentPlans() {
     const timestamp = now();
+    // Wish-network plans persist identity and slot, not redundant catalog
+    // labels. A missing saved name must not erase a valid goal and its inputs.
+    const validTargets = (DataCache.items || []).filter(GearAcquisitionPlanner.isRealCatalogItem)
+        .map(item => Number(item.selfId));
     return Database.execute([
         `UPDATE ${TABLE}
         SET statsJson = json_remove(COALESCE(statsJson, '{}'), '$.equipmentPlan', '$.partyRequest', '$.clanPartyObjective'),
@@ -1524,7 +1528,6 @@ function discardInvalidEquipmentPlans() {
         WHERE json_extract(statsJson, '$.equipmentPlan.target') IS NOT NULL
         AND (
             COALESCE(CAST(json_extract(statsJson, '$.equipmentPlan.target.selfId') AS INTEGER), 0) <= 0
-            OR TRIM(COALESCE(json_extract(statsJson, '$.equipmentPlan.target.name'), '')) IN ('', '0')
             OR (
                 json_extract(statsJson, '$.equipmentPlan.status') = 'active'
                 AND json_extract(statsJson, '$.equipmentPlan.expectedKills') IS NOT NULL
@@ -1534,8 +1537,10 @@ function discardInvalidEquipmentPlans() {
                     OR COALESCE(CAST(json_extract(statsJson, '$.equipmentPlan.clanGoal.clanId') AS INTEGER), 0) > 0
                 )
             )
+            OR CAST(json_extract(statsJson, '$.equipmentPlan.target.selfId') AS INTEGER)
+                NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
         )`,
-        [timestamp, GearAcquisitionPlanner.RATE_MODEL_VERSION]
+        [timestamp, GearAcquisitionPlanner.RATE_MODEL_VERSION, JSON.stringify(validTargets)]
     ]).then((result) => {
         const discarded = Number(result?.affectedRows || 0);
         if (discarded > 0) {

@@ -4,6 +4,7 @@
 // of the wish graph, never a second wallet or a persistent acquisition plan.
 const roots = [null, 'power', 'stock', 'book', 'enchant', 'sa', 'henna', 'status', 'resale'];
 const stockKinds = [null, 'shots', 'potions', 'scrolls'];
+const Funding = require('./PurchaseFunding');
 const integer = n => Number.isSafeInteger(n) && n >= 0;
 // Selected NPC and configured shot quotes already have a native purchase owner.
 // Public BUY ads describe alternative player supply, not a duplicate store job.
@@ -71,7 +72,8 @@ function preparedProject(network, worth, limit) {
             if (id && value > 0 && !nativePurchase(plan)) {
                 const previous = rows.get(id);
                 rows.set(id, { itemId: id, amount: plan.missingAmount + (previous?.amount || 0), worth: worth(id),
-                    kind: wish.object?.kind, key: wish.key, recipeId, valueHours: value + (previous?.valueHours || 0), valueRate: wish.ratio });
+                    kind: wish.object?.kind, key: wish.key, recipeId, valueHours: value + (previous?.valueHours || 0),
+                    valueRate: Funding.significant(wish.ratio) });
             }
             const path = plan.intentionPath || plan, command = path.execution || path;
             const requirements = command.requirements || [];
@@ -84,4 +86,37 @@ function preparedProject(network, worth, limit) {
     }
     return result.slice(0, limit);
 }
-module.exports = { rootTuple, rootKey, encode, decode, project, npcOwnsPurchase, isNativeSource };
+
+// Public willingness prices all missing units. The current funded action has
+// already accepted a concrete finite quote, which can exceed that estimate
+// for a required kit piece. Keep that consent local to meeting preparation;
+// it neither raises standing bids nor authorizes a different or larger buy.
+function meetingPurchase(network, intents, { selfId, count, price, town, enchant = 0 }, state = null) {
+    const ordinary = intents?.find(row => row.itemId === selfId && row.amount >= count && Number(row.worth) >= price);
+    const leaf = network?.activity;
+    if (!network?.quantityPrepared || leaf?.kind !== 'buy' || leaf.activity !== 'shopping'
+        || leaf.sourceType !== 'afk' || leaf.quoted !== true || leaf.executable !== true
+        || leaf.itemId !== selfId || leaf.town !== town || enchant !== 0
+        || !integer(leaf.amount) || leaf.amount <= 0 || !integer(leaf.unitPrice) || leaf.unitPrice <= 0
+        || !integer(count) || count <= 0 || count > leaf.amount || !(leaf.availableUnits >= count)
+        || !integer(price) || price <= 0 || price > leaf.unitPrice) return ordinary || null;
+    const wish = network.queue?.find(row => row.key === leaf.rootKey && row.funded === true);
+    const intent = wish && intents?.find(row => row.key === wish.key && row.itemId === selfId && row.amount >= leaf.amount);
+    if (!intent) return ordinary || null;
+    // A fresh source review can change the hour estimate while the native
+    // row still holds this same goal's funded bucket. Spend at that bucket's
+    // stored priority; another goal's reserve cannot authorize this quote.
+    const packet = state?.stats?.money;
+    let valueRate = intent.valueRate;
+    if (state?.stats?.wishFocus?.[0] === wish.key && Array.isArray(packet)) {
+        for (let at = 4; at + 2 < packet.length; at += 3) {
+            if (Number(packet[at + 2]) === Number(wish.object?.itemId) && packet[at] > 0 && packet[at] >= packet[1]) {
+                valueRate = Number(packet[at]); break;
+            }
+        }
+    }
+    return ordinary?.key === wish.key ? { ...ordinary, valueRate }
+        : { ...intent, amount: leaf.amount, worth: leaf.unitPrice, valueRate,
+            valueHours: intent.valueHours * leaf.amount / intent.amount };
+}
+module.exports = { rootTuple, rootKey, encode, decode, project, meetingPurchase, npcOwnsPurchase, isNativeSource };
