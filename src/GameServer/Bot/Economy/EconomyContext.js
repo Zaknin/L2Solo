@@ -144,7 +144,9 @@ function inputKey(state, deps = {}) {
 }
 // Every section keeps only its used inputs. Current combat resources and
 // financial facts do not invalidate a sword's benefit or its source graph.
-function sectionKeys(state, deps = {}, bands = []) {
+// A caller reads one part: the build compares only its source sections, the
+// verdict and the fence only the structure, so the other key is not built (L73).
+function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
     const stats = state.stats || {}, inventory = { ...state.inventory };
     const role = state.party?.role || stats.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(stats.classId || 0);
     const partyId = Number(state.party?.partyId || state.partyId || 0);
@@ -175,10 +177,10 @@ function sectionKeys(state, deps = {}, bands = []) {
         stats: { ...stats, role, clanId: Number(stats.clanId ?? state.clanId ?? 0),
             karma: stats.karma ?? 0, decisionSeq: 0, activityLeaf: 0, exp: 0, huntEfficiency: [] } };
     const build = Sections.capability(state, deps.timestamp);
-    const structural = `${inputKey(stable, deps)}|${build}|${JSON.stringify([
+    if (part === 'structural') return { build, structural: `${inputKey(stable, deps)}|${build}|${JSON.stringify([
         calculationPlan, stats.craftStationId, stats.persona, Number(stats.spotRisk?.windowDeaths || 0),
         state.marketTrades, stats.marketTrades, stats.relations,
-        stats.production, role, state.accountName])}`;
+        stats.production, role, state.accountName])}` };
     const sourceStable = { ...stable, inventory: Object.fromEntries(Object.entries(inventory)
         .filter(([, row]) => row.equipped || row.equippedCount)), stats: { ...stable.stats, memoryRevision: 0 } };
     const sourceKey = `${inputKey(sourceStable, { ...deps, memory: null })}|${build}|${Sections.hash([
@@ -191,7 +193,7 @@ function sectionKeys(state, deps = {}, bands = []) {
         stats.money ? [stats.money[0], Number(stats.money[3]) > 0] : stats.wishFocus?.[2],
         stats.exp ?? state.exp,
         Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0])}`;
-    return { build, structural, sources: sourceKey };
+    return { build, sources: sourceKey };
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised; location, region and the travel target stay
@@ -762,7 +764,7 @@ function forState(state = {}, deps = {}) {
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
             fenceData: { sections: held.sections, reads: held.reads, spots: held.spotReads } });
     }
-    const sections = sectionKeys(state, { ...deps, timestamp });
+    const sections = sectionKeys(state, { ...deps, timestamp }, [], 'sources');
     const started = diagnostic ? performance.now() : 0;
     // Identity replacement is the worker's technical safety backstop, not an
     // economic event. An input-key mismatch is named as a dependency change;
@@ -824,8 +826,8 @@ function forState(state = {}, deps = {}) {
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
         // Every evaluated source participates in admission/ranking, including a losing candidate.
-        sourceSpot: id => { spotReads.set(id, occupancyToken(deps, id));
-            for (const local of nodeScopes) local.spots.set(id, occupancyToken(deps, id)); },
+        sourceSpot: id => { const token = occupancyToken(deps, id); spotReads.set(id, token);
+            for (const local of nodeScopes) local.spots.set(id, token); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
             bag: id => { if (!(Number(id) > 0)) return;

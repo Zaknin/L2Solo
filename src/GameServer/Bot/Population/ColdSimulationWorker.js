@@ -69,10 +69,15 @@ const stubs = new Map([
         townOffers: npcShopTables.townOffers }]
 ]);
 
+// A name passes the boundary check once; hot paths call invoke() per decision.
+const allowedModules = new Set();
 global.invoke = (module) => {
     if (stubs.has(module)) return stubs.get(module);
-    if (forbidden.test(String(module || ''))) {
-        throw new Error(`cold worker forbidden dependency: ${module}`);
+    if (!allowedModules.has(module)) {
+        if (forbidden.test(String(module || ''))) {
+            throw new Error(`cold worker forbidden dependency: ${module}`);
+        }
+        if (typeof module === 'string') allowedModules.add(module);
     }
     return originalInvoke(module);
 };

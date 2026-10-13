@@ -10,6 +10,8 @@
 const { isMainThread } = require('node:worker_threads');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+// Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
+let CraftInputReservations = null, PurchaseFunding = null, DecisionSections = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -259,13 +261,13 @@ function capture(economy, state, seen = state) {
     if (economy?.network?.quantityPrepared) for (const row of queue) visit(row.plan);
     const activity = leaf ? new CompactActivity(leaf) : null;
     if (activity) {
-        const reserved = require('../Economy/CraftInputReservations').selectedCraftAmounts(seen, economy?.network);
+        const reserved = (CraftInputReservations ||= require('../Economy/CraftInputReservations')).selectedCraftAmounts(seen, economy?.network);
         const rows = Object.entries(reserved).filter(([, amount]) => amount > 0).map(([id, amount]) => [Number(id), amount]);
         if (rows.length) activity.craftReservations = rows;
     }
     if (activity?.activity === 'shopping') {
         activity.heldAtDecision = heldFor(seen, activity.itemId);
-        const r = require('../Economy/PurchaseFunding').rootRatio(wish);
+        const r = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).rootRatio(wish);
         if (r > 0) activity.r = r;
     }
     let clan = null;
@@ -397,7 +399,7 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity) || !options.afterResult && state.activity === 'traveling'
         && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return false;
-    const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
     if (Sections.capability(state, timestamp) !== baseline.build) return false;
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
@@ -416,7 +418,7 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
         key: stateKey(state), flags: 0 });
     const economy = view(state, decision, deps, current());
     economy.inputKey = String(decision.inputHash);
-    economy.wallet = require('../Economy/PurchaseFunding').budget(state, deps.buyOrderEscrow);
+    economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
         stockTargets: state.stats.stockTargets, wishSections: state.stats.wishSections, wishDirty: 0 };

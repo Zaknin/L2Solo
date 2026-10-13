@@ -343,12 +343,15 @@ try {
             const exclusionKeys = Economy.sectionKeys(subject, options);
             const expiredKeys = Economy.sectionKeys(subject, { ...options, timestamp: expiry });
             assert.equal(exclusionKeys.structural, expiredKeys.structural, 'source expiry does not change decision scheduling dependencies');
-            assert.notEqual(exclusionKeys.sources, expiredKeys.sources, 'source dependencies read the active exclusion set at review time');
+            assert.equal(exclusionKeys.sources, undefined, 'a structural reader does not build the source key');
+            assert.notEqual(Economy.sectionKeys(subject, options, [], 'sources').sources,
+                Economy.sectionKeys(subject, { ...options, timestamp: expiry }, [], 'sources').sources,
+                'source dependencies read the active exclusion set at review time');
             const reordered = { ...subject, stats: { ...subject.stats, capacityBackoffs: [
                 { spotId: 'unused-b', until: expiry }, { spotId: 'unused-a', until: expiry }] } };
-            assert.equal(Economy.sectionKeys(reordered, options).sources,
+            assert.equal(Economy.sectionKeys(reordered, options, [], 'sources').sources,
                 Economy.sectionKeys({ ...reordered, stats: { ...reordered.stats,
-                    capacityBackoffs: reordered.stats.capacityBackoffs.slice().reverse() } }, options).sources,
+                    capacityBackoffs: reordered.stats.capacityBackoffs.slice().reverse() } }, options, [], 'sources').sources,
                 'exclusion ordering does not invalidate identical route inputs');
             const warm = Economy.forState(subject, options);
             assert.equal(source(warm), 'source-slow', 'the warm native source graph excludes the faster ground');

@@ -4,6 +4,8 @@
 // things. Only these compact boundaries belong to the saved decision; graphs
 // stay in EconomyContext's existing bounded working cache.
 const { fnv1a32 } = require('../Fnv1a');
+// Resolved at the first call (cycles); a require per call is a path lookup (L73).
+let PurchaseFunding = null, EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
 function capability(state, timestamp = Date.now()) {
@@ -17,7 +19,7 @@ function fundingMark(state) {
     const wallet = positive(state.adena) - positive(packet[2]);
     const funded = [];
     for (let at = 5; at < packet.length; at += 3) funded.push(wallet >= positive(packet[at]));
-    return hash([wallet >= 0, ...funded, require('./PurchaseFunding').moneyReached(state)]);
+    return hash([wallet >= 0, ...funded, (PurchaseFunding ||= require('./PurchaseFunding')).moneyReached(state)]);
 }
 function crosses(wallet, baseline) {
     const [low, high] = baseline?.cashBounds || [-1, null];
@@ -112,7 +114,7 @@ function semanticFacts(state, timestamp) {
 }
 function horizonChanged(state, baseline, expPerHour, persona) {
     if (!baseline) return true;
-    const horizon = require('./EconomicValuation').stageHours(state, expPerHour, persona);
+    const horizon = (EconomicValuation ||= require('./EconomicValuation')).stageHours(state, expPerHour, persona);
     return Math.abs(horizon - Number(baseline.horizon || 0)) > Math.abs(Number(baseline.horizon || 0)) * positive(baseline.incomeError);
 }
 function horizonEvent(state, baseline, expPerHour, persona, timestamp) {

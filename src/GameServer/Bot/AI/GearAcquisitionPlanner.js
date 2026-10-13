@@ -33,6 +33,8 @@ const GearLifecycle = invoke('GameServer/Bot/AI/GearLifecycle');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const OfferOrder = require('../Economy/OfferOrder');
 const SpotIndex = require('./SpotIndex');
+// Resolved at the first call (cycles); a require per call is a path lookup (L73).
+let SpotEconomics = null;
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
@@ -2079,7 +2081,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const timestamp = options.timestamp ?? Date.now();
     const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
     const spotValue = options.spotValue
-        || require('../Economy/SpotEconomics').create(state, { timestamp, occupancy: options.occupancy });
+        || (SpotEconomics ||= require('../Economy/SpotEconomics')).create(state, { timestamp, occupancy: options.occupancy });
     const trips = options.trips || new Map();
     const current = String(state.stats?.travel?.spotId || state.spotId || null);
     const bestForWish = options.bestForWish;

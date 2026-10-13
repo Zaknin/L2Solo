@@ -1,4 +1,6 @@
 'use strict';
+// Resolved at the first call (cycles); a require per call is a path lookup (L73).
+let SpotEconomics = null;
 
 // Only economic errands may deliberately hunt below the ordinary XP band.
 // Deep-blue drop/spoil penalties still apply in the native reward facts.
@@ -25,7 +27,7 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const costs = Hunt.consumablePrices(state, price);
     const tableRole = spoiler ? 'spoiler' : role === 'melee' || role === 'crafter' ? 'dps' : role === 'nuker' ? 'mage' : role;
-    const evaluate = require('./SpotEconomics').create(state, { timestamp, occupancy, price, moneyWeight: 1 });
+    const evaluate = (SpotEconomics ||= require('./SpotEconomics')).create(state, { timestamp, occupancy, price, moneyWeight: 1 });
     const excluded = Risk.excludedSpotIdsForStates([state], timestamp);
     const options = { timestamp, mode: 'solo', occupancy, matchupProfiles: Match.stateProfiles(state, { timestamp }) };
     const survives = Match.soloSpotUpperBound(options.matchupProfiles);

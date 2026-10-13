@@ -1,5 +1,6 @@
 'use strict';
 const { isMainThread } = require('node:worker_threads');
+let ItemTemplateIndex = null;
 const records = new Map(), pending = new Set();
 let source = id => records.get(id), initialized = false, draining = false, revision = 0;
 let ready = null;
@@ -54,7 +55,7 @@ async function initialize() {
 }
 function inventory(state) {
     const row = source(Number(state?.characterId));
-    const Data = invoke('GameServer/DataCache'), Index = require('../../Item/ItemTemplateIndex');
+    const Data = invoke('GameServer/DataCache'), Index = ItemTemplateIndex ||= require('../../Item/ItemTemplateIndex');
     const result = {};
     for (const [id, amount, enchant] of row?.[2] || []) {
         const item = Index.find(Data.items, id);
