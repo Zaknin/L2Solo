@@ -711,11 +711,12 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
     if (!owner?.context || !Object.isExtensible(owner.context)) return;
     const current = kernel.states.get(Number(owner.state.characterId));
     if (current?.state !== owner.state || current.context !== owner.context) return;
-    // The fence must describe this exact state (activity included). A read
+    // The fence must describe this exact state; the build activity and a
+    // trip to the held leaf's own spot compare as in the card (L70). A read
     // market token already deferred by the reused plan stays soft (L70).
     if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
-        .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections,
-            timestamp: Number(deps.timestamp || Date.now()) }))) advisory = null;
+        .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections, activity: advisory.activity,
+            leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()) }))) advisory = null;
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
     });
@@ -1122,7 +1123,8 @@ function startKernel(config = {}) {
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
-            rememberWishAdvisory(kernel.states.get(Number(state.characterId)), ColdEconomyDecision.advisory(economy, seen), seen, deps);
+            rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
+                ColdEconomyDecision.advisory(economy, seen, preparationState.activity), seen, deps);
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,

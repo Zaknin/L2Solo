@@ -92,6 +92,35 @@ try {
         assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
             at(T + 1000), { afterResult: true }), null, 'a location change stays exact');
     }
+    // (h) a trip to the held hunting leaf's own spot executes the plan: no
+    // event; a trip to another spot or a town stays exact (lever 2).
+    {
+        const { state, economy, accepted } = decided(93011);
+        const leaf = accepted.card.activity;
+        assert(leaf && leaf.activity === 'hunting' && leaf.spotId != null, 'fixture: a hunting leaf at a spot');
+        const trip = (spotId, extra = {}) => ({ ...state, activity: 'traveling', updatedAt: state.updatedAt + 1,
+            stats: { ...state.stats, travel: { from: { ...state.loc }, to: { locX: 81000, locY: 149000, locZ: -3500 }, spotId,
+                regionName: 'Hunting Ground', arrivalActivity: 'hunting', townName: null, method: 'gatekeeper_spot',
+                startedAt: T, arrivalAt: T + 10 * MINUTE, ...extra } } });
+        const own = trip(leaf.spotId);
+        let before = builds;
+        assert.strictEqual(Economy.forState(own, at(T + 1000)).plan, economy.plan, 'the cache keeps the plan on its own trip');
+        assert.equal(builds, before);
+        assert.equal(Economy.calculationHolds(own, accepted.fence, at(T + 1000)), false,
+            'without the card options the proof stays exact');
+        assert(Economy.calculationHolds(own, accepted.fence, at(T + 1000), { activity: 'hunting', leaf }),
+            'the build activity and the own leaf accept the trip start');
+        Economy.forgetContext(state.characterId);
+        assert(Decisions.refreshAdvisory(own, accepted, at(T + 1000)), 'before an action the own trip keeps the card');
+        assert(Decisions.refreshAdvisory(own, accepted, at(T + 1000), { afterResult: true }), 'after a result as well');
+        assert.equal(Decisions.refreshAdvisory(trip(`${leaf.spotId}_other`), accepted, at(T + 1000)), null,
+            'a trip to another spot rebuilds');
+        assert.equal(Decisions.refreshAdvisory(trip(leaf.spotId, { townName: 'Giran', arrivalActivity: 'shopping' }), accepted,
+            at(T + 1000)), null, 'a town trip rebuilds');
+        assert.equal(Decisions.refreshAdvisory({ ...own, activity: 'hunting', spotId: leaf.spotId,
+            loc: own.stats.travel.to, stats: { ...own.stats, travel: null } }, accepted, at(T + 1000), { afterResult: true }),
+        null, 'the arrival (location and spot) stays exact');
+    }
     // (b) hard events rebuild at once.
     {
         const { state, economy } = decided(93002, 1e6);
@@ -221,7 +250,7 @@ try {
         assert(Sections.softDue(wishSections, 'observation', T + 5 * MINUTE));
         assert.equal(Sections.softDue(wishSections, 'market', T + 9 * MINUTE), false);
     }
-    console.log('PASS L70 held plan: own result reuse and restamp, hard events, soft market delay, reconcile kept, shared money verdict');
+    console.log('PASS L70 held plan: own result reuse and restamp, own-spot trip, hard events, soft market delay, reconcile kept, shared money verdict');
 } finally {
     Providers.build = originalBuild;
     fs.rmSync(dir, { recursive: true, force: true });

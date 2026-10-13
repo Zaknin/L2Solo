@@ -195,11 +195,18 @@ function sectionKeys(state, deps = {}, bands = []) {
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised; location, region and the travel target stay
-// exact inside Trip.key, so 'to town' never matches 'to a spot'.
+// exact inside Trip.key, so 'to town' never matches 'to a spot'. One trip
+// is the plan itself: a hunter or rester leaving for its held hunting
+// leaf's own spot. Only that trip record is dropped from the comparison;
+// a trip to any other spot or a town, and the arrival, stay exact.
 const FIELD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling']);
-function fieldActivity(state, activity) {
-    return activity && activity !== state.activity && FIELD_ACTIVITIES.has(activity) && FIELD_ACTIVITIES.has(state.activity)
-        ? { ...state, activity } : state;
+function fieldActivity(state, activity, leaf = null) {
+    if (!activity || activity === state.activity || !FIELD_ACTIVITIES.has(activity) || !FIELD_ACTIVITIES.has(state.activity)) return state;
+    const travel = state.stats?.travel;
+    return travel && state.activity === 'traveling' && leaf?.activity === 'hunting' && leaf.spotId != null
+        && travel.spotId != null && String(travel.spotId) === String(leaf.spotId)
+        && travel.arrivalActivity === 'hunting' && travel.townName == null
+        ? { ...state, activity, stats: { ...state.stats, travel: null } } : { ...state, activity };
 }
 function bandsHold(state, bands = []) {
     for (const [id, low, high] of bands) {
@@ -239,7 +246,7 @@ function decisionHolds(state, held, timestamp, deps, deferred = null) {
     if (!sameDecision || !heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred)) return false;
     const bands = held.plan.quantityBands || [];
-    if (!bandsHold(state, bands) || fnv1a32(sectionKeys(fieldActivity(state, held.activity),
+    if (!bandsHold(state, bands) || fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
         { ...deps, timestamp }, bands).structural) !== held.bandHash) return false;
     const safety = bagSafety(state, timestamp), heldSafety = held.plan.bagSafety;
     return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
@@ -396,8 +403,9 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
         const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
         if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;
     }
-    // options.activity is the fence's own build activity, so one key compares.
-    if (key !== sectionKeys(fieldActivity(state, options.activity), deps, bands).structural) return false;
+    // options.activity is the fence's own build activity, so one key compares;
+    // options.leaf is its held leaf (a trip to the leaf's own spot).
+    if (key !== sectionKeys(fieldActivity(state, options.activity, options.leaf), deps, bands).structural) return false;
     const reads = new Map();
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;

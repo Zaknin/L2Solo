@@ -367,13 +367,15 @@ function economyFor(state, deps = {}) {
 // A compact accepted decision is advisory calculation data, never a lease,
 // quote or permission to spend. Keep it at the existing worker entry owner;
 // there is no saved per-bot graph and no second decision map.
-function advisory(economy, state) {
+// activity: the state the economy was built on, when the published state
+// already left it (a trip started after the build).
+function advisory(economy, state, activity = state.activity) {
     const card = capture(economy, state);
     const fence = economy?.calculationFence;
     if (!(fence instanceof Uint8Array)) return null;
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
-        activityLeaf: Number(state.stats?.activityLeaf || 0), activity: state.activity, mp: Number(state.vitals?.mp) };
+        activityLeaf: Number(state.stats?.activityLeaf || 0), activity, mp: Number(state.vitals?.mp) };
 }
 // The bot's own hunting/resting/travelling inside one decision is not an
 // event (L70). After a result the card is only restamped and published.
@@ -401,7 +403,7 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
     if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps)) return false;
-    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, baseline, timestamp, countDeferral: true })
+    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true })
         && Economy.acceptedActivityHolds(state, leaf, deps, current);
 }
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
