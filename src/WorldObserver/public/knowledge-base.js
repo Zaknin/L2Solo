@@ -1,3 +1,4 @@
+/* global WorldObserverFormat */
 const Router = window.WorldObserverSpaRouter;
 
 const state = {

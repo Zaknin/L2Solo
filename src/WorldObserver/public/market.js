@@ -1,5 +1,5 @@
 /* eslint-env browser */
-/* global MarketModel */
+/* global MarketModel, WorldObserverFormat */
 
 const marketState = {
     data: null,

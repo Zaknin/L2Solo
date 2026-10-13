@@ -1,3 +1,4 @@
+/* global WorldObserverFormat */
 const ActorFilters = window.WorldObserverActorFilters;
 const Leaderboards = window.WorldObserverLeaderboards;
 const WorldState = window.WorldObserverWorldState;
