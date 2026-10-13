@@ -106,8 +106,11 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
+let StarterItemCatalog = null; // loaded on first use, as the inline require did, then kept
+
 function isStarterEquipment(item, template = templateFor(item?.selfId)) {
-    const starterItemIds = require('../../Knowledge/StarterItemCatalog').snapshotIds(DataCache.newbieItems, isStarterEquipment);
+    StarterItemCatalog ||= require('../../Knowledge/StarterItemCatalog');
+    const starterItemIds = StarterItemCatalog.snapshotIds(DataCache.newbieItems, isStarterEquipment);
     return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
 }
 
