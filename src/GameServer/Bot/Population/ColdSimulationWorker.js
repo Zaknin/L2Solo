@@ -235,7 +235,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             // Fresh physical incoming is delivered in the native owner snapshot.
             // Reuse the bounded graph/seed; no price or private plan from another actor.
             const economy = Context.forState(input.state, { board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
-                timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: { known: true, recipeId: 0, incomePerHour: 0 },
+                timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 },
                 buyOrderEscrow: input.buyOrderEscrow, npcOffersFor: OccupationSources.npcOffersFor,
                 caller: 'meeting_prepare', trigger: request.token });
             yield 'candidate';
@@ -322,7 +322,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             input.economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(input.state, {
                 board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
-                buyOrderEscrow: input.buyOrderEscrow, workshop: { known: true, recipeId: 0, incomePerHour: 0 },
+                buyOrderEscrow: input.buyOrderEscrow, workshop: { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 },
                 caller: 'economy_refresh', trigger: 'native_own_action' });
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
