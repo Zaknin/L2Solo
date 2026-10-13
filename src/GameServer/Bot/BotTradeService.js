@@ -149,6 +149,12 @@ function tradeIsOpen(trade) {
         cancelTrade(trade, 'missing_actor');
         return false;
     }
+    // The trade belongs to the characters that opened it; a session that now
+    // plays another character gets no packet about it.
+    if (trade.playerSession.actor !== trade.playerActor || trade.botSession.actor !== trade.botActor) {
+        cancelTrade(trade, 'actor_changed', trade.playerSession.actor === trade.playerActor);
+        return false;
+    }
     if (trade.playerSession.actor.fetchIsOnline?.() === false || trade.botSession.actor.fetchIsOnline?.() === false) {
         cancelTrade(trade, 'disconnected');
         return false;
@@ -196,6 +202,8 @@ function createTrade(playerSession, botSession, direction, metadata = {}) {
         direction,
         playerSession,
         botSession,
+        playerActor: playerSession.actor,
+        botActor: botSession.actor,
         playerItems: new Map(),
         botItems: new Map(),
         playerConfirmed: false,
@@ -459,6 +467,8 @@ function transferEntries(trade) {
             direction: 'player_to_bot',
             fromSession: trade.playerSession,
             toSession: trade.botSession,
+            fromActor: trade.playerActor,
+            toActor: trade.botActor,
             line
         });
     }
@@ -467,25 +477,36 @@ function transferEntries(trade) {
             direction: 'bot_to_player',
             fromSession: trade.botSession,
             toSession: trade.playerSession,
+            fromActor: trade.botActor,
+            toActor: trade.playerActor,
             line
         });
     }
     return entries;
 }
 
+// The database moved the items between the characters remembered before the
+// wait. Memory is updated only for a side whose session still plays that
+// character: a replaced actor is never saved again (item writes are keyed by
+// the session's current actor and a reselected character loads from the
+// database), and a new actor must not receive another character's items.
 function applyLocalTransfers(moved, entries) {
-    const byKey = new Map(entries.map((entry) => [`${entry.fromSession.actor.fetchId()}:${entry.line.objectId}`, entry]));
+    const byKey = new Map(entries.map((entry) => [`${entry.fromActor.fetchId()}:${entry.line.objectId}`, entry]));
     moved.forEach((record) => {
         const entry = byKey.get(`${record.fromCharacterId}:${record.sourceItemId}`);
         if (!entry) return;
-        const sourceItems = entry.fromSession.actor.backpack.items || entry.fromSession.actor.backpack.fetchItems();
-        const sourceItem = sourceItems.find((item) => Number(item.fetchId()) === Number(record.sourceItemId));
-        if (sourceItem) {
-            if (Number(record.remaining) > 0) sourceItem.setAmount(Number(record.remaining));
-            else entry.fromSession.actor.backpack.items = sourceItems.filter((item) => Number(item.fetchId()) !== Number(record.sourceItemId));
+        if (entry.fromSession.actor === entry.fromActor) {
+            const sourceBackpack = entry.fromActor.backpack;
+            const sourceItems = sourceBackpack.items || sourceBackpack.fetchItems();
+            const sourceItem = sourceItems.find((item) => Number(item.fetchId()) === Number(record.sourceItemId));
+            if (sourceItem) {
+                if (Number(record.remaining) > 0) sourceItem.setAmount(Number(record.remaining));
+                else sourceBackpack.items = sourceItems.filter((item) => Number(item.fetchId()) !== Number(record.sourceItemId));
+            }
         }
 
-        const targetBackpack = entry.toSession.actor.backpack;
+        if (entry.toSession.actor !== entry.toActor) return;
+        const targetBackpack = entry.toActor.backpack;
         const existing = entry.line.stackable
             ? targetBackpack.fetchItemFromSelfId?.(entry.line.selfId)
             : null;
@@ -575,8 +596,8 @@ function prepareCommit(trade) {
     }
 
     const databaseTransfers = entries.map((entry) => ({
-        fromCharacterId: entry.fromSession.actor.fetchId(),
-        toCharacterId: entry.toSession.actor.fetchId(),
+        fromCharacterId: entry.fromActor.fetchId(),
+        toCharacterId: entry.toActor.fetchId(),
         sourceItemId: entry.line.objectId,
         selfId: entry.line.selfId,
         amount: entry.line.count,
@@ -616,6 +637,10 @@ async function finishCommit(trade, playerSession, entries, databaseTransfers) {
         direction: trade.direction,
         negotiationId: trade.negotiationId || null,
         partnerSession: trade.botSession,
+        // A side whose session plays another character now: the caller sends
+        // that session nothing about this trade.
+        playerActorChanged: trade.playerSession.actor !== trade.playerActor,
+        botActorChanged: trade.botSession.actor !== trade.botActor,
         moved: publicMoved(entries)
     };
     recordSupplyTrade(trade, 'completed', 'native_trade_commit', true, {
