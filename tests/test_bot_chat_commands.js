@@ -71,6 +71,7 @@ const originalSetTimeout = global.setTimeout;
 const originalRecordEvent = BotSocialMemory.recordEvent;
 const originalSkillExec = Generics.skillExec;
 const originalBotTell = BotManager.botTell;
+const originalBotSay = BotManager.botSay;
 const originalBuffQuote = BuffService.quote;
 
 try {
@@ -215,6 +216,28 @@ try {
         detail: 'chat'
     }], 'direct insult should be recorded only for the targeted bot');
 
+    // The disabled-LLM greeting fallback must match whole words only:
+    // "this" contains "hi" and "купи" contains "ку", but neither greets.
+    const greetBot = fakeActor(2000014, 'GreetBot', { locX: 100 });
+    const greetSession = fakeSession('bot_greet', greetBot);
+    const greetings = [];
+    BotManager.sessions = [greetSession];
+    player.fetchDestId = () => 0;
+    BotManager.botSay = (sourceSession, _text, targetSession) => greetings.push({ sourceSession, targetSession });
+    for (const greeting of ['hi', 'hi!', 'привет all', 'ку', 'Hello']) {
+        greetings.length = 0;
+        BotManager.handlePlayerSpeak(playerSession, { text: greeting });
+        assert.strictEqual(greetings.length, 1, `"${greeting}" should still get a greeting reply`);
+        assert.strictEqual(greetings[0].sourceSession, greetSession);
+        assert.strictEqual(greetings[0].targetSession, playerSession);
+    }
+    for (const notGreeting of ['this', 'купи', 'which']) {
+        greetings.length = 0;
+        BotManager.handlePlayerSpeak(playerSession, { text: notGreeting });
+        assert.strictEqual(greetings.length, 0, `"${notGreeting}" contains a greeting substring but is not a greeting`);
+    }
+    BotManager.botSay = originalBotSay;
+
     console.log('Bot chat command checks passed');
 } finally {
     BotManager.sessions = originalSessions;
@@ -222,6 +245,7 @@ try {
     BotSocialMemory.recordEvent = originalRecordEvent;
     Generics.skillExec = originalSkillExec;
     BotManager.botTell = originalBotTell;
+    BotManager.botSay = originalBotSay;
     BuffService.quote = originalBuffQuote;
     if (options.default.OpenRouter) options.default.OpenRouter.enabled = originalOpenRouterEnabled;
     options.default.AI = originalAI;

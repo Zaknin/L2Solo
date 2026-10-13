@@ -35,6 +35,9 @@ const BotClassProgression = invoke('GameServer/Bot/BotClassProgression');
 const BOTS_TO_SPAWN = BotPopulation.buildStarterBots();
 const DIRECT_SUPPORT_RANGE = 900;
 const INSULT_PATTERN = /\b(noob|idiot|stupid|trash|useless|suck|sucks)\b|(?:дурак|дура|тупой|тупая|лох|нуб|мусор|бесполезн)/i;
+// Whole-word greetings only ("this" is not "hi", "купи" is not "ку").
+// \b does not see Cyrillic letters, so word edges are Unicode letters/digits.
+const GREETING_PATTERN = /(^|[^\p{L}\p{N}])(hi|hello|привет|ку)(?![\p{L}\p{N}])/iu;
 
 const MERCHANT_BOTS = Object.keys(MerchantConfigs).map(name => {
     const cfg = MerchantConfigs[name];
@@ -1153,7 +1156,7 @@ const BotManager = {
                 }, 500 + Math.random() * 500);
             }
 
-            else if (text.includes("hi") || text.includes("hello") || text.includes("привет") || text.includes("ку")) {
+            else if (GREETING_PATTERN.test(text)) {
                 handledByRule = true;
                 setTimeout(() => {
                     const currentPlan = session.plan || 'hunting';
