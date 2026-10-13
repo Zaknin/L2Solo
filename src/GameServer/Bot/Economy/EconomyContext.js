@@ -385,7 +385,7 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;
     if (!Object.hasOwn(options, 'baseline') || Sections.softDue(options.baseline, 'market', options.timestamp ?? Date.now())) return false;
-    if (Diagnostics.active()) Diagnostics.count('context', 'soft_deferred', 'market');
+    if (Diagnostics.active()) Diagnostics.count('advisory', 'soft_deferred', 'market');
     return true;
 }
 // A retained leaf is calculation data. Recheck its native source, physical
