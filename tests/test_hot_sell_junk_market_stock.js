@@ -1,4 +1,5 @@
 const assert = require('assert');
+const world = require('./fixtures/native_stock_world')();
 
 require('../src/Global');
 
@@ -11,6 +12,7 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const ServerResponse = invoke('GameServer/Network/Response');
 const SellJunk = invoke('GameServer/World/Generics/NpcBypasses/SellJunk');
 const ScrollStock = invoke('GameServer/Bot/Travel/ScrollStock');
+const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
 
 // A bot's "Sell Unequipped Junk" sells what the cold town visit sells to the
 // NPC (one rule for hot and cold bots, MarketListingPolicy.npcSaleForActor):
@@ -44,7 +46,7 @@ function item(id, selfId, amount) {
         fetchSelfId: () => selfId,
         fetchAmount: () => amount,
         setAmount: (value) => { amount = value; },
-        fetchPrice: () => 100,
+        fetchPrice: () => Number(template.template.price),
         fetchName: () => `Item ${selfId}`,
         fetchKind: () => template?.template?.kind || '',
         fetchStackable: () => true,
@@ -82,9 +84,11 @@ async function sellJunk(accountId, crafter, knownRecipeIds = []) {
         },
         fetchItems() { return this.items; }
     };
-    // ARCH-NOTE: pin a native potion-consuming spot, since the best-income fallback has zero potion use.
+    // Prepare the same physical seller and native route used by the hot sale.
     const session = { accountId, actor: actor(backpack, crafter), currentSpot: { id: '-10_30' },
-        coldLifeState: { characterId: 77, phase: 'hot', spotId: '-10_30', stats: {} }, dataSendToMe() {} };
+        coldLifeState: { characterId: 77, phase: 'hot', spotId: '-10_30', activity: 'shopping',
+            currentRegion: 'Giran', loc: world.town(), stats: {} }, dataSendToMe() {} };
+    world.economyFor(MarketListingPolicy.actorState(session));
     await SellJunk(session, ['sell-junk']);
     await new Promise((resolve) => setImmediate(resolve));
     return { left: backpack.items.map((entry) => [entry.fetchSelfId(), entry.fetchAmount()]), actor: session.actor, learned, potionTarget };
@@ -109,14 +113,10 @@ async function run() {
     // One decision point for each sale: the clock stands still in this test.
     const frozen = 1800000000000;
     Date.now = () => frozen;
-    const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
-    MarketCounters.reset();
-    for (let deal = 0; deal < 40; deal++) {
-        const at = Date.now() - (40 - deal) * 60000;
-        MarketCounters.deal(ANIMAL_BONE, 2000, 5, at, 1);
-        MarketCounters.deal(D_RECIPE, 60000, 1, at, 1);
-        MarketCounters.deal(ENCHANT_ARMOR_D, 150000, 1, at, 1);
-    }
+    Database.init();
+    assert(Database.isReady());
+    world.usePotionSpot();
+    await world.buyer([[D_RECIPE, 1], [ANIMAL_BONE, 5], [ENCHANT_ARMOR_D, 1], [MATERIAL_RECIPE, 1]], 77);
     Database.deleteItem = () => Promise.resolve();
     Database.updateItemAmount = () => Promise.resolve();
     const materialRecipeId = Number(ItemDisposition.recipeInfo({ selfId: MATERIAL_RECIPE }).recipe.recipeId);
@@ -130,8 +130,7 @@ async function run() {
 
     const botSale = await sellJunk('bot_hot_hunter');
     const keep = HealingPotionStock.targetAmountFor({ level: 30, spotId: '-10_30', stats: { classId: 0 } });
-    // ARCH-NOTE: E9 no-history T=24h at this native spot gives 82 potions,
-    // so sell an actual target+20 stack instead of assuming target<30.
+    // Sell an actual target+20 stack under the native town-visit horizon.
     assert(keep > 0 && botSale.potionTarget === keep, `the native potion stock must match the real sale: ${keep}`);
     assert.deepStrictEqual(botSale.left.filter(([selfId]) => selfId !== 57),
         // Step 3.2 (H12 narrowed): the Scrolls of Escape a bot reads for town
@@ -158,11 +157,12 @@ async function run() {
 
 run().then(() => console.log('Hot sell-junk market stock checks passed'))
     .catch((error) => { console.error(error); process.exitCode = 1; })
-    .finally(() => {
+    .finally(async () => {
         Object.assign(Database, { deleteItem: originals.deleteItem, updateItemAmount: originals.updateItemAmount,
             learnColdRecipes: originals.learnColdRecipes });
         Coordinator.economyDecisions.decided = originals.decided;
         EconomyCommit.admit = originals.admit;
         Object.assign(ServerResponse, { itemsList: originals.itemsList, userInfo: originals.userInfo, speak: originals.speak });
         Date.now = originals.now;
+        await world.close();
     });
