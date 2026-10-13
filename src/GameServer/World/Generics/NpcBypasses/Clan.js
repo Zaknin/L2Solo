@@ -88,7 +88,7 @@ function createForm(session) {
 }
 
 function createClan(session, name) {
-    ClanService.create(session.actor, name).then((result) => {
+    return ClanService.create(session.actor, name).then((result) => {
         if (!result.ok) {
             sendHtml(session, page(errorText(result.code) + returnLink()));
             return;
@@ -198,13 +198,14 @@ function levelUp(session) {
         }).finally(() => { session.clanLevelUpPending = false; });
     }
 
-    spendLevelCost(session, requirement).then((spent) => {
+    // The level write is returned so that its failure reaches the catch below.
+    return spendLevelCost(session, requirement).then((spent) => {
         if (!spent.ok) {
             sendHtml(session, page(errorText(spent.code, spent) + returnLink()));
             return;
         }
 
-        ClanService.changeLevel(clan, requirement.nextLevel).then(() => {
+        return ClanService.changeLevel(clan, requirement.nextLevel).then(() => {
             ClanService.onlineSessions(clan).forEach((memberSession) => {
                 memberSession.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan));
             });
