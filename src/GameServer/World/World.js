@@ -369,7 +369,8 @@ const World = {
             // Save the replaced character's status now, while it is still the
             // account's session: its own close runs after the replacement and
             // is refused then, so stale state cannot overwrite the new one.
-            exists.persistCharacterStatus?.({ currentOnly: true });
+            try { exists.persistCharacterStatus?.({ currentOnly: true }); }
+            catch (error) { utils.infoWarn('World', 'replaced session status save failed: %s', error.message); }
             // Retire before destroying the socket: synchronous/late cleanup
             // from the previous session cannot alter its replacement.
             removeIndexedSession(runtime, exists);
