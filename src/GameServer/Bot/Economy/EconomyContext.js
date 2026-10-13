@@ -208,10 +208,14 @@ function fieldActivity(state, activity, leaf = null) {
         && travel.arrivalActivity === 'hunting' && travel.townName == null
         ? { ...state, activity, stats: { ...state.stats, travel: null } } : { ...state, activity };
 }
-function bandsHold(state, bands = []) {
-    for (const [id, low, high] of bands) {
+// The held leaf's own purchase item stays exact: its order counts only the
+// rise since the decision (remainingToOrder), so use inside a band would buy short.
+function bandsHold(state, bands = [], leaf = null) {
+    const bought = leaf?.activity === 'shopping' ? Number(leaf.itemId) || 0 : 0;
+    for (const [id, low, high, original] of bands) {
         const amount = Number(state.inventory?.[id]?.amount);
-        if (!(amount >= low) || high !== null && !(amount <= high)) return false;
+        if (bought && Number(id) === bought ? amount !== original
+            : !(amount >= low) || high !== null && !(amount <= high)) return false;
     }
     return true;
 }
@@ -246,7 +250,7 @@ function decisionHolds(state, held, timestamp, deps, deferred = null) {
     if (!sameDecision || !heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred)) return false;
     const bands = held.plan.quantityBands || [];
-    if (!bandsHold(state, bands) || fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
+    if (!bandsHold(state, bands, held.plan.network?.activity) || fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
         { ...deps, timestamp }, bands).structural) !== held.bandHash) return false;
     const safety = bagSafety(state, timestamp), heldSafety = held.plan.bagSafety;
     return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
@@ -412,7 +416,7 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
     const fields = decodeCalculationFence(fence);
     if (!fields) return false;
     const [key, [tokens, items], spots, bands, safety] = fields;
-    if (!bandsHold(state, bands)) return false;
+    if (!bandsHold(state, bands, options.leaf)) return false;
     if (safety) {
         const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
         if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;

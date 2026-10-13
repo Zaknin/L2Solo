@@ -203,9 +203,15 @@ function resolveRest(state, elapsedMs, timestamp, options = {}) {
     };
 }
 
+// A trip record the background step resolves as travel (no fight); the held
+// economy card (ColdEconomyDecision.canReuse) reads the same rule.
+function travelRecord(travel) {
+    return !!(travel?.to && travel.arrivalAt);
+}
+
 function resolveTravel(state, timestamp = Date.now()) {
     const travel = state.stats?.travel;
-    if (!travel?.to || !travel?.arrivalAt) return null;
+    if (!travelRecord(travel)) return null;
     const isLegacyGiranMarketTrip = travel.townName === 'Giran'
         && ['market_sale_inventory', 'market_search_for_weapon', 'market_search_for_gear'].includes(travel.reason)
         && !['soe_gatekeeper', 'walk_gatekeeper'].includes(travel.method);
@@ -1573,6 +1579,7 @@ function huntCycleDelayMs(roll) {
 
 const BackgroundResolver = {
     soloFightCount,
+    travelRecord,
     huntCycleDelayMs,
     combat: { chooseSkill, chooseChargeSkill, coldChargeState, expireCharges, addCharges, consumeCharges,
         spendSkill, settleCharges, attackDamage,

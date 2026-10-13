@@ -396,7 +396,7 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
         || state.incomingPending) return false;
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity) || !options.afterResult && state.activity === 'traveling'
-        && !(state.stats.travel?.to && state.stats.travel.arrivalAt)) return false;
+        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return false;
     const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
     if (Sections.capability(state, timestamp) !== baseline.build) return false;

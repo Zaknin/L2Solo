@@ -117,6 +117,8 @@ try {
             'a trip to another spot rebuilds');
         assert.equal(Decisions.refreshAdvisory(trip(leaf.spotId, { townName: 'Giran', arrivalActivity: 'shopping' }), accepted,
             at(T + 1000)), null, 'a town trip rebuilds');
+        assert(Decisions.refreshAdvisory(trip(leaf.spotId, { arrivalAt: T + 500 }), accepted, at(T + 1000)),
+            'a due arrival keeps the card before an action: the step resolves the arrival, not a fight');
         assert.equal(Decisions.refreshAdvisory({ ...own, activity: 'hunting', spotId: leaf.spotId,
             loc: own.stats.travel.to, stats: { ...own.stats, travel: null } }, accepted, at(T + 1000), { afterResult: true }),
         null, 'the arrival (location and spot) stays exact');
@@ -154,6 +156,13 @@ try {
             'below the survival line rebuilds at once');
         assert.equal(Decisions.refreshAdvisory(used(amount + 1), accepted, at(T + 1000), { afterResult: true }), null,
             'a rise below the target stays exact');
+        // A held purchase of the shots themselves orders only the rise since
+        // its decision, so its own item stays exact (else it would buy short).
+        const options = { activity: accepted.activity, leaf: accepted.card.activity };
+        assert(Economy.calculationHolds(used(amount - 1), accepted.fence, at(T + 1000), options), 'fixture: the held leaf holds the band');
+        assert.equal(Economy.calculationHolds(used(amount - 1), accepted.fence, at(T + 1000),
+            { ...options, leaf: { activity: 'shopping', kind: 'buy', itemId: 1835, amount: target - amount + 1 } }), false,
+        'a held shots purchase keeps the shots exact');
     }
     // (b) hard events rebuild at once.
     {
