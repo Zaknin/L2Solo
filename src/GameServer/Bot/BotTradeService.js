@@ -542,10 +542,8 @@ async function commit(playerSession) {
         return inFlight.commitPromise.then((result) => (result.ok ? { ...result, idempotent: true } : result));
     }
 
-    const replay = playerSession?.lastBotTradeCompletion;
-    if (!playerSession?.activeTrade && replay && now() - Number(replay.completedAt || 0) <= COMPLETION_REPLAY_TTL_MS) {
-        return { ...replay.result, idempotent: true };
-    }
+    const replay = completionReplay(playerSession);
+    if (replay) return { ...replay.result, idempotent: true };
 
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
@@ -557,6 +555,15 @@ async function commit(playerSession) {
     trade.state = 'committing';
     trade.commitPromise = finishCommit(trade, playerSession, prepared.entries, prepared.databaseTransfers);
     return trade.commitPromise;
+}
+
+// The result of the trade this character completed a moment ago, for a
+// repeated confirmation packet of the same trade.
+function completionReplay(playerSession) {
+    const replay = playerSession?.lastBotTradeCompletion;
+    if (playerSession?.activeTrade || !replay || now() - Number(replay.completedAt || 0) > COMPLETION_REPLAY_TTL_MS) return null;
+    if (Number(replay.playerId) !== Number(playerSession.actor?.fetchId?.())) return null;
+    return replay;
 }
 
 function prepareCommit(trade) {
@@ -657,6 +664,7 @@ async function finishCommit(trade, playerSession, entries, databaseTransfers) {
     // Keep replay data serializable and detached from live session graphs.
     playerSession.lastBotTradeCompletion = {
         completedAt: trade.completedAt,
+        playerId: Number(trade.playerActor?.fetchId?.()),
         result: { ...result, partnerSession: null }
     };
     const detail = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? result.moved.map((item) => `${item.count} ${item.name}`).join(', ') : null;
@@ -667,6 +675,9 @@ async function finishCommit(trade, playerSession, entries, databaseTransfers) {
 function confirmPlayerTrade(playerSession) {
     const inFlight = committingTrade(playerSession);
     if (inFlight?.playerSession === playerSession) return { ok: true, trade: inFlight };
+    // A repeated confirmation of a trade that just completed reaches the
+    // commit, which answers with the completed result.
+    if (completionReplay(playerSession)) return { ok: true, trade: null, replay: true };
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
 
