@@ -375,9 +375,13 @@ function advisory(economy, state) {
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
         activityLeaf: Number(state.stats?.activityLeaf || 0), activity: state.activity, mp: Number(state.vitals?.mp) };
 }
-// Before an action the card is executed (activityPick), so only a hunter
-// reuses it. After a result it is only restamped and published: the bot's
-// own hunting/resting/travelling inside one decision is not an event (L70).
+// The bot's own hunting/resting/travelling inside one decision is not an
+// event (L70). After a result the card is only restamped and published.
+// Before an action it is executed only through a hunter's target
+// (activityPick.npcId, ColdSimulationKernel); a resting or travelling bot's
+// step is resolveRest/resolveTravel of its own state (BackgroundResolver),
+// the same after a rebuild. A traveller without a trip record falls
+// through to a fight there, so it takes the rebuild.
 function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
         || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
@@ -389,7 +393,8 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
         || state.incomingPending) return false;
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    if (!(options.afterResult ? Economy.FIELD_ACTIVITIES.has(state.activity) : state.activity === 'hunting')) return false;
+    if (!Economy.FIELD_ACTIVITIES.has(state.activity) || !options.afterResult && state.activity === 'traveling'
+        && !(state.stats.travel?.to && state.stats.travel.arrivalAt)) return false;
     const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
     if (Sections.capability(state, timestamp) !== baseline.build) return false;

@@ -80,8 +80,13 @@ try {
         assert(thin, 'after a result the card accepts the own hunting -> resting step');
         assert.equal(builds, thinBuilds);
         assert.equal(thin.decision.key, Decisions.stateKey(next));
-        assert.equal(Decisions.refreshAdvisory(next, accepted, at(T + 1000)), null,
-            'before an action only a hunter executes the card');
+        // Before an action a resting bot's step is its own rest; the card is
+        // executed only through a hunter's target, so a rester reuses it too.
+        assert(Decisions.refreshAdvisory(next, accepted, at(T + 1000)), 'before an action a resting bot reuses the card');
+        assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'shopping' }, accepted, at(T + 1000)), null,
+            'before an action a shopper still rebuilds');
+        assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'traveling' }, accepted, at(T + 1000)), null,
+            'a traveller without a trip record (resolved as a fight) still rebuilds');
         assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'shopping' }, accepted, at(T + 1000), { afterResult: true }), null,
             'only hunting, resting and travelling are equalised');
         assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
