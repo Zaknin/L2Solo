@@ -3192,11 +3192,13 @@ const BotLifeState = {
             const state = normalize(row);
             state.classId = Number(row.canonicalClassId ?? state.stats?.classId ?? 0);
             state.clanId = Number(row.canonicalClanId || 0);
-            state.simulationOwner = state.simulation.ownerId;
             state.partyId = state.party.partyId;
             state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             cache.set(state.characterId, state);
-            return state;
+            // The cache feeds cold worker snapshots: an own flat simulationOwner
+            // there makes the worker read it as flat wire input and refuse every
+            // command (bot never scheduled again). Clan readers get it on a copy.
+            return { ...state, simulationOwner: state.simulation.ownerId };
         })).catch((err) => {
             utils.infoWarn('BotLife', 'failed to hydrate %d party candidate(s): %s', ids.length, err.message);
             return [];

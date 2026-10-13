@@ -1812,7 +1812,9 @@ class ColdSimulationCoordinator {
         const authoritativeStates = rebaseIds.length
             ? await LifeState.statesByIds(rebaseIds)
             : [];
-        const authoritativeById = new Map(authoritativeStates.map((state) => [
+        // statesByIds rows carry a flat simulationOwner for clan readers; the
+        // worker must receive the native shape or it cannot command the bot.
+        const authoritativeById = new Map(authoritativeStates.map(({ simulationOwner: _flatOwner, ...state }) => [
             Number(state.characterId), state
         ]));
         const rejected = [...missing, ...(claimed.rejected || [])].map((result) => {
