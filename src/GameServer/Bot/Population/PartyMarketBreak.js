@@ -38,23 +38,32 @@ function sessionReady(party, member, goal, now, config) {
 function memberNeed(party, member, now = Date.now()) {
     return clanDuty(party) ? cleanupNeed(member, now) : null;
 }
-function allowed(party, member, now = Date.now(), need = undefined) {
+function shotRestock(party, current) {
+    const objective = party?.stats?.objective;
+    return objective?.sourceKind !== 'raid' && !objective?.raidBoss
+        && current?.type === 'buy_craft_material' && current.plan?.wishKey === 'stock:shots'
+        && Number(current.target?.amount) > 0
+        && invoke('GameServer/Inventory/ShotStock').SHOT_IDS.includes(Number(current.target?.itemId));
+}
+function allowed(party, member, now = Date.now(), need = undefined, current = null) {
     if (!clanDuty(party)) return true;
     if (pending(party, now).length) return false;
-    return ['inventory_capacity', 'inventory_overweight'].includes((need === undefined ? cleanupNeed(member, now) : need)?.reason);
+    return ['inventory_capacity', 'inventory_overweight'].includes((need === undefined ? cleanupNeed(member, now) : need)?.reason)
+        || shotRestock(party, current);
 }
-// A clan duty is left only for a bag over its slot limit.
+// A clan duty retains its member while unloading or refilling the selected
+// shot stock. The native purchase/travel gate still checks its quote and cash.
 function goal(party, member, current, now, need = undefined) {
     if (!clanDuty(party)) return current;
     const bag = need === undefined ? cleanupNeed(member, now) : need;
-    if (!['inventory_capacity', 'inventory_overweight'].includes(bag?.reason)) return null;
-    return { ...cleanupGoal(bag), status: 'active' };
+    if (['inventory_capacity', 'inventory_overweight'].includes(bag?.reason)) return { ...cleanupGoal(bag), status: 'active' };
+    return shotRestock(party, current) ? current : null;
 }
 function departure(party, member, travel, now, given = undefined) {
     if (!clanDuty(party)) return travel;
     const need = given === undefined ? cleanupNeed(member, now) : given;
     const token = { partyId: party.partyId, characterId: member.characterId, until: now + RESERVATION_MS,
-        objective: { ...party.stats.objective }, startedAt: now, cleanupReason: need?.reason,
+        objective: { ...party.stats.objective }, startedAt: now, cleanupReason: need?.reason || 'restock_shots',
         slots: need?.slots, limit: need?.limit };
     return { ...travel, stats: { ...travel.stats, partyMarketReturn: token,
         lastPartyMarketBreak: token, clanPartyObjective: token.objective } };

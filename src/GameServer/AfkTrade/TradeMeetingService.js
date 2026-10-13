@@ -86,12 +86,11 @@ const sessionFor = id => world().registeredActorById(Number(id))?.session || nul
 function acceptRows(result) {
     trackPlayerWaiting(result?.meeting);
     for (const row of Object.values(result?.coldLifeRows || {})) {
-        const previous = life().cachedState(row.characterId);
         const state = life().acceptLifecycleRow(row);
-        // Native reserve/leg/arrival writes are authoritative publications.
-        // Cache adoption alone does not update the worker's lifecycle queue.
-        if (state?.phase === 'cold' && (state.simulation?.revision !== previous?.simulation?.revision
-            || state.phase !== previous?.phase || state.updatedAt !== previous?.updatedAt)) {
+        // Native reserve/leg/arrival replies owe a worker publication even if
+        // another reflection already adopted the same row in the main cache.
+        // An older reply republishes only the monotonic accepted current state.
+        if (state?.phase === 'cold') {
             coordinator()?.notifyState?.(state, { reason: 'trade_meeting_native', critical: true });
         }
     }

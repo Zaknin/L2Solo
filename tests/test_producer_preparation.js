@@ -24,13 +24,13 @@ const adapters = {
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
     'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn() },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), buildGainsFor: () => ({}),
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
         powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
-    'GameServer/Items/C4RecipeItems': { resolveByProductId: id => allowCraft && id === 101 ? recipe : null, resolveByRecipeId: id => id === 301 ? recipe : null },
+    'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? [recipe] : [], resolveByRecipeId: id => id === 301 ? recipe : null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
     'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => true },
@@ -97,7 +97,7 @@ const provider = load('WishProviders.js' , name => {
         assess: () => ({ required: false, gaps: new Map() }),
         // This fixture has no C-kit gap, so acquisition uses the planner's current grade.
         acquisitionRankFor: state => adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].gradeForLevel(state.level),
-        preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+        gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');

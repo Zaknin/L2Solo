@@ -17,7 +17,8 @@ try {
     Data.npcRewards = [...saved.rewards, { selfId: 99001, template: { name: 'Facts Test Mob' },
         rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
         spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }];
-    const spots = [{ id: 'facts-test', avgLevel: 40, capacity: 9, density: 4,
+    const spots = [{ id: 'facts-test', avgLevel: 40, minLevel: 40, maxLevel: 40,
+        levelCounts: { 40: 4 }, capacity: 9, density: 4,
         center: { locX: Towns.towns.giran_town.locX + 2000, locY: Towns.towns.giran_town.locY, locZ: Towns.towns.giran_town.locZ },
         npcEntries: [{ selfId: 99001, count: 1 }, { selfId: 99002, count: 3 }], npcSelfIds: [99001, 99002] }];
     const spotValue = () => ({ kills: 100, valueHours: 0.75 });
@@ -53,7 +54,8 @@ try {
 
     // Hunt rules: level band, occupancy, solo safety; raids are not a solo farm.
     assert.equal(byKind(facts({ ...warsmith, level: 50 })).drop.reason, 'level_band');
-    const deepBlue = { ...warsmith, level: 49 };
+    const deepBlue = { ...warsmith, level: 49,
+        stats: { ...warsmith.stats, wishFocus: ['power:161:7', 1, 0] } };
     assert.equal(byKind(facts(deepBlue)).drop.reason, 'level_band');
     const earning = byKind(facts(deepBlue, { economicLower: true }));
     assert.equal(earning.drop.status, 'ready', 'an equipment earning route admits the wider band');
@@ -96,7 +98,8 @@ try {
     const again = drain(Planner.sourceFacts(away, 99101, 50, { spots, spotValue, timestamp: 1, trips }));
     assert.equal(byKind(again.value).drop.town, drop.town);
     assert(travelled.stages.includes('edge') && !again.stages.includes('edge'), 'regional town read once per spot');
-    // A known non-spoiler is read once from its learned skills, never from a combat profile per spoil record.
+    // Spoil reads learned skills directly; the route gate builds one combat
+    // profile set for the whole source decision, not one per spoil record.
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile'), profileFor = Profile.profileFor;
     let profiles = 0;
     Profile.profileFor = (...args) => { profiles++; return profileFor(...args); };
@@ -106,7 +109,7 @@ try {
             .filter(row => row.kind === 'spoil');
         assert.equal(refused.length, 2);
         assert(refused.every(row => row.reason === 'spoil_skill'));
-        assert.equal(profiles, 0, 'no combat profile for spoil eligibility');
+        assert.equal(profiles, 1, 'one combat profile for route safety across all sources');
     } finally { Profile.profileFor = profileFor; }
 
     // The wish's reader (readyOnly) gets only the ready facts, the same objects;

@@ -24,7 +24,7 @@ const adapters = {
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
     'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: item => gearIds.has(item.selfId), considerable: () => true, itemScore: () => 1, withReadiness: fn => fn(),
         equippedSlotsFor: row => row?.equippedSlots?.length ? row.equippedSlots : row?.equipped ? [row.slot] : [],
         equipmentCandidate: () => true, equipmentItemBetter: (item, current) => !current },
@@ -36,7 +36,7 @@ const adapters = {
             return { pAtk: 100 * (1 + (worn ? gains.get(worn.selfId) : 0)), pDef: 100, mDef: 100 };
         }, buildOptions: () => ({}) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => opportunities, crystalPath: () => null },
-    'GameServer/Items/C4RecipeItems': { resolveByProductId: id => recipes.get(Number(id)) || null,
+    'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => recipes.has(Number(id)) ? [recipes.get(Number(id))] : [],
         resolveByRecipeId: id => [...recipes.values()].find(row => row.recipeId === Number(id)) || null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
     'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
@@ -83,7 +83,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return Diagnostics;
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return tracked;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');

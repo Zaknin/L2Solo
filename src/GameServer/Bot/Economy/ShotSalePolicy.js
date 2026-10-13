@@ -5,15 +5,18 @@ const Belief = require('./PriceBelief');
 
 // Production and native rechecks share the seller's ordinary price decision
 // and finite public demand evidence. No accepted buyer is invented here.
-function exit(state, id, { board, town, timestamp = Date.now(), trip, npcOffers = [], units, lot = 1, reserve = 0, current = 0 } = {}) {
+function exit(state, id, { board, town, timestamp = Date.now(), trip, npcOffers = [], units, lot = 1, reserve = 0,
+    productionUnits = null, current = 0 } = {}) {
     const demand = History.forecast(id, town, timestamp), persona = invoke('GameServer/Bot/AI/BotPersona').of(state);
     if (!demand || !persona || !trip?.details?.(town)?.known) return null;
     const belief = Belief.prior(id, { board, characterId: Number(state.characterId), timestamp,
         understanding: persona.understanding, marketTrades: state.marketTrades || {} });
     if (!belief) return null;
     const trader = Price.traderOf(persona);
+    const pricedUnits = productionUnits === null ? units
+        : Math.max(0, units - lot) + Math.max(0, productionUnits - Math.max(0, Number(reserve) || 0));
     const market = Price.marketFor(id, { board, ownerId: state.characterId, town, tripCost: trip,
-        npcOffers, timestamp, demand, units });
+        npcOffers, timestamp, demand, units: pricedUnits });
     const ask = Price.chooseAsk(belief, market, trader, ['shot-production', state.characterId, id, demand.authority.revision], current);
     if (!ask.known || ask.npc || !(ask.sold > 0)) return null;
     const landed = ask.price + market.ownTrip;
@@ -36,10 +39,18 @@ function* exits(state, recipe, { board, timestamp, trip, prepareTrip, npcOffersF
     for (const town of History.towns(id, timestamp)) {
         if (prepareTrip) yield* prepareTrip(town);
         yield 'trip';
-        const value = exit(state, id, { board, town, timestamp, trip,
+        const terms = { board, town, timestamp, trip,
             npcOffers: npcOffersFor?.(id) || [], lot: Number(recipe.productCount), reserve,
-            units: Number(recipe.productCount) + Math.max(0, Number(existing) || 0) });
-        if (value) result.push(value);
+            units: Number(recipe.productCount) + Math.max(0, Number(existing) || 0) };
+        const value = exit(state, id, terms);
+        if (value) {
+            // A larger lot may need a lower ask to reach its observed buyers.
+            // This local adapter never enters the worker command; only the
+            // selected price, quantity and public forecast revision do.
+            Object.defineProperty(value, 'forQuantity', { value: batches => exit(state, id,
+                { ...terms, productionUnits: batches * Number(recipe.productCount) }) });
+            result.push(value);
+        }
         yield 'exit';
     }
     return result;

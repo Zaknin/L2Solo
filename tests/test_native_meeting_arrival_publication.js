@@ -5,7 +5,7 @@ require('../src/Global');
 invoke('GameServer/DataCache').init();
 const Life = invoke('GameServer/Bot/Population/BotLifeState'), Clan = invoke('GameServer/Clan/ClanService');
 const savedSync = Clan.syncColdMember; Clan.syncColdMember = () => {};
-const originalInvoke = global.invoke, paid = [], acked = [];
+const originalInvoke = global.invoke, paid = [], acked = [], snapshots = [];
 const id = 930001;
 let row = { id: 7, actorA: id, actorB: id + 1, state: 'accepted', locX: 2000, locY: 0, locZ: 0,
     routeA: JSON.stringify({ method: 'soe_gatekeeper', scroll: true }), nextLegA: 2, routeReserveA: 0,
@@ -25,10 +25,20 @@ const db = {
     payTradeMeetingLeg: async (_, side, sequence, legId, fee, scroll) => {
         paid.push({ side, sequence, legId, fee, scroll }); row.legA = JSON.stringify({ sequence, legId, fee, scroll }); row.nextLegA++;
         publish({ activity: 'traveling', stats: { ...state.stats, travel: { meetingId: 7 } } });
-        return { coldLifeRows: {} };
+        const nativeRow = { characterId: id, characterName: 'NativeArrival', phase: state.phase, activity: state.activity,
+            level: 20, hp: 100, maxHp: 100, mp: 100, maxMp: 100, adena: 0,
+            locX: state.loc.locX, locY: state.loc.locY, locZ: state.loc.locZ,
+            inventorySummary: '{}', statsJson: JSON.stringify(state.stats),
+            simulationOwner: state.simulation.ownerId, simulationRevision: state.simulation.revision,
+            updatedAt: Date.now(), nextResolveAt: Date.now() + 20000 };
+        // A native reflection may reach the cache before the service receives
+        // its transaction reply. Worker publication is still owed by that reply.
+        Life.acceptLifecycleRow(nativeRow); state = Life.cachedState(id);
+        return { coldLifeRows: { [id]: nativeRow } };
     }
 };
 global.invoke = name => ({ Database: db, 'GameServer/Bot/Population/BotLifeState': Life,
+    'GameServer/Bot/Population/ColdSimulationCoordinator': { notifyState: (state, options) => snapshots.push({ state, options }) },
     'GameServer/World/World': { registeredActorById: () => null, subscribeUserChanges: () => () => {} },
     'GameServer/AfkTrade/AfkTradeService': { subscribeBoardChanges: () => () => {} }
 })[name] || originalInvoke(name);
@@ -45,6 +55,9 @@ const flush = async () => { for (let n = 0; n < 12; n++) await new Promise(resol
         await flush();
         assert.deepEqual(acked, [1], 'native committed arrival acknowledges the consumed recall');
         assert.deepEqual(paid, [{ side: 0, sequence: 2, legId: 'walk:2000:0:0', fee: 0, scroll: false }], 'remaining physical leg starts without another fare or scroll');
+        assert.equal(snapshots.length, 1, 'an already adopted native paid leg must still reach the worker');
+        assert.equal(snapshots[0].state.activity, 'traveling');
+        assert.equal(snapshots[0].options.critical, true);
         Life.acceptSimulationOwnership(id, state.simulation, state); await flush();
         assert.equal(paid.length, 1, 'unchanged publication does not replay payment');
         service.reset();

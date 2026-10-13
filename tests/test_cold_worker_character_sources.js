@@ -96,6 +96,38 @@ module.exports.inspectSources = async name => {
         assert.strictEqual(Runtime.index.sourceSize('state'), kernel.states.size);
         return { fenced: true };
     }
+    if (name === 'meeting') {
+        const planned = { wishFocus: ['power:95:14', 1, 0], money: [1000, .001, 0, 0],
+            equipmentPlan: { status: 'active', strategy: 'luxury_exchange', target: { selfId: 95 },
+                materials: [{ selfId: 1458, amount: 12 }] } };
+        const at = original.updatedAt + 5000;
+        const travelling = { ...original, activity: 'traveling', stats: { ...original.stats, ...planned,
+            craftShop: null, tradeMeeting: [38, 1], travel: { from: original.loc,
+                to: { locX: 83396, locY: 147904, locZ: -3400 }, startedAt: original.updatedAt,
+                arrivalAt: at, arrivalActivity: 'shopping', arrivalEvent: 'trade_meeting_arrival',
+                method: 'soe_gatekeeper', meetingId: 38, reason: 'trade_meeting', townName: 'Giran' } } };
+        const request = occupationPlanner.request, Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+        const build = Economy.forState;
+        occupationPlanner.request = () => { throw Error('meeting_transition_replanned'); };
+        Economy.forState = () => { throw Error('meeting_transition_rebuilt_economy'); };
+        try {
+            assert.strictEqual(await kernel.planLifecycle({ state: travelling, context: {}, timestamp: at }), null);
+            const outcome = invoke('GameServer/Bot/Population/BackgroundResolver').resolveSolo({ state: travelling,
+                spot: null, timestamp: at, elapsedMs: 5000 });
+            const projected = await kernel.projectResolve(travelling, outcome, at);
+            assert.strictEqual(projected.state.activity, 'shopping');
+            assert.deepStrictEqual(projected.state.loc, travelling.stats.travel.to);
+            assert.strictEqual(projected.state.stats.travel, null);
+            assert.deepStrictEqual(projected.state.stats.tradeMeeting, [38, 1]);
+            for (const key of Object.keys(planned)) assert.deepStrictEqual(projected.state.stats[key], planned[key]);
+            assert.strictEqual(projected.economyPlan, undefined);
+            assert.strictEqual(projected.market, undefined);
+            const released = { ...travelling, stats: { ...travelling.stats, tradeMeeting: null } };
+            await assert.rejects(kernel.planLifecycle({ state: released, context: {}, timestamp: at }),
+                /meeting_transition_replanned/, 'normal economic planning resumes after custody ends');
+            return { arrivedWithoutPlanning: true, originalGoalPreserved: true };
+        } finally { occupationPlanner.request = request; Economy.forState = build; }
+    }
     throw Error('unknown source oracle');
 };`;
 const wrapper = String.raw`
@@ -147,7 +179,7 @@ parentPort.on('message', message => {
         worker.postMessage(Protocol.envelope('snapshot_page', epoch, { rows: [{ state: original, context: { route: null } }],
             initial: true, done: true, ack: true }, 'initial'));
         await wait(message => message.type === 'ready' && message.msgId === 'initial');
-        await oracle('positive'); await oracle('guards'); await oracle('publication');
+        await oracle('positive'); await oracle('guards'); await oracle('publication'); await oracle('meeting');
         const replacement = { ...original, inventory: { '1864': { selfId: 1864, amount: 31 } }, updatedAt: born + 1 };
         worker.postMessage(Protocol.envelope('snapshot_page', epoch, { rows: [{ state: replacement, context: { route: null, fresh: true } }], ack: true }, 'replace'));
         await wait(message => message.type === 'ready' && message.msgId === 'replace'); await oracle('replacement');

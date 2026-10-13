@@ -238,7 +238,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             const intents = invoke('GameServer/Bot/Economy/TradeIntent').project(input.state, economy.network, economy.projection,
                 id => economy.worth(id) ?? economy.price(id), 40);
             if (!intents) throw Error('trade_meeting_preparation_pending');
-            const routePlan = invoke('GameServer/Bot/Population/ColdTrip').townPlan(input.state, request.point);
+            const routePlan = invoke('GameServer/Bot/Population/ColdTrip').meetingTownPlan(input.state, request.point);
             if (!routePlan) throw Error('trade_meeting_route');
             const shared = /^meeting:([1-9][0-9]*)$/.exec(own.route.method);
             if (shared && Number(shared[1]) !== Number(input.state.stats?.tradeMeeting?.[0])) throw Error('trade_meeting_route_changed');
@@ -252,9 +252,18 @@ const occupationPlanner = new ColdOccupationPlanner({
             for (const line of request.lines) {
                 input.read(line.selfId);
                 if (line.payer === side) {
-                    const intent = intents.find(row => row.itemId === line.selfId && row.amount >= required.get(line.selfId)
-                        && Number(row.worth) >= line.price);
+                    const intent = invoke('GameServer/Bot/Economy/TradeIntent').meetingPurchase(economy.network, intents,
+                        { selfId: line.selfId, count: required.get(line.selfId), price: line.price,
+                            town: request.town, enchant: Number(line.enchant || 0) }, input.state);
                     if (!intent) throw Error('trade_meeting_need_changed');
+                    if (economyDiagnostics.active() && !intents.some(row => row.itemId === line.selfId
+                        && row.amount >= required.get(line.selfId) && Number(row.worth) >= line.price)) {
+                        economyDiagnostics.count('meeting', 'purchase_consent', 'selected_quote');
+                        if (economyDiagnostics.enabled(ownId)) economyDiagnostics.push({ owner: ownId,
+                            trigger: request.token, phase: 'meeting_consent', reason: 'selected_quote',
+                            wishKey: intent.key, item: line.selfId, requested: line.count, unitPrice: line.price,
+                            quote: intents.find(row => row.itemId === line.selfId)?.worth || 0 });
+                    }
                     line.certificate = invoke('GameServer/Bot/Economy/TradeIntent').encode({ ...intent, amount: line.count, price: line.price, valueHours: intent.valueHours * line.count / intent.amount });
                     line.needAdId = line.needAdRevision = 0; own.needRevision = own.revision;
                     // Survival first (each item's kit cost once), the rest by the
@@ -989,6 +998,10 @@ function startKernel(config = {}) {
                 ...(progressionChanged ? { classId: afterClassId } : {}),
                 ...(result.soulCrystals?.length ? { soulCrystals: result.soulCrystals } : {})
             };
+            // Accepted custody owns the next physical transition. Resume the
+            // original economic plan after the meeting releases the actor.
+            if (state.stats?.tradeMeeting) return { state: projected,
+                durable: Object.keys(durable).length ? durable : null };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
@@ -1016,6 +1029,7 @@ function startKernel(config = {}) {
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
         }),
         planLifecycle: async ({ state, context, timestamp }) => {
+            if (state.stats?.tradeMeeting) return null;
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
             if (karmaPlan) return karmaPlan;
             const previousPlan = state.stats?.equipmentPlan || null;

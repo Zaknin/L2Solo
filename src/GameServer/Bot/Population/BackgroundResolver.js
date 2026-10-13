@@ -1011,7 +1011,7 @@ function coldBotTurn(fighter, { allies, mob, mobHp, at, time, rng, party = false
         fighter.readyAt += 250;
         return null;
     }
-    const heal = chooseHeal(fighter.profile, allies, fighter.vitals.mp, fighter.cooldowns, at, fighter);
+    const heal = chooseHeal(fighter.profile, allies, fighter.vitals.mp, fighter.cooldowns, at, fighter, mob);
     if (heal) {
         const shot = loadColdShot(fighter, heal.skill);
         const events = applyAllyHeal(fighter, allies, heal, shot);
@@ -1078,11 +1078,12 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     const bot = botCombatStats(fightState, timestamp);
     const encounterKey = PveEncounter.key([state], spot, targetNpcId);
     const pending = PveEncounter.read(state.stats?.pveEncounter, encounterKey, timestamp);
+    const matchupProfiles = pending ? null : TargetMatchup.coldProfiles(bot, fightState, timestamp);
     const mob = pending?.mob || ColdCombatProfile.npcForSpot(spot, rng, { preferredNpcId: targetNpcId,
         soloSafety: true,
         maxTargetLevel: invoke('GameServer/Bot/Population/SpotRiskPolicy').recoveryFor(state)?.levelPenalty > 0
             ? invoke('GameServer/Bot/AI/LevelingRoutes').targetLevelForState(state) : null,
-        matchupProfiles: TargetMatchup.coldProfiles(bot, fightState, timestamp) }) || {
+        matchupProfiles }) || {
         level: Number(spot.avgLevel || bot.level), maxHp: Math.max(1, Number(spot.mob?.hp || 1)),
         pAtk: Math.max(1, Number(spot.mob?.damage || 1)), pAtkRnd: 0, pDef: 1, mDef: 1,
         accur: 1, evasion: 0, critical: 0, atkSpd: 253, mAtk: 1, castSpd: 333
@@ -1094,7 +1095,16 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             mp: state.vitals?.mp ?? bot.maxMp, maxMp: bot.maxMp, level: bot.level,
             manaDependent: BotRoles.shouldRestForMana(state)
         }, mob);
-        if (!readiness.ready) {
+        // A full-health route verdict cannot admit the next mob after a win
+        // depleted the owner. Keep the same damage margin with the HP/MP that
+        // remain now; pending fights and aggressive interruptions still run.
+        const remaining = matchupProfiles.map(profile => profile.soloDamageReceiver === false ? profile : {
+            ...profile,
+            maxHp: Math.min(profile.maxHp, state.vitals?.hp ?? profile.maxHp),
+            maxMp: Math.min(profile.maxMp, state.vitals?.mp ?? profile.maxMp)
+        });
+        const canSurvive = TargetMatchup.soloSurvival(remaining, mob).eligible;
+        if (!readiness.ready || !canSurvive) {
             return { avoided: true, needsRest: true, reason: 'solo_recovery_needed' };
         }
     }
@@ -1270,13 +1280,28 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     };
 }
 
-function chooseHeal(profile, allies, mp, cooldowns, time, caster) {
+function chooseHeal(profile, allies, mp, cooldowns, time, caster, mob) {
     const injured = allies.filter((ally) => ally.vitals.hp > 0 && ally.vitals.hp / Math.max(1, ally.vitals.maxHp) < 0.7)
         .sort((a, b) => (a.vitals.hp / a.vitals.maxHp) - (b.vitals.hp / b.vitals.maxHp))[0];
     if (!injured) return null;
     const skill = (profile.skills || []).filter((candidate) => {
         if (candidate.passive || Number(candidate.mp || 0) > mp || Number(cooldowns[candidate.selfId] || 0) > time) return false;
         const semantic = C4SkillRules.resolveCached(candidate);
+        if (allies.length === 1 && mob && !semantic.hot
+            && [C4SkillRules.HEAL, C4SkillRules.HEAL_PERCENT].includes(semantic.skillType)) {
+            const shot = loadColdShot(caster, candidate);
+            const amount = semantic.skillType === C4SkillRules.HEAL_PERCENT
+                ? profile.maxHp * Number(candidate.power || 0) / 100
+                : Formulas.calcHealAmount(candidate.power, { spiritshot: shot?.spiritshot === true,
+                    blessedSpiritshot: shot?.blessedSpiritshot === true });
+            const damage = 70 * Number(mob.pAtk || 0) / Math.max(1, profile.pDef)
+                * coldNpcWeaponModifier(mob, profile, time)
+                * actionDelayMs(profile, candidate, shot?.spiritshot === true)
+                / Math.max(250, Formulas.calcMeleeAtkTime(mob.atkSpd));
+            // A weak solo heal that loses more HP during its cast creates an
+            // endless heal loop. Keep attacking or use a useful sustain skill.
+            if (Math.min(profile.maxHp - caster.vitals.hp, amount) <= damage) return false;
+        }
         return [C4SkillRules.HEAL, C4SkillRules.HEAL_PERCENT, C4SkillRules.HEAL_HOT, C4SkillRules.HOT].includes(semantic.skillType)
             && ['self', 'party', 'ally', 'friendly'].includes(semantic.target)
             && (semantic.target !== 'ally' || caster === injured || Number(caster?.state.clanId) > 0

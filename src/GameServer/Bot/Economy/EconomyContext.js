@@ -7,6 +7,7 @@ const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Providers = require('./WishProviders');
 const Sections = require('./DecisionSections');
+const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
@@ -183,6 +184,9 @@ function sectionKeys(state, deps = {}, bands = []) {
     const sourceKey = `${inputKey(sourceStable, { ...deps, memory: null })}|${build}|${Sections.hash([
         calculationPlan, stats.craftStationId, stats.persona, state.marketTrades, stats.marketTrades,
         role, state.accountName,
+        // Source descriptors include route admission. Reuse only while the
+        // native active exclusions are equal at this already scheduled review.
+        [...SpotRiskPolicy.excludedSpotIdsForStates([state], deps.timestamp)].sort(),
         stats.huntEfficiency, stats.huntClock, stats.spotRisk,
         stats.money ? [stats.money[0], Number(stats.money[3]) > 0] : stats.wishFocus?.[2],
         stats.exp ?? state.exp,

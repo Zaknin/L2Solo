@@ -39,7 +39,10 @@ function pickupItem(session, actor, item) {
     }
 
     const recipientSession = allocations[0].session;
-    this.purchaseItem(recipientSession, selfId, amount, claimedItem.fetchPetData?.() ? { petData: claimedItem.fetchPetData() } : {});
+    this.purchaseItem(recipientSession, selfId, amount, {
+        enchant: claimedItem.fetchEnchantLevel?.() ?? 0,
+        ...(claimedItem.fetchPetData?.() ? { petData: claimedItem.fetchPetData() } : {})
+    });
     ConsoleText.transmitPickup(recipientSession, selfId, amount);
     return true;
 }

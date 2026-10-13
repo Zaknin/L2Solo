@@ -15,10 +15,11 @@ function merchantSellRows(actor, store) {
             const wanted = nativeItems.find((storeItem) => storeItem.selfId === item.fetchSelfId() && storeItem.count > 0);
             if (!wanted) return null;
 
+            const quote = TradeService.storeSaleQuote(store, wanted, actor, item);
             return {
                 item,
-                amount: Math.min(item.fetchAmount(), wanted.count),
-                price: wanted.price
+                amount: Math.min(item.fetchAmount(), quote.count),
+                price: quote.price
             };
         })
         .filter((row) => row && row.amount > 0);
@@ -73,12 +74,16 @@ async function consumeMerchant(session, list, { native = false } = {}) {
             const item = line.objectId ? TradeService.sellableCopy(session.actor, line.selfId, line.objectId) : null;
             const wanted = nativeItems.find((storeItem) => storeItem.selfId === line.selfId && storeItem.count > 0);
             const amount = Number(line.amount);
-            const matchesPrice = line.price === undefined || Number(line.price) === Number(wanted?.price);
+            const quote = item && wanted ? TradeService.storeSaleQuote(store, wanted, session.actor, item) : null;
+            const saved = trade.saleQuotes?.get(item?.fetchId());
+            const expectedUnitPrice = line.price ?? saved?.price ?? trade.prices?.[line.selfId] ?? quote?.price;
+            const matchesPrice = Number(expectedUnitPrice) === Number(quote?.price);
             if (!item || !wanted ||
-                !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount() || amount > wanted.count || !matchesPrice ||
+                !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount() || amount > quote.count || !matchesPrice ||
+                (saved && (saved.selfId !== line.selfId || amount > saved.amount || Number(expectedUnitPrice) !== saved.price)) ||
                 objectIds.has(item.fetchId())) return null;
             objectIds.add(item.fetchId());
-            return { item, amount, expectedUnitPrice: line.price };
+            return { item, amount, expectedUnitPrice };
         });
         if (requested.length !== list.length || requested.some((line) => line === null)) {
             session.dataSendToMe(ServerResponse.actionFailed());
@@ -124,6 +129,8 @@ async function consumeMerchant(session, list, { native = false } = {}) {
         }
         const rows = merchantSellRows(session.actor, store);
         trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
+        trade.saleQuotes = new Map(rows.map(row => [row.item.fetchId(),
+            { selfId: row.item.fetchSelfId(), price: row.price, amount: row.amount }]));
         if (native) {
             session.dataSendToMe(ServerResponse.privateStoreListBuy(
                 trade.merchant,
@@ -209,3 +216,4 @@ async function sellToNpcShop(session, list) {
 
 module.exports = sell;
 module.exports.consumeMerchant = consumeMerchant;
+module.exports.merchantSellRows = merchantSellRows;

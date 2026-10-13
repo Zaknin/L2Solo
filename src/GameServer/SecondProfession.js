@@ -40,35 +40,39 @@ function render(session, message = '') {
 }
 
 async function transfer(session, targetClassId) {
+    const actor = session?.actor;
     if (!nearbyNpc(session)) return { ok: false, reason: 'npc' };
     const route = Catalog.routeForClass(targetClassId);
-    if (!route?.npcs.includes(session.activeNpcTalk.selfId) || route.race !== session.actor.fetchRace()) {
+    if (!route?.npcs.includes(session.activeNpcTalk.selfId) || route.race !== actor.fetchRace()) {
         return { ok: false, reason: 'wrong_profession' };
     }
-    if (session.actor.fetchClassId() === targetClassId) {
+    if (actor.fetchClassId() === targetClassId) {
         await ClassTransfer.refresh(session, { restoreVitals: false, celebrate: false });
-        return { ok: true, targetClassId };
+        return { ok: true, targetClassId, ...(session.actor !== actor ? { refreshPending: true } : {}) };
     }
-    const check = ClassTransfer.eligibility(session.actor, targetClassId);
+    const check = ClassTransfer.eligibility(actor, targetClassId);
     if (!check.ok || check.requiredLevel !== 40) return { ok: false, reason: 'wrong_profession' };
-    if (session.actor.fetchLevel() < 40) return { ok: false, reason: 'level' };
+    if (actor.fetchLevel() < 40) return { ok: false, reason: 'level' };
     let changed;
-    try { changed = await Database.completeSecondProfession(session.actor.fetchId(), check.currentClassId, targetClassId); }
+    try { changed = await Database.completeSecondProfession(actor.fetchId(), check.currentClassId, targetClassId); }
     catch (error) { return { ok: false, reason: 'marks', error }; }
+    // The committed class and marks belong to the original character. A new
+    // selection will load that result when this character logs in again.
+    if (session.actor !== actor) return { ok: true, targetClassId, refreshPending: true };
     for (const row of changed) {
-        if (row.amount) session.actor.backpack.fetchItemRaw(row.id)?.setAmount(row.amount);
-        else session.actor.backpack.items = session.actor.backpack.items.filter(item => item.fetchId() !== row.id);
+        if (row.amount) actor.backpack.fetchItemRaw(row.id)?.setAmount(row.amount);
+        else actor.backpack.items = actor.backpack.items.filter(item => item.fetchId() !== row.id);
     }
-    session.actor.setClassId(targetClassId);
-    session.dataSendToMe(Response.itemsList(session.actor.backpack.fetchItems()));
+    actor.setClassId(targetClassId);
+    session.dataSendToMe(Response.itemsList(actor.backpack.fetchItems()));
     try {
         await ClassTransfer.refresh(session);
-        return { ok: true, targetClassId };
+        return { ok: true, targetClassId, ...(session.actor !== actor ? { refreshPending: true } : {}) };
     } catch (error) {
         // The durable class and consumed marks remain a single committed result.
         // The master can retry refresh, including after login, without charging
         // marks again: the persisted target class is proof of the transfer.
-        utils.infoWarn('Character', 'second profession refresh failed for %s: %s', session.actor.fetchName(), error.message);
+        utils.infoWarn('Character', 'second profession refresh failed for %s: %s', actor.fetchName(), error.message);
         return { ok: true, targetClassId, refreshPending: true };
     }
 }

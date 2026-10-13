@@ -69,3 +69,45 @@ assert.equal(Intent.project({}, { quantityPrepared: true, queue: [
     mixedPrepared.queue[0], { ...scrollWish, key: 'stock:food' }
 ] }, {}, () => 124, 40), null, 'unknown identities still defer instead of granting unsupported spending');
 console.log('PASS scroll identity preserves existing codes, mixed gear projection and NPC ownership');
+
+// The selected funded quote is executable consent for its own finite units,
+// even when a mandatory kit upgrade exceeds the general willingness estimate.
+const Funding = require('../src/GameServer/Bot/Economy/PurchaseFunding');
+const requiredWish = { ...preparedRoot('power:101:7', 202,
+    { ...plannedPurchase('afk', true, true, 10), unitPrice: 1459, town: 'Dion' }),
+    funded: true, progressionPriority: 3, price: 14590, valueHours: 1,
+    ratio: 1 / 90155 };
+const selectedNetwork = { quantityPrepared: true, queue: [requiredWish], activity: {
+    kind: 'buy', activity: 'shopping', sourceType: 'afk', quoted: true, executable: true,
+    itemId: 202, amount: 2, availableUnits: 2, unitPrice: 1459, town: 'Dion', rootKey: requiredWish.key
+} };
+const standing = Intent.project({}, selectedNetwork, {}, () => 378, 40);
+const terms = { selfId: 202, count: 2, price: 1459, town: 'Dion', enchant: 0 };
+assert.equal(standing[0].worth, 378, 'selected purchase does not inflate the standing bid for all missing units');
+const agreed = Intent.meetingPurchase(selectedNetwork, standing, terms);
+assert(agreed, 'a funded selected quote reaches meeting preparation at its decided price');
+assert.equal(agreed.amount, 2, 'only the selected finite stock receives quote authority');
+assert.equal(agreed.valueHours, standing[0].valueHours * 2 / 10);
+const packet = Funding.packetFor({ ...selectedNetwork, moneyPrice: requiredWish.ratio }, 90155, 0);
+assert.equal(Funding.spendable({ adena: 20000, stats: { money: packet } }, 0,
+    { r: agreed.valueRate }), 20000, 'the certificate uses the native packet rounding at the funding floor');
+for (const changed of [{ count: 3 }, { price: 1460 }, { town: 'Giran' }, { selfId: 203 }, { enchant: 1 }]) {
+    assert.equal(Intent.meetingPurchase(selectedNetwork, standing, { ...terms, ...changed }), null,
+        'selected consent cannot cover a changed item, price, town, enchant or excess amount');
+}
+for (const changed of [{ executable: false }, { quoted: false }, { sourceType: 'npc' }, { kind: 'farm' }, { rootKey: 'power:999:7' }]) {
+    assert.equal(Intent.meetingPurchase({ ...selectedNetwork, activity: { ...selectedNetwork.activity, ...changed } }, standing, terms), null);
+}
+assert.equal(Intent.meetingPurchase({ ...selectedNetwork, queue: [{ ...requiredWish, funded: false }] }, standing, terms), null);
+assert.equal(standing[0].amount, 10); assert.equal(standing[0].worth, 378);
+const priorFunding = { stats: { wishFocus: [requiredWish.key], money: [100, .01, 0, 0, .01, 20000, 202] } };
+assert.equal(Intent.meetingPurchase(selectedNetwork, standing, terms, priorFunding).valueRate, .01,
+    'fresh valuation can spend the same goal at its already funded native priority');
+assert.equal(Intent.meetingPurchase(selectedNetwork, [{ ...standing[0], worth: 2000 }], terms, priorFunding).valueRate, .01,
+    'the selected ordinary quote uses that same native bucket after a changed hour estimate');
+assert.equal(Intent.meetingPurchase(selectedNetwork, standing, terms,
+    { stats: { ...priorFunding.stats, wishFocus: ['power:999:7'] } }).valueRate, standing[0].valueRate,
+    'another goal cannot donate its native funding priority');
+assert.equal(Intent.meetingPurchase(selectedNetwork, [{ ...standing[0], worth: 2000 }], terms).amount, 10,
+    'ordinary public willingness remains valid without selected-quote fallback');
+console.log('PASS finite selected purchase consent, standing bid limits and native funding rounding');

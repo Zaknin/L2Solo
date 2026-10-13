@@ -328,6 +328,7 @@ function buildProjection(state, ctx, deps) {
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);
     const sourceTrips = new Map(), farmFacts = new Map();
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, occupancy: deps.occupancy });
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
@@ -352,7 +353,7 @@ function buildProjection(state, ctx, deps) {
             const diagnostic = Diagnostics.active(), reasons = diagnostic ? new Map() : null;
             const steps = Planner.sourceFacts(state, id, 1, { spots: deps.spots, spotValue, occupancy: deps.occupancy,
                 trips: sourceTrips, trip: deps.tripCost || ctx.trip || { details: () => ({ known: false }) }, spoiler, timestamp,
-                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons,
+                economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons, routeAllowed,
                 bestForWish: { spoilOnly, progressionRequired: progression.required, hourAdena: ctx.hourAdena } });
             let step;
             do step = steps.next(); while (!step.done);
@@ -470,10 +471,13 @@ function buildProjection(state, ctx, deps) {
         if (invoke('GameServer/Items/SoulCrystalProgression').catalog.crystals[id]) ctx.nodeInputs?.wholeBag();
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
-        const recipe = Recipes.resolveByProductId(id) || invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
-            .find(row => Number(row.productId) === Number(id));
-        const craft = craftPath(recipe, id, depth);
-        if (craft) paths.push(craft);
+        const recipes = Recipes.resolveVariantsByProductId(id);
+        const alternatives = recipes.length ? recipes : invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
+            .filter(row => Number(row.productId) === Number(id));
+        for (const recipe of alternatives) {
+            const craft = craftPath(recipe, id, depth);
+            if (craft) paths.push(craft);
+        }
         const exchange = luxury?.get(Number(id));
         if (exchange) {
             const requirements = exchange.materials.map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
@@ -724,6 +728,8 @@ function buildProjection(state, ctx, deps) {
         if (!(value > 0) || !(price(item.selfId) > 0)) continue;
         candidates.push({ item, slot, value, gain, notBeforeHours: early ? horizon : 0,
             horizonHours: early ? horizon + futureHorizon : horizon,
+            firstWeaponGrade: Equipment.isWeaponSlot(slot) && Progression.gapFor(slot, progression)?.rank === 1
+                && Progression.gapFor(slot, progression)?.priority === 3,
             progressionPriority: Progression.priority(item, slot, progression) });
     }
     // MVP-6: every nominated candidate is valued by the same path solver
@@ -766,6 +772,14 @@ function buildProjection(state, ctx, deps) {
     const statusOf = (wish, node) => !wish.plan ? 'no_path'
         : wish.valueHours > 0 && positive(wish.plan.hours) < node.horizonHours ? 'evaluated'
             : wish.fullValueHours > 0 ? 'not_ready' : 'no_path';
+    const readyGear = row => {
+        const acquisition = row.wish.plan?.requirements?.find(requirement => requirement.key === `item:${row.candidate.item.selfId}`)?.plan
+            || row.wish.plan;
+        const command = acquisition?.execution || acquisition;
+        return !!command?.executable && !command.awaitingIncoming && !command.requirements?.length
+            && Number(command.availableUnits ?? Infinity) >= 1
+            && Number(command.price || 0) <= Math.max(0, positive(solverOptions.wallet) - positive(solverOptions.survivalReserve));
+    };
     const evaluate = (row, used) => {
         admission.evaluations++; row.evaluations = (row.evaluations || 0) + 1;
         row.status = 'limit'; row.wish = null; row.claims = null;
@@ -779,15 +793,23 @@ function buildProjection(state, ctx, deps) {
                 : solver.rootWish(row.node.key);
             if (solverOptions.stockFor) { const claims = solver.allocate(wish, used); if (wish.plan) row.claims = claims; }
             row.wish = wish;
+            row.readyGear = readyGear(row);
             row.status = statusOf(wish, row.node);
         } catch (error) {
             if (!SOLVER_LIMITS.has(error?.message)) throw error;
         }
     };
     const score = row => row.wish.valueHours / Math.max(1 / 3600, row.wish.effort);
-    const before = (a, b) => a.node.progressionPriority !== b.node.progressionPriority
-        ? a.node.progressionPriority > b.node.progressionPriority
-        : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+    const before = (a, b) => {
+        // Fundable material errands are not an equipped first-grade weapon.
+        // Compare ready D/higher acquisitions first while that floor is open;
+        // once it closes, the ordinary C weapon/armour/jewellery order resumes.
+        if (a.candidate.firstWeaponGrade && b.candidate.firstWeaponGrade && a.readyGear !== b.readyGear)
+            return a.readyGear;
+        return a.node.progressionPriority !== b.node.progressionPriority
+            ? a.node.progressionPriority > b.node.progressionPriority
+            : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+    };
     const winners = open => {
         const best = new Map();
         for (const row of gear) {
@@ -862,6 +884,7 @@ function buildProjection(state, ctx, deps) {
                 const wish = { key: row.node.key, need: row.node.need, object: row.node.object };
                 const claims = solver.allocate(wish, used);
                 row.wish = wish; row.claims = wish.plan ? claims : null;
+                row.readyGear = readyGear(row);
                 row.status = statusOf(wish, row.node);
                 // Only a root that stays admitted keeps its claim on held stock.
                 if (row.status === 'evaluated') used = claims;
@@ -922,9 +945,11 @@ function buildProjection(state, ctx, deps) {
     }
     for (const kind of ['shots', 'potions', 'scrolls']) {
         const stock = ctx.stock(kind);
-        // One missing amount (MVP-3): the survival tranche and the rest, as
-        // every restock executor buys them.
-        const amount = Number(stock?.survivalMissing || 0) + (progression.required ? 0 : Number(stock?.missing || 0));
+        // A necessary refill covers the planned outing in the same purchase.
+        // Only the survival shortfall outranks unfinished equipment; once that
+        // floor is filled, optional stock cannot keep the kit on hold.
+        const amount = Number(stock?.survivalMissing || 0)
+            + (progression.required && kind !== 'shots' ? 0 : Number(stock?.missing || 0));
         if (Diagnostics.active() && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
             caller: deps.caller || 'wish_provider', trigger: 'projection_build',
             phase: 'wish_need', reason: !(amount > 0) ? 'target_satisfied' : !(stock.unitPrice > 0)
@@ -1079,6 +1104,21 @@ function personalCraftPlan(state, context) {
             plan: context.network.plans.get(leaf.rootKey) };
     const targetId = Number(wish?.object?.itemId || leaf.rootKey.split(':')[1]);
     if (!targetId || !leaf.rootKey.startsWith('power:')) return null;
+    // Ready blacksmith exchanges cost no money, so their root need not be in
+    // the spending queue. Route the native selected leaf to the equipment
+    // owner; it cannot be executed by the dwarf workshop/production owner.
+    const dual = leaf.kind === 'craft' && leaf.activity === 'crafting' && leaf.executable && !leaf.funding
+        ? invoke('GameServer/Items/C4DualSwordCombinations').resolveByRecipeId(leaf.recipeId) : null;
+    if (dual?.productId === targetId && dual.materials.every(row =>
+        Number(state.inventory?.[row.selfId]?.amount || 0) >= row.amount)) return {
+        strategy: 'craft', status: 'ready_to_craft', next: null,
+        target: { selfId: targetId, slot: 14 }, recipeId: dual.recipeId, outputAmount: 1,
+        materials: dual.materials.map(row => ({ ...row,
+            owned: Number(state.inventory[row.selfId].amount), missing: 0 })),
+        combine: { type: 'dual_sword', resultId: targetId, stationId: dual.station.id,
+            npcId: dual.station.npcId, requirements: dual.materials.map(row => ({ ...row })) },
+        source: 'wish_network'
+    };
     const providers = {}, components = {}, visited = new Set(), crystalInputs = new Map();
     let finalRecipe = null, exchange = leaf.kind === 'luxury_exchange' ? leaf.improvement : null;
     const visit = (plan, depth = 0) => {
@@ -1113,7 +1153,7 @@ function personalCraftPlan(state, context) {
         valueRate: Number(wish.ratio || 0), source: 'wish_network' };
     if (!finalRecipe) return null;
     return { strategy: 'craft', status: 'active',
-        target: { selfId: targetId },
+        target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) },
         ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
             selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
         recipeId: Number(finalRecipe.recipeId), outputAmount: Number(wish.object.amount || 1),

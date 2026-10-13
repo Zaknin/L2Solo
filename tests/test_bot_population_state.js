@@ -193,7 +193,13 @@ try {
                 [5, 'crafting', { status: 'component_ready', strategy: 'craft', rateModelVersion: staleVersion, target: validTarget }],
                 [6, 'merchant', { status: 'blocked', strategy: 'blocked', rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: { selfId: 0, name: '' } }],
                 [7, 'resting', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: staleVersion, target: validTarget, clanGoal: { clanId: 10 } }],
-                [8, 'grouped', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: validTarget, clanGoal: { clanId: 10 } }]
+                [8, 'grouped', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: validTarget, clanGoal: { clanId: 10 } }],
+                [9, 'shopping', { status: 'deferred', strategy: 'none', reason: 'wish_focus', target: { selfId: 76, slot: 7 },
+                    exchange: { kind: 'luxury_exchange' }, materials: [{ selfId: 1458, amount: 5375 }] }],
+                [10, 'shopping', { status: 'active', strategy: 'market', target: { selfId: 99999999, name: 'Looks real' } }],
+                [11, 'hunting', { status: 'active', strategy: 'direct_drop', expectedKills: 10, rateModelVersion: staleVersion,
+                    target: { selfId: 76, slot: 7 } }],
+                [12, 'resting', { status: 'active', strategy: 'luxury_exchange', target: { selfId: 76, slot: 7, name: '0' } }]
             ].forEach(([characterId, activity, equipmentPlan]) => insertProbe.run(
                 characterId,
                 activity,
@@ -203,8 +209,10 @@ try {
             const retainedPlanIds = migrationProbe.prepare(`SELECT characterId FROM bot_life_state
                 WHERE json_extract(statsJson, '$.equipmentPlan.target') IS NOT NULL ORDER BY characterId`).all()
                 .map((row) => Number(row.characterId));
-            assert.deepStrictEqual(retainedPlanIds, [2, 3, 4, 5, 8],
-                'startup model invalidation must remove stale hunting and clan combat routes without resetting unrelated passive workflows');
+            assert.deepStrictEqual(retainedPlanIds, [2, 3, 4, 5, 8, 9, 12],
+                'startup uses the canonical catalog ID, preserves nameless exchange reserves and removes unknown or stale combat routes');
+            assert.equal(JSON.parse(migrationProbe.prepare('SELECT statsJson FROM bot_life_state WHERE characterId=9').get().statsJson)
+                .equipmentPlan.materials[0].amount, 5375, 'the paused exchange inputs survive startup unchanged');
         } finally {
             migrationProbe.close();
         }

@@ -94,9 +94,13 @@ try {
         const reservedCount = Math.max(1, Number(spot.density)) * 4;
         return [spot.id, { reservedCount, capacity: reservedCount + 1 }];
     }));
-    // The complete saved native crafter from the measured corpus, including
-    // physical equipment, learned skills and remembered hunt/stock facts.
-    const crafter = require('./fixtures/wish_spot_native_state.json');
+    // Replay the saved D-grade kit at level 45 with native skills for that
+    // level. At the saved level 65 the solo executor refuses its farm routes,
+    // so that state cannot exercise repeated native spot-value reads.
+    const crafter = structuredClone(require('./fixtures/wish_spot_native_state.json'));
+    crafter.level = 45;
+    crafter.stats.coldCombat = Profile.legacySnapshot(crafter,
+        Profile.skillRecordsFromTree(crafter.stats.classId, crafter.level), timestamp);
     const cases = [
         { state: crafter, deps: { spots, board, timestamp, occupancy: new Map() } },
         { state: crafter, deps: { spots, board, timestamp: timestamp + 60000, occupancy: occupied } },

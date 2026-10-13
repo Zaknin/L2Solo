@@ -18,20 +18,21 @@ const state = { characterId: 1, level: 40, inventory: {}, stats: { recipes: [301
 const board = new BoardIndex();
 const persona = { primaryDrive: 'progression', understanding: 1,
     traits: { commitment: 0, caution: 0, ambition: 0 } };
-let allowCraft = false, ownCraft = true, spotReads = 0;
+let allowCraft = false, ownCraft = true, spotReads = 0, recipeVariants = [recipe];
 const adapters = {
     'GameServer/DataCache': { items: [item] },
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
     'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn(),
         equipmentCandidate: () => true, equipmentItemBetter: (item, current) => !current },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), skillsFor: () => [], buildGainsFor: () => ({}),
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
         powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
-    'GameServer/Items/C4RecipeItems': { resolveByProductId: id => allowCraft && id === 101 ? recipe : null, resolveByRecipeId: id => id === 301 ? recipe : null },
+    'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? recipeVariants : [],
+        resolveByRecipeId: id => recipeVariants.find(row => row.recipeId === Number(id)) || null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
     'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => false },
@@ -92,7 +93,7 @@ const provider = load('WishProviders.js', name => {
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
+    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name.endsWith('BoardIndex')) return { SELL: 1 };
@@ -426,4 +427,22 @@ const planned = provider.personalCraftPlan(state, { network: { activity: { rootK
     queue: [{ key: 'power:101:7', object: { itemId: 101 }, ratio: 2, plan: craftPath }], plans: new Map() } });
 assert.equal(planned.craftProviders[301].characterId, 2);
 assert.equal(planned.valueRate, 2, 'paid service inherits the personal root funding rate');
+const uncertainVariant = { ...recipe, recipeId: 302, recipeItemId: 402, successRate: 60,
+    materials: [{ selfId: 202, amount: 5 }] };
+recipeVariants = [uncertainVariant, recipe];
+const uncertainService = { ...publicService, characterId: 3, recipeId: 302, price: 3, entryPrice: 3 };
+const variantPaths = run(true, { deps: services([publicService, uncertainService]) }).nodes
+    .find(row => row.key === 'item:101').paths.filter(row => row.kind === 'craft');
+assert.equal(variantPaths.length, 2, 'both feasible native variants enter the shared comparison');
+const certain = variantPaths.find(row => row.recipeId === 301), uncertain = variantPaths.find(row => row.recipeId === 302);
+assert.equal(certain.successProbability, 1); assert.equal(uncertain.successProbability, .6);
+assert.equal(certain.price, 5); assert.equal(uncertain.price, 3);
+assert.equal(certain.grossRequirements.find(row => row.key === 'item:202').amount, 10);
+assert.equal(uncertain.grossRequirements.find(row => row.key === 'item:202').amount, 5,
+    'chance, service fee and inputs stay attached to their own variant');
+const onlyPublished = run(true, { deps: services([publicService]) }).nodes.find(row => row.key === 'item:101')
+    .paths.filter(row => row.kind === 'craft');
+assert.deepEqual(onlyPublished.map(row => row.recipeId), [301],
+    'an unavailable first variant cannot hide a later published one');
+recipeVariants = [recipe];
 console.log('PASS public paid service for fighter, no scroll/phantom source, route and capacity gates, indexed usable choice per known town');

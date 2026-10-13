@@ -71,12 +71,14 @@ async function transfer(session, targetClassId, options = {}) {
 async function refresh(session, { restoreVitals = true, celebrate = true } = {}) {
     const actor = session.actor;
     await actor.skillset.awardSkills(actor.fetchId(), actor.fetchClassId(), actor.fetchLevel());
+    if (session.actor !== actor) return;
     CalculateStats(session, actor);
     if (restoreVitals) actor.fillupVitals();
 
     if (celebrate) session.dataSendToMeAndOthers?.(ServerResponse.socialAction(actor.fetchId(), 15), actor);
     session.dataSendToMe?.(ServerResponse.skillsList(actor.skillset.fetchSkills()));
     await invoke('GameServer/Shortcuts').refreshSkills(session, actor);
+    if (session.actor !== actor) return;
     session.dataSendToMe?.(ServerResponse.exStorageMaxCount(actor));
     session.dataSendToMe?.(ServerResponse.userInfo(actor));
     session.dataSendToMe?.(ServerResponse.statusUpdate(actor.fetchId(), statusParams(actor)));

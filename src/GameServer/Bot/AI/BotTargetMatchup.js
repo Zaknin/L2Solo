@@ -64,14 +64,18 @@ function coldProfiles(profile, state = {}, timestamp = Date.now()) {
     })) }];
     const summon = state.stats?.coldCombat?.summon;
     if (summon?.active && number(summon.hp, summon.maxHp) > 0 && summon.expiresAt > timestamp) {
-        profiles.push({ ...summon, role: 'dps', skills: [] });
+        profiles.push({ ...summon, role: 'dps', skills: [], soloDamageReceiver: false });
     } else if (Roles.isSummoner(profile.classId)) {
         const Cold = invoke('GameServer/Bot/Population/ColdCombatProfile');
         const skill = Cold.summonSkills(profile).find(s => s.reuseReady !== false
             && number(s.mp, 0) <= number(state.vitals?.mp, profile.maxMp)
             && number(state.stats?.coldCombat?.cooldowns?.[s.selfId], 0) <= timestamp);
         if (skill) profiles.push({ ...invoke('GameServer/Bot/Population/ColdSummonProfile')(profile, Cold.summonDetails(skill)),
-            role: 'dps', skills: [] });
+            role: 'dps', skills: [], soloDamageReceiver: false });
+    }
+    if ((profile.role || Roles.combatRoleFor(profile)) === 'mage') {
+        profiles[0].soloAttackScores = invoke('GameServer/Bot/Population/ColdClassPolicy')
+            .soloAttackScores(profiles[0], { summon: profiles.length > 1 });
     }
     return profiles;
 }
@@ -154,6 +158,7 @@ function channels(profile, target) {
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
             : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef);
         result.push({ weight, modifier: modifier(target, semantic, magic, kind), magic,
+            soloScore: profile.soloAttackScores?.[skill.selfId],
             survivalWeight: Math.min(weight, hitDamage / Math.max(0.25, number(skill.reuse, 0) / 1000)),
             damageBudget: number(skill.mp, 0) > 0
                 ? Math.floor(number(profile.maxMp, 0) / skill.mp) * hitDamage : Infinity });
@@ -179,18 +184,36 @@ function evaluate(profiles, target) {
 // headroom for misses, interrupted casts and the retreat before zero HP.
 // Missing legacy projections remain neutral until real stats are available.
 function soloSurvival(profiles, target, minimum = 1.5) {
-    if (!profiles?.length || !(target.maxHp > 0) || !(target.pAtk > 0)
-        || profiles.some(profile => profile.survivalKnown === false || !(profile.maxHp > 0) || !(profile.pDef > 0))) {
+    // The cold solo executor damages the owner; the summon only adds attacks.
+    // Native actor profiles retain their ordinary tanking behavior.
+    const receivers = profiles?.filter(profile => profile.soloDamageReceiver !== false);
+    if (!receivers?.length || !(target.maxHp > 0) || !(target.pAtk > 0)
+        || receivers.some(profile => profile.survivalKnown === false || !(profile.maxHp > 0) || !(profile.pDef > 0))) {
         return { eligible: true, survivalRatio: null };
     }
-    const lifetime = Math.max(...profiles.map(profile => profile.maxHp
+    const lifetime = Math.max(...receivers.map(profile => profile.maxHp
         / (70 * target.pAtk / profile.pDef * positive(target.atkSpd || 253) / 500)));
-    const damage = profiles.reduce((sum, profile) => sum + Math.max(0, ...channels(profile, target)
+    const damage = profiles.reduce((sum, profile) => sum + Math.max(0, ...soloChannels(profile, target)
         .map(attack => Math.min((attack.survivalWeight ?? attack.weight) * lifetime,
             attack.damageBudget ?? Infinity) * attack.modifier)), 0);
     const survivalRatio = damage / target.maxHp;
     return { eligible: survivalRatio >= minimum, survivalRatio,
         reason: survivalRatio >= minimum ? 'solo_survival_ready' : 'insufficient_survival_margin' };
+}
+
+function soloChannels(profile, target) {
+    const attacks = channels(profile, target);
+    if (!profile.soloAttackScores) return attacks;
+    // The executor chooses by native skill priority, not maximum DPS. Do not
+    // admit a fight on a fast spell the bot would never select at full HP.
+    let best = null, score = -Infinity;
+    for (const attack of attacks) {
+        if (!Number.isFinite(attack.soloScore)) continue;
+        const current = attack.soloScore + Math.round(180 * Math.log2(
+            Math.max(0.01, Math.min(2, attack.modifier))));
+        if (current > score) { best = attack; score = current; }
+    }
+    return best ? [best] : [];
 }
 
 function soloCanHunt(profiles, target, { maxTargetLevel, npcLevel } = {}) {
@@ -206,11 +229,12 @@ function soloCanHunt(profiles, target, { maxTargetLevel, npcLevel } = {}) {
 // attack envelopes per profile. Separate maxima for rate/budget and the best
 // vulnerability can only increase damage, so an exact-safe mob stays eligible.
 function soloSpotUpperBound(profiles) {
-    if (!profiles?.length || profiles.some(p => p.survivalKnown === false
+    const receivers = profiles?.filter(profile => profile.soloDamageReceiver !== false);
+    if (!receivers?.length || receivers.some(p => p.survivalKnown === false
         || !Number.isFinite(p.maxHp) || !(p.maxHp > 0) || !Number.isFinite(p.pDef) || !(p.pDef > 0))) {
         return () => true;
     }
-    const lifetimeNumerator = Math.max(...profiles.map(p => p.maxHp * p.pDef)) * 500 / 70;
+    const lifetimeNumerator = Math.max(...receivers.map(p => p.maxHp * p.pDef)) * 500 / 70;
     if (!Number.isFinite(lifetimeNumerator)) return () => true;
     const neutral = { basePDef: 1, pDef: 1, baseMDef: 1, mDef: 1, undead: true };
     const bounds = profiles.map(profile => {
@@ -312,13 +336,17 @@ function profileFingerprint(profile) {
     const role = profile.role || Roles.combatRoleFor(profile);
     const parts = [role, profile.equipment?.weaponKind || '', profile.pAtk, profile.atkSpd, profile.mAtk,
         profile.castSpd, profile.maxMp, profile.weaponMask, profile.maxHp, profile.pDef,
-        profile.survivalKnown === false].map(fingerprintValue);
+        profile.survivalKnown === false, profile.soloDamageReceiver === false].map(fingerprintValue);
     for (const skill of profile.skills || []) {
         const semantic = skill.semantic || Rules.resolveCached(skill);
         parts.push('|', ...[skill.passive, skill.spell === true, skill.mp, skill.power, skill.hitTime, skill.reuse,
             skill.distance, semantic.skillType, semantic.target, semantic.notUsedInC4, semantic.undeadOnly,
             semantic.requires?.weaponsAllowed, semantic.castRange, semantic.power, semantic.trait]
             .map(fingerprintValue));
+    }
+    if (profile.soloAttackScores) {
+        parts.push('solo-priority');
+        for (const [id, score] of Object.entries(profile.soloAttackScores)) parts.push(id, fingerprintValue(score));
     }
     return parts.join(',');
 }

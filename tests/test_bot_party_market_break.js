@@ -62,6 +62,29 @@ async function run() {
     assert.strictEqual(result.ok, true, result.reason);
     assert.deepStrictEqual(departed, [3]);
     assert.deepStrictEqual(savedParties.at(-1).memberIds, [1, 2]);
+    const shotGoal = { type: 'buy_craft_material', status: 'active',
+        target: { itemId: 1463, amount: 390 }, plan: { wishKey: 'stock:shots',
+            expectedBenefit: 'market_buy_craft_material', sourceType: 'configured_store', marketTown: 'Dion' } };
+    const clanParty = { ...party, stats: { ...party.stats,
+        objective: { priority: 'required', clanGoalKey: 'clan-duty', clanId: 1, clanOperation: 'equipment' } } };
+    assert(Break.allowed(clanParty, members[2], now, null, shotGoal), 'a selected shot refill may temporarily leave clan duty');
+    assert.strictEqual(Break.goal(clanParty, members[2], shotGoal, now, null), shotGoal);
+    assert(!Break.allowed(clanParty, members[2], now, null, gearGoal), 'optional gear shopping still cannot leave clan duty');
+    assert(!Break.allowed({ ...clanParty, stats: { ...clanParty.stats, marketAbsences: {
+        2: { until: now + 60000 } } } }, members[2], now, null, shotGoal), 'only one member may be away at a time');
+    assert(!Break.allowed({ ...clanParty, stats: { objective: { ...clanParty.stats.objective, sourceKind: 'raid' } } },
+        members[2], now, null, shotGoal), 'a raid cannot be interrupted by a stock trip');
+    assert(!Break.allowed(clanParty, members[2], now, null, { ...shotGoal, target: { itemId: 1864, amount: 390 } }),
+        'a material order cannot impersonate a shot refill');
+    GoalService.review = state => Promise.resolve({ current: state.characterId === 3 ? shotGoal : null });
+    departed.length = 0;
+    const refill = await PopulationService.resolveBackgroundParty(clanParty);
+    assert.strictEqual(refill.ok, true, refill.reason);
+    assert.deepStrictEqual(departed, [3], 'the actual party resolve admits the named stock trip');
+    const absence = savedParties.at(-1).stats.marketAbsences[3];
+    assert.strictEqual(absence.cleanupReason, 'restock_shots');
+    assert.strictEqual(absence.objective.clanGoalKey, 'clan-duty');
+    assert(absence.until > now, 'the party reserves its returning member');
     console.log('Bot party market break checks passed');
 }
 

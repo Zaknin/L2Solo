@@ -6,6 +6,8 @@ let recipeItems = null;
 let recipesById = null;
 let recipesByProductId = null;
 let recipeSource = null;
+let recipeVariantsByProductId = null;
+const NO_RECIPES = Object.freeze([]);
 
 function parseItemList(value) {
     const items = [];
@@ -48,6 +50,7 @@ function loadRecipeItems() {
     recipeItems = {};
     recipesById = {};
     recipesByProductId = {};
+    recipeVariantsByProductId = {};
     const rows = fs.existsSync(RECIPE_DATA_PATH) ? fs.readFileSync(RECIPE_DATA_PATH, 'utf8')
         .split(/\r?\n/)
         .map(parseLine)
@@ -58,6 +61,8 @@ function loadRecipeItems() {
         }
         if (!recipesById[recipe.recipeId]) {
             recipesById[recipe.recipeId] = recipe;
+            const variants = recipeVariantsByProductId[recipe.productId] ||= [];
+            variants.push(recipe);
         }
         if (!recipesByProductId[recipe.productId]) {
             recipesByProductId[recipe.productId] = recipe;
@@ -71,6 +76,8 @@ function loadRecipeItems() {
     // Freeze only this container, never the author's mutable recipe objects.
     const sourceRows = Object.freeze(rows);
     recipeSource = Object.freeze({ revision: sourceRows, rows: sourceRows, recipeItems });
+
+    for (const variants of Object.values(recipeVariantsByProductId)) Object.freeze(variants);
 
     return recipeItems;
 }
@@ -94,6 +101,13 @@ function nativeSource() {
     return recipeSource;
 }
 
+// A product can have different native chances, inputs and recipe books.
+// Keep each variant so acquisition can match the crafter's published recipe.
+function resolveVariantsByProductId(productId) {
+    loadRecipeItems();
+    return recipeVariantsByProductId[Number(productId)] || NO_RECIPES;
+}
+
 module.exports = {
     RECIPE_DATA_PATH,
     loadRecipeItems,
@@ -102,5 +116,6 @@ module.exports = {
     resolveByProductId,
     nativeSource,
     // A synthetic craft query need not load the native CSV just to miss it.
-    loadedSource: () => recipeSource
+    loadedSource: () => recipeSource,
+    resolveVariantsByProductId
 };

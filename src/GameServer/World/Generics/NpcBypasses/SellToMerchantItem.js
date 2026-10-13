@@ -16,15 +16,15 @@ function itemColor(kind) {
     return Html.COLOR.title;
 }
 
-function quantityLinks(prefix, selfId, maxSell) {
+function quantityLinks(prefix, selfId, maxSell, price) {
     if (maxSell <= 0) return Html.font('None', Html.COLOR.muted);
 
     const links = [
-        Html.link('x1', `${prefix} ${selfId} 1`, { color: Html.COLOR.warn })
+        Html.link('x1', `${prefix} ${selfId} 1 ${price}`, { color: Html.COLOR.warn })
     ];
-    if (maxSell >= 10) links.push(Html.link('x10', `${prefix} ${selfId} 10`, { color: Html.COLOR.warn }));
-    if (maxSell >= 100) links.push(Html.link('x100', `${prefix} ${selfId} 100`, { color: Html.COLOR.warn }));
-    if (maxSell > 1) links.push(Html.link('All', `${prefix} ${selfId} ${maxSell}`, { color: Html.COLOR.warn }));
+    if (maxSell >= 10) links.push(Html.link('x10', `${prefix} ${selfId} 10 ${price}`, { color: Html.COLOR.warn }));
+    if (maxSell >= 100) links.push(Html.link('x100', `${prefix} ${selfId} 100 ${price}`, { color: Html.COLOR.warn }));
+    if (maxSell > 1) links.push(Html.link('All', `${prefix} ${selfId} ${maxSell} ${price}`, { color: Html.COLOR.warn }));
     return links.join('&nbsp;&nbsp;');
 }
 
@@ -43,7 +43,8 @@ function buildShopHtml(session, bot) {
         const icat = template?.template?.kind ?? '';
         const playerItem = TradeService.sellableCopy(session.actor, item.selfId);
         const playerCount = playerItem ? playerItem.fetchAmount() : 0;
-        const maxSell = Math.min(item.count, playerCount);
+        const quote = TradeService.storeSaleQuote(store, item, session.actor, playerItem);
+        const maxSell = Math.min(quote.count, playerCount);
 
         rows += Html.table([
             Html.row([Html.cell(Html.font(iname, itemColor(icat)))])
@@ -51,8 +52,8 @@ function buildShopHtml(session, bot) {
         rows += Html.table([
             Html.row([
                 Html.cell(`Have: ${Html.font(fold(playerCount), Html.COLOR.link)}`, { width: 80 }),
-                Html.cell(`Price: ${Html.font(`${fold(item.price)}a`, Html.COLOR.ok)}`, { width: 80, align: 'right' }),
-                Html.cell(quantityLinks('sell-to-merchant-item', item.selfId, maxSell), { width: 110, align: 'right' })
+                Html.cell(`Price: ${Html.font(`${fold(quote.price)}a`, Html.COLOR.ok)}`, { width: 80, align: 'right' }),
+                Html.cell(quantityLinks('sell-to-merchant-item', item.selfId, maxSell, quote.price), { width: 110, align: 'right' })
             ])
         ]);
         if (i < items.length - 1) rows += Html.line('L2UI_CH3.hegaerectangle');
@@ -104,14 +105,16 @@ module.exports = async function(session, parts) {
 
     const playerItem = TradeService.sellableCopy(session.actor, selfId);
     const playerCount = playerItem ? playerItem.fetchAmount() : 0;
-    const sellQty = Math.min(qty, playerCount, storeItem.count);
+    const quote = TradeService.storeSaleQuote(store, storeItem, session.actor, playerItem);
+    const sellQty = Math.min(qty, playerCount, quote.count);
     if (sellQty <= 0) {
         session.dataSendToMe(ServerResponse.npcHtml(bot.fetchId(), buildShopHtml(session, bot)));
         return;
     }
 
     try {
-        const sold = await TradeService.sellToStore(session.actor, store, selfId, sellQty);
+        const sold = await TradeService.sellToStore(session.actor, store, selfId, sellQty,
+            { expectedUnitPrice: parts[3] === undefined ? quote.price : Number(parts[3]) });
         const recordedQty = sold.npcQty ?? sold.qty;
         if (recordedQty > 0) MarketTelemetry.recordTrade({ channel: 'wtb', sourceType: 'private_buy_store_player_sale',
             selfId, itemName: sold.name, quantity: recordedQty, unitPrice: (sold.npcAdena ?? sold.totalAdena) / recordedQty,

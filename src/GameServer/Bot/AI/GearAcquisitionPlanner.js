@@ -2048,10 +2048,36 @@ function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expected
     fact.costHours = costHours;
     return fact;
 }
+// A source is executable only on ground the solo route executor admits.
+// Share profiles and spot verdicts for one projection, then discard them.
+function sourceRouteReader(state, options = {}) {
+    const allowed = new WeakMap();
+    const timestamp = options.timestamp ?? Date.now();
+    const excluded = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
+    const Spots = invoke('GameServer/Bot/AI/SpotService');
+    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
+    const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
+    let profiles = null;
+    return spot => {
+        if (!allowed.has(spot)) {
+            const soloOptions = { timestamp, occupancy: options.occupancy,
+                mode: 'solo', capacityStates: [state] };
+            profiles ||= invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(state, soloOptions);
+            allowed.set(spot, spot.raidBoss !== true && !excluded.has(String(spot.id))
+                && LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })
+                && (Spots.isSuitable(spot, Number(state.level || 1), soloOptions)
+                    || economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= Number(state.level || 1) - 15)
+                && Profiles.hasCapacityForStates(spot, [state], options.occupancy));
+        }
+        return allowed.get(spot);
+    };
+}
+
 function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const facts = [], ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
     const entries = sourceIndexFor(options.spots || []).get(Number(itemId)) || [];
     const timestamp = options.timestamp ?? Date.now();
+    const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
     const spotValue = options.spotValue
         || require('../Economy/SpotEconomics').create(state, { timestamp, occupancy: options.occupancy });
     const trips = options.trips || new Map();
@@ -2106,6 +2132,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
                 target.capacity = LevelingRoutes.capacityForSpot(spot);
                 if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
             }
+            if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
         }
         let row = null, perHour = 0, trip = null, town = null;
         if (!reason) {
@@ -2673,6 +2700,7 @@ module.exports.acquisitionTargetAllowed = acquisitionTargetAllowed;
 module.exports.sourceCacheSize = sourceCacheSize;
 module.exports.sourceYieldReaderFor = sourceYieldReaderFor;
 module.exports.sourceFacts = sourceFacts;
+module.exports.sourceRouteReader = sourceRouteReader;
 
 // Only the exports that judge a bot against several sources share readiness.
 for (const name of ['preferredTarget', 'preferredDropTarget', 'preferredNoGradeTarget', 'staticNpcUpgradePlan',

@@ -32,10 +32,11 @@ function merchantDemandRows(actor, store) {
         ));
 
         if (inventoryItem) {
+            const quote = TradeService.storeSaleQuote(store, storeItem, actor, inventoryItem);
             rows.push({
                 item: inventoryItem,
-                amount: Math.min(inventoryItem.fetchAmount(), storeItem.count),
-                price: storeItem.price
+                amount: Math.min(inventoryItem.fetchAmount(), quote.count),
+                price: quote.price
             });
             return;
         }
@@ -86,12 +87,15 @@ function openMerchantTradeWindow(session, merchant) {
     }
 
     if (store.storeType === 3) {
+        const rows = merchantDemandRows(session.actor, store);
+        session.activeMerchantTrade.saleQuotes = new Map(rows.map(row => [row.item.fetchId(),
+            { selfId: row.item.fetchSelfId(), price: row.price, amount: row.amount }]));
         // Finish the interaction before opening WTB so the C4 client can move
         // while keeping the buyer targeted, as with manufacture windows.
         session.dataSendToMe(ServerResponse.actionFailed());
         session.dataSendToMe(ServerResponse.privateStoreListBuy(
             merchant,
-            merchantDemandRows(session.actor, store),
+            rows,
             session.actor.backpack.fetchTotalAdena()
         ));
     }

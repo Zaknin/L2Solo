@@ -44,6 +44,7 @@ function awardItem(session, actor, selfId, amount, metadata) {
                   selfId: item.selfId,
                     name: item.template.name,
                   amount: amount,
+                 enchant: metadata.enchant ?? 0,
                 equipped: false,
                     slot: item.etc.slot,
                     ...(metadata.petData ? { petData: metadata.petData } : {})

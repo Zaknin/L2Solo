@@ -206,11 +206,13 @@ function* searchQuantity({ state, recipe, planFor, exits = [], ownedFor = () => 
         if (!basket) continue;
         for (const exit of exits) {
             yield 'exit';
-            if (mode === 'occupation' && exit.repeatable !== true) continue;
+            const pricedExit = typeof exit.forQuantity === 'function' ? exit.forQuantity(batches) : exit;
+            if (!pricedExit) continue;
+            if (mode === 'occupation' && pricedExit.repeatable !== true) continue;
             // Unsupported external demand permits only an explicitly valued
             // minimum trial, never a speculative larger production command.
-            if (exit.trial === true && batches > 1) continue;
-            const candidate = yield* evaluatePrepared({ state, recipe, batches, basket, exit, ownedFor, context });
+            if (pricedExit.trial === true && batches > 1) continue;
+            const candidate = yield* evaluatePrepared({ state, recipe, batches, basket, exit: pricedExit, ownedFor, context });
             const score = mode === 'occupation' ? candidate?.incomePerHour : candidate?.valueHours;
             if (candidate && score > 0 && (!best || score > (mode === 'occupation' ? best.incomePerHour : best.valueHours))) best = candidate;
         }

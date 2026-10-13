@@ -312,6 +312,60 @@ try {
             scoped.calculationFence, { ...deps, occupancy: new Map([[id, { count: 1 }]]) }), false,
             'a change to a retained or losing source forces native reconsideration');
     } finally { Providers.build = scopedProvider; }
+    // Source descriptors must follow the native timed route exclusions even
+    // when a real money/event review leaves item, occupancy and bag tokens equal.
+    {
+        const savedNpcs = Data.npcs, savedRewards = Data.npcRewards, wrappedBuild = Providers.build;
+        const npcId = 990095, itemId = 1835, expiry = deps.timestamp + 1000;
+        Data.npcs = [...Data.npcs, { selfId: npcId,
+            template: { name: 'Source expiry probe', level: 35, kind: 'Monster' } }];
+        Data.npcRewards = [...Data.npcRewards, { selfId: npcId,
+            rewards: [{ overall: 100, items: [{ selfId: itemId, chance: 100, min: 100, max: 100 }] }], spoils: [] }];
+        const spots = ['source-fast', 'source-slow'].map(id => ({ id, minLevel: 35, maxLevel: 35,
+            avgLevel: 35, levelCounts: { 35: 4 }, capacity: 9, density: 4,
+            center: state.loc, npcEntries: [{ selfId: npcId, level: 35, count: 4 }], npcSelfIds: [npcId] }));
+        const trip = () => 0;
+        trip.details = () => ({ known: true, hours: 0, fees: 0 });
+        const options = { ...deps, spots, npcOffersFor: () => [], tripCost: trip };
+        const subject = { ...state, characterId: 92095, adena: 50,
+            stats: { classId: 1, coldCombat: { classId: 1, skillSource: 'database', skills: [] },
+                capacityBackoffs: [{ spotId: 'source-fast', until: expiry }] } };
+        let actualBuilds = 0;
+        Providers.build = (bot, ctx, inputs) => {
+            actualBuilds++;
+            ctx.spotValue = spot => { ctx.sourceSpot(spot.id);
+                return { kills: spot.id === 'source-fast' ? 1000 : 100, valueHours: 0.5 }; };
+            return originalBuild(bot, ctx, inputs);
+        };
+        const source = context => context.projection.nodes.find(node => node.key === `item:${itemId}`)
+            ?.paths.find(row => row.kind === 'drop')?.spotId;
+        try {
+            const exclusionKeys = Economy.sectionKeys(subject, options);
+            const expiredKeys = Economy.sectionKeys(subject, { ...options, timestamp: expiry });
+            assert.equal(exclusionKeys.structural, expiredKeys.structural, 'source expiry does not change decision scheduling dependencies');
+            assert.notEqual(exclusionKeys.sources, expiredKeys.sources, 'source dependencies read the active exclusion set at review time');
+            const reordered = { ...subject, stats: { ...subject.stats, capacityBackoffs: [
+                { spotId: 'unused-b', until: expiry }, { spotId: 'unused-a', until: expiry }] } };
+            assert.equal(Economy.sectionKeys(reordered, options).sources,
+                Economy.sectionKeys({ ...reordered, stats: { ...reordered.stats,
+                    capacityBackoffs: reordered.stats.capacityBackoffs.slice().reverse() } }, options).sources,
+                'exclusion ordering does not invalidate identical route inputs');
+            const warm = Economy.forState(subject, options);
+            assert.equal(source(warm), 'source-slow', 'the warm native source graph excludes the faster ground');
+            const expired = { ...subject, adena: 51, stats: { ...subject.stats, wishDirty: 1 } };
+            const afterExpiry = Economy.forState(expired, { ...options, timestamp: expiry });
+            assert.equal(actualBuilds, 2, 'expiry case performs a real native provider review');
+            assert.equal(source(afterExpiry), 'source-fast', 'expired route exclusion cannot retain the slower source descriptor');
+            const newlyExcluded = { ...expired, adena: 52,
+                stats: { ...expired.stats, capacityBackoffs: [{ spotId: 'source-fast', until: expiry + 1000 }] } };
+            const afterExclusion = Economy.forState(newlyExcluded, { ...options, timestamp: expiry + 1 });
+            assert.equal(actualBuilds, 3, 'a newly excluded route also reaches a real review');
+            assert.equal(source(afterExclusion), 'source-slow', 'a new exclusion cannot retain the now forbidden source descriptor');
+        } finally {
+            Providers.build = wrappedBuild; Data.npcs = savedNpcs; Data.npcRewards = savedRewards;
+            Economy.forget(subject.characterId);
+        }
+    }
     Economy.forget(state.characterId);
     assert.equal(Profile.size().ownerBuilds >= 0, true);
     console.log('PASS money/XP/combat reuse, fresh funding, source sections, publication/eviction, accumulation/loss, coalesced level/death and untouched expiry');

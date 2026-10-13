@@ -58,4 +58,20 @@ function select(profile,{hp,mp,cooldowns,time,charges=0,mob,party=false,pvp=fals
     return selected?{skill:selected.skill.coldRecord,magic:selected.skill.fetchSpell()===true,
         reasons:selected.reasons,score:selected.score}:null;
 }
-module.exports={select};
+// Compile full-health solo priorities once per hunting profile. Matchup scans
+// apply each target's resistance to these scores without rebuilding native
+// skill adapters for every species. This is transient planning data.
+function soloAttackScores(profile, { summon = false } = {}) {
+    const cached = adapter(profile);
+    Object.assign(cached.state, { hp: profile.maxHp, mp: profile.maxMp, cooldowns: {}, time: 0, charges: 0 });
+    cached.actor.summon = summon ? activeServitor : null;
+    const policy = { mode: 'solo_pve', classProfile: ClassPolicy.profileFor(cached.actor, { mode: 'solo_pve' }),
+        matchupTarget: { vulnerabilities: {}, undead: true } };
+    const target = { fetchHp: () => 1, fetchUndead: () => true, matchupTarget: policy.matchupTarget };
+    const role = Roles.combatRoleFor(cached.actor);
+    return Object.fromEntries(cached.actor.skillset.skills.map(skill => {
+        const verdict = Utility.evaluate(cached.actor, target, skill, role, policy);
+        return verdict && [skill.fetchSelfId(), verdict.score];
+    }).filter(Boolean));
+}
+module.exports={select,soloAttackScores};
