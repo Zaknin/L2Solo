@@ -1,12 +1,24 @@
+// Native input catalogue and own paths precede all game modules.
+require('./helpers/databaseIsolation');
+delete process.env.L2NODE_CONFIG_FILE;
+delete process.env.L2NODE_SHARED_CONFIG_FILE;
+delete process.env.N53_GAME_ROOT;
+const fixture = require('./helpers/isolatedSocialDatabase')('late-cold-travel');
+process.once('exit', () => require('node:fs').rmSync(fixture.directory, { recursive: true, force: true }));
 const assert = require('assert');
 
 require('../src/Global');
+fixture.assertConfigured(options.default);
+invoke('GameServer/DataCache').init();
 
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
+// Travel timing and routes are the subject here. Whether a shopping trip pays
+// for itself (24512a44) has its own fixture (test_acquisition_trip_value.js).
+invoke('GameServer/Bot/Economy/ColdMarketService').canTravelForPurchase = () => true;
 
 const state = {
     characterId: 7,
@@ -14,6 +26,9 @@ const state = {
     activity: 'hunting',
     currentRegion: 'Dion',
     loc: { locX: 15631, locY: 142885, locZ: -2704 },
+    // Town trips are paid (N2, user 2026-10-04): a Scroll of Escape and the gatekeeper fee.
+    adena: 100000,
+    inventory: { 57: { selfId: 57, amount: 100000 }, 736: { selfId: 736, amount: 3 } },
     stats: {},
     vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 }
 };
@@ -65,12 +80,23 @@ assert.strictEqual(arrived.patch.activity, 'shopping');
 assert.strictEqual(arrived.events[0].type, 'arrived_town');
 assert(arrived.nextResolveAt <= Date.now(), 'arrival must make the shopping event due without another polling delay');
 
-const shoppingState = {
+const unfinishedShoppingState = {
     ...arrivedState,
     activity: 'shopping',
     currentRegion: 'Giran',
     loc: { ...started.stats.travel.to },
     stats: { ...started.stats, travel: null }
+};
+// ARCH-NOTE: C2a preserves the native town steps. Arrival alone does not
+// supply ColdMarketService's completed-visit input for the return boundary.
+assert.strictEqual(GoalExecutor.finishMarketVisit(unfinishedShoppingState, Date.now()), null,
+    'an arrived but unfinished visit must not start its return trip');
+const shoppingState = {
+    ...unfinishedShoppingState,
+    stats: {
+        ...unfinishedShoppingState.stats,
+        townVisit: { ...unfinishedShoppingState.stats.townVisit, completed: true }
+    }
 };
 const returning = GoalExecutor.finishMarketVisit(shoppingState, Date.now());
 assert.strictEqual(returning.activity, 'traveling');

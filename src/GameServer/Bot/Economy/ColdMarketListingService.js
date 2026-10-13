@@ -2,175 +2,17 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const ColdSafeEnchantService = invoke('GameServer/Bot/Economy/ColdSafeEnchantService');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const { marketStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 const TownPathfinder = invoke('GameServer/Bot/AI/TownPathfinder');
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
-const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
-const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
+const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 const StaticBuyerService = invoke('GameServer/Bot/Economy/StaticBuyerService');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
-const MarketBuyerActivity = invoke('GameServer/Bot/Economy/MarketBuyerActivity');
 const BuyStoreService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService');
-const BotMerchantStoreService = invoke('GameServer/Bot/Economy/BotMerchantStoreService');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 
-const DEFAULT_LISTING_MS = 20 * 60 * 1000;
-const SPECULATIVE_LISTING_MS = 5 * 60 * 1000;
-const LISTING_REVIEW_MS = 2 * 60 * 1000;
 const SELL_RETRY_DELAY_MS = 30 * 60 * 1000;
-const MARKET_TOWN_ROUTING_VERSION = 5;
-// Captured in-game from the Giran trading square. The inner rectangle is the
-// central column: it is walkable around, but a private store cannot sit there.
-const GIRAN_MARKET_PLAZA = Object.freeze({
-    outer: Object.freeze({ minX: 80911, maxX: 82947, minY: 147662, maxY: 149550 }),
-    column: Object.freeze({ minX: 81667, maxX: 82174, minY: 148354, maxY: 148857 }),
-    locZ: -3466
-});
-const GIRAN_STALL_EDGE_PADDING = 60;
-const GIRAN_COLUMN_CLEARANCE = 80;
-const GIRAN_STALL_MIN_DISTANCE = 40;
-// Captured from the Gludio D-grade trading square. Dynamic stalls use its
-// north, level ground; the south edge changes elevation and stays clear for
-// the fixed perimeter traders.
-const GLUDIO_D_MARKET_PLAZA = Object.freeze({
-    outer: Object.freeze({ minX: -14710, maxX: -14200, minY: 122620, maxY: 123820 }),
-    locZ: -3117
-});
-const GLUDIO_D_STALL_EDGE_PADDING = 60;
-const GLUDIO_D_STALL_MIN_DISTANCE = 60;
-const DION_D_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [15575, 143050], [16665, 144618], [17082, 145399], [18101, 146231],
-        [18564, 145810], [17813, 145422], [17129, 144877], [16364, 142984]
-    ]),
-    bounds: Object.freeze({ minX: 15575, maxX: 18564, minY: 142984, maxY: 146231 }),
-    locZ: -2900
-});
-const DION_D_STALL_EDGE_PADDING = 55;
-const DION_D_STALL_MIN_DISTANCE = 60;
-// Captured in-game around the Oren market. The concave inset stays
-// outside the trading area; all six corners are on the same level ground.
-const OREN_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [82942, 53245], [82946, 54161], [82181, 54163],
-        [82175, 53746], [81669, 53745], [81665, 53287]
-    ]),
-    bounds: Object.freeze({ minX: 81665, maxX: 82946, minY: 53245, maxY: 54163 }),
-    locZ: -1496
-});
-const OREN_STALL_EDGE_PADDING = 55;
-const OREN_STALL_MIN_DISTANCE = 60;
-// Captured in-game around Hunter's Village. Heights vary across the square,
-// so each chosen stall resolves its ground height through geodata.
-const HUNTERS_VILLAGE_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [117437, 76275], [116628, 75417], [116157, 75751],
-        [115910, 76188], [116395, 76915]
-    ]),
-    bounds: Object.freeze({ minX: 115910, maxX: 117437, minY: 75417, maxY: 76915 }),
-    center: Object.freeze({ locX: 116505, locY: 76109, locZ: -2717 }),
-    locZ: -2717
-});
-const HUNTERS_VILLAGE_STALL_EDGE_PADDING = 55;
-const HUNTERS_VILLAGE_STALL_MIN_DISTANCE = 60;
-// Captured in-game around the lower Aden trading square. Keep the measured
-// ground level rather than the higher town respawn terrace.
-const ADEN_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [146732, 26595], [146738, 27305], [148167, 27309], [148173, 26594]
-    ]),
-    bounds: Object.freeze({ minX: 146732, maxX: 148173, minY: 26594, maxY: 27309 }),
-    center: Object.freeze({ locX: 147453, locY: 26951, locZ: -2205 }),
-    locZ: -2205
-});
-const ADEN_STALL_EDGE_PADDING = 55;
-const ADEN_STALL_MIN_DISTANCE = 60;
-// Captured in-game around the Rune trading square. All four corners share
-// the same ground level; retain the slanted edges of the measured footprint.
-const RUNE_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [43248, -47812], [43329, -48311], [44978, -48312], [45006, -47721]
-    ]),
-    bounds: Object.freeze({ minX: 43248, maxX: 45006, minY: -48312, maxY: -47721 }),
-    center: Object.freeze({ locX: 44140, locY: -48039, locZ: -797 }),
-    locZ: -797
-});
-const RUNE_STALL_EDGE_PADDING = 55;
-const RUNE_STALL_MIN_DISTANCE = 60;
-// Captured in-game around Goddard, including the concave upper edge.
-// This footprint is recorded for later market routing and placement.
-const GODDARD_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [148750, -55483], [148257, -55709], [147976, -56081],
-        [147411, -56052], [147174, -55712], [146704, -55743],
-        [146855, -56198], [147622, -56624], [147789, -56569], [148642, -56101]
-    ]),
-    bounds: Object.freeze({ minX: 146704, maxX: 148750, minY: -56624, maxY: -55483 }),
-    locZ: -2781
-});
-const GODDARD_STALL_EDGE_PADDING = 55;
-// Captured in-game around Floran, including the central inset. Keep each
-// measured corner height for later placement on the uneven ground.
-const FLORAN_MARKET_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [16933, 169872], [16777, 170253], [17382, 170559],
-        [18255, 170501], [18309, 170202], [17899, 170030],
-        [17672, 170355], [17402, 170300], [17518, 169837]
-    ]),
-    boundaryHeights: Object.freeze([-3495, -3498, -3502, -3499, -3496, -3499, -3508, -3507, -3501]),
-    bounds: Object.freeze({ minX: 16777, maxX: 18309, minY: 169837, maxY: 170559 }),
-    locZ: -3501
-});
-const FLORAN_STALL_EDGE_PADDING = 55;
-const TALKING_ISLAND_NO_GRADE_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [-84242, 245018], [-83965, 244591], [-84553, 243951],
-        [-84801, 244105], [-85256, 243540], [-85494, 243762]
-    ]),
-    bounds: Object.freeze({ minX: -85494, maxX: -83965, minY: 243540, maxY: 245018 }),
-    locZ: -3730
-});
-const TALKING_ISLAND_STALL_EDGE_PADDING = 55;
-const TALKING_ISLAND_STALL_MIN_DISTANCE = 60;
-const ELVEN_VILLAGE_NO_GRADE_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [46644, 50600], [47041, 49427], [46867, 48783],
-        [46384, 49055], [46230, 50247]
-    ]),
-    bounds: Object.freeze({ minX: 46230, maxX: 47041, minY: 48783, maxY: 50600 }),
-    locZ: -3060
-});
-const ELVEN_VILLAGE_STALL_EDGE_PADDING = 55;
-const ELVEN_VILLAGE_STALL_MIN_DISTANCE = 60;
-const DARK_ELVEN_VILLAGE_NO_GRADE_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [12112, 16364], [13160, 16121], [13286, 16756], [12230, 17001]
-    ]),
-    bounds: Object.freeze({ minX: 12112, maxX: 13286, minY: 16121, maxY: 17001 }),
-    locZ: -4585
-});
-const DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING = 55;
-const DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE = 60;
-const ORC_VILLAGE_NO_GRADE_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [-45219, -112854], [-45219, -111851], [-44647, -111993], [-43825, -112855]
-    ]),
-    bounds: Object.freeze({ minX: -45219, maxX: -43825, minY: -112854, maxY: -111851 }),
-    locZ: -240
-});
-const ORC_VILLAGE_STALL_EDGE_PADDING = 55;
-const ORC_VILLAGE_STALL_MIN_DISTANCE = 60;
-const DWARVEN_VILLAGE_NO_GRADE_PLAZA = Object.freeze({
-    boundary: Object.freeze([
-        [115570, -178085], [115871, -179190], [115235, -179361], [115099, -177873]
-    ]),
-    bounds: Object.freeze({ minX: 115099, maxX: 115871, minY: -179361, maxY: -177873 }),
-    locZ: -920
-});
-const DWARVEN_VILLAGE_STALL_EDGE_PADDING = 55;
-const DWARVEN_VILLAGE_STALL_MIN_DISTANCE = 60;
 
 function marketTown(name) {
     return TownPathfinder.towns.find((town) => town.name === name)
@@ -181,517 +23,26 @@ function marketTown(name) {
 
 const targetMarketTownName = MarketTownPolicy.targetTownForItems;
 
-function isInRect(loc, rect) {
-    return Number(loc?.locX) >= rect.minX && Number(loc?.locX) <= rect.maxX
-        && Number(loc?.locY) >= rect.minY && Number(loc?.locY) <= rect.maxY;
-}
-
-function isInsidePolygon(loc, boundary = []) {
-    const x = Number(loc?.locX);
-    const y = Number(loc?.locY);
-    return boundary.reduce((inside, point, index) => {
-        const previous = boundary[(index + boundary.length - 1) % boundary.length];
-        const [xi, yi] = point;
-        const [xj, yj] = previous;
-        return ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi) / (yj - yi)) + xi) ? !inside : inside;
-    }, false);
-}
-
-function isGiranPlazaStallLocation(loc) {
-    const { outer, column } = GIRAN_MARKET_PLAZA;
-    const safeOuter = {
-        minX: outer.minX + GIRAN_STALL_EDGE_PADDING,
-        maxX: outer.maxX - GIRAN_STALL_EDGE_PADDING,
-        minY: outer.minY + GIRAN_STALL_EDGE_PADDING,
-        maxY: outer.maxY - GIRAN_STALL_EDGE_PADDING
-    };
-    const blockedColumn = {
-        minX: column.minX - GIRAN_COLUMN_CLEARANCE,
-        maxX: column.maxX + GIRAN_COLUMN_CLEARANCE,
-        minY: column.minY - GIRAN_COLUMN_CLEARANCE,
-        maxY: column.maxY + GIRAN_COLUMN_CLEARANCE
-    };
-    return isInRect(loc, safeOuter) && !isInRect(loc, blockedColumn);
-}
-
-function distance2d(a, b) {
-    const dx = Number(a?.locX || 0) - Number(b?.locX || 0);
-    const dy = Number(a?.locY || 0) - Number(b?.locY || 0);
-    return Math.sqrt(dx * dx + dy * dy);
-}
-
-function staticMerchantStalls(townName, isValidStall) {
-    return Object.values(MerchantStoreConfigs)
-        .filter((store) => store.town === townName)
-        .map((store) => ({ locX: store.locX, locY: store.locY, locZ: store.locZ }))
-        .filter(isValidStall);
-}
-
-function activeAfkStalls(townName, characterId, isValidStall) {
-    return invoke('GameServer/AfkTrade/AfkTradeService')
-        .activeLocations(townName, characterId).filter(isValidStall);
-}
-
-function isFreeGiranPlazaStall(loc, occupied) {
-    return isGiranPlazaStallLocation(loc)
-        && !occupied.some((other) => distance2d(loc, other) < GIRAN_STALL_MIN_DISTANCE);
-}
-
-function occupiedGiranPlazaStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Giran', isGiranPlazaStallLocation),
-        ...activeAfkStalls('Giran', characterId, isGiranPlazaStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && (
-                (state.activity === 'merchant' && state.stats?.marketStore?.town === 'Giran')
-                || (state.activity === 'crafting' && state.stats?.craftShop?.town === 'Giran')
-            )
-            && isGiranPlazaStallLocation(state.stats.marketStore?.loc || state.stats.craftShop?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.stats.craftShop?.loc || state.loc)
-    ];
-}
-
-function isGludioDMarketStallLocation(loc) {
-    const { outer } = GLUDIO_D_MARKET_PLAZA;
-    return isInRect(loc, {
-        minX: outer.minX + GLUDIO_D_STALL_EDGE_PADDING,
-        maxX: outer.maxX - GLUDIO_D_STALL_EDGE_PADDING,
-        minY: outer.minY + GLUDIO_D_STALL_EDGE_PADDING,
-        maxY: outer.maxY - GLUDIO_D_STALL_EDGE_PADDING
-    });
-}
-
-function occupiedGludioDStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Gludio', isGludioDMarketStallLocation),
-        ...activeAfkStalls('Gludio', characterId, isGludioDMarketStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Gludio'
-            && isGludioDMarketStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseGludioDMarketStall(random = Math.random, occupied = []) {
-    const { outer, locZ } = GLUDIO_D_MARKET_PLAZA;
-    const minX = outer.minX + GLUDIO_D_STALL_EDGE_PADDING;
-    const maxX = outer.maxX - GLUDIO_D_STALL_EDGE_PADDING;
-    const minY = outer.minY + GLUDIO_D_STALL_EDGE_PADDING;
-    const maxY = outer.maxY - GLUDIO_D_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = {
-            locX: Math.round(minX + random() * (maxX - minX)),
-            locY: Math.round(minY + random() * (maxY - minY)),
-            locZ
-        };
-        if (isGludioDMarketStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < GLUDIO_D_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += GLUDIO_D_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += GLUDIO_D_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (!occupied.some((other) => distance2d(loc, other) < GLUDIO_D_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isDionDMarketStallLocation(loc) {
-    const { bounds, boundary } = DION_D_MARKET_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + DION_D_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - DION_D_STALL_EDGE_PADDING,
-        minY: bounds.minY + DION_D_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - DION_D_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedDionDStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Dion', isDionDMarketStallLocation),
-        ...activeAfkStalls('Dion', characterId, isDionDMarketStallLocation),
-        ...LifeState.allStates(2000)
-            .filter((state) => Number(state.characterId) !== Number(characterId)
-                && state.activity === 'merchant'
-                && state.stats?.marketStore?.town === 'Dion'
-                && isDionDMarketStallLocation(state.stats.marketStore?.loc || state.loc))
-            .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function dionGroundLocation(locX, locY) {
-    return { locX, locY, locZ: GeodataEngine.getHeight(locX, locY, DION_D_MARKET_PLAZA.locZ) };
-}
-
-function chooseDionDMarketStall(random = Math.random, occupied = []) {
-    const { bounds } = DION_D_MARKET_PLAZA;
-    const minX = bounds.minX + DION_D_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - DION_D_STALL_EDGE_PADDING;
-    const minY = bounds.minY + DION_D_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - DION_D_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 128; attempt++) {
-        const loc = dionGroundLocation(
-            Math.round(minX + random() * (maxX - minX)),
-            Math.round(minY + random() * (maxY - minY))
-        );
-        if (isDionDMarketStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DION_D_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += DION_D_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += DION_D_STALL_MIN_DISTANCE) {
-            const loc = dionGroundLocation(locX, locY);
-            if (isDionDMarketStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DION_D_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isInsetPolygonStallLocation(loc, plaza, edgePadding) {
-    const { boundary } = plaza;
-    if (!isInsidePolygon(loc, boundary)) return false;
-    // Keep the margin along every edge, including the concave corner,
-    // rather than only shrinking the polygon's enclosing rectangle.
-    return boundary.every(([ax, ay], index) => {
-        const [bx, by] = boundary[(index + 1) % boundary.length];
-        const dx = bx - ax;
-        const dy = by - ay;
-        const t = Math.max(0, Math.min(1,
-            ((loc.locX - ax) * dx + (loc.locY - ay) * dy) / (dx * dx + dy * dy)));
-        return Math.hypot(loc.locX - ax - t * dx, loc.locY - ay - t * dy) >= edgePadding;
-    });
-}
-
-function choosePolygonMarketStall(plaza, edgePadding, minDistance, random, occupied, useGeodata = false) {
-    const { bounds, locZ } = plaza;
-    const minX = bounds.minX + edgePadding;
-    const maxX = bounds.maxX - edgePadding;
-    const minY = bounds.minY + edgePadding;
-    const maxY = bounds.maxY - edgePadding;
-    const isFree = (loc) => isInsetPolygonStallLocation(loc, plaza, edgePadding)
-        && !occupied.some((other) => distance2d(loc, other) < minDistance);
-    const groundLocation = (loc) => useGeodata
-        ? { ...loc, locZ: GeodataEngine.getHeight(loc.locX, loc.locY, locZ) } : loc;
-    for (let attempt = 0; attempt < 128; attempt++) {
-        const loc = {
-            locX: Math.round(minX + random() * (maxX - minX)),
-            locY: Math.round(minY + random() * (maxY - minY)),
-            locZ
-        };
-        if (isFree(loc)) return groundLocation(loc);
-    }
-    for (let locX = minX; locX <= maxX; locX += minDistance) {
-        for (let locY = minY; locY <= maxY; locY += minDistance) {
-            const loc = { locX, locY, locZ };
-            if (isFree(loc)) return groundLocation(loc);
-        }
-    }
-    return null;
-}
-
-function isOrenMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, OREN_MARKET_PLAZA, OREN_STALL_EDGE_PADDING);
-}
-
-function chooseOrenMarketStall(random = Math.random, occupied = []) {
-    return choosePolygonMarketStall(OREN_MARKET_PLAZA, OREN_STALL_EDGE_PADDING,
-        OREN_STALL_MIN_DISTANCE, random, occupied);
-}
-
-function isHuntersVillageMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, HUNTERS_VILLAGE_MARKET_PLAZA, HUNTERS_VILLAGE_STALL_EDGE_PADDING);
-}
-
-function chooseHuntersVillageMarketStall(random = Math.random, occupied = []) {
-    return choosePolygonMarketStall(HUNTERS_VILLAGE_MARKET_PLAZA, HUNTERS_VILLAGE_STALL_EDGE_PADDING,
-        HUNTERS_VILLAGE_STALL_MIN_DISTANCE, random, occupied, true);
-}
-
-function isAdenMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, ADEN_MARKET_PLAZA, ADEN_STALL_EDGE_PADDING);
-}
-
-function chooseAdenMarketStall(random = Math.random, occupied = []) {
-    return choosePolygonMarketStall(ADEN_MARKET_PLAZA, ADEN_STALL_EDGE_PADDING,
-        ADEN_STALL_MIN_DISTANCE, random, occupied);
-}
-
-function isRuneMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, RUNE_MARKET_PLAZA, RUNE_STALL_EDGE_PADDING);
-}
-
-function chooseRuneMarketStall(random = Math.random, occupied = []) {
-    return choosePolygonMarketStall(RUNE_MARKET_PLAZA, RUNE_STALL_EDGE_PADDING,
-        RUNE_STALL_MIN_DISTANCE, random, occupied);
-}
-
-function isGoddardMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, GODDARD_MARKET_PLAZA, GODDARD_STALL_EDGE_PADDING);
-}
-
-function isFloranMarketStallLocation(loc) {
-    return isInsetPolygonStallLocation(loc, FLORAN_MARKET_PLAZA, FLORAN_STALL_EDGE_PADDING);
-}
-
-function isTalkingIslandNoGradeStallLocation(loc) {
-    const { bounds, boundary } = TALKING_ISLAND_NO_GRADE_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + TALKING_ISLAND_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - TALKING_ISLAND_STALL_EDGE_PADDING,
-        minY: bounds.minY + TALKING_ISLAND_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - TALKING_ISLAND_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedTalkingIslandNoGradeStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Talking Island', isTalkingIslandNoGradeStallLocation),
-        ...activeAfkStalls('Talking Island', characterId, isTalkingIslandNoGradeStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Talking Island'
-            && isTalkingIslandNoGradeStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseTalkingIslandNoGradeStall(random = Math.random, occupied = []) {
-    const { bounds, locZ } = TALKING_ISLAND_NO_GRADE_PLAZA;
-    const minX = bounds.minX + TALKING_ISLAND_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - TALKING_ISLAND_STALL_EDGE_PADDING;
-    const minY = bounds.minY + TALKING_ISLAND_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - TALKING_ISLAND_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = { locX: Math.round(minX + random() * (maxX - minX)), locY: Math.round(minY + random() * (maxY - minY)), locZ };
-        if (isTalkingIslandNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < TALKING_ISLAND_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += TALKING_ISLAND_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += TALKING_ISLAND_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isTalkingIslandNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < TALKING_ISLAND_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isElvenVillageNoGradeStallLocation(loc) {
-    const { bounds, boundary } = ELVEN_VILLAGE_NO_GRADE_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        minY: bounds.minY + ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - ELVEN_VILLAGE_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedElvenVillageNoGradeStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Elven Village', isElvenVillageNoGradeStallLocation),
-        ...activeAfkStalls('Elven Village', characterId, isElvenVillageNoGradeStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Elven Village'
-            && isElvenVillageNoGradeStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseElvenVillageNoGradeStall(random = Math.random, occupied = []) {
-    const { bounds, locZ } = ELVEN_VILLAGE_NO_GRADE_PLAZA;
-    const minX = bounds.minX + ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const minY = bounds.minY + ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = { locX: Math.round(minX + random() * (maxX - minX)), locY: Math.round(minY + random() * (maxY - minY)), locZ };
-        if (isElvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < ELVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += ELVEN_VILLAGE_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += ELVEN_VILLAGE_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isElvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < ELVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isDarkElvenVillageNoGradeStallLocation(loc) {
-    const { bounds, boundary } = DARK_ELVEN_VILLAGE_NO_GRADE_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        minY: bounds.minY + DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedDarkElvenVillageNoGradeStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Dark Elven Village', isDarkElvenVillageNoGradeStallLocation),
-        ...activeAfkStalls('Dark Elven Village', characterId, isDarkElvenVillageNoGradeStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Dark Elven Village'
-            && isDarkElvenVillageNoGradeStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseDarkElvenVillageNoGradeStall(random = Math.random, occupied = []) {
-    const { bounds, locZ } = DARK_ELVEN_VILLAGE_NO_GRADE_PLAZA;
-    const minX = bounds.minX + DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const minY = bounds.minY + DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - DARK_ELVEN_VILLAGE_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = { locX: Math.round(minX + random() * (maxX - minX)), locY: Math.round(minY + random() * (maxY - minY)), locZ };
-        if (isDarkElvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isDarkElvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isOrcVillageNoGradeStallLocation(loc) {
-    const { bounds, boundary } = ORC_VILLAGE_NO_GRADE_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + ORC_VILLAGE_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - ORC_VILLAGE_STALL_EDGE_PADDING,
-        minY: bounds.minY + ORC_VILLAGE_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - ORC_VILLAGE_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedOrcVillageNoGradeStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Orc Village', isOrcVillageNoGradeStallLocation),
-        ...activeAfkStalls('Orc Village', characterId, isOrcVillageNoGradeStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Orc Village'
-            && isOrcVillageNoGradeStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseOrcVillageNoGradeStall(random = Math.random, occupied = []) {
-    const { bounds, locZ } = ORC_VILLAGE_NO_GRADE_PLAZA;
-    const minX = bounds.minX + ORC_VILLAGE_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - ORC_VILLAGE_STALL_EDGE_PADDING;
-    const minY = bounds.minY + ORC_VILLAGE_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - ORC_VILLAGE_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = { locX: Math.round(minX + random() * (maxX - minX)), locY: Math.round(minY + random() * (maxY - minY)), locZ };
-        if (isOrcVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < ORC_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += ORC_VILLAGE_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += ORC_VILLAGE_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isOrcVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < ORC_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function isDwarvenVillageNoGradeStallLocation(loc) {
-    const { bounds, boundary } = DWARVEN_VILLAGE_NO_GRADE_PLAZA;
-    return isInRect(loc, {
-        minX: bounds.minX + DWARVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxX: bounds.maxX - DWARVEN_VILLAGE_STALL_EDGE_PADDING,
-        minY: bounds.minY + DWARVEN_VILLAGE_STALL_EDGE_PADDING,
-        maxY: bounds.maxY - DWARVEN_VILLAGE_STALL_EDGE_PADDING
-    }) && isInsidePolygon(loc, boundary);
-}
-
-function occupiedDwarvenVillageNoGradeStalls(characterId) {
-    return [
-        ...staticMerchantStalls('Dwarven Village', isDwarvenVillageNoGradeStallLocation),
-        ...activeAfkStalls('Dwarven Village', characterId, isDwarvenVillageNoGradeStallLocation),
-        ...LifeState.allStates(2000)
-        .filter((state) => Number(state.characterId) !== Number(characterId)
-            && state.activity === 'merchant'
-            && state.stats?.marketStore?.town === 'Dwarven Village'
-            && isDwarvenVillageNoGradeStallLocation(state.stats.marketStore?.loc || state.loc))
-        .map((state) => state.stats.marketStore?.loc || state.loc)
-    ];
-}
-
-function chooseDwarvenVillageNoGradeStall(random = Math.random, occupied = []) {
-    const { bounds, locZ } = DWARVEN_VILLAGE_NO_GRADE_PLAZA;
-    const minX = bounds.minX + DWARVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxX = bounds.maxX - DWARVEN_VILLAGE_STALL_EDGE_PADDING;
-    const minY = bounds.minY + DWARVEN_VILLAGE_STALL_EDGE_PADDING;
-    const maxY = bounds.maxY - DWARVEN_VILLAGE_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = { locX: Math.round(minX + random() * (maxX - minX)), locY: Math.round(minY + random() * (maxY - minY)), locZ };
-        if (isDwarvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DWARVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-    }
-    for (let locX = minX; locX <= maxX; locX += DWARVEN_VILLAGE_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += DWARVEN_VILLAGE_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isDwarvenVillageNoGradeStallLocation(loc) && !occupied.some((other) => distance2d(loc, other) < DWARVEN_VILLAGE_STALL_MIN_DISTANCE)) return loc;
-        }
-    }
-    return null;
-}
-
-function chooseGiranPlazaStall(random = Math.random, occupied = []) {
-    const { outer, locZ } = GIRAN_MARKET_PLAZA;
-    const minX = outer.minX + GIRAN_STALL_EDGE_PADDING;
-    const maxX = outer.maxX - GIRAN_STALL_EDGE_PADDING;
-    const minY = outer.minY + GIRAN_STALL_EDGE_PADDING;
-    const maxY = outer.maxY - GIRAN_STALL_EDGE_PADDING;
-    for (let attempt = 0; attempt < 96; attempt++) {
-        const loc = {
-            locX: Math.round(minX + random() * (maxX - minX)),
-            locY: Math.round(minY + random() * (maxY - minY)),
-            locZ
-        };
-        if (isFreeGiranPlazaStall(loc, occupied)) return loc;
-    }
-
-    // A deterministic grid is the overflow path: it keeps a dense, readable
-    // market rather than allowing two stores to occupy one stall.
-    for (let locX = minX; locX <= maxX; locX += GIRAN_STALL_MIN_DISTANCE) {
-        for (let locY = minY; locY <= maxY; locY += GIRAN_STALL_MIN_DISTANCE) {
-            const loc = { locX, locY, locZ };
-            if (isFreeGiranPlazaStall(loc, occupied)) return loc;
-        }
-    }
-    return null;
-}
-
+// A store's place: the next free place of the town's captured square, or,
+// in a town without one, the town centre (or the bot's own place).
 function marketLocation(town, options) {
-    if (town?.name === 'Giran') return chooseGiranPlazaStall(options.random, occupiedGiranPlazaStalls(options.state?.characterId));
-    if (town?.name === 'Gludio') return chooseGludioDMarketStall(options.random, occupiedGludioDStalls(options.state?.characterId));
-    if (town?.name === 'Dion') return chooseDionDMarketStall(options.random, occupiedDionDStalls(options.state?.characterId));
-    if (town?.name === 'Talking Island') return chooseTalkingIslandNoGradeStall(options.random, occupiedTalkingIslandNoGradeStalls(options.state?.characterId));
-    if (town?.name === 'Elven Village') return chooseElvenVillageNoGradeStall(options.random, occupiedElvenVillageNoGradeStalls(options.state?.characterId));
-    if (town?.name === 'Dark Elven Village') return chooseDarkElvenVillageNoGradeStall(options.random, occupiedDarkElvenVillageNoGradeStalls(options.state?.characterId));
-    if (town?.name === 'Orc Village') return chooseOrcVillageNoGradeStall(options.random, occupiedOrcVillageNoGradeStalls(options.state?.characterId));
-    if (town?.name === 'Dwarven Village') return chooseDwarvenVillageNoGradeStall(options.random, occupiedDwarvenVillageNoGradeStalls(options.state?.characterId));
+    if (ShopPlaces.hasPlaza(town?.name)) {
+        return ShopPlaces.take(town.name, options.owner || ShopPlaces.stateOwner(options.state?.characterId));
+    }
     return town?.center ? { ...town.center } : { ...(options.state?.loc || {}) };
 }
 
+// The centre of a market town: the place of a board ad, which stands nowhere.
+function townCenter(name) {
+    const town = marketTown(name);
+    return town?.center ? { ...town.center } : null;
+}
+
 function marketAwareNpcCandidates(state, options = {}) {
-    const market = MarketListingPolicy.evaluate(state, {
+    return MarketListingPolicy.evaluate(state, {
         unlimited: true,
         allowPreTradeCleanup: options.allowPreTradeCleanup === true
     }).npc;
-    const chosen = new Set(market.map((item) => Number(item.selfId)));
-    return market.concat(ItemDisposition.npcLiquidationCandidates(state, options).filter((item) => {
-        const kind = String(item.kind || '');
-        return !kind.startsWith('Weapon.') && !kind.startsWith('Armor.')
-            && !chosen.has(Number(item.selfId));
-    }));
 }
 
 function preTradeNpcCleanup(state, forcedCleanup = {}, timestamp = Date.now()) {
@@ -737,7 +88,7 @@ function open(state, options = {}) {
         if (!options.forcedCleanup) return Promise.resolve({ state, listed: false, reason: 'sell_retry_cooldown' });
         // Cleanup may bypass the travel delay, but must not open another WTS.
         // Learn recipes first, as the sale path does: a learnable one is not junk.
-        return MarketBuyerActivity.refresh().then(() => LifeState.learnCraftableRecipes(state))
+        return LifeState.learnCraftableRecipes(state)
             .then((learnedState) => preTradeNpcCleanup(learnedState || state, options.forcedCleanup, timestamp)).then((cleanup) => (
             BotWarehouse.depositCold({
                 ...cleanup.state,
@@ -752,12 +103,15 @@ function open(state, options = {}) {
             marketSellRetryAfter: timestamp + SELL_RETRY_DELAY_MS
         }
     });
-    return MarketBuyerActivity.refresh().then(() => ColdSafeEnchantService.enchantSafe(state, options))
+    return ColdSafeEnchantService.enchantSafe(state, options)
         .then((enchantResult) => LifeState.learnCraftableRecipes(enchantResult.state || state))
-        .then((preparedState) => {
+        .then((preparedState) => storedAmounts(preparedState || state).then((stored) => ({ preparedState, stored })))
+        .then(({ preparedState, stored }) => {
+    // The warehouse room of each item, and one decision point for the visit.
+    options = { ...options, stored, now: timestamp };
     state = preparedState || state;
     const forcedCleanup = options.forcedCleanup || null;
-    if (forcedCleanup && !ItemDisposition.isTradeEligible(state)) {
+    if (forcedCleanup?.cleanupReason === 'npc_only_inventory') {
         return preTradeNpcCleanup(state, forcedCleanup, timestamp);
     }
     const initialItems = ItemDisposition.saleCandidates(state, options);
@@ -768,22 +122,20 @@ function open(state, options = {}) {
     // GoalExecutor chooses the best buyer town before travel. At this stage
     // the bot must trade only with the city it has actually reached.
     const town = marketTown(options.town || state.currentRegion || targetMarketTownName(state, initialItems));
-    return BuyStoreService.sellToBestBuyer(state, town?.name).then((dynamicBuyerSale) => StaticBuyerService.sell(dynamicBuyerSale.state || state, town?.name).then((buyerSale) => {
+    // One sale decision for the visit (one decision point, evaluated once):
+    // the buy ads it answers here, the NPC sale, the board's listings.
+    const market = invoke('GameServer/Bot/Economy/BotAfkMarketService').saleDecision(state, options);
+    const initialMarket = market;
+    return BuyStoreService.sellToBestBuyer(state, town?.name, { answers: market.answers }).then((dynamicBuyerSale) => {
+    if (dynamicBuyerSale.pending) return { ...dynamicBuyerSale, listed: false };
+    return StaticBuyerService.sell(dynamicBuyerSale.state || state, town?.name).then((buyerSale) => {
     const saleState = buyerSale.state || dynamicBuyerSale.state || state;
-    const initialMarket = MarketListingPolicy.evaluate(saleState, options);
-    return LifeState.applyNpcLiquidation(saleState, initialMarket.npc, {
+    return LifeState.applyNpcLiquidation(saleState, market.npc, {
         source: 'pre_market_junk',
         town: town?.name || saleState.currentRegion || null
     }).then((liquidatedState) => {
     const marketState = liquidatedState || saleState;
-    const market = MarketListingPolicy.evaluate(marketState, options);
-    const requestedDurationMs = Number(options.durationMs) || 0;
-    const items = market.listings.map((item) => ({
-        ...item,
-        marketExpiresAt: timestamp + (requestedDurationMs || (
-            item.marketReason === 'speculative_demand' ? SPECULATIVE_LISTING_MS : DEFAULT_LISTING_MS
-        ))
-    }));
+    const items = market.listings;
     if (!items.length) {
         return BotWarehouse.depositCold(marketState).then((warehouse) => ({
             state: deferSellRetry(warehouse.state || marketState),
@@ -803,638 +155,95 @@ function open(state, options = {}) {
             market
         }));
     }
-    const speculative = items.every((item) => item.marketReason === 'speculative_demand');
-    const durationMs = requestedDurationMs || Math.max(...items.map((item) => Number(item.marketExpiresAt) - timestamp));
-    const earliestSpeculativeExpiry = items
-        .filter((item) => item.marketReason === 'speculative_demand')
-        .reduce((earliest, item) => Math.min(earliest, Number(item.marketExpiresAt || Infinity)), Infinity);
-    const storeLoc = marketLocation(town, { ...options, state });
-    if (!storeLoc) return { state: deferSellRetry(marketState), listed: false, reason: 'giran_plaza_full', buyerSale, market };
-    const nextState = {
-        ...marketState,
-        activity: 'merchant',
-        currentRegion: town?.name || marketState.currentRegion,
-        // A private store has a stall, not a roaming route. Persist the plaza
-        // coordinate so cold ticks and hot materialization use the same spot.
-        loc: storeLoc,
-        stats: {
-            ...(marketState.stats || {}),
-            marketStore: {
-                id: `${state.characterId}:${timestamp}`,
-                storeType: 1,
-                sellerCharacterId: Number(marketState.characterId),
-                sellerName: marketState.name,
-                title: options.title || marketStoreTitle(items),
-                autoTitle: !options.title,
-                marketTownRoutingVersion: MARKET_TOWN_ROUTING_VERSION,
-                town: town?.name || options.town || saleState.currentRegion,
-                loc: storeLoc,
-                items,
-                openedAt: timestamp,
-                nextReviewAt: Math.min(timestamp + LISTING_REVIEW_MS, timestamp + durationMs, earliestSpeculativeExpiry),
-                expiresAt: timestamp + durationMs
-            }
-        },
-        timing: {
-            ...(saleState.timing || {}),
-            activityStartedAt: timestamp,
-            // Sales settle through the market event path.  A listed store only
-            // needs a scheduled wake-up when its offer expires.
-            nextResolveAt: timestamp + durationMs
-        }
-    };
-    return LifeState.upsertState(nextState, 'cold_market_listing').then((saved) => {
-        if (saved) MarketOpportunity.indexColdStore(saved);
-        if (saved) MarketTelemetry.listingOpened({ speculative });
-        if (saved) invoke('GameServer/Bot/Economy/BotTradeChat').offer(saved, timestamp);
-        return {
-            state: saved || marketState,
-            listed: !!saved,
-            itemCount: items.length,
-            buyerSale,
-            dynamicBuyerSale,
-            market
-        };
-    });
-    });
-    }));
-    });
-}
-
-function stockUnits(store) {
-    return (store?.items || []).reduce((sum, item) => sum + Math.max(0, Number(item.count || 0)), 0);
-}
-
-function revalidatedItems(state, store, timestamp) {
-    const decisions = (store.items || []).map((item) => {
-        const speculativeExpired = item.marketReason === 'speculative_demand'
-            && Number(item.marketExpiresAt || 0) > 0
-            && Number(item.marketExpiresAt) <= timestamp;
-        return {
-            item,
-            decision: speculativeExpired
-                ? { action: 'warehouse', reason: 'speculative_expired' }
-                : MarketListingPolicy.classify(state, item, { now: timestamp })
-        };
-    });
-    const items = decisions.flatMap(({ item, decision }) => {
-        if (decision.action !== 'list') return [];
-        const speculative = decision.reason === 'speculative_demand';
-        const marketExpiresAt = speculative
-            ? item.marketReason === 'speculative_demand' && Number(item.marketExpiresAt || 0) > timestamp
-                ? Number(item.marketExpiresAt)
-                : Math.min(Number(store.expiresAt || Infinity), timestamp + SPECULATIVE_LISTING_MS)
-            : Number(store.expiresAt || item.marketExpiresAt || timestamp + DEFAULT_LISTING_MS);
-        return [{
-            ...item,
-            count: Math.max(1, Math.min(Number(item.count), Number(decision.listCount || item.count))),
-            price: MarketListingPolicy.listingPrice(item, decision),
-            marketReason: decision.reason,
-            marketExpiresAt
-        }];
-    });
-    return { decisions, items };
-}
-
-function listingNextReviewAt(items, storeExpiresAt, timestamp) {
-    const speculativeExpiry = items
-        .filter((item) => item.marketReason === 'speculative_demand')
-        .reduce((earliest, item) => Math.min(earliest, Number(item.marketExpiresAt || Infinity)), Infinity);
-    return Math.min(Number(storeExpiresAt || timestamp + LISTING_REVIEW_MS), timestamp + LISTING_REVIEW_MS, speculativeExpiry);
-}
-
-function pricingAfterReview(state, store, timestamp, expired = false) {
-    const pricing = { ...(state.stats?.marketPricing || {}) };
-    for (const item of store.items || []) {
-        if (Number(item.count || 0) <= 0) continue;
-        const speculativeFailed = item.marketReason === 'speculative_demand'
-            && (expired || Number(item.marketExpiresAt || store.expiresAt || Infinity) <= timestamp);
-        if (!expired && !speculativeFailed) continue;
-        const previous = pricing[item.selfId] || {};
-        pricing[item.selfId] = {
-            ...previous,
-            percent: Math.max(50, Number(previous.percent || 100) - 5),
-            lastAdjustedAt: timestamp,
-            ...(speculativeFailed ? { speculativeFailedAt: timestamp, failedSpeculativePrice: Number(item.price) } : {})
-        };
-    }
-    return pricing;
-}
-
-function closeSellStore(state, timestamp, reason) {
-    const store = state.stats.marketStore;
-    const hasStock = stockUnits(store) > 0;
-    const nextState = {
-        ...state,
-        activity: 'shopping',
-        stats: {
-            ...(state.stats || {}),
-            marketStore: null,
-            marketSellRetryAfter: hasStock ? timestamp + SELL_RETRY_DELAY_MS : null,
-            marketPricing: pricingAfterReview(state, store, timestamp, reason === 'expired')
-        },
-        timing: { ...(state.timing || {}), nextResolveAt: timestamp }
-    };
-    MarketOpportunity.removeColdStore(state.characterId);
-    return MarketBuyerActivity.refresh().then(() => (
-        hasStock ? BotWarehouse.depositCold(nextState) : Promise.resolve({ state: nextState, count: 0 })))
-        .then((warehouse) => {
-            const storedState = warehouse.state || nextState;
-            const liquidated = hasStock ? marketAwareNpcCandidates(storedState) : [];
-            return LifeState.applyNpcLiquidation(storedState, liquidated).then((liquidatedState) => ({
-                state: liquidatedState || storedState,
-                warehouseCount: warehouse.count || 0,
-                liquidated
+    // The board replaced the stall (step 3.3): the listings go to the bot's
+    // shop and, past its lines, to sell ads; their items leave the bag into
+    // the records. The bot then goes back to its hunt.
+    return invoke('GameServer/Bot/Economy/BotAfkMarketService').listOnBoard(marketState, { ...options, decided: market }).then((board) => {
+        const boardState = board.state || marketState;
+        if (board.shopTown) return travelToShopTown(boardState, board, timestamp);
+        if (!board.listed) {
+            return BotWarehouse.depositCold(boardState).then((warehouse) => ({
+                state: deferSellRetry(warehouse.state || boardState),
+                listed: false,
+                reason: board.reason || 'board_refused',
+                buyerSale,
+                dynamicBuyerSale,
+                warehouse,
+                market
             }));
-        })
-        .then(({ state: liquidatedState, warehouseCount, liquidated }) => {
-            MarketTelemetry.closed(reason, stockUnits(store));
-            // A closed cold WTS has no remaining town action. Persist the
-            // return trip at the same durable boundary, matching the WTB
-            // close path, instead of leaving an immediately-due shopping row
-            // for a later scheduler command.
-            const returning = reason === 'sold_out'
-                ? liquidatedState
-                : GoalExecutor.finishMarketVisit(liquidatedState, timestamp, { recoverMissingReturn: true }) || liquidatedState;
-            return LifeState.upsertState(returning, `cold_market_${reason}`)
-                .then((saved) => ({
-                    state: saved || returning,
-                    closed: true,
-                    reason,
-                    warehouseCount,
-                    liquidatedCount: liquidated.reduce((sum, item) => sum + Number(item.count || 0), 0)
-                }));
-        });
-}
-
-function revalidateListing(state, timestamp) {
-    const store = state.stats.marketStore;
-    const { items } = revalidatedItems(state, store, timestamp);
-    const prunedItems = Math.max(0, stockUnits(store) - items.reduce((sum, item) => sum + Number(item.count || 0), 0));
-    if (!items.length) return closeSellStore(state, timestamp, 'no_actionable_demand');
-
-    const nextState = {
-        ...state,
-        stats: {
-            ...(state.stats || {}),
-            marketPricing: pricingAfterReview(state, store, timestamp),
-            marketStore: {
-                ...store,
-                items,
-                title: store.autoTitle === false ? store.title : marketStoreTitle(items),
-                nextReviewAt: listingNextReviewAt(items, store.expiresAt, timestamp)
-            }
         }
-    };
-    return LifeState.upsertState(nextState, 'cold_market_demand_revalidated').then((saved) => {
-        const resolved = saved || nextState;
-        MarketOpportunity.indexColdStore(resolved);
-        if (prunedItems > 0) MarketTelemetry.demandPruned(prunedItems);
-        return { state: resolved, closed: false, revalidated: true, prunedItems };
+        MarketTelemetry.listingOpened({ speculative: false });
+        return BotWarehouse.depositCold(boardState).then((warehouse) => {
+            const deposited = warehouse.state || boardState;
+            const stored = deferSellRetry(deposited);
+            const returning = GoalExecutor.finishMarketVisit(stored, timestamp, { recoverMissingReturn: true }) || stored;
+            return LifeState.upsertState(returning, 'cold_market_board_listing').then((saved) => ({
+                state: saved || returning,
+                listed: true,
+                itemCount: board.listed,
+                buyerSale,
+                dynamicBuyerSale,
+                warehouse,
+                market
+            }));
+        });
+    });
+    });
+    });
+    });
     });
 }
 
-function hotClosedState(state, store, timestamp, reason) {
-    const hasStock = stockUnits(store) > 0;
-    return {
-        ...state,
-        phase: 'hot',
-        activity: 'shopping',
-        stats: {
-            ...(state.stats || {}),
-            marketStore: null,
-            marketSellRetryAfter: hasStock ? timestamp + SELL_RETRY_DELAY_MS : null,
-            marketPricing: pricingAfterReview(state, store, timestamp, reason === 'expired')
-        },
-        timing: { ...(state.timing || {}), nextResolveAt: timestamp }
-    };
+// The bot's shop opens in another town than the one it sold in (its one
+// roll, MarketTownPolicy.openingTown): it travels there with its lines and
+// keeps its way back to its spot; the visit there opens the shop. When it
+// cannot travel, its lines wait in the bag for the next visit.
+function travelToShopTown(state, board, timestamp) {
+    const stats = { ...(state.stats || {}), shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
+    const goal = { type: 'sell_inventory', status: 'active',
+        plan: { expectedBenefit: 'market_sale_inventory', marketTown: board.shopTown } };
+    const travel = GoalExecutor.beginMarketTravel({ ...state, activity: 'hunting', stats }, goal, timestamp);
+    if (travel) travel.stats.marketReturn = state.stats?.marketReturn || travel.stats.marketReturn;
+    const next = travel || GoalExecutor.finishMarketVisit({ ...state, stats }, timestamp, { recoverMissingReturn: true })
+        || { ...state, stats };
+    return LifeState.upsertState(next, travel ? 'cold_market_shop_town_trip' : 'cold_market_shop_town_unreached')
+        .then((saved) => ({ state: saved || next, listed: board.listed > 0, itemCount: board.listed,
+            reason: travel ? 'shop_town_trip' : 'shop_town_unreached', shopTown: board.shopTown }));
 }
 
-async function resolveHotSession(session, timestamp = Date.now()) {
-    const state = session?.coldMarketState;
-    const persistedStore = state?.stats?.marketStore;
-    const liveStore = session?.actor?.fetchPrivateStore?.();
-    if (!state || !persistedStore || !liveStore || Number(persistedStore.storeType || 1) !== 1) {
-        return { state, closed: false, maintained: false };
-    }
-    if (liveStore.repricing === true || Number(liveStore.activePurchases || 0) > 0) {
-        return { state, closed: false, maintained: false, reason: 'store_busy' };
-    }
-
-    const persistedById = new Map((persistedStore.items || []).map((item) => [Number(item.selfId), item]));
-    const store = {
-        ...persistedStore,
-        items: (liveStore.items || []).map((item) => ({
-            ...(persistedById.get(Number(item.selfId)) || {}),
-            ...item,
-            selfId: Number(item.selfId),
-            count: Number(item.count),
-            price: Number(item.price)
-        }))
-    };
-    const runtimeState = {
-        ...state,
-        phase: 'hot',
-        stats: { ...(state.stats || {}), marketStore: store }
-    };
-    const hasStock = stockUnits(store) > 0;
-    const active = hasStock && Number(store.expiresAt || 0) > timestamp;
-
-    if (!active) {
-        const reason = hasStock ? 'expired' : 'sold_out';
-        const nextState = hotClosedState(runtimeState, store, timestamp, reason);
-        const applied = await BotMerchantStoreService.applyLifecycle(session, nextState, `hot_market_${reason}`);
-        if (!applied.ok) return { state, closed: false, maintained: false, reason: applied.reason };
-        MarketOpportunity.removeColdStore(state.characterId);
-        MarketTelemetry.closed(reason, stockUnits(store));
-        return { state: applied.state, closed: true, maintained: true, reason };
-    }
-    if (Number(store.nextReviewAt || 0) > timestamp) {
-        return { state: runtimeState, closed: false, maintained: false };
-    }
-
-    const { items } = revalidatedItems(runtimeState, store, timestamp);
-    const prunedItems = Math.max(0, stockUnits(store) - items.reduce((sum, item) => sum + Number(item.count || 0), 0));
-    if (!items.length) {
-        const reason = 'no_actionable_demand';
-        const nextState = hotClosedState(runtimeState, store, timestamp, reason);
-        const applied = await BotMerchantStoreService.applyLifecycle(session, nextState, `hot_market_${reason}`);
-        if (!applied.ok) return { state, closed: false, maintained: false, reason: applied.reason };
-        MarketOpportunity.removeColdStore(state.characterId);
-        MarketTelemetry.closed(reason, stockUnits(store));
-        return { state: applied.state, closed: true, maintained: true, reason };
-    }
-
-    const nextStore = {
-        ...store,
-        items,
-        title: store.autoTitle === false ? store.title : marketStoreTitle(items),
-        nextReviewAt: listingNextReviewAt(items, store.expiresAt, timestamp)
-    };
-    const nextState = {
-        ...runtimeState,
-        stats: { ...(runtimeState.stats || {}), marketStore: nextStore,
-            marketPricing: pricingAfterReview(runtimeState, store, timestamp) }
-    };
-    const applied = await BotMerchantStoreService.applyLifecycle(session, nextState, 'hot_market_demand_revalidated');
-    if (!applied.ok) return { state, closed: false, maintained: false, reason: applied.reason };
-    if (prunedItems > 0) MarketTelemetry.demandPruned(prunedItems);
-    return { state: applied.state, closed: false, maintained: true, revalidated: true, prunedItems };
-}
-
-function maintainHotMarketStores(sessions = [], limit = 10, timestamp = Date.now()) {
-    const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
-    const candidates = sessions.filter((session) => {
-        const store = session?.coldMarketState?.stats?.marketStore;
-        if (!session?.actor || !store || Number(store.storeType || 1) !== 1) return false;
-        return Number(store.expiresAt || 0) <= timestamp || Number(store.nextReviewAt || 0) <= timestamp;
-    }).slice(0, safeLimit);
-    return candidates.reduce((chain, session) => chain.then(async (maintained) => {
-        const result = await resolveHotSession(session, timestamp);
-        if (result.maintained) maintained.push(result);
-        return maintained;
-    }), Promise.resolve([]));
-}
-
+// A merchant without a stall: the board replaced the stalls (step 3.3), and
+// an old state, or historical cleanup, can still say merchant. There is no
+// expiry event to release it: it goes back to its trip or its hunt.
 function resolve(state, timestamp = Date.now()) {
-    const store = state?.stats?.marketStore;
     if (!state || state.activity !== 'merchant') return Promise.resolve({ state, closed: false });
-    if (!store) {
-        if (invoke('GameServer/Bot/AI/BotServiceIdentity').isStaticService(state)) {
-            return Promise.resolve({ state, closed: false });
-        }
-        // Historical store cleanup can leave an adventurer in merchant mode
-        // without a shop. There is then no expiry event to release the bot.
-        const recovered = { ...state, activity: state.stats?.marketReturn ? 'shopping' : 'hunting',
-            timing: { ...(state.timing || {}), nextResolveAt: timestamp } };
-        return LifeState.upsertState(recovered, 'orphaned_market_recovery').then(saved => {
-            if (!saved) return { state, closed: false };
-            MarketOpportunity.removeColdStore(state.characterId);
-            return { state: saved, closed: true, reason: 'orphaned_market_recovery' };
-        });
-    }
-    if (Number(store.storeType || 1) === 3) {
-        const hasDemand = (store.items || []).some((item) => Number(item.count || 0) > 0);
-        if (hasDemand && Number(store.expiresAt || 0) > timestamp) {
-            MarketOpportunity.indexColdStore(state);
-            return Promise.resolve({ state, closed: false });
-        }
-        const recovered = hasDemand
-            ? invoke('GameServer/Bot/AI/GearAcquisitionPlanner').abandonAcquisition(
-                state, store.items.find((item) => Number(item.count) > 0)?.selfId, timestamp)
-            : state;
-        const cleared = {
-            ...recovered,
-            activity: 'shopping',
-            stats: {
-                ...(recovered.stats || {}),
-                marketStore: null,
-                marketRetryAfter: hasDemand ? timestamp + SELL_RETRY_DELAY_MS : null,
-                marketWanted: null
-            },
-            timing: { ...(state.timing || {}), nextResolveAt: timestamp }
-        };
-        const returning = GoalExecutor.finishMarketVisit(cleared, timestamp) || { ...cleared, activity: 'hunting' };
-        MarketOpportunity.removeColdStore(state.characterId);
-        return LifeState.upsertState(returning, hasDemand ? 'cold_market_buy_expired' : 'cold_market_buy_filled').then(async (saved) => {
-            if (saved && hasDemand && recovered !== state) await invoke('GameServer/Bot/Goals/GoalState').clear(state.characterId, 'abandoned');
-            return {
-                state: saved || returning,
-                closed: true,
-                reason: hasDemand ? 'buy_expired' : 'buy_filled'
-            };
-        });
-    }
-    const hasStock = (store.items || []).some((item) => Number(item.count) > 0);
-    const isActive = hasStock && Number(store.expiresAt || 0) > timestamp;
-    if (isActive) {
-        if (Number(store.nextReviewAt || 0) <= timestamp) {
-            // Revalidation is the maintenance action for this pass. Do not
-            // recursively resolve the returned snapshot: an ownership race or
-            // stale persisted deadline can otherwise keep the promise chain
-            // growing until V8 reports "Invalid string length". A still-due
-            // snapshot is safe to retry in the next bounded maintenance pass.
-            return revalidateListing(state, timestamp);
-        }
-        const targetTownName = targetMarketTownName(state, store.items || []);
-        if (store.town !== targetTownName) {
-            const town = marketTown(targetTownName);
-            const loc = marketLocation(town, { state });
-            if (!loc) return Promise.resolve({ state, closed: false, reason: 'market_plaza_full' });
-            const relocated = {
-                ...state,
-                currentRegion: town.name,
-                loc,
-                stats: {
-                    ...(state.stats || {}),
-                    marketStore: { ...store, marketTownRoutingVersion: MARKET_TOWN_ROUTING_VERSION, town: town.name, loc }
-                }
-            };
-            return LifeState.upsertState(relocated, 'cold_market_town_rebalanced').then((saved) => {
-                if (saved) MarketOpportunity.indexColdStore(saved);
-                return { state: saved || relocated, closed: false, relocated: true };
-            });
-        }
-        MarketOpportunity.indexColdStore(state);
+    if (invoke('GameServer/Bot/AI/BotServiceIdentity').isStaticService(state)) {
         return Promise.resolve({ state, closed: false });
     }
-
-    return closeSellStore(state, timestamp, hasStock ? 'expired' : 'sold_out');
-}
-
-// Stores created before town-based routing all lived in Giran.  Move that
-// bounded legacy set outside the normal cold-resolve queue, which prioritises
-// finite travel transitions and may otherwise starve passive merchant states.
-function legacyMarketTownCandidates(states = [], limit = 10) {
-    const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
-    return states
-        .filter((state) => state.phase === 'cold' && state.activity === 'merchant')
-        .filter((state) => state.stats?.marketStore)
-        .filter((state) => Number(state.stats.marketStore.marketTownRoutingVersion || 0) < MARKET_TOWN_ROUTING_VERSION)
-        .sort((a, b) => Number(a.updatedAt || 0) - Number(b.updatedAt || 0))
-        .slice(0, safeLimit);
-}
-
-function migrateLegacyMarketTowns(limit = 10) {
-    return LifeState.legacyMarketTownCandidates(limit, MARKET_TOWN_ROUTING_VERSION).then((states) => {
-        const candidates = legacyMarketTownCandidates(states, limit);
-        return candidates.reduce((chain, state) => chain.then((migrated) => {
-        const store = state.stats.marketStore;
-        const targetTownName = targetMarketTownName(state, store.items || []);
-        if (store.town === targetTownName) {
-            const checked = {
-                ...state,
-                stats: {
-                    ...(state.stats || {}),
-                    marketStore: { ...store, marketTownRoutingVersion: MARKET_TOWN_ROUTING_VERSION }
-                }
-            };
-            return LifeState.upsertState(checked, 'cold_market_town_migration_checked').then((saved) => {
-                migrated.push({ state: saved || checked, relocated: false });
-                return migrated;
-            });
-        }
-
-        const town = marketTown(targetTownName);
-        const loc = marketLocation(town, { state });
-        if (!loc) return migrated;
-        const relocated = {
-            ...state,
-            currentRegion: town.name,
-            loc,
-            stats: {
-                ...(state.stats || {}),
-                marketStore: { ...store, marketTownRoutingVersion: MARKET_TOWN_ROUTING_VERSION, town: town.name, loc }
-            }
-        };
-        return LifeState.upsertState(relocated, 'cold_market_town_rebalanced').then((saved) => {
-            const resolved = saved || relocated;
-            MarketOpportunity.indexColdStore(resolved);
-            migrated.push({ state: resolved, relocated: true });
-            return migrated;
-        });
-        }), Promise.resolve([]));
-    });
-}
-
-function expireStaleMarketStores(limit = 10, timestamp = Date.now()) {
-    const candidates = typeof LifeState.marketStoreMaintenanceCandidates === 'function'
-        ? LifeState.marketStoreMaintenanceCandidates(limit, timestamp)
-        : LifeState.expiredMarketStoreCandidates(limit, timestamp);
-    return candidates.then((states) => states.reduce((chain, state) => (
-        chain.then((maintained) => resolve(state, timestamp).then((result) => {
-            if (result.closed || result.revalidated || result.relocated) maintained.push(result);
-            return maintained;
-        }))
-    ), Promise.resolve([])));
-}
-
-function reconcileInventory(state) {
-    const store = state?.stats?.marketStore;
-    if (!state || state.activity !== 'merchant' || !store) return Promise.resolve({ state, reconciled: false });
-    if (Number(store.storeType || 1) === 3) {
-        MarketOpportunity.indexColdStore(state);
-        return Promise.resolve({ state, reconciled: false, closed: false });
-    }
-
-    const items = ItemDisposition.saleCandidates(state);
-    if (items.length) {
-        const nextState = {
-            ...state,
-            stats: {
-                ...(state.stats || {}),
-                marketStore: {
-                    ...store,
-                    items,
-                    // Existing listings predate inventory-backed titles; they
-                    // are upgraded on their next cold-state reconciliation.
-                    title: store.autoTitle === false ? store.title : marketStoreTitle(items)
-                }
-            }
-        };
-        return LifeState.upsertState(nextState, 'cold_market_inventory_reconciled').then((saved) => {
-            if (saved) MarketOpportunity.indexColdStore(saved);
-            return { state: saved || nextState, reconciled: true, closed: false };
-        });
-    }
-
-    const nextState = {
-        ...state,
-        activity: 'shopping',
+    const recovered = { ...state, activity: state.stats?.marketReturn ? 'shopping' : 'hunting',
         stats: { ...(state.stats || {}), marketStore: null },
-        timing: { ...(state.timing || {}), nextResolveAt: Date.now() }
-    };
-    MarketOpportunity.removeColdStore(state.characterId);
-    return LifeState.upsertState(nextState, 'cold_market_inventory_empty').then((saved) => ({
-        state: saved || nextState,
-        reconciled: true,
-        closed: true,
-        reason: 'inventory_empty'
-    }));
-}
-
-function settle(offer, qty = 1) {
-    if (offer?.sourceType !== 'cold_store') return Promise.resolve(null);
-    const seller = LifeState.snapshot(offer.sourceId) || offer.sellerState;
-    if (!seller) return Promise.resolve(null);
-    return LifeState.applyMarketSale(seller, offer, qty).then((saved) => {
-        if (!saved) return null;
-        const hasStock = (saved.stats?.marketStore?.items || []).some((item) => Number(item.count) > 0);
-        // Empty stock is a transaction event too; close immediately instead
-        // of keeping a dead merchant until the original listing expiry.
-        if (!hasStock) return resolve(saved).then((result) => result.state || saved);
-        MarketOpportunity.indexColdStore(saved);
-        return saved;
+        timing: { ...(state.timing || {}), nextResolveAt: timestamp } };
+    return LifeState.upsertState(recovered, 'orphaned_market_recovery').then(saved => {
+        if (!saved) return { state, closed: false };
+        return { state: saved, closed: true, reason: 'orphaned_market_recovery' };
     });
 }
 
-function withdrawForParty(state, timestamp = Date.now()) {
-    const store = state?.stats?.marketStore;
-    if (!state || (!store && state.activity !== 'merchant')) {
-        return Promise.resolve({ state, withdrawn: false });
-    }
-
-    const marketReturn = state.stats?.marketReturn;
-    const nextState = {
-        ...state,
-        activity: 'hunting',
-        currentRegion: marketReturn?.regionName || state.currentRegion,
-        spotId: marketReturn?.spotId || state.spotId,
-        loc: marketReturn?.loc ? { ...marketReturn.loc } : state.loc,
-        stats: {
-            ...(state.stats || {}),
-            marketStore: null,
-            marketReturn: null,
-            travel: null
-        },
-        timing: {
-            ...(state.timing || {}),
-            activityStartedAt: timestamp,
-            nextResolveAt: timestamp
-        }
-    };
-
-    // A const-party invitation has priority over the current market shift.
-    // Persist the transition before removing market discovery so a failed
-    // write leaves the existing offer and store intact.
-    return LifeState.upsertState(nextState, 'party_market_withdrawal').then((saved) => ({
-        state: saved || nextState,
-        previousState: state,
-        withdrawn: !!store
-    })).then((result) => {
-        MarketOpportunity.removeColdStore(state.characterId);
-        return result;
-    });
-}
-
-function restoreAfterPartyFailure(state) {
-    const store = state?.stats?.marketStore;
-    if (!state || !store) return Promise.resolve({ state, restored: false });
-    return LifeState.upsertState(state, 'party_market_withdrawal_rollback').then((saved) => {
-        const restored = saved || state;
-        MarketOpportunity.indexColdStore(restored);
-        return { state: restored, restored: true };
-    });
+// What the bot keeps in its warehouse, by item: its room to keep more.
+function storedAmounts(state) {
+    if (!state?.characterId) return Promise.resolve(new Map());
+    return invoke('Database').fetchWarehouseItems(state.characterId).then((rows) => {
+        const stored = new Map();
+        for (const row of rows || []) stored.set(Number(row.selfId), Number(stored.get(Number(row.selfId)) || 0) + Number(row.amount || 0));
+        return stored;
+    }).catch(() => new Map());
 }
 
 module.exports = {
-    DEFAULT_LISTING_MS,
-    SPECULATIVE_LISTING_MS,
-    LISTING_REVIEW_MS,
     SELL_RETRY_DELAY_MS,
-    MARKET_TOWN_ROUTING_VERSION,
-    GIRAN_MARKET_PLAZA,
-    GIRAN_STALL_MIN_DISTANCE,
-    GLUDIO_D_MARKET_PLAZA,
-    GLUDIO_D_STALL_MIN_DISTANCE,
-    DION_D_MARKET_PLAZA,
-    DION_D_STALL_MIN_DISTANCE,
-    OREN_MARKET_PLAZA,
-    OREN_STALL_EDGE_PADDING,
-    OREN_STALL_MIN_DISTANCE,
-    HUNTERS_VILLAGE_MARKET_PLAZA,
-    HUNTERS_VILLAGE_STALL_EDGE_PADDING,
-    HUNTERS_VILLAGE_STALL_MIN_DISTANCE,
-    ADEN_MARKET_PLAZA,
-    ADEN_STALL_EDGE_PADDING,
-    ADEN_STALL_MIN_DISTANCE,
-    RUNE_MARKET_PLAZA,
-    RUNE_STALL_EDGE_PADDING,
-    RUNE_STALL_MIN_DISTANCE,
-    GODDARD_MARKET_PLAZA,
-    GODDARD_STALL_EDGE_PADDING,
-    FLORAN_MARKET_PLAZA,
-    FLORAN_STALL_EDGE_PADDING,
-    TALKING_ISLAND_NO_GRADE_PLAZA,
-    TALKING_ISLAND_STALL_MIN_DISTANCE,
-    ELVEN_VILLAGE_NO_GRADE_PLAZA,
-    ELVEN_VILLAGE_STALL_MIN_DISTANCE,
-    DARK_ELVEN_VILLAGE_NO_GRADE_PLAZA,
-    DARK_ELVEN_VILLAGE_STALL_MIN_DISTANCE,
-    ORC_VILLAGE_NO_GRADE_PLAZA,
-    ORC_VILLAGE_STALL_MIN_DISTANCE,
-    DWARVEN_VILLAGE_NO_GRADE_PLAZA,
-    DWARVEN_VILLAGE_STALL_MIN_DISTANCE,
     marketStoreTitle,
     marketLocation,
-    pricingAfterReview,
-    staticMerchantStalls,
     targetMarketTownName,
-    legacyMarketTownCandidates,
-    migrateLegacyMarketTowns,
-    expireStaleMarketStores,
-    maintainHotMarketStores,
-    resolveHotSession,
-    chooseGiranPlazaStall,
-    chooseGludioDMarketStall,
-    chooseDionDMarketStall,
-    chooseOrenMarketStall,
-    chooseHuntersVillageMarketStall,
-    chooseAdenMarketStall,
-    chooseRuneMarketStall,
-    chooseTalkingIslandNoGradeStall,
-    chooseElvenVillageNoGradeStall,
-    chooseDarkElvenVillageNoGradeStall,
-    chooseOrcVillageNoGradeStall,
-    chooseDwarvenVillageNoGradeStall,
-    isGiranPlazaStallLocation,
-    isGludioDMarketStallLocation,
-    isDionDMarketStallLocation,
-    isOrenMarketStallLocation,
-    isHuntersVillageMarketStallLocation,
-    isAdenMarketStallLocation,
-    isRuneMarketStallLocation,
-    isGoddardMarketStallLocation,
-    isFloranMarketStallLocation,
-    isTalkingIslandNoGradeStallLocation,
-    isElvenVillageNoGradeStallLocation,
-    isDarkElvenVillageNoGradeStallLocation,
-    isOrcVillageNoGradeStallLocation,
-    isDwarvenVillageNoGradeStallLocation,
+    townCenter,
     open,
-    reconcileInventory,
-    resolve,
-    restoreAfterPartyFailure,
-    settle,
-    withdrawForParty
+    resolve
 };

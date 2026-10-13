@@ -1,9 +1,12 @@
+const ActorQueries = require('../../../World/ActorSpatialQueries');
+const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const World          = invoke('GameServer/World/World');
 const ServerResponse = invoke('GameServer/Network/Response');
 const GeodataEngine  = invoke('GameServer/Geodata/GeodataEngine');
 const SpotService    = invoke('GameServer/Bot/AI/SpotService');
+const Karma          = invoke('GameServer/Karma');
 const DecisionService = invoke('GameServer/Bot/AI/BotDecisionService');
 const BotBuffs       = invoke('GameServer/Bot/AI/BotBuffs');
 const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
@@ -12,8 +15,8 @@ const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const EncounterReadiness = invoke('GameServer/Bot/AI/BotEncounterReadiness');
 const BotPvpRisk      = invoke('GameServer/Bot/AI/BotPvpRisk');
 const BotRoles        = invoke('GameServer/Bot/AI/BotRoles');
+const RestPolicy      = invoke('GameServer/Bot/AI/RestPolicy');
 const SummonerTactics = invoke('GameServer/Bot/AI/SummonerTactics');
-const ShotStock      = invoke('GameServer/Inventory/ShotStock');
 const BotTownTravel  = invoke('GameServer/Bot/AI/BotTownTravel');
 const BotSpotTravel  = invoke('GameServer/Bot/AI/BotSpotTravel');
 const BotRetreatPlanner = invoke('GameServer/Bot/AI/BotRetreatPlanner');
@@ -27,15 +30,17 @@ const HotTownRebuff = invoke('GameServer/Bot/AI/HotTownRebuff');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 const HuntingVisibility = invoke('GameServer/Bot/AI/BotHuntingVisibility');
+const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+const SurvivalFloor = invoke('GameServer/Bot/Population/SurvivalFloor');
+const DecisionEvents = require('../DecisionEvents');
+const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const { SPOT_CELL_SIZE } = invoke('GameServer/World/WorldConstants');
 
 const TARGET_STALL_TICKS = 5;
 const TARGET_RETRY_COOLDOWN_MS = 15000;
 const TARGET_PROGRESS_DISTANCE = 40;
-const TARGET_SPOT_GRID_SIZE = 6000;
-const EMERGENCY_RETREAT_HP_RATIO = 0.35;
-const EMERGENCY_RETREAT_MP_RATIO = 0.20;
 const EMERGENCY_RETREAT_DISTANCE = 850;
-const MAX_WALK_SPOT_DISTANCE = 12000;
+const MAX_WALK_SPOT_DISTANCE = SpotService.MAX_WALK_SPOT_DISTANCE;
 const SPOT_ARRIVAL_RADIUS = 1000;
 const MAX_SPOT_RELOCATION_MS = 120000;
 const FAILED_SPOT_RETRY_MS = 60000;
@@ -46,8 +51,53 @@ function isSoloHunter(session) {
     return session.plan === 'hunting' && session.partyCompanion !== true && !session.followPlayerSession;
 }
 
+// When a solo hunter carries its bag to town: the cold rule
+// (ItemDisposition.inventoryCleanupNeed) on the live bag. The verdict is kept
+// until the bag, the life state, the level or the party changes, or the sell
+// pause ends, so a tick with nothing new costs a few comparisons.
+function sellTripDue(session, bot, now = Date.now()) {
+    if (!isSoloHunter(session) || session.pendingTownTrip) return null;
+    const items = bot.backpack?.fetchItems?.();
+    if (!items) return null;
+    const life = session.coldLifeState || null;
+    const level = Number(bot.fetchLevel?.() || 0);
+    const partyId = session.hotBackgroundPartyId || null;
+    const decisionSeq = Number(DecisionEvents.statsFor(session).decisionSeq || 0);
+    const last = session.sellTripCheck;
+    if (last && last.items === items && last.count === items.length && last.life === life
+        && last.revision === Number(bot.backpack.inventoryRevision || 0)
+        && last.level === level && last.partyId === partyId && last.decisionSeq === decisionSeq
+        && !(last.pauseEndsAt && now >= last.pauseEndsAt)) return last.need;
+    const state = MarketListingPolicy.actorState(session);
+    if (partyId) state.partyId = partyId;
+    const forced = ItemDisposition.inventoryCleanupNeed(state, { now });
+    const activity = DecisionEvents.held(session)?.network.activity;
+    const need = forced || (activity?.activity === 'selling'
+        ? { reason: 'wish_funding', itemIds: activity.items } : null);
+    const pause = Number(state.stats?.marketSellRetryAfter || 0);
+    session.sellTripCheck = { items, count: items.length, life, level, partyId, decisionSeq,
+        revision: Number(bot.backpack.inventoryRevision || 0),
+        pauseEndsAt: pause > now ? pause : 0, need };
+    return need;
+}
+
+// A sell trip starts the cold sell pause, as the cold visit does, so a bag the
+// town visit could not empty does not send the bot back on its next loot.
+function pauseSelling(session, now = Date.now()) {
+    const life = session.coldLifeState;
+    if (!life) return;
+    const delay = invoke('GameServer/Bot/Economy/ColdMarketListingService').SELL_RETRY_DELAY_MS;
+    session.coldLifeState = { ...life, stats: { ...(life.stats || {}), marketSellRetryAfter: now + delay } };
+    refreshPartyMemberships([session], invoke);
+}
+
 function isPartyCompanion(session) {
     return session.partyCompanion === true && !!session.followPlayerSession;
+}
+
+function economyForHunt(session, bot) {
+    return DecisionEvents.held(session) || DecisionEvents.hold(session, bot,
+        invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session));
 }
 
 function isClaimedByOtherSoloBot(session, npc) {
@@ -61,7 +111,7 @@ function isClaimedByOtherSoloBot(session, npc) {
     });
 }
 
-function startShopping(session, bot, BotAI, reason) {
+function startShopping(session, bot, BotAI, reason, townName = null) {
     if (isPartyCompanion(session)) {
         session.plan = 'following';
         session.shoppingTarget = undefined;
@@ -70,7 +120,11 @@ function startShopping(session, bot, BotAI, reason) {
         return false;
     }
 
-    return BotTownTravel.request(session, bot, BotAI, reason);
+    const destination = townName ? Object.values(invoke('GameServer/World/TownRespawn').towns)
+        .find(town => town.name === townName) : null;
+    return BotTownTravel.request(session, bot, BotAI, reason, destination ? {
+        destinationTown: { name: destination.name, x: destination.locX, y: destination.locY, z: destination.locZ }
+    } : {});
 }
 
 function claimedTargetIds(session, sessions = invoke('GameServer/Bot/BotManager').sessions || []) {
@@ -113,7 +167,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         if (clan) counts.set(clan, (counts.get(clan) || 0) + 1);
         return counts;
     }, new Map());
-    const spotIdAt = (actor) => `${Math.floor(actor.fetchLocX() / TARGET_SPOT_GRID_SIZE)}_${Math.floor(actor.fetchLocY() / TARGET_SPOT_GRID_SIZE)}`;
+    const spotIdAt = (actor) => `${Math.floor(actor.fetchLocX() / SPOT_CELL_SIZE)}_${Math.floor(actor.fetchLocY() / SPOT_CELL_SIZE)}`;
     const currentSpotId = String(session.currentSpot?.id || spotIdAt(bot)).split(':')[0];
     const partyActors = session.followPlayerSession || session.hotBackgroundPartyId
         ? PartyAwareness.partyActors(session.followPlayerSession || session) : [];
@@ -135,8 +189,8 @@ function findPreferredMonster(session, bot, radius, options = {}) {
             const matchupTarget = TargetMatchup.targetView(npc, matchupStats);
             const targetMatchup = TargetMatchup.evaluate(matchupProfiles, matchupTarget);
             if (isSoloHunter(session) && partyActors.length <= 1) {
-                const survival = TargetMatchup.soloSurvival(matchupProfiles, matchupTarget);
-                if (targetMatchup.eligible && !survival.eligible) Object.assign(targetMatchup, survival);
+                const canHunt = TargetMatchup.soloCanHunt(matchupProfiles, matchupTarget);
+                Object.assign(targetMatchup, { eligible: canHunt.eligible, reason: canHunt.reason });
             }
             const scoreContext = {
                 attackable: npc.fetchAttackable(),
@@ -144,6 +198,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
                 dead: npc.isDead(),
                 retryCooldown: targetOnCooldown(session, npc.fetchId()),
                 botLevel: bot.fetchLevel(),
+                minLevelGap: invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(session.coldLifeState || {}) ? -15 : undefined,
                 npcLevel: npc.fetchLevel?.() || bot.fetchLevel(),
                 distance: targetDistance(bot, npc),
                 verticalGap: Math.abs(bot.fetchLocZ() - npc.fetchLocZ()),
@@ -252,9 +307,9 @@ function beginVoluntaryRecovery(session, bot, BotAI, readiness = null) {
         action: 'recover_before_encounter',
         reason: readiness?.reason || 'low_resources',
         hpRatio: readiness?.hpRatio ?? (bot.fetchHp() / Math.max(1, bot.fetchMaxHp())),
-        hpNeeded: readiness?.hpNeeded ?? EMERGENCY_RETREAT_HP_RATIO,
+        hpNeeded: readiness?.hpNeeded ?? RestPolicy.THRESHOLDS.solo.hp,
         mpRatio: readiness?.mpRatio ?? (bot.fetchMp() / Math.max(1, bot.fetchMaxMp())),
-        mpNeeded: readiness?.mpNeeded ?? EMERGENCY_RETREAT_MP_RATIO,
+        mpNeeded: readiness?.mpNeeded ?? RestPolicy.THRESHOLDS.solo.mp,
         at: Date.now()
     };
     BotAI.say(session, Speech.line('combat.rest'), { ambient: true, key: 'rest' });
@@ -388,8 +443,9 @@ function beginSpotRelocation(session, bot, spot, BotAI) {
             ? Speech.lines('town.town-to-farm', { place: destinationName })
             : Speech.lines('town.farm-relocation', { place: destinationName }));
 
+    // A bot with karma never uses SoE or a gatekeeper: it walks.
     const travelDistance = SpotService.distance2d(botLocation(bot), destination);
-    if (travelDistance > MAX_WALK_SPOT_DISTANCE) {
+    if (travelDistance > MAX_WALK_SPOT_DISTANCE && !Karma.closesTowns(bot.fetchKarma?.())) {
         BotSpotTravel.start(session, bot, spot, destination);
         return;
     }
@@ -444,9 +500,12 @@ function clearTarget(session, bot, targetId, retryCooldown = false) {
     return true;
 }
 
+// Low MP sends only a bot that rests for mana away from a fight; a melee
+// bot keeps swinging, as it keeps hunting with low MP.
 function needsEmergencyRetreat(bot) {
-    return bot.fetchHp() / Math.max(1, bot.fetchMaxHp()) < EMERGENCY_RETREAT_HP_RATIO
-        || bot.fetchMp() / Math.max(1, bot.fetchMaxMp()) < EMERGENCY_RETREAT_MP_RATIO;
+    return RestPolicy.needsRest(bot,
+        bot.fetchHp() / Math.max(1, bot.fetchMaxHp()),
+        bot.fetchMp() / Math.max(1, bot.fetchMaxMp()));
 }
 
 function retreatFromThreat(session, bot, threat) {
@@ -486,12 +545,27 @@ function targetProgressing(session, bot, target) {
 }
 
 module.exports = {
+    economyForHunt,
+    sellTripDue,
+    pauseSelling,
     findPreferredMonster,
     limitTargetCandidates,
     claimedTargetIds,
     tick(session, bot, Generics, BotAI) {
         if (session.pendingTownTrip) {
             const trip = startShopping(session, bot, BotAI, session.pendingTownTrip.reason);
+            if (trip !== 'deferred') return;
+        }
+
+        const floor = SurvivalFloor.forActor(bot);
+        if (isSoloHunter(session)) DecisionEvents.observe(session, bot);
+        if (floor?.action === 'rest') {
+            bot.automation.abortAll(bot);
+            session.plan = 'resting';
+            return;
+        }
+        if (floor?.action === 'unload' && isSoloHunter(session)) {
+            const trip = startShopping(session, bot, BotAI, `Inventory ${floor.reason}. Heading to town.`);
             if (trip !== 'deferred') return;
         }
 
@@ -517,10 +591,34 @@ module.exports = {
             }
         }
 
-        if (isSoloHunter(session) && ShotStock.needsActorRestock(bot, 0)) {
-            const plan = ShotStock.planForActor(bot);
-            const trip = startShopping(session, bot, BotAI, `Out of ${ShotStock.describe(plan)}. Heading to town to restock.`);
-            if (trip !== 'deferred') return;
+        if (isSoloHunter(session) && Number(session.companionEquipmentRetryAt || 0) <= Date.now()) {
+            const economy = economyForHunt(session, bot);
+            const wealthCraft = require('../../Economy/HotWealthCraftService');
+            if (wealthCraft.canStart(session, economy.network.activity)) {
+                wealthCraft.review(session, economy)
+                    .catch(error => utils.infoWarn('BotWealth', '%s', error.message));
+                return;
+            }
+            if (economy.network.activity?.activity === 'improving') {
+                const state = MarketListingPolicy.actorState(session);
+                if (economy.network.activity.improvement?.kind !== 'enchant' && !invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state)) {
+                    const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned improvement.');
+                    if (trip !== 'deferred' && trip !== false) return;
+                }
+                invoke('GameServer/Bot/Economy/BotImprovementService').reviewHot(session, { ...economy, state })
+                    .catch(error => utils.infoWarn('BotImprovement', '%s', error.message));
+            }
+            if (economy.network.activity?.activity === 'shopping') {
+                const leaf = economy.network.activity;
+                const state = invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(bot, session);
+                if (invoke('GameServer/Bot/Economy/ColdMarketService').canTravelForPurchase(state,
+                    { selfId: Number(leaf.itemId || leaf.object?.itemId || leaf.object),
+                        amount: Number(leaf.amount || 1), town: leaf.town,
+                        valueHours: leaf.valueHours }, { economy })) {
+                    const trip = startShopping(session, bot, BotAI, 'Heading to town for my next planned purchase.', leaf.town);
+                    if (trip !== 'deferred' && trip !== false) return;
+                }
+            }
         }
 
         // 2. PK Spotting & Fleeing Check
@@ -528,7 +626,7 @@ module.exports = {
         let spottedPk = null;
         let pkDistance = 99999;
 
-        World.user.sessions.forEach((user) => {
+        ActorQueries.near(World, bot, 1500).forEach((user) => {
             const other = user.actor;
             if (other && other !== bot && other.fetchIsOnline() && !other.state.fetchDead() && other.fetchKarma() > 0) {
                 const dist = new SpeckMath.Point3D(other.fetchLocX(), other.fetchLocY(), other.fetchLocZ()).distance(botPt);
@@ -539,16 +637,20 @@ module.exports = {
             }
         });
 
+        // One roll per sighting: the same PK seen on the following ticks keeps it.
+        if (session.pkSighting?.id !== spottedPk?.fetchId()) {
+            session.pkSighting = spottedPk ? { id: spottedPk.fetchId(), at: Date.now() } : null;
+        }
         if (spottedPk) {
-            const allies = World.user.sessions.filter((otherSession) => {
+            const allies = ActorQueries.near(World, bot, 1000).filter((otherSession) => {
                 const other = otherSession.actor;
                 if (!BotPvpRisk.isCombatAlly(session, otherSession, spottedPk)) return false;
                 const dist = new SpeckMath.Point3D(other.fetchLocX(), other.fetchLocY(), other.fetchLocZ()).distance(botPt);
                 return dist < 1000;
             });
             const pvpDecision = BotPvpRisk.evaluate({
-                botLevel: bot.fetchLevel(),
-                threatLevel: spottedPk.fetchLevel(),
+                ...BotPvpRisk.sighting(session, spottedPk),
+                key: ['pk', bot.fetchId(), session.pkSighting.id, session.pkSighting.at],
                 hpRatio: bot.fetchHp() / Math.max(1, bot.fetchMaxHp()),
                 mpRatio: bot.fetchMp() / Math.max(1, bot.fetchMaxMp()),
                 allies: allies.length,
@@ -678,9 +780,7 @@ module.exports = {
         // Match RestingState's role-aware wake policy.  Melee/dps bots are
         // allowed to keep hunting with low MP; otherwise they immediately
         // wake again at full HP and oscillate between hunting and resting.
-        if (!encounterActionInFlight && (
-            hpRatio < 0.35 || (BotRoles.shouldRestForMana(bot) && mpRatio < 0.20)
-        )) {
+        if (!encounterActionInFlight && RestPolicy.needsRest(bot, hpRatio, mpRatio)) {
             beginVoluntaryRecovery(session, bot, BotAI);
             return;
         }
@@ -703,6 +803,7 @@ module.exports = {
                 const status = session.botStatus || BotAI.getStatus(session);
                 const destination = SpotService.findBestSpot(status, {
                     spotRetryAfter: session.spotRetryAfter,
+                    walkOnly: Karma.closesTowns(bot.fetchKarma?.()),
                     minDistance: 1,
                     mode: 'solo',
                     matchupProfiles: TargetMatchup.actorProfiles([bot]),
@@ -721,8 +822,9 @@ module.exports = {
 
         if (invoke('GameServer/Bot/AI/PendingSweep').tick(session, bot, Generics, BotAI)) return;
 
-        if (isSoloHunter(session) && Math.random() < 0.005) { // ~0.5% chance per tick (~10 minutes)
+        if (sellTripDue(session, bot)) {
             const closestTown = BotAI.getClosestTown(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
+            pauseSelling(session);
             const trip = startShopping(session, bot, BotAI, `My bags are full of loot. Heading to ${closestTown.name} to sell and restock.`);
             if (trip !== 'deferred') return;
         }
@@ -806,6 +908,17 @@ module.exports = {
                             }
                         }
 
+                        const crystal = bot.backpack.fetchItems().find(item => invoke('GameServer/Items/SoulCrystalProgression').crystal(item));
+                        if (crystal && npc.fetchHp() <= npc.fetchMaxHp() / 2 && !npc.fetchSoulCrystalAbsorber?.(bot)
+                            && invoke('GameServer/Items/SoulCrystalProgression').canUse(session, crystal, npc)) {
+                            const itemSkill = invoke('GameServer/Items/C4ItemSkills').resolve(crystal.fetchSelfId());
+                            const skill = bot.backpack.buildItemSkill(itemSkill);
+                            if (skill && bot.fetchMp() >= skill.fetchConsumedMp() && bot.canUseSkill?.(skill) !== false) {
+                                bot.select({ id: npc.fetchId() });
+                                bot.backpack.useDrainSoulItem(session, crystal.fetchId(), itemSkill, skill);
+                                if (bot.state.fetchCasts()) return;
+                            }
+                        }
                         BotAI.executeCombat(session, bot, npc, Generics);
                     }
                 }).catch(() => {

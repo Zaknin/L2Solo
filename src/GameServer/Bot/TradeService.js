@@ -1,3 +1,4 @@
+const BeginnerShots = require('../Items/C4BeginnerShots');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const Database  = invoke('Database');
@@ -5,6 +6,63 @@ const BotEconomyPricing = invoke('GameServer/Bot/Economy/BotEconomyPricing');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const storePurchaseQueues = new WeakMap();
 const actorPurchaseQueues = new WeakMap();
+// Runtime-only source identity: object spread preserves this symbol, JSON
+// and persisted item/state fields omit it. Repricing never loses the author's
+// configured line, even after another player opened the merchant's window.
+const staticPriceSource = Symbol('staticMerchantSource');
+
+function isBotActor(actor) {
+    const session = actor?.session;
+    return session?.botSession === true || session?.constructor?.name === 'BotSession'
+        || String(session?.accountId || '').startsWith('bot_');
+}
+
+function storeItemPrice(store, item, actor = null) {
+    const source = item[staticPriceSource];
+    if (!source) return Number(item.price);
+    const pricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
+    return isBotActor(actor) ? pricing.botPriceFor(source.store, source.line)
+        : pricing.priceFor(source.store, source.line, { viewerId: actor?.fetchId?.() || 0, actor,
+            enchant: Number((actor && Number(store.storeType) === 3
+                ? sellableCopy(actor, item.selfId) : null)?.fetchEnchantLevel?.() || 0) });
+}
+
+function storeSaleQuote(store, item, actor, inventoryItem = null) {
+    const source = item[staticPriceSource];
+    if (!source || isBotActor(actor) || Number(store.storeType) !== 3) {
+        return { price: storeItemPrice(store, item, actor), count: Number(item.count) };
+    }
+    const held = inventoryItem || sellableCopy(actor, item.selfId);
+    return invoke('GameServer/Bot/Economy/StaticMerchantPricing').buyQuote(source.store,
+        { ...source.line, count: item.count }, { actor, viewerId: actor?.fetchId?.() || 0,
+            enchant: Number(held?.fetchEnchantLevel?.() || 0) });
+}
+
+function refreshStorePrices(store, actor = null) {
+    for (const item of store?.items || []) {
+        if (item[staticPriceSource]) item.price = storeItemPrice(store, item, actor);
+    }
+    return store;
+}
+
+// Native C4 store windows cannot quote a price wider than their D field.
+// Keep the exact price for HTML and execution; omitted native rows have no quote.
+function nativeStoreItems(store) {
+    const WireD = invoke('Packet/WireD');
+    return (store?.items || []).filter(item => WireD.isRepresentable(item.price));
+}
+
+// The retained static-buyer route until 3.6 is only for bot materials.
+// Preview and queued execution share this gate so neither buyer selection
+// nor a direct/stale arrival can liquidate gear through a static buyer.
+function acceptsSellerItem(actor, storeItem, inventoryItem) {
+    if (BeginnerShots.isRestricted(storeItem.selfId)) return false;
+    if (storeItem[staticPriceSource] && isBotActor(actor)
+        && require('./Economy/ProductionPolicy').buyersDisabled()) return false;
+    return !storeItem[staticPriceSource] || !isBotActor(actor)
+        || String(inventoryItem?.fetchKind?.() || itemTemplate(storeItem.selfId)?.template?.kind || '')
+            .startsWith('Other.Material');
+}
 
 async function withTradeQueues(store, selfId, actors, operation) {
     if (!storePurchaseQueues.has(store)) storePurchaseQueues.set(store, new Map());
@@ -82,7 +140,7 @@ function fetchAdena(actor) {
 }
 
 function isSellableInventoryItem(item) {
-    return item && !item.fetchPetLocked?.() && !item.fetchEquipped() && item.fetchSelfId() !== 57;
+    return item && !BeginnerShots.isRestricted(item.fetchSelfId?.()) && !item.fetchPetLocked?.() && !item.fetchEquipped() && item.fetchSelfId() !== 57;
 }
 
 // The copies a sale to a buy store may take: not reserved by the bot's
@@ -99,7 +157,8 @@ function normalizeStoreItems(storeCfg, { staticStore = false } = {}) {
         objectId: ++fakeObjectIdSeq,
         selfId: item.selfId,
         price: pricing ? pricing.priceFor(storeCfg, item) : item.price ?? ratedPrice(item.selfId, item.priceRate ?? 1),
-        count: item.count ?? 1
+        count: item.count ?? 1,
+        ...(pricing ? { [staticPriceSource]: { store: storeCfg, line: item } } : {})
     })).filter((item) => !staticStore || item.price > 0);
 }
 
@@ -227,22 +286,38 @@ function takeItem(actor, selfId, amount, item = actor.backpack.fetchItemFromSelf
     });
 }
 
-// The AFK buy order in this town that pays most for the actor's sellable
-// items, as { offer, score }, or null.
-function findAfkBuyerForActor(actor, town, state = null) {
-    const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+// The board's buy record in this town a hot bot sells into, as { offer,
+// score, sale }, or null: the buy ads it chose to answer by the cold bots'
+// one sale decision (MarketListingPolicy.evaluate, MarketPricing.disposition:
+// an ad against the NPC, the board and keeping the item), over the items it
+// may sell (its reservations kept); of those in this town, the record that
+// pays most. sale: selfId -> the units decided for that record. A buy shop's
+// stall is walked to; a buy ad is answered by record at its place (D6, E45).
+// options.now: the decision point (tests).
+function findAfkBuyerForActor(actor, town, state = null, options = {}) {
+    const ListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+    const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const items = sellableActorItems(actor, state);
+    if (!items.length) return null;
+    const seller = ListingPolicy.actorState({ actor, coldLifeState: state });
+    seller.inventory = { ...LifeState.inventorySummaryFromItems(items),
+        ...(seller.inventory['57'] ? { 57: seller.inventory['57'] } : {}) };
+    const records = new Map();
+    for (const answer of ListingPolicy.evaluate(seller, { unlimited: true, now: options.now }).answers) {
+        if (answer.line.town !== town?.name) continue;
+        const record = records.get(answer.line.recordId) || { line: answer.line, score: 0, sale: {} };
+        // Expected receipts: a conditional bid pays only its willing units.
+        record.score += answer.receipts;
+        record.sale[answer.line.selfId] = (record.sale[answer.line.selfId] || 0) + answer.count;
+        records.set(answer.line.recordId, record);
+    }
     let best = null;
-    sellableActorItems(actor, state).forEach((item) => {
-        const offer = MarketOpportunity.findBuyOffers(item.fetchSelfId(), {
-            town: town?.name,
-            sellerCharacterId: actor.fetchId()
-        }).find((candidate) => ['afk_player_buy_store', 'afk_bot_buy_store'].includes(candidate.sourceType));
-        if (!offer) return;
-        const qty = Math.min(Number(item.fetchAmount?.() || 0), Number(offer.count || 0));
-        if (qty <= 0) return;
-        const score = qty * Number(offer.price || 0);
-        if (!best || score > best.score) best = { offer, score };
-    });
+    for (const record of records.values()) {
+        if (best && record.score <= best.score) continue;
+        const offer = AfkTrade.offerOf(record.line, town.name);
+        if (offer) best = { offer, score: record.score, sale: record.sale };
+    }
     return best;
 }
 
@@ -259,11 +334,13 @@ function previewSaleToStore(actor, store, options = {}) {
         .forEach((inventoryItem) => {
             const storeItem = store.items.find((item) => item.selfId === inventoryItem.fetchSelfId() && item.count > 0);
             if (!storeItem) return;
+            if (!acceptsSellerItem(actor, storeItem, inventoryItem)) return;
 
             const qty = Math.min(inventoryItem.fetchAmount(), storeItem.count);
             if (qty <= 0) return;
 
-            const payout = qty * storeItem.price;
+            const price = storeItemPrice(store, storeItem, actor);
+            const payout = qty * price;
             totalAdena += payout;
             itemCount += qty;
             lines.push({
@@ -271,7 +348,7 @@ function previewSaleToStore(actor, store, options = {}) {
                 selfId: inventoryItem.fetchSelfId(),
                 name: inventoryItem.fetchName(),
                 qty,
-                price: storeItem.price,
+                price,
                 payout
             });
         });
@@ -280,6 +357,7 @@ function previewSaleToStore(actor, store, options = {}) {
 }
 
 async function buyFromStore(actor, store, selfId, qty, options = {}) {
+    if (BeginnerShots.isRestricted(selfId)) throw new Error("Beginner shots cannot be traded.");
     if (!store || store.storeType !== 1) {
         throw new Error("This store is not selling items.");
     }
@@ -297,7 +375,13 @@ async function buyFromStore(actor, store, selfId, qty, options = {}) {
             if (!storeItem) {
                 throw new Error("Item is not available.");
             }
-            if (options.expectedUnitPrice !== undefined && Number(storeItem.price) !== Number(options.expectedUnitPrice)) {
+            if (storeItem[staticPriceSource] && isBotActor(actor)
+                && (!invoke('GameServer/Inventory/ShotStock').SHOT_IDS.includes(Number(selfId))
+                    || !require('./Economy/ProductionPolicy').allowsFixedShot(selfId))) {
+                throw new Error('Static merchant item is unavailable to bots.');
+            }
+            const unitPrice = storeItemPrice(store, storeItem, actor);
+            if (options.expectedUnitPrice !== undefined && unitPrice !== Number(options.expectedUnitPrice)) {
                 throw new Error("Store price changed.");
             }
 
@@ -310,7 +394,7 @@ async function buyFromStore(actor, store, selfId, qty, options = {}) {
                 throw new Error("Item is out of stock.");
             }
 
-            const totalCost = Number(storeItem.price) * buyQty;
+            const totalCost = unitPrice * buyQty;
             const originalCount = Number(storeItem.count);
             const originalIndex = store.items.indexOf(storeItem);
             // Reserve the finite lot synchronously, before any database await. A
@@ -370,19 +454,82 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
             if (!storeItem) {
                 throw new Error("Item is not wanted.");
             }
+            let actorItem = sellableCopy(actor, selfId, options.objectId);
+            const quote = storeSaleQuote(store, storeItem, actor, actorItem);
+            let unitPrice = quote.price;
+            if (options.expectedUnitPrice !== undefined && unitPrice !== Number(options.expectedUnitPrice)) {
+                throw new Error('Store price changed.');
+            }
 
             const requestedQty = Number(qty);
             if (!Number.isSafeInteger(requestedQty) || requestedQty <= 0) {
                 throw new Error("Invalid quantity.");
             }
-            const actorItem = sellableCopy(actor, selfId, options.objectId);
+            if (!acceptsSellerItem(actor, storeItem, actorItem)) {
+                throw new Error('Static buyer item is unavailable to bots.');
+            }
             const actorCount = actorItem ? actorItem.fetchAmount() : 0;
-            const sellQty = Math.min(requestedQty, Number(actorCount), Number(storeItem.count));
+            let sellQty = Math.min(requestedQty, Number(actorCount), quote.count);
             if (!Number.isSafeInteger(sellQty) || sellQty <= 0) {
                 throw new Error("No items to sell.");
             }
 
-            const totalEarn = storeItem.price * sellQty;
+            const staticBuyer = !!storeItem[staticPriceSource] && !isBotActor(actor);
+            let adQty = 0, adAdena = 0;
+            const staticResult = (npcQty = 0, npcAdena = 0) => ({ qty: adQty + npcQty,
+                totalAdena: adAdena + npcAdena, name: itemName(selfId), budgetBacked: false,
+                adQty, adAdena, npcQty, npcAdena });
+            if (staticBuyer) {
+                const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+                const ads = quote.offers;
+                let left = sellQty;
+                for (const ad of ads) {
+                    if (!left) break;
+                    const amount = Math.min(left, Number(ad.storeItem.count));
+                    if (!(amount > 0)) continue;
+                    try {
+                        const paid = await AfkTrade.sellToShop(actor.fetchId(), ad.store, selfId, amount, {
+                            lineId: ad.storeItem.afkTradeLineId, objectId: actorItem.fetchId(),
+                            expectedPrice: unitPrice });
+                        if (paid.pending) {
+                            // Earlier backed sales already moved physical goods. Keep
+                            // their result and the merchant's remaining quantity exact.
+                            storeItem.count -= adQty;
+                            if (storeItem.count <= 0) store.items = store.items.filter(item => item !== storeItem);
+                            const result = { ...staticResult(), pending: true, meetingId: paid.meetingId,
+                                preparationId: paid.preparationId, token: paid.token };
+                            if (adQty) await runPostCommitCallback('afterTrade', options.afterTrade, result, storeItem);
+                            return result;
+                        }
+                        adQty += paid.amount;
+                        adAdena += paid.totalPrice;
+                        left -= paid.amount;
+                    } catch (error) {
+                        const message = String(error?.message || error);
+                        if (!message.startsWith('afk_trade_') && ![
+                            'trade_meeting_player_at_point', 'trade_meeting_point_changed',
+                            'trade_meeting_quote_changed', 'trade_meeting_stock_changed',
+                            'trade_meeting_party_busy'
+                        ].includes(message)) throw error;
+                    }
+                }
+                // Never liquidate the remainder below the confirmed price.
+                // A smaller completed sale refreshes the window for the rest.
+                storeItem.count -= adQty;
+                if (storeItem.count <= 0) store.items = store.items.filter(item => item !== storeItem);
+                actorItem = sellableCopy(actor, selfId, options.objectId);
+                sellQty = Math.min(left, Number(actorItem?.fetchAmount() || 0));
+                if (quote.npcPrice !== unitPrice) sellQty = 0;
+                if (!sellQty) {
+                    if (!adQty) throw new Error('Store price changed.');
+                    const result = staticResult();
+                    await runPostCommitCallback('afterTrade', options.afterTrade, result, storeItem);
+                    return result;
+                }
+                unitPrice = quote.npcPrice;
+            }
+
+            const totalEarn = unitPrice * sellQty;
             const budgetBacked = store.budgetBacked === true;
             const buyerAdena = buyerActor ? Number(fetchAdena(buyerActor)?.fetchAmount() || 0) : 0;
             if (budgetBacked && (!buyerActor || buyerAdena < totalEarn)) {
@@ -424,7 +571,8 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
                 throw error;
             }
 
-            const result = { qty: sellQty, totalAdena: totalEarn, name: itemName(selfId), budgetBacked };
+            const result = staticBuyer ? staticResult(sellQty, totalEarn)
+                : { qty: sellQty, totalAdena: totalEarn, name: itemName(selfId), budgetBacked };
             await runPostCommitCallback('afterTrade', options.afterTrade, result, storeItem);
             return result;
         } finally {
@@ -482,6 +630,7 @@ function findBestBuyerForActor(actor, merchantSessions, options = {}) {
 }
 
 module.exports = {
+    nativeStoreItems,
     buyFromStore,
     describeStoreItems,
     findAfkBuyerForActor,
@@ -492,8 +641,11 @@ module.exports = {
     normalizeStoreItems,
     previewSaleToStore,
     ratedPrice,
+    refreshStorePrices,
     sellableActorItems,
     sellInventoryToStore,
     sellToStore,
-    sellableCopy
+    sellableCopy,
+    storeItemPrice,
+    storeSaleQuote
 };

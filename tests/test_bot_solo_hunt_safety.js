@@ -31,7 +31,68 @@ assert(!Match.soloSurvival(Match.stateProfiles({ level: 29, stats: { classId: 12
 const fragile = { ...mage, maxHp: 20 };
 const servitor = { role: 'dps', maxHp: 2000, pDef: 300, pAtk: 300, atkSpd: 300, skills: [] };
 assert(!Match.soloSurvival([fragile], target).eligible);
-assert(Match.soloSurvival([fragile, servitor], target).eligible, 'a real summon contributes damage and tanking');
+assert(Match.soloSurvival([fragile, servitor], target).eligible, 'native profiles retain tanking allies');
+const withSummon = owner => Match.coldProfiles(owner, { stats: { coldCombat: {
+    summon: { ...servitor, active: true, hp: servitor.maxHp, expiresAt: at + 60000 }
+} } }, at);
+assert(!Match.soloSurvival(withSummon(fragile), target).eligible,
+    'a cold summon cannot lend its HP and defense to a fragile owner');
+const durable = { ...mage, skills: [], maxHp: 150 };
+assert(!Match.soloSurvival([durable], target).eligible);
+assert(Match.soloSurvival(withSummon(durable), target).eligible,
+    'summon damage still helps an owner survive a fight');
+// KankaRes's native rotation prefers Death Spike to the faster Aura Burn.
+// Admission must use that chosen rotation rather than an imaginary best DPS.
+const necro = { classId: 13, level: 45, role: 'mage', maxHp: 932, maxMp: 1489,
+    pDef: 202, pAtk: 75.8, mAtk: 167.5, castSpd: 376, atkSpd: 383, weaponMask: 4,
+    equipment: { weaponKind: 'Weapon.Sword' }, skills: [
+        { selfId: 1148, level: 1, passive: false, spell: true, power: 58, mp: 23, hitTime: 4000, reuse: 6000 },
+        { selfId: 1172, level: 8, passive: false, spell: true, power: 36, mp: 30, hitTime: 1500, reuse: 2500 }
+    ] };
+const lizard = Cold.npcCombatStats(Data.npcs.find(row => row.selfId === 784));
+const nativeChoice = invoke('GameServer/Bot/Population/ColdClassPolicy').select(necro,
+    { hp: necro.maxHp, mp: necro.maxMp, cooldowns: {}, time: at, mob: lizard });
+assert.equal(nativeChoice.skill.selfId, 1148);
+assert(Match.soloSurvival([necro], lizard).eligible, 'fixture: imaginary Aura Burn DPS admits this fight');
+const realRotation = Match.coldProfiles(necro, {}, at);
+assert(!Match.soloSurvival(realRotation, lizard).eligible, 'the slower native rotation rejects this fight');
+assert(Cold.npcForSpot({ npcEntries: [{ selfId: 784, count: 1 }] }, () => 0.5,
+    { matchupProfiles: realRotation, soloSafety: true }).avoided, 'the executor refuses the unsafe voluntary target');
+const savedProfile = Cold.profileFor, savedSpots = Spots.cache;
+try {
+    const owned = { ...necro, accur: 100, evasion: 0, critical: 0, mCritRate: 0,
+        equipment: { ...necro.equipment, pAtkRnd: 0 }, effects: [], skills: [...necro.skills,
+            { selfId: 1220, level: 1, passive: false, spell: true, power: 44, mp: 22, hitTime: 4000, reuse: 6000 },
+            { selfId: 1015, level: 3, passive: false, spell: true, power: 107, mp: 32, hitTime: 2000, reuse: 3000 }
+        ] };
+    Cold.profileFor = () => owned;
+    const ground = { id: 'solo-heal-loop', name: 'Solo heal loop', avgLevel: 36, density: 6,
+        npcEntries: [{ selfId: 1639, count: 6 }], npcSelfIds: [1639] };
+    Spots.cache = [ground];
+    const fighter = { characterId: 990005, level: 45, activity: 'hunting', spotId: ground.id, inventory: {},
+        vitals: { hp: necro.maxHp, maxHp: necro.maxHp, mp: necro.maxMp, maxMp: necro.maxMp },
+        stats: { classId: 13, role: 'mage' } };
+    const fight = invoke('GameServer/Bot/Population/BackgroundResolver').resolveSolo({
+        state: fighter, spot: ground, elapsedMs: 60000, timestamp: at, rng: () => 0.5 });
+    assert.equal(fight.debug.heals, 0, 'a heal weaker than damage during its cast cannot replace the finishing attack');
+    assert.equal(fight.debug.wins, 1, 'the native rotation finishes the lizard');
+    assert.equal(fight.debug.died, false);
+    assert.equal(fight.debug.attemptedFights, 1, 'remaining HP must be checked before the next voluntary mob');
+    assert.equal(fight.patch.activity, 'resting');
+} finally { Cold.profileFor = savedProfile; Spots.cache = savedSpots; }
+
+const bow = { role: 'archer', pAtk: 100, pDef: 100, maxHp: 1000, atkSpd: 300,
+    weaponMask: 32, equipment: { weaponKind: 'Weapon.Bow' }, skills: [] };
+const resistedTarget = { ...target, vulnerabilities: { bowWpnVuln: 0.1 } };
+const bowRatio = Match.soloSurvival([bow], resistedTarget).survivalRatio;
+const safeBow = { ...bow, maxHp: bow.maxHp * 1.6 / bowRatio };
+assert(!Match.evaluate([safeBow], resistedTarget).eligible, 'fixture: the ordinary resistance gate rejects efficiency 0.1');
+assert(Match.soloCanHunt([safeBow], resistedTarget).eligible, 'solo hunting accepts a resisted mob it safely survives');
+assert(!Match.soloCanHunt([{ ...safeBow, maxHp: safeBow.maxHp * 1.2 / 1.6 }], resistedTarget).eligible);
+assert(!Match.soloCanHunt([safeBow], resistedTarget, { maxTargetLevel: 27, npcLevel: 29 }).eligible);
+assert.equal(Match.soloCanHunt([safeBow], resistedTarget, { maxTargetLevel: 27, npcLevel: 29 }).reason, 'recovery_level');
+assert(!Match.soloCanHunt([{ ...safeBow, maxHp: undefined }], resistedTarget).eligible,
+    'an unknown kit still uses the ordinary resistance gate');
 
 const exp = Number(Data.experience[28]) + 100000;
 const state = { characterId: 990003, level: 29, exp, sp: 0, adena: 0,
@@ -101,8 +162,11 @@ try {
     const otherEasy = { ...easy, id: 'other-easy', density: 20 };
     Spots.cache = [hard, easy, otherEasy];
     assert.strictEqual(Spots.findForState({ ...stranded, spotId: easy.id }, {
-        matchupProfiles: [mage], occupancy: {}, timestamp: at })?.id, 'easy',
-    'a safe lower-level fallback must not become an endless travel loop between comparable camps');
+        matchupProfiles: [mage], occupancy: {}, timestamp: at })?.id, 'other-easy',
+    'a lower-level fallback leaves its old camp when another allowed camp has a better value');
+    assert.strictEqual(Spots.findForState({ ...stranded, spotId: otherEasy.id }, {
+        matchupProfiles: [mage], occupancy: {}, timestamp: at })?.id, 'other-easy',
+    'the best lower-level fallback remains stable');
 } finally { Spots.cache = original; }
 
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
@@ -162,10 +226,10 @@ async function run() {
     assert(next.stats.huntingRecovery.levelPenalty > 0);
     let losing = { ...state, stats: { ...state.stats } };
     for (let i = 0; i < 3; i++) losing.stats.huntEfficiency = Efficiency.record(losing,
-        { spotId: 'danger', exp: -100, combatMs: 10000, timestamp: at });
+        { spotId: 'danger', exp: -100, cycleMs: 10000, timestamp: at });
     assert(Efficiency.scores(losing, at).get('danger') < 0, 'an exclusively losing history still lowers its route score');
     const legacy = { ...losing, stats: { ...losing.stats, huntEfficiency: losing.stats.huntEfficiency
-        .map(row => ({ ...row, signature: row.signature.replace('net-xp-v1:', ''), exp: 10000 })) } };
+        .map(row => ({ ...row, signature: `legacy-gross:${row.signature}`, exp: 10000 })) } };
     assert.strictEqual(Efficiency.scores(legacy, at).size, 0, 'legacy gross-reward samples cannot bias net-XP routing');
     console.log('Solo survival, safer routing, cross-window deaths, persistent recovery and net death XP passed');
 }

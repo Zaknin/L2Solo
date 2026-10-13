@@ -19,4 +19,19 @@ function karmaLostForExperience(actor, exp) {
     return Math.min(current, lost);
 }
 
-module.exports = { MIN_KARMA, MAX_KARMA, XP_DIVIDER, pkKillKarma, karmaLostForExperience };
+// A character with karma is kept out of towns: a bot takes no town trip and
+// travels on foot, never by Scroll of Escape or gatekeeper, and a teleporter
+// NPC refuses a player. One test for hot actors (fetchKarma) and cold states
+// (stats.karma).
+function closesTowns(karma) {
+    return Number(karma) > 0;
+}
+
+// Floran is the town where a PK trades without a fight (design 5.8): for a
+// character with karma "the town" of a trip, a shop or an ad is Floran.
+const TOWN_NAME = 'Floran Village';
+function townFor(karma, town) {
+    return closesTowns(karma) ? TOWN_NAME : town;
+}
+
+module.exports = { MIN_KARMA, MAX_KARMA, XP_DIVIDER, TOWN_NAME, pkKillKarma, karmaLostForExperience, closesTowns, townFor };

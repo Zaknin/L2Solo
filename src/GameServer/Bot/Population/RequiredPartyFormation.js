@@ -1,20 +1,24 @@
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
+const PersonaPartyPolicy = invoke('GameServer/Bot/Population/PersonaPartyPolicy');
+
+const { isMainThread } = require('node:worker_threads');
+const { partyTradeAllowed } = require('./PartyAdmission');
 
 const ELIGIBLE_ACTIVITIES = new Set(['hunting', 'resting', 'party_wait']);
 
+// The open requests this player-safe formation assembles: required ones
+// always, preferred ones when the bot is willing by the persona rule the
+// background formation applies (PersonaPartyPolicy.backgroundIntent).
 function objectiveFor(state) {
     const objective = PartyRequestPlanner.partyObjectiveForState(state);
-    return objective?.status === 'open' && objective?.priority === 'required' ? objective : null;
+    if (objective?.status !== 'open') return null;
+    if (objective.priority === 'required') return objective;
+    return objective.priority === 'preferred' && PersonaPartyPolicy.backgroundIntent(state).accept ? objective : null;
 }
 
 function spotFor(state, objective = null) {
-    return String(
-        objective?.spotId
-        || (state?.stats?.equipmentPlan?.status === 'active' ? state.stats.equipmentPlan.next?.spotId : null)
-        || state?.spotId
-        || ''
-    );
+    return String(PartyRequestPlanner.objectiveSpot(state, objective) || '');
 }
 
 function eligible(state) {
@@ -25,6 +29,8 @@ function eligible(state) {
         && String(state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && !state.party?.partyId
         && !state.partyId
+        && partyTradeAllowed('party', state)
+        && (!isMainThread || require('../../AfkTrade/TradeMeetingService').canJoinParty(state.characterId, state))
         && spotFor(state)
     );
 }
@@ -56,10 +62,13 @@ function proposalFromStates(states = [], options = {}) {
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push({ state, objective });
     });
-    const requiredCount = [...groups.values()].reduce((sum, group) => sum + group.length, 0);
+    const requiredCount = [...groups.values()].reduce((sum, group) => (
+        sum + group.filter(({ objective }) => objective.priority === 'required').length
+    ), 0);
     const ordered = [...groups.values()].map(group => ({
         spotId: spotFor(group[0].state, group[0].objective),
         playerClan: group.some(({ objective }) => objective.clanGoalKey && priorityClans.has(Number(objective.clanId))),
+        required: group.some(({ objective }) => objective.priority === 'required'),
         group,
         oldestAt: Math.min(...group.map(({ state, objective }) => Number(
             objective.requestedAt || state.timing?.activityStartedAt || state.updatedAt || timestamp
@@ -67,6 +76,7 @@ function proposalFromStates(states = [], options = {}) {
         activeParties: Number(activePartyIdsBySpot.get(spotFor(group[0].state, group[0].objective))?.size || 0)
     })).sort((left, right) => (
         Number(right.playerClan) - Number(left.playerClan)
+        || Number(right.required) - Number(left.required)
         || (right.group.length / (1 + right.activeParties)) - (left.group.length / (1 + left.activeParties))
         || left.oldestAt - right.oldestAt
         || left.spotId.localeCompare(right.spotId)
@@ -79,17 +89,9 @@ function proposalFromStates(states = [], options = {}) {
             || Number(left.state.characterId) - Number(right.state.characterId)
         ));
         for (const anchor of anchors) {
-            const clanEquipment = anchor.objective.clanOperation === 'equipment'
-                && Number(anchor.objective.clanId || 0) > 0;
-            const maxSize = clanEquipment
-                ? Math.max(defaultMinSize, Math.min(9, Number(anchor.objective.maxPartySize) || defaultMaxSize))
-                : defaultMaxSize;
-            const minSize = clanEquipment
-                ? Math.max(2, Math.min(maxSize, Number(anchor.objective.minPartySize) || defaultMinSize))
-                : defaultMinSize;
-            const levelRange = clanEquipment
-                ? Math.max(defaultLevelRange, Number(anchor.objective.levelRange) || 99)
-                : defaultLevelRange;
+            const { maxSize, minSize, levelRange } = PartyRequestPlanner.limitsForObjective(anchor.objective, {
+                minSize: defaultMinSize, maxSize: defaultMaxSize, levelRange: defaultLevelRange
+            });
             const anchorLevel = Number(anchor.state.level || 1);
             const compatible = anchors
                 .filter(({ state }) => Math.abs(Number(state.level || 1) - anchorLevel) <= levelRange)

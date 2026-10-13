@@ -1,11 +1,14 @@
 // Bounded, deterministic skirmishes. No actors, SQL, timers or population scans.
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const { combat } = invoke('GameServer/Bot/Population/BackgroundResolver');
-const Formulas = invoke('GameServer/Formulas');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
 const Aid = require('../../Social/OpponentAidPolicy');
 const Config = require('./PopulationConfig');
 const Aggression = require('../../Social/PvpAggression');
+const Visible = require('../../Social/VisibleStrength');
+const Tendency = require('../AI/TendencyRoll');
+const Roles = invoke('GameServer/Bot/AI/BotRoles');
+const DeathExperience = invoke('GameServer/Progression/DeathExperience');
 const { MAX_ACTIONS, INITIAL_MS: MAX_DURATION_MS } = require('./PvpEncounterBudget');
 const FLAG_MS = 15000;
 const RECOVERY_MS = 90000;
@@ -21,7 +24,36 @@ function allowed(sides) {
     return !sides[0].members.some(a => sides[1].members.some(b => clan(a) > 0 && clan(a) === clan(b)));
 }
 
-function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openingSide = 1 }) {
+// A cold side as it knows itself: best look, people with servitors, and people
+// weighted by their exact condition (HP, CP, MP; a servitor counts fresh).
+// coarse: each condition on the ceil quarters others see it on.
+function ownSide(states, timestamp, coarse = false) {
+    const condition = state => {
+        const p = Profile.profileFor(state, timestamp);
+        const exact = Visible.condition(clamp(Number(state.vitals?.hp) || 0, 0, p.maxHp) / p.maxHp, p.maxCp > 0 ? p.cp / p.maxCp : 0,
+            clamp(Number(state.vitals?.mp) || 0, 0, p.maxMp) / p.maxMp, Roles.shouldRestForMana(state), p.maxCp > 0);
+        return coarse ? Visible.seen(exact, true) : exact;
+    };
+    return { look: Visible.best(states.map(Visible.stateLook)),
+        people: states.reduce((sum, s) => sum + Visible.statePeople(s, timestamp), 0),
+        strength: states.reduce((sum, s) => sum + condition(s) + Visible.statePeople(s, timestamp) - 1, 0) };
+}
+
+// The start gate (U26, the user's choice, 2026-10-05). Character already decided
+// at the author's escalation (the PvP intent) or revenge roll; here the opener
+// only declines when it clearly looks weaker: visibly worse gear, fewer people,
+// or its own condition at least CLEAR_GAP below the other side's seen one
+// (both on ceil quarters; one quarter does not count). One roll on the
+// encounter's key keeps a rare 2% exception both ways.
+const CLEAR_GAP = 0.5;
+function clearlyWeaker(own, other, timestamp) {
+    const mine = ownSide(own, timestamp, true), theirs = Visible.stateSide(other, timestamp);
+    return Visible.compare(mine.look, theirs.look) < 0 || mine.people < theirs.people
+        || mine.strength / mine.people <= theirs.strength / theirs.people - CLEAR_GAP;
+}
+
+// key: the encounter's key, for the start gate's one roll.
+function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openingSide = 1, key = null }) {
     if (!allowed(sides)) return { started: false, reason: 'pvp_protected_context' };
     if (!step?.resuming && Aggression.normalize(Config.pvpAggression) === 0) return { started: false, reason: 'pvp_passive' };
     const fighters = sides.flatMap((side, index) => side.members
@@ -41,12 +73,14 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
                 ...combat.coldChargeState(state, timestamp),
                 kills: [], attacks: 0, skills: 0, heals: 0, preparations: 0 };
         }));
-    const power = side => fighters.filter(f => f.side === side).reduce((sum, f) => sum
-        + (f.vitals.hp + f.cp) * Math.sqrt(Math.max(f.profile.pAtk, f.profile.mAtk)
-            * (f.profile.pDef + f.profile.mDef)), 0);
     // Resource retaliation opens on side 1; an independent grievance opens on side 0.
-    if (!step?.resuming && power(openingSide) < power(1 - openingSide) * 0.6
-        * Aggression.retreatMultiplier(Config.pvpAggression)) return { started: false, reason: 'pvp_outmatched' };
+    // Can I win? The opener knows its own side exactly, the other only by look (U26).
+    if (!step?.resuming) {
+        const involved = side => fighters.filter(f => f.side === side).map(f => f.state);
+        const weaker = clearlyWeaker(involved(openingSide), involved(1 - openingSide), timestamp);
+        const gateKey = key || `cold_open:${sides[openingSide].principal.characterId}:${sides[1 - openingSide].principal.characterId}:${timestamp}`;
+        if (Tendency.roll(gateKey, 'open') >= Tendency.chance(weaker ? 0 : 1)) return { started: false, reason: 'pvp_outmatched' };
+    }
     const windowMs = step ? Math.max(0, Math.min(1000, Math.min(step.until, step.expiresAt) - timestamp)) : MAX_DURATION_MS;
     let time = 0, actions = 0, losingSide = null, outcome = 'disengaged';
     const incidents = new Map();
@@ -85,8 +119,7 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
         // Resolve only completed actions within the bounded combat window.
         if (!step && time + delay > MAX_DURATION_MS) { next.readyAt = MAX_DURATION_MS + 1; continue; }
         if (skill) {
-            next.vitals.mp = Math.max(0, next.vitals.mp - Number(skill.mp || 0));
-            next.cooldowns[skill.selfId] = timestamp + time + delay + Math.max(0, Number(skill.reuse || 0));
+            combat.spendSkill(next, skill, timestamp + time);
             next.skills++;
         }
         if (preparation) {
@@ -107,18 +140,9 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
             }
             next.attacks++;
             incident(target, next);
-            let damage = selected?.magic
-                ? Formulas.calcMagicDamage(next.profile.mAtk, Math.max(1, selected.power), target.profile.mDef,
-                    { magicCritical: rng() < Math.min(0.25, next.profile.critical / 1000) })
-                : combat.hitSucceeds(next.profile.accur, target.profile.evasion, rng)
-                    ? Formulas.calcPhysicalDamage(next.profile.pAtk, next.profile.equipment.pAtkRnd,
-                        target.profile.pDef, selected?.power || 0, { critical: Formulas.rollCritical(next.profile.critical, rng), rng }) : 0;
-            const semantic = skill ? Rules.resolve(skill) : {};
-            if (Number(semantic.requires?.charges) > 0) damage *= 0.8 + (0.201 * next.charges);
-            combat.consumeCharges(next, semantic.requires?.charges);
-            if (Number(semantic.chargeOnUse) > 0) {
-                combat.addCharges(next, semantic.chargeOnUse, semantic.maxCharges, timestamp + time);
-            }
+            // A player target: no monster weaknesses. PvP does not count shots yet.
+            let damage = combat.attackDamage(next, selected, target.profile, rng);
+            combat.settleCharges(next, skill ? Rules.resolve(skill) : {}, timestamp + time);
             damage = Math.max(0, Math.round(damage));
             const shield = Math.min(target.cp, damage);
             target.cp -= shield;
@@ -144,7 +168,9 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
     if (!step?.resuming && !fighters.some(f => f.attacks || f.preparations)) return { started: false, reason: 'no_hostile_action' };
     const ongoing = !!step && losingSide === null && step.until < step.expiresAt && actions < actionBudget;
     const durationMs = Math.min(MAX_DURATION_MS, Math.max(1000, time));
-    const until = timestamp + durationMs + FLAG_MS;
+    // ARCH-NOTE: Native command checkpoints use integer milliseconds. Keep combat
+    // duration exact; round only the persisted deadline up so recovery never begins early.
+    const until = Math.ceil(timestamp + durationMs + FLAG_MS);
     const updates = new Map(fighters.map(f => {
         const dead = f.vitals.hp <= 0;
         const enemies = [...(f.state.stats?.pvpEnemies || [])].map(e => ({ ...e }));
@@ -161,8 +187,8 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
             enemies.push(updated);
         }
         enemies.sort((a, b) => Number(b.kills || 0) - Number(a.kills || 0) || Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
-        return [f.id, { ...f.state, activity: dead ? 'dead' : 'resting', vitals: f.vitals,
-            stats: { ...f.state.stats, deaths: Number(f.state.stats?.deaths || 0) + Number(dead),
+        const next = { ...f.state, activity: dead ? 'dead' : 'resting', vitals: f.vitals,
+            stats: { ...require('../../Social/PeopleKnowledge').statsAfter(f.state.stats, key), deaths: Number(f.state.stats?.deaths || 0) + Number(dead),
                 restUntil: until, pvpEnemies: enemies.slice(0, 3),
                 coldPvp: { at: timestamp, until: step ? step.until : until, outcome: ongoing ? 'fighting' : outcome,
                     lastVictimId: f.lastVictimId, lastVictimAt: f.lastVictimAt,
@@ -172,7 +198,10 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
                 coldCombat: { ...(f.state.stats?.coldCombat || f.profile), cp: dead ? 0 : f.cp, cpAt: step ? step.until : until,
                     cooldowns: dead ? {} : f.cooldowns,
                     charges: dead ? 0 : f.charges, chargeExpiresAt: dead ? null : f.chargeExpiresAt,
-                    ...(dead ? { effects: [], charges: 0, chargeExpiresAt: null, summon: null } : {}) } } }];
+                    ...(dead ? { effects: [], charges: 0, chargeExpiresAt: null, summon: null } : {}) } } };
+        // The C4 death penalty of an ordinary cold death, with the PvP context.
+        // No clan wars, arenas or PvP zones reach cold PvP (peace zones never fight).
+        return [f.id, dead ? DeathExperience.applyColdDeath(next, { timestamp, cold: true, killerPlayable: true }).state : next];
     }));
     return { started: true, ongoing, outcome: ongoing ? 'fighting' : outcome, durationMs, until: step ? step.until : until, losingSide, updates,
         incidents: [...incidents.values()], help: [...help.values()], opponentAid: [...opponentAid.values()], fighters: fighters.map(f => ({ id: f.id, side: f.side,
@@ -180,4 +209,4 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
             preparations: f.preparations, charges: f.charges, heals: f.heals, kills: f.kills })), actions };
 }
 
-module.exports = { resolve, allowed, MAX_ACTIONS, MAX_DURATION_MS, FLAG_MS, RECOVERY_MS };
+module.exports = { resolve, allowed, ownSide, clearlyWeaker, CLEAR_GAP, MAX_ACTIONS, MAX_DURATION_MS, FLAG_MS, RECOVERY_MS };

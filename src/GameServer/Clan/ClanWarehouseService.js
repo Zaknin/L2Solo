@@ -1,3 +1,5 @@
+const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Crafting = require('./ClanCraftingPolicy');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const cursors = new Map();
@@ -13,8 +15,9 @@ const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 
 const HOUR = 60 * 60 * 1000;
-// Needs cache per clan: what each member wears, refreshed hourly.
+// Derived physical equipment cache; addressed clan changes invalidate it.
 const clanWorn = new Map();
+require('./ClanReviewEvents').subscribe(clanId => clanWorn.delete(clanId));
 // Spare wearable items each member already had at the previous supplies pass.
 const seenSpare = new Map();
 
@@ -28,7 +31,7 @@ const metrics = {
     reservationConflicts: 0,
     gearOffered: 0,
     budgetStops: 0,
-    reasonCounts: new Map()
+    reasonCounts: new DiagnosticMetricMap()
 };
 
 function number(value, fallback = 0) {
@@ -37,10 +40,10 @@ function number(value, fallback = 0) {
 }
 
 function recordReason(code) {
-    if (code) metrics.reasonCounts.set(code, (metrics.reasonCounts.get(code) || 0) + 1);
+    if (code) DiagnosticConfig.developerDiagnostics && metrics.reasonCounts.set(code, (metrics.reasonCounts.get(code) || 0) + 1);
 }
 
-async function depositHot(member, clan, rows, demand, limit, goalKey) {
+async function depositHot(member, clan, rows, demand, limit, goalKey, supplyGoalKeys, itemGoals) {
     const session = invoke('GameServer/Bot/BotManager').findSessionById(member.characterId);
     const actor = session?.actor;
     if (!actor?.backpack || Number(actor.fetchClanId?.()) !== Number(clan.id)
@@ -53,27 +56,49 @@ async function depositHot(member, clan, rows, demand, limit, goalKey) {
         kind: item.fetchKind(), name: item.fetchName(), equipped: item.fetchEquipped?.(), enchant: item.fetchEnchantLevel?.() || 0 }));
     const candidates = Policy.depositCandidates(member, snapshots, rows, { ...Config, demand, goalKey }).slice(0, limit);
     if (!candidates.length) return [];
-    const results = await Database.transferPlayerInventoryBatchToClanWarehouse({ clanId: clan.id, characterId: member.characterId,
-        transfers: candidates.map(item => ({ item, amount: item.amount,
-            resolveKey: `${clan.id}:hot-supplies:${member.characterId}:${item.id}:${Date.now()}` })) });
-    for (const result of results) {
-        const item = items.find(item => Number(item.fetchId()) === Number(result.sourceItemId));
+    const moved = [];
+    for (const candidate of candidates) {
+        const itemGoal = itemGoals.find(goal => number(goal.target?.itemId ?? goal.target?.selfId) === candidate.selfId);
+        const rewardUnitPrice = itemGoal ? invoke('GameServer/Items/NpcSellRules').npcBuyPrice(
+            number(ItemTemplateIndex.find(DataCache.items, candidate.selfId)?.template?.price)) : 0;
+        const result = await Database.transferInventoryToClanWarehouse({ clanId: clan.id, characterId: member.characterId,
+            item: candidate, amount: candidate.amount, supplyGoalKeys, goalKey: itemGoal?.goalKey,
+            rewardUnitPrice, expectedPhase: 'hot', allowParty: true,
+            validateLive: () => session.actor === actor && !actor.isDead?.() && !session.activeTrade && !session.trade
+                && !session.activeNegotiation && !session.botTradeReservations?.size && !actor.fetchPrivateStoreType?.()
+                && !actor.state?.fetchHits?.() && !actor.state?.fetchCasts?.()
+                && Number(actor.fetchClanId?.()) === Number(clan.id),
+            resolveKey: `${clan.id}:hot-supplies:${member.characterId}:${candidate.id}:${Date.now()}` });
+        if (!result.ok) { recordReason(result.code); continue; }
+        const item = items.find(item => Number(item.fetchId()) === candidate.id);
         if (!item) continue;
-        if (Number(result.inventoryAmount) > 0) item.setAmount(result.inventoryAmount);
+        const remaining = item.fetchAmount() - result.amount;
+        if (remaining > 0) item.setAmount(remaining);
         else actor.backpack.items = actor.backpack.items.filter(entry => entry !== item);
+        if (result.reward > 0) {
+            const cash = (await Database.fetchItems(member.characterId)).find(row => Number(row.selfId) === 57);
+            actor.backpack.items = actor.backpack.items.filter(entry => entry.fetchSelfId() !== 57);
+            if (cash) actor.backpack.insertItem(cash.id, 57, cash);
+        }
+        LifeState.acceptNewerLifecycleRow(result.state);
+        moved.push(candidate);
     }
     session.dataSendToMe?.(invoke('GameServer/Network/Response').itemsList(actor.backpack.fetchItems()));
-    return candidates;
+    return moved;
 }
 
 async function wornByClan(clan) {
     const cached = clanWorn.get(number(clan.id));
-    if (cached && Date.now() - cached.at < HOUR) return cached.rows;
+    if (cached?.rows && Date.now() - cached.at < HOUR) return cached.rows;
+    const input = {};
+    clanWorn.set(number(clan.id), input);
     const rows = new Map();
     for (const member of clan.members || []) {
         if (member.phase === 'cold') rows.set(number(member.characterId), await Database.fetchItems(member.characterId));
     }
-    clanWorn.set(number(clan.id), { at: Date.now(), rows });
+    if (clanWorn.get(number(clan.id)) === input) {
+        input.at = Date.now(); input.rows = rows;
+    }
     if (clanWorn.size > 128) clanWorn.delete(clanWorn.keys().next().value);
     return rows;
 }
@@ -93,15 +118,14 @@ function spareWearableIds(member) {
 // compensates 0-25% of the price by the giver's generosity (25% while it saves
 // for its own purchase) from its free money, else it is a gift; the giver is paid
 // before it gives, so a busy giver keeps the item for the next pass. The warehouse
-// exchange then hands the item out. Hot members are skipped; the first look at a
-// member only records its spare items.
+// exchange then hands the item out. Hot members are skipped.
 async function offerSpareGear(clan, member, warehouseRows, warehouseRevision) {
     const id = number(member.characterId);
     // A party holds the member's data: it offers once it is free.
     if (member.partyId || member.party?.partyId) return { deposited: 0, warehouseRevision };
     const spare = spareWearableIds(member);
     const seen = seenSpare.get(id);
-    const freshIds = seen ? spare.filter((selfId) => !seen.has(selfId)) : [];
+    const freshIds = (seen ? spare.filter((selfId) => !seen.has(selfId)) : spare).slice(0, 16);
     const handled = new Set(spare.filter((selfId) => !freshIds.includes(selfId)));
     const remember = () => {
         seenSpare.set(id, handled);
@@ -170,7 +194,7 @@ async function offerSpareGear(clan, member, warehouseRows, warehouseRevision) {
         member.simulationRevision = number(moved.simulationRevision, member.simulationRevision);
         handled.add(offer.selfId);
         deposited += 1;
-        metrics.gearOffered += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.gearOffered += 1);
         // The need is met for this hour: the cache sees the item as worn.
         worn.get(best.mateId).push({ id: -row.id, selfId: offer.selfId, amount: 1, enchant: 0, equipped: true, slot: best.slot });
     }
@@ -179,7 +203,7 @@ async function offerSpareGear(clan, member, warehouseRows, warehouseRevision) {
 }
 
 async function resolveClan(clan, options = {}) {
-    if (!clan || !number(clan.id)) {
+    if (!clan || !number(clan.id) || number(clan.level) < 1) {
         return { ok: true, skipped: true, reason: 'warehouse_level_unavailable' };
     }
     const deadlineAt = Number.isFinite(Number(options.deadlineAt)) ? Number(options.deadlineAt) : Infinity;
@@ -194,11 +218,16 @@ async function resolveClan(clan, options = {}) {
         ? clan.state.goal : clan.state?.productionGoal || clan.state?.goal;
     const beneficiary = (clan.members || []).find(member => number(member.characterId) === number(goal?.target?.memberId));
     const plan = beneficiary?.stats?.equipmentPlan;
-    const demand = goal?.policy?.strategy === 'craft'
-        ? Object.fromEntries((goal.plan?.craft?.materials || []).map(material => [material.selfId, material.required]))
-        : plan?.strategy === 'craft' && plan.clanGoal?.goalKey === goal?.goalKey
-        ? Object.fromEntries([...Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), beneficiary.inventory, null, 1, plan.craftProviders, plan.componentRecipes)]
-            .map(([id, amount]) => [id, Math.max(0, amount - number(beneficiary.inventory?.[id]?.amount))])) : {};
+    const Supplies = require('./ClanSupplyPolicy');
+    Supplies.publish(clan, warehouseRows);
+    // depositCandidates subtracts existing stock once; the public earmark is
+    // the remaining gap, shared with the market workers.
+    const demand = Supplies.requirements(clan);
+    const itemGoals = [clan.state?.goal, clan.state?.productionGoal].filter(entry => entry?.goalKey
+        && ['item', 'equipment'].includes(entry.type) && entry.policy?.strategy !== 'craft'
+        && !['completed', 'cancelled', 'failed', 'abandoned'].includes(entry.status));
+    const supplyGoalKeys = [clan.state?.goal, clan.state?.productionGoal].filter(entry => entry?.goalKey
+        && !['completed', 'cancelled', 'failed', 'abandoned'].includes(entry.status)).map(entry => entry.goalKey);
     const cursor = cursors.get(number(clan.id)) || 0;
     members = [...members.filter(member => member.characterId > cursor), ...members.filter(member => member.characterId <= cursor)];
     let warehouseRevision = number(clan.state?.warehouseRevision);
@@ -213,14 +242,14 @@ async function resolveClan(clan, options = {}) {
     for (const member of members) {
         if (Date.now() >= deadlineAt || attempted >= batchSize) {
             budgetStopped = Date.now() >= deadlineAt;
-            if (budgetStopped) metrics.budgetStops += 1;
+            if (budgetStopped) DiagnosticConfig.developerDiagnostics && (metrics.budgetStops += 1);
             break;
         }
         cursors.set(number(clan.id), number(member.characterId));
         if (cursors.size > 128) cursors.delete(cursors.keys().next().value);
         if (member.phase === 'hot') {
             try {
-                const moved = await depositHot(member, clan, warehouseRows, demand, batchSize - attempted, goal?.goalKey);
+                const moved = await depositHot(member, clan, warehouseRows, demand, batchSize - attempted, goal?.goalKey, supplyGoalKeys, itemGoals);
                 attempted += moved.length;
                 deposited += moved.length;
                 units += moved.reduce((sum, item) => sum + item.amount, 0);
@@ -245,10 +274,13 @@ async function resolveClan(clan, options = {}) {
         for (const candidate of candidates) {
             if (Date.now() >= deadlineAt || attempted >= batchSize) {
                 budgetStopped = Date.now() >= deadlineAt;
-                if (budgetStopped) metrics.budgetStops += 1;
+                if (budgetStopped) DiagnosticConfig.developerDiagnostics && (metrics.budgetStops += 1);
                 break;
             }
             attempted += 1;
+            const itemGoal = itemGoals.find(entry => number(entry.target?.itemId ?? entry.target?.selfId) === candidate.selfId);
+            const rewardUnitPrice = itemGoal ? invoke('GameServer/Items/NpcSellRules').npcBuyPrice(
+                number(ItemTemplateIndex.find(DataCache.items, candidate.selfId)?.template?.price)) : 0;
             const result = await (LifeState.applyClanMaterialTransfer ? LifeState.applyClanMaterialTransfer.bind(LifeState) : Database.transferInventoryToClanWarehouse)({
                 clanId: clan.id,
                 characterId: member.characterId,
@@ -256,6 +288,9 @@ async function resolveClan(clan, options = {}) {
                 amount: candidate.amount,
                 expectedWarehouseRevision: warehouseRevision,
                 expectedSimulationRevision: member.simulationRevision,
+                goalKey: itemGoal?.goalKey || null,
+                rewardUnitPrice,
+                supplyGoalKeys,
                 resolveKey: `${clan.id}:warehouse:${member.characterId}:${candidate.id}:${bucket}`
             });
             results.push(result);
@@ -275,18 +310,19 @@ async function resolveClan(clan, options = {}) {
                     enchant: candidate.enchant || 0,
                     reservedAmount: 0
                 });
-                if (candidate.reason === 'recipe') metrics.recipes += 1;
-                else if (candidate.reason === 'progression_item') metrics.progressionItems += 1;
-                else metrics.materials += 1;
+                if (candidate.reason === 'recipe') DiagnosticConfig.developerDiagnostics && (metrics.recipes += 1);
+                else if (candidate.reason === 'progression_item') DiagnosticConfig.developerDiagnostics && (metrics.progressionItems += 1);
+                else DiagnosticConfig.developerDiagnostics && (metrics.materials += 1);
                 recordReason(result.code);
             } else {
                 blocked += 1;
-                if (result.code === 'warehouse_item_reserved' || result.code === 'ownership_conflict') metrics.reservationConflicts += 1;
+                if (result.code === 'warehouse_item_reserved' || result.code === 'ownership_conflict') DiagnosticConfig.developerDiagnostics && (metrics.reservationConflicts += 1);
                 recordReason(result.code);
             }
         }
     }
 
+    Supplies.publish(clan, warehouseRows);
     const nextId = number(plan?.next?.itemId);
     const needed = number(plan?.next?.requiredTotal || plan?.next?.amount, 1);
     const nextAvailable = warehouseRows.filter(row => number(row.selfId) === nextId)
@@ -295,9 +331,9 @@ async function resolveClan(clan, options = {}) {
         await Database.execute([`UPDATE clan_actions SET availableAt = MIN(availableAt, ?)
             WHERE clanId = ? AND actionType IN ('goal_plan', 'production') AND status = 'pending'`, [Date.now(), clan.id]], 'clan-supplies:ready');
     }
-    metrics.resolves += 1;
-    metrics.depositsApplied += deposited;
-    metrics.depositsBlocked += blocked;
+    DiagnosticConfig.developerDiagnostics && (metrics.resolves += 1);
+    DiagnosticConfig.developerDiagnostics && (metrics.depositsApplied += deposited);
+    DiagnosticConfig.developerDiagnostics && (metrics.depositsBlocked += blocked);
     return {
         ok: true,
         clanId: number(clan.id),
@@ -324,7 +360,7 @@ const ClanWarehouseService = {
             for (const clan of entries || []) {
                 if (Date.now() >= deadlineAt) {
                     summary.budgetStopped = true;
-                    metrics.budgetStops += 1;
+                    DiagnosticConfig.developerDiagnostics && (metrics.budgetStops += 1);
                     break;
                 }
                 const result = await resolveClan(clan, {
@@ -342,6 +378,7 @@ const ClanWarehouseService = {
     },
 
     metrics() {
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
         return {
             resolves: metrics.resolves,
             depositsApplied: metrics.depositsApplied,

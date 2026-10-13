@@ -1,5 +1,13 @@
 const assert = require('assert');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
+// Navigation fixtures have no economy datapack; town wishes do not own these route checks.
+invoke('GameServer/Bot/Economy/EconomyContext').forActor = (_actor, session) => ({
+    // A real context always carries its stock reader; these bots use no shots.
+    stock: () => ({ itemId: 0, usePerHour: 0 }),
+    network: { activity: null }, statsPacket: { decisionSeq: session.coldLifeState?.stats?.decisionSeq || 0,
+        activityLeaf: 0, money: [1, 1, 0, 0] }
+});
 const Hunting = invoke('GameServer/Bot/AI/States/HuntingState');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Decision = invoke('GameServer/Bot/AI/BotDecisionService');
@@ -109,6 +117,87 @@ try {
     tick(expired);
     assert.strictEqual(expired.session.spotRelocation, undefined);
     assert(expired.session.spotRetryAfter[spot.id] > Date.now(), 'timeout must not immediately select the same destination');
+
+    // A hot bot with karma never uses SoE or a gatekeeper: it looks for a
+    // spot within walking range and walks there.
+    const farSpot = { ...spot, id: '31_8', name: 'Far field',
+        center: { locX: start.locX + 30000, locY: start.locY, locZ: start.locZ } };
+    Spots.ensureIndexed = () => [farSpot];
+    const redStatus = { ...fixture().session.botStatus, nearby: { attackableNpcs: 0, eligibleAttackableNpcs: 0 } };
+    assert.strictEqual(Spots.findBestSpot(redStatus).spot.id, farSpot.id, 'a far spot is in range for SoE');
+    assert.strictEqual(Spots.findBestSpot(redStatus, { walkOnly: true }), null, 'walking range ends at 12000');
+    const white = fixture(true);
+    const red = fixture(true);
+    red.bot.fetchKarma = () => 500;
+    assert.strictEqual(Decision.suggest(redStatus, white.session).spot?.id, farSpot.id, 'a white bot may pick a far spot');
+    assert.strictEqual(Decision.suggest(redStatus, red.session).action, 'search_locally', 'a bot with karma picks only spots it can walk to');
+
+    const realSuggest = Decision.suggest;
+    const realSetTimeout = global.setTimeout;
+    const Response = invoke('GameServer/Network/Response');
+    const realSkillStarted = Response.skillStarted;
+    Decision.suggest = () => ({ action: 'move_to_spot', reason: 'no_targets_nearby', spot: farSpot });
+    global.setTimeout = () => 0;
+    Response.skillStarted = () => Buffer.alloc(0);
+    try {
+        for (const f of [white, red]) {
+            f.session.spotRelocation = undefined;
+            f.session.townRoutePlan = null;
+            f.bot.automation = { abortAll() {} };
+            tick(f);
+        }
+    } finally {
+        Decision.suggest = realSuggest;
+        global.setTimeout = realSetTimeout;
+        Response.skillStarted = realSkillStarted;
+    }
+    assert.strictEqual(white.session.spotRelocation?.method, 'soe_gatekeeper', 'a white bot reads SoE to a far spot');
+    assert.strictEqual(red.session.spotRelocation?.method, 'walk', 'a bot with karma walks even to a far spot');
+    assert.strictEqual(red.bot.moves, 1, 'a bot with karma starts walking at once');
+
+    const Market = invoke('GameServer/Bot/Economy/ColdMarketService');
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const Events = require('../src/GameServer/Bot/AI/DecisionEvents');
+    const TownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
+    const savedPurchase = { check: Market.canTravelForPurchase, state: Economy.stateForActor,
+        held: Events.held, travel: TownTravel.request };
+    const purchaseState = { characterId: 2002505, activity: 'hunting' };
+    const purchaseEconomy = { network: { activity: { activity: 'shopping', itemId: 1835,
+        amount: 8, town: 'Giran', valueHours: 0.002 } } };
+    let purchaseChecks = 0, purchaseTrips = 0, allowed = false;
+    try {
+        Events.held = () => purchaseEconomy;
+        Economy.stateForActor = () => purchaseState;
+        Market.canTravelForPurchase = (state, request, options) => {
+            purchaseChecks++;
+            assert.strictEqual(state, purchaseState);
+            assert.strictEqual(options.economy, purchaseEconomy, 'the hot guard reuses its existing decision');
+            assert.deepStrictEqual(request, { selfId: 1835, amount: 8, town: 'Giran', valueHours: 0.002 });
+            return allowed;
+        };
+        TownTravel.request = () => { purchaseTrips++; return 'escape'; };
+        const denied = fixture();
+        denied.session.spotRelocation = undefined;
+        denied.session.townRoutePlan = null;
+        denied.bot.automation = { abortAll() {} };
+        tick(denied);
+        assert.strictEqual(purchaseChecks, 1);
+        assert.strictEqual(purchaseTrips, 0, 'a tiny unprofitable purchase cannot initiate a visible town trip');
+        allowed = true;
+        const accepted = fixture();
+        accepted.session.spotRelocation = undefined;
+        accepted.session.townRoutePlan = null;
+        accepted.bot.automation = { abortAll() {} };
+        tick(accepted);
+        assert.strictEqual(purchaseChecks, 2);
+        assert.strictEqual(purchaseTrips, 1, 'the same shared guard admits a worthwhile visible trip');
+    } finally {
+        Market.canTravelForPurchase = savedPurchase.check;
+        Economy.stateForActor = savedPurchase.state;
+        Events.held = savedPurchase.held;
+        TownTravel.request = savedPurchase.travel;
+    }
+
     console.log('Bot hunting route failure checks passed');
 } finally {
     Math.random = originalRandom;

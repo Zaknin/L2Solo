@@ -1,11 +1,14 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const ServerResponse = invoke('GameServer/Network/Response');
 const BotEventJournal = invoke('GameServer/Bot/AI/BotEventJournal');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
+const Karma = invoke('GameServer/Karma');
+const TripPayment = invoke('GameServer/Bot/Travel/TripPayment');
 
 const SOE_SKILL_ID = 2013;
-const SOE_CAST_MS = 20000;
+const SOE_CAST_MS = TripPayment.SCROLL_CAST_MS;
 const SOE_DISTANCE = 2500;
 
 function distance2d(bot, target) {
@@ -59,6 +62,7 @@ function restoreSupplyHot(session, bot, reason = 'supply_errand_interrupted') {
     revealInterruptedSupplyErrand(session, bot);
     if (session.coldLifeState) {
         session.coldLifeState = { ...session.coldLifeState, activity: session.plan || 'hunting' };
+        refreshPartyMemberships([session], invoke);
     }
     const BotAI = invoke('GameServer/Bot/BotAI');
     BotAI.stop?.(session);
@@ -73,6 +77,7 @@ function restoreSupplyHot(session, bot, reason = 'supply_errand_interrupted') {
 function interruptEscape(session, bot) {
     if (!session.townEscape) return false;
     session.townEscape = undefined;
+    session.meetingTravel = undefined;
     session.pendingTownTrip = session.pendingTownTrip || { reason: 'Finishing the fight before going to town.', requestedAt: Date.now() };
     session.plan = 'hunting';
     bot.state.setCasts(false);
@@ -99,6 +104,7 @@ function beginEscape(session, bot, town, options = {}) {
         if (bot.isDead() || hasCombatThreat(session, bot) || !bot.state.fetchCasts()) {
             bot.state.setCasts(false);
             session.townEscape = undefined;
+            session.meetingTravel = undefined;
             session.plan = 'hunting';
             restoreSupplyHot(session, bot, 'supply_errand_interrupted');
             return;
@@ -114,7 +120,7 @@ function beginEscape(session, bot, town, options = {}) {
             bot.setLocXYZ?.(destination);
         } else {
             const TeleportTo = invoke('GameServer/Actor/Generics/TeleportTo');
-            TeleportTo(session, bot, destination);
+            TeleportTo(session, bot, destination, { onArrival: options.onPhysicalArrival });
         }
         if (typeof options.onArrival === 'function') {
             Promise.resolve(options.onArrival(destination)).catch((error) => {
@@ -133,26 +139,47 @@ function beginEscape(session, bot, town, options = {}) {
     }, SOE_CAST_MS);
 }
 
+function karmaTown() {
+    const town = Object.values(invoke('GameServer/World/TownRespawn').towns).find((candidate) => candidate.name === Karma.TOWN_NAME);
+    return { name: town.name, x: town.locX, y: town.locY, z: town.locZ };
+}
+
 function request(session, bot, BotAI, reason, options = {}) {
     if (session.partyCompanion === true && session.followPlayerSession && options.allowCompanion !== true) return 'companion';
 
     const pending = session.pendingTownTrip || {};
     session.pendingTownTrip = { reason: reason || pending.reason || null, requestedAt: pending.requestedAt || Date.now() };
     if (inCombat(session, bot)) return 'deferred';
-
-    const town = options.destinationTown || BotAI.getClosestTown(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
+    // A bot with karma walks to Floran, the town where a PK trades (design
+    // 5.8): no scroll, no gatekeeper.
+    const red = Karma.closesTowns(bot.fetchKarma?.());
+    if (red && options.forceScrollOfEscape === true) return 'unpaid';
+    const town = red ? karmaTown() : options.destinationTown || BotAI.getClosestTown(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
+    const alreadyInTown = TownTransitPolicy.townAt(bot) === town.name;
+    const wantsScroll = !red && !alreadyInTown && (options.forceScrollOfEscape === true || distance2d(bot, town) > SOE_DISTANCE);
+    // The scroll is spent and the gatekeeper paid into another town, as for a
+    // player (TripPayment). Without a scroll the bot walks; a trip that must
+    // be made by scroll (a hidden supply errand) is refused instead.
+    const fare = { scroll: true, fee: options.destinationTown
+        ? TripPayment.fee({ locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
+            { locX: town.x, locY: town.y, locZ: town.z }) ?? 0
+        : 0 };
+    const affordable = wantsScroll && TripPayment.hasActorScroll(bot) && !TripPayment.fareShort(
+        options.forceScrollOfEscape === true ? 'hot_errand' : 'hot', fare.fee, TripPayment.actorAdena(bot));
+    if (wantsScroll && !affordable && options.forceScrollOfEscape === true) return 'unpaid';
+    const usesScroll = wantsScroll && affordable;
     session.preShopLocation = { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() };
     session.plan = 'shopping';
     session.shopTimer = Date.now();
+    session.shoppingRestock = undefined;
     if (options.preserveShoppingTarget !== true) session.shoppingTarget = undefined;
-    const alreadyInTown = TownTransitPolicy.townAt(bot) === town.name;
-    const usesScroll = !alreadyInTown && (options.forceScrollOfEscape === true || distance2d(bot, town) > SOE_DISTANCE);
     if (options.announce !== false) {
         TownChatter.say(session, BotAI, 'town-trip-start', Speech.lines('town.town-trip-start', { town: town.name }));
     }
     session.pendingTownTrip = undefined;
 
     if (usesScroll) {
+        TripPayment.payActor(session, bot, fare);
         beginEscape(session, bot, town, options);
         return 'escape';
     }
@@ -164,6 +191,99 @@ function request(session, bot, BotAI, reason, options = {}) {
     return 'walk';
 }
 
+async function requestMeeting(session, bot, meeting, side) {
+    if (hasCombatThreat(session, bot) || bot.isDead() || session.meetingTravel || session.pendingActorTeleport) return;
+    const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
+    const Routes = require('../Travel/TravelRoutes'), suffix = side ? 'B' : 'A';
+    const token = session.meetingTravel = { id: meeting.id };
+    const point = { locX: meeting.locX, locY: meeting.locY, locZ: meeting.locZ };
+    const position = () => ({ locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() });
+    const valid = () => session.meetingTravel === token && !bot.isDead() && !hasCombatThreat(session, bot);
+    const pay = async (legId, fee, scroll) => {
+        const latest = await Database.fetchTradeMeeting(meeting.id);
+        if (!valid() || latest?.state !== 'accepted') return null;
+        const saved = JSON.parse(latest[`leg${suffix}`] || 'null');
+        const sequence = saved?.legId === legId ? saved.sequence : latest[`nextLeg${suffix}`];
+        const paid = await Database.payTradeMeetingLeg(meeting.id, side, sequence, legId, fee, scroll);
+        const row = paid.coldLifeRows?.[bot.fetchId()]; if (row) Life.acceptLifecycleRow(row);
+        await invoke('GameServer/AfkTrade/AfkTradeService').syncOnlineInventory(bot.fetchId(), await Database.fetchItems(bot.fetchId()));
+        return sequence;
+    };
+    const finish = () => {
+        if (!valid()) { session.meetingTravel = undefined; return; }
+        session.meetingTravel = undefined;
+        bot.moveTo({ from: position(), to: point });
+    };
+    const hop = async () => {
+        if (!valid()) { session.meetingTravel = undefined; return; }
+        if (String(JSON.parse(meeting[`route${suffix}`]).method).startsWith('meeting:')) { finish(); return; }
+        const native = Routes.between(position(), point), step = native.route?.steps?.[0];
+        if (!step) { finish(); return; }
+        const latest = await Database.fetchTradeMeeting(meeting.id);
+        const held = JSON.parse(latest?.[`leg${suffix}`] || 'null');
+        if (step.fee > Number(latest?.[`routeReserve${suffix}`]) && !held?.legId?.startsWith('gk:')) { finish(); return; }
+        const gatekeeper = require('../../World/NpcObjectIndex').nearTemplate(invoke('GameServer/World/World'),
+            step.npcId, native.start.locX, native.start.locY, 1200);
+        if (!gatekeeper) throw Error('trade_meeting_gatekeeper_unavailable');
+        const gate = { locX: gatekeeper.fetchLocX(), locY: gatekeeper.fetchLocY(), locZ: gatekeeper.fetchLocZ() };
+        if (Math.hypot(bot.fetchLocX() - gate.locX, bot.fetchLocY() - gate.locY) > 200) {
+            session.meetingTravel = undefined;
+            if (session.tradeMeetingPresence) { session.tradeMeetingPresence.waypoint = gate; session.tradeMeetingPresence.atWaypoint = false; }
+            bot.moveTo({ from: position(), to: gate });
+            return;
+        }
+        if (session.tradeMeetingPresence) delete session.tradeMeetingPresence.waypoint;
+        const legId = `gk:${step.locX}:${step.locY}:${step.locZ}`;
+        const sequence = await pay(legId, step.fee, false);
+        if (sequence === null || !valid()) { session.meetingTravel = undefined; return; }
+        if (!invoke('GameServer/Actor/Generics/TeleportTo')(session, bot, step, {
+            onArrival: async () => {
+                try {
+                    await Database.acknowledgeTradeMeetingLeg(meeting.id, side, sequence);
+                    await hop();
+                } catch (error) { session.meetingTravel = undefined; utils.infoWarn('AfkTrade', 'meeting hop: %s', error.message); }
+            }
+        })) session.meetingTravel = undefined;
+    };
+    try {
+        const route = JSON.parse(meeting[`route${suffix}`]), saved = JSON.parse(meeting[`leg${suffix}`] || 'null');
+        // An interrupted recall spent its scroll. Continue on foot; never
+        // cast again using an old receipt as another physical scroll.
+        if (saved?.legId?.split(':')[0] === 'soe') await Database.acknowledgeTradeMeetingLeg(meeting.id, side, saved.sequence);
+        if (saved?.legId?.startsWith('walk:') || saved?.legId === 'outbound')
+            await Database.acknowledgeTradeMeetingLeg(meeting.id, side, saved.sequence);
+        if (saved?.legId?.startsWith('gk:')) {
+            const coords = saved.legId.slice(3).split(':').map(Number);
+            if (coords.length === 3 && coords.every(Number.isFinite)
+                && Math.hypot(bot.fetchLocX() - coords[0], bot.fetchLocY() - coords[1], bot.fetchLocZ() - coords[2]) <= 200)
+                await Database.acknowledgeTradeMeetingLeg(meeting.id, side, saved.sequence);
+        }
+        if (route.scroll && meeting[`nextLeg${suffix}`] === 1) {
+            const sequence = await pay('soe', 0, true), native = Routes.between(position(), point);
+            if (sequence === null || !valid()) { session.meetingTravel = undefined; return; }
+            beginEscape(session, bot, { name: native.start.name, x: native.start.locX, y: native.start.locY, z: native.start.locZ },
+                { onPhysicalArrival: async destination => {
+                    if (!valid() || Math.hypot(bot.fetchLocX() - destination.locX,
+                        bot.fetchLocY() - destination.locY, bot.fetchLocZ() - destination.locZ) > 200) {
+                        session.meetingTravel = undefined;
+                        return;
+                    }
+                    await Database.acknowledgeTradeMeetingLeg(meeting.id, side, sequence);
+                    await hop();
+                } });
+        } else await hop();
+    } catch (error) {
+        session.meetingTravel = undefined;
+        if (error.message === 'trade_meeting_gatekeeper_unavailable') {
+            const cancelled = await Database.cancelTradeMeeting(meeting.id, 'route_unavailable');
+            for (const row of Object.values(cancelled?.coldLifeRows || {})) Life.acceptLifecycleRow(row);
+            require('../../AfkTrade/TradeMeetingService').wake(bot.fetchId());
+            return;
+        }
+        throw error;
+    }
+}
+
 module.exports = {
     SOE_CAST_MS,
     SOE_DISTANCE,
@@ -172,6 +292,7 @@ module.exports = {
     inCombat,
     interruptEscape,
     request,
+    requestMeeting,
     revealSupplyErrand,
     restoreSupplyHot
 };

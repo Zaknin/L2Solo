@@ -54,19 +54,24 @@ function safeItem(item) {
     return Number(item.fetchAmount?.() || 0) > 0;
 }
 
+// Price change by relationship label: friends pay less, wary bots ask more.
+const PRICE_MODIFIER_BY_RELATIONSHIP = Object.freeze({
+    trusted: -0.08,
+    friendly: -0.04,
+    wary: 0.06,
+    familiar: -0.01,
+    stranger: 0
+});
+
 function relationshipFor(player, bot) {
     const memory = BotSocialMemory.getSnapshot(player, bot) || {};
-    const trust = Number(memory.trust || 0);
-    const familiarity = Number(memory.familiarity || 0);
-    if (trust >= 8) return { name: 'trusted', trust, familiarity, modifier: -0.08 };
-    if (trust >= 3 || familiarity >= 5) return { name: 'friendly', trust, familiarity, modifier: -0.04 };
-    if (trust <= -5) return { name: 'wary', trust, familiarity, modifier: 0.06 };
-    if (familiarity > 0) return { name: 'familiar', trust, familiarity, modifier: -0.01 };
-    return { name: 'stranger', trust, familiarity, modifier: 0 };
+    const name = BotSocialMemory.relationship(memory);
+    return { name, trust: Number(memory.trust || 0), familiarity: Number(memory.familiarity || 0),
+        modifier: PRICE_MODIFIER_BY_RELATIONSHIP[name] };
 }
 
 function personaFor(bot) {
-    const persona = bot?.persona || BotPersona.generate({ characterId: actorId(bot) });
+    const persona = bot?.persona || BotPersona.of(actorId(bot));
     const traits = persona?.traits || {};
     return {
         primaryDrive: ['progression', 'wealth', 'social'].includes(persona?.primaryDrive) ? persona.primaryDrive : 'progression',
@@ -332,11 +337,10 @@ function canAccess(bot, player) {
     return null;
 }
 
+// Only a bot's shop on the board haggles over its listed lines; a static
+// merchant's store has fixed prices.
 function canNegotiateStore(bot) {
-    if (bot?.afkTradeProjection && bot?.botOwned) {
-        return !!BotMerchantStoreService.storeFor(bot);
-    }
-    return !!(bot?.coldMarketState?.stats?.marketStore && BotMerchantStoreService.storeFor(bot));
+    return !!(bot?.afkTradeProjection && bot?.botOwned && BotMerchantStoreService.storeFor(bot));
 }
 
 function quoteItem(bot, player, itemObjectId, amount = 1, offeredTotalPrice = null) {
@@ -428,59 +432,35 @@ function counterOffer(bot, player, totalPrice) {
     return { ok: true, negotiation: summary(negotiation) };
 }
 
+// The agreed price goes onto the board shop's line (canNegotiateStore).
 async function republishAcceptedStore(bot, negotiation) {
-    if (bot?.afkTradeProjection && bot?.botOwned) {
-        const store = BotMerchantStoreService.storeFor(bot);
-        const line = BotMerchantStoreService.lineFor(store, negotiation.itemSelfId);
-        if (!line || Number(store?.revision) !== Number(negotiation.storeRevision)) {
-            return { ok: false, reason: 'store_changed', negotiation: summary(negotiation) };
-        }
-        bot.afkRepricing = true;
-        try {
-            const updated = await invoke('GameServer/AfkTrade/AfkTradeService').repriceBot(
-                bot.actor.afkTradeOwnerId, line.afkTradeLineId,
-                negotiation.currentUnitPrice, negotiation.storeRevision, negotiation.quantity
-            );
-            negotiation.state = 'completed';
-            negotiation.reason = 'store_reopened';
-            const result = summary(negotiation);
-            persist(negotiation);
-            audit(negotiation, 'completed', 'store_reopened', { storeRevision: updated?.revision });
-            clear(negotiation);
-            return { ok: true, reason: 'store_reopened', negotiation: result, store: updated };
-        } catch (error) {
-            negotiation.state = 'countered';
-            negotiation.reason = error.message;
-            negotiation.agreedTotalPrice = null;
-            persist(negotiation);
-            return { ok: false, reason: error.message, negotiation: summary(negotiation) };
-        } finally {
-            bot.afkRepricing = false;
-        }
+    const store = BotMerchantStoreService.storeFor(bot);
+    const line = BotMerchantStoreService.lineFor(store, negotiation.itemSelfId);
+    if (!line || Number(store?.revision) !== Number(negotiation.storeRevision)) {
+        return { ok: false, reason: 'store_changed', negotiation: summary(negotiation) };
     }
-    const reopened = await BotMerchantStoreService.republish(bot, {
-        storeId: negotiation.storeId,
-        storeRevision: negotiation.storeRevision,
-        itemSelfId: negotiation.itemSelfId,
-        quantity: negotiation.quantity,
-        unitPrice: negotiation.currentUnitPrice
-    });
-    if (!reopened.ok) {
+    bot.afkRepricing = true;
+    try {
+        const updated = await invoke('GameServer/AfkTrade/AfkTradeService').repriceBot(
+            bot.actor.afkTradeOwnerId, line.afkTradeLineId,
+            negotiation.currentUnitPrice, negotiation.storeRevision, negotiation.quantity
+        );
+        negotiation.state = 'completed';
+        negotiation.reason = 'store_reopened';
+        const result = summary(negotiation);
+        persist(negotiation);
+        audit(negotiation, 'completed', 'store_reopened', { storeRevision: updated?.revision });
+        clear(negotiation);
+        return { ok: true, reason: 'store_reopened', negotiation: result, store: updated };
+    } catch (error) {
         negotiation.state = 'countered';
-        negotiation.reason = reopened.reason;
+        negotiation.reason = error.message;
         negotiation.agreedTotalPrice = null;
         persist(negotiation);
-        audit(negotiation, 'rejected', reopened.reason);
-        return { ok: false, reason: reopened.reason, negotiation: summary(negotiation) };
+        return { ok: false, reason: error.message, negotiation: summary(negotiation) };
+    } finally {
+        bot.afkRepricing = false;
     }
-    negotiation.state = 'completed';
-    negotiation.reason = 'store_reopened';
-    const result = summary(negotiation);
-    persist(negotiation);
-    audit(negotiation, 'completed', 'store_reopened', { storeRevision: reopened.store?.revision });
-    journal(negotiation, 'completed', `${actorName(bot)} reopened the store with ${negotiation.itemName} x${negotiation.quantity} at ${negotiation.currentUnitPrice} Adena each.`);
-    clear(negotiation);
-    return { ok: true, reason: 'store_reopened', negotiation: result, store: reopened.store };
 }
 
 function acceptPrice(bot, player, totalPrice = null, itemIdentifier = null, amount = 1) {

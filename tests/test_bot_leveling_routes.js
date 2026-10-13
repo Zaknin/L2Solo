@@ -1,6 +1,8 @@
 const assert = require('assert');
 
 require('../src/Global');
+// Load native data before the first economic route or combat profile check.
+invoke('GameServer/DataCache').init();
 
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
@@ -320,5 +322,16 @@ try {
 } finally {
     SpotService.ensureIndexed = originalEnsureIndexed;
 }
+
+// Route roles of dwarves: a crafter class keeps the crafter route over its party role.
+assert.deepStrictEqual([
+    { level: 39, stats: { classId: 56 } },
+    { level: 45, stats: { classId: 56 }, party: { role: 'tank' } },
+    { level: 60, stats: { classId: 57, routeRole: 'dps' } },
+    { level: 42, stats: { classId: 54 } },
+    { level: 78, stats: { classId: 118 } },
+    { level: 78, stats: { classId: 118 }, party: { role: 'tank' } }
+].map((state) => LevelingRoutes.roleForState(state)), ['spoiler', 'crafter', 'crafter', 'spoiler', 'crafter', 'crafter'],
+'route roles of dwarves');
 
 console.log('Bot leveling route checks passed');

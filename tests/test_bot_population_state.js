@@ -1,10 +1,20 @@
 const assert = require('assert');
 const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-population-state-'));
+process.env.L2NODE_CONFIG_FILE = path.join(directory, 'config.ini');
+delete process.env.L2NODE_SHARED_CONFIG_FILE;
+fs.writeFileSync(process.env.L2NODE_CONFIG_FILE, `[Database]\npath=${directory}/world.sqlite\nhistoryPath=${directory}/history.sqlite\n`);
 
 require('../src/Global');
+invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true;
 
 const Database = invoke('Database');
+Database.init();
 const originalReconcileClanGoals = Database.reconcileBotClanGoals;
+const originalFetchMarketCounts = Database.fetchBotMarketCounts;
 const DataCache = invoke('GameServer/DataCache');
 const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
@@ -14,6 +24,12 @@ const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 DataCache.init();
 
 const originalExecute = Database.execute;
+const originalSaveLifeState = Database.saveBotLifeState;
+const fixtureReady = originalExecute(["INSERT INTO accounts(username,password) VALUES('bot_population_fixture','pw')"])
+    .then(() => Promise.all([42, 43, 44, 45, 46, 71, 72, 99].map(id => originalExecute([
+        'INSERT INTO characters(id,username,name,classId,race,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [id, 'bot_population_fixture', `PopulationFixture${id}`, 0, 0, 100, 100, 0, 0, 0, 0, 0, 0, 0]
+    ]))));
 const originalSyncInventorySummary = Database.syncInventorySummary;
 const originalUpdateCharacterLocation = Database.updateCharacterLocation;
 const originalUpdateCharacterExperience = Database.updateCharacterExperience;
@@ -37,6 +53,11 @@ try {
     ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
     Database.reconcileBotClanMembership = () => Promise.resolve({ repairedMembers: 0, repairedParties: 0 });
     Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
+    Database.fetchBotMarketCounts = async () => [];
+    Database.saveBotLifeState = (statement, queryOptions) => {
+        statements.push({ sql: String(statement[0]), params: statement[1], queryOptions });
+        return originalSaveLifeState(statement, queryOptions);
+    };
     Database.execute = ([sql, params, queryOptions]) => {
         statements.push({ sql: String(sql), params, queryOptions });
         if (String(sql).startsWith('SELECT id, classId, level, exp, sp FROM characters')) {
@@ -75,7 +96,7 @@ try {
 
     const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
-    BotLifeState.init().then((ready) => {
+    fixtureReady.then(() => BotLifeState.init()).then((ready) => {
         assert.strictEqual(ready, true);
         const retiredStaticMerchants = statements.find((entry) => entry.sql.includes('retired_static_merchant'));
         assert(retiredStaticMerchants, 'bot life init should remove hot lifecycle rows for retired static merchants');
@@ -172,7 +193,13 @@ try {
                 [5, 'crafting', { status: 'component_ready', strategy: 'craft', rateModelVersion: staleVersion, target: validTarget }],
                 [6, 'merchant', { status: 'blocked', strategy: 'blocked', rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: { selfId: 0, name: '' } }],
                 [7, 'resting', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: staleVersion, target: validTarget, clanGoal: { clanId: 10 } }],
-                [8, 'grouped', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: validTarget, clanGoal: { clanId: 10 } }]
+                [8, 'grouped', { status: 'active', strategy: 'direct_drop', expectedKills: 5000, rateModelVersion: GearPlanner.RATE_MODEL_VERSION, target: validTarget, clanGoal: { clanId: 10 } }],
+                [9, 'shopping', { status: 'deferred', strategy: 'none', reason: 'wish_focus', target: { selfId: 76, slot: 7 },
+                    exchange: { kind: 'luxury_exchange' }, materials: [{ selfId: 1458, amount: 5375 }] }],
+                [10, 'shopping', { status: 'active', strategy: 'market', target: { selfId: 99999999, name: 'Looks real' } }],
+                [11, 'hunting', { status: 'active', strategy: 'direct_drop', expectedKills: 10, rateModelVersion: staleVersion,
+                    target: { selfId: 76, slot: 7 } }],
+                [12, 'resting', { status: 'active', strategy: 'luxury_exchange', target: { selfId: 76, slot: 7, name: '0' } }]
             ].forEach(([characterId, activity, equipmentPlan]) => insertProbe.run(
                 characterId,
                 activity,
@@ -182,8 +209,10 @@ try {
             const retainedPlanIds = migrationProbe.prepare(`SELECT characterId FROM bot_life_state
                 WHERE json_extract(statsJson, '$.equipmentPlan.target') IS NOT NULL ORDER BY characterId`).all()
                 .map((row) => Number(row.characterId));
-            assert.deepStrictEqual(retainedPlanIds, [2, 3, 4, 5, 8],
-                'startup model invalidation must remove stale hunting and clan combat routes without resetting unrelated passive workflows');
+            assert.deepStrictEqual(retainedPlanIds, [2, 3, 4, 5, 8, 9, 12],
+                'startup uses the canonical catalog ID, preserves nameless exchange reserves and removes unknown or stale combat routes');
+            assert.equal(JSON.parse(migrationProbe.prepare('SELECT statsJson FROM bot_life_state WHERE characterId=9').get().statsJson)
+                .equipmentPlan.materials[0].amount, 5375, 'the paused exchange inputs survive startup unchanged');
         } finally {
             migrationProbe.close();
         }
@@ -330,7 +359,7 @@ try {
                 'the candidate CTE must return rows through the database read path');
             assert(!marketCandidates.sql.includes('goalJson LIKE'), 'market reconciliation must not trust stale goal metadata');
             assert(marketCandidates.sql.includes("'$.marketSellRetryAfter'"), 'market reconciliation must exclude sellers whose retry cooldown is still active');
-            assert(marketCandidates.sql.includes('INDEXED BY bot_life_state_market_review'),
+            assert(marketCandidates.sql.includes('INDEXED BY bot_life_state_market_page'),
                 'market reconciliation must use its keyset-compatible lifecycle index');
             assert(!marketCandidates.sql.includes('COALESCE(states.updatedAt'),
                 'a redundant updatedAt expression must not force a temporary sort');
@@ -458,6 +487,7 @@ try {
                             aggregate: true,
                             populationTelemetryOwner: true,
                             targetNpcId: 93,
+                            targetOnSpot: 1,
                             defeatedNpcIds: [93]
                         }
                     }).then((resolvedMember) => {
@@ -467,7 +497,7 @@ try {
                         assert.strictEqual(resolvedMember.stats.expEarned, 1120, 'a projected party stats snapshot must not erase earned EXP telemetry');
                         assert.strictEqual(resolvedMember.stats.spEarned, 113, 'a projected party stats snapshot must not erase earned SP telemetry');
                         assert.strictEqual(resolvedMember.stats.adenaEarned, 580, 'a projected party stats snapshot must not erase earned Adena telemetry');
-                        assert.deepStrictEqual(resolvedMember.stats.coldCombat, { cooldowns: {} }, 'resolver-specific patch stats must still survive the authoritative counter merge');
+                        assert.deepStrictEqual(resolvedMember.stats.coldCombat.cooldowns, {}, 'resolver-specific cooldown patch must still survive profile normalization and the authoritative counter merge');
                         return resolvedMember;
                     });
                 });
@@ -549,14 +579,24 @@ try {
         }, 'summary_probe').then(() => {
             const summary = BotLifeState.coldDueSummary(1000);
             assert(summary.due >= 1, 'cold due telemetry must include stale hunting plans before their persisted deadline');
-        })).then(() => {
+        })).then(async () => {
+            const config = invoke('GameServer/Bot/Population/PopulationConfig');
+            config.developerDiagnostics = false;
+            const diagnosticOptions = {};
+            for (const field of ['onTiming', 'onStage']) Object.defineProperty(diagnosticOptions, field,
+                { get() { throw Error('optional lifecycle timing callback read off'); } });
+            try {
+                await BotLifeState.marketGoalCandidates(5, 123458, diagnosticOptions);
+                await BotLifeState.staleGoalCandidates(5, 123458, diagnosticOptions);
+            } finally { config.developerDiagnostics = true; }
             console.log('Bot population state checks passed');
         });
     }).catch((err) => {
         console.error(err);
         process.exitCode = 1;
-    }).finally(() => {
+    }).finally(async () => {
         Database.execute = originalExecute;
+        Database.saveBotLifeState = originalSaveLifeState;
         Database.syncInventorySummary = originalSyncInventorySummary;
         Database.updateCharacterLocation = originalUpdateCharacterLocation;
         Database.updateCharacterExperience = originalUpdateCharacterExperience;
@@ -572,9 +612,13 @@ try {
         ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
         Database.reconcileBotClanMembership = originalReconcileClanMembership;
         Database.reconcileBotClanGoals = originalReconcileClanGoals;
+        Database.fetchBotMarketCounts = originalFetchMarketCounts;
+        await Database.close();
+        fs.rmSync(directory, { recursive: true, force: true });
     });
 } catch (err) {
     Database.execute = originalExecute;
+    Database.saveBotLifeState = originalSaveLifeState;
     Database.syncInventorySummary = originalSyncInventorySummary;
     Database.updateCharacterLocation = originalUpdateCharacterLocation;
     Database.updateCharacterExperience = originalUpdateCharacterExperience;
@@ -590,5 +634,8 @@ try {
     ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
     Database.reconcileBotClanMembership = originalReconcileClanMembership;
     Database.reconcileBotClanGoals = originalReconcileClanGoals;
+    Database.fetchBotMarketCounts = originalFetchMarketCounts;
+    Database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
     throw err;
 }

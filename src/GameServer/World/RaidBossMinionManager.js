@@ -1,9 +1,18 @@
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
 const RaidEntityIndex = invoke('GameServer/World/RaidEntityIndex');
 
+// One manager for every Lisvus minion group: raid bosses and ordinary group
+// leaders (data/Npcs/Minions). Lisvus keeps the raid rules apart: only raid
+// minions return on a timer while their boss lives and leave with its death.
+// An ordinary leader's minions spawn with it, are not replaced while it lives,
+// outlive it, and give way to a fresh group when its spawn brings it back.
 const groupsByBoss = new Map();
 const minionTemplates = new Map();
+// The last ordinary leader of each spawn definition, to replace its group.
+const leaderBySpawnDefinition = new WeakMap();
 const MINION_MAINTENANCE_INTERVAL_MS = 5000;
 // C4/Lisvus Config.RAID_MINION_RESPAWN_TIME defaults to five minutes.
 const MINION_RESPAWN_DELAY_MS = 300000;
@@ -15,7 +24,10 @@ const telemetry = {
     lastAttackerId: null
 };
 
-require('../../../data/Npcs/Minions/c4_raid_bosses.json').forEach((row) => {
+[
+    ...require('../../../data/Npcs/Minions/c4_raid_bosses.json'),
+    ...require('../../../data/Npcs/Minions/c4_group_leaders.json')
+].forEach((row) => {
     if (!groupsByBoss.has(Number(row.bossId))) groupsByBoss.set(Number(row.bossId), []);
     groupsByBoss.get(Number(row.bossId)).push({
         minionId: Number(row.minionId),
@@ -33,9 +45,13 @@ function randomCount(min, max) {
 function templateFor(minionId) {
     const id = Number(minionId);
     if (!minionTemplates.has(id)) {
-        minionTemplates.set(id, DataCache.npcs?.find((npc) => Number(npc.selfId) === id) || null);
+        minionTemplates.set(id, ItemTemplateIndex.find(DataCache.npcs, id) || null);
     }
     return minionTemplates.get(id);
+}
+
+function isRaidBoss(boss) {
+    return boss?.fetchIsRaidBoss?.() === true;
 }
 
 function liveNpc(world, npc) {
@@ -63,11 +79,14 @@ function spawnMinion(world, boss, group) {
     if (!template || boss.state?.fetchDead?.() === true) return null;
 
     const SpawnNpcs = invoke('GameServer/World/Generics/SpawnNpcs');
-    const minion = SpawnNpcs.spawnChildNpc(world, template, minionCoords(boss), {
+    // The boss ids mark raid entities for raid rules and bot safety; an
+    // ordinary minion is a plain monster that only knows its leader.
+    const link = isRaidBoss(boss) ? {
         minionBossTemplateId: Number(boss.fetchSelfId?.() || 0),
         minionBossObjectId: Number(boss.fetchId?.() || 0),
         minionGroup: group
-    });
+    } : { minionLeader: boss, minionGroup: group };
+    const minion = SpawnNpcs.spawnChildNpc(world, template, minionCoords(boss), link);
     if (minion) group.members.push(minion);
     return minion;
 }
@@ -81,6 +100,11 @@ function attachBoss(world, boss) {
     const bossId = Number(boss?.fetchSelfId?.() || 0);
     const definitions = groupsByBoss.get(bossId) || [];
     if (!boss || definitions.length === 0 || boss.minionState) return boss?.minionState || null;
+    if (!isRaidBoss(boss) && boss.spawnDefinition) {
+        const previous = leaderBySpawnDefinition.get(boss.spawnDefinition);
+        if (previous && previous !== boss) removeMinions(world, previous);
+        leaderBySpawnDefinition.set(boss.spawnDefinition, boss);
+    }
 
     const state = {
         boss,
@@ -117,7 +141,7 @@ function onBossAttacked(world, boss, attacker, sourceSession) {
     });
     // `alerted > 0` is naturally edge-triggered: later hits see the same
     // minions already in combat, so one encounter produces one concise line.
-    if (alerted > 0) {
+    if (DiagnosticConfig.developerDiagnostics && alerted > 0 && isRaidBoss(boss)) {
         const observedAt = Date.now();
         telemetry.engagements += 1;
         telemetry.minionsAlerted += alerted;
@@ -135,7 +159,14 @@ function onBossAttacked(world, boss, attacker, sourceSession) {
 }
 
 function bossForMinion(world, minion) {
-    return RaidEntityIndex.bossFor(world, minion);
+    return minion?.minionLeader || RaidEntityIndex.bossFor(world, minion);
+}
+
+// Lisvus TARGET_CLAN of a minion: its leader and the leader's live minions.
+function leaderGroup(world, leader) {
+    const members = [leader];
+    leader?.minionState?.groups?.forEach((group) => members.push(...aliveMinions(world, group)));
+    return members;
 }
 
 // C4/Lisvus treats a minion hit as an attack on the raid group. The leader
@@ -183,7 +214,8 @@ function cleanupMinion(world, minion, sourceSession) {
     return true;
 }
 
-function onBossDeath(world, boss, sourceSession) {
+// A raid boss's death and an ordinary leader's replacement remove the group.
+function removeMinions(world, boss, sourceSession) {
     const state = boss?.minionState;
     if (!state) return 0;
     let removed = 0;
@@ -198,6 +230,7 @@ function onBossDeath(world, boss, sourceSession) {
 }
 
 function stats() {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     return { ...telemetry };
 }
 
@@ -245,7 +278,9 @@ module.exports = {
     onBossAttacked,
     onMinionAttacked,
     onMinionDeath,
-    onBossDeath,
+    onBossDeath: removeMinions,
+    removeMinions,
+    leaderGroup,
     maintain,
     start,
     stop,

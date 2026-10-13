@@ -1,32 +1,51 @@
 const assert = require('assert');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('test_bot_market_offer_order');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
+const Database = invoke('Database');
+Database.init();
 
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 
-// Offers of equal price keep their listing order: the sort key is price,
-// then a player before a bot, then the NPC last. Bot asks of the same price
-// have no further key, so the comparator must call them equal.
+// Offers of equal price keep a stable order: the sort key is price, then a
+// player before a bot, then the NPC last, then the record id (the order the
+// records were listed in). The asks are board records (sell ads) in memory;
+// the board itself lists them in that order.
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const ITEM = 1865;
-const seller = (characterId, price) => ({
-    characterId,
-    name: `Seller${characterId}`,
-    activity: 'merchant',
-    stats: { marketStore: { storeType: 1, town: 'Giran', items: [{ selfId: ITEM, name: 'Varnish', count: 5, price }] } }
+let recordId = 990000;
+const ad = (ownerId, price, selfId = ITEM, account = `bot_${ownerId}`) => AfkTrade.refreshRecord({
+    id: ++recordId, ownerId, ownerName: `Seller${ownerId}`, ownerAccount: account, kind: 'sell_ad',
+    storeType: 1, status: 'active', town: 'Giran', title: '', revision: 1, expiresAt: 0, locX: 0, locY: 0, locZ: 0,
+    lines: [{ id: recordId, selfId, name: 'Varnish', count: 5, price }]
 });
 
-MarketOpportunity.resetColdStores();
-[seller(990301, 100), seller(990302, 100), seller(990303, 90), seller(990304, 100)]
-    .forEach((state) => MarketOpportunity.indexColdStore(state));
+[ad(990301, 100), ad(990302, 100), ad(990303, 90), ad(990304, 100)];
+const listed = AfkTrade.offers(ITEM, AfkTrade.SELL).map((offer) => offer.sourceId);
+assert.deepStrictEqual(listed, [990303, 990301, 990302, 990304], 'the board lists the best line first');
+// The one offer query takes them in the same order, one after another.
+const taken = [];
+for (let next = 0; next < 4; next++) {
+    taken.push(Number(MarketOpportunity.bestOffer(ITEM, { accept: (offer) => !taken.includes(Number(offer.sourceId)) }).sourceId));
+}
+assert.deepStrictEqual(taken, [990303, 990301, 990302, 990304], 'equal-price bot asks must keep their listing order');
+AfkTrade._resetForTests();
 
-const listed = MarketOpportunity.coldOffers(ITEM, null).map((offer) => offer.sourceId);
-assert.deepStrictEqual(listed, [990301, 990302, 990303, 990304]);
-assert.deepStrictEqual(MarketOpportunity.findOffers(ITEM).map((offer) => offer.sourceId),
-    [990303, 990301, 990302, 990304], 'equal-price bot asks must keep their listing order');
-MarketOpportunity.resetColdStores();
+// Buy records keep the board's order too: the bid, then the record (not the
+// owner's id, a second tie-break the buy side used to have).
+const bid = (ownerId, price) => AfkTrade.refreshRecord({
+    id: ++recordId, ownerId, ownerName: `Buyer${ownerId}`, ownerAccount: `bot_${ownerId}`, kind: 'buy_ad',
+    storeType: 3, status: 'active', town: 'Giran', title: '', revision: 1, expiresAt: 0, locX: 0, locY: 0, locZ: 0,
+    lines: [{ id: recordId, selfId: ITEM, name: 'Varnish', count: 5, price }]
+});
+[bid(990402, 50), bid(990401, 50), bid(990403, 60)];
+assert.deepStrictEqual(MarketOpportunity.findBuyOffers(ITEM).map((offer) => offer.sourceId), [990403, 990402, 990401],
+    'the best bid first, equal bids in listing order');
+AfkTrade._resetForTests();
 
 // Hot bots sort live private stores with the same key.
 const World = invoke('GameServer/World/World');
@@ -48,30 +67,28 @@ try {
 }
 
 // The clan planning worker orders the same offers as the main thread: a
-// private store and a cold store at the same price in the same town.
+// player's ask and a bot's ask at the same price in the same town (the
+// player's first).
 async function clanWorkerTie() {
     const Runtime = require('../src/GameServer/Clan/ClanPlanningCoordinator');
     const { planForMember } = require('../src/GameServer/Clan/ClanEquipmentPlanner');
     const worker = new Runtime.ClanPlanningCoordinator();
     try {
-        World.user = { sessions: [store(990321, 50)] };
-        World.user.sessions[0].actor.fetchPrivateStore = () => ({ storeType: 1, town: 'Giran', items: [{ selfId: 123, count: 1, price: 50 }] });
-        MarketOpportunity.indexColdStore({ characterId: 990322, activity: 'merchant', stats: {
-            marketStore: { storeType: 1, town: 'Giran', items: [{ selfId: 123, price: 50, count: 1 }] } } });
+        ad(990322, 50, 123);
+        ad(990321, 50, 123, 'player_990321');
         const member = { characterId: 990323, level: 20, classId: 4, phase: 'cold', inventory: {}, adena: 100000,
             stats: { classId: 4, equipmentPlan: { status: 'active', strategy: 'market', rateModelVersion: 0,
                 target: { selfId: 123, slot: 7 } } } };
         const expected = planForMember(member);
-        assert.strictEqual(expected.market.sourceType, 'private_store');
+        assert.strictEqual(expected.market.sourceType, 'afk_player_store');
         assert.deepStrictEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {},
             context: await Runtime.context() }, DataCache), expected,
         'the clan worker must take the same tied offer as the main thread');
     } finally {
-        World.user = originalUser;
-        MarketOpportunity.resetColdStores();
+        AfkTrade._resetForTests();
         await worker.shutdown();
     }
 }
 
 clanWorkerTie().then(() => console.log('Bot market offer order checks passed'))
-    .catch((error) => { console.error(error); process.exitCode = 1; });
+    .catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => { Database.close(); require('node:fs').rmSync(isolated.directory, { recursive: true, force: true }); });

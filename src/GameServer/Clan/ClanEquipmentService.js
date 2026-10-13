@@ -1,9 +1,11 @@
+const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Crafting = require('./ClanCraftingPolicy');
 const CraftShops = invoke('GameServer/Bot/Economy/CraftShopService');
 const Database = invoke('Database');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const ComponentProgress = invoke('GameServer/Bot/AI/EquipmentAcquisitionProgress');
-const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+const ClanCredit = require('./ClanPurchaseCredit');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const Policy = invoke('GameServer/Clan/ClanEquipmentPolicy');
@@ -25,7 +27,7 @@ const metrics = {
     partyAssignments: 0,
     assignmentFailures: 0,
     noDebt: 0,
-    reasonCounts: new Map()
+    reasonCounts: new DiagnosticMetricMap()
 };
 
 function number(value, fallback = 0) {
@@ -44,7 +46,7 @@ function parseJson(value, fallback = {}) {
 }
 
 function recordReason(reason) {
-    if (reason) metrics.reasonCounts.set(reason, (metrics.reasonCounts.get(reason) || 0) + 1);
+    if (reason) DiagnosticConfig.developerDiagnostics && metrics.reasonCounts.set(reason, (metrics.reasonCounts.get(reason) || 0) + 1);
 }
 
 function reservationOptionsForClan(clan) {
@@ -401,54 +403,68 @@ function goalPurchaseFailed(code, result = {}) {
     return { ...result, ok: false, code };
 }
 
-// The clan buys a market goal item for its beneficiary at once, where the
-// beneficiary stands (ColdMarketService.buyOffer with keepActivity: no trip,
-// goal or activity change): the member pays its funds above its reserve, the clan the rest from
-// its free money; a purchase that fails returns the clan's part. Only a free cold
-// member the main thread owns (not in a party, hunting or resting); others wait
-// for the next review.
-async function buyGoalCopy(memberId, plan, clan) {
+// The clan buys a market goal item for its beneficiary on the one purchase
+// path of a cold bot (б5, ColdMarketService.acquire, as ClanMarketService
+// buys): the clan credits the member the price above its free money, and the
+// member buys in the seller's town, at once when it stands there, else on a
+// clan errand it goes on and buys on arrival (a real NPC sells only to a bot in
+// its town). A purchase that neither happens nor leaves returns the clan's part.
+// Only a free cold member the main thread owns (not in a party, hunting or
+// resting) and not already on its errand for this item; others wait for the
+// next review.
+async function buyGoalCopy(memberId, plan, clan, amount = 1) {
     let state = await LifeState.findByCharacterId(memberId);
     if (!state || state.phase !== 'cold' || state.partyId || state.party?.partyId
         || String(state.simulation?.ownerId || 'legacy_main') !== 'legacy_main'
         || !['hunting', 'resting'].includes(state.activity)) return { ok: false, code: 'member_busy' };
+    const selfId = number(plan.target?.selfId);
+    if (ClanCredit.hasClanErrand(state, clan.id, selfId)) {
+        recordReason('clan_goal_market_buyer_traveling');
+        return { ok: false, code: 'market_buyer_traveling', traveling: true };
+    }
     // The offer the plan was priced on: the planner's own search over every
     // town (a hunting member's region is its hunting ground, not a town), at
     // no more than the planned price.
     const offer = GearAcquisitionPlanner.marketOfferForTarget(plan.target, state, { maxMarketPrice: number(plan.market?.price) });
     if (!offer) return goalPurchaseFailed('market_no_offer');
-    offer.buyerCharacterId = memberId;
-    offer.equipSlot = number(plan.target?.slot) || undefined;
-    const blocker = LifeState.marketPurchaseBlocker(state, offer, 1);
+    const blocker = LifeState.marketPurchaseBlocker(state,
+        { ...offer, buyerCharacterId: memberId, equipSlot: number(plan.target?.slot) || undefined }, amount);
     if (blocker) return goalPurchaseFailed(blocker);
-    const clanPart = Math.max(0, Math.ceil(number(offer.price)) - PurchaseFunding.spendable(state));
-    if (clanPart > 0) {
-        const paid = await Database.payClanMember({ clanId: clan.id, characterId: memberId, amount: clanPart, kind: 'clan_goal_purchase', moveMark: false });
-        if (!paid.ok) return goalPurchaseFailed(paid.code, paid);
-        state = LifeState.acceptNewerLifecycleRow(paid.row) || await LifeState.findByCharacterId(memberId);
+    const price = Math.ceil(number(offer.price)) * amount;
+    const funded = await ClanCredit.fund(clan.id, state, price, 'clan_goal_purchase');
+    if (!funded.ok) return goalPurchaseFailed(funded.code, funded.paid);
+    state = funded.state;
+    const clanPart = funded.clanPart;
+    const placed = { price: number(offer.price), sourceType: offer.sourceType, sourceId: offer.sourceId, town: offer.town };
+    const purchase = await invoke('GameServer/Bot/Economy/ColdMarketService').acquire(state, selfId, amount, {
+        towns: offer.town ? [offer.town] : null, maxPrice: number(offer.price), npc: offer.sourceType === 'npc',
+        purpose: 'clan', money: price, free: true, clanPart, tag: { clanId: number(clan.id), offer: placed, clanPart }
+    });
+    // A kept errand (waiting for its party or town visit) carries the credit.
+    const { code: settled } = await ClanCredit.settle(clan.id, memberId, clanPart, purchase, 'clan_goal_purchase_refund');
+    if (settled.startsWith('bought')) {
+        if (settled !== 'bought') recordReason(`clan_goal_${settled}`);
+        return { ok: true, purchase };
     }
-    const bought = await invoke('GameServer/Bot/Economy/ColdMarketService').buyOffer(state, offer, { keepActivity: true });
-    if (bought.purchased) return { ok: true, purchase: bought };
-    recordReason(bought.reason || 'clan_goal_purchase_failed');
-    if (clanPart > 0) {
-        const back = await Database.payClanMember({ clanId: clan.id, characterId: memberId, amount: -clanPart, kind: 'clan_goal_purchase_refund', moveMark: false });
-        if (back.ok) LifeState.acceptNewerLifecycleRow(back.row);
-        else recordReason(`clan_goal_refund_${back.code}`);
+    if (settled === 'kept') {
+        recordReason('clan_goal_market_buyer_traveling');
+        return { ok: true, traveling: true, purchase };
     }
-    return { ok: false, code: bought.reason || 'clan_goal_purchase_failed' };
+    const code = purchase.reason || 'clan_goal_purchase_failed';
+    recordReason(code);
+    if (settled !== 'refunded') recordReason(`clan_goal_${settled}`);
+    return { ok: false, code };
 }
 
 // A goal combined from several copies of one item (the blades of a dual sword)
-// is bought whole in one review: the clan funded the whole combination, and a
+// is bought whole on one errand: the clan funded the whole combination, and a
 // first blade worn in the weapon slot already reads as a fulfilled goal.
 async function buyGoalItem(memberId, plan, clan) {
     const copies = ComponentProgress.componentRequirement(plan)?.amount || 1;
-    let result = await buyGoalCopy(memberId, plan, clan);
-    for (let bought = 1; result.ok && bought < copies; bought++) {
-        if (ComponentProgress.componentAcquired(await LifeState.findByCharacterId(memberId), plan)) break;
-        result = await buyGoalCopy(memberId, plan, clan);
-    }
-    return result;
+    if (copies === 1) return buyGoalCopy(memberId, plan, clan);
+    const state = await LifeState.findByCharacterId(memberId);
+    const owned = number(state?.inventory?.[String(plan.target?.selfId)]?.amount);
+    return buyGoalCopy(memberId, plan, clan, Math.max(1, copies - owned));
 }
 
 async function assignPartyObjective(member, clan, goal, plan, priority = 'preferred') {
@@ -487,7 +503,7 @@ async function assignPartyObjective(member, clan, goal, plan, priority = 'prefer
         }
     }, 'clan_equipment_party_objective');
     if (!saved) return { ok: false, code: 'member_state_write_failed', memberId: id };
-    metrics.partyAssignments += 1;
+    DiagnosticConfig.developerDiagnostics && (metrics.partyAssignments += 1);
     return { ok: true, changed: true, memberId: id };
 }
 
@@ -535,13 +551,13 @@ async function assignPlan(member, plan, clan, goal) {
     };
     const saved = await LifeState.upsertState(nextState, 'clan_equipment_goal');
     if (!saved) return { ok: false, code: 'member_state_write_failed', memberId: id, handoff };
-    metrics.assignments += 1;
+    DiagnosticConfig.developerDiagnostics && (metrics.assignments += 1);
     const purchase = plan.strategy === 'market' ? await buyGoalItem(id, plan, clan) : null;
     return { ok: true, changed: true, memberId: id, handoff, purchase };
 }
 
 async function craftingOptions(clan) {
-    const all = CraftShops.availableRecipes({ level: 70, stats: { classId: 57 } });
+    const all = CraftShops.availableRecipes(CraftShops.STATION_CRAFTER);
     const published = new Map(CraftShops.publishedStationRecipes().recipes.map(recipe => [Number(recipe.recipeId), recipe]));
     const providers = {};
     const crafters = (clan.members || []).filter(member => member.phase === 'cold'
@@ -703,15 +719,31 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
         const windowComplete = (index + 1) % planningWindow === 0 || index + 1 === members.length;
         if (windowComplete && [...plans.values()].some(Policy.isAcquisitionPlan)) break;
     }
-    const selection = Policy.selectTargetMember(clan.members, plans, previousGoal, {
+    let selection = Policy.selectTargetMember(clan.members, plans, previousGoal, {
         previousFulfilled,
         roleFor: ClanPolicy.rosterRole
     });
+    const economy = require('./ClanEconomyContext').forClan(clan, { warehouse: warehouseRows,
+        halls: await Database.fetchClanHallAuctions(),
+        equipment: [...plans].filter(([, plan]) => Policy.isAcquisitionPlan(plan))
+            .map(([memberId, plan]) => ({ memberId, plan })) });
+    const moneyWish = economy.network.queue.find(wish => wish.object.kind === 'equipment' && wish.funded);
+    const freeWish = economy.network.plans.get(economy.network.focus?.[0]);
+    const desired = moneyWish || (freeWish?.price === 0 && economy.focusObject?.kind === 'equipment'
+        ? { object: economy.focusObject, valueHours: 0 } : null);
+    if (desired) {
+        const member = members.find(row => memberId(row) === desired.object.memberId);
+        const plan = plans.get(desired.object.memberId);
+        if (member && plan) selection = { member, plan, priority: desired.valueHours, selectedBy: 'clan_wish_network' };
+    } else if (selection?.plan?.strategy === 'market' && economy.network.queue.some(wish => wish.object.kind === 'equipment')) {
+        selection = null;
+    }
     return {
         spots,
         occupancy,
         warehouseRows,
         plans,
+        economy,
         selection,
         previousFulfilled,
         workerFingerprint,
@@ -787,11 +819,11 @@ async function recordRaidFailure(party, timestamp = Date.now()) {
     return { ok: false, code: 'ownership_conflict' };
 }
 
-function selectedPlanningTarget(clan, previousGoal, planning, selectedCandidate = null) {
+function selectedPlanningTarget(clan, previousGoal, planning, selectedCandidate = null, candidateIds = []) {
     const memberIdValue = number(selectedCandidate?.memberId);
     const itemId = number(selectedCandidate?.itemId);
     const slot = number(selectedCandidate?.slot);
-    if (!memberIdValue) return planning.selection;
+    if (!memberIdValue || (planning.economy && !candidateIds.includes(selectedCandidate?.id))) return planning.selection;
     const member = (clan.members || []).find((entry) => memberId(entry) === memberIdValue);
     const plan = planning.plans.get(memberIdValue);
     if (!member || !Policy.isAcquisitionPlan(plan)) return planning.selection;
@@ -807,7 +839,7 @@ function selectedPlanningTarget(clan, previousGoal, planning, selectedCandidate 
 }
 
 async function resolveClan(clan, previousGoal = null, options = {}) {
-    metrics.resolves += 1;
+    DiagnosticConfig.developerDiagnostics && (metrics.resolves += 1);
     if (!clan || !number(clan.id)) {
         return { ok: true, skipped: true, reason: 'equipment_level_unavailable' };
     }
@@ -824,7 +856,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
     }
     const planning = options.planning || await planningForClan(clan, previousGoal, options);
     const { plans, previousFulfilled } = planning;
-    const selection = selectedPlanningTarget(clan, previousGoal, planning, options.selectedCandidate);
+    const selection = selectedPlanningTarget(clan, previousGoal, planning, options.selectedCandidate, options.candidateIds);
     await validatePlanning(clan, planning, selection);
     const raidPartyAfterPlanning = activeRaidPartyForClan(clan.id);
     if (raidPartyAfterPlanning) {
@@ -838,7 +870,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         };
     }
     if (!selection) {
-        metrics.noDebt += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.noDebt += 1);
         recordReason('no_equipment_debt');
         // The beneficiary has its item and no member needs anything next: the
         // goal is closed, not left executing until the next debt appears.
@@ -911,7 +943,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
     const partyReform = await releaseConflictingRosterParties([...new Set([...assignedMemberIds, ...craftMembers])], goal, expectedObjective);
     const assignment = await assignPlan(selection.member, selection.plan, clan, goal);
     if (!assignment.ok) {
-        metrics.assignmentFailures += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.assignmentFailures += 1);
         recordReason(assignment.code);
         return { ...assignment, goal, plans, selection };
     }
@@ -931,7 +963,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         [number(clan.id)]
     ]);
     const latestState = parseJson(latestStateRow?.stateJson, clan.state || {});
-    metrics.plans += 1;
+    DiagnosticConfig.developerDiagnostics && (metrics.plans += 1);
     recordReason(goal.plan.reasonCode);
     return {
         ok: true,
@@ -949,6 +981,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
 
 const ClanEquipmentService = {
     assignPlan,
+    selectedPlanningTarget,
     resolveClan,
     planningForClan,
     craftingOptions,
@@ -961,6 +994,7 @@ const ClanEquipmentService = {
     reserveGoalCapacity,
     releaseConflictingRosterParties,
     metrics() {
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
         return {
             resolves: metrics.resolves,
             plans: metrics.plans,

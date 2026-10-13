@@ -1,7 +1,6 @@
 const World     = invoke('GameServer/World/World');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Metrics   = invoke('GameServer/Bot/Population/PopulationMetrics');
-const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const ServerResponse = invoke('GameServer/Network/Response');
 const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 
@@ -64,7 +63,7 @@ const Cooldown = {
                 BotManager.sessions = BotManager.sessions.filter((candidate) => candidate !== session);
                 session.actor = null;
 
-                console.info('BotPopulation :: cooled %s reason=%s', saved.name, reason);
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotPopulation :: cooled %s reason=%s', saved.name, reason);
                 Metrics.recordCooldown();
                 return { ok: true, state: saved, reason };
             });
@@ -100,7 +99,6 @@ const Cooldown = {
 
         return LifeState.markCold(session, reason).then((state) => {
             if (!state) return { ok: false, reason: 'state_save_failed' };
-            if (session.coldMarketState) MarketOpportunity.indexColdStore(state);
             return this.transitionToColdState(session, state, reason);
         });
     }

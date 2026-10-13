@@ -60,6 +60,7 @@ const CLIENT_PACKET_NAMES = {
     0x6d: 'RestartPoint',
     0x9d: 'RequestSkillCoolTime',
     0xaa: 'UserCommand',
+    0xa7: 'MultiSellChoose',
     0xb9: 'Recommend',
     0xc0: 'RequestPledgePower',
     0xc1: 'RequestMakeMacro',
@@ -147,7 +148,7 @@ const SERVER_PACKET_NAMES = {
     0xc7: 'NpcHtmlMessage',
     0xc8: 'TutorialShowQuestionMark',
     0xce: 'RelationChanged',
-    0xd0: 'ExtendedPacket',
+    0xd0: 'MultiSellList',
     0xe7: 'SendMacroList'
 };
 
@@ -165,8 +166,10 @@ class Session {
 
         this.socket   = socket;
         this.serverId = optn.id;
-        this.packetTrace = [];
-        this.movementPacketTrace = [];
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true && process.env.L2NODE_PACKET_TRACE !== '0') {
+            this.packetTrace = [];
+            this.movementPacketTrace = [];
+        }
     }
 
     setAccountId(username) {
@@ -175,12 +178,14 @@ class Session {
     }
 
     setActor(properties) {
+        World.retireUserActor(this, this.actor);
         // The connection survives returning to character selection.
         invoke('GameServer/World/Generics/NativeUiSession').reset(this);
         this.questStates = new Map();
         this.questStatesLoaded = false;
         this.activeNpcTalk = null;
         this.actor = new Actor(this, properties);
+        World.updateUserLocation(this, this.actor);
     }
 
     persistCharacterStatus({ currentOnly = false } = {}) {
@@ -200,7 +205,7 @@ class Session {
     dataReceive(data) {
         // Weird, sometimes the packet is sent twofold/duplicated. I had to limit it based on the header size...
         const packet = data.slice(2, data.readInt16LE());
-        this.tracePacket('in', packet, packetName(CLIENT_PACKET_NAMES, packetOpcode(packet)));
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) this.tracePacket('in', packet, packetName(CLIENT_PACKET_NAMES, packetOpcode(packet)));
         if (this.enterWorldReady) {
             const actor = this.actor;
             return this.enterWorldReady.then(() => {
@@ -243,10 +248,11 @@ class Session {
     }
 
     tracePacket(direction, data, name) {
-        if (process.env.L2NODE_PACKET_TRACE === '0') {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) || process.env.L2NODE_PACKET_TRACE === '0') {
             return;
         }
 
+        this.packetTrace ||= [];
         this.packetTrace.push({
             at: new Date().toISOString(),
             direction,
@@ -262,11 +268,13 @@ class Session {
     }
 
     recordOutboundPacket(data) {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) || process.env.L2NODE_PACKET_TRACE === '0') return;
         const opcode = packetOpcode(data);
         const name = packetName(SERVER_PACKET_NAMES, opcode);
         this.tracePacket('out', data, name);
 
         if (!MOVEMENT_PACKET_OPCODES.has(opcode)) return;
+        this.movementPacketTrace ||= [];
         this.movementPacketTrace.push({
             at: new Date().toISOString(),
             opcode,
@@ -286,6 +294,7 @@ class Session {
     }
 
     dumpPacketTrace() {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) || process.env.L2NODE_PACKET_TRACE === '0') return;
         if (!this.packetTrace || this.packetTrace.length === 0) {
             utils.infoWarn('GameServer', 'packet trace for %s is empty', this.traceLabel());
             return;

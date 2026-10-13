@@ -17,6 +17,7 @@ const Approach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const Navigation = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Departure = require('../src/GameServer/ClanHall/Departure');
+const VisitPolicy = require('../src/GameServer/ClanHall/VisitPolicy');
 const originalBestSpot = Spots.findBestSpot;
 const originalArrival = Spots.arrivalPointForState;
 const originalInvoke = global.invoke;
@@ -236,6 +237,54 @@ async function main() {
             false
         );
         assert.equal(Cold.needed({ ...state, party: { partyId: 'party' } }, at), false);
+        // Death restart: where a dead bot of the hall's clan restarts, hot and cold.
+        const hall = Runtime.owned(1);
+        const restart = (extra, actor = physical) => Hot.restartHall({ plan: 'hunting', ...extra }, actor);
+        assert.strictEqual(restart({}), hall, 'hot: a solo hunter restarts in the hall');
+        assert.strictEqual(restart({ partyCompanion: true, followPlayerSession: {} }), null,
+            'hot: a player companion restarts in town');
+        assert.strictEqual(restart({ clanAllianceQuest: {} }), null, 'hot: an alliance courier restarts in town');
+        assert.strictEqual(restart({ clanAllianceSupportLeaderId: 7 }), null);
+        assert.strictEqual(restart({ plan: 'merchant' }), null, 'hot: a merchant restarts at its stall');
+        assert.strictEqual(restart({}, { ...physical, fetchKarma: () => 10 }), null, 'hot: a red bot restarts in town');
+        // One rule for hot and cold (VisitPolicy, step 1.5): a party member and
+        // a bot with an errand restart in town.
+        assert.strictEqual(restart({ hotBackgroundPartyId: 'party' }), null, 'hot: a party member restarts in town');
+        assert.strictEqual(restart({ coldLifeState: { stats: { marketReturn: { spotId: 'home' } } } }), null,
+            'hot: a bot with an errand restarts in town');
+        assert.strictEqual(restart({ pvpEncounter: { key: 'e1' } }), null, 'hot: a bot in a PvP fight restarts in town');
+        assert.strictEqual(restart({ accountId: 'bot_craft_probe' }), null, 'hot: a craft account restarts in town');
+        assert.strictEqual(restart({}, { ...physical, fetchPrivateStore: () => ({ storeType: 1 }) }), null,
+            'hot: a bot with a store restarts at its stall');
+        // Hot visit: the same exclusions; a grouped bot takes support only at the manager.
+        const atManager = { ...physical, fetchLocX: () => npc.fetchLocX(), fetchLocY: () => npc.fetchLocY(),
+            fetchLocZ: () => npc.fetchLocZ() };
+        assert(Services.near(atManager, npc));
+        for (const extra of [{ hotBackgroundPartyId: 'party' }, { partyCompanion: true, followPlayerSession: {} }]) {
+            assert(VisitPolicy.mayUse(VisitPolicy.fromSession(extra, atManager), { atManager: true }),
+                'a grouped bot already at the manager takes support');
+            assert.strictEqual(VisitPolicy.mayUse(VisitPolicy.fromSession(extra, remote), { atManager: false }), false,
+                'a grouped bot does not leave its group for the hall');
+        }
+        assert(VisitPolicy.mayUse(VisitPolicy.fromSession({ plan: 'hunting' }, remote)), 'a free solo hunter may visit');
+        for (const extra of [{ pvpEncounter: {} }, { accountId: 'bot_craft_probe' }, { plan: 'merchant' },
+            { clanAllianceSupportLeaderId: 7 }]) {
+            assert.strictEqual(VisitPolicy.mayUse(VisitPolicy.fromSession({ plan: 'hunting', ...extra }, remote)), false);
+            assert.strictEqual(Hot.tick({ ...session, actor: remote, clanHallVisit: null, clanHallRetryAt: 0, ...extra },
+                remote, at), false, `hot visit excluded: ${Object.keys(extra)[0]}`);
+        }
+        const dead = { ...state, activity: 'dead', vitals: { ...state.vitals, hp: 0 } };
+        assert.strictEqual(Cold.needed(dead, at), true, 'cold: a dead solo hunter restarts in the hall');
+        assert.strictEqual(Cold.needed({ ...dead, party: { partyId: 'party' } }, at), false,
+            'cold: a party member restarts in town');
+        assert.strictEqual(Cold.needed({ ...dead, stats: { ...dead.stats, marketReturn: { spotId: 'home' } } }, at), false,
+            'cold: a bot with an errand restarts in town');
+        assert.strictEqual(Cold.needed({ ...dead, stats: { ...dead.stats, karma: 10 } }, at), false,
+            'cold: a red bot restarts in town');
+        assert.strictEqual(Cold.needed({ ...dead, accountName: 'bot_craft_probe' }, at), false,
+            'cold: a craft account restarts in town');
+        assert.strictEqual(Cold.needed({ ...dead, stats: { ...dead.stats, pvpEncounter: { key: 'e1' } } }, at), false,
+            'cold: a bot in a PvP fight restarts in town');
         const distantState = { ...state, loc: { locX: 0, locY: 0, locZ: 0 } };
         assert(Cold.needed(distantState, at), 'missing useful buffs trigger a cold visit from anywhere');
         assert.equal(Cold.needed({ ...distantState, stats: { ...state.stats, marketReturn: {} } }, at), false);
@@ -255,7 +304,9 @@ async function main() {
             }
         });
         kernel.upsert({ state, context: { clanHallServices: true } });
-        await kernel.resolveCommand(id);
+        const commandAttempt = kernel.beginCommand(id);
+        assert(commandAttempt, 'hall fixture admits an actual current command attempt');
+        await kernel.resolveCommand(id, commandAttempt);
         assert(requests?.[0].precomputedResult, 'worker requests a main-thread service operation');
         const returnSpot = { id: 'hall-return-test', name: 'Hunting field',
             center: { locX: 10000, locY: 15000, locZ: -3000 }, npcNames: [] };
@@ -267,6 +318,12 @@ async function main() {
         assert(safeDeparture);
         assert.equal(selection.options.spotRetryAfter.dangerous, Infinity, 'do not return to a dangerous spot');
         assert.equal(selection.options.mode, 'solo');
+        // Karma closes the hall's teleport: any karma above 0 blocks it; none,
+        // zero or negative karma does not.
+        for (const [karma, blocked] of [[undefined, false], [null, false], [0, false], [-5, false], ['0', false], [NaN, false], [1, true], ['7', true], [45, true]]) {
+            assert.strictEqual(!!Departure.plan({ ...state, stats: { ...state.stats, karma } }, Runtime.owned(1), at), !blocked,
+                `hall departure with karma ${karma}`);
+        }
         assert.equal(Departure.plan({ ...state, loc: { locX: 0, locY: 0, locZ: 0 } }, Runtime.owned(1), at), null,
             'hall departure is not a free teleport from anywhere');
         Spots.arrivalPointForState = () => null;

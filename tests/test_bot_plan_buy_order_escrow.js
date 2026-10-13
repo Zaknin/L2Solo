@@ -1,6 +1,11 @@
 const assert = require('assert');
 
+require('./helpers/databaseIsolation');
+const fixture = require('./helpers/isolatedSocialDatabase')('fx-market-case');
+const fixtureFs = require('node:fs');
 require('../src/Global');
+fixture.assertConfigured(options.default);
+process.on('exit', () => fixtureFs.rmSync(fixture.directory, { recursive: true, force: true }));
 
 const DataCache = invoke('GameServer/DataCache');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -16,7 +21,9 @@ DataCache.init();
 // The bot holds a usable weapon: an unarmed bot would bridge a weapon first.
 const weapon = invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 1, level: 30 }).items.find((item) => Number(item.slot) === 7);
 const state = {
-    characterId: 7, phase: 'cold', level: 30, activity: 'hunting',
+    // Market trips are valued from where the bot stands (d5fb26bd); a bot
+    // without a location priced the kit at Aden instead of nearby Giran.
+    characterId: 7, phase: 'cold', level: 30, activity: 'hunting', loc: { locX: 83000, locY: 148000, locZ: -3400 },
     inventory: { [weapon.selfId]: { selfId: Number(weapon.selfId), amount: 1, equippedCount: 1, equipped: 1 } },
     stats: { classId: 1, build: { grade: 'd', classId: 1, level: 30 }, equipment: [] }
 };
@@ -48,14 +55,14 @@ assert.strictEqual(kitAfterPosting.market.reserve, kit.market.reserve, 'posting 
 assert.strictEqual(GearAcquisitionPlanner.operationalAdenaReserve({ ...state, adena: 100000 - kitPrice },
     kitPrice), GearAcquisitionPlanner.operationalAdenaReserve({ ...state, adena: 100000 }));
 
-const originalProjection = AfkTrade.findOwnerProjection;
+const originalProjection = AfkTrade.ownerRecords;
 try {
-    AfkTrade.findOwnerProjection = () => ({ shop: { storeType: AfkTrade.BUY, escrowAdena: price } });
+    AfkTrade.ownerRecords = () => [{ kind: 'buy_ad', storeType: AfkTrade.BUY, escrowAdena: price, lines: [] }];
     assert.strictEqual(BotAfkMarketService.buyOrderEscrow(7), price, 'a buy order reports its escrow');
-    AfkTrade.findOwnerProjection = () => ({ shop: { storeType: AfkTrade.SELL, escrowAdena: price } });
+    AfkTrade.ownerRecords = () => [{ kind: 'shop', storeType: AfkTrade.SELL, escrowAdena: price, lines: [] }];
     assert.strictEqual(BotAfkMarketService.buyOrderEscrow(7), 0, 'a sell shop holds no purchase budget');
 } finally {
-    AfkTrade.findOwnerProjection = originalProjection;
+    AfkTrade.ownerRecords = originalProjection;
 }
 
 // Every other funding check counts the same escrow: the funded re-price, the
@@ -75,16 +82,16 @@ const botPlanState = { ...weaponState, stats: { ...weaponState.stats, equipmentP
     market: { ...posting.market, sourceType: 'afk_bot_store' } } } };
 assert.notStrictEqual(lifecycleKind(botPlanState, { buyOrderEscrow: price }), 'command', 'a kept order is no trip');
 const PopulationServiceForResume = invoke('GameServer/Bot/Population/PopulationService');
-const savedProjection = AfkTrade.findOwnerProjection;
+const savedProjection = AfkTrade.ownerRecords;
 try {
     assert.strictEqual(PopulationServiceForResume.canResumeAffordableMarketPlan(weaponState), false);
-    AfkTrade.findOwnerProjection = () => ({ shop: { storeType: AfkTrade.BUY, escrowAdena: price } });
+    AfkTrade.ownerRecords = () => [{ kind: 'buy_ad', storeType: AfkTrade.BUY, escrowAdena: price, lines: [] }];
     assert.strictEqual(PopulationServiceForResume.canResumeAffordableMarketPlan(weaponState), true,
         'the resume after a rest counts the escrow');
     assert.strictEqual(PopulationServiceForResume.canResumeAffordableMarketPlan(botPlanState), false,
         'a kept order is no reason to leave for town');
 } finally {
-    AfkTrade.findOwnerProjection = savedProjection;
+    AfkTrade.ownerRecords = savedProjection;
 }
 
 // A dual-sword plan buying its missing blade keeps the same reserve once its
@@ -102,8 +109,7 @@ const bladeAfter = GearAcquisitionPlanner.planFor(dualState(4000000), { ...blade
 assert.strictEqual(bladeBefore?.target?.selfId, 129, 'fixture: the plan buys the missing blade');
 assert.strictEqual(bladeAfter.market.reserve, bladeBefore.market.reserve, 'the blade plan keeps its reserve after posting');
 
-// Background party members replan on the main thread with the member's
-// escrow (the worker's party review is checked in test_cold_worker_buy_order_escrow).
+// The shared party refresh planner receives the member's own escrow (the worker's party review is checked in test_cold_worker_buy_order_escrow).
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
@@ -113,12 +119,12 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const saved = {
         planFor: GearAcquisitionPlanner.planFor,
         replacementPlanFor: GearAcquisitionPlanner.replacementPlanFor,
-        statesForParties: LifeState.statesForParties,
+        cachedStatesForParties: LifeState.cachedStatesForParties,
         upsertState: LifeState.upsertState,
         createOrUpdate: PartyState.createOrUpdate,
         ensure: SpotProfiles.ensure,
         currentOccupancy: SpotProfiles.currentOccupancy,
-        findOwnerProjection: AfkTrade.findOwnerProjection,
+        ownerRecords: AfkTrade.ownerRecords,
         cachedState: LifeState.cachedState,
         npcEquipmentBridgePlan: GearAcquisitionPlanner.npcEquipmentBridgePlan,
         replanContextFor: GearAcquisitionPlanner.replanContextFor,
@@ -132,19 +138,27 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         GearAcquisitionPlanner.replacementPlanFor = (_state, _previous, _spots, options) => {
             plannedWith.push(options.buyOrderEscrow); return memberPlan;
         };
-        AfkTrade.findOwnerProjection = () => ({ shop: { storeType: AfkTrade.BUY, escrowAdena: price } });
+        AfkTrade.ownerRecords = () => [{ kind: 'buy_ad', storeType: AfkTrade.BUY, escrowAdena: price, lines: [] }];
         SpotProfiles.ensure = () => [];
         SpotProfiles.currentOccupancy = () => ({});
         PartyState.createOrUpdate = async (party) => party;
         LifeState.upsertState = async (state) => state;
         const member = (characterId, equipmentPlan) => ({ ...afterPosting, characterId, name: `Member${characterId}`,
             partyId: 'bgp-escrow', stats: { ...afterPosting.stats, equipmentPlan } });
-        LifeState.statesForParties = () => Promise.resolve(new Map([['bgp-escrow', [
+        LifeState.cachedStatesForParties = () => Promise.resolve(new Map([['bgp-escrow', [
             member(7, memberPlan),
             member(8, { status: 'blocked', strategy: 'direct_drop', target: { selfId: 1 } })
         ]]]));
-        await PopulationService.refreshBackgroundPartyRequirements([{ partyId: 'bgp-escrow', leaderId: 7,
-            memberIds: [7, 8], stats: { lastRequirementRefreshAt: 0 } }]);
+        const Economy = invoke('GameServer/Bot/Economy/EconomyContext'), originalContext = Economy.forState;
+        Economy.forState = state => ({ inputKey: 'escrow-fixture', network: {
+            queue: [{ key: 'gear', funded: true, object: { slot: 7, itemId: state.stats.equipmentPlan.target.selfId } }],
+            focus: ['gear'], activity: { rootKey: 'gear', activity: 'shopping', key: 'buy-gear' } } });
+        try {
+            for (const state of [member(7, memberPlan), member(8, { status: 'blocked', strategy: 'direct_drop', target: { selfId: 1 } })]) {
+                require('../src/GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
+                    spots: [], occupancy: {}, timestamp: Date.now(), planningOptions: { buyOrderEscrow: price } });
+            }
+        } finally { Economy.forState = originalContext; }
         assert.deepStrictEqual(plannedWith, [price, price], 'the party refresh plans both paths with the member\'s escrow');
 
         // Without a worker plan, the main thread plans a solo bot itself:
@@ -154,9 +168,13 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         LifeState.cachedState = () => null;
         GearAcquisitionPlanner.npcEquipmentBridgePlan = (_state, options) => { soloOptions.push(['bridge', options?.buyOrderEscrow]); return null; };
         GearAcquisitionPlanner.planFor = (_state, options) => { soloOptions.push(['plan', options.buyOrderEscrow]); throw sentinel; };
-        await assert.rejects(async () => PopulationService.resolveColdState({ ...afterPosting, name: 'Solo7' }),
-            (error) => error === sentinel);
-        assert.deepStrictEqual(soloOptions, [['bridge', price], ['plan', price]], 'the main-thread solo plan counts the bot\'s escrow');
+        // ARCH-NOTE: FX-C1 explicitly defers a solo Main read with no worker plan.
+        const beforeDeferred = Number(PopulationService.planDeferred || 0);
+        const deferred = await PopulationService.resolveColdState({ ...afterPosting, name: 'Solo7' });
+        assert.deepStrictEqual(soloOptions, [], 'Main never invokes the retired solo planner fallback');
+        assert.deepStrictEqual(deferred.state.stats.equipmentPlan, afterPosting.stats.equipmentPlan,
+            'a missing worker plan preserves the previous acquisition plan');
+        assert.strictEqual(Number(PopulationService.planDeferred), beforeDeferred + 1);
         soloOptions.length = 0;
         GearAcquisitionPlanner.replanContextFor = () => ({ routeCurrent: true, failure: null });
         GearAcquisitionPlanner.fundedMarketPlanForTarget = (_state, _target, options) => {
@@ -168,18 +186,19 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         const waiting = { ...afterPosting, name: 'Solo7', stats: { ...afterPosting.stats,
             equipmentPlan: { ...posting, strategy: 'direct_drop', next: { spotId: 'x', npcId: 1 } },
             partyRequest: { status: 'open', reviewAt: Date.now() + 600000 } } };
-        await assert.rejects(async () => PopulationService.resolveColdState(waiting), (error) => error === sentinel);
-        assert.deepStrictEqual(soloOptions, [['bridge', price], ['funded', price]],
-            'keeping an open party request checks the funded purchase with the escrow');
+        const waitingDeferred = await PopulationService.resolveColdState(waiting);
+        assert.deepStrictEqual(soloOptions, [], 'a waiting solo plan is also deferred without Main funded re-planning');
+        assert.deepStrictEqual(waitingDeferred.state.stats.equipmentPlan, waiting.stats.equipmentPlan);
+        assert.strictEqual(Number(PopulationService.planDeferred), beforeDeferred + 2);
     } finally {
         GearAcquisitionPlanner.planFor = saved.planFor;
         GearAcquisitionPlanner.replacementPlanFor = saved.replacementPlanFor;
-        LifeState.statesForParties = saved.statesForParties;
+        LifeState.cachedStatesForParties = saved.cachedStatesForParties;
         LifeState.upsertState = saved.upsertState;
         PartyState.createOrUpdate = saved.createOrUpdate;
         SpotProfiles.ensure = saved.ensure;
         SpotProfiles.currentOccupancy = saved.currentOccupancy;
-        AfkTrade.findOwnerProjection = saved.findOwnerProjection;
+        AfkTrade.ownerRecords = saved.ownerRecords;
         LifeState.cachedState = saved.cachedState;
         GearAcquisitionPlanner.npcEquipmentBridgePlan = saved.npcEquipmentBridgePlan;
         GearAcquisitionPlanner.replanContextFor = saved.replanContextFor;

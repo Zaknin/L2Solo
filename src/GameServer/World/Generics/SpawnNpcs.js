@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Npc       = invoke('GameServer/Npc/Npc');
 const DataCache = invoke('GameServer/DataCache');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -6,7 +7,7 @@ const NpcAggro = invoke('GameServer/Npc/NpcAggro');
 const RaidBossState = invoke('GameServer/World/RaidBossState');
 const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
 
-const VISIBILITY_RADIUS = 6000;
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 
 function distanceSquared(first, second) {
     const dx = first.fetchLocX() - second.fetchLocX();
@@ -16,7 +17,7 @@ function distanceSquared(first, second) {
 
 function notifyNearby(world, npc, response = ServerResponse) {
     if (!world?.user?.sessions || !npc) return;
-    const radiusSquared = VISIBILITY_RADIUS * VISIBILITY_RADIUS;
+    const radiusSquared = CLIENT_VISIBILITY_RADIUS * CLIENT_VISIBILITY_RADIUS;
     const packet = response.npcInfo(npc);
 
     world.user.sessions.forEach((session) => {
@@ -142,9 +143,8 @@ function spawnDefinition(world, definition, coords, { ignoreRaidBossState = fals
     }
 
     const npc = createNpc(world, definition.npc, coords, definition);
-    if (isRaidBossDefinition(definition)) {
-        MinionManager.attachBoss(world, npc);
-    }
+    // Raid bosses and ordinary group leaders bring their minion groups.
+    MinionManager.attachBoss(world, npc);
     if (isRaidBossDefinition(definition) && RaidBossState.get(raidBossId(definition))) {
         RaidBossState.markSpawned(raidBossId(definition));
     }
@@ -167,7 +167,7 @@ function spawnNpc(world, definition, options = {}) {
 
 function templateFor(selfId) {
     const id = Number(selfId);
-    const template = DataCache.npcs?.find((npc) => Number(npc.selfId) === id);
+    const template = ItemTemplateIndex.find(DataCache.npcs, id);
     return template ? structuredClone(template) : null;
 }
 

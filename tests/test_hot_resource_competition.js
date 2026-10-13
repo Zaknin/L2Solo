@@ -1,5 +1,10 @@
 const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Hot = invoke('GameServer/Bot/AI/HotResourceCompetition');
 const Claims = invoke('GameServer/Bot/AI/BotMobCompetition');
 const World = invoke('GameServer/World/World');
@@ -15,6 +20,7 @@ const Population = invoke('GameServer/Bot/Population/PopulationService');
 const AI = invoke('GameServer/Bot/BotAI');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-hot-resource-'));
 options.default.Database.path = path.join(dir, 'test.sqlite');
+options.default.Database.historyPath = path.join(dir, 'history.sqlite');
 const original = { user: World.user, npcs: World.fetchNpcsInRadius, incoming: Awareness.npcThreateningActor,
     plan: Retreat.plan, spot: Spots.findCurrentSpot, peace: utils.isInPeaceZone, now: Date.now,
     enabled: Config.backgroundPartyEnabled, limit: Config.maxBackgroundParties, enqueue: Memory.events.enqueue, promote: AI.promoteForPlayerInteraction };
@@ -30,8 +36,9 @@ function actor(id) {
         automation: { abortAll() {} }, moveTo({ to }) { this.requested = to; },
         skillset: { fetchSkills: () => [] }, backpack: { fetchItems: () => [] } };
     const s = { actor: bot, aiActive: true, plan: 'hunting', accountId: `bot_hot_${id}`,
+        fetchAccountId() { return this.accountId; },
         coldLifeState: Life.cachedState(id), persona: { traits: { caution: 0.5, assertiveness: 0.5, sociability: 0.8, empathy: 0.5 } } };
-    bot.session = s; sessions.push(s); return s;
+    bot.session = s; sessions.push(s); World.insertUser(s); return s;
 }
 function mob(owner) {
     const target = { fetchId: () => target.id, id: serial++, fetchKind: () => 'Monster', fetchSelfId: () => 10,
@@ -46,7 +53,7 @@ async function run() {
     Date.now = () => now;
     AI.promoteForPlayerInteraction = () => {};
     Config.backgroundPartyEnabled = true; Config.maxBackgroundParties = 60;
-    World.user = { sessions }; Awareness.npcThreateningActor = s => s.incoming || null;
+    World.user = { sessions: [], revision: 0 }; Awareness.npcThreateningActor = s => s.incoming || null;
     utils.isInPeaceZone = () => false;
     Spots.findCurrentSpot = () => ({ id: 'field' });
     Retreat.plan = bot => ({ safe: true, movesAway: true, routeUsable: true, requestedTo: { locX: bot.x - 1400, locY: 0, locZ: 0 } });

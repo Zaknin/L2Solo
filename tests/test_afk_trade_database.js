@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
 
 const Database = invoke('Database');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-afk-trade.sqlite');
@@ -120,7 +121,7 @@ function amountOf(rows, selfId) {
     const events = await Database.fetchAfkTradeNotifications(ownerId);
     assert.strictEqual(events.length, 2);
     assert.deepStrictEqual(events.map((event) => event.kind), ['sale', 'purchase']);
-    const marketTrades = await Database.execute([
+    const marketTrades = await Database.readHistory([
         `SELECT eventKey, channel, sourceType, selfId, quantity, unitPrice, totalPrice
          FROM market_trades ORDER BY id ASC`
     ], 'test:afk-market-journal');
@@ -183,21 +184,17 @@ function amountOf(rows, selfId) {
     assert.strictEqual(amountOf(await inventory(ownerId), 3005), 2, 'sixth slot stock returns on closure');
 
     const remoteStock = (await inventory(ownerId)).find((row) => Number(row.selfId) === 1001);
-    const playerSale = await Database.createAfkTradeShop(ownerId, {
+    await Database.createAfkTradeShop(ownerId, {
         storeType: 1, town: 'Giran', locX: 83000, locY: 148000, locZ: -3400,
         lines: [{ objectId: remoteStock.id, selfId: 1001, name: 'Test Material',
             count: 1, price: 12, stackable: true }]
     });
-    const playerBuy = await Database.createAfkTradeShop(customerId, {
+    await Database.createAfkTradeShop(customerId, {
         storeType: 3, town: 'Dion', locX: 16308, locY: 143760, locZ: -2888,
         lines: [{ selfId: 1001, name: 'Test Material', count: 1, price: 20, stackable: true }]
     });
-    await assert.rejects(Database.matchAfkTradeShops({
-        sellerId: ownerId, buyerId: customerId,
-        sellShopId: playerSale.shop.id, buyShopId: playerBuy.shop.id,
-        sellLineId: playerSale.shop.lines[0].id, buyLineId: playerBuy.shop.lines[0].id,
-        amount: 1
-    }), /afk_trade_shop_changed/, 'two player shops must not settle remotely across towns');
+    // Records never settle against each other from afar (E45): no such move exists.
+    assert.strictEqual(Database.matchAfkTradeShops, undefined);
     assert.strictEqual((await Database.fetchAfkTradeShops(ownerId))[0].lines[0].count, 1);
     assert.strictEqual((await Database.fetchAfkTradeShops(customerId))[0].escrowAdena, 20);
     await Database.closeAfkTradeShop(ownerId);

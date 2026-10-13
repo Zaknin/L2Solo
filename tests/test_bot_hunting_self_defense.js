@@ -1,6 +1,13 @@
 const assert = require('assert');
 
 require('../src/Global');
+// Combat fixtures have no economy datapack; keep unrelated town wishes out of this encounter test.
+invoke('GameServer/Bot/Economy/EconomyContext').forActor = (_actor, session) => ({
+    // A real context always carries its stock reader; these bots use no shots.
+    stock: () => ({ itemId: 0, usePerHour: 0 }),
+    network: { activity: null }, statsPacket: { decisionSeq: session.coldLifeState?.stats?.decisionSeq || 0,
+        activityLeaf: 0, money: [1, 1, 0, 0] }
+});
 
 const World = invoke('GameServer/World/World');
 const HuntingState = invoke('GameServer/Bot/AI/States/HuntingState');
@@ -99,6 +106,28 @@ tickHunting(session, bot, {}, {
 assert.strictEqual(session.currentTargetId, threatNpc.fetchId(), 'solo hunter should target the mob that just hit it');
 assert.strictEqual(bot.selected, threatNpc.fetchId(), 'solo hunter should select the incoming threat');
 assert.strictEqual(attackedId, threatNpc.fetchId(), 'solo hunter should counterattack the incoming threat immediately');
+
+const lowManaFighter = actor(2000015);
+lowManaFighter.fetchMp = () => 10;
+const lowManaSession = {
+    accountId: 'bot_low_mana_fighter',
+    actor: lowManaFighter,
+    plan: 'hunting',
+    incomingThreatId: threatNpc.fetchId(),
+    incomingThreatAt: Date.now(),
+    dataSendToOthers() {}
+};
+let lowManaAttackId = null;
+World.user = { sessions: [lowManaSession] };
+World.npc = { spawns: [threatNpc] };
+World.fetchNpcsInRadius = () => [];
+tickHunting(lowManaSession, lowManaFighter, {}, {
+    say() {},
+    getStatus() { return {}; },
+    executeCombat(_session, _bot, npc) { lowManaAttackId = npc.fetchId(); }
+});
+assert.strictEqual(lowManaSession.plan, 'hunting', 'a fighter at full HP and 10% MP does not flee from a mob that hits it');
+assert.strictEqual(lowManaAttackId, threatNpc.fetchId(), 'a melee bot with low MP counterattacks like at full MP');
 
 const raidThreat = {
     ...threatNpc,

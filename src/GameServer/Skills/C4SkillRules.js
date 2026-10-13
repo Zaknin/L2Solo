@@ -281,7 +281,7 @@ const RULES = {
     225: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 3, conditionalStats: [{ condition: { moving: true, walking: false }, statsByLevel: { pEvasionRateAdd: [4, 5, 6] } }] },
     226: { skillType: EFFECT, trait: 'buff', effect: 'relax', effectType: 'buff', target: 'self', isMagic: false, baseLandRate: 100, operateType: 'toggle', mpInitialConsume: 2, toggleMpConsume: 2, toggleIntervalMs: 2000, stopAtFullHp: true, stats: { relaxing: true, regHpAdd: 5 } },
     232: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 52, requires: { armorKind: 'Armor.Chain' }, statsByLevel: { pDefAdd: [17.7, 19.1, 20.5, 23.5, 25, 26.7, 30, 31.8, 33.6, 37.4, 39.3, 41.3, 45.6, 47.7, 50, 54.6, 57.1, 59.5, 62.1, 64.6, 67.3, 70, 72.7, 75.5, 78.4, 81.3, 84.3, 87.3, 90.4, 93.5, 96.7, 99.9, 103.2, 106.5, 109.9, 113.3, 116.8, 120.3, 123.8, 127.4, 131, 134.7, 138.4, 142.1, 145.8, 149.6, 153.4, 157.2, 161, 164.9, 168.7, 172.6] } },
-    233: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 47, requires: { armorKind: 'Armor.Leather', excludedArmorKinds: ['Armor.Chain', 'Armor.Fabric'] }, statsByLevel: { pDefAdd: [1.3, 2.2, 3.2, 4.2, 5.3, 6.8, 8.4, 10.1, 11.9, 13.7, 15.7, 16.7, 17.8, 18.8, 19.9, 21.1, 22.2, 23.4, 24.5, 25.8, 27, 28.2, 29.5, 30.8, 32.1, 33.5, 34.8, 36.2, 37.6, 39.1, 40.5, 42, 43.5, 44.9, 46.5, 48, 49.5, 51.1, 52.7, 54.2, 55.8, 57.4, 59.1, 60.7, 62.3, 63.9, 65.6], pEvasionRateAdd: [4, 4, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7] } },
+    233: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 47, requires: { armorSetKind: 'Armor.Leather', excludedArmorSetKinds: ['Armor.Chain', 'Armor.Fabric'] }, statsByLevel: { pDefAdd: [1.3, 2.2, 3.2, 4.2, 5.3, 6.8, 8.4, 10.1, 11.9, 13.7, 15.7, 16.7, 17.8, 18.8, 19.9, 21.1, 22.2, 23.4, 24.5, 25.8, 27, 28.2, 29.5, 30.8, 32.1, 33.5, 34.8, 36.2, 37.6, 39.1, 40.5, 42, 43.5, 44.9, 46.5, 48, 49.5, 51.1, 52.7, 54.2, 55.8, 57.4, 59.1, 60.7, 62.3, 63.9, 65.6], pEvasionRateAdd: [4, 4, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7] } },
     // Expertise is an automatic C4 passive. Grade penalties are enforced by
     // the equipment runtime; it must never fall through as an active attack.
     239: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 5 },
@@ -355,11 +355,11 @@ const RULES = {
         pAtkAdd: [4.5, 7.3, 8.9, 10.7, 12.8, 15.1, 17.7, 20.5, 23.7, 25.4, 27.1, 29, 30.9, 32.9, 35, 37.1, 39.4, 41.7, 44.1, 46.6, 49.2, 51.9, 54.6, 57.5, 60.4, 63.3, 66.4, 69.5, 72.7, 76, 79.3, 82.7, 86.1, 89.6, 93.1, 96.6, 100.2, 103.8, 107.5, 111.1, 114.8, 118.4, 122.1, 125.7, 129.3],
         atkCountMaxAdd: [5, 5, 5, 5, 5, 5, 5, 5, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
     } },
-    227: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 50, requires: { armorKind: 'Armor.Leather', excludedArmorKinds: ['Armor.Chain', 'Armor.Fabric'] }, statsByLevel: {
+    227: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 50, requires: { armorSetKind: 'Armor.Leather', excludedArmorSetKinds: ['Armor.Chain', 'Armor.Fabric'] }, statsByLevel: {
         pDefAdd: [4.2, 5.3, 6.5, 7.7, 9, 9.9, 10.8, 12.7, 13.7, 14.8, 16.9, 18, 19.1, 21.5, 22.7, 24, 25.3, 26.6, 27.9, 29.3, 30.7, 32.1, 33.6, 35, 36.5, 38.1, 39.6, 41.2, 42.8, 44.5, 46.1, 47.8, 49.5, 51.3, 53, 54.5, 56.6, 58.4, 60.2, 62.1, 64, 65.8, 67.7, 69.7, 71.6, 73.5, 75.5, 77.4, 79.4, 81.3],
         pEvasionRateAdd: [3, 3, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
     } },
-    231: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 50, requires: { armorKind: 'Armor.Chain', excludedArmorKinds: ['Armor.Leather', 'Armor.Fabric'] }, statsByLevel: { pDefAdd: [1.9, 3.3, 4.8, 6.4, 8.1, 8.9, 9.8, 11.7, 12.7, 13.7, 15.8, 16.9, 18, 20.4, 21.6, 22.8, 24.1, 25.4, 26.7, 28, 29.4, 30.8, 32.2, 33.7, 35.2, 36.7, 38.2, 39.8, 41.4, 43, 44.6, 46.3, 48, 49.7, 51.4, 53.2, 55, 56.7, 58.6, 60.4, 62.2, 64.1, 66, 67.8, 69.7, 71.6, 73.6, 75.5, 77.4, 79.3] } },
+    231: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 50, requires: { armorSetKind: 'Armor.Chain', excludedArmorSetKinds: ['Armor.Leather', 'Armor.Fabric'] }, statsByLevel: { pDefAdd: [1.9, 3.3, 4.8, 6.4, 8.1, 8.9, 9.8, 11.7, 12.7, 13.7, 15.8, 16.9, 18, 20.4, 21.6, 22.8, 24.1, 25.4, 26.7, 28, 29.4, 30.8, 32.2, 33.7, 35.2, 36.7, 38.2, 39.8, 41.4, 43, 44.6, 46.3, 48, 49.7, 51.4, 53.2, 55, 56.7, 58.6, 60.4, 62.2, 64.1, 66, 67.8, 69.7, 71.6, 73.6, 75.5, 77.4, 79.3] } },
     248: { skillType: PASSIVE, trait: 'craft', target: 'self', maxLevel: 5 },
     213: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 8, statsByLevel: { maxMpAdd: [30, 50, 70, 100, 140, 152, 180, 200] } },
     217: { skillType: PASSIVE, trait: 'passive', target: 'self', maxLevel: 45, requires: { weaponKinds: ['Weapon.Sword', 'Weapon.GreatSword', 'Weapon.Blunt', 'Weapon.BigBlunt'] }, statsByLevel: { pAtkAdd: [1.5, 3.1, 4.1, 5.2, 6.5, 7.9, 9.4, 11.1, 13.0, 14.0, 15.1, 16.2, 17.3, 18.5, 19.8, 21.1, 22.4, 23.8, 25.3, 26.8, 28.3, 29.9, 31.6, 33.3, 35.0, 36.8, 38.6, 40.5, 42.4, 44.4, 46.4, 48.4, 50.4, 52.5, 54.6, 56.8, 58.9, 61.1, 63.3, 65.5, 67.6, 69.8, 72.0, 74.2, 76.4] } },
@@ -380,7 +380,7 @@ const RULES = {
     245: { skillType: DAMAGE, trait: 'physical', target: 'enemy', sourceTarget: 'area', radius: 150, ssBoost: 1, overHit: true, requires: { weaponsAllowed: 64 }, castRange: 40, effectRange: 400 },
     246: { skillType: TAKE_CASTLE, trait: 'siege', target: 'holy', ssBoost: 0, castRange: 85, effectRange: 400, staticReuse: true, staticHitTime: true, mpInitialConsume: 50, condition: { clanLeader: true, siegeAttacker: true } },
     247: { skillType: SIEGE_FLAG, trait: 'siege', target: 'self', ssBoost: 0, itemConsumeId: 2131, itemConsumeCount: 300, npcId: 12024 },
-    254: { skillType: SPOIL, trait: 'spoil', target: 'enemy', ssBoost: 0, levelDepend: 1, castRange: 40, effectRange: 400 },
+    254: { skillType: SPOIL, trait: 'spoil', target: 'enemy', ssBoost: 0, levelDepend: 1, magicLevelByLevel: [10, 20, 28, 36, 43, 49, 55, 60, 64, 68, 72], castRange: 40, effectRange: 400 },
     255: { skillType: DAMAGE, trait: 'physical', target: 'enemy', ssBoost: 1, overHit: true, requires: { weaponsAllowed: 18444 }, castRange: 40, effectRange: 400 },
     261: { skillType: DAMAGE, trait: 'physical', target: 'enemy', ssBoost: 1, requires: { weaponsAllowed: 512, itemKind: 'Dual Sword', charges: 3, condition: 128, conditionValue: 3 }, castRange: 40, effectRange: 400 },
     230: { skillType: EFFECT, trait: 'buff', effect: 'sprint', effectType: 'buff', target: 'self', baseLandRate: 100, statsByLevel: { runSpdAdd: [20, 33] } },
@@ -432,7 +432,7 @@ const RULES = {
     284: { skillType: DAMAGE, trait: 'wind', target: 'enemy', ssBoost: 1, requires: { weaponsAllowed: 1024, charges: 2, condition: 128, conditionValue: 2 } },
     299: { skillType: SUMMON, trait: 'summon', target: 'self', ssBoost: 0 },
     301: { skillType: SUMMON, trait: 'summon', target: 'self', ssBoost: 0 },
-    302: { skillType: SPOIL, trait: 'spoil', target: 'enemy', sourceTarget: 'area', radius: 200, ssBoost: 0, levelDepend: 1, castRange: 40, effectRange: 400 },
+    302: { skillType: SPOIL, trait: 'spoil', target: 'enemy', sourceTarget: 'area', radius: 200, ssBoost: 0, levelDepend: 1, magicLevelByLevel: [28, 36, 43, 49, 55, 62, 66, 70, 74], castRange: 40, effectRange: 400 },
     296: { skillType: EFFECT, trait: 'buff', effect: 'chameleon_rest', effectType: 'buff', target: 'self', isMagic: false, baseLandRate: 100, operateType: 'toggle', mpInitialConsume: 9, toggleMpConsume: 6, toggleIntervalMs: 3000, stats: { relaxing: true, silentMoving: true } },
     312: { skillType: EFFECT, trait: 'buff', effect: 'vicious_stance', effectType: 'buff', target: 'self', baseLandRate: 100, operateType: 'toggle', mpInitialConsumeByLevel: [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 14, 14], toggleMpPerLevel: true, toggleMpConsume: 0.4, toggleIntervalMs: 3000, statsByLevel: { pCritDamageAdd: [35, 48, 64, 84, 109, 139, 166, 196, 229, 266, 306, 349, 379, 410, 443, 475, 509, 542, 576, 609] } },
     313: { skillType: EFFECT, trait: 'buff', effect: 'snipe', effectType: 'buff', target: 'self', isMagic: false, baseLandRate: 100, durationMs: 120000, condition: { actorStanding: true }, stats: { pCritRateMul: 1.2, immobile: true }, statsByLevel: { pAtkAdd: [110, 119, 129, 138, 148, 158, 167, 177], pAccuracyCombatAdd: [1, 3, 3, 3, 3, 3, 3, 3] } },
@@ -1059,6 +1059,7 @@ const RULES = {
     4137: { skillType: DAMAGE, trait: 'water', target: 'enemy', sourceTarget: 'area', radius: 200, ssBoost: 1, castRange: 500, effectRange: 1000 },
     4138: { skillType: DAMAGE, trait: 'magic', target: 'corpse_mob', sourceTarget: 'area', radius: 200, ssBoost: 1, castRange: 900, effectRange: 1400, levelDepend: 1, magicLevelByLevel: [10, 20, 30, 40, 50, 60, 70, 75, 80, 85, 90, 95] },
     4139: { skillType: DAMAGE, trait: 'fire', target: 'enemy', sourceTarget: 'aura', radius: 150, ssBoost: 1 },
+    4163: { skillType: EFFECT, trait: 'buff', effect: 'npc_self_damage_shield', effectType: 'buff', target: 'self', ssBoost: 0, baseLandRate: 100, stats: { reflectDam: 20 } },
     4230: { skillType: DAMAGE, trait: 'physical', target: 'enemy', ssBoost: 1, castRange: 2500, effectRange: 3000 },
     4259: { skillType: EFFECT, trait: 'poison', effect: 'toxic_smoke', effectType: 'debuff', target: 'enemy', sourceTarget: 'area', radius: 200, ssBoost: 1, baseLandRate: 80, levelDepend: 1, magicLevelByLevel: [10, 20, 30, 40, 50, 60, 70, 75, 80, 85, 90, 95], castRangeByLevel: [500, 600, 600, 750, 750, 750, 750, 750, 750, 750, 750, 750], effectRange: 1000, dot: { count: 10, intervalMs: 3000, damageByLevel: [12, 18, 24, 31, 38, 44, 48, 48, 50, 50, 51, 51] } },
     4378: { skillType: EFFECT, trait: 'buff', effect: 'self_damage_shield', effectType: 'buff', target: 'self', ssBoost: 0, baseLandRate: 100, stats: { reflectDam: 20 } },
@@ -1305,6 +1306,12 @@ function resolve(skill = {}) {
 // bot's whole skill list per decision; they share these results read-only.
 const RESOLVED_LIMIT = 20000;
 const resolved = new Map();
+
+// The heals a spiritshot strengthens (x1.3, blessed x1.5), in hot and cold combat.
+const SHOT_BOOSTED_HEALS = new Set([HEAL, HEAL_HOT, HEAL_CLEANSE]);
+function shotBoostsHeal(skillType) {
+    return SHOT_BOOSTED_HEALS.has(skillType);
+}
 
 function resolveCached(skill = {}) {
     const key = `${skill.selfId}|${skill.level}|${skill.name}|${skill.power}|${skill.buff}|${skill.spell === true}|${skill.distance}`;
@@ -1558,6 +1565,7 @@ module.exports = {
     SIEGE_FLAG,
     resolve,
     resolveCached,
+    shotBoostsHeal,
     normalizeKey,
     sourcedMaxLevel,
     expandSourcedLevels

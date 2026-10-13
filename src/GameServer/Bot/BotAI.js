@@ -1,4 +1,7 @@
+const DiagnosticConfig = require('./Population/PopulationConfig');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
+const { raiseDecision } = require('./AI/DecisionEvents');
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 const BotStatus      = invoke('GameServer/Bot/AI/BotStatus');
 const BotRoles       = invoke('GameServer/Bot/AI/BotRoles');
 const BotCombatUtility = invoke('GameServer/Bot/AI/BotCombatUtility');
@@ -8,6 +11,7 @@ const BotEquipmentUpgrade = invoke('GameServer/Bot/AI/BotEquipmentUpgrade');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const PartyRevivalService = invoke('GameServer/Bot/AI/PartyRevivalService');
 const TownRespawn = invoke('GameServer/World/TownRespawn');
+const Karma = invoke('GameServer/Karma');
 const HotBotPolicyOverlay = invoke('GameServer/Bot/AI/HotBotPolicyOverlay');
 const BotTradeService = invoke('GameServer/Bot/BotTradeService');
 const ChatArrivalState = invoke('GameServer/Bot/AI/ChatArrivalState');
@@ -19,6 +23,7 @@ const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPositioning');
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const { performance } = require('perf_hooks');
+const ActorQueries = require('../World/ActorSpatialQueries');
 
 // Visibility refreshes and damage can request an immediate AI pass from
 // several nearby actors at once.  Without a small gate each request cancels
@@ -39,10 +44,6 @@ function newbieSpawnCoords(classId) {
     return DataCache.newbieSpawns.find(ob => ob.classId === classId)?.spawns ?? [{ locX: -84318, locY: 244579, locZ: -3730 }];
 }
 
-function townRespawnCoords(bot) {
-    return TownRespawn.getRespawnCoords(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
-}
-
 function isRealPlayerSession(session) {
     return !!(
         session &&
@@ -54,6 +55,7 @@ function isRealPlayerSession(session) {
 }
 
 function realPlayerSessions(World) {
+    if (ActorQueries.native(World)) return ActorQueries.humans(World, isRealPlayerSession, true);
     const sessions = World?.user?.sessions;
     if (!Array.isArray(sessions)) return null;
     const timestamp = Date.now();
@@ -102,6 +104,7 @@ function clearTacticalState(session) {
 }
 
 function recordHotStage(name, startedAt) {
+    if (!DiagnosticConfig.developerDiagnostics) return;
     HotActorLodPolicy.recordSubsystem(name, performance.now() - startedAt, 1);
 }
 
@@ -215,6 +218,12 @@ const BotAI = {
     init(session) {
         this.cancelScheduledTick(session);
         session.aiActive = true;
+        // Once per activation: a later re-init must not bring back a servitor
+        // that died near the player.
+        if (session.coldSummon && session.actor) {
+            invoke('GameServer/Npc/SummonControl').restoreFromCold(session, session.actor, session.coldSummon);
+            session.coldSummon = null;
+        }
         if (session.actor?.fetchClanId?.()) invoke('GameServer/Clan/ClanAllianceService').resume(session)
             .catch(error => utils.infoWarn('ClanQuest', 'resume failed: %s', error.message));
         this.scheduleTick(session, 1000 + Math.random() * 2000);
@@ -251,8 +260,7 @@ const BotAI = {
         const bot = session.actor;
         if (!bot) return 3000;
         const World = invoke('GameServer/World/World');
-        const onlinePlayers = realPlayerSessions(World) || [];
-        const context = HotActorLodPolicy.evaluate(session, onlinePlayers);
+        const context = HotActorLodPolicy.evaluate(session, ActorQueries.native(World) ? World : realPlayerSessions(World) || []);
         const lodDelay = HotActorLodPolicy.nextTickDelay(session, context);
         return session.plan === 'shopping' && context.tier === 'full'
             ? Math.min(1500, lodDelay)
@@ -276,9 +284,8 @@ const BotAI = {
         if (session?.pkProfile?.anchor) {
             return { ...session.pkProfile.anchor };
         }
-        if (bot.fetchKarma?.() > 0) {
-            return TownRespawn.getChaoticRespawnCoords(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
-        }
+        // With karma the PK point comes before the shop spot and the leader.
+        if (Karma.closesTowns(bot.fetchKarma?.())) return TownRespawn.restartCoords(bot);
 
         if (session.plan === 'merchant' || (bot.fetchPrivateStore && bot.fetchPrivateStore())) {
             return {
@@ -301,7 +308,7 @@ const BotAI = {
             };
         }
 
-        return townRespawnCoords(bot);
+        return TownRespawn.restartCoords(bot);
     },
 
     beginPartyTownRecovery(session, bot, now = Date.now()) {
@@ -403,8 +410,9 @@ const BotAI = {
         if (session.supplyErrandPhase === 'cold' || session.supplyErrandPhase === 'returning') return;
 
         const World = invoke('GameServer/World/World');
-        const onlinePlayers = realPlayerSessions(World) || [];
-        lodContext = HotActorLodPolicy.evaluate(session, onlinePlayers, tickStartedAt);
+        const nativeActors = ActorQueries.native(World);
+        const onlinePlayerCount = nativeActors ? World.actorPresenceCount() : (realPlayerSessions(World) || []).length;
+        lodContext = HotActorLodPolicy.evaluate(session, nativeActors ? World : realPlayerSessions(World) || [], tickStartedAt);
         PopulationService.recordHotTick(session);
         invoke('GameServer/Bot/Population/BotGlobalChat').offerReply(session, tickStartedAt);
         const botDead = bot.isDead();
@@ -454,9 +462,9 @@ const BotAI = {
         }
 
         if (HotActorLodPolicy.shouldRefreshStatus(session, lodContext, tickStartedAt)) {
-            const statusStartedAt = Date.now();
+            const statusStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
             session.botStatus = BotStatus.getStatus(session);
-            HotActorLodPolicy.recordStatusRefresh(session, Date.now() - statusStartedAt);
+            HotActorLodPolicy.recordStatusRefresh(session, DiagnosticConfig.developerDiagnostics ? Date.now() - statusStartedAt : 0);
         }
         if (defendingPvp) {
             if (session.partyCompanion === true && session.followPlayerSession) PartyCompanionService.updateMember(session);
@@ -481,7 +489,7 @@ const BotAI = {
         const isCompanion = !!session.followPlayerSession && session.partyCompanion === true;
         const visibleRealPlayers = this.visibleRealPlayers(session, bot, World);
 
-        if (!botDead && onlinePlayers.length > 0 && visibleRealPlayers.length === 0 && !isCompanion && !session.hotBackgroundPartyId && session.plan !== 'shopping' && session.plan !== 'pk_hunting') {
+        if (!botDead && onlinePlayerCount > 0 && visibleRealPlayers.length === 0 && !isCompanion && !session.hotBackgroundPartyId && session.plan !== 'shopping' && session.plan !== 'pk_hunting') {
             // Far-away bot: light background event processing, skip everything else
             if (Math.random() < 0.05) {
                 this.triggerFarAwayChatEvent(session, bot);
@@ -501,7 +509,7 @@ const BotAI = {
 
         // If bot is a companion, dynamically refresh player's party HUD sidebar HP/MP bars
         if (session.followPlayerSession && session.partyCompanion === true) {
-            const partyMemberStartedAt = performance.now();
+            const partyMemberStartedAt = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
             PartyCompanionService.updateMember(session);
             recordHotStage('partyMemberSync', partyMemberStartedAt);
         }
@@ -565,12 +573,11 @@ const BotAI = {
                 // TeleportTo rejects actors that are still marked dead, so bot
                 // respawns must complete before applying the new town location.
                 const hallRuntime = invoke('GameServer/ClanHall/Runtime');
-                const recoveryHall = !wasCompanion && !session.clanAllianceQuest && !session.clanAllianceSupportLeaderId
-                    && Number(bot.fetchKarma?.() || 0) === 0 && session.plan !== 'merchant'
-                    ? hallRuntime.forActor(bot) : null;
+                const recoveryHall = invoke('GameServer/ClanHall/BotVisit').restartHall(session, bot);
                 Generics.revive(session, bot, { delayMs: 0, restoreFullVitals: true,
                     restoreExpPercent: recoveryHall ? hallRuntime.expRestore(bot) : null,
                     recoveryReason: recoveryHall ? 'restart_to_clan_hall' : 'restart_to_town' });
+                raiseDecision(session, 'revived');
                 session.clanHallVisit = null;
                 session.clanHallRetryAt = 0;
                 session.deathTimerStart = undefined;
@@ -631,7 +638,7 @@ const BotAI = {
             session.plan = 'hunting';
         }
 
-        const equipmentStartedAt = performance.now();
+        const equipmentStartedAt = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
         BotEquipmentUpgrade.applyBestUpgrades(session);
         recordHotStage('equipmentUpgrade', equipmentStartedAt);
 
@@ -639,7 +646,7 @@ const BotAI = {
         // next hunt or formation move. The queue yields to combat and support.
         if (isCompanion || session.hotBackgroundPartyId || session.partyGroundPickupQueue?.length
             || ['hunting', 'resting'].includes(session.plan)) {
-            const groundLootStartedAt = performance.now();
+            const groundLootStartedAt = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
             PartyCompanionService.reconcileGroundLoot(session);
             const startedGroundPickup = PartyCompanionService.startQueuedGroundPickup(session);
             recordHotStage('partyGroundLoot', groundLootStartedAt);
@@ -658,21 +665,24 @@ const BotAI = {
         if (invoke('GameServer/Bot/AI/HotResourceCompetition').tick(session)) return;
         if (session.hotBackgroundPartyId && invoke('GameServer/Bot/AI/HotBackgroundParty').tick(session, bot, Generics, this)) return;
         const state = States[session.plan];
+        if (!['resting', 'shopping'].includes(session.plan)) {
+            invoke('GameServer/Bot/Economy/HotBoardReviewService').naturalBreak(session, 0);
+        }
         if (state) {
             const stateName = session.plan;
-            const stateStartedAt = performance.now();
+            const stateStartedAt = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
             try {
                 state.tick(session, bot, Generics, BotAI);
             } catch (err) {
                 console.error(`Error in Bot AI State (${session.plan}) tick:`, err);
             } finally {
-                recordHotStage(`state.${stateName}`, stateStartedAt);
+                DiagnosticConfig.developerDiagnostics && recordHotStage(`state.${stateName}`, stateStartedAt);
             }
         } else {
             utils.infoWarn('GameServer', 'Unhandled Bot plan: %s', session.plan);
         }
         } finally {
-            HotActorLodPolicy.recordTick(lodContext.tier, Date.now() - tickStartedAt);
+            if (DiagnosticConfig.developerDiagnostics) HotActorLodPolicy.recordTick(lodContext.tier, Date.now() - tickStartedAt);
         }
     },
 
@@ -927,7 +937,7 @@ const BotAI = {
         const World = invoke('GameServer/World/World');
         const packet = ServerResponse.speak(session.actor, { kind: 8, text: text });
 
-        World.user.sessions.forEach((user) => {
+        ActorQueries.humans(World).forEach((user) => {
             if (user.socket && typeof user.socket.write === 'function' && user.accountId.indexOf('bot_') !== 0) {
                 user.dataSendToMe(packet);
             }
@@ -936,6 +946,10 @@ const BotAI = {
 
     visibleRealPlayers(session, bot, World = invoke('GameServer/World/World')) {
         if (!session || !bot || !World) return [];
+        if (World.botRealPlayerIndex === true && typeof bot.fetchLocX === 'function' && typeof bot.fetchLocY === 'function') {
+            if (typeof World.botVisibleRealPlayers !== 'function') throw new TypeError('invalid_bot_real_player_index');
+            return World.botVisibleRealPlayers(session, bot);
+        }
         const players = realPlayerSessions(World);
         if (players && typeof bot.fetchLocX === 'function' && typeof bot.fetchLocY === 'function') {
             const x = bot.fetchLocX();
@@ -944,7 +958,7 @@ const BotAI = {
                 if (candidate === session || !candidate.actor || typeof candidate.actor.fetchLocX !== 'function' || typeof candidate.actor.fetchLocY !== 'function') return false;
                 const dx = candidate.actor.fetchLocX() - x;
                 const dy = candidate.actor.fetchLocY() - y;
-                return dx * dx + dy * dy <= 6000 * 6000;
+                return dx * dx + dy * dy <= CLIENT_VISIBILITY_RADIUS * CLIENT_VISIBILITY_RADIUS;
             });
         }
         const fetchVisiblePlayers = typeof World.fetchVisibleRealPlayers === 'function'

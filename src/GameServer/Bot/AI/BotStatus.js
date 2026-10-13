@@ -1,4 +1,6 @@
+const ActorQueries = require('../../World/ActorSpatialQueries');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
+const RestPolicy = invoke('GameServer/Bot/AI/RestPolicy');
 const BotBuffs = invoke('GameServer/Bot/AI/BotBuffs');
 const TownPathfinder = invoke('GameServer/Bot/AI/TownPathfinder');
 const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
@@ -105,7 +107,13 @@ function findTarget(session, bot) {
     if (!session.currentTargetId) return null;
 
     const World = invoke('GameServer/World/World');
-    const userSession = World.user.sessions.find((ob) => ob.actor && ob.actor.fetchId() === session.currentTargetId);
+    let userSession;
+    if (typeof World.registeredActorById === 'function') {
+        const candidate = World.registeredActorById(session.currentTargetId)?.session;
+        userSession = candidate?.actor && candidate.actor.fetchId() === session.currentTargetId ? candidate : null;
+    } else {
+        userSession = World.user.sessions.find((ob) => ob.actor && ob.actor.fetchId() === session.currentTargetId);
+    }
     if (userSession && userSession.actor) {
         return { type: 'user', ...actorSummary(userSession.actor, bot) };
     }
@@ -147,7 +155,7 @@ function inferIntent(session, bot, vitals, target) {
     if (session.plan === 'pk_hunting') {
         return target ? 'hunt_player' : 'find_player';
     }
-    if (vitals.hpPct < 0.35 || (BotRoles.shouldRestForMana(bot) && vitals.mpPct < 0.20)) return 'recover';
+    if (RestPolicy.needsRest(bot, vitals.hpPct, vitals.mpPct)) return 'recover';
     return target ? 'fight_target' : 'find_target';
 }
 
@@ -155,8 +163,8 @@ function collectBlockers(session, bot, vitals, party) {
     const blockers = [];
 
     if (bot.state.fetchDead()) blockers.push('dead');
-    if (vitals.hpPct < 0.35) blockers.push('low_hp');
-    if (BotRoles.shouldRestForMana(bot) && vitals.mpPct < 0.20) blockers.push('low_mp');
+    if (RestPolicy.needsRest(bot, vitals.hpPct, 1)) blockers.push('low_hp');
+    if (RestPolicy.needsRest(bot, 1, vitals.mpPct)) blockers.push('low_mp');
     if (session.stuckTicks >= 3) blockers.push('stuck');
     if (party && party.leader && party.leader.distance > 1000) blockers.push('too_far_from_leader');
     if (session.plan === 'hunting' && session.noTargetTicks >= 3) blockers.push('no_targets_nearby');
@@ -174,7 +182,7 @@ function nearbySnapshot(bot) {
     let eligibleAttackableNpcs = 0;
     const attackableNames = new Map();
 
-    World.user.sessions.forEach((session) => {
+    ActorQueries.near(World, bot, 1500).forEach((session) => {
         const actor = session.actor;
         if (!actor || actor === bot || !actor.fetchIsOnline()) return;
         if (distance2d(actorLocation(actor), loc) > 1500) return;
@@ -372,13 +380,13 @@ const BotStatus = {
                         : 1,
                     walking: bot.state.fetchWalkin?.() === true
                 },
-                trace: Array.isArray(session.movementTrace) ? session.movementTrace.slice(-24) : [],
+                trace: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && Array.isArray(session.movementTrace) ? session.movementTrace.slice(-24) : null,
                 stuckTicks: session.stuckTicks || 0,
                 followTarget: session.lastFollowMoveTarget || null,
                 followHeldAt: session.lastFollowMoveHeldAt || null,
                 townRoute: session.townRoutePlan || null,
                 pathfinding: session.lastPathfinding || null,
-                pathSummary: TownPathfinder.describeDiagnostics(session.lastPathfinding?.townRoute),
+                pathSummary: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? TownPathfinder.describeDiagnostics(session.lastPathfinding?.townRoute) : null,
                 retreat: session.lastRetreatPlan ? {
                     threatId: session.lastRetreatPlan.threatId,
                     to: session.lastRetreatPlan.to,
@@ -408,11 +416,11 @@ const BotStatus = {
             trade: tradeSnapshot(session, bot),
             ambient,
             inference: BotInferenceBudget.snapshot(session),
-            llm: {
+            llm: invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true ? {
                 last: session.lastBrainTelemetry || null,
                 context: session.lastBrainContextTelemetry || null,
                 langfuse: LangfuseTracing.status()
-            },
+            } : { enabled: false },
             persona: personaSnapshot(session),
             policy: HotBotPolicyOverlay.status(session),
             social: session.socialSummary || null,

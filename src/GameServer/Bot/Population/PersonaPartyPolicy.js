@@ -6,7 +6,17 @@ function supportCount(coverage = {}) {
 }
 
 function profileFor(state) {
-    return state?.persona?.traits ? state.persona : BotPersona.generate(state);
+    return BotPersona.of(state);
+}
+
+// How much a persona wants a party, before the situation: shared by the
+// bot-to-bot intent below and the answer to a player's invite
+// (PersonaPartyDecisionPolicy). Not rounded.
+function baseScore(persona) {
+    const traits = persona.traits;
+    const driveBonus = persona.primaryDrive === 'social' ? 18
+        : persona.primaryDrive === 'progression' ? 4 : -8;
+    return traits.sociability * 55 + traits.commitment * 25 + traits.empathy * 10 + driveBonus;
 }
 
 function backgroundIntent(state = {}) {
@@ -16,18 +26,12 @@ function backgroundIntent(state = {}) {
         return { accept: true, reason: 'goal_requires_party', score: 100, persona };
     }
 
-    const traits = persona.traits;
     const establishedBond = Object.values(state.stats?.partyHistory || {})
         .some((entry) => Number(entry?.runs || 0) >= 3);
-    const driveBonus = persona.primaryDrive === 'social' ? 18
-        : persona.primaryDrive === 'progression' ? 4 : -8;
-    const score = Math.round(
-        traits.sociability * 55 +
-        traits.commitment * 25 +
-        traits.empathy * 10 +
-        driveBonus
-    );
-    const accept = establishedBond || score >= 45;
+    const score = Math.round(baseScore(persona));
+    const probability = require('../AI/TendencyRoll').chance(score / 100 + (establishedBond ? persona.traits.commitment / 4 : 0));
+    const accept = require('../AI/TendencyRoll').roll('party_intent', state.characterId,
+        state.stats?.partyRequest?.requestedAt || state.spotId || state.updatedAt) < probability;
     return {
         accept,
         reason: establishedBond ? 'established_party_bonds'
@@ -74,4 +78,4 @@ function explain(state, peers = [], coverage = {}) {
     };
 }
 
-module.exports = { backgroundIntent, preference, explain };
+module.exports = { baseScore, backgroundIntent, preference, explain };

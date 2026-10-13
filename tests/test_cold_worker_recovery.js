@@ -1,3 +1,4 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const EventEmitter = require('events');
 
@@ -44,6 +45,8 @@ function wait(ms) {
         const firstEpoch = coordinator.workerEpoch;
         assert(first, 'coordinator must create one long-lived worker');
         assert.strictEqual(first.options.name, 'l2node-cold-simulation');
+        assert.strictEqual(first.options.resourceLimits.maxOldGenerationSizeMb, 512,
+            'the full-world worker must leave headroom above its retained state and caches');
 
         first.emit('exit', 1);
         assert.strictEqual(coordinator.snapshot().workerRestarts, 1);
@@ -56,6 +59,9 @@ function wait(ms) {
         const results = Array.from({ length: 20 }, (_, index) => ({
             ok: true,
             characterId: index + 1,
+            inputToken: { characterId: index + 1, ownerId: 'cold_simulation_owner', revision: 1,
+                leaseId: `lease-${index + 1}`, leaseUntil: Date.now() + 30000 },
+            proposalId: `proposal-${index + 1}`,
             state: { characterId: index + 1, stats: { padding: 'x'.repeat(40000) } },
             context: {}
         }));

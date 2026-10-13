@@ -1,3 +1,5 @@
+const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Database = invoke('Database');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
 const Contracts = invoke('GameServer/Clan/ClanSimulationContracts');
@@ -11,6 +13,9 @@ const ClanBrain = invoke('GameServer/Clan/ClanBrain');
 const ClanCrestService = invoke('GameServer/Clan/ClanCrestService');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const DataCache = invoke('GameServer/DataCache');
+const ClanEconomy = require('./ClanEconomyContext');
+const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const ReviewEvents = require('./ClanReviewEvents');
 
 const metrics = {
     resolves: 0,
@@ -25,8 +30,8 @@ const metrics = {
     catastrophicFailures: 0,
     levelUps: 0,
     budgetStops: 0,
-    planCounts: new Map(),
-    reasonCounts: new Map()
+    planCounts: new DiagnosticMetricMap(),
+    reasonCounts: new DiagnosticMetricMap()
 };
 
 function number(value, fallback = 0) {
@@ -44,7 +49,39 @@ function parseJson(value, fallback = {}) {
     }
 }
 
+// Parsed member stats and inventory kept between projections, keyed by the row
+// text (also the warehouse gear pass's stats). Clan actions project their clan many times a minute (live x10: ~15
+// projections a minute, ~6% of main-thread busy, nearly all of it parsing) and
+// ~90% of member texts are the same as in the previous read, so they are parsed
+// once. The text is the key, not simulationRevision: some writes change the
+// text under the same revision. Readers share these objects across projections
+// and never write into them. A member not projected for MEMBER_JSON_IDLE_MS
+// (left the clan, clan no longer acting) is forgotten at the next projection.
+const MEMBER_JSON_IDLE_MS = 10 * 60 * 1000;
+const parsedMemberJson = new Map();
+let memberJsonSweepAt = 0;
+
+function memberJson(characterId, field, text, now = Date.now()) {
+    let entry = parsedMemberJson.get(characterId);
+    if (!entry) parsedMemberJson.set(characterId, entry = {});
+    entry.seenAt = now;
+    const cached = entry[field];
+    if (cached && cached.text === text) return cached.value;
+    const value = parseJson(text, {});
+    entry[field] = { text, value };
+    return value;
+}
+
+function forgetIdleMemberJson(now) {
+    if (now < memberJsonSweepAt) return;
+    memberJsonSweepAt = now + MEMBER_JSON_IDLE_MS;
+    for (const [characterId, entry] of parsedMemberJson) {
+        if (now - entry.seenAt >= MEMBER_JSON_IDLE_MS) parsedMemberJson.delete(characterId);
+    }
+}
+
 function record(map, value) {
+    if (!DiagnosticConfig.developerDiagnostics) return;
     if (value) map.set(value, (map.get(value) || 0) + 1);
 }
 
@@ -68,15 +105,18 @@ async function clanProjection(clanId = null) {
                COALESCE(life.locX, members.locX) AS locX, COALESCE(life.locY, members.locY) AS locY,
                COALESCE(life.locZ, members.locZ) AS locZ,
                life.partyId,
-               life.simulationOwner, life.simulationRevision, life.inventorySummary, life.statsJson
+               life.simulationOwner, life.simulationRevision, life.inventorySummary, life.statsJson, personas.traitsJson, personas.primaryDrive, personas.archetype
         FROM clan_simulation_clans simulated
         JOIN clans ON clans.id = simulated.clanId
         JOIN characters members ON members.clanId = simulated.clanId
         LEFT JOIN bot_life_state life ON life.characterId = members.id
+        LEFT JOIN bot_personas personas ON personas.characterId = members.id
         ${hasClanId ? 'WHERE simulated.clanId = ?' : ''}
         ORDER BY simulated.clanId ASC, members.id ASC
     `, hasClanId ? [Number(clanId)] : []], hasClanId ? 'clan-goal:projection-one' : 'clan-goal:projection');
     const byId = new Map();
+    const now = Date.now();
+    forgetIdleMemberJson(now);
     rows.forEach((row) => {
         const clanId = number(row.clanId);
         if (!byId.has(clanId)) {
@@ -107,12 +147,15 @@ async function clanProjection(clanId = null) {
             simulationOwner: String(row.simulationOwner || 'legacy_main'),
             adena: number(row.adena),
             simulationRevision: number(row.simulationRevision),
-            inventory: parseJson(row.inventorySummary, {}),
-            stats: parseJson(row.statsJson, {})
+            inventory: memberJson(number(row.characterId), 'inventory', row.inventorySummary, now),
+            stats: memberJson(number(row.characterId), 'stats', row.statsJson, now),
+            persona: { primaryDrive: row.primaryDrive, archetype: row.archetype, traits: parseJson(row.traitsJson, {}) }
         };
         if (!ClanSimulationPolicy.isStaticService(member)) byId.get(clanId).members.push(member);
     });
-    return [...byId.values()];
+    const projection = [...byId.values()];
+    for (const clan of projection) require('./ClanSupplyPolicy').publish(clan);
+    return projection;
 }
 
 async function clanProjectionById(clanId) {
@@ -145,7 +188,8 @@ async function contextFor(clan) {
     const members = clan.members || [];
     if (level <= 1) {
         const summary = (await Database.fetchClanContributionSummary(clan.id, level))[0] || { amount: 0 };
-        const warehouse = (await Database.fetchClanWarehouseItems(clan.id))
+        const warehouseRows = await Database.fetchClanWarehouseItems(clan.id);
+        const warehouse = warehouseRows
             .filter((item) => Number(item.selfId) === 57)
             .reduce((sum, item) => sum + number(item.amount), 0);
         return {
@@ -155,6 +199,7 @@ async function contextFor(clan) {
             itemId: 0,
             itemName: '',
             partyReady: false,
+            economy: ClanEconomy.forClan(clan, { warehouse: warehouseRows }),
             members
         };
     }
@@ -164,6 +209,16 @@ async function contextFor(clan) {
     const stock = warehouseRows
         .filter((item) => Number(item.selfId) === Number(Config.bloodMarkItemId))
         .reduce((sum, item) => sum + Math.max(0, number(item.amount) - number(item.reservedAmount)), 0);
+    const offer = stock < 1 ? MarketOpportunity.bestOffer(Config.bloodMarkItemId, { budget: Infinity }) : null;
+    const halls = await Database.fetchClanHallAuctions();
+    const economy = ClanEconomy.forClan(clan, { warehouse: warehouseRows, halls, proofOffer: offer });
+    const affordable = offer && Number(offer.price) <= economy.budgetFor('level', Config.bloodMarkItemId);
+    // Purchasing the real C4 proof competes in the same purse as gear and a
+    // residence. An unavailable/unfunded offer keeps the native farm route.
+    if (affordable) return { required: 1, progress: stock, warehouse: stock,
+        itemId: Config.bloodMarkItemId, itemName: 'Proof of Blood', members,
+        marketOffer: true, marketOfferPrice: Number(offer.price), partyReady: false,
+        economy, offer };
     const demands = await Database.fetchClanMarketDemands({ clanId: clan.id, itemId: Config.bloodMarkItemId, status: 'open', limit: 4 });
     const latestDemand = demands.sort((left, right) => number(right.updatedAt) - number(left.updatedAt))[0] || null;
     const sourceLevel = bloodMarkSourceLevel();
@@ -181,6 +236,7 @@ async function contextFor(clan) {
             levelingTargetLevel: targetLevel,
             levelingProgress: levelingProgress(members),
             marketDemand: latestDemand,
+            economy,
             partyReady: false,
             craftReady: false,
             members
@@ -198,6 +254,7 @@ async function contextFor(clan) {
         marketOfferPrice: 0,
         marketDemandFresh: false,
         marketDemand: latestDemand,
+        economy,
         // Missing support inside the clan is repaired by ClanPartyService.
         // It must not keep a level-ready Blood Mark goal in prepare forever.
         partyReady: true,
@@ -230,7 +287,12 @@ async function cancelLegacyBloodMarkDemand(clan, context) {
 }
 
 async function resolveClan(clan, options = {}) {
-    try { return await resolveClanInternal(clan, options); }
+    ReviewEvents.track(clan);
+    try {
+        const result = await resolveClanInternal(clan, options);
+        if (result.goal && clan) ReviewEvents.track({ ...clan, state: { ...clan.state, goal: result.goal } });
+        return result;
+    }
     catch (error) {
         if (error.code !== 'clan_planning_deferred') throw error;
         return { ok: true, skipped: true, retryable: true, reason: 'clan_planning_deferred' };
@@ -277,8 +339,7 @@ async function resolveClanInternal(clan, options = {}) {
         const candidateSnapshot = await ClanGoalCandidateService.snapshotFor(clan, previous, options);
         await ClanEquipmentService.validatePlanning(clan, candidateSnapshot.planning);
         const brain = candidateSnapshot.decisionNeeded
-            ? ClanBrain.choose(clan, candidateSnapshot, options)
-            : null;
+            ? ClanBrain.choose(clan, candidateSnapshot, options) : null;
         if (brain?.pending) {
             return {
                 ok: true,
@@ -298,7 +359,8 @@ async function resolveClanInternal(clan, options = {}) {
         const equipment = await ClanEquipmentService.resolveClan(clan, previous, {
             ...options,
             planning: candidateSnapshot.planning,
-            selectedCandidate: brain?.candidate || null
+            selectedCandidate: brain?.source === 'llm' ? brain.candidate : null,
+            candidateIds: candidateSnapshot.candidates.map(candidate => candidate.id)
         });
         if (equipment.skipped && !equipment.completed) {
             return {
@@ -316,6 +378,9 @@ async function resolveClanInternal(clan, options = {}) {
             return equipment;
         }
         const goal = equipment.goal;
+        const economy = candidateSnapshot.planning.economy;
+        if (economy) goal.economy = { focus: economy.network.focus, dormant: economy.network.dormant,
+            moneyPrice: economy.moneyPrice, incomePerHour: economy.incomePerHour };
         const changed = JSON.stringify(goalComparable(previous)) !== JSON.stringify(goalComparable(goal));
         let persisted = { ok: true, goal: previous };
         if (changed) {
@@ -331,8 +396,8 @@ async function resolveClanInternal(clan, options = {}) {
                 reasonCode: goal.plan?.reasonCode || ''
             });
             if (persisted.ok) {
-                if (!previous) metrics.goalsCreated += 1;
-                else metrics.goalsUpdated += 1;
+                if (!previous) DiagnosticConfig.developerDiagnostics && (metrics.goalsCreated += 1);
+                else DiagnosticConfig.developerDiagnostics && (metrics.goalsUpdated += 1);
             }
         }
         if (persisted.ok && brain?.source === 'llm') {
@@ -353,7 +418,7 @@ async function resolveClanInternal(clan, options = {}) {
             });
         }
         record(metrics.planCounts, goal.plan?.kind);
-        metrics.activeGoals += goal.status !== 'completed' ? 1 : 0;
+        DiagnosticConfig.developerDiagnostics && (metrics.activeGoals += goal.status !== 'completed' ? 1 : 0);
         return {
             ok: !!persisted.ok,
             clanId: clan.id,
@@ -375,7 +440,7 @@ async function resolveClanInternal(clan, options = {}) {
         };
     }
     const context = await contextFor(clan);
-    const cancelledDemand = await cancelLegacyBloodMarkDemand(clan, context);
+    const cancelledDemand = context.marketOffer ? null : await cancelLegacyBloodMarkDemand(clan, context);
     const previous = automaticPrevious;
     if (number(clan.level) === 2 && number(context.progress) >= number(context.required)) {
         const advanced = await Database.advanceAutonomousClanLevel({
@@ -387,8 +452,8 @@ async function resolveClanInternal(clan, options = {}) {
             requiredItemAmount: 1
         });
         if (advanced.ok) {
-            metrics.levelUps += 1;
-            metrics.goalsCompleted += previous?.status === 'completed' ? 0 : 1;
+            DiagnosticConfig.developerDiagnostics && (metrics.levelUps += 1);
+            DiagnosticConfig.developerDiagnostics && (metrics.goalsCompleted += previous?.status === 'completed' ? 0 : 1);
             record(metrics.reasonCounts, Contracts.REASON_CODES.CONTRIBUTION_LEVEL_UP);
             await ClanCrestService.ensureAutonomousCrest(clan.id);
             if (typeof ClanService.reload === 'function') await ClanService.reload();
@@ -422,7 +487,13 @@ async function resolveClanInternal(clan, options = {}) {
         timestamp: Date.now(),
         failureThreshold: Config.catastrophicFailureThreshold
     });
-    const demand = null;
+    let demand = null;
+    if (context.marketOffer) {
+        demand = await Database.upsertClanMarketDemand({ clanId: clan.id, itemId: Config.bloodMarkItemId,
+            amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
+        await Database.syncClanMarketDemandSignal({ clanId: clan.id, itemId: Config.bloodMarkItemId,
+            amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
+    }
     if (goal.type === 'item' && demand?.created && !context.marketOffer) {
         context.marketDemandFresh = true;
         goal = GoalPolicy.buildGoal(clan, context, previous, {
@@ -431,6 +502,11 @@ async function resolveClanInternal(clan, options = {}) {
         });
     }
 
+    if (context.economy) {
+        goal.economy = { focus: context.economy.network.focus, dormant: context.economy.network.dormant,
+            moneyPrice: context.economy.moneyPrice, incomePerHour: context.economy.incomePerHour };
+        if (context.marketOffer) { goal.plan.maxPrice = context.marketOfferPrice; goal.budget = context.marketOfferPrice; }
+    }
     const changed = JSON.stringify(goalComparable(previous)) !== JSON.stringify(goalComparable(goal));
     let persisted = { ok: true, goal: previous };
     if (changed) {
@@ -445,16 +521,16 @@ async function resolveClanInternal(clan, options = {}) {
             reasonCode: goal.plan?.reasonCode || ''
         });
         if (persisted.ok) {
-            if (!previous) metrics.goalsCreated += 1;
-            else metrics.goalsUpdated += 1;
-            if (goal.status === 'completed' && previous?.status !== 'completed') metrics.goalsCompleted += 1;
+            if (!previous) DiagnosticConfig.developerDiagnostics && (metrics.goalsCreated += 1);
+            else DiagnosticConfig.developerDiagnostics && (metrics.goalsUpdated += 1);
+            if (goal.status === 'completed' && previous?.status !== 'completed') DiagnosticConfig.developerDiagnostics && (metrics.goalsCompleted += 1);
         }
     }
     if (goal.status === 'completed') record(metrics.reasonCounts, Contracts.REASON_CODES.GOAL_COMPLETED);
     else record(metrics.reasonCounts, goal.plan?.reasonCode);
     record(metrics.planCounts, goal.plan?.kind);
-    if (goal.status === 'preparing') metrics.preparationCycles += 1;
-    if (goal.status !== 'completed') metrics.activeGoals += 1;
+    if (goal.status === 'preparing') DiagnosticConfig.developerDiagnostics && (metrics.preparationCycles += 1);
+    if (goal.status !== 'completed') DiagnosticConfig.developerDiagnostics && (metrics.activeGoals += 1);
     return {
         ok: !!persisted.ok,
         clanId: clan.id,
@@ -491,8 +567,8 @@ async function recordCatastrophicFailure(clanId, reasonCode = Contracts.REASON_C
         reasonCode
     });
     if (result.ok) {
-        metrics.catastrophicFailures += 1;
-        metrics.replans += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.catastrophicFailures += 1);
+        DiagnosticConfig.developerDiagnostics && (metrics.replans += 1);
         record(metrics.reasonCounts, Contracts.REASON_CODES.GOAL_REPLANNED);
     }
     return { ...result, goal: next };
@@ -503,6 +579,7 @@ const ClanGoalService = {
     policy: GoalPolicy,
     clanProjection,
     clanProjectionById,
+    memberJson,
     resolveClan,
     recordCatastrophicFailure,
 
@@ -514,7 +591,7 @@ const ClanGoalService = {
             for (const clan of clans.slice(0, Math.max(1, number(limit, Config.resolveBatchSize)))) {
                 if (Date.now() >= deadlineAt) {
                     summary.budgetStopped = true;
-                    metrics.budgetStops += 1;
+                    DiagnosticConfig.developerDiagnostics && (metrics.budgetStops += 1);
                     break;
                 }
                 const result = await resolveClan(clan, { deadlineAt });
@@ -522,12 +599,13 @@ const ClanGoalService = {
                 summary.changed += result.changed ? 1 : 0;
                 summary.completed += result.goal?.status === 'completed' ? 1 : 0;
             }
-            metrics.resolves += summary.attempted;
+            DiagnosticConfig.developerDiagnostics && (metrics.resolves += summary.attempted);
             return summary;
         });
     },
 
     metrics() {
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
         return {
             resolves: metrics.resolves,
             goalsCreated: metrics.goalsCreated,

@@ -1,7 +1,7 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const PartyRewardMath = invoke('GameServer/Actor/PartyRewardMath');
 
 const pending = new Map();
-const RECENT_ABANDON_MS = 5 * 60 * 1000;
 
 function isJoinRequest(text) {
     return /\b(?:can|could|may)\s+i\s+join(?:\s+(?:you\s+guys|you|(?:your|the|this)\s+(?:party|group|team)))?\b|\b(?:let|add|take|invite)\s+me\s+(?:join|into|to)\s+(?:your|the|this)\s+(?:party|group|team)\b|\bcan\s+i\s+party\s+with\s+you\b/i.test(String(text || ''));
@@ -80,7 +80,7 @@ function specialOperation(party, states) {
     return states.some((state) => {
         const member = state?.stats || {};
         return member.travel || member.pvpEncounter || activeCompetition(member) || member.supplyErrand
-            || member.warehouseWorkflow || member.marketStore || member.craftShop
+            || member.warehouseWorkflow || member.craftShop
             || ['dead', 'merchant', 'crafting', 'shopping', 'traveling', 'pk_hunting'].includes(state?.activity);
     });
 }
@@ -123,13 +123,9 @@ async function evaluate(playerSession, party, states) {
             const availability = hotSession?.actor
                 ? BotAvailability.evaluate(playerSession, hotSession, { loadMemory: false })
                 : BotAvailability.evaluateState(playerSession, state, { loadMemory: false });
-            if (availability.relationshipReason === 'relationship_hostile' || Number(availability.memory?.trust || 0) <= -6) {
-                return rejection('relationship_hostile', { refusingMemberId: state.characterId });
-            }
-            if (availability.memory?.recentlyAbandonedAt
-                && Date.now() - Number(availability.memory.recentlyAbandonedAt) < RECENT_ABANDON_MS) {
-                return rejection('recently_abandoned', { refusingMemberId: state.characterId });
-            }
+            const refusal = availability.relationshipReason === 'relationship_hostile' ? 'relationship_hostile'
+                : BotAvailability.socialRefusal(availability.memory, Date.now());
+            if (refusal) return rejection(refusal, { refusingMemberId: state.characterId });
         }
     }
     return { ok: true, reason: clanmate ? 'same_clan' : 'party_accepts', clanmate };
@@ -205,7 +201,7 @@ async function perform(playerSession, target, source) {
 
     const Social = invoke('GameServer/Bot/AI/BotSocialMemory');
     sessions.forEach((session) => Social.recordEvent(playerSession, session, 'party_formed', source));
-    console.info('BotParty :: player %s took over party %s members=%d source=%s',
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotParty :: player %s took over party %s members=%d source=%s',
         playerSession.actor.fetchName?.() || actorId(playerSession), partyId, sessions.length, source);
     return {
         ok: true,
@@ -261,6 +257,7 @@ async function restoreAutonomousParty({ partyId, playerId, companionSessions = [
         Coordinator.markDirty?.(state, { reason: 'player_party_restored', critical: true });
     });
     const statesById = new Map(states.map((state) => [Number(state.characterId), state]));
+    const changedSessions = [];
     companionSessions.forEach((session) => {
         const id = actorId(session);
         const state = statesById.get(id);
@@ -268,11 +265,13 @@ async function restoreAutonomousParty({ partyId, playerId, companionSessions = [
         session.coldLifeState = state;
         session.hotBackgroundPartyId = state.phase === 'hot' ? party.partyId : null;
         session.plan = state.phase === 'hot' ? 'hunting' : session.plan;
+        changedSessions.push(session);
         if (state.phase === 'hot' && session.actor) {
             invoke('GameServer/Bot/BotAI').wakeup(session, { urgent: true });
         }
     });
-    console.info('BotParty :: restored autonomous party %s members=%d source=%s',
+    refreshPartyMemberships(changedSessions, invoke);
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotParty :: restored autonomous party %s members=%d source=%s',
         party.partyId, party.memberIds.length, source);
     return { ok: true, reason: 'autonomous_party_restored', party, states };
 }

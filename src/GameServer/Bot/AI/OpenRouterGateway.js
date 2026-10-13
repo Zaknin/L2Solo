@@ -1,5 +1,6 @@
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const LangfuseTracing = invoke('GameServer/Bot/AI/LangfuseTracing');
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 const REASONING_EFFORTS = new Set(['off', 'low', 'medium', 'high']);
 const COMPLETION_LIMIT_PARAMS = new Set(['max_tokens', 'max_completion_tokens']);
 
@@ -24,7 +25,7 @@ const DEFAULTS = Object.freeze({
     // knobs; callers may override them explicitly for focused tests/workflows.
     maxTokens: 320,
     timeoutMs: 3500,
-    visibilityRadius: 6000,
+    visibilityRadius: CLIENT_VISIBILITY_RADIUS,
     circuitBreakerFailureThreshold: 3,
     circuitBreakerOpenMs: 30000
 });
@@ -142,7 +143,7 @@ function config(overrides = {}) {
             optn.maxConcurrentRequests,
             DEFAULTS.maxConcurrentRequests
         ))),
-        debug: bool(optn.debug, DEFAULTS.debug)
+        debug: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && bool(optn.debug, DEFAULTS.debug)
     };
 
     return {
@@ -185,7 +186,7 @@ function config(overrides = {}) {
             num(overrides.circuitBreakerFailureThreshold, source.circuitBreakerFailureThreshold)
         ),
         circuitBreakerOpenMs: Math.max(0, num(overrides.circuitBreakerOpenMs, source.circuitBreakerOpenMs)),
-        debug: bool(overrides.debug, source.debug)
+        debug: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && bool(overrides.debug, source.debug)
     };
 }
 
@@ -285,6 +286,7 @@ function circuitIsOpen(cfg, key = 'default', now = Date.now()) {
 }
 
 function recordMetric(outcome, latencyMs, meta = {}) {
+    if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return;
     metrics.total += 1;
     if (outcome === 'success') metrics.success += 1;
     else metrics.fallback += 1;
@@ -312,18 +314,18 @@ function telemetry(request, cfg, outcome, startedAt, extra = {}) {
         circuitKey: request.circuitKey,
         model: cfg.model,
         outcome,
-        latencyMs: Date.now() - startedAt,
+        ...((invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)
+            ? { latencyMs: Date.now() - startedAt, rawContent: extra.rawContent || null,
+                initialRawContent: extra.initialRawContent || null } : {}),
         status: extra.status || null,
         usage: extra.usage || null,
         finishReason: extra.finishReason || null,
         providerRequestId: extra.providerRequestId || null,
-        rawContent: extra.rawContent || null,
         responsePreview: extra.responsePreview || null,
         attempts: Number(extra.attempts || 1),
         repairTriggered: extra.repairTriggered === true,
         repairType: extra.repairType || null,
         initialOutcome: extra.initialOutcome || null,
-        initialRawContent: extra.initialRawContent || null,
         initialFinishReason: extra.initialFinishReason || null
     };
 }
@@ -412,7 +414,8 @@ function repairedResult(initial, repaired, repairType = 'schema') {
             repairTriggered: true,
             repairType,
             initialOutcome: initial?.reason || null,
-            initialRawContent: initial?.telemetry?.rawContent || null,
+            ...((invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)
+                ? { initialRawContent: initial?.telemetry?.rawContent || null } : {}),
             initialFinishReason: initial?.telemetry?.finishReason || null,
             initialUsage: initial?.usage || null
         }
@@ -509,7 +512,7 @@ async function requestUntraced(spec = {}) {
         sessionId: sessionId(spec.sessionId),
         circuitKey: String(spec.circuitKey || 'default').slice(0, 64)
     };
-    const startedAt = Date.now();
+    const startedAt = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? Date.now() : 0;
     const requestUrl = String(requestData.url || cfg.apiUrl || '').trim();
     const requestProvider = requestData.url ? providerForUrl(requestUrl) : cfg.provider;
 
@@ -607,7 +610,8 @@ async function requestUntraced(spec = {}) {
         const choice = json.choices?.[0] || {};
         const content = choice.message?.content;
         const finishReason = choice.finish_reason || null;
-        const rawContent = typeof content === 'string' ? content.slice(0, 12000) : null;
+        const rawContent = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)
+            && typeof content === 'string' ? content.slice(0, 12000) : null;
         let data;
         if (finishReason === 'length') {
             return complete(requestData, cfg, 'output_truncated', startedAt, {
@@ -671,13 +675,13 @@ async function requestUntraced(spec = {}) {
 }
 
 async function request(spec = {}) {
-    const input = {
+    const input = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? {
         messages: spec.messages || [],
         responseSchema: spec.responseSchema?.name || null,
         model: spec.config?.model || config().model,
         interactive: spec.interactive === true
-    };
-    const metadata = {
+    } : null;
+    const metadata = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? {
         requestId: spec.requestId || null,
         sessionId: spec.sessionId || null,
         circuitKey: spec.circuitKey || null,
@@ -686,7 +690,7 @@ async function request(spec = {}) {
         botId: spec.botId || null,
         playerId: spec.playerId || null,
         turnId: spec.turnId || null
-    };
+    } : null;
     return LangfuseTracing.withObservation(
         'openrouter.generation',
         input,
@@ -791,6 +795,7 @@ const OpenRouterGateway = {
     },
 
     metrics() {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return { enabled: false };
         return {
             ...metrics,
             averageLatencyMs: metrics.total > 0 ? metrics.totalLatencyMs / metrics.total : 0,

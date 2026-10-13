@@ -1,4 +1,7 @@
-const VISIBILITY_RADIUS = 6000;
+const { DiagnosticMetricMap } = require('../Population/DiagnosticMetricMap');
+const DiagnosticConfig = require('../Population/PopulationConfig');
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
+const ActorQueries = require('../../World/ActorSpatialQueries');
 const FULL_ENTER_RADIUS = 3500;
 const FULL_EXIT_RADIUS = 4000;
 const PROMOTION_HOLD_MS = 8000;
@@ -73,10 +76,11 @@ const telemetry = {
     last: {},
     tickDurations: [],
     statusDurations: [],
-    subsystems: new Map()
+    subsystems: new DiagnosticMetricMap()
 };
 
 function increment(name, count = 1) {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     telemetry.counters[name] = Number(telemetry.counters[name] || 0) + Math.max(0, Number(count) || 0);
 }
 
@@ -92,7 +96,7 @@ function promote(session, reason = 'player_interaction', now = Date.now()) {
     return true;
 }
 
-function playerContext(session, realPlayers, now) {
+function playerContext(session, realPlayers, now, World = null) {
     const bot = session?.actor;
     if (!bot) return null;
     if (session.clanAllianceQuest) return 'player_clan_quest';
@@ -101,7 +105,8 @@ function playerContext(session, realPlayers, now) {
         const group = invoke('GameServer/Bot/AI/HotBackgroundParty').roster(session);
         if (group.some(member => member.actor?.state?.fetchHits?.() || member.actor?.state?.fetchCasts?.()
             || now - Number(member.incomingThreatAt || 0) < PLAYER_THREAT_HOLD_MS
-            || realPlayers.some(player => distance2d(member.actor, player.actor) <= VISIBILITY_RADIUS))) return 'hot_party';
+            || (World ? ActorQueries.near(World, member.actor, CLIENT_VISIBILITY_RADIUS, isRealPlayerSession).length > 0
+                : realPlayers.some(player => distance2d(member.actor, player.actor) <= CLIENT_VISIBILITY_RADIUS)))) return 'hot_party';
     }
     if (session.chatArrivalActive || session.inConversation || session.activeTrade || session.pendingPartyInvite) return 'player_interaction';
 
@@ -109,6 +114,17 @@ function playerContext(session, realPlayers, now) {
     const currentTargetId = Number(session.currentTargetId || bot.fetchDestId?.() || 0);
     const incomingThreatId = Number(session.incomingThreatId || 0);
     const incomingRecent = now - Number(session.incomingThreatAt || 0) <= PLAYER_THREAT_HOLD_MS;
+    if (World) {
+        // Current target, incoming actor and reverse selection are addressed;
+        // preserve registration order for the original reason precedence.
+        const candidates = new Set(World.actorPresenceSessions('onlineHuman', botId));
+        for (const id of [currentTargetId, incomingRecent ? incomingThreatId : 0]) {
+            const candidate = ActorQueries.byId(World, id);
+            if (candidate && isRealPlayerSession(candidate)) candidates.add(candidate);
+        }
+        realPlayers = [...candidates].sort((a, b) => World.registeredActorById(actorId(a.actor)).order
+            - World.registeredActorById(actorId(b.actor)).order);
+    }
     for (const playerSession of realPlayers) {
         const player = playerSession.actor;
         const playerId = actorId(player);
@@ -122,13 +138,15 @@ function playerContext(session, realPlayers, now) {
 function evaluate(session, sessions = [], now = Date.now()) {
     const bot = session?.actor;
     const state = stateFor(session);
-    const realPlayers = (Array.isArray(sessions) ? sessions : []).filter(isRealPlayerSession);
-    const nearestDistance = realPlayers.reduce((nearest, playerSession) => (
+    const World = ActorQueries.native(sessions) ? sessions : null;
+    const realPlayers = World ? [] : (Array.isArray(sessions) ? sessions : []).filter(isRealPlayerSession);
+    const nearest = World ? ActorQueries.nearestPlayer(World, bot) : null;
+    const nearestDistance = nearest ? nearest.distance : realPlayers.reduce((nearest, playerSession) => (
         Math.min(nearest, distance2d(bot, playerSession.actor))
     ), Infinity);
-    const context = playerContext(session, realPlayers, now);
+    const context = playerContext(session, realPlayers, now, World);
     if (context) promote(session, context, now);
-    const visibleCombat = nearestDistance <= VISIBILITY_RADIUS && !!(
+    const visibleCombat = nearestDistance <= CLIENT_VISIBILITY_RADIUS && !!(
         bot?.state?.fetchHits?.() || bot?.state?.fetchCasts?.() || bot?.state?.fetchCombats?.()
     );
     if (visibleCombat) promote(session, 'visible_combat', now);
@@ -142,12 +160,12 @@ function evaluate(session, sessions = [], now = Date.now()) {
     } else if (nearestDistance <= FULL_ENTER_RADIUS || (state.tier === 'full' && nearestDistance <= FULL_EXIT_RADIUS)) {
         tier = 'full';
         reason = state.tier === 'full' && nearestDistance > FULL_ENTER_RADIUS ? 'distance_hysteresis' : 'near_player';
-    } else if (nearestDistance <= VISIBILITY_RADIUS) {
+    } else if (nearestDistance <= CLIENT_VISIBILITY_RADIUS) {
         tier = 'visible';
         reason = 'far_visible';
     } else {
         tier = 'preload';
-        reason = realPlayers.length ? 'outer_preload' : 'no_real_players';
+        reason = (nearest ? nearest.count : realPlayers.length) ? 'outer_preload' : 'no_real_players';
     }
     state.tier = tier;
     state.reason = reason;
@@ -172,6 +190,7 @@ function shouldRefreshStatus(session, context, now = Date.now()) {
 
 function recordStatusRefresh(session, durationMs, now = Date.now()) {
     stateFor(session).lastStatusAt = now;
+    if (!DiagnosticConfig.developerDiagnostics) return;
     increment('statusRefreshes');
     telemetry.statusDurations.push(Math.max(0, Number(durationMs) || 0));
     if (telemetry.statusDurations.length > 512) telemetry.statusDurations.shift();
@@ -184,12 +203,14 @@ function budgetExceeded(context, tickStartedAt, now = Date.now()) {
 function recordDeferral() { increment('deferrals'); }
 
 function recordTick(tier, durationMs) {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     increment(tier === 'full' ? 'fullTicks' : tier === 'visible' ? 'visibleTicks' : 'preloadTicks');
     telemetry.tickDurations.push(Math.max(0, Number(durationMs) || 0));
     if (telemetry.tickDurations.length > 1024) telemetry.tickDurations.shift();
 }
 
 function recordPacketBroadcast(recipients, bytes) {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     const count = Math.max(0, Number(recipients) || 0);
     if (!count) { increment('packetSkips'); return; }
     increment('packetBroadcasts');
@@ -198,6 +219,7 @@ function recordPacketBroadcast(recipients, bytes) {
 }
 
 function recordSubsystem(name, durationMs, items = 0) {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     const key = String(name || 'unknown');
     const entry = telemetry.subsystems.get(key) || { durations: [], items: 0 };
     entry.durations.push(Math.max(0, Number(durationMs) || 0));
@@ -207,6 +229,7 @@ function recordSubsystem(name, durationMs, items = 0) {
 }
 
 function snapshot(sessions = []) {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     const population = { full: 0, visible: 0, preload: 0 };
     (Array.isArray(sessions) ? sessions : []).forEach((session) => {
         if (!isBotSession(session) || !session.actor) return;
@@ -221,7 +244,7 @@ function snapshot(sessions = []) {
         items: entry.items
     }]));
     const result = {
-        constants: { visibilityRadius: VISIBILITY_RADIUS, fullEnterRadius: FULL_ENTER_RADIUS, fullExitRadius: FULL_EXIT_RADIUS, promotionHoldMs: PROMOTION_HOLD_MS, fullAmbientTickMs: FULL_AMBIENT_TICK_MS, farVisibleTickMs: FAR_VISIBLE_TICK_MS, preloadTickMs: PRELOAD_TICK_MS, farVisibleTickBudgetMs: FAR_VISIBLE_TICK_BUDGET_MS },
+        constants: { visibilityRadius: CLIENT_VISIBILITY_RADIUS, fullEnterRadius: FULL_ENTER_RADIUS, fullExitRadius: FULL_EXIT_RADIUS, promotionHoldMs: PROMOTION_HOLD_MS, fullAmbientTickMs: FULL_AMBIENT_TICK_MS, farVisibleTickMs: FAR_VISIBLE_TICK_MS, preloadTickMs: PRELOAD_TICK_MS, farVisibleTickBudgetMs: FAR_VISIBLE_TICK_BUDGET_MS },
         population,
         counters: { ...telemetry.counters },
         delta,
@@ -231,12 +254,12 @@ function snapshot(sessions = []) {
     };
     telemetry.tickDurations = [];
     telemetry.statusDurations = [];
-    telemetry.subsystems = new Map();
+    telemetry.subsystems = new DiagnosticMetricMap();
     return result;
 }
 
 module.exports = {
-    VISIBILITY_RADIUS, FULL_ENTER_RADIUS, FULL_EXIT_RADIUS, PROMOTION_HOLD_MS, FAR_VISIBLE_TICK_MS, PRELOAD_TICK_MS,
+    VISIBILITY_RADIUS: CLIENT_VISIBILITY_RADIUS, FULL_ENTER_RADIUS, FULL_EXIT_RADIUS, PROMOTION_HOLD_MS, FAR_VISIBLE_TICK_MS, PRELOAD_TICK_MS,
     evaluate, nextTickDelay, promote, shouldRefreshStatus, recordStatusRefresh, budgetExceeded, recordDeferral,
     recordTick, recordPacketBroadcast, recordSubsystem, snapshot, isRealPlayerSession
 };

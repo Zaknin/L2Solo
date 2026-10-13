@@ -1,12 +1,16 @@
 // Based on the C4 L2J mapRegions/restartPoints data. Restart regions are
 // deliberately geographical, not a straight-line nearest-city calculation.
+const Karma = require('../Karma');
+
 const TOWNS = {
     aden_town: { name: 'Aden', locX: 146737, locY: 25807, locZ: -2008 },
     de_village: { name: 'Dark Elven Village', locX: 9670, locY: 15537, locZ: -4576 },
     dion_town: { name: 'Dion', locX: 15631, locY: 142885, locZ: -2704 },
     dwarven_village: { name: 'Dwarven Village', locX: 115072, locY: -178176, locZ: -880 },
     elven_village: { name: 'Elven Village', locX: 46926, locY: 51511, locZ: -2976 },
-    floran_village: { name: 'Floran Village', locX: 17144, locY: 170156, locZ: -3504 },
+    // Floran's centre is its village (shops, nearest town), but C4 restarts a
+    // death in its map cell at Dion (zone_respawn.txt, restart_points.xml).
+    floran_village: { name: 'Floran Village', locX: 17144, locY: 170156, locZ: -3504, respawnTown: 'dion_town' },
     giran_town: { name: 'Giran', locX: 83396, locY: 147904, locZ: -3400 },
     gludin_village: { name: 'Gludin', locX: -80752, locY: 149776, locZ: -3040 },
     gludio_town: { name: 'Gludio', locX: -12736, locY: 122816, locZ: -3112 },
@@ -122,7 +126,8 @@ function getClosestTown(locX, locY, locZ) {
 }
 
 function getRespawnCoords(locX, locY, locZ) {
-    const town = getClosestTown(locX, locY, locZ);
+    const closest = getClosestTown(locX, locY, locZ);
+    const town = TOWNS[closest.respawnTown] || closest;
     return {
         locX: town.locX + GATEKEEPER_RESPAWN_OFFSET.locX,
         locY: town.locY + GATEKEEPER_RESPAWN_OFFSET.locY,
@@ -143,11 +148,26 @@ function getChaoticRespawnCoords(locX, locY, locZ, random = Math.random) {
     return { locX: respawnX, locY: respawnY, locZ: respawnZ };
 }
 
+// Where a character restarts in town (restart after death, Scroll of Escape
+// recall, a bot's death respawn): with karma the region's PK point, otherwise
+// the town gatekeeper.
+function restartCoords(actor) {
+    return Karma.closesTowns(actor.fetchKarma?.())
+        ? getChaoticRespawnCoords(actor.fetchLocX(), actor.fetchLocY(), actor.fetchLocZ())
+        : getRespawnCoords(actor.fetchLocX(), actor.fetchLocY(), actor.fetchLocZ());
+}
+
 module.exports = {
     towns: TOWNS,
+    // Immutable native regional rules for resumable worker route preparation.
+    regionIndex: Object.freeze({ cells: Object.freeze({ ...CELL_TO_GROUP }),
+        dungeons: Object.freeze(DUNGEON_REGION_OVERRIDES.map(row => Object.freeze({ ...row }))),
+        zones: Object.freeze(RESPAWN_ZONES.map(row => Object.freeze({ group: row.group,
+            points: Object.freeze(row.points.map(point => Object.freeze([...point]))) }))) }),
     getClosestTown,
     getRegionGroup,
     getRespawnCoords,
     getChaoticRespawnCoords,
+    restartCoords,
     CHAOTIC_RESPAWNS
 };

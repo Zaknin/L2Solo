@@ -5,6 +5,20 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     appliedAt INTEGER NOT NULL
 );
 
+-- History rows on their way to the history file (src/HistoryStore.js,
+-- database/sql/history.sql): written in the world transaction, moved and
+-- deleted by the history thread.
+CREATE TABLE IF NOT EXISTS history_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS world_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS maintenance_tasks (
     name TEXT PRIMARY KEY,
     completedAt INTEGER NOT NULL
@@ -156,23 +170,6 @@ CREATE TABLE IF NOT EXISTS clan_warehouse_reservations (
 CREATE INDEX IF NOT EXISTS clan_warehouse_reservations_active
     ON clan_warehouse_reservations(clanId, selfId, status, updatedAt);
 
-CREATE TABLE IF NOT EXISTS clan_goal_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    clanId INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
-    eventType TEXT NOT NULL,
-    goalType TEXT NOT NULL DEFAULT '',
-    plan TEXT NOT NULL DEFAULT '',
-    reasonCode TEXT NOT NULL DEFAULT '',
-    payloadJson TEXT NOT NULL DEFAULT '{}',
-    occurredAt INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS clan_goal_events_clan_recent
-    ON clan_goal_events(clanId, occurredAt DESC, id DESC);
-CREATE INDEX IF NOT EXISTS clan_goal_events_uncompacted_details
-    ON clan_goal_events(occurredAt, id)
-    WHERE eventType IN ('action_succeeded', 'action_failed', 'action_cancelled')
-      AND payloadJson <> '{}';
-
 CREATE TABLE IF NOT EXISTS clan_market_demands (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     clanId INTEGER NOT NULL REFERENCES clans(id) ON DELETE CASCADE,
@@ -271,10 +268,6 @@ CREATE INDEX IF NOT EXISTS clan_actions_due
     ON clan_actions(status, availableAt, priority DESC, id ASC);
 CREATE INDEX IF NOT EXISTS clan_actions_clan_status
     ON clan_actions(clanId, status, updatedAt DESC, id DESC);
-CREATE INDEX IF NOT EXISTS clan_actions_uncompacted_details
-    ON clan_actions(resolvedAt, id)
-    WHERE status IN ('succeeded', 'failed', 'cancelled')
-      AND (payloadJson <> '{}' OR resultJson <> '{}');
 
 CREATE TABLE IF NOT EXISTS clan_crests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,7 +309,9 @@ CREATE TABLE IF NOT EXISTS afk_trade_shops (
     revision INTEGER NOT NULL DEFAULT 1,
     createdAt INTEGER NOT NULL,
     updatedAt INTEGER NOT NULL,
-    closedAt INTEGER
+    closedAt INTEGER,
+    kind TEXT NOT NULL DEFAULT 'shop' CHECK(kind IN ('shop', 'sell_ad', 'buy_ad', 'order')),
+    expiresAt INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS afk_trade_shops_active_owner
     ON afk_trade_shops(ownerId) WHERE status = 'active';
@@ -342,64 +337,21 @@ CREATE TABLE IF NOT EXISTS afk_trade_lines (
 CREATE INDEX IF NOT EXISTS afk_trade_lines_shop_item
     ON afk_trade_lines(shopId, selfId, count);
 
-CREATE TABLE IF NOT EXISTS afk_trade_events (
+-- What a deal or a closed record owes a cold bot: it reaches the bot's bag
+-- at its next save (the worker's commit or a main-thread settle).
+CREATE TABLE IF NOT EXISTS board_settlements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shopId INTEGER REFERENCES afk_trade_shops(id) ON DELETE SET NULL,
     ownerId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    counterpartyId INTEGER REFERENCES characters(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('sale', 'purchase')),
     selfId INTEGER NOT NULL,
-    itemName TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
     amount INTEGER NOT NULL CHECK(amount > 0),
-    unitPrice INTEGER NOT NULL CHECK(unitPrice >= 0),
-    totalPrice INTEGER NOT NULL CHECK(totalPrice >= 0),
-    createdAt INTEGER NOT NULL,
-    deliveredAt INTEGER
+    enchant INTEGER NOT NULL DEFAULT 0,
+    slot INTEGER NOT NULL DEFAULT 0,
+    stackable INTEGER NOT NULL DEFAULT 0,
+    petData TEXT,
+    createdAt INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS afk_trade_events_owner_delivery
-    ON afk_trade_events(ownerId, deliveredAt, id);
-
-CREATE TABLE IF NOT EXISTS market_trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    eventKey TEXT NOT NULL UNIQUE,
-    occurredAt INTEGER NOT NULL,
-    channel TEXT NOT NULL,
-    sourceType TEXT NOT NULL DEFAULT '',
-    selfId INTEGER NOT NULL,
-    itemName TEXT NOT NULL DEFAULT '',
-    quantity INTEGER NOT NULL CHECK(quantity > 0),
-    unitPrice INTEGER NOT NULL CHECK(unitPrice >= 0),
-    totalPrice INTEGER NOT NULL CHECK(totalPrice >= 0),
-    town TEXT,
-    sellerCharacterId INTEGER,
-    sellerName TEXT,
-    buyerCharacterId INTEGER,
-    buyerName TEXT
-);
-CREATE INDEX IF NOT EXISTS market_trades_item_recent
-    ON market_trades(selfId, occurredAt DESC, id DESC);
-CREATE INDEX IF NOT EXISTS market_trades_recent
-    ON market_trades(occurredAt DESC, id DESC);
-CREATE INDEX IF NOT EXISTS market_trades_town_recent
-    ON market_trades(town, occurredAt DESC, id DESC);
-INSERT OR IGNORE INTO market_trades (
-    eventKey, occurredAt, channel, sourceType, selfId, itemName,
-    quantity, unitPrice, totalPrice, town,
-    sellerCharacterId, sellerName, buyerCharacterId, buyerName
-)
-SELECT 'afk:' || events.id, events.createdAt,
-    CASE events.kind WHEN 'purchase' THEN 'wtb' ELSE 'player_wts' END,
-    CASE events.kind WHEN 'purchase' THEN 'afk_player_buy_store' ELSE 'afk_player_store' END,
-    events.selfId, events.itemName, events.amount, events.unitPrice, events.totalPrice,
-    shops.town,
-    CASE events.kind WHEN 'purchase' THEN events.counterpartyId ELSE events.ownerId END,
-    CASE events.kind WHEN 'purchase' THEN counterparty.name ELSE owner.name END,
-    CASE events.kind WHEN 'purchase' THEN events.ownerId ELSE events.counterpartyId END,
-    CASE events.kind WHEN 'purchase' THEN owner.name ELSE counterparty.name END
-FROM afk_trade_events events
-LEFT JOIN afk_trade_shops shops ON shops.id = events.shopId
-LEFT JOIN characters owner ON owner.id = events.ownerId
-LEFT JOIN characters counterparty ON counterparty.id = events.counterpartyId;
+CREATE INDEX IF NOT EXISTS board_settlements_owner ON board_settlements(ownerId);
 
 CREATE TABLE IF NOT EXISTS character_recipes (
     characterId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -509,13 +461,20 @@ CREATE TABLE IF NOT EXISTS bot_life_state (
     partyObjectiveSpot TEXT GENERATED ALWAYS AS (
         COALESCE(
             json_extract(statsJson, '$.partyRequest.spotId'),
-            json_extract(statsJson, '$.equipmentPlan.next.spotId'),
+            CASE WHEN json_extract(statsJson, '$.equipmentPlan.status') = 'active'
+                THEN json_extract(statsJson, '$.equipmentPlan.next.spotId') END,
             spotId
         )
     ) VIRTUAL
 );
 CREATE INDEX IF NOT EXISTS bot_life_state_phase_nextResolveAt ON bot_life_state(phase, nextResolveAt);
 CREATE INDEX IF NOT EXISTS bot_life_state_phase_partyId ON bot_life_state(phase, partyId);
+CREATE TABLE IF NOT EXISTS bot_market_counts (
+    characterId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    counter TEXT NOT NULL,
+    deals INTEGER NOT NULL,
+    PRIMARY KEY(characterId, counter)
+);
 CREATE INDEX IF NOT EXISTS bot_life_state_accountName ON bot_life_state(accountName);
 CREATE INDEX IF NOT EXISTS bot_life_state_characterName ON bot_life_state(characterName COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS bot_life_state_market_reconcile ON bot_life_state(phase, updatedAt, characterId);
@@ -532,33 +491,13 @@ CREATE TABLE IF NOT EXISTS bot_personas (
     primaryDrive TEXT NOT NULL,
     archetype TEXT NOT NULL,
     traitsJson TEXT NOT NULL,
+    inclinationsJson TEXT NOT NULL DEFAULT '{}',
     textCard TEXT NOT NULL DEFAULT '',
     createdAt INTEGER NOT NULL DEFAULT 0,
     updatedAt INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS bot_personas_primaryDrive ON bot_personas(primaryDrive);
 CREATE INDEX IF NOT EXISTS bot_personas_archetype ON bot_personas(archetype);
-
-CREATE TABLE IF NOT EXISTS bot_social_memory (
-    playerId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    botId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    playerName TEXT NOT NULL DEFAULT '',
-    botName TEXT NOT NULL DEFAULT '',
-    trust INTEGER NOT NULL DEFAULT 0,
-    familiarity INTEGER NOT NULL DEFAULT 0,
-    lastGroupedAt INTEGER,
-    groupRuns INTEGER NOT NULL DEFAULT 0,
-    wipesTogether INTEGER NOT NULL DEFAULT 0,
-    helpedInCombat INTEGER NOT NULL DEFAULT 0,
-    gaveUsefulLoot INTEGER NOT NULL DEFAULT 0,
-    ignoredLootRequests INTEGER NOT NULL DEFAULT 0,
-    tradesCompleted INTEGER NOT NULL DEFAULT 0,
-    insults INTEGER NOT NULL DEFAULT 0,
-    recentlyAbandonedAt INTEGER,
-    notes TEXT,
-    updatedAt INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(playerId, botId)
-);
 
 CREATE TABLE IF NOT EXISTS bot_conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -697,18 +636,6 @@ CREATE TABLE IF NOT EXISTS bot_friend_roster (
     PRIMARY KEY (playerId, botId)
 );
 CREATE INDEX IF NOT EXISTS bot_friend_roster_player ON bot_friend_roster(playerId, selectedAt);
-
-CREATE TABLE IF NOT EXISTS bot_life_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    characterId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
-    eventType TEXT NOT NULL,
-    summary TEXT NOT NULL DEFAULT '',
-    weight INTEGER NOT NULL DEFAULT 1,
-    createdAt INTEGER NOT NULL DEFAULT 0,
-    metaJson TEXT
-);
-CREATE INDEX IF NOT EXISTS bot_life_events_character_weight_created ON bot_life_events(characterId, weight DESC, createdAt DESC);
-CREATE INDEX IF NOT EXISTS bot_life_events_recent ON bot_life_events(createdAt DESC, weight DESC);
 
 CREATE TABLE IF NOT EXISTS bot_background_parties (
     partyId TEXT PRIMARY KEY,

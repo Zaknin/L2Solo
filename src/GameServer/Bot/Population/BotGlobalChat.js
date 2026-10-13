@@ -1,3 +1,4 @@
+const ActorQueries = require('../../World/ActorSpatialQueries');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const Voice = invoke('GameServer/Bot/AI/BotChatVoice');
 const Reactions = invoke('GameServer/Bot/AI/BotChatReactions');
@@ -14,7 +15,7 @@ const lastTextByTopic = new Map();
 
 function realPlayerSessions() {
     const World = invoke('GameServer/World/World');
-    return (World.user?.sessions || []).filter((session) => (
+    return ActorQueries.humans(World).filter((session) => (
         session.socket && typeof session.socket.write === 'function' &&
         session.accountId && !String(session.accountId).startsWith('bot_')
     ));
@@ -49,7 +50,7 @@ function deliverReaction(source, text, topic, now) {
     nextGlobalAt = Math.max(now, nextGlobalAt) + Config.globalChatMinIntervalMs;
     recent.push({ id: actor.fetchId(), topic: `reply:${topic}`, at: now });
     if (recent.length > 128) recent.shift();
-    console.info('BotGlobalChat :: %s replied to %s: %s', actor.fetchName(), topic, text);
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotGlobalChat :: %s replied to %s: %s', actor.fetchName(), topic, text);
     return true;
 }
 
@@ -74,7 +75,7 @@ function send(actor, topic, templates, now, source) {
     nextGlobalAt = now + Config.globalChatMinIntervalMs * (1 + Math.random() * 0.75);
     recent.push({ id, topic, at: now });
     if (recent.length > 128) recent.shift();
-    console.info('BotGlobalChat :: %s announced %s: %s', actor.fetchName(), topic, text);
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotGlobalChat :: %s announced %s: %s', actor.fetchName(), topic, text);
     Reactions.openGlobal(source, topic, now);
     return true;
 }

@@ -8,6 +8,10 @@ const ITEM_ICON_MANIFEST_PATH = path.join(ITEM_ICON_CATALOG_DIR, 'index.json');
 const KNOWLEDGE_BASE_DIR = path.join(__dirname, '..', '..', 'data', 'KnowledgeBase');
 const { searchPlayers } = require('./CharacterSearch');
 const { createKnowledgeBaseService } = require('./KnowledgeBaseService');
+const { createJsonResponseCache, sendCachedJson } = require('./JsonResponseCache');
+const marketJson = createJsonResponseCache(() => marketSnapshot());
+const ActorEconomy = require('./ActorEconomyProjection');
+const { createActorCollections } = require('./ActorCollections');
 const BotBrainContext = invoke('GameServer/Bot/AI/BotBrainContext');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
@@ -1639,15 +1643,65 @@ function compactActorClan(subject) {
     };
 }
 
+function observerItem(selfId) {
+    const meta = knowledgeBaseService().itemOverview(Number(selfId));
+    return { selfId: Number(selfId), name: meta?.name || `Item ${selfId}`,
+        iconUrl: meta?.iconUrl || null, grade: meta?.grade || null };
+}
+
+function observerWishName(kind, reference) {
+    if (kind === 'henna') {
+        const symbol = invoke('GameServer/Henna/HennaRules').symbol(reference);
+        return symbol ? ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN'].filter(stat => Number(symbol[stat]))
+            .map(stat => `${stat} ${Number(symbol[stat]) > 0 ? '+' : ''}${symbol[stat]}`).join(' · ') : null;
+    }
+    if (kind === 'book') {
+        const book = invoke('GameServer/Skills/SkillBookCatalog').bookFor(reference);
+        return book ? observerItem(book).name.replace(/^Spellbook:\s*/i, '') : null;
+    }
+    return null;
+}
+
+function actorEconomy(state, session = null) {
+    const decisionStats = { ...state?.stats, ...session?.decisionStats };
+    const held = session && session.economySeq === Number(decisionStats.decisionSeq || 0) ? session.heldEconomy?.statsPacket : null;
+    const stats = { ...decisionStats, ...held };
+    const decision = !session && state ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.inspect(state) : null;
+    const activity = held ? session.heldEconomy.network?.activity : decision?.activity;
+    return ActorEconomy.project({ ...state, stats,
+        adena: session?.actor?.backpack?.fetchTotalAdena?.() ?? state?.adena }, { itemFor: observerItem, wishName: observerWishName, activity });
+}
+
+async function collectionSubject(kind, id) {
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    if (kind === 'bot') {
+        const session = invoke('GameServer/Bot/BotManager').findSessionById(id);
+        const state = session?.coldLifeState || await invoke('GameServer/Bot/Population/BotLifeState').findByCharacterId(id);
+        return session?.actor || state ? { actor: session?.actor || null, state, session } : null;
+    }
+    const session = realPlayerSessions().find(row => Number(row.actor?.fetchId?.()) === id);
+    if (session?.actor) return { actor: session.actor, state: null, session };
+    const rows = await Database.execute(['SELECT id, username FROM characters WHERE id = ?', [id]], 'observer:profile-owner');
+    return rows[0] && !/^(bot_|afk_trade_)/.test(rows[0].username) ? { actor: null, state: null } : null;
+}
+
+const actorCollection = createActorCollections({ subjectFor: collectionSubject,
+    execute: query => Database.execute(query, 'observer:profile-collection'), itemFor: observerItem,
+    shopsFor: id => Database.fetchAfkTradeShops(id, { activeOnly: true }),
+    enemiesFor: subject => invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(
+        subject.session?.pvpEnemyMemory || subject.state?.stats?.pvpEnemies) });
+
 function compactHotDetail(status, session) {
-    const context = BotBrainContext.compactStatus(session, status, '', {
+    const context = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? BotBrainContext.compactStatus(session, status, '', {
         includeInventory: false,
         includeSkills: false
-    });
+    }) : null;
     const pkIds = isPkActor(session?.actor) ? new Set([Number(status.id)]) : new Set();
     return {
         ...compactHotBot(status, pkIds, session),
         kind: 'bot',
+        economy: actorEconomy(session.coldLifeState || invoke('GameServer/Bot/Population/BotLifeState').cachedState(status.id), session),
+        pvp: session.actor?.fetchPvp?.(), pk: session.actor?.fetchPk?.(), karma: session.actor?.fetchKarma?.(),
         clan: compactActorClan(session?.actor),
         vitals: fullVitals(status.vitals),
         movement: status.movement || null,
@@ -1658,15 +1712,15 @@ function compactHotDetail(status, session) {
         buffs: context?.buffs || status.buffs || null,
         debuffs: status.debuffs || [],
         timers: status.timers || {},
-        decisions: Object.fromEntries(Object.entries(status.decisions || {}).map(([key, value]) => [key, compactDecision(value)])),
-        enemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session),
-        interactionMemory: invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(status.id)),
+        decisions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? Object.fromEntries(Object.entries(status.decisions || {}).map(([key, value]) => [key, compactDecision(value)])) : null,
+        enemies: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session) : null,
+        interactionMemory: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(status.id)) : null,
         build: compactBuild(status.build),
-        equipment: compactEquipment(context?.equipment),
+        equipment: context ? compactEquipment(context.equipment) : liveEquipment(session?.actor),
         persona: status.persona || null,
         social: status.social || null,
         ambient: status.ambient || null,
-        inference: status.inference || null,
+        inference: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? status.inference || null : null,
         updatedAt: Date.now()
     };
 }
@@ -1706,9 +1760,9 @@ function compactPlayerDetail(session) {
         pvp: Number(actor.fetchPvp?.() || 0),
         pk: Number(actor.fetchPk?.() || 0),
         karma: Number(actor.fetchKarma?.() || 0),
-        movementPacketTrace: Array.isArray(session.movementPacketTrace)
+        movementPacketTrace: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && Array.isArray(session.movementPacketTrace)
             ? session.movementPacketTrace.slice(-160)
-            : [],
+            : null,
         updatedAt: Date.now()
     };
 }
@@ -1791,8 +1845,10 @@ function compactColdDetail(state, leaderState = null) {
     return {
         ...compact,
         kind: 'bot',
-        enemies: invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(stats.pvpEnemies),
-        interactionMemory: invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(state.characterId)),
+        economy: actorEconomy(state),
+        pvp: state.pvp, pk: state.pk, karma: state.karma ?? stats.karma,
+        enemies: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(stats.pvpEnemies) : null,
+        interactionMemory: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(state.characterId)) : null,
         clan: compactActorClan(state),
         classId,
         className: className(classId),
@@ -1824,7 +1880,7 @@ function compactColdDetail(state, leaderState = null) {
             adenaEarned: Number(stats.adenaEarned || 0),
             partyGearReceived: Number(stats.partyGearReceived || 0)
         },
-        lastResolve: lastResolve ? {
+        lastResolve: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && lastResolve ? {
             route: lastResolve.route || null,
             targetNpcId: Number(lastResolve.targetNpcId || 0) || null,
             fights: Number(lastResolve.fights || 0),
@@ -1833,8 +1889,8 @@ function compactColdDetail(state, leaderState = null) {
         } : null,
         plan: compactColdPlan(state),
         travel: stats.travel || null,
-        goal: stats.goal || null,
-        persona: BotPersona.generate(state),
+        goal: stats.acquisitionGoal || stats.goal || null,
+        persona: BotPersona.of(state),
         updatedAt: state.updatedAt || 0
     };
 }
@@ -2065,27 +2121,32 @@ async function worldBootstrap() {
 
 function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
-    const memory = process.memoryUsage();
+    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
     return {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
         uptimeMs: Math.round(process.uptime() * 1000),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null,
-        coldCompetitionActions: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null,
-        hotCompetitionActions: invoke('GameServer/Bot/AI/HotResourceCompetition').report,
-        partyReviews: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null,
-        clanSocial: invoke('GameServer/Clan/ClanSocialRuntime').summary(),
-        runtime: {
+        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
+        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
+        hotCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
+        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
+        clanSocial: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
+        runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
+            developerDiagnostics: {
+                main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
+                worker: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.developerDiagnostics || null,
+                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false }
+            },
             townNavigation: {
                 paths: invoke('GameServer/Bot/AI/TownNavigation').forPool(invoke('GameServer/Geodata/PathfindingWorkerPool')).stats(),
                 workers: invoke('GameServer/Geodata/PathfindingWorkerPool').stats(),
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
-        }
+        } : null
     };
 }
 
@@ -2161,7 +2222,7 @@ async function snapshot() {
     const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
     const { hotBots, bots, players } = await collectWorldActors();
-    const memory = process.memoryUsage();
+    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
 
     return LifeEvents.recent(18).then((events) => ({
         generatedAt: Date.now(),
@@ -2173,10 +2234,10 @@ async function snapshot() {
         classes: classCatalog(),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null,
-        coldCompetitionActions: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null,
-        partyReviews: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null,
-        runtime: {
+        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
+        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
+        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
+        runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
             townNavigation: {
@@ -2184,7 +2245,7 @@ async function snapshot() {
                 workers: invoke('GameServer/Geodata/PathfindingWorkerPool').stats(),
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
-        },
+        } : null,
         players,
         bots,
         stats: {
@@ -2202,15 +2263,15 @@ async function snapshot() {
 function snapshotJson(now = Date.now()) {
     const ttlMs = observerCacheTtl(now);
     if (snapshotCache.json && now - snapshotCache.generatedAt < ttlMs) {
-        snapshotCache.hits += 1;
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.hits += 1;
         return Promise.resolve(snapshotCache.json);
     }
     if (snapshotCache.inFlight) {
-        snapshotCache.hits += 1;
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.hits += 1;
         return snapshotCache.inFlight;
     }
 
-    snapshotCache.builds += 1;
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.builds += 1;
     snapshotCache.inFlight = Promise.resolve()
         .then(() => snapshot())
         .then((data) => JSON.stringify(data))
@@ -2235,7 +2296,7 @@ async function botDetail(characterId) {
     const BotManager = invoke('GameServer/Bot/BotManager');
     const hotSession = BotManager.findSessionById(id);
     if (hotSession?.actor) {
-        await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
+        if (PopulationConfig.developerDiagnostics) await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
         const status = BotManager.getBotStatus(hotSession);
         return status?.available ? compactHotDetail(status, hotSession) : null;
     }
@@ -2243,7 +2304,7 @@ async function botDetail(characterId) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
     const state = await LifeState.findByCharacterId(id);
     if (!state) return null;
-    await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
+    if (PopulationConfig.developerDiagnostics) await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
 
     const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0) || null;
     let leaderState = leaderId === id ? state : null;
@@ -2263,8 +2324,8 @@ async function botDetail(characterId) {
             leaderState = await LifeState.findByCharacterId(leaderId);
         }
     }
-    const rows = await Database.execute(['SELECT karma FROM characters WHERE id = ?', [id]]);
-    return compactColdDetail({ ...state, karma: Number(rows[0]?.karma || 0) }, leaderState);
+    const rows = await Database.execute(['SELECT karma, pvp, pk FROM characters WHERE id = ?', [id]]);
+    return compactColdDetail({ ...state, karma: Number(rows[0]?.karma || 0), pvp: rows[0]?.pvp, pk: rows[0]?.pk }, leaderState);
 }
 
 async function actorDetail(kind, characterId) {
@@ -2516,7 +2577,7 @@ function route(request, response) {
 
     if (url.pathname === '/observer/api/clans/social') {
         if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
-        sendJson(response, invoke('GameServer/Clan/ClanSocialRuntime').inspect());
+        sendJson(response, (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').inspect() : { enabled: false });
         return;
     }
     if (url.pathname === '/observer/api/world/status') {
@@ -2551,8 +2612,8 @@ function route(request, response) {
             response.end();
             return;
         }
-        marketSnapshot()
-            .then((data) => sendJson(response, data))
+        marketJson()
+            .then((entry) => sendCachedJson(request, response, entry))
             .catch((err) => sendJson(response, { error: err.message }, 500));
         return;
     }
@@ -2794,6 +2855,16 @@ function route(request, response) {
         return;
     }
 
+    const collectionMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)\/(inventory|warehouse|skills|pvp|board)$/);
+    if (collectionMatch) {
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        actorCollection(collectionMatch[1], Number(collectionMatch[2]), collectionMatch[3], {
+            offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 100)
+        }).then(data => sendJson(response, data || { error: 'Character not found' }, data ? 200 : 404))
+            .catch(error => sendJson(response, { error: error.message }, error.message === 'invalid_profile_collection' ? 400 : 500));
+        return;
+    }
+
     const actorMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)$/);
     if (actorMatch) {
         actorDetail(actorMatch[1], actorMatch[2])
@@ -2909,8 +2980,10 @@ const WorldObserverServer = {
     worldStatus,
     marketSnapshot,
     marketHistorySnapshot,
+    actorCollection,
     observerCacheTtl,
     snapshotCacheStats() {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return { enabled: false };
         return {
             generatedAt: snapshotCache.generatedAt,
             etag: snapshotCache.etag,

@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const World          = invoke('GameServer/World/World');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -54,6 +55,7 @@ const SUPPORT_APPROACH_REPATH_MS = 1500;
 const SUPPORT_TARGET_DRIFT = 120;
 
 function timedFollowingStage(name, callback, items = 1) {
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics !== true) return callback();
     const startedAt = performance.now();
     try {
         return callback();
@@ -215,17 +217,10 @@ function companionTownErrand(session, bot, player, BotAI) {
     });
     const afkBuyer = TradeService.findAfkBuyerForActor(bot, town, session.coldLifeState);
     if (afkBuyer && (!buyer || Number(afkBuyer.score) >= Number(buyer.preview?.totalAdena || 0))) {
-        const offer = afkBuyer.offer;
         return {
             kind: 'sell_resources',
-            target: {
-                actorId: offer.projection.actor.fetchId(),
-                name: offer.sourceName,
-                locX: offer.locX,
-                locY: offer.locY,
-                locZ: offer.locZ,
-                town: offer.town || town.name
-            }
+            target: { ...invoke('GameServer/Bot/Economy/MarketOpportunity').offerTarget(afkBuyer.offer, town.name),
+                sale: afkBuyer.sale }
         };
     }
     if (buyer) {
@@ -373,6 +368,7 @@ function recordRoleDecision(session, bot, action, reason, extra = {}) {
 
     session.roleDecision = current;
 
+    if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return;
     const signature = roleDecisionSignature(current);
     const shouldLog = !previous ||
         roleDecisionSignature(previous) !== signature ||
@@ -386,7 +382,7 @@ function recordRoleDecision(session, bot, action, reason, extra = {}) {
             current.threatSource && `source=${current.threatSource}`,
             current.phase && `phase=${current.phase}`
         ].filter(Boolean).join(' ');
-        console.info("BotRole :: %s %s/%s (%s)%s", bot.fetchName(), action, reason, role, details ? ` ${details}` : '');
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotRole :: %s %s/%s (%s)%s", bot.fetchName(), action, reason, role, details ? ` ${details}` : '');
     }
 }
 
@@ -829,7 +825,7 @@ function deliverPurchasedResources(session, bot, playerSession) {
             key: `resource-delivery-failed:${bot.fetchId()}:${delivery.purchasedAt}`,
             templates: [`I brought ${delivery.itemName}, but could not open trade (${trade.reason}).`]
         });
-        WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
             botId: bot.fetchId(),
             playerId: delivery.playerId,
             amount: delivery.amount
@@ -843,7 +839,7 @@ function deliverPurchasedResources(session, bot, playerSession) {
         key: `resource-delivery:${bot.fetchId()}:${delivery.purchasedAt}`,
         templates: [`I brought ${delivery.amount} ${delivery.itemName}. Please confirm the trade.`]
     });
-    WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
         botId: bot.fetchId(),
         playerId: delivery.playerId,
         amount: delivery.amount,
@@ -864,6 +860,7 @@ module.exports = {
             session.plan = 'hunting';
             session.followPlayerSession = null;
             session.roleDecision = null;
+            refreshPartyMemberships([session], invoke);
             return;
         }
 
@@ -1080,7 +1077,18 @@ module.exports = {
         // report no movement even though its server-stepped route is healthy.
         // A truly distant puller may still use the normal catch-up teleport.
         const pullerTravelling = activeBotPullTravel(session, pulling);
-        if (session.companionTownTransit || distance > FOLLOW_TELEPORT_DISTANCE) {
+        // Neither a gatekeeper transit nor a catch-up teleport takes a
+        // companion with karma into a town; it waits where it is.
+        const waitsOutsideTown = PartyCompanionService.staysOutOfTown(bot, loc(player));
+        if (waitsOutsideTown && !partyThreat) {
+            if (session.lastFollowMoveTarget) {
+                bot.automation?.abortAll?.(bot);
+                session.lastFollowMoveTarget = null;
+            }
+            recordRoleDecision(session, bot, 'hold_position', 'karma_keeps_out_of_town');
+            return;
+        }
+        if (!waitsOutsideTown && (session.companionTownTransit || distance > FOLLOW_TELEPORT_DISTANCE)) {
             const transit = CompanionTownTransit.tick(session, bot, player);
             if (transit.handled) {
                 session.stuckTicks = 0;
@@ -1093,7 +1101,8 @@ module.exports = {
         }
         const separatedInsideTown = distance > FOLLOW_TELEPORT_DISTANCE
             && CompanionTownTransit.sameTown(bot, player);
-        if (!pullerTravelling && (session.stuckTicks >= 3 || (distance > FOLLOW_TELEPORT_DISTANCE && !separatedInsideTown))) {
+        if (!waitsOutsideTown && !pullerTravelling
+            && (session.stuckTicks >= 3 || (distance > FOLLOW_TELEPORT_DISTANCE && !separatedInsideTown))) {
             session.stuckTicks = 0;
             recordRoleDecision(session, bot, 'follow_leader', distance > FOLLOW_TELEPORT_DISTANCE ? 'catch_up' : 'unstuck');
             const TeleportTo = invoke('GameServer/Actor/Generics/TeleportTo');

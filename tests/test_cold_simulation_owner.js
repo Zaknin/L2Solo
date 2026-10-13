@@ -1,3 +1,4 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -139,7 +140,7 @@ function state(characterId, revision, activity = 'hunting') {
     });
     assert.strictEqual(invalidPatch.reason, 'invalid_patch', 'gateway must reject fields outside the explicit bridge protocol');
 
-    const renewed = await Owner.renewActiveLeases({ timestamp: 2000, leaseMs: 5000 });
+    const renewed = await Owner.renewActiveLeases([first], { now: () => 2000, leaseMs: 5000, canRenew: () => true });
     assert.strictEqual(renewed.length, 1, 'active cold ownership must be renewable before its lease expires');
     assert.strictEqual(renewed[0].ok, true);
     assert.strictEqual(renewed[0].leaseUntil, 7000, 'renewal must extend the lease from the renewal timestamp');

@@ -32,8 +32,8 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
         coldCompetition: { ...s.stats?.coldCompetition, avoid } } } : s);
     const route = avoiding ? retreatRoute(actorMembers, sides[0].party, event, at) : null;
     if (avoiding && (!route?.needed || !route.spotId || route.spotId === event.spotId)) return { ok: false, reason: 'no_retreat_route' };
-    const { beginRouteTravelState } = require('./ColdSimulationKernel');
-    const travelling = avoiding ? actorMembers.map(s => beginRouteTravelState(s, route, at)) : [];
+    const { beginHuntingTrip } = require('./HuntingTravel');
+    const travelling = avoiding ? actorMembers.map(s => beginHuntingTrip(s, route, at)) : [];
     if (avoiding && travelling.some(s => !s)) return { ok: false, reason: 'invalid_retreat_route' };
     const preparedParties = sides.map((side, i) => {
         if (!side.party) return null;
@@ -70,7 +70,7 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
         const results = await owner.commitAndReleaseBatch(next.map((s, i) => ({
             token: grants.find(g => g.characterId === s.characterId), nextState: s, atomicGroup: group,
             options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[i] }
-        })), { timestamp: now() });
+        })), { timestamp: now(), journalReason: 'retreat' });
         if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
         preparedParties.filter(Boolean).forEach(p => parties.acceptCommit(p));
         return { ok: true, affectedIds: sides[0].members.map(s => s.characterId), memoryEvents: 0,

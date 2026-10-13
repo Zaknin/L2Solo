@@ -11,6 +11,8 @@ const CompanionEquipmentShopping = invoke('GameServer/Bot/AI/CompanionEquipmentS
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
 const TradeService = invoke('GameServer/Bot/TradeService');
+const NpcRestock = invoke('GameServer/Bot/Economy/NpcRestockPlan');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 // A cold bot that wants gear may hold an AFK buy order for it. When the bot
 // is hot and buys the item in town, that order must be withdrawn: an owned
@@ -37,10 +39,12 @@ const errand = () => ({
 });
 
 const original = {
-    findOwnerProjection: AfkTrade.findOwnerProjection,
-    stop: AfkTrade.stop,
+    ownerRecords: AfkTrade.ownerRecords,
+    closeBotRecord: AfkTrade.closeBotRecord,
     npcOffers: MarketOpportunity.npcOffers,
     buyFromStore: TradeService.buyFromStore,
+    npcPurchase: NpcRestock.purchaseForActor,
+    hotRow: LifeState.hotRow,
     applyBestUpgrades: BotEquipmentUpgrade.applyBestUpgrades,
     planErrand: CompanionEquipmentShopping.planErrand,
     scheduleRestock: ShoppingState.scheduleRestock
@@ -48,10 +52,11 @@ const original = {
 
 async function buyWithOrderFor(orderItemId) {
     const stopped = [];
-    AfkTrade.findOwnerProjection = (ownerId) => Number(ownerId) === BOT_ID
-        ? { shop: { storeType: AfkTrade.BUY, ownerAccount: 'bot_hot_buyer', lines: [{ selfId: orderItemId, count: 1, price: 750 }] } } : null;
-    AfkTrade.stop = async (ownerId) => { stopped.push(Number(ownerId)); return { stopped: true }; };
-    const session = { companionShopping: errand(), coldLifeState: { characterId: BOT_ID, stats: {} } };
+    AfkTrade.ownerRecords = (ownerId) => Number(ownerId) === BOT_ID
+        ? [{ id: 21, kind: 'buy_ad', storeType: AfkTrade.BUY, ownerAccount: 'bot_hot_buyer', revision: 1,
+            lines: [{ selfId: orderItemId, count: 1, price: 750 }] }] : [];
+    AfkTrade.closeBotRecord = async (ownerId) => { stopped.push(Number(ownerId)); return { closed: true }; };
+    const session = { actor: bot, companionShopping: errand(), coldLifeState: { characterId: BOT_ID, stats: {} } };
     await ShoppingState.sellAndRestock(session, bot, null, { getClosestTown: () => null, say() {} });
     assert.strictEqual(session.coldLifeState.stats.lastMarketPurchase.selfId, SHORT_SWORD, 'the purchase must complete');
     return stopped;
@@ -60,6 +65,11 @@ async function buyWithOrderFor(orderItemId) {
 async function run() {
     MarketOpportunity.npcOffers = () => [{ sourceType: 'npc', sourceId: 7001, price: 883, available: true }];
     TradeService.buyFromStore = async () => ({ qty: 1, totalAdena: 883, name: 'Short Sword' });
+    // Since a19a9727 a hot NPC equipment purchase goes through the seller
+    // basket (NpcRestockPlan.purchaseForActor) and needs the bot's hot row.
+    NpcRestock.purchaseForActor = async () => ({ ok: true,
+        receipts: [{ lines: [{ selfId: SHORT_SWORD, amount: 1, unitPrice: 883 }] }] });
+    LifeState.hotRow = () => ({ phase: 'hot' });
     BotEquipmentUpgrade.applyBestUpgrades = () => [];
     CompanionEquipmentShopping.planErrand = () => null;
     ShoppingState.scheduleRestock = () => {};
@@ -73,10 +83,12 @@ async function run() {
 run().then(() => console.log('Hot purchase buy order checks passed'))
     .catch((error) => { console.error(error); process.exitCode = 1; })
     .finally(() => {
-        AfkTrade.findOwnerProjection = original.findOwnerProjection;
-        AfkTrade.stop = original.stop;
+        AfkTrade.ownerRecords = original.ownerRecords;
+        AfkTrade.closeBotRecord = original.closeBotRecord;
         MarketOpportunity.npcOffers = original.npcOffers;
         TradeService.buyFromStore = original.buyFromStore;
+        NpcRestock.purchaseForActor = original.npcPurchase;
+        LifeState.hotRow = original.hotRow;
         BotEquipmentUpgrade.applyBestUpgrades = original.applyBestUpgrades;
         CompanionEquipmentShopping.planErrand = original.planErrand;
         ShoppingState.scheduleRestock = original.scheduleRestock;

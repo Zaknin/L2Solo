@@ -1,7 +1,10 @@
+const DiagnosticConfig = require('./PopulationConfig');
 const { collectionPagesWithBytes, PAGE_BYTES } = require('./ColdMessagePages');
+const StateWire = require('./ColdStateWire');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { Worker } = require('worker_threads');
+const { performance } = require('perf_hooks');
 
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
@@ -12,22 +15,33 @@ const DataCache = invoke('GameServer/DataCache');
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
-const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
 const Director = invoke('GameServer/Bot/Population/PopulationDirector');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Protocol = require('./ColdSimulationProtocol');
+const { ColdEconomyDecisions } = require('./ColdEconomyDecision');
+const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
+const { ColdProjectionRetention } = require('./ColdProjectionRetention');
+const ColdSafetyTransport = require('./ColdSafetyTransport');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
+const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
+const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 
-const HUNTING_TRAVEL_MS = 25000;
+const ColdTrip = require('./ColdTrip');
+// Private main-thread provenance survives the queue's shallow clone but is
+// excluded from JSON/wire sizing and cannot be supplied by a Worker message.
+const PROPOSAL_SOURCE = Symbol('cold-proposal-source');
+const CLAN_BEFORE = Symbol('cold-clan-before');
 const OWNERSHIP_REBASE_REASONS = new Set([
     'stale_revision',
     'cas_failed',
@@ -44,13 +58,15 @@ function wait(ms) {
 // Longest stretch the initial full snapshot builds rows without yielding.
 const SNAPSHOT_SLICE_MS = 50;
 
-function yieldToLoop() {
-    return new Promise((resolve) => setImmediate(resolve));
+function recipeKnowledgeFor(state) {
+    if (!invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) return {};
+    const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+    return { knownShotRecipes: invoke('GameServer/Bot/Economy/ShotCraftPolicy').packKnown(Workshop.cachedRecipes(state.characterId)),
+        recipeBook: Workshop.bookFor(state.characterId) };
 }
 
-function directDropTargetNpcId(plan = {}) {
-    if (!plan || plan.status !== 'active') return 0;
-    return Number(plan.next?.npcId || plan.targetNpcId || 0);
+function yieldToLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
 }
 
 function admitSoloRouteTravelState(nextState, baseState, profiles, occupancy, timestamp = Date.now()) {
@@ -79,7 +95,8 @@ function admitSoloRouteTravelState(nextState, baseState, profiles, occupancy, ti
         };
     }
 
-    const { travel: _travel, ...stats } = nextState.stats || {};
+    const stats = { ...(nextState.stats || {}) };
+    delete stats.travel;
     return {
         state: SpotRiskPolicy.withCapacityBackoff({
             ...nextState,
@@ -131,11 +148,33 @@ class ColdSimulationCoordinator {
     constructor(options = {}) {
         this.WorkerClass = options.WorkerClass || Worker;
         this.workerPath = options.workerPath || path.join(__dirname, 'ColdSimulationWorker.js');
+        this.tableChannel = options.tableChannel || TableChannel.shared;
         this.worker = null;
         this.workerEpoch = null;
+        this.safetyTransport = null;
+        this.projectionRetention = new ColdProjectionRetention({
+            stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
+            dependencies: (state, context) => {
+                const memory = invoke('GameServer/Social/InteractionMemoryRuntime').snapshots.get(Number(state.characterId));
+                const pressure = Director.pressureForState(state);
+                const party = context.party ? BackgroundPartyState.find(context.party.partyId) : null;
+                const leaf = !party ? this.economyDecisions.activity(state) : null;
+                return {
+                    catalog: SpotProfiles.cache, physicalCatalog: SpotService.spots,
+                    partyGeneration: BackgroundPartyState.generation(), party,
+                    pressure: [pressure.expMultiplier, pressure.deathChanceMultiplier, pressure.directorReason],
+                    memory, memoryRevision: memory?.revision,
+                    clanId: invoke('GameServer/Clan/ClanSocialRuntime').view.memberships.get(Number(state.characterId)) || 0,
+                    escrow: invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId),
+                    targetNpcId: party ? invoke('GameServer/Bot/Population/PartyHuntingTarget').npcId(party, state)
+                        : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null
+                };
+            }
+        });
         this.population = null;
         this.started = false;
         this.stopping = false;
+        this.stopPromise = null;
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = 0;
@@ -146,21 +185,43 @@ class ColdSimulationCoordinator {
         this.restartTimer = null;
         this.watchdogTimer = null;
         this.reconcileTimer = null;
-        this.buffServiceTimer = null;
         this.snapshotContinuationTimer = null;
         this.recoveryTimer = null;
         this.renewalTimer = null;
+        this.leaseRenewalRound = null;
+        this.leaseRenewalInFlight = null;
         this.historyCleanupTimer = null;
         this.historyCleanupInFlight = null;
         this.seen = new Set();
+        this.economyDecisions = new ColdEconomyDecisions();
+        this.economyRoutes = new (invoke('GameServer/Bot/Economy/EconomyRouteCache').EconomyRouteCache)({
+            send: payload => !this.stopping && this.ready && !!this.post('economy_route_request', payload),
+            prepared: (id, key) => {
+                const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+                Economy.forgetContext(id, 'state_publication');
+                const record = invoke('GameServer/World/World').registeredActorById(id);
+                const session = record?.session;
+                if (record && !record.retired && session?.actor === record.actor
+                    && invoke('GameServer/Bot/Economy/EconomicTrip').key(Economy.stateForActor(record.actor, session)) === key)
+                    invoke('GameServer/Bot/AI/DecisionEvents').prepared(session);
+            }
+        });
+        this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
+            if (packet.kind !== 'remove') return;
+            this.economyDecisions.forget(packet.characterId);
+            this.economyRoutes.forget(packet.characterId);
+            invoke('GameServer/Bot/Economy/EconomyContext').forget(packet.characterId);
+        });
         this.seenOrder = [];
         this.waiters = new Map();
+        this.partyGoalRequests = 0;
         this.commandTail = Promise.resolve();
-        this.competitionActions = new (require('./ColdCompetitionActions').ColdCompetitionActions)({
+        this.competitionFrameAdmission = null;
+        this.competitionActions = new (invoke('GameServer/Bot/Population/ColdCompetitionActions').ColdCompetitionActions)({
             life: LifeState, owner: ColdSimulationOwner,
             memory: invoke('GameServer/Social/InteractionMemoryRuntime'),
             parties: BackgroundPartyState,
-            personaFor: state => invoke('GameServer/Bot/AI/BotPersona').generate(state),
+            personaFor: state => invoke('GameServer/Bot/AI/BotPersona').of(state),
             conflictsEnabled: () => Config.coldCompetitionConflictsEnabled === true,
             pvpEnabled: () => Config.coldCompetitionPvpEnabled === true,
             incrementalPvp: true,
@@ -171,6 +232,8 @@ class ColdSimulationCoordinator {
                 return physical?.id === event.spotId && (event.action === 'revenge' || !!spot?.npcEntries?.some(row => Number(row.selfId) === event.npcId));
             },
             participantAllowed: id => !this.fencedBots.has(Number(id)),
+            releaseForecasts: events => this.post('competition_release', { events: events.map(e => ({ at: e.at, action: e.action,
+                actor: { id: e.actor.id, partyId: e.actor.partyId || null }, peer: { id: e.peer.id, partyId: e.peer.partyId || null } })) }),
             retreatRoute: (members, party, event, timestamp) => {
                 const leader = members.find(s => s.characterId === party?.leaderId) || members[0];
                 const index = this.contextIndex();
@@ -188,8 +251,8 @@ class ColdSimulationCoordinator {
                 && Number(Metrics.currentEventLoopLag()) < 40
         });
         this.commandInflight = new Map();
+        this.commitAcknowledgements = new Map();
         this.fencedBots = new Set();
-        this.economyBots = new Set();
         this.pauseReasons = new Set();
         this.snapshotQueue = new ColdSnapshotQueue({
             pageSize: Config.coldWorkerSnapshotPageSize || 48,
@@ -201,6 +264,7 @@ class ColdSimulationCoordinator {
         this.snapshotInFlight = null;
         this.snapshotInFlightInitial = false;
         this.snapshotRefreshPending = false;
+        this.snapshotBootstrapPending = false;
         this.criticalSnapshotInFlight = null;
         this.snapshotLast = {
             mode: 'none',
@@ -233,8 +297,13 @@ class ColdSimulationCoordinator {
             snapshotCriticalRuns: 0,
             snapshotYields: 0,
             snapshotDeferrals: 0,
-            routeCapacityRejects: 0
+            routeCapacityRejects: 0,
+            afterCommitStepErrors: { partyCache: 0, raidCache: 0, raidSettlement: 0, economyDecision: 0,
+                journal: 0, board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
+                economyPlan: 0, clanEvents: 0, partyPlans: 0, buff: 0 }
         };
+        this.economyPlanCount = 0;
+        this.economyPlanTimes = [];
         this.queue = new ColdCommitQueue({
             targetMs: Config.coldWorkerOrdinaryFlushMs || 2000,
             hardMs: Config.coldWorkerOrdinaryHardMaxMs || 5000,
@@ -246,10 +315,10 @@ class ColdSimulationCoordinator {
             commit: (entries) => ColdSimulationOwner.commitAndReleaseBatch(entries),
             afterCommit: (entry, result) => this.afterCommit(entry, result),
             onResults: (results) => {
-                const startedAt = Date.now();
+                const startedAt = Config.developerDiagnostics ? Date.now() : 0;
                 this.handleCommitResults(results)
-                    .catch((error) => this.recordError(error))
-                    .finally(() => this.queue.recordStage('ackBuild', Date.now() - startedAt));
+                    .catch((error) => { this.finishCommitAcknowledgements(results, false); this.recordError(error); })
+                    .finally(() => { if (Config.developerDiagnostics) this.queue.recordStage('ackBuild', Date.now() - startedAt); });
             },
             onPause: () => this.setPauseReason('commit_queue_high_water', true),
             onResume: () => this.setPauseReason('commit_queue_high_water', false),
@@ -272,6 +341,7 @@ class ColdSimulationCoordinator {
     }
 
     start(population = null) {
+        if (this.stopPromise) return Promise.resolve(false);
         this.competitionActions.stopping = false;
         if (this.started || Config.enabled === false || Config.backgroundResolverEnabled === false) return Promise.resolve(false);
         this.population = population || this.population;
@@ -290,8 +360,9 @@ class ColdSimulationCoordinator {
             // LifeState startup has already released members of historical
             // dissolved parties. Only then is it safe to trim the rows.
             await BackgroundPartyState.purgeHistory();
-            await require('./ColdRaidAuthority').init();
+            await invoke('GameServer/Bot/Population/ColdRaidAuthority').init();
             await invoke('GameServer/Clan/ClanSocialRuntime').refresh(true);
+            invoke('GameServer/Bot/Population/ColdOccupationSources').initialise();
             this.queue.start();
             this.startWorker();
             this.watchdogTimer = setInterval(() => this.watchdog(), 1000);
@@ -301,24 +372,14 @@ class ColdSimulationCoordinator {
                 encounters.tick(this.competitionActions)?.catch(error => this.recordError(error));
             }, 1000);
             this.reconcileTimer = setInterval(() => {
+                this.tableChannel.flush();
                 this.sendSnapshots(false).catch((error) => this.recordError(error));
             }, Math.max(2000, Number(Config.coldWorkerSnapshotRefreshMs) || 10000));
-            this.buffServiceTimer = setInterval(() => {
-                if (this.stopping || !this.snapshotsLoaded) return;
-                invoke('GameServer/Bot/Economy/ColdBuffService').tick()
-                    .catch((error) => this.recordError(error));
-            }, 60000);
             this.recoveryTimer = setInterval(() => {
                 ColdSimulationOwner.recoverExpiredLeases().catch((error) => this.recordError(error));
             }, Math.max(1000, Number(Config.coldOwnerRecoveryIntervalMs) || 5000));
             this.renewalTimer = setInterval(() => {
-                if (!this.worker || this.stopping) return;
-                ColdSimulationOwner.renewActiveLeases({
-                    leaseMs: Math.max(2000, Number(Config.coldOwnerLeaseMs) || 30000)
-                }).then((renewals) => {
-                    const active = (renewals || []).filter((result) => result.ok);
-                    if (active.length) this.postCollections('lease_renewal', { renewals: active });
-                }).catch((error) => this.recordError(error));
+                this.beginLeaseRenewalRound();
             }, Math.max(1000, Number(Config.coldOwnerRenewalIntervalMs) || 5000));
             this.historyCleanupTimer = setInterval(() => {
                 if (this.stopping || this.historyCleanupInFlight) return;
@@ -330,7 +391,6 @@ class ColdSimulationCoordinator {
             }, Math.max(30000, Number(Config.partyHistoryCleanupIntervalMs) || 60 * 60 * 1000));
             this.watchdogTimer.unref?.();
             this.reconcileTimer.unref?.();
-            this.buffServiceTimer.unref?.();
             this.recoveryTimer.unref?.();
             this.renewalTimer.unref?.();
             this.historyCleanupTimer.unref?.();
@@ -344,20 +404,28 @@ class ColdSimulationCoordinator {
 
     startWorker() {
         if (this.worker || this.stopping) return;
+        this.cancelLeaseRenewalRound();
         this.workerEpoch = `cold-worker:${process.pid}:${randomUUID()}`;
+        this.competitionFrameAdmission = null;
+        this.projectionRetention.reset();
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = Date.now();
         const worker = new this.WorkerClass(this.workerPath, {
-            workerData: { workerEpoch: this.workerEpoch },
+            workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true },
             name: 'l2node-cold-simulation',
-            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 256) }
+            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) }
         });
         this.worker = worker;
-        this.counters.workersStarted += 1;
-        worker.on('message', (message) => { this.onMessage(message); });
-        worker.on('error', (error) => this.onWorkerError(error));
-        worker.on('exit', (code) => this.onWorkerExit(code));
+        Metrics.beginColdSafetyEpoch(this.workerEpoch);
+        this.attachSafetyTransport();
+        DiagnosticConfig.developerDiagnostics && (this.counters.workersStarted += 1);
+        const epoch = this.workerEpoch;
+        worker.on('message', (message) => { this.onMessage(message, worker, epoch); });
+        worker.on('error', (error) => {
+            if (this.worker === worker && this.workerEpoch === epoch) this.onWorkerError(error);
+        });
+        worker.on('exit', (code) => this.onWorkerExit(code, worker, epoch));
     }
 
     remember(msgId) {
@@ -369,26 +437,203 @@ class ColdSimulationCoordinator {
     }
 
     recordInvalid(reason = 'unknown') {
-        this.counters.invalidMessages += 1;
-        this.counters.invalidReasons[reason] = Number(this.counters.invalidReasons[reason] || 0) + 1;
+        DiagnosticConfig.developerDiagnostics && (this.counters.invalidMessages += 1);
+        DiagnosticConfig.developerDiagnostics && (this.counters.invalidReasons[reason] = Number(this.counters.invalidReasons[reason] || 0) + 1);
     }
 
     post(type, payload = {}, msgId = null, bytes = null) {
         if (!this.worker || !this.workerEpoch) return null;
+        const entries = type === 'snapshot_page' ? payload.rows
+            : type === 'claim_ack' ? payload.rejected
+                : ['commit_ack', 'release_ack', 'command_ack'].includes(type) ? payload.results : [];
+        for (const entry of entries || []) {
+            if (!entry?.state?.inventoryInstanceColumns) this.projectionRetention.remember(entry);
+        }
+        const packed = StateWire.packPayload(type, payload);
+        if (packed !== payload) { payload = packed; bytes = null; }
         const message = Protocol.envelope(type, this.workerEpoch, payload, msgId);
         const valid = Protocol.validateEnvelope(message, 'main', { workerEpoch: this.workerEpoch, bytes });
         if (!valid.ok) {
             this.recordInvalid(`out_${type}_${valid.reason}`);
             return null;
         }
-        this.counters.messagesOut += 1;
-        this.counters.bytesOut += valid.bytes;
-        message.bytes = valid.bytes;
+        DiagnosticConfig.developerDiagnostics && (this.counters.messagesOut += 1);
+        DiagnosticConfig.developerDiagnostics && (this.counters.bytesOut += valid.bytes);
+        if (!['command_request', 'command_ack'].includes(type)
+            || !(payload.requests || payload.results || []).some(row => row.kind === 'meeting')) message.bytes = valid.bytes;
         this.worker.postMessage(message);
         return message.msgId;
     }
 
+    meetingTermsDigest(input) {
+        const request = invoke('GameServer/AfkTrade/TradeMeeting').canonical(input);
+        const immutable = [request.token, request.actorA, request.actorB, request.seqA, request.seqB, request.town,
+            [request.point.locX, request.point.locY, request.point.locZ],
+            request.parties.map(party => [party.phase, party.ownerId, party.leaseId, party.hotAt, party.revision, party.sequence]),
+            request.lines.map(line => [line.payer, line.itemId, line.selfId, line.enchant, line.count, line.price, line.adId, line.adRevision])];
+        return require('node:crypto').createHash('sha256').update(JSON.stringify(immutable)).digest('hex');
+    }
+
+    requestMeetingPreparation(characterId, request) {
+        const id = Number(characterId), token = request?.token;
+        if (!this.worker || !this.ready || this.stopping || !request || ![request.actorA, request.actorB].includes(id))
+            return Promise.reject(Error('trade_meeting_worker_unavailable'));
+        const held = this.commandInflight.get(id);
+        if (held?.meetingToken === token) return held;
+        if (held?.meetingPending?.meetingToken === token) return held.meetingPending;
+        if (held?.meetingToken || held?.meetingPending) return Promise.reject(Error('trade_meeting_preparation_busy'));
+        const worker = this.worker, epoch = this.workerEpoch;
+        let resolve, reject;
+        const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+        Object.assign(promise, { meetingToken: token, epoch, worker, termsDigest: this.meetingTermsDigest(request), resolve, reject, frames: [], reservedPages: 0, reservedBytes: 0 });
+        promise.timer = setTimeout(() => {
+            this.post('command_ack', { results: [{ kind: 'meeting', characterId: id, commandId: token,
+                pageIndex: -1, ok: false, reason: 'preparation_timeout' }] });
+            this.finishMeetingPreparation(id, promise, null, Error('trade_meeting_preparation_timeout'));
+        }, 15000);
+        promise.timer.unref?.();
+        if (held) held.meetingPending = promise; else this.commandInflight.set(id, promise);
+        // This call may originate inside a lifecycle command. Its ACK must
+        // release the worker owner before the read-only preparation starts.
+        // A postcommit market review can start consent before its resolver's
+        // commit_ack clears in_flight in the worker. Wait for this owner's ACK,
+        // independently of unrelated commits and the lifecycle command tail.
+        const commitAck = this.commitAcknowledgements.get(id)?.promise;
+        Promise.all([this.commandTail, commitAck]).then(([, acknowledged]) => {
+            if (promise.settled) return;
+            if (acknowledged === false) throw Error('trade_meeting_source_retired');
+            if (!this.commandInflight.has(id)) this.commandInflight.set(id, promise);
+            if (this.commandInflight.get(id) !== promise || this.worker !== worker || this.workerEpoch !== epoch || this.stopping)
+                throw Error('trade_meeting_source_retired');
+            const state = LifeState.cachedState(id);
+            if (!state) throw Error('trade_meeting_missing_state');
+            this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) }] });
+            const codec = invoke('GameServer/AfkTrade/TradeMeetingCodec');
+            const msgId = `meeting:${id}:${token}`;
+            const envelope = frame => Protocol.envelope('command_request', epoch,
+                { requests: [{ kind: 'meeting', characterId: id, commandId: token, frame }] }, `${msgId}:3`);
+            const frames = codec.commandPages(request, envelope, null, { incoming: request.incoming || request.parties.map(party => party.acceptedIncoming || {}) });
+            const bytes = frames.reduce((sum, frame) => sum + Buffer.byteLength(JSON.stringify(envelope(frame))), 0);
+            // Reserve response headroom in the same global staging budget.
+            invoke('GameServer/AfkTrade/TradeMeetingService').adjustTransportPages(4, Math.max(bytes, 4 * 768));
+            promise.reservedPages = 4; promise.reservedBytes = Math.max(bytes, 4 * 768);
+            for (const frame of frames) if (!this.post('command_request', { requests: [
+                { kind: 'meeting', characterId: id, commandId: token, frame }] }, `${msgId}:${frame[2]}`))
+                throw Error('trade_meeting_send_failed');
+        }).catch(error => this.finishMeetingPreparation(id, promise, null, error));
+        return promise;
+    }
+
+    finishMeetingPreparation(id, promise, proof, error) {
+        const held = this.commandInflight.get(Number(id));
+        if (promise.settled) return;
+        promise.settled = true;
+        clearTimeout(promise.timer);
+        if (held === promise) this.commandInflight.delete(Number(id)); else if (held?.meetingPending === promise) delete held.meetingPending;
+        if (promise.reservedPages) invoke('GameServer/AfkTrade/TradeMeetingService')
+            .adjustTransportPages(-promise.reservedPages, -promise.reservedBytes);
+        promise.frames = null;
+        if (error) promise.reject(error); else promise.resolve(proof);
+    }
+
+    cancelMeetingPreparation(token) {
+        for (const [id, held] of this.commandInflight) {
+            const promise = held.meetingToken === token ? held : held.meetingPending?.meetingToken === token ? held.meetingPending : null;
+            if (!promise) continue;
+            this.post('command_ack', { results: [{ kind: 'meeting', characterId: id, commandId: token,
+                pageIndex: -1, ok: false, reason: 'preparation_discarded' }] });
+            this.finishMeetingPreparation(id, promise, null, Error('trade_meeting_preparation_discarded'));
+        }
+    }
+
+    meetingPreparationCurrent(proof, request) {
+        if (!proof || proof.epoch !== this.workerEpoch || proof.worker !== this.worker || this.stopping) return false;
+        const state = LifeState.cachedState(proof.characterId);
+        const authority = state && invoke('GameServer/Bot/Economy/EconomyCommit').authority(state), expected = proof.authority;
+        if (!authority || !expected || !['phase', 'ownerId', 'leaseId', 'hotAt', 'revision'].every(key => authority[key] === expected[key])) return false;
+        const board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
+        const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
+        const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+        if (!proof.dependencies?.every(([id, boardToken, marketToken, workshopToken]) => {
+            const scope = Counters.counterOf(id), grouped = boardToken.startsWith('g:');
+            return (grouped ? `g:${board.groupFingerprint(scope)}` : board.itemFingerprint(id)) === boardToken
+                && Counters.revisionOf(scope).split('.').slice(1).join('.') === marketToken
+                && (grouped ? `g:${Workshop.publicScopeDigest(scope)}` : String(Workshop.publicRecipeDigest(id))) === workshopToken;
+        })) return false;
+        return proof.sources.every(([recordId, revision]) => {
+            const rows = board.records.get(recordId);
+            return rows?.length && rows.every(row => row.revision === revision);
+        }) && proof.token === request.token;
+    }
+
+    handleMeetingRequest(message, worker, epoch) {
+        for (const request of message.payload.requests || []) {
+            const identity = Protocol.meetingIdentity(request);
+            if (!identity || !request.frame) continue;
+            const held = this.commandInflight.get(identity.characterId);
+            if (!held || held.meetingToken !== identity.commandId || held.worker !== worker || held.epoch !== epoch) {
+                this.post('command_ack', { results: [{ ...identity, pageIndex: request.frame[2], ok: true }] }, message.msgId);
+                continue;
+            }
+            let ok = true, error;
+            try {
+                const previous = held.frames[request.frame[2]];
+                if (previous && JSON.stringify(previous) !== JSON.stringify(request.frame)) throw Error('trade_meeting_consent_changed');
+                held.frames[request.frame[2]] = request.frame;
+                if (held.frames.filter(Boolean).length === request.frame[3]) {
+                    const result = invoke('GameServer/AfkTrade/TradeMeetingCodec').fromPages(held.frames);
+                    if (this.meetingTermsDigest(result) !== held.termsDigest) throw Error('trade_meeting_consent_changed');
+                    const side = result.actorA === identity.characterId ? 0 : 1;
+                    const own = result.parties[side];
+                    const proof = { token: result.token, characterId: identity.characterId, sequence: own.sequence,
+                        authority: { phase: own.phase, ownerId: own.ownerId, leaseId: own.leaseId, hotAt: own.hotAt, revision: own.revision },
+                        route: own.route, certificates: result.lines.map(line => line.payer === side ? line.certificate : null),
+                        dependencies: result.dependencies || [], sources: result.lines.map(line => [line.adId, line.adRevision]), epoch, worker, approved: true };
+                    this.finishMeetingPreparation(identity.characterId, held, proof);
+                }
+            } catch (caught) { ok = false; error = caught; this.finishMeetingPreparation(identity.characterId, held, null, caught); }
+            this.post('command_ack', { results: [{ ...identity, pageIndex: request.frame[2], ok,
+                ...(error ? { reason: error.message } : {}) }] }, message.msgId);
+        }
+    }
+
+    routeRows(state) {
+        if (this.stopping || !this.ready) return null;
+        const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
+        return this.economyRoutes.read(state.characterId, Trip.key(state), Trip.frame(state));
+    }
+
+    requestEconomyRefresh(characterId) {
+        const id = Number(characterId), state = LifeState.cachedState(id);
+        if (!state || this.stopping || !this.ready) return false;
+        const owned = this.commandInflight.get(id);
+        if (owned) {
+            if (!owned.meetingToken && !owned.economyRefreshPending) {
+                owned.economyRefreshPending = true;
+                this.commandTail.then(() => {
+                    if (this.commandInflight.get(id) !== owned) this.requestEconomyRefresh(id);
+                }).catch(error => this.recordError(error));
+            }
+            return true;
+        }
+        this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) }] });
+        return !!this.post('snapshot_page', { rows: [], economyOwnerId: id, reconcile: true });
+    }
+
+    requestEconomyLook(characterId) {
+        const id = Number(characterId);
+        if (this.stopping || !Number.isSafeInteger(id) || id <= 0
+            || LifeState.cachedState(id)?.phase !== 'hot') return false;
+        // A natural owner event requests its existing canonical worker row.
+        // Empty rows retain neither an owner copy nor a snapshot/ACK cursor.
+        return !!this.post('snapshot_page', { rows: [], economyOwnerId: id });
+    }
+
     postCollections(type, collections = {}, msgId = null) {
+        for (const entries of Object.values(collections)) for (const entry of entries || []) {
+            if (!entry?.state?.inventoryInstanceColumns) this.projectionRetention.remember(entry);
+        }
+        collections = StateWire.packPayload(type, collections);
         const pages = collectionPagesWithBytes(type, this.workerEpoch, collections, msgId, (value) => {
             this.recordInvalid(`out_${type}_single_item_too_large`);
             return value?.state ? {
@@ -405,24 +650,115 @@ class ColdSimulationCoordinator {
         return sent;
     }
 
-    async onMessage(message) {
+    releaseCompetitionForecasts(events, worker, epoch) {
+        if (this.stopping || this.worker !== worker || this.workerEpoch !== epoch) return null;
+        return this.post('competition_release', { events: events.map(e => ({ at: e.at, action: e.action,
+            actor: { id: e.actor.id, partyId: e.actor.partyId || null }, peer: { id: e.peer.id, partyId: e.peer.partyId || null } })) });
+    }
+
+    handleCompetitionForecast(forecast, worker, epoch) {
+        if (this.stopping || this.worker !== worker || this.workerEpoch !== epoch || !forecast) return;
+        const releaseForecasts = events => this.releaseCompetitionForecasts(events, worker, epoch);
+        const frame = forecast.frame;
+        if (frame === undefined) {
+            if (Config.coldCompetitionActionsEnabled) this.competitionActions.submit(forecast, { releaseForecasts });
+            return;
+        }
+        const reply = status => {
+            if (this.stopping || this.worker !== worker || this.workerEpoch !== epoch) return;
+            this.post('competition_release', { events: [], receipt: { frameId: frame.frameId, at: frame.at, status } });
+        };
+        const accepted = this.competitionFrameAdmission;
+        if (accepted?.worker === worker && accepted.epoch === epoch) {
+            if (accepted.frameId === frame.frameId && accepted.at === frame.at) {
+                reply(accepted.status);
+                return;
+            }
+            if (frame.frameId <= accepted.frameId) return;
+        }
+        const now = Date.now();
+        if (frame.at > now) { reply('deferred'); return; }
+        if (now - frame.at > COMPETITION_TTL_MS) { reply('expired'); return; }
+        const status = Config.coldCompetitionActionsEnabled
+            ? this.competitionActions.submit(frame, { framed: true, releaseForecasts }) ? 'accepted' : 'deferred'
+            : 'observed';
+        if (status === 'accepted' || status === 'observed') {
+            // Install before sending: a lost receipt replays this admission,
+            // even after TTL, without installing another action task.
+            this.competitionFrameAdmission = { worker, epoch, frameId: frame.frameId, at: frame.at, status };
+        }
+        reply(status);
+    }
+
+    async onMessage(message, worker = this.worker, epoch = this.workerEpoch) {
+        if (this.worker !== worker || this.workerEpoch !== epoch) return;
+        if (message?.type === 'economy_diagnostics' && Config.developerDiagnostics && Config.economyDiagnostics && message.epoch === epoch) {
+            if (!Number.isSafeInteger(message.id) || message.id <= 0) return;
+            const diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+            const accepted = diagnostics.accept(message.records);
+            if (this.diagnosticEpoch !== epoch) { this.diagnosticEpoch = epoch; this.diagnosticDropped = 0; }
+            const dropped = Number(message.dropped);
+            if (Number.isSafeInteger(dropped) && dropped >= this.diagnosticDropped) {
+                diagnostics.noteDropped(dropped - this.diagnosticDropped); this.diagnosticDropped = dropped;
+            }
+            worker.postMessage({ type: 'economy_diagnostics_ack', epoch, id: message.id,
+                accepted: Number.isSafeInteger(accepted) ? accepted : 0 }); return;
+        }
         const valid = Protocol.validateEnvelope(message, 'worker', { workerEpoch: this.workerEpoch, bytes: message?.bytes });
         if (!valid.ok) {
             this.recordInvalid(`in_${valid.reason}`);
             return;
         }
-        if (!this.remember(message.msgId)) {
-            this.counters.duplicateMessages += 1;
+        try {
+            const payload = StateWire.unpackPayload(message.type, message.payload);
+            if (payload !== message.payload) message = { ...message, payload };
+        } catch (error) {
+            this.recordInvalid(`in_${message.type}_${error.message}`);
             return;
         }
-        this.counters.messagesIn += 1;
-        this.counters.bytesIn += valid.bytes;
+        // A restarted worker numbers its requests from 1 again (claim:1,
+        // release:1): a duplicate is the same id from the same worker epoch.
+        if (!this.remember(`${epoch}:${message.msgId}`)) {
+            DiagnosticConfig.developerDiagnostics && (this.counters.duplicateMessages += 1);
+            if (message.type === 'command_request' && message.payload.requests?.some(row => row.kind === 'meeting'))
+                this.handleMeetingRequest(message, worker, epoch);
+            return;
+        }
+        DiagnosticConfig.developerDiagnostics && (this.counters.messagesIn += 1);
+        DiagnosticConfig.developerDiagnostics && (this.counters.bytesIn += valid.bytes);
         const payload = message.payload || {};
         switch (message.type) {
+        case 'command_ack':
+            for (const result of payload.results || []) {
+                const held = this.commandInflight.get(result.characterId);
+                if (held?.meetingToken === result.commandId && result.ok === false)
+                    this.finishMeetingPreparation(result.characterId, held, null, Error(result.reason || 'trade_meeting_preparation_refused'));
+            }
+            break;
+        case 'economy_route_result':
+            if (!this.stopping) this.economyRoutes.accept(payload);
+            break;
+        case 'lease_renewal_candidates':
+            await this.handleLeaseRenewalCandidates(message, worker, epoch);
+            break;
         case 'ready':
             if (payload.phase === 'loaded') {
                 this.sendPlanningCatalog();
                 this.post('init', { config: this.workerConfig(), catalogVersion: utils.buildNumber() });
+                this.stopDiagnosticSelection?.();
+                this.stopDiagnosticSelection = Config.developerDiagnostics && Config.economyDiagnostics
+                    ? EconomyDiagnostics.followSelection(ownerIds => {
+                        if (!this.stopping && this.worker === worker && this.workerEpoch === epoch)
+                            worker.postMessage({ type: 'economy_diagnostics_selection', epoch, ownerIds });
+                    }) : null;
+                try {
+                    this.attachTableChannel();
+                } catch (error) {
+                    // Native source setup failed; use the existing Worker exit
+                    // path rather than leave a running child without its feed.
+                    this.onWorkerError(error);
+                    worker.terminate?.()?.catch(failure => this.recordError(failure));
+                }
             } else if (payload.phase === 'running') {
                 this.ready = true;
                 this.syncWorkerPressure();
@@ -431,13 +767,43 @@ class ColdSimulationCoordinator {
             } else if (payload.phase === 'snapshots_loaded') {
                 this.snapshotsLoaded = true;
                 this.lastWorkerSnapshot = payload;
-                utils.infoSuccess('ColdWorker', 'ready states=%d due=%d', Number(payload.states || 0), Number(payload.due || 0));
+                utils.infoSuccess('ColdWorker', 'ready states=%d queueHead=%s', Number(payload.states || 0), payload.queueHead?.kind || 'unknown');
             } else if (payload.phase === 'state_loaded') {
                 const waiter = this.waiters.get(message.msgId);
                 if (waiter) {
                     this.waiters.delete(message.msgId);
                     waiter.resolve(payload);
                 }
+            } else if (payload.phase === 'economy_plan_ready' && !this.stopping) {
+                const id = Number(payload.characterId), state = LifeState.cachedState(id);
+                const current = state && invoke('GameServer/Bot/Economy/EconomyCommit').authority(state);
+                if (current && payload.authority && Object.keys(current).every(key => current[key] === payload.authority[key])) {
+                    const beforeWrite = () => {
+                        if (this.worker !== worker || this.workerEpoch !== epoch) throw Error('economy_refresh_source_retired');
+                    };
+                    const decision = payload.economyDecision;
+                    if (!decision || decision.updatedAt !== Number(state.updatedAt || 0)
+                        || decision.key !== invoke('GameServer/Bot/Population/ColdEconomyDecision').stateKey(state)) break;
+                    this.economyDecisions.hold(id, decision);
+                    try {
+                        const result = await invoke('GameServer/Bot/Economy/BotAfkMarketService').executePlan(state, payload.economyPlan, { beforeWrite, preparedState: state })
+                            .catch(error => { this.recordError(error); return null; });
+                        if (result?.buyPending) this.requestEconomyRefresh(id);
+                    } finally { this.economyDecisions.release(id); }
+                }
+            } else if (payload.phase === 'economy_decided' && !this.stopping) {
+                const id = Number(payload.characterId), state = LifeState.cachedState(id);
+                const decision = payload.economyDecision ? invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(payload.economyDecision) : null;
+                // Same worker generation plus the exact captured owner facts
+                // fence hot publications; they never authorize native spending.
+                if (state?.phase === 'hot' && decision && decision.updatedAt === Number(state.updatedAt || 0)
+                    && decision.key === invoke('GameServer/Bot/Population/ColdEconomyDecision').stateKey(state)) {
+                    this.economyDecisions.accept(id, decision);
+                    if (decision.feasibility) invoke('GameServer/Bot/Economy/HotBoardReviewService').preparedOwner(id);
+                }
+            } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
+                this.economyDecisions.staleWorkshop(Number(payload.characterId),
+                    { updatedAt: Number(payload.updatedAt), key: payload.key });
             }
             break;
         case 'claim_request':
@@ -448,11 +814,12 @@ class ColdSimulationCoordinator {
             await this.handleClaimRequest(message).catch((error) => this.recordError(error));
             break;
         case 'proposal_batch':
-            this.handleProposalBatch(message);
+            this.handleProposalBatch(message, worker, epoch);
             break;
+        case 'party_goal_result':
         case 'party_formation_proposal': {
             const waiter = this.waiters.get(message.msgId);
-            if (waiter) {
+            if (waiter && (!waiter.expectedType || waiter.expectedType === message.type)) {
                 this.waiters.delete(message.msgId);
                 waiter.resolve(payload);
             }
@@ -462,12 +829,13 @@ class ColdSimulationCoordinator {
             await this.handleReleaseRequest(message);
             break;
         case 'command_request':
-            this.handleCommandRequest(message);
+            this.handleCommandRequest(message, worker, epoch);
             break;
         case 'heartbeat':
             this.lastHeartbeatAt = Date.now();
             this.lastWorkerSnapshot = payload;
-            if (Config.coldCompetitionActionsEnabled) this.competitionActions.submit(payload.competition);
+            if (!this.stopping) Metrics.recordColdSafetyTotals(epoch, payload.safety);
+            this.handleCompetitionForecast(payload.competition, worker, epoch);
             break;
         case 'fence_ack':
         case 'drained': {
@@ -478,8 +846,11 @@ class ColdSimulationCoordinator {
             }
             break;
         }
+        case 'table_resync':
+            this.tableChannel.resync(this, message.workerEpoch, payload.names || []);
+            break;
         case 'fault':
-            this.counters.workerErrors += 1;
+            DiagnosticConfig.developerDiagnostics && (this.counters.workerErrors += 1);
             utils.infoWarn('ColdWorker', 'worker fault: %s%s', payload.reason || 'unknown', payload.stack ? `\n${payload.stack}` : '');
             break;
         default:
@@ -487,8 +858,25 @@ class ColdSimulationCoordinator {
         }
     }
 
+    // A new worker epoch gets every table in full; later flushes send changes.
+    attachTableChannel() {
+        if (this.stopping) return;
+        // ARCH-NOTE: no cold worker code reads hot actors. Keep its actor
+        // recipient detached until a concrete worker reader needs this stream.
+        const worker = this.worker;
+        const epoch = this.workerEpoch;
+        this.tableChannel.attach(this, epoch, (payload, payloadBytes) => {
+            if (this.stopping || this.worker !== worker || this.workerEpoch !== epoch) return false;
+            const bytes = Protocol.envelopeBytes(Protocol.envelope('table_page', epoch, {}), payloadBytes) + 256;
+            return !!this.post('table_page', payload, null, bytes);
+        });
+    }
+
     workerConfig() {
         return {
+            developerDiagnostics: Config.developerDiagnostics === true,
+            ...(Config.developerDiagnostics && Config.economyDiagnostics ? { economyDiagnostics: true, economyDiagnosticsBotIds: EconomyDiagnostics.ownerIds() } : {}),
+            coldHonestTravel: Config.coldHonestTravel,
             pvpAggression: Config.pvpAggression,
             maxBatch: Math.max(1, Math.min(64, Number(Config.coldWorkerBatchSize) || 64)),
             maxInFlight: this.desiredWorkerPressure().maxInFlight,
@@ -536,6 +924,58 @@ class ColdSimulationCoordinator {
         }
     }
 
+    async requestPartyGoals(party, members, options = {}) {
+        const Calculation = invoke('GameServer/Bot/Population/PartyGoalCalculation');
+        if (!Calculation.validMembers(party, members)) return { ok: false, reason: 'invalid_party_members' };
+        if (!this.worker || !this.ready || !this.snapshotsLoaded || this.stopping)
+            return { ok: false, reason: 'worker_not_ready' };
+        if (this.partyGoalRequests >= 2) return { ok: false, reason: 'party_goal_busy' };
+        const worker = this.worker, epoch = this.workerEpoch;
+        const timestamp = Number(options.timestamp || Date.now());
+        const replyBy = Date.now() + Math.max(50, Math.min(5000, Number(options.timeoutMs) || 5000));
+        const expected = Calculation.sources(members);
+        const escrowFor = member => invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(member.characterId);
+        const escrows = members.map(escrowFor);
+        const recipeKnowledge = members.map(recipeKnowledgeFor);
+        const msgId = randomUUID();
+        let timer, waitStarted;
+        this.partyGoalRequests++;
+        try {
+            const result = await new Promise((resolve, reject) => {
+                this.waiters.set(msgId, { resolve, reject, expectedType: 'party_goal_result' });
+                timer = setTimeout(() => reject(new Error('party_goal_timeout')), Math.max(1, replyBy - Date.now()));
+                const payload = { party, members, escrows, recipeKnowledge, timestamp, replyBy };
+                const bytes = Protocol.byteLength(Protocol.envelope('party_goal_request', epoch, payload, msgId));
+                const pages = bytes <= Protocol.MAX_MESSAGE_BYTES ? [{ payload, bytes }]
+                    : members.map((member, pageIndex) => {
+                        const page = { ...(pageIndex === 0 ? { party } : { partyId: party.partyId }),
+                            members: [member], escrows: [escrows[pageIndex]], recipeKnowledge: [recipeKnowledge[pageIndex]], timestamp, replyBy,
+                            pageIndex, pageCount: members.length };
+                        return { payload: page, bytes: Protocol.byteLength(Protocol.envelope('party_goal_request', epoch, page, msgId)) };
+                    });
+                if (pages.some(page => page.bytes > Protocol.MAX_MESSAGE_BYTES)
+                    || pages.some(page => !this.post('party_goal_request', page.payload, msgId, page.bytes)))
+                    reject(new Error('party_goal_send_failed'));
+                waitStarted = performance.now();
+            });
+            if (options.onWorkerWait && waitStarted !== undefined) options.onWorkerWait(performance.now() - waitStarted);
+            if (this.worker !== worker || this.workerEpoch !== epoch || this.stopping || Date.now() >= replyBy)
+                return { ok: false, reason: 'party_goal_stale_worker' };
+            if (!result.ok) return result;
+            if (JSON.stringify(result.sources) !== JSON.stringify(expected)
+                || JSON.stringify(members.map(escrowFor)) !== JSON.stringify(escrows)
+                || JSON.stringify(members.map(recipeKnowledgeFor)) !== JSON.stringify(recipeKnowledge))
+                return { ok: false, reason: 'party_goal_source_changed' };
+            return result;
+        } catch (error) {
+            return { ok: false, reason: error.message };
+        } finally {
+            clearTimeout(timer);
+            this.waiters.delete(msgId);
+            this.partyGoalRequests--;
+        }
+    }
+
     sendPlanningCatalog() {
         const catalogs = [
             { catalog: 'spots', rows: SpotProfiles.ensure() || [] },
@@ -579,6 +1019,7 @@ class ColdSimulationCoordinator {
             profiles,
             occupancy,
             parties,
+            partyGeneration: BackgroundPartyState.generation(),
             compactPartyMembers: options.compactPartyMembers === true,
             compactPartyMemberIds: options.compactPartyMemberIds instanceof Set
                 ? options.compactPartyMemberIds
@@ -588,11 +1029,12 @@ class ColdSimulationCoordinator {
 
     routeFor(state, currentSpot, party, partyMembers, index) {
         if (!state || state.phase !== 'cold' || state.stats?.travel) return null;
-        if (!party && require('./ClanPartyDuty').waiting(state)) return null;
+        if (!party && invoke('GameServer/Bot/Population/ClanPartyDuty').waiting(state)) return null;
         const partyRoute = !!party;
         const eligibleActivity = state.activity === 'hunting'
             || (partyRoute && state.activity === 'grouped');
         if (!eligibleActivity) return null;
+        if (!partyRoute && invoke('GameServer/Bot/Economy/BotCrystallization').ready(state)) return null;
         if (partyRoute && partyMembers.some((member) => ['resting', 'traveling', 'dead'].includes(member.activity))) return null;
 
         let physical = null;
@@ -610,43 +1052,24 @@ class ColdSimulationCoordinator {
             : physical?.id || currentSpot?.id || declaredSpotId;
         const timestamp = Number(index.timestamp || Date.now());
         const routedMembers = partyRoute ? partyMembers : [state];
-        const partyRisk = require('./PartySpotRiskPolicy');
+        const partyRisk = invoke('GameServer/Bot/Population/PartySpotRiskPolicy');
         const excludedSpotIds = partyRoute ? partyRisk.excludedSpotIds(party, timestamp)
             : SpotRiskPolicy.excludedSpotIdsForStates(routedMembers, timestamp);
         const spotBackoff = partyRoute ? partyRisk.backoff(party, currentId, timestamp)
             : SpotRiskPolicy.backoffForStates(routedMembers, currentId, timestamp);
 
         const role = partyRoute ? PartyComposition.roleForState(state) : null;
-        const partyRequired = !partyRoute
-            && !state.party?.partyId
-            && (state.stats?.equipmentPlan?.partyNeed === 'required'
-                || state.stats?.equipmentPlan?.requiresParty === true);
         let fallbackSpot = null;
-        if (partyRequired) {
-            let fallback = null;
+        if (!partyRoute && PartyWaitFallback.waiting(state, state.stats?.equipmentPlan, state.stats?.partyRequest)) {
             try {
-                fallback = GearAcquisitionPlanner.safeFallbackForPlan(
+                fallbackSpot = PartyWaitFallback.spotFor(
                     state,
                     state.stats?.equipmentPlan,
                     // Preserve catalog identity for the planner's source-index cache.
                     index.profiles || [...index.spots.values()],
-                    { occupancy: index.occupancy, excludedSpotIds }
-                );
-            } catch (_) { fallback = null; }
-            fallbackSpot = (fallback && index.spots.get(String(fallback.spotId))) || null;
-            if (fallbackSpot && !LevelingRoutes.isSpotAllowedForState(fallbackSpot, state)) {
-                fallbackSpot = null;
-            }
-            if (!fallbackSpot) {
-                try {
-                    fallbackSpot = SpotProfiles.findForState({
-                        ...state,
-                        spotId: null,
-                        stats: Object.fromEntries(Object.entries(state.stats || {})
-                            .filter(([key]) => key !== 'equipmentPlan'))
-                    }, { occupancy: index.occupancy, excludedSpotIds, timestamp });
-                } catch (_) { fallbackSpot = null; }
-            }
+                    { occupancy: index.occupancy, excludedSpotIds, timestamp }
+                )?.spot || null;
+            } catch (_) { fallbackSpot = null; }
         }
         const routeState = partyRoute
             ? {
@@ -688,9 +1111,20 @@ class ColdSimulationCoordinator {
         };
         const unsafeSoloGround = !partyRoute && currentGround
             && !LevelingRoutes.isSpotAllowedForState(currentGround, state, soloOptions());
+        const leaf = partyRoute ? null : index.wishLeaf !== undefined ? index.wishLeaf
+            : this.economyDecisions.activity(state);
+        const wished = leaf?.activity === 'hunting' && leaf.spotId
+            ? index.spots.get(String(leaf.spotId)) : null;
+        const wishDestination = wished && wished.raidBoss !== true
+            && !excludedSpotIds.has(String(wished.id))
+            && LevelingRoutes.isSpotAllowedForState(wished, state, soloOptions())
+            && (SpotService.isSuitable(wished, Number(state.level || 1), options)
+                || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state)
+                    && Number(wished.avgLevel || wished.minLevel || 1) >= Number(state.level || 1) - 15)
+            && SpotProfiles.hasCapacityForStates(wished, routedMembers, index.occupancy) ? wished : null;
         const sharedSpot = party?.stats?.objective?.spotId;
         let selected = partyRoute && sharedSpot && !excludedSpotIds.has(String(sharedSpot))
-            ? index.spots.get(String(sharedSpot)) || null : fallbackSpot;
+            ? index.spots.get(String(sharedSpot)) || null : wishDestination || fallbackSpot;
         try {
             // A party-mode search of a lone member builds no profiles at all.
             if (!selected) selected = SpotProfiles.findForState(routeState, !partyRoute
@@ -745,7 +1179,7 @@ class ColdSimulationCoordinator {
         const repairingPartyPosition = partyRoute && String(selected.id) === String(party.spotId || '')
             && partyMembers.every(member => member.phase === 'cold' && member.vitals?.hp > 0
                 && !member.stats?.pvpEncounter && !member.stats?.travel)
-            && (!require('./PartyHuntingAssembly').nearby(partyMembers)
+            && (!invoke('GameServer/Bot/Population/PartyHuntingAssembly').nearby(partyMembers)
                 || partyMembers.some(member => !SpotService.containsLocation(selected, member.loc)));
         if (String(selected.id) === String(currentId || '') && !repairingPartyPosition
             && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
@@ -777,7 +1211,8 @@ class ColdSimulationCoordinator {
             currentSpotId: currentId,
             spotId: selected.id,
             regionName: selected.name || state.currentRegion || 'Hunting Ground',
-            travelMs: HUNTING_TRAVEL_MS,
+            // The routed bot's trip time; a party's members all take it.
+            travelMs: ColdTrip.spotTripMs(state, destinations[String(state.characterId)] || selected.center),
             reason: partyRoute
                 ? 'party_spot_replan'
                 : unsafeSoloGround ? 'unsafe_ground_evacuation'
@@ -788,6 +1223,12 @@ class ColdSimulationCoordinator {
             to: destinations[String(state.characterId)] || null,
             destinations
         };
+    }
+
+    async ensureCraftRecipes(state) {
+        if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) {
+            await invoke('GameServer/Bot/Economy/CraftWorkshopService').knownFor(state.characterId);
+        }
     }
 
     contextFor(state, index = this.contextIndex()) {
@@ -812,25 +1253,101 @@ class ColdSimulationCoordinator {
                     || index.compactPartyMemberIds?.has(memberId);
                 return compact ? compactPartyMemberContext(member) : member;
             });
-        return {
+        const interactionMemory = invoke('GameServer/Social/InteractionMemoryRuntime').snapshot(Number(state.characterId));
+        const leaf = !party ? this.economyDecisions.activity(state) : null;
+        const workshop = this.economyDecisions.workshopFor(state);
+        const context = {
+            playerWaiting: invoke('GameServer/AfkTrade/TradeMeetingService').isPlayerWaiting?.(state.characterId) === true,
+            // The public workshop is capped at 16 entries, not the recipe
+            // book. Hydrated knowledge travels as one catalogue bitset.
+            ...recipeKnowledgeFor(state),
+            ...(state.stats?.workshop?.entries?.length ? { workshop } : {}),
             spot: invoke('GameServer/RaidBoss/RaidEncounterScope').decorateSpot(spot),
-            interactionMemory: invoke('GameServer/Social/InteractionMemoryRuntime').snapshot(Number(state.characterId)),
+            interactionMemory,
             clanHallServices: invoke('GameServer/ClanHall/ColdVisit').needed(state),
             pressure,
+            goalReviewAt: Number(invoke('GameServer/Bot/Goals/GoalService').snapshot(state.characterId)?.current?.nextReviewAt || 0),
             // The worker cannot see AFK shops: hand it the Adena the bot's own
             // buy order holds, which still counts as purchase budget.
             buyOrderEscrow: invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId),
-            targetNpcId: party ? require('./PartyHuntingTarget').npcId(party, state)
-                : directDropTargetNpcId(state.stats?.equipmentPlan),
+            targetNpcId: party ? invoke('GameServer/Bot/Population/PartyHuntingTarget').npcId(party, state)
+                : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null,
             isPartyLeader: !!party,
             party,
             partyMembers,
-            route: this.routeFor(state, spot, party, fullPartyMembers, index)
+            requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
+            route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })
         };
+        this.projectionRetention.prepare(state, context, index.partyGeneration);
+        return context;
     }
 
     snapshotEntry(state, index = this.contextIndex()) {
+        if (Config.developerDiagnostics && Config.economyDiagnostics) EconomyDiagnostics.enabled(state.characterId);
         return { state, context: this.contextFor(state, index) };
+    }
+
+    attachSafetyTransport() {
+        if (!this.worker || !this.workerEpoch) return null;
+        if (this.safetyTransport?.worker === this.worker && this.safetyTransport.epoch === this.workerEpoch
+            && !this.safetyTransport.disposed) return this.safetyTransport;
+        this.cancelSafety();
+        this.safetyTransport = new ColdSafetyTransport({ worker: this.worker, epoch: this.workerEpoch,
+            post: (type, payload, msgId) => this.post(type, payload, msgId),
+            isCurrent: (worker, epoch) => this.worker === worker && this.workerEpoch === epoch
+                && this.ready && this.snapshotsLoaded && !this.stopping,
+            onTotals: (epoch, totals) => Metrics.recordColdSafetyTotals(epoch, totals),
+            now: () => Date.now(), timeoutMs: Math.max(1000, Number(Config.coldOwnerResolveTimeoutMs) || 10000) });
+        return this.safetyTransport;
+    }
+
+    safetyCurrent() {
+        if (!this.worker || !this.workerEpoch || this.stopping) return null;
+        this.attachSafetyTransport();
+        return { worker: this.worker, epoch: this.workerEpoch, ready: this.ready && this.snapshotsLoaded };
+    }
+
+    safetyExcluded(characterId) {
+        return !this.worker || !this.ready || !this.snapshotsLoaded || this.stopping || this.snapshotInFlightInitial
+            || this.fencedBots.has(characterId) || this.commandInflight.has(characterId)
+            || this.snapshotQueue.dirty.has(characterId);
+    }
+
+    canRepairSafety(checkpoint) {
+        if (this.safetyExcluded(checkpoint?.characterId) || checkpoint?.phase !== 'cold') return false;
+        const state = LifeState.cachedState(checkpoint.characterId);
+        if (!state || !Protocol.sameSafetyCheckpoint(checkpoint, Protocol.safetyCheckpoint(state))) return false;
+        const loc = state.stats?.craftShop?.loc || state.loc;
+        if (![Number(loc?.locX), Number(loc?.locY)].every(Number.isFinite)
+            || typeof this.population?.realPlayerSessionsNear !== 'function') return false;
+        try { return !this.visibleToRealPlayer(state); } catch (_) { return false; }
+    }
+
+    requestSafety(kind, rows, expected) {
+        const current = this.safetyCurrent();
+        if (!current?.ready || current.worker !== expected?.worker || current.epoch !== expected?.epoch) {
+            return Promise.resolve({ ok: false, results: [], reason: 'stale' });
+        }
+        return this.safetyTransport.request(kind, rows);
+    }
+
+    pollSafety(timestamp) {
+        return this.safetyTransport?.pulse(timestamp) || false;
+    }
+
+    cancelSafety() {
+        this.safetyTransport?.dispose();
+        this.safetyTransport = null;
+    }
+
+    projectedEntryFor(characterId) {
+        if (!this.worker || !this.ready || this.stopping || !this.snapshotsLoaded) {
+            return { ok: false, reason: 'worker_not_ready' };
+        }
+        if (this.fencedBots.has(characterId) || this.commandInflight.has(characterId)) {
+            return { ok: false, reason: 'projection_owner_busy' };
+        }
+        return this.projectionRetention.get(characterId);
     }
 
     snapshotPressure() {
@@ -845,7 +1362,7 @@ class ColdSimulationCoordinator {
     }
 
     markDirty(state, options = {}) {
-        if (this.economyBots.has(Number(state?.characterId))) return { ok: false, reason: 'economy_in_progress' };
+        this.projectionRetention.invalidate(state);
         if (!state?.characterId || !this.worker || !this.ready) {
             return { ok: false, reason: 'worker_not_ready' };
         }
@@ -868,8 +1385,8 @@ class ColdSimulationCoordinator {
             ...(options.priority ? { priority: options.priority } : {})
         };
         if (!this.post('snapshot_page', payload, null, options.bytes)) return false;
-        this.counters.snapshotsSent += rows.length;
-        this.counters.snapshotPages += 1;
+        DiagnosticConfig.developerDiagnostics && (this.counters.snapshotsSent += rows.length);
+        DiagnosticConfig.developerDiagnostics && (this.counters.snapshotPages += 1);
         return true;
     }
 
@@ -893,14 +1410,17 @@ class ColdSimulationCoordinator {
             if (!await this.sendSnapshotPage(rows, { initial: false, priority, bytes })) return false;
             rowsSent += rows.length;
             pagesSent += 1;
-            this.counters.snapshotYields += 1;
+            DiagnosticConfig.developerDiagnostics && (this.counters.snapshotYields += 1);
             await yieldToLoop();
             return true;
         };
 
         for (const entry of entries) {
             if (rowsSent + page.length > 0 && Date.now() >= deadlineAt) break;
-            const row = this.snapshotEntry(entry.state || entry, index);
+            await this.ensureCraftRecipes(entry.state || entry);
+            const source = this.snapshotEntry(entry.state || entry, index);
+            this.projectionRetention.remember(source);
+            const row = StateWire.packEntry(source);
             const rowBytes = Protocol.byteLength([row]) - 2;
             const tooLarge = page.length > 0 && pageBytes + rowBytes + 1 > PAGE_BYTES;
             if (tooLarge || page.length >= pageSize) {
@@ -919,7 +1439,7 @@ class ColdSimulationCoordinator {
         // Re-read after reconciliation: releasing an invalid party updates
         // cached member ownership and membership. Sending the pre-repair
         // array would immediately seed the worker with the stale party again.
-        const states = LifeState.allStates(Math.max(1, Number(Config.maxPlayingPopulation) + 300 || 2000));
+        const states = LifeState.everyState();
         const compactPartyMemberIds = new Set(states.map((state) => Number(state.characterId || 0)).filter(Boolean));
         const index = this.contextIndex({ compactPartyMemberIds });
         const pageSize = this.snapshotQueue.pageSize;
@@ -937,7 +1457,7 @@ class ColdSimulationCoordinator {
             if (!await this.sendSnapshotPage(rows, { done, initial: true, bytes })) return false;
             rowsSent += rows.length;
             pagesSent += 1;
-            this.counters.snapshotYields += 1;
+            DiagnosticConfig.developerDiagnostics && (this.counters.snapshotYields += 1);
             await yieldToLoop();
             return true;
         };
@@ -947,7 +1467,7 @@ class ColdSimulationCoordinator {
         let sliceStartedAt = Date.now();
         for (let stateIndex = 0; stateIndex < states.length; stateIndex++) {
             if (Date.now() - sliceStartedAt >= SNAPSHOT_SLICE_MS) {
-                this.counters.snapshotYields += 1;
+                DiagnosticConfig.developerDiagnostics && (this.counters.snapshotYields += 1);
                 await yieldToLoop();
                 sliceStartedAt = Date.now();
             }
@@ -956,7 +1476,10 @@ class ColdSimulationCoordinator {
                     states.slice(stateIndex, stateIndex + pageSize).map(state => Number(state.characterId)));
             }
             const state = states[stateIndex];
-            const row = this.snapshotEntry(state, index);
+            await this.ensureCraftRecipes(state);
+            const source = this.snapshotEntry(state, index);
+            this.projectionRetention.remember(source);
+            const row = StateWire.packEntry(source);
             const rowBytes = Protocol.byteLength([row]) - 2;
             const tooLarge = page.length > 0 && pageBytes + rowBytes + 1 > PAGE_BYTES;
             if (tooLarge || page.length >= pageSize) {
@@ -980,22 +1503,25 @@ class ColdSimulationCoordinator {
     }
 
     async reconcileOrphanedBackgroundParties() {
-        const allStates = typeof LifeState.allStates === 'function'
-            ? LifeState.allStates(Math.max(2000, Number(Config.maxPlayingPopulation || 0) + 300))
-            : [];
+        const statePartyId = (state) => state?.party?.partyId ?? state?.partyId ?? null;
+        // Who claims each party, from one pass over every state, instead of
+        // a pass over the states for every party.
+        const attachedByParty = new Map();
+        for (const state of LifeState.everyState()) {
+            const partyId = String(statePartyId(state) || '');
+            if (!partyId) continue;
+            if (!attachedByParty.has(partyId)) attachedByParty.set(partyId, []);
+            attachedByParty.get(partyId).push(Number(state.characterId));
+        }
         const invalid = BackgroundPartyState.active().map((party) => {
             const memberIds = (party.memberIds || []).map((id) => Number(id)).filter(Boolean);
             const states = memberIds.map((id) => LifeState.cachedState(id)).filter(Boolean);
-            const statePartyId = (state) => state?.party?.partyId ?? state?.partyId ?? null;
             const attached = states.filter((state) => (
                 String(statePartyId(state) || '') === String(party.partyId)
             ));
             const leaderAttached = attached.some((state) => Number(state.characterId) === Number(party.leaderId));
             const declared = new Set(memberIds);
-            const extraAttached = allStates.some((state) => (
-                String(statePartyId(state) || '') === String(party.partyId)
-                && !declared.has(Number(state.characterId))
-            ));
+            const extraAttached = (attachedByParty.get(String(party.partyId)) || []).some((id) => !declared.has(id));
             const reason = !memberIds.length || !states.length
                 ? 'orphaned_dissolved_party'
                 : !leaderAttached || attached.length !== memberIds.length || extraAttached
@@ -1011,7 +1537,7 @@ class ColdSimulationCoordinator {
                     party.partyId,
                     reason
                 );
-                console.info('ColdWorker :: dissolved invalid background party %s reason=%s declaredMembers=%d releasedMembers=%d',
+                Config.developerDiagnostics && console.info('ColdWorker :: dissolved invalid background party %s reason=%s declaredMembers=%d releasedMembers=%d',
                     party.partyId,
                     reason,
                     party.memberIds?.length || 0,
@@ -1022,12 +1548,12 @@ class ColdSimulationCoordinator {
     }
 
     startSnapshotJob(mode, work, pressure = {}) {
-        const startedAt = Date.now();
+        const startedAt = Config.developerDiagnostics ? Date.now() : 0;
         this.snapshotInFlightInitial = mode === 'full';
         const job = (async () => {
             try {
                 const result = await work();
-                this.snapshotLast = {
+                if (Config.developerDiagnostics) this.snapshotLast = {
                     mode,
                     rows: Number(result?.rowsSent || 0),
                     pages: Number(result?.pagesSent || 0),
@@ -1039,7 +1565,7 @@ class ColdSimulationCoordinator {
                 };
                 return result;
             } catch (error) {
-                this.snapshotLast = {
+                if (Config.developerDiagnostics) this.snapshotLast = {
                     mode,
                     rows: 0,
                     pages: 0,
@@ -1066,7 +1592,7 @@ class ColdSimulationCoordinator {
     }
 
     async flushCriticalSnapshots() {
-        if (!this.worker || !this.ready || this.snapshotInFlightInitial) return false;
+        if (!this.worker || !this.ready || this.snapshotInFlightInitial || this.snapshotBootstrapPending) return false;
         if (this.criticalSnapshotInFlight) return this.criticalSnapshotInFlight;
 
         const job = (async () => {
@@ -1080,12 +1606,18 @@ class ColdSimulationCoordinator {
                     break;
                 }
                 entries.forEach((entry) => this.snapshotQueue.complete(entry, true));
-                this.counters.snapshotCriticalRuns += 1;
+                DiagnosticConfig.developerDiagnostics && (this.counters.snapshotCriticalRuns += 1);
             }
             return true;
         })();
         this.criticalSnapshotInFlight = job;
-        job.finally(() => { this.criticalSnapshotInFlight = null; }).catch(() => null);
+        job.finally(() => {
+            this.criticalSnapshotInFlight = null;
+            if (this.snapshotRefreshPending && this.started && !this.stopping) {
+                this.snapshotRefreshPending = false;
+                setImmediate(() => this.sendSnapshots(false).catch(error => this.recordError(error)));
+            }
+        }).catch(() => null);
         return job;
     }
 
@@ -1100,6 +1632,9 @@ class ColdSimulationCoordinator {
 
     async sendSnapshots(initial = false, continuation = false) {
         if (!this.worker || !this.ready) return false;
+        // Preserve bootstrap intent across a concurrent critical publication.
+        // An incremental continuation has no final initial-ready marker.
+        if (initial) this.snapshotBootstrapPending = true;
         await invoke('GameServer/Clan/ClanSocialRuntime').refresh();
         await invoke('GameServer/Clan/ClanSocialRuntime').enforceOne(this);
         invoke('GameServer/Clan/ClanSocialRuntime').send(this);
@@ -1107,17 +1642,23 @@ class ColdSimulationCoordinator {
             this.snapshotRefreshPending = true;
             return false;
         }
-        if (initial) {
-            this.counters.snapshotFullRuns += 1;
-            return this.startSnapshotJob('full', () => this.sendFullSnapshot());
+        if (this.snapshotBootstrapPending) {
+            this.snapshotBootstrapPending = false;
+            DiagnosticConfig.developerDiagnostics && (this.counters.snapshotFullRuns += 1);
+            return this.startSnapshotJob('full', async () => {
+                const result = await this.sendFullSnapshot();
+                if (!result?.ok) utils.infoWarn('ColdWorker', 'initial snapshot failed after %d states in %d pages',
+                    Number(result?.rowsSent || 0), Number(result?.pagesSent || 0));
+                return result;
+            });
         }
 
         if (!this.snapshotQueue.size()) return false;
         const pressure = this.snapshotPressure();
         const plan = this.snapshotQueue.takeNormal(pressure);
         if (plan.deferred) {
-            this.counters.snapshotDeferrals += 1;
-            this.snapshotLast = {
+            DiagnosticConfig.developerDiagnostics && (this.counters.snapshotDeferrals += 1);
+            if (Config.developerDiagnostics) this.snapshotLast = {
                 mode: 'deferred',
                 rows: 0,
                 pages: 0,
@@ -1141,7 +1682,7 @@ class ColdSimulationCoordinator {
             lease = admission.lease;
         }
 
-        this.counters.snapshotDirtyRuns += 1;
+        DiagnosticConfig.developerDiagnostics && (this.counters.snapshotDirtyRuns += 1);
         return this.startSnapshotJob('dirty', async () => {
             const startedAt = Date.now();
             try {
@@ -1158,7 +1699,6 @@ class ColdSimulationCoordinator {
 
     notifyState(state, options = {}) {
         if (!state) return { ok: false, reason: 'missing_state' };
-        if (this.economyBots.has(Number(state.characterId))) return { ok: false, reason: 'economy_in_progress' };
         this.fencedBots.delete(Number(state.characterId));
         return this.markDirty(state, { ...options, critical: options.critical !== false });
     }
@@ -1166,6 +1706,7 @@ class ColdSimulationCoordinator {
     async acceptColdState(state, timeoutMs = 500) {
         if (!state || !this.worker || !this.ready) return { ok: false, reason: 'worker_not_ready' };
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([Number(state.characterId)]);
+        await this.ensureCraftRecipes(state);
         this.fencedBots.delete(Number(state.characterId));
         const msgId = this.post('snapshot_page', {
             rows: [this.snapshotEntry(state)],
@@ -1194,17 +1735,13 @@ class ColdSimulationCoordinator {
         const missing = [];
         const purposes = new Map();
         for (const candidate of message.payload.candidates || []) {
-            if (this.economyBots.has(Number(candidate.characterId))) {
-                missing.push({ ok: false, characterId: Number(candidate.characterId), reason: 'economy_in_progress', retryAfterMs: 1000 });
-                continue;
-            }
+            const purpose = candidate.purpose || null;
+            purposes.set(Number(candidate.characterId), purpose);
             const state = LifeState.cachedState(candidate.characterId);
             if (!state) {
                 missing.push({ ok: false, characterId: Number(candidate.characterId), reason: 'missing_state' });
                 continue;
             }
-            const purpose = candidate.purpose || null;
-            purposes.set(Number(candidate.characterId), purpose);
             const partyId = String(purpose?.partyId || state.party?.partyId || state.partyId || '');
             if (partyId && invoke('GameServer/Bot/Population/HotPartyLifecycle').pending.has(partyId)) {
                 Metrics.recordColdOwnerRejected('party_hot_transition');
@@ -1248,7 +1785,10 @@ class ColdSimulationCoordinator {
                 ...candidate,
                 state,
                 options: {
-                    allowParty: candidate.purpose?.kind === 'party',
+                    // Native meeting custody may retain party membership.
+                    // Its finite travel/recovery still belongs to this actor.
+                    allowParty: candidate.purpose?.kind === 'party'
+                        || candidate.purpose?.kind === 'resolver' && !!state.stats?.tradeMeeting,
                     allowLifecycle: ['party', 'resolver'].includes(candidate.purpose?.kind)
                 }
             });
@@ -1292,11 +1832,16 @@ class ColdSimulationCoordinator {
 
     visibleToRealPlayer(state) {
         if (!state || ['pk_hunting', 'traveling'].includes(state.activity) || state.stats?.supplyErrand) return false;
-        const players = this.population?.realPlayerSessions?.() || [];
-        if (!players.length) return false;
-        const candidateLoc = state.stats?.marketStore?.loc || state.stats?.craftShop?.loc || state.loc;
+        const candidateLoc = state.stats?.craftShop?.loc || state.loc;
         if (!candidateLoc) return false;
+        const queryLoc = { locX: Number(candidateLoc.locX), locY: Number(candidateLoc.locY), locZ: Number(candidateLoc.locZ) };
+        if (![queryLoc.locX, queryLoc.locY].every(Number.isFinite)) return false;
+        // The index searches XY; the original candidate still reaches the
+        // floor policy, including its missing-height fallback.
+        if (!Number.isFinite(queryLoc.locZ)) queryLoc.locZ = 0;
         const radius = Math.max(1, Number(Config.activationRadius) || 9000);
+        const players = this.population?.realPlayerSessionsNear?.(queryLoc, radius) || [];
+        if (!players.length) return false;
         const floor = invoke('GameServer/Bot/Population/FloorAwareActivationPolicy');
         return players.some((playerSession) => {
             const actor = playerSession?.actor;
@@ -1318,11 +1863,13 @@ class ColdSimulationCoordinator {
         });
     }
 
-    handleProposalBatch(message) {
+    handleProposalBatch(message, worker = this.worker, epoch = this.workerEpoch) {
         if (message.payload.capacityBlocked === true) this.queue.capacityBlocked = true;
         const rejected = [];
         const sizes = message.payload.proposalBytes;
+        const source = Object.freeze({ worker, epoch });
         (message.payload.proposals || []).forEach((proposal, index) => {
+            proposal[PROPOSAL_SOURCE] = source;
             const tokenValid = Protocol.validateToken(proposal.token);
             if (!tokenValid.ok || Number(proposal.characterId) !== Number(proposal.token?.characterId)) {
                 rejected.push({ ok: false, characterId: Number(proposal.characterId || 0), reason: tokenValid.reason || 'token_character', proposal });
@@ -1330,17 +1877,43 @@ class ColdSimulationCoordinator {
             }
             const queued = this.queue.enqueue(proposal, Array.isArray(sizes) ? sizes[index] : null);
             if (!queued.ok) rejected.push({ ok: false, characterId: proposal.characterId, reason: queued.reason, proposal });
-            else Metrics.recordColdOwnerResolved();
+            else {
+                this.trackCommitAcknowledgement(proposal, source);
+                Metrics.recordColdOwnerResolved();
+            }
         });
         if (rejected.length) this.handleCommitResults(rejected).catch((error) => this.recordError(error));
     }
 
+    trackCommitAcknowledgement(proposal, source) {
+        const id = Number(proposal.characterId), previous = this.commitAcknowledgements.get(id);
+        if (previous?.proposalId === proposal.proposalId && previous.source.worker === source.worker
+            && previous.source.epoch === source.epoch) return;
+        previous?.resolve(false);
+        let resolve;
+        const promise = new Promise(done => { resolve = done; });
+        // One small waiter per admitted queue owner; no retained state copy.
+        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve });
+    }
+
+    finishCommitAcknowledgements(results, acknowledged = true) {
+        for (const result of results) {
+            const id = Number(result.characterId), held = this.commitAcknowledgements.get(id);
+            const source = result.proposal?.[PROPOSAL_SOURCE];
+            if (!held || held.proposalId !== result.proposal?.proposalId
+                || source && (held.source.worker !== source.worker || held.source.epoch !== source.epoch)) continue;
+            this.commitAcknowledgements.delete(id);
+            held.resolve(acknowledged);
+        }
+    }
+
     async prepareProposal(proposal) {
         if (proposal.atomicGroup?.raidCommit) {
-            if (!require('./ColdRaidAuthority').prepare(proposal.atomicGroup.raidCommit)) return null;
+            if (!invoke('GameServer/Bot/Population/ColdRaidAuthority').prepare(proposal.atomicGroup.raidCommit)) return null;
         }
         const state = LifeState.cachedState(proposal.characterId) || proposal.baseState;
         if (!state) return null;
+        if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, inventory: state.inventory };
         const partyId = String(state.party?.partyId || state.partyId || '');
         if ((partyId && invoke('GameServer/Bot/Population/HotPartyLifecycle').pending.has(partyId))
             || this.visibleToRealPlayer(state)) return null;
@@ -1368,6 +1941,9 @@ class ColdSimulationCoordinator {
             ? await LifeState.prepareResolve(claimedState, proposal.result, { persist: false, timestamp })
             : null);
         if (!resolvedState) return null;
+        // The worker recorded this hunt's income: the main thread's level-band
+        // table (the hour value of bots without a sample) learns it here.
+        HuntEfficiency.observe(resolvedState);
         // An atomic group commits all members or none: as before, its cleanup
         // is decided on the claimed state, so a member its party releases in
         // this commit does not fail the whole group.
@@ -1397,170 +1973,356 @@ class ColdSimulationCoordinator {
             occupancy,
             Date.now()
         );
-        if (admission.checked && !admission.admitted) this.counters.routeCapacityRejects += 1;
+        if (admission.checked && !admission.admitted) DiagnosticConfig.developerDiagnostics && (this.counters.routeCapacityRejects += 1);
         return admission.state;
     }
 
+    async step(name, characterId, work) {
+        try { return await work(); }
+        catch (error) {
+            DiagnosticConfig.developerDiagnostics && (this.counters.afterCommitStepErrors[name] += 1);
+            utils.infoWarn('ColdWorker', 'postcommit %s failed for %s: %s', name, characterId, error?.message || error);
+            return undefined;
+        }
+    }
+
     async afterCommit(entry, committed = {}) {
-        if (committed.raidPartyRow && Number(BackgroundPartyState.find(committed.raidPartyRow.partyId)?.updatedAt || 0)
-            < Number(committed.raidPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committed.raidPartyRow);
-        if (committed.raidRow) require('./ColdRaidAuthority').accept(committed.raidRow);
-        if (committed.raidPartyRow && entry.proposal.partyResolution?.party?.stats?.raidEncounter?.status === 'defeated') {
-            await require('./ColdRaidWorldBridge').settle(entry.proposal.partyResolution.party, { respawnAt: committed.raidRespawnAt });
-        }
-        const state = LifeState.cachedState(entry.nextState.characterId) || entry.nextState;
-        await LifeEvents.recordMany(state.characterId, entry.proposal.result?.events || []);
-        await LifeState.enqueueEquipmentGoalAdvanceForState(state)
-            .catch((error) => {
-                utils.infoWarn('BotGoals', 'equipment goal advance enqueue failed for %s: %s',
-                    state.characterId, error?.message || error);
+        if (Config.developerDiagnostics === true) invoke('GameServer/Bot/Economy/ConsumptionDiagnostics').publish(
+            entry.nextState.characterId, entry.proposal.result?.consumptionDiagnostics, {
+                source: 'cold_commit', commandId: entry.proposal.commandId, proposalId: entry.proposal.proposalId,
+                revision: committed.revision ?? committed.row?.simulationRevision ?? entry.proposal.token?.revision, sequence: entry.proposal.sequence
             });
-        if (entry.proposal.partyResolution?.party) {
-            const party = entry.proposal.partyResolution.party;
-            if (!committed.raidPartyRow) await BackgroundPartyState.createOrUpdate(party);
-            if (!committed.raidPartyRow && party.stats?.raidEncounter?.status === 'defeated') {
-                await invoke('GameServer/Bot/Population/ColdRaidWorldBridge').settle(party)
-                    .catch((error) => utils.infoWarn('RaidBoss', 'cold raid settlement failed for %s: %s',
-                        party.partyId, error?.message || error));
+        const id = entry.nextState.characterId;
+        const source = entry.proposal[PROPOSAL_SOURCE];
+        const sourceCurrent = () => !this.stopping && (!source || source.worker === this.worker && source.epoch === this.workerEpoch);
+        const beforeWrite = () => {
+            if (!sourceCurrent()) throw Error('cold_postcommit_source_retired');
+        };
+        const committedPartyRow = committed.partyRow || committed.raidPartyRow;
+        await this.step('partyCache', id, () => {
+            if (committedPartyRow && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
+                < Number(committedPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committedPartyRow);
+        });
+        await this.step('raidCache', id, () => {
+            if (committed.raidRow) invoke('GameServer/Bot/Population/ColdRaidAuthority').accept(committed.raidRow);
+        });
+        await this.step('raidSettlement', id, async () => {
+            if (committedPartyRow && entry.proposal.partyResolution?.party?.stats?.raidEncounter?.status === 'defeated') {
+                await invoke('GameServer/Bot/Population/ColdRaidWorldBridge').settle(entry.proposal.partyResolution.party, { respawnAt: committed.raidRespawnAt });
             }
-            if (party.stats?.raidEncounter?.status === 'failed') {
-                await invoke('GameServer/Clan/ClanEquipmentService').recordRaidFailure(party)
-                    .catch((error) => utils.infoWarn('RaidBoss', 'raid failure planning failed for %s: %s',
-                        party.partyId, error?.message || error));
-            }
-            if (entry.proposal.result?.debug?.activity === 'party_session_review') {
-                const review = party.stats?.sessionReview || {};
-                const decisions = review.decisions || [];
-                const departed = Math.max(0, decisions.length - (party.memberIds || []).length);
-                this.partyReviews.committed += 1;
-                this.partyReviews.departed += departed;
-                this.partyReviews.dissolved += Number(party.status === 'dissolved');
-                for (const decision of decisions) {
-                    this.partyReviews.reasons[decision.reason] = (this.partyReviews.reasons[decision.reason] || 0) + 1;
-                }
-                this.partyReviews.recent.unshift({ partyId: party.partyId, at: review.at, departed, status: party.status, decisions });
-                this.partyReviews.recent.length = Math.min(12, this.partyReviews.recent.length);
-            }
-            if (party.status === 'dissolved') {
-                await LifeState.clearParty(
-                    party.partyId,
-                    party.stats?.partyBreakReason || 'party_dissolved'
-                );
-                Metrics.recordPartyDissolution();
-            } else {
-                Metrics.recordPartyResolve();
-                if (entry.proposal.partyResolution.reviewGoals
-                    && this.population?.reconcileWorkerPartyGoals) {
-                    await this.population.reconcileWorkerPartyGoals(party, Number(entry.proposal.enqueuedAt || Date.now()))
-                        .catch((error) => {
-                            utils.infoWarn('BotGoals', 'worker party goal reconcile failed for %s: %s', party.partyId, error?.message || error);
-                        });
-                }
+        });
+        let state = LifeState.cachedState(id) || entry.nextState;
+        if (sourceCurrent()) await this.step('economyDecision', id,
+            () => this.economyDecisions.accept(id, entry.proposal.economyDecision, committed));
+        await this.step('journal', id, () => LifeEvents.recordMany(id, entry.proposal.result?.events || []));
+        if (sourceCurrent() && entry.proposal.market) {
+            // The resolve has already advanced native ownership. Capture its
+            // accepted authority after commit, never the worker's old revision.
+            const coldAuthority = { ownerId: state.simulation?.ownerId || 'legacy_main',
+                revision: Number(state.simulation?.revision || 0), leaseId: state.simulation?.leaseId || null };
+            const canCommitReview = () => {
+                const current = LifeState.cachedState(id), actual = current?.simulation || {};
+                return sourceCurrent() && current?.phase === 'cold'
+                    && (actual.ownerId || 'legacy_main') === coldAuthority.ownerId
+                    && Number(actual.revision || 0) === coldAuthority.revision
+                    && (actual.leaseId || null) === coldAuthority.leaseId;
+            };
+            await this.step('board', id, () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
+                .applyReview(id, entry.proposal.market, { coldAuthority, canCommitReview }));
+        }
+        await this.step('equipment', id, () => LifeState.enqueueEquipmentGoalAdvanceForState(state));
+        if (sourceCurrent() && entry.proposal.economyPlan) {
+            const started = Config.developerDiagnostics ? performance.now() : 0;
+            const decision = await this.step('improvement', id, () => this.economyDecisions.decided(state));
+            // Native moves publish a new timestamp. Hold the worker's one
+            // decision across this plan exactly as the town command does.
+            this.economyDecisions.hold(id, decision);
+            const preparedState = state;
+            try {
+                state = await this.step('improvement', id, () => this.reviewCommittedEconomy(state, beforeWrite, decision || null)) || state;
+                const applied = await this.step('economyPlan', id, () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
+                    .executePlan(state, entry.proposal.economyPlan,
+                        { beforeWrite, preparedState, step: work => this.step('economyPlan', id, work) }));
+                state = LifeState.cachedState(id) || applied?.state || state;
+                if (applied?.buyPending) this.requestEconomyRefresh(id);
+            } finally {
+                this.economyDecisions.release(id);
+                if (Config.developerDiagnostics) this.economyPlanCount++;
+                if (Config.developerDiagnostics) this.economyPlanTimes.push(performance.now() - started);
+                if (this.economyPlanTimes.length > 256) this.economyPlanTimes.shift();
             }
         }
-        Metrics.recordBackgroundResolve();
-        Metrics.recordCombat(entry.proposal.result?.debug);
-        Metrics.recordResolveDuration(Math.max(0, Date.now() - Number(entry.proposal.enqueuedAt || Date.now())));
-        GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []);
+        // The native plan may have just started a trip or changed the money
+        // packet. Correct only this owner's standing bids against that final
+        // state, even when wish preparation or a board write was deferred.
+        if (sourceCurrent()) await this.step('boardLimits', id, async () => {
+            const checked = await invoke('GameServer/Bot/Economy/BotAfkMarketService')
+                .reviewPurchaseLimits(state, { beforeWrite });
+            state = checked.state || state;
+        });
+        await this.step('clanEvents', id, () => invoke('GameServer/Clan/ClanReviewEvents').committedMember(entry.proposal[CLAN_BEFORE], state));
+        await this.step('party', id, async () => {
+            if (entry.proposal.partyResolution?.party) {
+                const party = entry.proposal.partyResolution.party;
+                if (!committedPartyRow) await BackgroundPartyState.createOrUpdate(party);
+                if (!committedPartyRow && party.stats?.raidEncounter?.status === 'defeated') {
+                    await invoke('GameServer/Bot/Population/ColdRaidWorldBridge').settle(party)
+                        .catch((error) => utils.infoWarn('RaidBoss', 'cold raid settlement failed for %s: %s',
+                            party.partyId, error?.message || error));
+                }
+                if (party.stats?.raidEncounter?.status === 'failed') {
+                    await invoke('GameServer/Clan/ClanEquipmentService').recordRaidFailure(party)
+                        .catch((error) => utils.infoWarn('RaidBoss', 'raid failure planning failed for %s: %s',
+                            party.partyId, error?.message || error));
+                }
+                if (entry.proposal.result?.debug?.activity === 'party_session_review') {
+                    const review = party.stats?.sessionReview || {};
+                    const decisions = review.decisions || [];
+                    const departed = Math.max(0, decisions.length - (party.memberIds || []).length);
+                    this.partyReviews.committed += 1;
+                    this.partyReviews.departed += departed;
+                    this.partyReviews.dissolved += Number(party.status === 'dissolved');
+                    for (const decision of decisions) {
+                        this.partyReviews.reasons[decision.reason] = (this.partyReviews.reasons[decision.reason] || 0) + 1;
+                    }
+                    this.partyReviews.recent.unshift({ partyId: party.partyId, at: review.at, departed, status: party.status, decisions });
+                    this.partyReviews.recent.length = Math.min(12, this.partyReviews.recent.length);
+                }
+                if (party.status === 'dissolved') {
+                    await LifeState.clearParty(
+                        party.partyId,
+                        party.stats?.partyBreakReason || 'party_dissolved'
+                    );
+                    Metrics.recordPartyDissolution();
+                } else {
+                    Metrics.recordPartyResolve();
+                    // ARCH-NOTE: the commit still awaits the worker goal review;
+                    // a busy worker now answers at once with the current objective.
+                    if (entry.proposal.partyResolution.reviewGoals
+                        && this.population?.reconcileWorkerPartyGoals) {
+                        await this.population.reconcileWorkerPartyGoals(party, Number(entry.proposal.enqueuedAt || Date.now()))
+                            .catch((error) => {
+                                utils.infoWarn('BotGoals', 'worker party goal reconcile failed for %s: %s', party.partyId, error?.message || error);
+                            });
+                    }
+                }
+            }
+        });
+        if (entry.proposal.partyResolution?.party && this.population?.applyWorkerPartyRequirements) {
+            await this.step('partyPlans', id, () => this.population.applyWorkerPartyRequirements(
+                BackgroundPartyState.find(entry.proposal.partyResolution.partyId) || entry.proposal.partyResolution.party,
+                entry.proposal.partyResolution));
+        }
+        if (entry.proposal.buffOffer) {
+            await this.step('buff', id, () => invoke('GameServer/Bot/Economy/ColdBuffService')
+                .applyOffer(entry.proposal.buffOffer, { beforeWrite }));
+        }
+        if (Config.developerDiagnostics) await this.step('metrics', id, () => {
+            Metrics.recordBackgroundResolve();
+            Metrics.recordCombat(entry.proposal.result?.debug);
+            Metrics.recordResolveDuration(Math.max(0, Date.now() - Number(entry.proposal.enqueuedAt || Date.now())));
+        });
+        await this.step('announce', id, () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
         return state;
     }
 
+    async reviewCommittedEconomy(state, beforeWrite, decisionOverride) {
+        if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return LifeState.cachedState(state.characterId) || state;
+        // The native commit has released its lease before these actions.
+        // Each action validates the current row again inside its writer.
+        state = LifeState.cachedState(state.characterId) || state;
+        const decision = decisionOverride === undefined
+            ? await this.step('improvement', state.characterId, () => this.economyDecisions.decided(state)) : decisionOverride;
+        state = await this.step('training', state.characterId, () => LifeState.reviewTrainingAfterCommit(state, { beforeWrite }))
+            || LifeState.cachedState(state.characterId) || state;
+        const improved = await this.step('improvement', state.characterId, () => invoke('GameServer/Bot/Economy/BotImprovementService')
+            .reviewCold(state, { beforeWrite, decide: () => decision }));
+        return improved?.state || LifeState.cachedState(state.characterId) || state;
+    }
+
     async handleCommitResults(results = []) {
+        const worker = this.worker, epoch = this.workerEpoch;
+        results = results.filter(result => {
+            const source = result.proposal?.[PROPOSAL_SOURCE];
+            return !source || (source.worker === worker && source.epoch === epoch);
+        });
+        if (!results.length) {
+            this.tableChannel.flush();
+            return;
+        }
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
+        if (this.worker !== worker || this.workerEpoch !== epoch) {
+            this.tableChannel.flush();
+            return;
+        }
         const index = this.contextIndex({ compactPartyMembers: true });
-        const acknowledgements = results.map((result) => {
+        for (const result of results) {
+            const state = LifeState.cachedState(result.characterId) || result.nextState;
+            if (state) await this.step('economyPlan', result.characterId, () => this.ensureCraftRecipes(state));
+        }
+        if (this.worker !== worker || this.workerEpoch !== epoch) {
+            this.tableChannel.flush();
+            return;
+        }
+        const acknowledgements = results.flatMap((result) => {
+            const inputToken = Protocol.leaseRenewalToken(result.proposal?.token);
+            const proposalId = result.proposal?.proposalId;
+            if (!inputToken || inputToken.characterId !== Number(result.characterId)
+                || typeof proposalId !== 'string' || !proposalId || proposalId.length > 240) return [];
             const state = LifeState.cachedState(result.characterId) || result.nextState || result.proposal?.baseState || null;
-            return {
+            return [{
                 ok: !!result.ok,
                 characterId: Number(result.characterId),
+                inputToken,
+                proposalId,
                 reason: result.reason || (result.ok ? 'committed' : 'rejected'),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
                 state,
                 context: state ? this.contextFor(state, index) : {}
-            };
+            }];
         });
-        this.postCollections('commit_ack', { results: acknowledgements });
+        // Table changes reach the worker before the commits that made them.
+        this.tableChannel.flush();
+        const sent = this.postCollections('commit_ack', { results: acknowledgements });
+        this.finishCommitAcknowledgements(results, sent > 0);
     }
 
     async handleReleaseRequest(message) {
+        const worker = this.worker, epoch = this.workerEpoch;
         const tokens = (message.payload.releases || []).map((entry) => entry.token).filter(Boolean);
+        const original = new Map();
+        for (const token of tokens) {
+            const inputToken = Protocol.leaseRenewalToken(token);
+            if (!inputToken) continue;
+            // Ambiguous repeated ids cannot identify an original request.
+            original.set(inputToken.characterId, original.has(inputToken.characterId) ? null : inputToken);
+        }
         const released = await ColdSimulationOwner.releaseBatch(tokens, { releaseInvalidated: true }).catch(() => []);
+        if (this.worker !== worker || this.workerEpoch !== epoch) return;
         const index = this.contextIndex({ compactPartyMembers: true });
-        const results = released.map((result) => {
+        const results = released.flatMap((result) => {
+            const inputToken = original.get(Number(result.characterId));
+            if (!inputToken) return [];
             const state = LifeState.cachedState(result.characterId);
-            return { ...result, state, context: state ? this.contextFor(state, index) : {} };
+            return [{ ...result, inputToken, releaseRequestId: message.msgId,
+                state, context: state ? this.contextFor(state, index) : {} }];
         });
         this.postCollections('release_ack', { results }, message.msgId);
     }
 
-    handleCommandRequest(message) {
-        const requests = message.payload.requests || [];
+    handleCommandRequest(message, worker = this.worker, epoch = this.workerEpoch) {
+        if ((message.payload.requests || []).some(request => request.kind === 'meeting')) {
+            this.handleMeetingRequest(message, worker, epoch); return;
+        }
+        const sourceCurrent = () => this.worker === worker && this.workerEpoch === epoch;
+        const requests = (message.payload.requests || []).flatMap((request) => {
+            const parsed = Protocol.commandIdentity(request);
+            const identity = parsed && { characterId: parsed.characterId, commandId: parsed.commandId,
+                commandCheckpoint: parsed.checkpoint };
+            if (!identity || request.kind !== 'lifecycle'
+                || !Protocol.sameCommandCheckpoint(identity.commandCheckpoint, request.state)) return [];
+            return [{ request, identity }];
+        });
         this.commandTail = this.commandTail.then(async () => {
+            if (!sourceCurrent()) return;
             const results = [];
-            for (const request of requests) {
-                this.counters.commands += 1;
+            for (const { request, identity } of requests) {
+                if (!sourceCurrent()) return;
+                DiagnosticConfig.developerDiagnostics && (this.counters.commands += 1);
                 try {
-                    const state = LifeState.cachedState(request.characterId) || request.state;
-                    const id = Number(request.characterId);
+                    const state = LifeState.cachedState(request.characterId);
+                    const id = identity.characterId;
                     Metrics.recordColdOwnerLegacyDeferred(`command_${String(state?.activity || 'unknown')}`);
                     if (this.fencedBots.has(id) || state?.phase !== 'cold') {
-                        results.push({ ok: false, characterId: id, reason: 'hot_handoff_fenced', state });
+                        results.push({ ...identity, ok: false, reason: 'hot_handoff_fenced',
+                            ...(state ? { state } : {}) });
+                        continue;
+                    }
+                    if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) {
+                        results.push({ ...identity, ok: false, reason: 'stale_command', retryAfterMs: 1000,
+                            state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) });
                         continue;
                     }
                     let result;
-                    const operation = Promise.resolve(this.population?.executeWorkerLifecycleCommand?.(state, request));
+                    const operation = this.executeLifecycleCommand(request, identity, sourceCurrent);
                     this.commandInflight.set(id, operation);
-                    try { result = await operation; } finally { this.commandInflight.delete(id); }
-                    const nextState = result?.state || LifeState.cachedState(request.characterId) || state;
+                    try { result = await operation; } finally {
+                        if (this.commandInflight.get(id) === operation) this.commandInflight.delete(id);
+                    }
+                    if (!sourceCurrent()) return;
+                    const nextState = LifeState.cachedState(request.characterId) || result?.state;
                     results.push({
+                        ...identity,
                         ok: result?.ok !== false,
-                        characterId: request.characterId,
                         reason: result?.reason || (result?.ok === false ? 'command_rejected' : 'command_applied'),
                         ...(result?.ok === false ? { retryAfterMs: Math.max(1000,
                             Number(result.retryAfterMs) || (result.reason === 'missing_spot' ? 30000 : 5000)) } : {}),
-                        state: nextState,
-                        context: this.contextFor(nextState, this.contextIndex({ compactPartyMembers: true }))
+                        ...(nextState ? { state: nextState } : {}),
+                        context: nextState ? this.contextFor(nextState, this.contextIndex({ compactPartyMembers: true })) : {}
                     });
                 } catch (error) {
-                    this.counters.commandErrors += 1;
-                    results.push({ ok: false, characterId: request.characterId, reason: error?.message || 'command_error', retryAfterMs: 5000 });
+                    if (!sourceCurrent()) return;
+                    DiagnosticConfig.developerDiagnostics && (this.counters.commandErrors += 1);
+                    const state = LifeState.cachedState(request.characterId);
+                    results.push({ ...identity, ok: false, reason: error?.message || 'command_error', retryAfterMs: 5000,
+                        ...(state ? { state } : {}) });
                 }
                 await new Promise((resolve) => setImmediate(resolve));
             }
+            if (!sourceCurrent()) return;
             this.postCollections('command_ack', { results }, message.msgId);
-        }).catch((error) => this.recordError(error));
+        }).catch((error) => { if (sourceCurrent()) this.recordError(error); });
     }
 
-    async withEconomyState(state, work) {
-        const id = Number(state.characterId);
-        if (this.economyBots.has(id) || this.commandInflight.has(id) || this.fencedBots.has(id)) {
-            return { state, reason: 'economy_busy' };
+    async executeLifecycleCommand(request, identity, sourceCurrent) {
+        // A previous native writer can hold the character beyond the worker
+        // lifetime. Own this entire promise and admit the computation only
+        // after the existing writer has settled against the current cache.
+        await LifeState.settleWrites([identity.characterId]);
+        if (!sourceCurrent()) return { ok: false, reason: 'stale_worker_source' };
+        const state = LifeState.cachedState(identity.characterId);
+        const refusal = reason => ({ ok: false, reason, retryAfterMs: 1000, ...(state ? { state } : {}) });
+        if (this.stopping) return refusal('coordinator_stopping');
+        if (!state) return refusal('missing_state');
+        if (this.fencedBots.has(identity.characterId) || state.phase !== 'cold') return refusal('hot_handoff_fenced');
+        if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) return refusal('stale_command');
+        const owned = this.commandInflight.get(identity.characterId);
+        if (!(owned instanceof Promise)) return refusal('stale_command');
+        const checkpoint = Object.freeze({ ...Protocol.commandCheckpoint(identity.commandCheckpoint) });
+        const workerAdmission = Object.freeze({
+            characterId: identity.characterId, commandId: identity.commandId, commandCheckpoint: checkpoint,
+            check: () => {
+                if (!sourceCurrent()) return { reason: 'stale_worker_source' };
+                if (this.stopping) return { reason: 'coordinator_stopping' };
+                if (this.commandInflight.get(identity.characterId) !== owned) return { reason: 'stale_command' };
+                const latest = LifeState.cachedState(identity.characterId);
+                if (!latest) return { reason: 'missing_state' };
+                if (this.fencedBots.has(identity.characterId) || latest.phase !== 'cold') {
+                    return { reason: 'hot_handoff_fenced' };
+                }
+                return Protocol.sameCommandCheckpoint(checkpoint, latest) ? null : { reason: 'stale_command' };
+            }
+        });
+        const result = await this.population?.executeWorkerLifecycleCommand?.(state, request, { workerAdmission });
+        if (result?.ok && sourceCurrent() && !this.stopping) {
+            const current = LifeState.cachedState(identity.characterId);
+            if (current) result.state = await this.step('improvement', identity.characterId, () => this.reviewCommittedEconomy(current, () => {
+                if (!sourceCurrent() || this.stopping) throw Error('cold_postcommit_source_retired');
+            })) || current;
         }
-        this.economyBots.add(id);
-        try {
-            const fence = await this.fenceBot(id, 1000, true);
-            if (!fence.ok) return { state, reason: fence.reason };
-            const latest = LifeState.snapshot(id) || state;
-            if (latest.phase !== 'cold') return { state: latest, reason: 'not_cold' };
-            const handoff = await ColdSimulationOwner.handoffToMain(latest, { allowParty: true, allowLifecycle: true });
-            if (!handoff.ok) return { state: latest, reason: handoff.reason };
-            return await work(LifeState.snapshot(id) || latest);
-        } finally {
-            this.economyBots.delete(id);
-            const latest = LifeState.snapshot(id);
-            if (latest) this.notifyState(latest, { critical: true, reason: 'economy_finished' });
-            else this.fencedBots.delete(id);
-        }
+        return result;
     }
 
-    async fenceBot(characterId, timeoutMs = 500, economy = false) {
-        if (!economy && this.economyBots.has(Number(characterId))) return { ok: false, reason: 'economy_in_progress' };
-        if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
+    async fenceBot(characterId, timeoutMs = 500) {
         const id = Number(characterId);
+        this.economyDecisions.forget(id);
+        invoke('GameServer/Bot/Economy/EconomyContext').forget(id);
+        if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         this.fencedBots.add(id);
-        this.counters.fences += 1;
+        this.economyRoutes.forget(id);
+        DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
         if (!msgId) return { ok: false, reason: 'fence_send_failed' };
         let timer = null;
@@ -1578,7 +2340,7 @@ class ColdSimulationCoordinator {
             await this.queue.flushCharacter(id);
             return { ok: true, reason: 'fenced', ...fenced };
         } catch (error) {
-            this.counters.fenceTimeouts += 1;
+            DiagnosticConfig.developerDiagnostics && (this.counters.fenceTimeouts += 1);
             this.waiters.delete(msgId);
             return { ok: false, reason: error.message };
         } finally {
@@ -1647,13 +2409,120 @@ class ColdSimulationCoordinator {
         return paused;
     }
 
+    currentLeaseRenewalRound(round) {
+        return !!round && this.leaseRenewalRound === round && !round.cancelled
+            && this.worker === round.worker && this.workerEpoch === round.epoch
+            && this.ready && this.snapshotsLoaded && !this.stopping && Date.now() < round.replyBy;
+    }
+
+    canRenewLease(round, token) {
+        if (!this.currentLeaseRenewalRound(round) || this.fencedBots.has(token.characterId)
+            || this.commandInflight.has(token.characterId)) return false;
+        const cached = LifeState.cachedState(token.characterId), current = cached?.simulation;
+        return cached?.phase === 'cold' && current?.ownerId === token.ownerId
+            && current.revision === token.revision && current.leaseId === token.leaseId;
+    }
+
+    cancelLeaseRenewalRound(round = this.leaseRenewalRound) {
+        if (!round) return;
+        round.cancelled = true;
+        if (this.leaseRenewalRound === round) this.leaseRenewalRound = null;
+        // Actual native work retains its exclusion token until finally. A
+        // replacement worker must not overlap the old character flush/SQL.
+    }
+
+    beginLeaseRenewalRound() {
+        const previous = this.leaseRenewalRound;
+        if (previous && !this.currentLeaseRenewalRound(previous)) this.cancelLeaseRenewalRound(previous);
+        if (this.leaseRenewalRound || this.leaseRenewalInFlight || !this.worker || !this.ready
+            || !this.snapshotsLoaded || this.stopping) return false;
+        const round = {
+            worker: this.worker, epoch: this.workerEpoch, msgId: randomUUID(),
+            replyBy: Date.now() + Math.max(1000, Math.trunc(Number(Config.coldOwnerRenewalIntervalMs) || 5000)),
+            nextPage: 0, pendingPages: 0, doneSeen: false, cancelled: false,
+            ids: new Set(), tail: Promise.resolve()
+        };
+        this.leaseRenewalRound = round;
+        try {
+            if (this.post('lease_renewal_probe', { replyBy: round.replyBy }, round.msgId) === round.msgId) return true;
+        } catch (error) { this.recordError(error); }
+        this.cancelLeaseRenewalRound(round);
+        return false;
+    }
+
+    handleLeaseRenewalCandidates(message, worker, epoch) {
+        const round = this.leaseRenewalRound, payload = message.payload;
+        if (!this.currentLeaseRenewalRound(round) || round.worker !== worker || round.epoch !== epoch
+            || payload.requestId !== round.msgId || payload.pageIndex !== round.nextPage || round.doneSeen) return Promise.resolve(false);
+        // The Kernel ownership window is at most 128 claims; each can hold a
+        // partial batch of at most MAX_BATCH grants. This is not a bot catalog.
+        if (round.ids.size + payload.tokens.length > 128 * Protocol.MAX_BATCH
+            || (!payload.done && !payload.tokens.length)
+            || payload.tokens.some(token => round.ids.has(token.characterId))) {
+            this.cancelLeaseRenewalRound(round);
+            return Promise.resolve(false);
+        }
+        // Reserve before awaiting: onMessage handlers can overlap while a
+        // native character flush is pending. A final page still owns its work.
+        round.nextPage += 1;
+        payload.tokens.forEach(token => round.ids.add(token.characterId));
+        round.pendingPages += 1;
+        round.doneSeen = payload.done;
+        const job = round.tail.then(async () => {
+            if (!this.currentLeaseRenewalRound(round)) return false;
+            const flight = { round, msgId: message.msgId };
+            this.leaseRenewalInFlight = flight;
+            try {
+                const renewals = await ColdSimulationOwner.renewActiveLeases(payload.tokens, {
+                    now: Date.now,
+                    leaseMs: Math.max(2000, Math.trunc(Number(Config.coldOwnerLeaseMs) || 30000)),
+                    canRenew: token => this.canRenewLease(round, token)
+                });
+                if (!this.currentLeaseRenewalRound(round)) return false;
+                const accepted = renewals.filter(result => result.ok && this.canRenewLease(round, result));
+                // Even an empty page needs its exact acknowledgement so the
+                // worker can continue its bounded, backpressured iterator.
+                return this.post('lease_renewal', { renewals: accepted }, message.msgId) === message.msgId;
+            } finally {
+                if (this.leaseRenewalInFlight === flight) this.leaseRenewalInFlight = null;
+            }
+        }).catch(error => {
+            this.recordError(error);
+            this.cancelLeaseRenewalRound(round);
+            return false;
+        }).finally(() => {
+            round.pendingPages -= 1;
+            if (!round.pendingPages && (round.doneSeen || !this.currentLeaseRenewalRound(round))) {
+                this.cancelLeaseRenewalRound(round);
+            }
+        });
+        round.tail = job;
+        return job;
+    }
+
     onWorkerError(error) {
-        this.counters.workerErrors += 1;
+        DiagnosticConfig.developerDiagnostics && (this.counters.workerErrors += 1);
         this.recordError(error);
     }
 
-    onWorkerExit(code) {
-        this.counters.workerExits += 1;
+    onWorkerExit(code, worker = this.worker, epoch = this.workerEpoch) {
+        if (this.worker !== worker || this.workerEpoch !== epoch) return;
+        for (const held of this.commitAcknowledgements.values()) held.resolve(false);
+        this.commitAcknowledgements.clear();
+        for (const [id, held] of this.commandInflight) {
+            const preparation = held.meetingToken ? held : held.meetingPending;
+            if (preparation) this.finishMeetingPreparation(id, preparation, null, Error('trade_meeting_worker_exited'));
+        }
+        this.stopDiagnosticSelection?.();
+        this.stopDiagnosticSelection = null;
+        this.cancelLeaseRenewalRound();
+        this.cancelSafety();
+        Metrics.clearColdSafetyEpoch(epoch);
+        this.projectionRetention.reset();
+        this.economyDecisions.clear();
+        this.economyRoutes.clear();
+        DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
+        this.tableChannel.detach(this);
         this.worker = null;
         this.workerMaxInFlight = null;
         this.ready = false;
@@ -1666,7 +2535,7 @@ class ColdSimulationCoordinator {
         const delays = [1000, 2000, 5000, 10000, 30000];
         const restartDelay = delays[Math.min(this.restartCount, delays.length - 1)];
         this.restartCount += 1;
-        this.counters.workerRestarts += 1;
+        DiagnosticConfig.developerDiagnostics && (this.counters.workerRestarts += 1);
         utils.infoWarn('ColdWorker', 'worker exited code=%d; restarting in %dms', Number(code || 0), restartDelay);
         this.restartTimer = setTimeout(() => this.startWorker(), restartDelay);
         this.restartTimer.unref?.();
@@ -1677,7 +2546,28 @@ class ColdSimulationCoordinator {
         utils.infoWarn('ColdWorker', '%s', error?.message || String(error));
     }
 
-    async stop() {
+    stop() {
+        if (this.stopPromise) return this.stopPromise;
+        const pending = this.stopCurrent(this.worker, this.workerEpoch).finally(() => {
+            if (this.stopPromise === pending) this.stopPromise = null;
+        });
+        this.stopPromise = pending;
+        return pending;
+    }
+
+    async stopCurrent(worker, epoch) {
+        // Fence posted continuations before cancellation, early returns or any
+        // drain await. A stopped same-epoch recipient cannot be rearmed.
+        this.tableChannel.stopActorRecipient?.(this, epoch);
+        this.stopDiagnosticSelection?.();
+        this.stopDiagnosticSelection = null;
+        this.cancelLeaseRenewalRound();
+        this.cancelSafety();
+        for (const held of this.commitAcknowledgements.values()) held.resolve(false);
+        this.commitAcknowledgements.clear();
+        this.projectionRetention.reset();
+        this.economyDecisions.clear();
+        this.economyRoutes.clear();
         if (!this.started) return { stopped: true };
         this.stopping = true;
         if (this.pvpEncounterTimer) clearInterval(this.pvpEncounterTimer);
@@ -1685,7 +2575,6 @@ class ColdSimulationCoordinator {
         await this.competitionActions.stop();
         if (this.watchdogTimer) clearInterval(this.watchdogTimer);
         if (this.reconcileTimer) clearInterval(this.reconcileTimer);
-        if (this.buffServiceTimer) clearInterval(this.buffServiceTimer);
         if (this.snapshotContinuationTimer) clearTimeout(this.snapshotContinuationTimer);
         if (this.recoveryTimer) clearInterval(this.recoveryTimer);
         if (this.renewalTimer) clearInterval(this.renewalTimer);
@@ -1693,7 +2582,6 @@ class ColdSimulationCoordinator {
         if (this.restartTimer) clearTimeout(this.restartTimer);
         this.watchdogTimer = null;
         this.reconcileTimer = null;
-        this.buffServiceTimer = null;
         this.snapshotContinuationTimer = null;
         this.recoveryTimer = null;
         this.renewalTimer = null;
@@ -1703,7 +2591,7 @@ class ColdSimulationCoordinator {
         await Promise.race([this.snapshotInFlight || Promise.resolve(), wait(10000)]).catch(() => null);
         await Promise.race([this.criticalSnapshotInFlight || Promise.resolve(), wait(10000)]).catch(() => null);
         let drained = null;
-        if (this.worker) {
+        if (worker && this.worker === worker && this.workerEpoch === epoch) {
             const msgId = this.post('shutdown', { deadlineAt: Date.now() + 10000 });
             if (msgId) {
                 drained = await Promise.race([
@@ -1716,8 +2604,10 @@ class ColdSimulationCoordinator {
         await Promise.race([this.commandTail.catch(() => null), wait(10000)]);
         await Promise.race([this.historyCleanupInFlight || Promise.resolve(), wait(10000)]).catch(() => null);
         this.historyCleanupInFlight = null;
-        if (this.worker) await this.worker.terminate().catch(() => null);
-        this.worker = null;
+        if (worker) await worker.terminate().catch(() => null);
+        Metrics.clearColdSafetyEpoch(epoch);
+        if (this.worker === worker) this.worker = null;
+        if (this.workerEpoch !== epoch) return { stopped: true, drained, queue };
         await ColdSimulationOwner.recoverStartupLeases().catch(() => null);
         this.started = false;
         return { stopped: true, drained, queue };
@@ -1725,15 +2615,17 @@ class ColdSimulationCoordinator {
 
     snapshot() {
         return {
-            ...this.counters,
+            ...(Config.developerDiagnostics ? this.counters : { diagnosticsEnabled: false }),
             started: this.started,
             ready: this.ready,
             snapshotsLoaded: this.snapshotsLoaded,
             epoch: this.workerEpoch,
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
-            competitionActions: this.competitionActions.snapshot(),
-            partyReviews: this.partyReviews,
+            competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
+            economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,
+            partyReviews: Config.developerDiagnostics ? this.partyReviews : null,
+            economyPlans: Config.developerDiagnostics ? { count: this.economyPlanCount, perCommit: this.economyPlanCount / Math.max(1, this.queue.snapshot().committed || 0), p95Ms: [...this.economyPlanTimes].sort((a, b) => a - b)[Math.max(0, Math.ceil(this.economyPlanTimes.length * .95) - 1)] || 0 } : null,
             queue: this.queue.snapshot(),
             snapshots: {
                 ...this.snapshotQueue.snapshot(),
@@ -1741,12 +2633,14 @@ class ColdSimulationCoordinator {
                 inFlightInitial: this.snapshotInFlightInitial,
                 refreshPending: this.snapshotRefreshPending,
                 criticalInFlight: !!this.criticalSnapshotInFlight,
+                ...(Config.developerDiagnostics ? {
                 last: { ...this.snapshotLast },
                 fullRuns: this.counters.snapshotFullRuns,
                 dirtyRuns: this.counters.snapshotDirtyRuns,
                 criticalRuns: this.counters.snapshotCriticalRuns,
                 yields: this.counters.snapshotYields,
                 deferrals: this.counters.snapshotDeferrals
+                } : {})
             }
         };
     }

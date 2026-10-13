@@ -6,8 +6,14 @@ on:
 
 jobs:
   node-tests:
-    name: Node tests
+    name: Node tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
+    # A test file that never exits must not hold its shard for the 6 h default.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
       - name: Checkout
@@ -22,7 +28,10 @@ jobs:
         run: npm install
 
       - name: Check syntax
+        if: matrix.shard == 1
         run: npm run check
 
       - name: Run tests
-        run: npm test
+        env:
+          L2NODE_TEST_TIMEOUT_MS: 180000
+        run: npm test -- --keep-going --shard=${{ matrix.shard }}/12

@@ -67,10 +67,12 @@ function isProtectedStarterCohort(state) {
         && !!state?.stats?.starterRegion;
 }
 
-function physicalSpotForState(state, profiles) {
+// `catalogOnly`: the caller has no live world (the cold worker); the cell is
+// looked up in the profiles, which carry the same ids.
+function physicalSpotForState(state, profiles, catalogOnly = false) {
     const loc = state?.loc;
     if (loc && Number.isFinite(Number(loc.locX)) && Number.isFinite(Number(loc.locY))) {
-        const physical = SpotService.findCurrentSpot(loc);
+        const physical = SpotService.findCurrentSpot(loc, catalogOnly ? profiles : null);
         if (physical) return SpotIndex.spotById(profiles, physical.id) || physical;
     }
     return state?.spotId ? SpotIndex.spotById(profiles, state.spotId) : null;
@@ -301,6 +303,21 @@ function capacityFingerprint(occupancy = {}, maxUnits = 9, options = {}) {
 // out-of-range spots are rejected before deriving their tags. The window of
 // one target level is the same for every search of one catalog.
 const spotsNearLevelByCatalog = new WeakMap();
+// Catalogue-owned references, at most 80 level arrays; collecting/resetting a
+// catalogue releases its lists. No bot, state or matchup is retained here.
+const lowerSpotsByCatalog = new WeakMap();
+
+function lowerSpots(profiles, targetLevel) {
+    let byLevel = lowerSpotsByCatalog.get(profiles);
+    if (!byLevel) lowerSpotsByCatalog.set(profiles, byLevel = new Map());
+    let spots = byLevel.get(targetLevel);
+    if (!spots) {
+        spots = profiles.filter(profile => profile.raidBoss !== true && profile.maxLevel < targetLevel - 4);
+        byLevel.set(targetLevel, spots);
+        if (byLevel.size > 80) byLevel.delete(byLevel.keys().next().value);
+    }
+    return spots;
+}
 
 function spotsNearLevel(profiles, targetLevel) {
     let byLevel = spotsNearLevelByCatalog.get(profiles);
@@ -334,7 +351,7 @@ function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
     for (const key of view.excludedKeys) if (!excludedKeys.has(key)) markPlace(key);
     view.excludedKeys = new Set(excludedKeys);
     const catalog = profiles || [];
-    const counted = (members) => [...(members || [])]
+    const counted = (spotId, kind) => [...index.members(spotId, kind)]
         .filter(([key]) => !view.excludedKeys.has(key))
         .map(([, state]) => state);
     const snapshot = {};
@@ -348,8 +365,8 @@ function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
         }
         let cached = view.entries.get(spotId);
         if (!cached || cached.profile !== profile || index.dirty.has(spotId)) {
-            const spotMembers = counted(index.physical.get(spotId));
-            const claimers = counted(index.reserved.get(spotId));
+            const spotMembers = counted(spotId, 'physical');
+            const claimers = counted(spotId, 'reserved');
             cached = { profile, entry: spotMembers.length || claimers.length
                 ? occupancyEntry(key, profile, spotMembers, claimers) : null };
             view.entries.set(spotId, cached);
@@ -422,6 +439,8 @@ const SpotProfiles = {
         return SpotIndex.spotById(this.ensure(), id);
     },
 
+    // options.profiles: the spot catalogue to search instead of ensure(), for
+    // callers without the live world (the cold worker).
     findForState(state, options = {}) {
         const timestamp = Number(options.timestamp || Date.now());
         if (GearAcquisitionPlanner.levelingRecoveryFor(state, state?.stats?.equipmentPlan, timestamp)) {
@@ -429,9 +448,9 @@ const SpotProfiles = {
         }
         const acquisitionPlan = state?.stats?.equipmentPlan;
         const protectedStarterCohort = isProtectedStarterCohort(state);
-        const profiles = this.ensure();
-        const physicalSpot = physicalSpotForState(state, profiles);
-        const savedSpot = state?.spotId ? this.findById(state.spotId) : null;
+        const profiles = options.profiles || this.ensure();
+        const physicalSpot = physicalSpotForState(state, profiles, !!options.profiles);
+        const savedSpot = state?.spotId ? SpotIndex.spotById(profiles, state.spotId) : null;
         const currentSpot = physicalSpot || savedSpot;
         const targetLevel = LevelingRoutes.targetLevelForState(state, options);
         const excludedSpotIds = new Set([
@@ -453,6 +472,8 @@ const SpotProfiles = {
         const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
         const mode = LevelingRoutes.modeForState(state, options);
         const routeOptions = { ...options, occupancy, excludedSpotIds, capacityUnits, ...reservationOptions,
+            spotEconomics: options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
+                { timestamp, mode, occupancy }),
             matchupProfiles: TargetMatchup.stateProfiles(state, { ...options, mode }) };
         const currentMatch = currentSpot ? LevelingRoutes.scoreSpot(currentSpot, state, routeOptions) : null;
         // Staying on the leader's ground still admits any teammates reserved
@@ -488,6 +509,14 @@ const SpotProfiles = {
         // Fresh racial cohorts stay at their physical level-one spot until
         // they advance. A gear plan otherwise remains the normal route choice
         // for established bots.
+        const collectingGear = acquisitionPlan?.status === 'active' && acquisitionPlan.next?.spotId;
+        if (!protectedStarterCohort && !collectingGear && !GearAcquisitionPlanner.isClanOwnedPlan(acquisitionPlan)) {
+            const incomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').select(state, {
+                spots: profiles, occupancy, timestamp, mode,
+                required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
+            if (incomeRoute) return incomeRoute.spot;
+        }
+
         if (keepCurrentSpot) {
             return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
         }
@@ -505,12 +534,12 @@ const SpotProfiles = {
                         && GearAcquisitionPlanner.isClanOwnedPlan(acquisitionPlan) }
             );
             const planned = plannedSource
-                ? this.findById(plannedSource.spotId)
+                ? SpotIndex.spotById(profiles, plannedSource.spotId)
                 // Lightweight callers may provide only the persisted route
                 // metadata, without a source atlas or occupancy snapshot.
                 // Preserve that route until live capacity data is available.
                 : Object.keys(occupancy || {}).length === 0
-                    ? this.findById(acquisitionPlan.next?.spotId)
+                    ? SpotIndex.spotById(profiles, acquisitionPlan.next?.spotId)
                     : null;
             if (planned && !excludedSpotIds.has(String(planned.id))
                 && LevelingRoutes.isSpotAllowedForState(planned, state, routeOptions)) {
@@ -519,7 +548,9 @@ const SpotProfiles = {
                 // plan pin an outleveled bot to that source indefinitely.
                 const hasLevelBounds = Number.isFinite(Number(planned.minLevel))
                     && Number.isFinite(Number(planned.maxLevel));
-                if (!currentSpot || !hasLevelBounds || SpotService.isSuitable(planned, targetLevel, options)) {
+                const economicSource = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state)
+                    && Number(planned.avgLevel || planned.minLevel || 1) - state.level >= -15;
+                if (!currentSpot || !hasLevelBounds || SpotService.isSuitable(planned, targetLevel, options) || economicSource) {
                     return planned;
                 }
             }
@@ -549,16 +580,24 @@ const SpotProfiles = {
         // otherwise a perfectly healthy bot repeats missing_spot forever.
         if (!routeCandidates.length && soloSearch) {
             const recoveryState = { ...state, stats: { ...state.stats, equipmentPlan: null } };
-            routeCandidates = profiles.filter(profile => profile.raidBoss !== true
-                && profile.maxLevel >= targetLevel - 16
-                && profile.maxLevel < targetLevel - 4
-                && !excludedSpotIds.has(String(profile.id))
-                && hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions)
-                && LevelingRoutes.isSpotAllowedForState(profile, recoveryState, routeOptions));
-            if (currentSpotAmong(routeCandidates, currentSpot, mustRelocate)) {
-                return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
+            const spotValue = routeOptions.spotEconomics;
+            const maybeSurvives = TargetMatchup.soloSpotUpperBound(routeOptions.matchupProfiles);
+            const lower = lowerSpots(profiles, targetLevel)
+                .filter(profile => !excludedSpotIds.has(String(profile.id))
+                    && hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions)
+                    && maybeSurvives(profile))
+                .map(profile => ({ profile, value: spotValue(profile)?.valueHours ?? -Infinity }))
+                .sort((a, b) => b.value - a.value || String(a.profile.id).localeCompare(String(b.profile.id)));
+            routeCandidates = [];
+            // ARCH-NOTE: ALT optimistic damage prefilter preserves exact-safe
+            // camps: naked L50 catalogue fixture finds 100% of best safe income
+            // with 8 exact probes (default 128 found none). Same-catalogue first
+            // search 65.9 -> 22.1 ms; warm 1.77 -> 2.38 ms. Shared gate unchanged.
+            for (let checked = 0; checked < lower.length && checked < 128 && routeCandidates.length < 8; checked++) {
+                const profile = lower[checked].profile;
+                if (LevelingRoutes.isSpotAllowedForState(profile, recoveryState, routeOptions)) routeCandidates.push(profile);
             }
-            suitable = routeCandidates.filter((profile) => SpotService.isSuitable(profile, targetLevel, options));
+            suitable = [];
         }
         const guided = LevelingRoutes.bestSpot(suitable.length ? suitable : routeCandidates, state, routeOptions);
 
@@ -585,3 +624,7 @@ SpotProfiles.clanEquipmentReservationKey = clanEquipmentReservationKey;
 SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT = MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT;
 
 module.exports = SpotProfiles;
+// A getter also sees replaced period catalogs and manually hydrated profiles;
+// table forecasts never call ensure() or import a live World from a worker.
+const EMPTY_REWARD_SPOTS = [];
+invoke('GameServer/Bot/AI/SpotValueTable').useSpots(() => SpotProfiles.cache || EMPTY_REWARD_SPOTS);

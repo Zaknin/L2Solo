@@ -8,7 +8,7 @@ const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const GeneratedColdSeeder = invoke('GameServer/Bot/Population/GeneratedColdSeeder');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
-const ColdMarketListingService = invoke('GameServer/Bot/Economy/ColdMarketListingService');
+const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 
 DataCache.init();
 
@@ -46,12 +46,38 @@ async function run() {
     assert.strictEqual(CraftShopService.craftLevelFor({ level: 60, stats: { classId: 0 } }), 0,
         'a class without Create Item has no craft level');
     const levelOneRecipe = { level: 1 };
-    assert.strictEqual(CraftShopService.canCraft({ level: 40, stats: { classId: 55 } }, levelOneRecipe), false,
-        'a Bounty Hunter has Create Item 1 but only crafter classes craft');
+    assert.strictEqual(CraftShopService.canCraft({ level: 40, stats: { classId: 55 } }, levelOneRecipe), true,
+        'a Bounty Hunter may use its retained Create Item 1');
     assert.strictEqual(CraftShopService.canCraft({ level: 36, stats: { classId: 56 } }, { level: 4 }), true);
     assert.strictEqual(CraftShopService.canCraft({ level: 36, stats: { classId: 56 } }, { level: 5 }), false,
         'a crafter needs the recipe level');
     assert.strictEqual(CraftShopService.canCraft({ level: 41, stats: { classId: 57 } }, { level: 4 }), true);
+    // Physical crafting capability follows the skill, not a profession list.
+    [[53, 30], [54, 40], [55, 60], [117, 78]].forEach(([classId, level]) => assert.strictEqual(
+        CraftShopService.isServiceCrafter({ level, stats: { classId } }), true, `class ${classId} retains Create Item`));
+    for (const level of [1, 4, 5, 9, 16, 19]) {
+        const beginner = { classId: 53, level };
+        assert.strictEqual(CraftShopService.isServiceCrafter(beginner), level >= 5);
+        assert.strictEqual(CraftShopService.canCraft(beginner, levelOneRecipe), level >= 5);
+        assert.strictEqual(CraftShopService.canCraft(beginner, { level: 2 }), false);
+    }
+    for (const craftLevel of [0, -1, NaN, Infinity]) {
+        assert.strictEqual(CraftShopService.isServiceCrafter({ ...artisan, craftLevel }), false);
+        assert.strictEqual(CraftShopService.canCraft({ ...artisan, craftLevel }, levelOneRecipe), false);
+    }
+    assert.strictEqual(CraftShopService.canCraft({ ...artisan, stats: { classId: 56, dwarvenCraftLevel: 0 } }, levelOneRecipe), false,
+        'an authoritative unlearned skill must override the class tree');
+    for (const level of [0, -1, NaN, Infinity, undefined]) {
+        assert.strictEqual(CraftShopService.canCraft(artisan, { level }), false, 'invalid recipes cannot be crafted');
+    }
+    assert.strictEqual(CraftShopService.isServiceCrafter({ classId: 57, level: 70 }), true, 'a top-level class id counts too');
+    const maestro = { level: 78, stats: { classId: 118 } };
+    // C4: Maestro is the third craft class and keeps crafting after its third profession.
+    assert.strictEqual(CraftShopService.isServiceCrafter(maestro), true, 'a Maestro is a crafter class');
+    assert.strictEqual(CraftShopService.canCraft(maestro, levelOneRecipe), true);
+    assert.strictEqual(CraftShopService.craftLevelFor(maestro), 9);
+    assert.deepStrictEqual(CraftShopService.availableRecipes(maestro),
+        CraftShopService.availableRecipes({ level: 78, stats: { classId: 57 } }), 'a Maestro crafts what a Warsmith of its level crafts');
     const loadedTree = DataCache.skillTree;
     DataCache.skillTree = loadedTree.filter((entry) => entry.classId !== 56);
     assert.strictEqual(CraftShopService.craftLevelFor({ level: 41, stats: { classId: 57 } }), 1,
@@ -91,9 +117,9 @@ async function run() {
     assert.notStrictEqual(invalid.entries[0]?.recipeId, 999999, 'persisted offers must be revalidated against craft level and recipe data');
     assert.strictEqual(invalid.title, 'Custom smith');
 
-    assert.strictEqual(CraftShopService.CraftStations.length, 31, 'Giran must expose the full D/C/B/A/S market, resources and progressive C weapons');
-    assert.strictEqual(new Set(CraftShopService.GiranCraftStalls.map((loc) => `${loc.locX}:${loc.locY}:${loc.locZ}`)).size, 31, 'every craft station must have its own stall');
-    assert(CraftShopService.GiranCraftStalls.every((loc) => ColdMarketListingService.isGiranPlazaStallLocation(loc)), 'every craft station must remain in the actual sellable Giran plaza footprint');
+    assert.strictEqual(CraftShopService.CraftStations.length, 35, 'Giran includes entry B armor and jewelry alongside progressive weapons');
+    assert.strictEqual(new Set(CraftShopService.GiranCraftStalls.map((loc) => `${loc.locX}:${loc.locY}:${loc.locZ}`)).size, 35, 'every craft station must have its own stall');
+    assert(CraftShopService.GiranCraftStalls.every((loc) => ShopPlaces.isStallArea('Giran', loc)), 'every craft station must remain in the actual sellable Giran plaza footprint');
     const outer = { minX: 80971, maxX: 82887, minY: 147722, maxY: 149490 };
     const width = outer.maxX - outer.minX;
     const height = outer.maxY - outer.minY;

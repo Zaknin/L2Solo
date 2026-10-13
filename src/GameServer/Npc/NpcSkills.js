@@ -22,6 +22,7 @@ const c4ImperialTombSkills = require('../../../data/Npcs/Skills/c4_imperial_tomb
 const c4LowLevelRaidBossSkills = require('../../../data/Npcs/Skills/c4_low_level_raid_bosses_templates.json');
 const c4RaidBossSkills = require('../../../data/Npcs/Skills/c4_raid_bosses_templates.json');
 const c4RaidBossMinionSkills = require('../../../data/Npcs/Skills/c4_raid_boss_minions_templates.json');
+const c4GroupLeaderMinionSkills = require('../../../data/Npcs/Skills/c4_group_leader_minions_templates.json');
 const c4LegacyMonsterSkillTemplates = require('../../../data/Npcs/Skills/c4_legacy_monster_templates.json');
 const c4LegacyMonsterSkillRows = require('../../../data/Npcs/Skills/c4_legacy_monsters.json');
 const c4LegacyMonsterIds = new Set(c4LegacyMonsterSkillRows.map((row) => Number(row.npcId)));
@@ -50,6 +51,18 @@ const npcSkillRows = [
     ...require('../../../data/Npcs/Skills/c4_heathen_camp.json'),
     ...require('../../../data/Npcs/Skills/c4_imperial_tomb.json'),
     ...require('../../../data/Npcs/Skills/c4_tower_of_insolence.json'),
+    ...require('../../../data/Npcs/Skills/c4_blazing_swamp.json'),
+    ...require('../../../data/Npcs/Skills/c4_devastated_castle_outskirts.json'),
+    ...require('../../../data/Npcs/Skills/c4_antharas_lair.json'),
+    ...require('../../../data/Npcs/Skills/c4_devils_isle_elites.json'),
+    ...require('../../../data/Npcs/Skills/c4_cemetery.json'),
+    ...require('../../../data/Npcs/Skills/c4_forsaken_plains.json'),
+    ...require('../../../data/Npcs/Skills/c4_fields_of_massacre.json'),
+    ...require('../../../data/Npcs/Skills/c4_ancient_battleground.json'),
+    ...require('../../../data/Npcs/Skills/c4_tower_of_insolence_lower_floors.json'),
+    ...require('../../../data/Npcs/Skills/c4_skyshadow_meadow.json'),
+    ...require('../../../data/Npcs/Skills/c4_beast_farm.json'),
+    ...require('../../../data/Npcs/Skills/c4_remaining_high_level_monsters.json'),
     ...require('../../../data/Npcs/Skills/c4_necropolis_of_sacrifice.json'),
     ...require('../../../data/Npcs/Skills/c4_catacomb_of_the_branded.json'),
     ...require('../../../data/Npcs/Skills/c4_catacomb_of_the_witch.json'),
@@ -66,7 +79,8 @@ const npcSkillRows = [
     ...require('../../../data/Npcs/Skills/c4_catacomb_of_the_forbidden_path.json'),
     ...require('../../../data/Npcs/Skills/c4_low_level_raid_bosses.json'),
     ...require('../../../data/Npcs/Skills/c4_raid_bosses.json'),
-    ...require('../../../data/Npcs/Skills/c4_raid_boss_minions.json')
+    ...require('../../../data/Npcs/Skills/c4_raid_boss_minions.json'),
+    ...require('../../../data/Npcs/Skills/c4_group_leader_minions.json')
 ];
 
 // These action skills belong to temporary servitors, but their NPC templates
@@ -89,7 +103,7 @@ const summonActionSkillIds = new Map([
 ]);
 
 const skillTemplates = new Map(
-    [...activeSkills, ...passiveSkills, ...npcActiveSkills, ...c4LegacyMonsterSkillTemplates, ...c4SwampSkills, ...c4GardenSkills, ...c4ValleySkills, ...summonActionSkills, ...c4ForestSkills, ...c4DevilsIsleSkills, ...c4NecropolisSacrificeSkills, ...c4DevastatedCastleSkills, ...c4KetraOrcOutpostSkills, ...c4VarkaSilenosStrongholdSkills, ...c4HotSpringsSkills, ...c4WallOfArgosSkills, ...c4ForgeOfTheGodsSkills, ...c4FieldsSkills, ...c4HeathenCampSkills, ...c4ImperialTombSkills, ...c4LowLevelRaidBossSkills, ...c4RaidBossSkills, ...c4RaidBossMinionSkills, ...require('../../../data/Pets/c4-skills.json').skills, ...phantomSummons.templates]
+    [...activeSkills, ...passiveSkills, ...npcActiveSkills, ...c4LegacyMonsterSkillTemplates, ...c4SwampSkills, ...c4GardenSkills, ...c4ValleySkills, ...summonActionSkills, ...c4ForestSkills, ...c4DevilsIsleSkills, ...c4NecropolisSacrificeSkills, ...c4DevastatedCastleSkills, ...c4KetraOrcOutpostSkills, ...c4VarkaSilenosStrongholdSkills, ...c4HotSpringsSkills, ...c4WallOfArgosSkills, ...c4ForgeOfTheGodsSkills, ...c4FieldsSkills, ...c4HeathenCampSkills, ...c4ImperialTombSkills, ...c4LowLevelRaidBossSkills, ...c4RaidBossSkills, ...c4RaidBossMinionSkills, ...c4GroupLeaderMinionSkills, ...require('../../../data/Pets/c4-skills.json').skills, ...phantomSummons.templates]
         .map((skill) => [Number(skill.selfId), skill])
 );
 
@@ -177,6 +191,24 @@ function combatSkillsFor(npc) {
     });
 }
 
+// Prepared once with the datapack; zero is unknown, one physical, three mixed.
+// Retain only numeric membership, never the temporary native skill models.
+let threatMembership = new Uint8Array(0);
+function prepareThreats(npcs) {
+    const maximum = npcs.reduce((value, npc) => Math.max(value, Number(npc.selfId)), 0);
+    const prepared = new Uint8Array(maximum + 1);
+    for (const npc of npcs) {
+        const id = Number(npc.selfId);
+        if (prepared[id]) continue;
+        const actor = { fetchSelfId: () => id, fetchLevel: () => npc.template.level,
+            fetchMaxHp: () => npc.vitals?.maxHp || 1, fetchHp: () => npc.vitals?.maxHp || 1 };
+        prepared[id] = combatSkillsFor(actor).some(skill => skill.fetchSpell() && skill.fetchTargetKind() === 'enemy') ? 3 : 1;
+    }
+    threatMembership = prepared;
+}
+function threatFor(npcId) { return threatMembership[Number(npcId)] || 0; }
+function threatBytes() { return threatMembership.byteLength; }
+
 function passiveSkillsFor(npc) {
     return forNpc(npc).filter((skill) => skill.fetchPassive?.() === true);
 }
@@ -189,6 +221,9 @@ function maxHpMultiplierFor(npc) {
 }
 
 module.exports = {
+    prepareThreats,
+    threatFor,
+    threatBytes,
     forNpc,
     combatSkillsFor,
     passiveSkillsFor,

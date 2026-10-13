@@ -15,6 +15,8 @@ const SeedPlanner = invoke('GameServer/Bot/Population/PopulationSeedPlanner');
 const BotNameGenerator = invoke('GameServer/Bot/Population/BotNameGenerator');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
+const Intake = require('./PopulationIntakePolicy');
+const ClassProgression = invoke('GameServer/ClassProgression');
 
 const NAME_GENERATOR_VERSION = 3;
 const APPEARANCE_VERSION = 2;
@@ -41,7 +43,7 @@ const STARTER_REGION_RACES = Object.freeze({
     dwarf: 4
 });
 
-const CRAFT_SERVICE_PROFILE = { race: 4, classId: 57, role: 'crafter', serviceCrafter: true };
+const CRAFT_SERVICE_PROFILE = { race: 4, classId: CraftShopService.STATION_CRAFTER.classId, role: 'crafter', serviceCrafter: true };
 const CRAFT_SERVICE_COUNT = CraftShopService.CraftStations.length;
 const CRAFT_SERVICE_INDEX_BASE = 10000;
 
@@ -78,17 +80,17 @@ function expForLevel(level) {
     return Number(table[Math.max(0, Number(level || 1) - 1)] || 0);
 }
 
-function baseForIndex(index, starterRegion = null) {
+function baseForIndex(index, starterRegion = null, intake = null) {
     const race = STARTER_REGION_RACES[starterRegion];
     const pool = Number.isInteger(race)
         ? CLASS_POOL.filter((entry) => entry.race === race)
         : CLASS_POOL;
-    return { ...pick(index, pool), sex: sexForIndex(index) };
+    return { ...(intake ? Intake.choose(pool, index, intake) : pick(index, pool)), sex: sexForIndex(index) };
 }
 
 function profileForIndex(index, base = baseForIndex(index), seedProfile = null) {
     if (base.serviceCrafter) {
-        return { level: ProgressionCap.clampLevel(70), band: 'craft_service' };
+        return { level: CraftShopService.stationCrafter().level, band: 'craft_service' };
     }
     if (seedProfile?.level) {
         return {
@@ -204,7 +206,7 @@ function migrationBaseFor(state) {
 
     return {
         ...stats,
-        classId: isCraftService ? 57 : classId,
+        classId: isCraftService ? CraftShopService.STATION_CRAFTER.classId : classId,
         race: isCraftService ? 4 : (Number.isFinite(storedRace) ? storedRace : inferredRace),
         role: isCraftService ? 'crafter' : stats.role,
         serviceCrafter: isCraftService
@@ -248,7 +250,8 @@ function migratePopulationAppearances(states = []) {
 
 function awardBaseGear(characterId, classId) {
     const items = DataCache.newbieItems.find((row) => row.classId === classId)?.items || [];
-    const starterTemplates = items.map((item) => ItemTemplateIndex.findStrict(DataCache.items, item.selfId));
+    const starterTemplates = items.filter((item) => item.equipped === true)
+        .map((item) => ItemTemplateIndex.findStrict(DataCache.items, item.selfId));
     const hasTwoHandedWeapon = starterTemplates.some((template) => (
         Number(template?.etc?.slot || 0) === 14 &&
         String(template?.template?.kind || '').startsWith('Weapon.')
@@ -266,7 +269,8 @@ function awardBaseGear(characterId, classId) {
                     // Newbie templates may still grant a Buckler, but it
                     // must remain in inventory until the two-handed weapon
                     // is replaced.
-                    equipped: !(hasTwoHandedWeapon && Number(template?.etc?.slot || 0) === 8)
+                    equipped: item.equipped === true
+                        && !(hasTwoHandedWeapon && Number(template?.etc?.slot || 0) === 8)
                 });
             }));
     });
@@ -322,10 +326,7 @@ function ensureBaseLoadout(characterId, classId, adena, level = 1, starterShots 
         .then((progression) => {
             const resolvedClassId = Number(progression?.classId || classId);
             return ensureAdena(characterId, adena)
-                .then(() => starterShots ? ShotStock.ensureCharacterStock(characterId, {
-                    classId: resolvedClassId,
-                    targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT
-                }) : null)
+                .then(() => starterShots ? ShotStock.ensureStarterStock(characterId, resolvedClassId) : null)
                 .then(() => ({ classId: resolvedClassId }));
         });
 }
@@ -565,6 +566,7 @@ const GeneratedColdSeeder = {
     // restart; the base-36 form still fits the sixteen-character account name.
     nextPopulationIndex: Date.now(),
 
+    awardBaseGear,
     awardProfileSkills,
     craftServiceSeedState,
     baseForIndex,
@@ -576,6 +578,7 @@ const GeneratedColdSeeder = {
     cooperativeEach,
 
     ensureCraftServices() {
+        if (require('../Economy/ProductionPolicy').buyersDisabled()) return Promise.resolve({ created: 0, seeded: 0 });
         let created = 0;
         let seeded = 0;
         const slots = Array.from({ length: CRAFT_SERVICE_COUNT }, (_, slot) => slot);
@@ -615,6 +618,12 @@ const GeneratedColdSeeder = {
                                 stats: { ...(state.stats || {}), craftStationId: craftShop.stationId, craftShop }
                             }, 'generated_craft_service')
                             : state))
+                        // The station publishes its workshop to bots (E212);
+                        // review writes only when its entries change.
+                        .then((saved) => (saved?.phase === 'cold' && LifeState.cachedState(saved.characterId)
+                            ? invoke('GameServer/Bot/Economy/CraftWorkshopService').review(LifeState.cachedState(saved.characterId))
+                                .then(() => saved)
+                            : saved))
                         .then((saved) => {
                             if (saved && result.created) created += 1;
                             if (saved && shouldSeedState) seeded += 1;
@@ -633,19 +642,33 @@ const GeneratedColdSeeder = {
             .then(() => migratePopulationNames(LifeState.populationSeedStates()))
             .then(() => migratePopulationAppearances(LifeState.allStates(50000)))
             .then(() => {
+            const states = LifeState.populationSeedStates();
             const plan = SeedPlanner.plan(
                 SpotProfiles.ensure(),
-                LifeState.populationSeedStates(),
+                states,
                 limit,
                 Config.starterBotsPerRace
             );
             const batch = plan.missing.slice(0, SeedPlanner.seedBatchSize(plan, Config.generatedColdBatchSize));
+            const classCounts = Intake.classCounts(states, ClassProgression);
+            const regionalClassTotals = {};
+            const regionalIntake = {};
+            for (const slot of batch) regionalIntake[slot.starterRegion] = Number(regionalIntake[slot.starterRegion] || 0) + 1;
+            for (const profile of CLASS_POOL) {
+                regionalClassTotals[profile.race] = (regionalClassTotals[profile.race] || 0) + Number(classCounts[profile.classId] || 0);
+            }
             let created = 0;
             let seeded = 0;
             return cooperativeEach(batch, (spot) => {
                 const index = this.nextPopulationIndex++;
                 const username = `bot_pop_${index.toString(36)}`.slice(0, 16);
-                const base = baseForIndex(index, spot.starterRegion);
+                const race = STARTER_REGION_RACES[spot.starterRegion];
+                const base = baseForIndex(index, spot.starterRegion, {
+                    typeCounts: BotPersona.typeCounts(), classCounts,
+                    total: plan.targetPopulation,
+                    classTotal: Math.max(Number(plan.regionalTargets[spot.starterRegion] || 0),
+                        Number(regionalClassTotals[race] || 0) + Number(regionalIntake[spot.starterRegion] || 0))
+                });
                 const seedProfile = {
                     spot,
                     level: Math.max(1, Number(spot.minLevel || 1)),
@@ -663,11 +686,16 @@ const GeneratedColdSeeder = {
                             loc: result.loc || randomNear(spot.center, index)
                         });
                         return hydrateColdCombatProfile(state)
-                            .then((profiledState) => BotPersona.ensure(profiledState).then(() => profiledState))
+                            .then((profiledState) => BotPersona.ensure(profiledState, { archetype: base.archetype }).then(() => profiledState))
                             .then((profiledState) => LifeState.upsertState(profiledState, 'population_wave_seed'))
                             .then((saved) => {
                                 if (saved && result.created) created += 1;
-                                if (saved) seeded += 1;
+                                if (saved) {
+                                    seeded += 1;
+                                    classCounts[base.classId] = Number(classCounts[base.classId] || 0) + 1;
+                                    regionalClassTotals[race] = Number(regionalClassTotals[race] || 0) + 1;
+                                    regionalIntake[spot.starterRegion] -= 1;
+                                }
                                 return saved;
                             });
                     });

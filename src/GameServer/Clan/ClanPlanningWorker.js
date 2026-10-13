@@ -1,13 +1,30 @@
-const { parentPort } = require('node:worker_threads');
+const { parentPort, workerData } = require('node:worker_threads');
+process.env.BOT_DEVELOPER_DIAGNOSTICS = workerData?.developerDiagnostics === true ? 'true' : 'false';
 require('../../Global');
-const OfferOrder = require('../Bot/Economy/OfferOrder');
+const OfferQuery = require('../Bot/Economy/OfferQuery');
+const TableMirror = require('../Bot/Population/TableMirror');
+const { BoardIndex } = require('../AfkTrade/BoardIndex');
+const { SpotCatalogReader } = require('./ClanSpotCatalog');
+const spotCatalog = new SpotCatalogReader();
 
 // Only immutable catalogs and per-request snapshots enter this process.
-const catalogs = { items: [], npcs: [], npcRewards: [] };
+const catalogs = { items: [], npcs: [], npcRewards: [], npcSpawns: [], newbieItems: [], experience: [], skillTree: [], classTemplates: [], revitalize: {} };
+// ARCH-NOTE: native cap, tree and seated recovery readers capture DataCache.
+// Keep the same authored arrays/objects behind the facade and populate them
+// once per epoch; full native planning previously failed at missing craftLevelFor
+// and then FirstPrice's eager BackgroundResolver/ChargeLifecycle import.
+Object.assign(invoke('GameServer/DataCache'), catalogs);
 let context = {};
 let planner;
-let offers = new Map();
+let fixedOffers = new Map();
 let npcOffers = new Map();
+// Tables from the main thread's ColdTableChannel; pages are not answered.
+// The board's offers come from the 'board' table, indexed as it changes.
+const tables = new TableMirror();
+invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
+const boardIndex = new BoardIndex();
+tables.watch('board', boardIndex.follower());
 const originalInvoke = global.invoke;
 const indexOffers = (rows = []) => {
     const index = new Map();
@@ -21,22 +38,25 @@ const indexOffers = (rows = []) => {
 const market = {
     get TOWN_NPC_SELLERS() { return context.towns || {}; },
     npcOffersAll: (id) => npcOffers.get(Number(id)) || [],
+    // MarketOpportunity.bestOffer over the same sources: the board, the
+    // configured merchants (with the plan) and the NPC shops in the towns.
     bestOffer(id, options = {}) {
-        return [...(offers.get(Number(id)) || []), ...(npcOffers.get(Number(id)) || [])]
-            .filter((offer) => offer.available !== false && Number(offer.count ?? 1) > 0
-                && Number(offer.price) > 0 && Number(offer.price) <= Number(options.budget ?? Infinity)
-                && (!offer.town || offer.town === options.town)
-                && !(offer.sourceType === 'cold_store' && !offer.town && options.town)
-                && (!['cold_store', 'afk_player_store', 'afk_bot_store'].includes(offer.sourceType)
-                    || Number(offer.sourceId) !== Number(options.buyerCharacterId)))
-            .map((offer) => offer.town ? offer : { ...offer, town: options.town || null })
-            .sort((a, b) => OfferOrder.compareOffers(a, b))[0] || null;
+        const towns = options.town ? [options.town] : options.towns || null;
+        return OfferQuery.bestSellOffer(tables.ready('board') ? boardIndex : null, Number(id), {
+            towns,
+            excludeOwner: options.buyerCharacterId,
+            budget: options.budget,
+            cost: options.cost,
+            accept: options.accept,
+            others: OfferQuery.othersIn(towns, fixedOffers.get(Number(id)) || [], npcOffers.get(Number(id)) || [])
+        });
     }
 };
 const stubs = new Map([
     ['GameServer/DataCache', catalogs],
     ['GameServer/Bot/Economy/MarketOpportunity', market],
     ['GameServer/Bot/Economy/CraftShopService', {
+        ...require('../Bot/Economy/CraftEligibility'),
         CraftStations: [{}],
         availableRecipes: () => context.recipes || [],
         stationRecipes: (_station, recipes) => recipes,
@@ -58,25 +78,39 @@ global.invoke = (name) => {
 
 parentPort.on('message', (message) => {
     try {
-        if (message.type === 'catalog') {
+        if (message.type === 'table_page') {
+            const resync = tables.apply(message.tables);
+            if (resync.length) parentPort.postMessage({ type: 'table_resync', names: resync });
+            return;
+        } else if (message.type === 'table_summary') {
+            parentPort.postMessage({ id: message.id, result: tables.summary() });
+            return;
+        } else if (message.type === 'catalog') {
             if (!Object.hasOwn(catalogs, message.name)) throw new Error('unknown catalog');
-            catalogs[message.name].push(...message.rows);
+            if (message.name === 'revitalize') Object.assign(catalogs.revitalize, message.rows[0]);
+            else catalogs[message.name].push(...message.rows);
+            // Item origins are rebuilt from the complete catalogs, never a partial page.
+            require('../Items/ItemAcquisitionCatalog').reset();
+        } else if (message.type === 'spot_catalog') {
+            spotCatalog.apply(message.page);
         } else if (message.type === 'plan') {
-            context = message.payload.context;
+            const payload = spotCatalog.restore(message.payload);
+            context = payload.context;
             global.options.default.General = context.general;
+            global.options.default.Progression = context.progression;
             if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
             else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-            offers = indexOffers(context.offers);
+            fixedOffers = indexOffers(context.fixedOffers);
             npcOffers = indexOffers(context.npcOffers);
             invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot(context.npcOffers);
             planner ||= require('./ClanEquipmentPlanner');
             const forbidden = Object.keys(require.cache).some((filename) =>
                 /[\\/]src[\\/]Database\.js$|[\\/]World[\\/]World\.js$|[\\/]Bot[\\/]BotManager\.js$/.test(filename));
             if (forbidden) throw new Error('clan planning worker loaded a live runtime dependency');
-            const startedAt = performance.now();
-            const { member, spots, warehouseRows, options } = message.payload;
+            const startedAt = workerData?.developerDiagnostics ? performance.now() : 0;
+            const { member, spots, warehouseRows, options } = payload;
             const plan = planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
-            parentPort.postMessage({ id: message.id, result: { plan, durationMs: performance.now() - startedAt } });
+            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt } : {}) } });
             return;
         } else {
             throw new Error('unknown clan worker message');

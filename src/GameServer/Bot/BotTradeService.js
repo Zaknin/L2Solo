@@ -1,3 +1,4 @@
+const BeginnerShots = require('../Items/C4BeginnerShots');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
@@ -37,7 +38,7 @@ function actorName(session) {
 
 function recordSupplyTrade(trade, outcome, reason = null, terminal = false, payload = {}) {
     if (!trade?.workflowId) return;
-    WorkflowTelemetry.recordSupply(trade.workflowId, 'trade', {
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(trade.workflowId, 'trade', {
         botId: trade.botSession?.actor?.fetchId?.() || null,
         playerId: trade.playerSession?.actor?.fetchId?.() || null,
         tradeId: trade.id,
@@ -75,7 +76,7 @@ function resolveInventoryItem(backpack, identifier) {
 }
 
 function isSafeOfferItem(item) {
-    if (!item || item.fetchPetLocked?.() || item.fetchEquipped?.()) return false;
+    if (!item || BeginnerShots.isRestricted(item.fetchSelfId?.()) || item.fetchPetLocked?.() || item.fetchEquipped?.()) return false;
     const kind = String(item.fetchKind?.() || '');
     if (kind === 'Other.Quest' || kind.endsWith('.Quest')) return false;
     if (item.model?.quest === true || item.model?.reserved === true) return false;
@@ -112,7 +113,10 @@ function clearAttachedTrade(trade) {
     if (!trade) return;
     releaseReservations(trade);
     if (trade.playerSession?.activeTrade === trade) trade.playerSession.activeTrade = null;
-    if (trade.botSession?.activeTrade === trade) trade.botSession.activeTrade = null;
+    if (trade.botSession?.activeTrade === trade) {
+        trade.botSession.activeTrade = null;
+        invoke('GameServer/World/World').notifyUserStateChanged(trade.botSession);
+    }
 }
 
 function sendToPlayer(trade, packet) {
@@ -216,7 +220,7 @@ function startPlayerTrade(playerSession, targetSession) {
 
     const existing = activeTradeBetween(playerSession, targetSession);
     if (existing) {
-        console.info("BotTrade :: %s reused trade with %s", actorName(playerSession), actorName(targetSession));
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s reused trade with %s", actorName(playerSession), actorName(targetSession));
         return { ok: true, trade: existing, reused: true };
     }
 
@@ -226,7 +230,7 @@ function startPlayerTrade(playerSession, targetSession) {
     const trade = createTrade(playerSession, targetSession, 'player_inbound');
     attachTrade(trade);
     targetSession.actor.automation?.abortAll?.(targetSession.actor);
-    console.info("BotTrade :: %s opened trade with %s", actorName(playerSession), actorName(targetSession));
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s opened trade with %s", actorName(playerSession), actorName(targetSession));
     return { ok: true, trade };
 }
 
@@ -244,7 +248,7 @@ function startBuffTrade(playerSession, botSession, offer) {
     attachTrade(trade);
     botSession.actor.automation?.abortAll?.(botSession.actor);
     playerSession.dataSendToMe(ServerResponse.tradeStart(botSession.actor, playerSession.actor.backpack.fetchItems()));
-    console.info('BotTrade :: %s opened buff trade with %s price=%d', actorName(playerSession), actorName(botSession), offer.price);
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotTrade :: %s opened buff trade with %s price=%d', actorName(playerSession), actorName(botSession), offer.price);
     return { ok: true, trade };
 }
 
@@ -274,7 +278,7 @@ function openBotTrade(botSession, playerSession, negotiation = null, metadata = 
             playerSession.actor.backpack.fetchItems()
         ));
     }
-    console.info("BotTrade :: %s opened outbound trade with %s", actorName(botSession), actorName(playerSession));
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s opened outbound trade with %s", actorName(botSession), actorName(playerSession));
     if (negotiation) {
         const offered = offerBotItem(botSession, negotiation.itemObjectId, negotiation.quantity);
         if (!offered.ok) {
@@ -324,7 +328,7 @@ function addPlayerItem(playerSession, objectId, amount) {
     const line = lineFor(item, nextCount);
     trade.playerItems.set(Number(objectId), line);
     trade.playerConfirmed = false;
-    console.info("BotTrade :: %s offered %d %s", actorName(playerSession), line.count, item.fetchName());
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s offered %d %s", actorName(playerSession), line.count, item.fetchName());
     return { ok: true, line };
 }
 
@@ -364,7 +368,7 @@ function offerBotItem(botSession, objectId, amount) {
     trade.botConfirmed = true;
     trade.playerConfirmed = false;
     sendToPlayer(trade, ServerResponse.tradeOtherAdd(line));
-    console.info("BotTrade :: %s offered %d %s to %s", actorName(botSession), line.count, item.fetchName(), actorName(trade.playerSession));
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s offered %d %s to %s", actorName(botSession), line.count, item.fetchName(), actorName(trade.playerSession));
     return { ok: true, line };
 }
 
@@ -428,7 +432,7 @@ function inventoryCapacity(session, incomingLines, outgoingLines) {
 }
 
 function logInventoryCapacity(trade, session, snapshot) {
-    console.info(
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
         'BotTradeCapacity :: trade=%s receiver=%s receiverType=%s raw=%d equipped=%d loose=%d stackableRows=%d stackableKinds=%d canonical=%d incomingLines=%d incomingNew=%d projectedRaw=%d max=%d accepted=%s incoming=%s',
         trade.id,
         actorName(session),
@@ -602,8 +606,8 @@ async function commit(playerSession) {
         completedAt: trade.completedAt,
         result: { ...result, partnerSession: null }
     };
-    const detail = result.moved.map((item) => `${item.count} ${item.name}`).join(', ');
-    console.info("BotTrade :: %s completed trade with %s: %s", actorName(trade.playerSession), actorName(trade.botSession), detail);
+    const detail = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? result.moved.map((item) => `${item.count} ${item.name}`).join(', ') : null;
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotTrade :: %s completed trade with %s: %s", actorName(trade.playerSession), actorName(trade.botSession), detail);
     return result;
 }
 

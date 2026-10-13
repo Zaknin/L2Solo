@@ -1,4 +1,5 @@
 const Policy = require('../../Social/ResourceCompetitionPolicy');
+const Visible = require('../../Social/VisibleStrength');
 
 // A forecast lives for a few seconds. Reassess it against current participants
 // before taking leases; never turn ordinary state writes into cancelled meetings.
@@ -37,9 +38,11 @@ function refresh(event, { life, parties, memory, personaFor }, timestamp) {
             return { reason: 'invalid_decision_rolls' };
         }
         let index = 0;
-        decision = Policy.decide({ pressure: event.pressure, actor: a.participant, peer: b.participant,
+        const look = side => ({ ...side.participant, own: require('./ColdPvpResolver').ownSide(side.members, timestamp),
+            seen: Visible.stateSide(side.members, timestamp) });
+        decision = Policy.decide({ pressure: event.pressure, actor: look(a), peer: look(b),
             actorPersona: personaFor(a.state), peerPersona: personaFor(b.state),
-            towardPeer: ab, towardActor: ba, rng: () => rolls[index++] });
+            towardPeer: ab, towardActor: ba, rng: () => rolls[index++], key: event.key, willing: event.willing });
         if (decision.action !== 'contest') return { reason: 'decision_changed', decision: decision.action };
     }
     // Revenge has its own saved roll and is re-evaluated by ColdPartyConflict.

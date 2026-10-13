@@ -1,3 +1,5 @@
+const ActorQueries = require('../World/ActorSpatialQueries');
+const refreshPartyMemberships = require('../World/PartyMembershipPublication');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Database    = invoke('Database');
 const Shared      = invoke('GameServer/Network/Shared');
@@ -54,8 +56,7 @@ function personaArchetype(persona) {
 const merchantConfigFor = (botData, characterName) => MerchantConfigs[botData.merchantConfigName || characterName];
 
 function isOnGiranMarketPlaza(loc = {}) {
-    return Number(loc.locX) >= 80911 && Number(loc.locX) <= 83750
-        && Number(loc.locY) >= 147662 && Number(loc.locY) <= 149550;
+    return invoke('GameServer/Bot/Economy/ShopPlaces').isOnSquare('Giran', loc);
 }
 
 function stableSpawnLocation(botData = {}) {
@@ -237,7 +238,7 @@ const BotManager = {
         const lead = state.stats?.marketLead;
         const wanted = state.stats?.marketWanted;
         const history = Object.values(state.stats?.partyHistory || {});
-        const persona = BotPersona.generate(state);
+        const persona = BotPersona.of(state);
         const traits = personaTraits(persona);
         const goalLabel = !goal ? 'none' : goal.plan?.personaDrive === 'wealth'
             ? `${goal.type}: wealth / ${goal.target?.focusItem?.itemName || 'best surplus'}`
@@ -316,7 +317,7 @@ const BotManager = {
     },
 
     init() {
-        console.info("BotManager :: Initializing automated bots...");
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotManager :: Initializing automated bots...");
         BotSocialMemory.init();
         BotFriendship.init();
         PopulationService.init();
@@ -336,7 +337,7 @@ const BotManager = {
         // seeder. Keeping the old static starters here doubled the fresh-world
         // population before wave one had even begun.
         const bots = process.env.L2NODE_HOT_LOAD_TEST === '1' ? [] : [...MERCHANT_BOTS];
-        console.info('BotManager :: Static services: merchants=%d; adventure population is seeder-managed', bots.length);
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotManager :: Static services: merchants=%d; adventure population is seeder-managed', bots.length);
         
         // Wait 5 seconds after startup to let world finish loading
         setTimeout(() => {
@@ -384,7 +385,7 @@ const BotManager = {
 
     activePopulationForPk(profile) {
         if (!profile) return [];
-        return World.user.sessions.filter((session) => {
+        return ActorQueries.near(World, profile.anchor, profile.activationRadius).filter((session) => {
             const actor = session?.actor;
             if (!actor || !actor.fetchIsOnline?.() || session.plan === 'merchant') return false;
             if (actor.state?.fetchDead?.() || utils.isInPeaceZone(actor.fetchLocX(), actor.fetchLocY())) return false;
@@ -575,6 +576,9 @@ const BotManager = {
     loadAndSpawnBot(username, botData = {}) {
         const session = new BotSession(username);
         session.populationStaging = botData.prepareOnly === true;
+        // The servitor kept away from the player, read before a party or PvP
+        // handoff re-captures the staged actor (which has none yet).
+        session.coldSummon = botData.coldLifeState?.stats?.coldCombat?.summon || null;
 
         return Shared.fetchCharacters(username).then((characters) => {
             const firstCharacter = characters[0];
@@ -600,7 +604,6 @@ const BotManager = {
                 const character = readyCharacters?.[0];
                 if (!character) return null;
                 const storeCfg = merchantConfigFor(botData, character.name);
-                const runtimeStore = botData.privateStore || null;
                 const manufactureShop = botData.manufactureShop || null;
 
                 return Shared.fetchClassInformation(character.classId).then(async (classInfo) => {
@@ -623,6 +626,7 @@ const BotManager = {
                     if (!staticService) {
                         BotPersona.ensure({
                             characterId: character.id,
+                            classId: character.classId,
                             stats: botData.coldLifeState?.stats || {}
                         }).then((persona) => {
                             session.persona = persona;
@@ -659,10 +663,9 @@ const BotManager = {
                     };
 
                     let privateStore = null;
-                    if (storeCfg || runtimeStore) {
-                        privateStore = runtimeStore || storeCfg;
+                    if (storeCfg) {
+                        privateStore = storeCfg;
                         session.plan = 'merchant';
-                        session.coldMarketState = botData.coldMarketState || null;
                         session.actor.state.setSeated(true);
 
                         // A C4 shop title is carried by PrivateStoreMsg, not
@@ -670,7 +673,7 @@ const BotManager = {
                         // clan title while publishing the store overlay.
                         session.actor.setPrivateStoreType(privateStore.storeType);
 
-                        const storeItems = TradeService.normalizeStoreItems(privateStore, { staticStore: !runtimeStore && !!storeCfg });
+                        const storeItems = TradeService.normalizeStoreItems(privateStore, { staticStore: true });
 
                         session.actor.setPrivateStore({
                             storeType: privateStore.storeType,
@@ -751,12 +754,13 @@ const BotManager = {
                         BotAI.init(session);
 
                         this.sessions.push(session);
-                        if (privateStore) invoke('GameServer/Bot/Economy/BotTradeChat').offer(session);
+                        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) {
                         let modeText = "[Hunting Mode]";
                         if (session.townGossip) modeText = "[Gossip Mode]";
                         if (session.plan === 'pk_hunting') modeText = "[PK Mode]";
                         if (session.plan === 'merchant') modeText = "[Merchant Mode]";
                         utils.infoSuccess("BotManager", "%s (Level %d) is active in World %s", character.name, character.level, modeText);
+                        }
                         return session;
                     } catch (error) {
                         if (hotPersisted) await rollbackPublishedBot(session, 'hot_spawn_rollback');
@@ -1220,6 +1224,7 @@ const BotManager = {
                         session.plan = 'hunting';
                         session.followPlayerSession = null;
                         session.partyCompanion = false;
+                        refreshPartyMemberships([session], invoke);
                     }
                 }, 800 + Math.random() * 800);
             }
@@ -1369,7 +1374,7 @@ const BotManager = {
         
         const packet = ServerResponse.speak(session.actor, { kind: 1, text: text });
         
-        World.user.sessions.forEach((user) => {
+        ActorQueries.humans(World).forEach((user) => {
             if (user.socket && typeof user.socket.write === 'function' && user.accountId.indexOf('bot_') !== 0) {
                 user.dataSendToMe(packet);
             }
@@ -1461,7 +1466,7 @@ const BotManager = {
         let maxCount = 0;
         let bestSector = null;
 
-        World.user.sessions.forEach((session) => {
+        ActorQueries.humans(World).forEach((session) => {
             const actor = session.actor;
             if (actor && actor.fetchIsOnline() && actor.fetchKarma() === 0 && !session.accountId?.startsWith('bot_') && !utils.isInPeaceZone(actor.fetchLocX(), actor.fetchLocY())) {
                 const sx = Math.floor(actor.fetchLocX() / 4000);
@@ -1491,13 +1496,14 @@ const BotManager = {
     },
 
     startDynamicScalingMonitor() {
-        console.info("BotManager :: Dynamic bot teleport/level scaling removed; using persistent starter populations.");
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotManager :: Dynamic bot teleport/level scaling removed; using persistent starter populations.");
     },
 
     startStatusLogMonitor() {
-        if (process.env.BOT_STATUS_LOGS === '0') return;
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) || process.env.BOT_STATUS_LOGS === '0') return;
 
         setInterval(() => {
+            if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return;
             try {
                 const summaries = this.sessions
                     .filter((session) => session.actor && session.plan !== 'merchant')

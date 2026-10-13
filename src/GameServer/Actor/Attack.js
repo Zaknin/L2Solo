@@ -9,6 +9,7 @@ const EffectStats    = invoke('GameServer/Effects/EffectStats');
 const EffectStore    = invoke('GameServer/Effects/EffectStore');
 const C4EquipmentItemSkills = invoke('GameServer/Items/C4EquipmentItemSkills');
 const WeaponSA = invoke('GameServer/Items/C4WeaponSA');
+const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const RaidCurse = invoke('GameServer/RaidBoss/RaidCurse');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const AttackRange = invoke('GameServer/Actor/AttackRange');
@@ -554,12 +555,17 @@ class Attack {
             const boss = Number(actor.minionBossObjectId) > 0 ? RaidEntityIndex.bossFor(World, actor) : null;
             const faction = actor.fetchClanName?.();
             const range = Math.max(0, Number(skill.fetchDistance?.()) || 0);
-            const targets = boss ? RaidEntityIndex.entitiesForRaid(World, {
-                bossId: boss.fetchId(), bossTemplateId: boss.fetchSelfId()
-            }) : [actor, ...(faction ? (World.npc?.spawns || []).filter(target => (
-                this.isNpcCombatant(target) && target !== actor
-                && target.fetchClanName?.() === faction && this.distance2d(actor,target) <= range
-            )) : [])];
+            let targets;
+            if (boss) {
+                targets = RaidEntityIndex.entitiesForRaid(World, { bossId: boss.fetchId(), bossTemplateId: boss.fetchSelfId() });
+            } else if (actor.minionLeader) {
+                targets = invoke('GameServer/World/RaidBossMinionManager').leaderGroup(World, actor.minionLeader);
+            } else {
+                targets = [actor, ...(faction ? (World.npc?.spawns || []).filter(target => (
+                    this.isNpcCombatant(target) && target !== actor
+                    && target.fetchClanName?.() === faction && this.distance2d(actor,target) <= range
+                )) : [])];
+            }
             return this.uniqueSkillTargets(targets.filter(target => (
                 this.isValidSkillTarget(target,skill,actor) && target.isDead?.() !== true
             )));
@@ -770,9 +776,7 @@ class Attack {
     }
 
     chargeShotForSkill(session, actor, magicSkill, skill = null) {
-        if (!magicSkill && skill?.fetchSsBoost && Number(skill.fetchSsBoost()) <= 0) {
-            return;
-        }
+        if (!ShotStock.actionShotKind(magicSkill, skill?.fetchSsBoost?.())) return;
 
         if (magicSkill) {
             const autoShot = actor.backpack?.fetchAutoSpiritshot?.(actor);
@@ -801,17 +805,10 @@ class Attack {
     }
 
     calculatedSkillHitTime(actor, skill, magicSkill) {
-        const hitTime = Math.max(0, Number(skill?.fetchHitTime?.()) || 0);
-        if (skill?.fetchSemantic?.()?.staticHitTime) return hitTime;
-
-        const attackRate = magicSkill ? actor.fetchCollectiveCastSpd() : actor.fetchCollectiveAtkSpd();
-        const scaledHitTime = Formulas.calcRemoteAtkTime(hitTime, attackRate);
-        const adjustedHitTime = magicSkill && actor.spiritshotLoaded
-            ? Math.floor(scaledHitTime * 0.70)
-            : scaledHitTime;
-        return magicSkill && hitTime >= 500
-            ? Math.max(500, adjustedHitTime)
-            : adjustedHitTime;
+        const hitTime = skill?.fetchHitTime?.();
+        if (skill?.fetchSemantic?.()?.staticHitTime) return Formulas.calcSkillHitTime(hitTime, 1, { staticHitTime: true });
+        const speed = magicSkill ? actor.fetchCollectiveCastSpd() : actor.fetchCollectiveAtkSpd();
+        return Formulas.calcSkillHitTime(hitTime, speed, { magic: !!magicSkill, spiritshot: !!actor.spiritshotLoaded });
     }
 
     skillUseConditionFailure(session, actor, skill) {
@@ -979,10 +976,12 @@ class Attack {
             const usedBlessedSpiritshot = usedSpiritshot && !!actor.blessedSpiritshotLoaded;
             const semantic = skill.fetchSemantic?.() || {};
             const vulnModifier = traitVulnerabilityModifier(creature, semantic.trait);
-            const magicCriticalRate = Math.min(300, Math.max(0,
-                (8 * EffectStats.multiplier(actor, 'mCritRateMul'))
-                + EffectStats.add(actor, 'mCritRateAdd')
-            ));
+            const magicCriticalRate = Formulas.magicCriticalRate({
+                multiplier: EffectStats.multiplier(actor, 'mCritRateMul'),
+                add: EffectStats.add(actor, 'mCritRateAdd'),
+                wit: actor.fetchCollectiveWit?.(),
+                weapon: !!actor.backpack?.fetchEquippedWeapon?.()
+            });
             const magicCritical = Formulas.rollCritical(magicCriticalRate, rng);
             const power = semantic.skillType === C4SkillRules.DEATH_LINK
                 ? Formulas.calcDeathLinkPower(skill.fetchPower(), actor.fetchHp?.(), actor.fetchMaxHp?.())

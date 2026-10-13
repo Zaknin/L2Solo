@@ -94,11 +94,86 @@ function assertExact(actual, expected, label) {
     }
 }
 
-module.exports = function generateC4MonsterLocation(config) {
+function assertLisvusRevision() {
     const lisvusRevision = execFileSync('git', ['-C', vendorRepo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     if (lisvusRevision !== expectedLisvusRevision) {
         throw new Error(`Expected Lisvus ${expectedLisvusRevision}, found ${lisvusRevision}`);
     }
+}
+
+function itemTemplate(source) {
+    const kind = itemKind(source);
+    return {
+        selfId: source.id,
+        template: {
+            // Recipes share the client item type 5 ("other item") of the recipe templates in others.json.
+            kind, name: source.name, class1: 4, class2: kind === 'Other.Recipe' ? 5 : 0,
+            mass: Number(source.sets.get('weight') || 0), price: Number(source.sets.get('price') || 0)
+        },
+        etc: { stackable: source.sets.get('is_stackable') === 'true', consumable: false }
+    };
+}
+
+// Lisvus droplist rows of one monster as reward groups: a drop category becomes
+// one group (overall = category chance, item chance = share of the category),
+// every spoil row (category -1) its own group.
+function rewardGroups(rows, itemName) {
+    const categories = new Map();
+    rows.filter((row) => Number(row[4]) >= 0).forEach((row) => {
+        const category = Number(row[4]);
+        if (!categories.has(category)) categories.set(category, []);
+        categories.get(category).push(row);
+    });
+    const rewards = [...categories.values()].map((categoryRows) => {
+        const totalChance = categoryRows.reduce((sum, row) => sum + Number(row[5]), 0);
+        return {
+            items: categoryRows.map((row) => ({
+                selfId: Number(row[1]), name: itemName(Number(row[1])), min: Number(row[2]),
+                max: Number(row[3]), chance: round(Number(row[5]) / totalChance * 100)
+            })),
+            overall: round(totalChance / 10000)
+        };
+    });
+    const spoils = rows.filter((row) => Number(row[4]) === -1).map((row) => ({
+        items: [{
+            selfId: Number(row[1]), name: itemName(Number(row[1])), min: Number(row[2]),
+            max: Number(row[3]), chance: round(Number(row[5]) / 10000)
+        }],
+        overall: 100
+    }));
+    return { rewards, spoils };
+}
+
+// One Lisvus npc.sql row as a monster template; the weapon (from loaded items)
+// gives the random attack spread and accuracy.
+function npcTemplate(row, race, itemsById) {
+    const [
+        id, , name, , title, , , collisionRadius, collisionHeight, level, , ,
+        attackRange, hp, mp, hpRegen, mpRegen, str, con, dex, int, wit, men,
+        exp, sp, pAtk, pDef, mAtk, mDef, atkSpd, aggro, castSpd, rightHand, leftHand,
+        , walk, run, faction, helpRadius, undead
+    ] = row;
+    const weapon = itemsById.get(Number(rightHand));
+    return {
+        selfId: id,
+        template: { kind: 'Monster', name, title, level, hostile: Number(aggro) > 0 },
+        base: { str, dex, con, int, wit, men },
+        stats: {
+            pAtk, pAtkRnd: Number(weapon?.stats?.pAtkRnd ?? 30), pDef, mAtk, mDef,
+            accur: Number(weapon?.stats?.accur ?? 4.75), atkSpd, castSpd, atkRadius: attackRange
+        },
+        speed: { walk, run },
+        vitals: { maxHp: hp, maxMp: mp, revHp: hpRegen, revMp: mpRegen, corpseTime: 7000 },
+        collision: { radius: collisionRadius, size: collisionHeight },
+        equipment: { weapon: rightHand, shield: leftHand, reuseTime: 0 },
+        clan: { clanName: faction === 'NULL' ? '' : faction, helpRadius },
+        rewards: { exp: level > 0 ? round(exp / (level * level), 12) : 0, sp },
+        traits: { race, undead: Number(undead) !== 0 }
+    };
+}
+
+function generateC4MonsterLocation(config) {
+    assertLisvusRevision();
 
     const filename = `${config.slug}.json`;
     const mobIds = [...config.mobIds].sort((a, b) => a - b);
@@ -112,10 +187,17 @@ module.exports = function generateC4MonsterLocation(config) {
     const sourceLabels = config.sourceLabels || (config.sourceLabel ? [config.sourceLabel] : []);
     const sourceLabelSet = new Set(sourceLabels);
     const sourcePrefixes = config.sourcePrefixes || [];
-    const spawnRows = tuples('sql/spawnlist.sql').filter((row) =>
+    const sourceRows = tuples('sql/spawnlist.sql').filter((row) =>
         (sourceLabelSet.has(row[1]) || sourcePrefixes.some((prefix) => String(row[1]).startsWith(prefix)))
         && npcRowsById.get(Number(row[3]))?.[11] === 'L2Monster'
     );
+    // Monsters of a shared source label that the old datapack or another slice
+    // already spawns stay out of this slice; every listed id must be in the label.
+    const skippedMobIds = [...(config.skippedMobIds || [])].sort((a, b) => a - b);
+    const skippedMobIdSet = new Set(skippedMobIds);
+    assertExact([...new Set(sourceRows.map((row) => Number(row[3])))].filter((id) => skippedMobIdSet.has(id))
+        .sort((a, b) => a - b), skippedMobIds, 'skipped monster ids');
+    const spawnRows = sourceRows.filter((row) => !skippedMobIdSet.has(Number(row[3])));
     if (spawnRows.length !== config.spawnRows) {
         throw new Error(`Expected ${config.spawnRows} ${config.displayName} monster spawns, found ${spawnRows.length}`);
     }
@@ -159,31 +241,9 @@ module.exports = function generateC4MonsterLocation(config) {
     const existingItemsById = new Map(existingItems.map((item) => [Number(item.selfId), item]));
     const sourceItemsById = vendorItems();
     const npcs = newMobIds.map((id) => npcRowsById.get(id)).map((row) => {
-        const [
-            id, , name, , title, , , collisionRadius, collisionHeight, level, , type,
-            attackRange, hp, mp, hpRegen, mpRegen, str, con, dex, int, wit, men,
-            exp, sp, pAtk, pDef, mAtk, mDef, atkSpd, aggro, castSpd, rightHand, leftHand,
-            , walk, run, faction, helpRadius, undead
-        ] = row;
-        const race = raceByNpc.get(id);
-        if (type !== 'L2Monster' || !race) throw new Error(`Invalid source NPC ${id}: type=${type} race=${race}`);
-        const weapon = existingItemsById.get(Number(rightHand));
-        return {
-            selfId: id,
-            template: { kind: 'Monster', name, title, level, hostile: Number(aggro) > 0 },
-            base: { str, dex, con, int, wit, men },
-            stats: {
-                pAtk, pAtkRnd: Number(weapon?.stats?.pAtkRnd ?? 30), pDef, mAtk, mDef,
-                accur: Number(weapon?.stats?.accur ?? 4.75), atkSpd, castSpd, atkRadius: attackRange
-            },
-            speed: { walk, run },
-            vitals: { maxHp: hp, maxMp: mp, revHp: hpRegen, revMp: mpRegen, corpseTime: 7000 },
-            collision: { radius: collisionRadius, size: collisionHeight },
-            equipment: { weapon: rightHand, shield: leftHand, reuseTime: 0 },
-            clan: { clanName: faction === 'NULL' ? '' : faction, helpRadius },
-            rewards: { exp: level > 0 ? round(exp / (level * level), 12) : 0, sp },
-            traits: { race, undead: Number(undead) !== 0 }
-        };
+        const race = raceByNpc.get(row[0]);
+        if (row[11] !== 'L2Monster' || !race) throw new Error(`Invalid source NPC ${row[0]}: type=${row[11]} race=${race}`);
+        return npcTemplate(row, race, existingItemsById);
     });
 
     const npcNameById = new Map(mobIds.map((id) => [id, npcRowsById.get(id)[2]]));
@@ -214,33 +274,11 @@ module.exports = function generateC4MonsterLocation(config) {
         return source.name;
     }
 
-    const rewards = newMobIds.map((mobId) => {
-        const rows = dropRows.filter((row) => Number(row[0]) === mobId);
-        const categories = new Map();
-        rows.filter((row) => Number(row[4]) >= 0).forEach((row) => {
-            const category = Number(row[4]);
-            if (!categories.has(category)) categories.set(category, []);
-            categories.get(category).push(row);
-        });
-        const normal = [...categories.values()].map((categoryRows) => {
-            const totalChance = categoryRows.reduce((sum, row) => sum + Number(row[5]), 0);
-            return {
-                items: categoryRows.map((row) => ({
-                    selfId: Number(row[1]), name: sourceItemName(Number(row[1])), min: Number(row[2]),
-                    max: Number(row[3]), chance: round(Number(row[5]) / totalChance * 100)
-                })),
-                overall: round(totalChance / 10000)
-            };
-        });
-        const spoils = rows.filter((row) => Number(row[4]) === -1).map((row) => ({
-            items: [{
-                selfId: Number(row[1]), name: sourceItemName(Number(row[1])), min: Number(row[2]),
-                max: Number(row[3]), chance: round(Number(row[5]) / 10000)
-            }],
-            overall: 100
-        }));
-        return { selfId: mobId, template: { name: npcNameById.get(mobId) }, rewards: normal, spoils };
-    });
+    const rewards = newMobIds.map((mobId) => ({
+        selfId: mobId,
+        template: { name: npcNameById.get(mobId) },
+        ...rewardGroups(dropRows.filter((row) => Number(row[0]) === mobId), sourceItemName)
+    }));
 
     const requiredItemIds = new Set(dropRows.map((row) => Number(row[1])));
     const missingSourceItems = [...requiredItemIds]
@@ -251,14 +289,7 @@ module.exports = function generateC4MonsterLocation(config) {
     if (missingSourceItems.some((source) => source.type === 'Weapon')) {
         throw new Error(`Unsupported weapon dependencies: ${missingSourceItems.filter((source) => source.type === 'Weapon').map((source) => source.id).join(', ')}`);
     }
-    const missingItems = missingSourceItems.map((source) => ({
-        selfId: source.id,
-        template: {
-            kind: itemKind(source), name: source.name, class1: 4, class2: 0,
-            mass: Number(source.sets.get('weight') || 0), price: Number(source.sets.get('price') || 0)
-        },
-        etc: { stackable: source.sets.get('is_stackable') === 'true', consumable: false }
-    }));
+    const missingItems = missingSourceItems.map(itemTemplate);
     assertExact(missingItems.map((item) => item.selfId), config.missingItemIds, 'item dependencies');
 
     writeJson(`data/Npcs/${filename}`, npcs);
@@ -278,4 +309,15 @@ module.exports = function generateC4MonsterLocation(config) {
         skillTemplates: config.skillTemplates?.length || 0,
         items: missingItems.length
     };
-};
+}
+
+module.exports = generateC4MonsterLocation;
+module.exports.assertLisvusRevision = assertLisvusRevision;
+module.exports.loadedItems = loadedItems;
+module.exports.vendorItems = vendorItems;
+module.exports.itemTemplate = itemTemplate;
+module.exports.assertExact = assertExact;
+module.exports.tuples = tuples;
+module.exports.rewardGroups = rewardGroups;
+module.exports.writeJson = writeJson;
+module.exports.npcTemplate = npcTemplate;

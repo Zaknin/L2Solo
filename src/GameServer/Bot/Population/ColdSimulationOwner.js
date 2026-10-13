@@ -1,7 +1,9 @@
+const DiagnosticConfig = require('./PopulationConfig');
 const { randomUUID } = require('crypto');
 
 const Database = invoke('Database');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
+const BotErrands = require('./BotErrands');
 
 const OWNER_ID = 'cold_simulation_owner';
 const LEGACY_OWNER_ID = 'legacy_main';
@@ -14,7 +16,7 @@ function Metrics() {
 }
 
 function recordFailure(error) {
-    Metrics().recordColdOwnerError(error);
+    DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerError(error);
     if (error && typeof error === 'object') error.coldOwnerRecorded = true;
     throw error;
 }
@@ -32,10 +34,8 @@ function eligibility(state = {}, options = {}) {
     if (stats.mammonReturn || (Number(stats.mammonRetryAt || 0) <= Date.now()
         && Object.values(state.inventory || {}).some(item => Number(item.amount)>0
             && invoke('GameServer/Items/C4Unseal').options(item.selfId).length))) return { ok:false, reason:'craft_state' };
-    if (stats.warehouseWorkflow || stats.warehouseErrand) return { ok: false, reason: 'warehouse_state' };
-    if (stats.marketStore || stats.marketReturn) return { ok: false, reason: 'market_state' };
-    if (stats.craftShop || stats.craftStationId) return { ok: false, reason: 'craft_state' };
-    if (stats.supplyErrand) return { ok: false, reason: 'player_workflow' };
+    const busy = BotErrands.busyWith(state, BotErrands.COLD_CLAIM);
+    if (busy) return { ok: false, reason: BotErrands.CLAIM_REASONS[busy] };
     if (stats.backgroundPartyId && options.allowParty !== true) return { ok: false, reason: 'background_party' };
     if (LEGACY_PLAN_STRATEGIES.has(String(stats.equipmentPlan?.strategy || ''))) {
         return { ok: false, reason: `${stats.equipmentPlan.strategy}_plan` };
@@ -99,7 +99,12 @@ function withPersistedStats(state, result) {
     if (!state || typeof result?.row?.statsJson !== 'string') return state;
     try {
         const stats = JSON.parse(result.row.statsJson);
-        return stats && typeof stats === 'object' ? { ...state, name: result.row.characterName || state.name, stats } : state;
+        if (!stats || typeof stats !== 'object') return state;
+        const persisted = { ...state, name: result.row.characterName || state.name, stats };
+        // The commit merged what the board held for the bot (deals, closed
+        // records): the stored bag is the one the bot goes on with.
+        if (!result.settled && !result.pkDrops?.length) return persisted;
+        return { ...persisted, adena: Number(result.row.adena || 0), inventory: JSON.parse(result.row.inventorySummary || '{}') };
     } catch (_) {
         return state;
     }
@@ -113,6 +118,11 @@ function reflect(result, committedState = null) {
     }
     const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
     BotLifeState.acceptSimulationOwnership(result.characterId, result, committedState);
+    if (result.pkDrops?.length) {
+        const row = result.row;
+        require('../../Actor/Generics/PkDeathDrop').spawn(result.characterId,
+            { locX: row.locX, locY: row.locY, locZ: row.locZ }, result.pkDrops);
+    }
     return result;
 }
 
@@ -130,12 +140,12 @@ function reflectRecovery(result = {}) {
 function claim(state, options = {}) {
     const partition = eligibility(state, options);
     if (!partition.ok) {
-        Metrics().recordColdOwnerRejected(partition.reason);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(partition.reason);
         return Promise.resolve(partition);
     }
     const timestamp = Number(options.timestamp || Date.now());
     const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     return Database.claimColdSimulationLease({
         characterId: Number(state.characterId),
         expectedRevision: ownership(state).revision,
@@ -146,7 +156,7 @@ function claim(state, options = {}) {
         allowParty: options.allowParty === true,
         allowLifecycle: options.allowLifecycle === true
     }).then((result) => {
-        Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
         return reflect(result);
     }).catch(recordFailure);
 }
@@ -161,7 +171,7 @@ function claimBatch(candidates = [], options = {}) {
         const partition = eligibility(state, candidate.options || options);
         if (!partition.ok) {
             const result = { ...partition, characterId: Number(state?.characterId || candidate.characterId || 0) };
-            Metrics().recordColdOwnerRejected(result.reason);
+            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(result.reason);
             rejected.push(result);
             return;
         }
@@ -177,10 +187,10 @@ function claimBatch(candidates = [], options = {}) {
         });
     });
     if (!requests.length) return Promise.resolve({ grants: [], rejected });
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     return Database.claimColdSimulationLeases(requests).then((results) => {
         results.forEach((result) => {
-            Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
+            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
             if (result.ok) reflect(result);
         });
         return {
@@ -193,18 +203,18 @@ function claimBatch(candidates = [], options = {}) {
 function commit(claimToken, nextState, options = {}) {
     if (!claimToken?.ok) {
         const result = { ok: false, reason: 'missing_claim' };
-        Metrics().recordColdOwnerCommit(result, 0);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
         return Promise.resolve(result);
     }
     const partition = eligibility(nextState, options);
     if (!partition.ok) {
         const result = { ok: false, reason: 'partition_rejected', detail: partition.reason };
-        Metrics().recordColdOwnerCommit(result, 0);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
         return Promise.resolve(result);
     }
     if (Number(nextState.characterId) !== Number(claimToken.characterId)) {
         const result = { ok: false, reason: 'character_changed' };
-        Metrics().recordColdOwnerCommit(result, 0);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
         return Promise.resolve(result);
     }
     const canonicalState = {
@@ -213,7 +223,7 @@ function commit(claimToken, nextState, options = {}) {
     };
     const timestamp = Number(options.timestamp || Date.now());
     const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     return Database.commitColdSimulationLease({
         characterId: Number(claimToken.characterId),
         expectedRevision: Number(claimToken.revision),
@@ -224,7 +234,7 @@ function commit(claimToken, nextState, options = {}) {
         patch: persistencePatch(canonicalState, timestamp),
         ...(options.memoryEvents ? { memoryEvents: options.memoryEvents } : {})
     }).then((result) => {
-        Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
         return reflect(result, withPersistedStats(canonicalState, result));
     }).catch(recordFailure);
 }
@@ -232,7 +242,7 @@ function commit(claimToken, nextState, options = {}) {
 function release(claimToken, options = {}) {
     if (!claimToken?.ok) {
         const result = { ok: false, reason: 'missing_claim' };
-        Metrics().recordColdOwnerRelease(result);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
         return Promise.resolve(result);
     }
     return Database.releaseColdSimulationLease({
@@ -242,7 +252,7 @@ function release(claimToken, options = {}) {
         leaseId: claimToken.leaseId,
         timestamp: Number(options.timestamp || Date.now())
     }).then((result) => {
-        Metrics().recordColdOwnerRelease(result);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
         return reflect(result);
     }).catch(recordFailure);
 }
@@ -305,8 +315,14 @@ function commitAndReleaseBatch(entries = [], options = {}) {
         const canonicalInventory = InventorySummary.canonicalize(nextState.inventory);
         const canonicalState = { ...nextState, inventory: canonicalInventory };
         states.set(Number(token.characterId), canonicalState);
-        const inventoryChanged = JSON.stringify(InventorySummary.canonicalize(entry.proposal?.baseState?.inventory))
-            !== JSON.stringify(canonicalInventory);
+        const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
+        const inventoryChanged = JSON.stringify(previousInventory) !== JSON.stringify(canonicalInventory);
+        // The physical writer needs explicit removals even though persisted
+        // summaries omit empty stacks. Only remove items owned by this proposal.
+        const physicalInventory = { ...canonicalInventory };
+        Object.entries(previousInventory).forEach(([key, item]) => {
+            if (!canonicalInventory[key]) physicalInventory[key] = { ...item, amount: 0 };
+        });
         requests.push({
             characterId: Number(token.characterId),
             expectedRevision: Number(token.revision),
@@ -323,25 +339,26 @@ function commitAndReleaseBatch(entries = [], options = {}) {
                 mp: Number(nextState.vitals?.mp || 0),
                 maxMp: Number(nextState.vitals?.maxMp || 0),
                 ...(entry.proposal?.durable?.classId !== undefined ? {
-                    classId: Number(entry.proposal.durable.classId),
-                    skills: entry.proposal.durable.skills || []
+                    classId: Number(entry.proposal.durable.classId)
                 } : {}),
                 ...(entry.proposal?.durable?.pvpKills ? { pvpKills: entry.proposal.durable.pvpKills } : {}),
-                ...(inventoryChanged ? { inventory: canonicalInventory } : {})
+                ...(entry.proposal?.durable?.soulCrystals?.length ? { soulCrystals: entry.proposal.durable.soulCrystals } : {}),
+                ...(inventoryChanged ? { inventory: physicalInventory } : {})
             },
             allowParty: entry.options?.allowParty === true || options.allowParty === true,
             allowLifecycle: entry.options?.allowLifecycle === true || options.allowLifecycle === true,
             atomicGroup: entry.atomicGroup || null,
+            journalReason: entry.journalReason || options.journalReason || null,
             ...(entry.proposal?.result?.memoryEvents ? { memoryEvents: entry.proposal.result.memoryEvents } : {})
         });
     });
     if (!requests.length) return Promise.resolve(rejected);
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     return Database.commitAndReleaseColdSimulationLeases(requests).then((results) => {
         results.forEach((result) => {
-            Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
+            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
             if (result.ok) {
-                Metrics().recordColdOwnerRelease({ ok: true });
+                DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease({ ok: true });
                 const state = states.get(Number(result.characterId));
                 reflect(result, withPersistedStats(state, result));
             }
@@ -363,24 +380,21 @@ function releaseBatch(tokens = [], options = {}) {
     if (!requests.length) return Promise.resolve([]);
     return Database.releaseColdSimulationLeases(requests).then((results) => {
         results.forEach((result) => {
-            Metrics().recordColdOwnerRelease(result);
+            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
             if (result.ok) reflect(result);
         });
         return results;
     }).catch(recordFailure);
 }
 
-function renewActiveLeases(options = {}) {
-    const timestamp = Number(options.timestamp || Date.now());
-    const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    return Database.renewColdSimulationLeases({
-        ownerId: OWNER_ID,
-        timestamp,
-        leaseMs
-    }).then((results) => {
+function renewActiveLeases(tokens = [], options = {}) {
+    return Database.renewColdSimulationLeases(tokens, options).then((results) => {
         results.forEach((result) => {
-            if (result.ok) reflect(result);
-            else Metrics().recordColdOwnerRejected(result.reason);
+            if (!result.ok) { DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(result.reason); return; }
+            const cached = invoke('GameServer/Bot/Population/BotLifeState').cachedState(result.characterId);
+            const current = cached?.simulation;
+            if (cached?.phase === 'cold' && current?.ownerId === result.ownerId && current.revision === result.revision
+                && current.leaseId === result.leaseId && options.canRenew(result) === true) reflect(result);
         });
         return results;
     }).catch(recordFailure);
@@ -399,7 +413,7 @@ function handoffToMain(state, options = {}) {
         allowLifecycle: options.allowLifecycle === true,
         ...(nextState ? { patch: persistencePatch(nextState, timestamp) } : {})
     }).then((result) => {
-        Metrics().recordColdOwnerHandoff(result);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerHandoff(result);
         return reflect(result, nextState);
     }).catch(recordFailure);
 }
@@ -407,7 +421,7 @@ function handoffToMain(state, options = {}) {
 function recoverExpiredLeases(timestamp = Date.now()) {
     if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
     return Database.recoverColdSimulationLeases({ timestamp, includeActive: false }).then((result) => {
-        Metrics().recordColdOwnerRecovery(result.affectedRows, false);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRecovery(result.affectedRows, false);
         return reflectRecovery(result);
     }).catch(recordFailure);
 }
@@ -415,7 +429,7 @@ function recoverExpiredLeases(timestamp = Date.now()) {
 function recoverStartupLeases() {
     if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
     return Database.recoverColdSimulationLeases({ includeActive: true }).then((result) => {
-        Metrics().recordColdOwnerRecovery(result.affectedRows, true);
+        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRecovery(result.affectedRows, true);
         return reflectRecovery(result);
     }).catch(recordFailure);
 }

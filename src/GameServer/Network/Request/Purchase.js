@@ -5,16 +5,15 @@ const DataCache      = invoke('GameServer/DataCache');
 const Item           = invoke('GameServer/Item/Item');
 const TradeService   = invoke('GameServer/Bot/TradeService');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
-const LifeState      = invoke('GameServer/Bot/Population/BotLifeState');
 const BotManager     = invoke('GameServer/Bot/BotManager');
-const Cooldown       = invoke('GameServer/Bot/Population/Cooldown');
-const GoalExecutor   = invoke('GameServer/Bot/Goals/GoalExecutor');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
+const WireD = invoke('Packet/WireD');
 
-function merchantPurchaseItems(store) {
+function merchantPurchaseItems(store, actor) {
     const items = [];
 
-    store.items.forEach((storeItem) => {
+    TradeService.refreshStorePrices(store, actor);
+    TradeService.nativeStoreItems(store).forEach((storeItem) => {
         DataCache.fetchItemFromSelfId(storeItem.selfId, (item) => {
             items.push(new Item(storeItem.objectId, {
                 ...utils.crushOb(item),
@@ -55,6 +54,12 @@ async function consume(session, data) {
     const store = trade && trade.store;
     const adminShop = session.activeAdminShop;
 
+    // A shop on the board trades only through the board (PrivateStoreBuy):
+    // its window's store is a projection of the record (E43).
+    if (store?.afkTrade === true) {
+        session.dataSendToMe(ServerResponse.actionFailed());
+        return;
+    }
     if (store && store.storeType === 1) {
         try {
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1)) {
@@ -63,21 +68,11 @@ async function consume(session, data) {
             const bought = [];
             const sellerSession = BotManager.sessions.find((candidate) => candidate.actor === trade.merchant);
             for (const item of data.list) {
-                const storeItem = store.items.find((entry) => Number(entry.selfId) === Number(item.selfId));
+                const quote = trade.prices?.[Number(item.selfId)];
+                if (!WireD.isRepresentable(quote)) throw new Error('Store item has no native quote.');
                 const result = await TradeService.buyFromStore(session.actor, store, item.selfId, item.amount, {
                     expectedRevision: trade.revision,
-                    expectedUnitPrice: trade.prices?.[Number(item.selfId)],
-                    afterPurchase: sellerSession?.coldMarketState
-                        ? async (purchaseResult) => {
-                            const updatedSeller = await LifeState.applyMarketSale(sellerSession.coldMarketState, {
-                                selfId: item.selfId,
-                                price: purchaseResult.totalAdena / purchaseResult.qty,
-                                buyerCharacterId: session.actor.fetchId(),
-                                storeItem
-                            }, purchaseResult.qty);
-                            if (updatedSeller) sellerSession.coldMarketState = updatedSeller;
-                        }
-                        : null
+                    expectedUnitPrice: quote
                 });
                 bought.push(result);
                 MarketTelemetry.recordTrade({
@@ -104,23 +99,15 @@ async function consume(session, data) {
             session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
             const soldOut = !store.items.some((item) => Number(item.count || 0) > 0);
             if (soldOut) {
-                const returnState = sellerSession?.coldMarketState
-                    ? GoalExecutor.finishMarketVisit(sellerSession.coldMarketState)
-                    : null;
-                if (returnState) {
-                    await Cooldown.transitionToColdState(sellerSession, {
-                        ...returnState,
-                        stats: { ...(returnState.stats || {}), marketStore: null }
-                    }, 'market_sold_out');
-                }
                 session.activeMerchantTrade = null;
                 session.dataSendToMe(ServerResponse.actionFailed());
                 return;
             }
             session.dataSendToMe(ServerResponse.purchaseList(
-                merchantPurchaseItems(store),
+                merchantPurchaseItems(store, session.actor),
                 session.actor.backpack.fetchTotalAdena()
             ));
+            trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
         } catch (err) {
             utils.infoWarn('Purchase', 'merchant purchase error: %s', err.message || err);
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1) || /changed/i.test(String(err.message || err))) {

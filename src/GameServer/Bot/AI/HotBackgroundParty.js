@@ -3,9 +3,11 @@ const World = invoke('GameServer/World/World');
 const Threats = invoke('GameServer/Bot/AI/BotPvpThreats');
 const Restrictions = invoke('GameServer/Effects/EffectRestrictions');
 const Tactics = invoke('GameServer/Bot/AI/BotPvpTactics');
-const Roles = invoke('GameServer/Bot/AI/BotRoles');
+const RestPolicy = invoke('GameServer/Bot/AI/RestPolicy');
 const Support = invoke('GameServer/Bot/AI/BotSupportPlanner');
 const HuntingVisibility = invoke('GameServer/Bot/AI/BotHuntingVisibility');
+// The cold party resolver's target rule: one answer for hot and cold parties.
+const PartyTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
 
 const RaidCombat = invoke('GameServer/Bot/AI/PartyRaidCombat');
 const RAID_PREPARATION_SETTLE_MS = 1500;
@@ -14,8 +16,12 @@ const RAID_RECOVERY_BUFF_WAIT_MS = 8000;
 function roster(session) {
     const party = session?.hotBackgroundPartyId && Parties.find(session.hotBackgroundPartyId);
     if (party?.status !== 'hot' || session.partyCompanion) return [];
-    return party.memberIds.map(id => World.user.sessions.find(s => s.actor?.fetchId() === id
-        && s.hotBackgroundPartyId === party.partyId && !s.partyCompanion)).filter(Boolean);
+    return party.memberIds.map(id => {
+        const registered = World.registeredActorById(id);
+        const session = registered?.session;
+        return registered?.actor && registered.actor.fetchId() === id && session.hotBackgroundPartyId === party.partyId
+            && !session.partyCompanion ? session : null;
+    }).filter(Boolean);
 }
 
 function leader(session) {
@@ -132,7 +138,7 @@ function searchGround(session, owner, members, party, legal, now) {
         || invoke('GameServer/Bot/Population/SpotProfiles').findById(party.spotId);
     if (!spot) return;
     const origin = loc(bot);
-    const npcId = Number(party.stats?.objective?.npcId || party.stats?.acquisitionGoal?.next?.npcId || 0);
+    const npcId = PartyTarget.npcId(party, owner.coldLifeState);
     const distance = point => Math.hypot(point.locX - origin.locX, point.locY - origin.locY);
     const usable = point => point && ['locX', 'locY', 'locZ'].every(k => Number.isFinite(point[k]))
         && distance(point) > 600 && distance(point) <= 4500
@@ -298,8 +304,8 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     if (!combatLegal(target) || (!incoming && Threats.distance(owner.actor, target) > 2000)) target = null;
     if (!incoming && target && !HuntingVisibility.canSee(owner.actor, target)) target = null;
     if (!target && !incoming) {
-        const low = members.some(s => ratio(s.actor.fetchHp(), s.actor.fetchMaxHp()) < 0.55
-            || (Roles.shouldRestForMana(s.actor) && ratio(s.actor.fetchMp(), s.actor.fetchMaxMp()) < 0.35));
+        const low = members.some(s => RestPolicy.needsRest(s.actor, ratio(s.actor.fetchHp(), s.actor.fetchMaxHp()),
+            ratio(s.actor.fetchMp(), s.actor.fetchMaxMp()), { party: true }));
         if (low) {
             Tactics.stop(session, bot);
             session.currentTargetId = undefined;
@@ -332,7 +338,7 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
         }
         if (now >= Number(owner.nextBackgroundTargetScanAt || 0)) {
             owner.nextBackgroundTargetScanAt = now + 2000;
-            const npcId = Number(party.stats?.objective?.npcId || party.stats?.acquisitionGoal?.next?.npcId || 0);
+            const npcId = PartyTarget.npcId(party, owner.coldLifeState);
             const npcs = World.fetchNpcsInRadius(owner.actor.fetchLocX(), owner.actor.fetchLocY(), radius)
                 .filter(allowedHunt).filter(n => Math.abs(n.fetchLocZ() - owner.actor.fetchLocZ()) < 500);
             npcs.sort((a, b) => Number(b.fetchSelfId() === npcId) - Number(a.fetchSelfId() === npcId)

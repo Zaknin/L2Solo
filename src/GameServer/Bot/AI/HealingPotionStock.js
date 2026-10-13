@@ -1,5 +1,5 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
-const Database = invoke('Database');
+const ConsumableRestock = invoke('GameServer/Inventory/ConsumableRestock');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
@@ -45,10 +45,10 @@ function useThreshold(value) {
 }
 
 function targetAmountFor(value) {
-    const role = roleFor(value);
-    if (role === 'tank') return 12;
-    if (BotRoles.isRanged(role) || role === 'healer' || BotRoles.shouldRestForMana(value)) return 4;
-    return 8;
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const state = value?.backpack ? Economy.stateForActor(value) : value;
+    // The stock rule needs no wish network (L25).
+    return Economy.stockFor(state, 'potions').target;
 }
 
 function purchasePotionFor(value) {
@@ -65,7 +65,8 @@ function purchasePotionFor(value) {
 function operationalReserve(value) {
     const adena = Math.max(0, Number(value?.adena ?? value?.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() ?? 0));
     const level = Math.max(1, Number(value?.fetchLevel?.() ?? value?.level ?? 1) || 1);
-    return PurchaseFunding.operatingReserve({ adena, level });
+    return PurchaseFunding.operatingReserve(value?.backpack
+        ? invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(value, value.session) : value);
 }
 
 function inventoryRows(inventory = {}) {
@@ -125,9 +126,27 @@ function keptAmounts(value, options = {}) {
     return kept;
 }
 
+// The price of the bot's potion at the cheapest NPC of a town; 0 = not sold there.
+// One lookup for the hot trip (ShoppingState) and the cold visit (PopulationService).
+function localNpcPrice(potion, town) {
+    if (!town) return 0;
+    let price = 0;
+    for (const offer of invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffers(potion.selfId, town)) {
+        const offerPrice = Number(offer.price || 0);
+        if (offer.available === false || offerPrice <= 0) continue;
+        if (price === 0 || offerPrice < price) price = offerPrice;
+    }
+    return price;
+}
+
 function restockPlan(value, options = {}) {
     const potion = options.potion || purchasePotionFor(value);
-    const targetAmount = Math.max(0, Number(options.targetAmount ?? targetAmountFor(value)) || 0);
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const state = value?.backpack ? Economy.stateForActor(value) : value;
+    // The budget needs the review; the same review gives the target.
+    const coldMain = require('node:worker_threads').isMainThread && state?.phase === 'cold';
+    const context = options.context || (coldMain || options.targetAmount !== undefined ? Economy.basics(state) : Economy.forState(state));
+    const targetAmount = Math.max(0, Number(options.targetAmount ?? context.stock('potions').target) || 0);
     // The purchased potion's own row (written by the purchase) and the whole stock (what is missing).
     const currentAmount = options.inventory
         ? amountInInventory(options.inventory, potion.selfId)
@@ -137,9 +156,12 @@ function restockPlan(value, options = {}) {
     const adena = Math.max(0, Number(options.adena ?? value?.adena
         ?? value?.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() ?? 0));
     const unitPrice = Math.max(0, Number(options.unitPrice ?? potion.price) || 0);
-    const reserve = Math.max(0, Number(options.reserve ?? operationalReserve(value)) || 0);
+    const reserve = Math.max(0, Number(options.reserve ?? context.survivalReserve) || 0);
     const desired = Math.max(0, targetAmount - stockAmount);
-    const affordable = unitPrice > 0 ? Math.floor(Math.max(0, adena - reserve) / unitPrice) : 0;
+    const wish = context.network?.queue?.find(row => Number(row.object?.itemId) === Number(potion.selfId));
+    const fundedState = context.statsPacket ? { ...state, stats: { ...state.stats, money: context.statsPacket.money } } : state;
+    const allowance = PurchaseFunding.stockAllowance(fundedState, wish, potion.selfId, context.kitCost(potion.selfId, unitPrice), PurchaseFunding.quoteScale(context.stock('potions').unitPrice, unitPrice));
+    const affordable = unitPrice > 0 ? Math.floor(allowance / unitPrice) : 0;
     const amount = Math.min(desired, affordable);
     return {
         potion,
@@ -156,25 +178,10 @@ function restockPlan(value, options = {}) {
     };
 }
 
-function ensureActorStock(actor, plan) {
-    const current = actor.backpack.fetchItemFromSelfId(plan.potion.selfId);
-    const nextAmount = plan.currentAmount + plan.amount;
-    if (current) {
-        return Database.updateItemAmount(actor.fetchId(), current.fetchId(), nextAmount).then(() => {
-            current.setAmount(nextAmount);
-            return nextAmount;
-        });
-    }
-    return Database.setItem(actor.fetchId(), {
-        selfId: plan.potion.selfId,
-        name: plan.potion.name,
-        amount: nextAmount,
-        equipped: false,
-        slot: 0
-    }).then((packet) => {
-        actor.backpack.insertItem(Number(packet.insertId), plan.potion.selfId, { amount: nextAmount });
-        return nextAmount;
-    });
+// The plan's purchase as a restock line (Inventory/ConsumableRestock).
+function purchaseLine(plan) {
+    return { selfId: plan.potion.selfId, name: plan.potion.name, currentAmount: plan.currentAmount,
+        amount: plan.amount, unitPrice: plan.unitPrice, cost: plan.cost, adena: plan.adena };
 }
 
 function purchaseActorRestock(actor, options = {}) {
@@ -184,16 +191,9 @@ function purchaseActorRestock(actor, options = {}) {
     const plan = restockPlan(actor, options);
     if (!plan.needed) return Promise.resolve({ ok: true, changed: false, ...plan });
     if (!plan.affordable) return Promise.resolve({ ok: false, reason: 'wallet_reserve', ...plan });
-
-    const adenaItem = actor.backpack.fetchItemFromSelfId(57);
-    if (!adenaItem) return Promise.resolve({ ok: false, reason: 'missing_adena', ...plan });
-    const nextAdena = plan.adena - plan.cost;
-    return Database.updateItemAmount(actor.fetchId(), adenaItem.fetchId(), nextAdena)
-        .then(() => {
-            adenaItem.setAmount(nextAdena);
-            return ensureActorStock(actor, plan);
-        })
-        .then((amount) => ({ ok: true, changed: true, ...plan, nextAdena, nextAmount: amount }));
+    return ConsumableRestock.buyForActor(actor, purchaseLine(plan)).then((bought) => (bought.ok
+        ? { ok: true, changed: true, ...plan, nextAdena: bought.nextAdena, nextAmount: bought.nextAmount }
+        : { ok: false, reason: bought.reason, ...plan }));
 }
 
 function activePotionHot(actor) {
@@ -312,32 +312,7 @@ function coldEffectFor(potion, usedAt = 0) {
 function coldPurchasePatch(state, options = {}) {
     const plan = restockPlan(state, { ...options, inventory: state?.inventory || {} });
     if (!plan.affordable) return null;
-    const inventory = { ...(state.inventory || {}) };
-    const key = String(plan.potion.selfId);
-    inventory[key] = {
-        ...(inventory[key] || {}),
-        selfId: plan.potion.selfId,
-        name: plan.potion.name,
-        amount: plan.currentAmount + plan.amount
-    };
-    inventory['57'] = {
-        ...(inventory['57'] || {}),
-        selfId: 57,
-        name: 'Adena',
-        amount: plan.adena - plan.cost
-    };
-    return {
-        adena: plan.adena - plan.cost,
-        inventory,
-        purchase: {
-            selfId: plan.potion.selfId,
-            name: plan.potion.name,
-            amount: plan.amount,
-            unitPrice: plan.unitPrice,
-            cost: plan.cost,
-            at: Date.now()
-        }
-    };
+    return ConsumableRestock.coldPatch(state, purchaseLine(plan));
 }
 
 module.exports = {
@@ -360,6 +335,7 @@ module.exports = {
     restockPlan,
     stockAmounts,
     keptAmounts,
+    localNpcPrice,
     selectPotion,
     targetAmountFor,
     tryUseInCombat,

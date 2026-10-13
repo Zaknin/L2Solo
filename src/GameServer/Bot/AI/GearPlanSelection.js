@@ -9,16 +9,77 @@ const OfferOrder = invoke('GameServer/Bot/Economy/OfferOrder');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
-function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {} } = {}) {
+function withBridgeInputPreparation(state, previous, next) {
+    if (!next?.weaponBridge || !['active', 'deferred'].includes(next.status)) return next;
+    const retained = previous?.inputPreparation || previous;
+    if (!retained?.target?.selfId || retained.reason === 'cancelled' || previous?.reason === 'cancelled'
+        || GearAcquisitionPlanner.isClanOwnedPlan(retained)) return next;
+    const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
+    const target = Index.find(Data.items, Number(retained.combine?.resultId || retained.target.selfId));
+    const bridge = Index.find(Data.items, Number(next.combine?.resultId || next.target?.selfId));
+    const ranks = ['none', 'd', 'c', 'b', 'a', 's'];
+    if (!target || !bridge || ranks.indexOf(target.etc?.rank) < 2
+        || ranks.indexOf(target.etc?.rank) <= ranks.indexOf(bridge.etc?.rank)
+        || !GearAcquisitionPlanner.considerable(target, state)
+        || GearAcquisitionPlanner.equipmentTargetFulfilled(state, retained)) return next;
+    const inputPreparation = { status: 'deferred', strategy: 'none', reason: 'wish_focus',
+        target: retained.target, exchange: retained.exchange, recipeId: retained.recipeId,
+        materials: retained.materials, combine: retained.combine };
+    const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+    const proposed = { ...state, stats: { ...state.stats, equipmentPlan: { ...next, inputPreparation } } };
+    if (!Object.keys(Disposition.retainedEquipmentAmounts(proposed)).length) return next;
+    return { ...next, inputPreparation };
+}
+
+function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null } = {}) {
+    if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
+    const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
+        spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
+    });
+    const preparedAcquisition = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, economy);
+    if (preparedAcquisition?.strategy === 'luxury_exchange' || preparedAcquisition?.combine?.type === 'dual_sword') return {
+        acquisitionPlan: preparedAcquisition, replanContext: {}, reusablePartyRequest: false,
+        excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
+    const chosen = economy.network.queue.find(wish => wish.key === economy.network.activity?.rootKey)
+        || economy.network.queue.find(wish => wish.key === economy.network.focus?.[0]);
+    const wishTargetId = chosen?.object?.slot ? chosen.object.itemId : null;
+    const activity = economy.network.activity;
+    const activeGear = wishTargetId && activity?.rootKey === chosen.key
+        && ['hunting', 'shopping', 'crafting'].includes(activity.activity) && activity.kind !== 'production' && !activity.funding;
+    if (!activeGear && !GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) {
+        // Acquisition metadata remains resumable, but cannot override the
+        // common engine's book, social, sale or production activity.
+        return { acquisitionPlan: { ...previousPlan, status: 'deferred', strategy: 'none', next: null,
+            reason: 'wish_focus' }, replanContext: {},
+            reusablePartyRequest: false, excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
+    }
+    // The selected item's native funding gate reads the packet made by this
+    // same review, including the bot's own funded buy-order escrow.
+    state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+    const bag = Object.values(state.inventory || {}).filter(row => row.equipped || row.equippedCount)
+        .map(row => [row.selfId, row.enchant, row.slot].join(':')).sort().join(',');
+    const materials = (previousPlan?.materials || []).map(row => [row.selfId,
+        Math.min(row.amount, Number(state.inventory?.[row.selfId]?.amount || 0))].join(':')).join(',');
+    const key = [state.level, state.stats?.classId, bag, materials, wishTargetId,
+        chosen?.funded, activity?.key, previousPlan?.status, previousPlan?.acquisitionProgress?.failures,
+        previousPlan?.target?.selfId, state.stats?.partyRequest?.status,
+        state.stats?.clanEquipmentOrder?.revision].join('|');
+    const held = economy.gearPlanMemo;
+    if (held?.key === key && held.spots === spots && !state.stats?.lastResolveDebug?.failed) {
+        // A transport copy retains the current native progress/claims; only
+        // the expensive choice is cached, never a stale whole state.
+        return { ...held.result, acquisitionPlan: previousPlan || held.result.acquisitionPlan, economy };
+    }
     const excludedSpotIds = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
     // Equal-price towns are ranked from the bot's hunting ground, for every caller.
     const origin = OfferOrder.farmingOrigin(state, (spotId) => SpotIndex.spotById(spots, spotId));
-    const planOptions = { ...planningOptions, excludedSpotIds, origin };
+    const planOptions = { ...planningOptions, excludedSpotIds, origin, wishTargetId, wishSlot: Number(chosen?.object?.slot) };
     const clanRaidPlan = GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)
         && previousPlan?.next?.sourceKind === 'raid';
     if (clanRaidPlan) planOptions.allowRaidSources = true;
     const replanContext = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
-    const weaponBridgePlan = GearAcquisitionPlanner.npcEquipmentBridgePlan(state, planOptions);
+    const weaponBridgePlan = !GearAcquisitionPlanner.combatReadiness(state).hasWeapon
+        ? GearAcquisitionPlanner.npcEquipmentBridgePlan(state, planOptions) : null;
     const clanGoalLocked = !weaponBridgePlan
         && GearAcquisitionPlanner.clanGoalPlanLocked(state, previousPlan);
     const availabilitySource = !replanContext.failure && previousPlan?.status === 'active'
@@ -86,12 +147,16 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         ? previousPlan
         : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
     const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
-    const acquisitionPlan = {
+    const acquisitionPlan = withBridgeInputPreparation(state, previousPlan, {
         ...costedPlan,
+        ...(costedPlan.target?.selfId === wishTargetId ? { target: { ...costedPlan.target, slot: Number(chosen.object.slot) } } : {}),
         marketFallback: finalizedPlan.status === 'active' && finalizedPlan.strategy === 'craft'
             && Number(finalizedPlan.acquisitionProgress?.at || finalizedPlan.startedAt || timestamp) + 20 * 60 * 1000 <= timestamp
-    };
-    return { acquisitionPlan, replanContext, reusablePartyRequest, excludedSpotIds };
+    });
+    const result = { acquisitionPlan: { ...acquisitionPlan },
+        replanContext, reusablePartyRequest, excludedSpotIds };
+    economy.gearPlanMemo = { key, spots, result };
+    return { ...result, economy };
 }
 
-module.exports = { selectAcquisitionPlan };
+module.exports = { selectAcquisitionPlan, withBridgeInputPreparation };

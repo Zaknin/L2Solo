@@ -1,5 +1,17 @@
+require('./helpers/databaseIsolation');
+delete process.env.L2NODE_CONFIG_FILE;
+delete process.env.L2NODE_SHARED_CONFIG_FILE;
+delete process.env.N53_GAME_ROOT;
+const fixture = require('./helpers/isolatedSocialDatabase')('late-revenge-publication');
+process.once('exit', () => require('node:fs').rmSync(fixture.directory, { recursive: true, force: true }));
 const assert = require('assert');
 require('../src/Global');
+fixture.assertConfigured(options.default);
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Memory = invoke('GameServer/Bot/AI/BotEnemyMemory');
 const SocialMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const SocialPolicy = require('../src/GameServer/Social/InteractionMemoryPolicy');
@@ -26,10 +38,12 @@ function character(bot = true, level = 40) {
             fetchTowards: () => false, setHits() {}, setCasts() {} },
         automation: { abortAll() {} },
         skillset: { fetchSkills: () => [] },
-        backpack: { fetchItems: () => [{ fetchEquipped: () => true, fetchSelfId: () => 999999, fetchPrice: () => a.gear }] }
+        backpack: { fetchItems: () => [{ fetchEquipped: () => true, fetchSelfId: () => 999999, fetchPrice: () => a.gear,
+            fetchSlot: () => 7, fetchRank: () => a.rank || 'none' }] }
     };
-    a.session = { actor: a, aiActive: bot, accountId: bot ? `bot_${a.id}` : 'player', plan: 'hunting',
+    a.session = { actor: a, aiActive: bot, accountId: `${bot ? 'bot' : 'player'}_${a.id}`, plan: 'hunting',
         persona: { traits: { caution: 0.3, assertiveness: 0.8, empathy: 0.4, resilience: 0.8 } },
+        fetchAccountId() { return this.accountId; },
         dataSendToOthers(packet) { events.push(['chat', a.id, packet]); } };
     if (bot) SocialMemory.accept(SocialPolicy.empty(a.id));
     return a;
@@ -47,7 +61,8 @@ try {
     Tactics.support = Tactics.control = Potions.tryUseInCombat = () => false;
     const bot = character(), foe = character(false, 10), helper = character(), outsider = character();
     helper.session.persona.traits = { assertiveness: 1, empathy: 0, commitment: 1, sociability: 1, caution: 0 };
-    World.user = { sessions: [bot.session, foe.session, helper.session, outsider.session] };
+    World.user = { sessions: [], revision: 0 };
+    [bot.session, foe.session, helper.session, outsider.session].forEach(s => World.insertUser(s));
     for (let i = 0; i < 500; i++) Memory.record(bot, foe, false, now + i);
     assert.strictEqual(Memory.entries(bot.session)[0].attacks, 1, 'a burst of damage counts as one incident');
     assert.strictEqual(writes.length, 1, 'damage bursts must not cause one write per hit');
@@ -74,6 +89,13 @@ try {
     bot.session.pvpEnemyMemory = [];
 
     bot.session.coldLifeState = helper.session.coldLifeState = { party: { partyId: 'revenge_party' } };
+    // ARCH-NOTE: manually changing a registered session models the input to
+    // the native lifecycle membership writer; publish the addressed changes.
+    assert.deepStrictEqual(Threats.members(bot.session), [bot.session],
+        'an unpublished late helper is not silently discovered by a world scan');
+    World.refreshPartyMemberships([bot.session, helper.session]);
+    assert.deepStrictEqual(Threats.members(bot.session), [bot.session, helper.session],
+        'the original registered helper joins the earned-grievance encounter');
     const ai = { executePvPCombat(session, actor, target) { events.push(['attack', actor.id, target.id]); } };
     assert(Defense.tick(bot.session, bot, {}, ai, { now, rng: () => 0 }));
     assert.deepStrictEqual(events.filter(e => ['chat', 'attack'].includes(e[0])).map(e => e[0]), ['chat', 'attack'],
@@ -88,6 +110,9 @@ try {
     assert.strictEqual(new Attack().blockedPvpDefense(bot.session, bot, foe), false,
         'native damage must accept only the explicitly authorized revenge target');
     helper.session.coldLifeState = { party: { partyId: 'another_party' } };
+    World.refreshPartyMemberships([helper.session]);
+    assert.deepStrictEqual(Threats.members(bot.session), [bot.session],
+        'the changed helper leaves the published party immediately');
     assert(!Revenge.allows(helper.session, foe, now), 'leaving the party revokes its borrowed attack permission');
     assert(!Revenge.allows(bot.session, foe, now + Revenge.ENCOUNTER_MS + 1), 'abandoned objectives expire');
     foe.x = 99999;
@@ -102,7 +127,7 @@ try {
     const opener = character(), ally = character(), neutral = character(false);
     ally.session.persona.traits = { assertiveness: 1, empathy: 0, commitment: 1, sociability: 1, caution: 0 };
     opener.session.coldLifeState = ally.session.coldLifeState = { party: { partyId: 'opening_party' } };
-    World.user.sessions.push(opener.session, ally.session, neutral.session);
+    [opener.session, ally.session, neutral.session].forEach(s => World.insertUser(s));
     Revenge.onAttack(opener, neutral, now, () => 0.2);
     Threats.record(neutral, opener, now);
     assert.strictEqual(ally.session.pvpRevenge?.reason, 'party_attack',
@@ -115,9 +140,10 @@ try {
     bot.fakeDeath = true;
     assert(!Revenge.tryStart(bot.session, now, () => 0), 'incapacitated bots must not announce or initiate revenge');
     bot.fakeDeath = false;
-    bot.level = 1; foe.level = 80;
-    assert(!Revenge.tryStart(bot.session, now, () => 0), 'revenge must use the same level and gear risk evaluation');
-    bot.level = 80; foe.level = 1; bot.session.nextRevengeScanAt = 0;
+    // U26: levels are hidden; a visibly higher weapon grade is what a player sees.
+    bot.rank = 'none'; foe.rank = 'c'; bot.backpack.visibleLook = foe.backpack.visibleLook = null;
+    assert(!Revenge.tryStart(bot.session, now, () => 0), 'revenge must use the same visible-strength risk evaluation');
+    bot.rank = 'c'; foe.rank = 'none'; bot.backpack.visibleLook = foe.backpack.visibleLook = null; bot.session.nextRevengeScanAt = 0;
     bot.session.persona.traits = { caution: 0.9, assertiveness: 0.1, empathy: 0.9 };
     assert(!Revenge.tryStart(bot.session, now, () => 0), 'a PvP-averse personality must refuse revenge');
     bot.session.persona.traits = { caution: 0.3, assertiveness: 0.8, empathy: 0.4 };
@@ -145,7 +171,7 @@ try {
     doomed.setHp = hp => { doomed.hp = hp; };
     doomed.statusUpdateVitals = () => {};
     const summon = { fetchKind: () => 'Summon', fetchOwnerId: () => killer.id, fetchId: () => 1000001 };
-    World.user.sessions.push(doomed.session, killer.session);
+    World.insertUser(doomed.session); World.insertUser(killer.session);
     const generics = invoke(path.actor), flag = invoke('GameServer/Actor/PvpFlag');
     const die = generics.die, mark = flag.mark;
     const Database = invoke('Database');

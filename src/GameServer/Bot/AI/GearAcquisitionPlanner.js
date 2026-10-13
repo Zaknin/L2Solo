@@ -1,3 +1,4 @@
+const Sources = require('../../Items/ItemAcquisitionCatalog');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
@@ -6,14 +7,24 @@ const C4DualSwordCombinations = invoke('GameServer/Items/C4DualSwordCombinations
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const BotEquipmentCompatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
 const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const CraftSupplementMaterials = invoke('GameServer/Bot/Economy/CraftSupplementMaterials');
-// Each entry holds every source of an item for one bot level (hundreds for a
-// common material); 128 entries keep the cold worker inside its heap limit.
+// Common materials have hundreds of sources. Retain only their sorted index
+// positions per shared input key, rather than a plain source object per row.
+// ARCH-NOTE: PERF on 1,000 native states/2,045 spots: retained heap plus
+// numeric backing falls 37.80 -> 6.78 MB; all source rows/order/targets match.
+// Mean lookup 0.49 -> 0.62 ms. FIFO/key semantics stay intact; per-decision
+// sourceCache still shares the plain result until that decision returns.
 const MAX_RESOLVED_SOURCE_CACHE = 128;
-let sourceIndexCache = { spots: null, rewards: null, byItemId: new Map(), resolved: new Map(), yields: new Map() };
+const MAX_SOURCE_YIELDS = 16384;
+// Rows are as long as an item's index records (up to ~3,300 for a material
+// every monster drops): the bound counts record cells, 9 bytes each.
+const MAX_SOURCE_FACT_RULE_CELLS = 262144;
+let sourceIndexCache = { spots: null, rewards: null, npcs: null, byItemId: new Map(), resolved: new Map(), yields: new Map(),
+    plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const GearLifecycle = invoke('GameServer/Bot/AI/GearLifecycle');
@@ -28,10 +39,12 @@ const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
-const WEAPON_SLOTS = new Set([7, 14]);
+const { equipmentSlotKey, equipmentReplacementConflict } = BotEquipmentCompatibility;
 const ARMOR_SLOTS = new Set([6, 9, 10, 11, 12, 15]);
 const JEWEL_SLOTS = new Set([1, 2, 3, 4, 5]);
-const RATE_MODEL_VERSION = 16;
+// Saved plans older than this version are re-planned (BotLifeState, ClanEquipmentPlanner).
+// 17: the income model is the bot's measured hour value (BotHuntEfficiency.hourValue).
+const RATE_MODEL_VERSION = 17;
 const RAID_MIN_ROSTER_LABOR = 7;
 const DIRECT_FAILURE_RESOLVE_LIMIT = 8;
 const DIRECT_DROP_EXHAUSTION_MULTIPLIER = 3;
@@ -42,8 +55,6 @@ const NPC_GEAR_MAX_RANK = 'd';
 let staticNpcItemIdsCache = null;
 let itemCatalogSource = null;
 let itemCatalogById = new Map();
-let npcCatalogSource = null;
-let npcCatalogById = new Map();
 
 function rateProfileSignature() {
     const rates = ProgressionRates.profile();
@@ -80,16 +91,14 @@ function catalogItem(selfId) {
 }
 
 function catalogNpc(selfId) {
-    const npcs = DataCache.npcs || [];
-    if (npcCatalogSource !== npcs) {
-        npcCatalogSource = npcs;
-        npcCatalogById = new Map(npcs.map((npc) => [Number(npc.selfId), npc]));
-    }
-    return npcCatalogById.get(Number(selfId)) || null;
+    return ItemTemplateIndex.find(DataCache.npcs, selfId) || null;
 }
 
 function isRealCatalogItem(item = {}) {
     const selfId = Number(item.selfId || 0);
+    // Catalog classification wins over old inventory/worker projections.
+    if (item.template?.kind === 'Other.Quest'
+        || catalogItem(selfId)?.template?.kind === 'Other.Quest') return false;
     const name = String(item.template?.name || '').trim();
     // A loaded row is not automatically a usable game item.  The datapack has
     // legacy placeholder rows (for example, the D-grade weapon named "0").
@@ -148,11 +157,6 @@ function equippedSlotsFor(entry = {}, fallbackSlot = 0) {
     return slots.slice(0, Math.min(amount, slots.length));
 }
 
-function equipmentSlotKey(slot) {
-    const value = Number(slot || 0);
-    if (WEAPON_SLOTS.has(value)) return 'weapon';
-    return String(value);
-}
 
 function isCraftService(state = {}) {
     return state.activity === 'crafting'
@@ -204,7 +208,7 @@ function missingRequiredDualSword(state = {}, role = roleFor(state), classId = c
 function itemScore(item, role, classId) {
     const stats = item.stats || {};
     const slot = Number(item.etc?.slot || 0);
-    if (WEAPON_SLOTS.has(slot)) return BotWeaponCompatibility.scoreWeapon(stats.pAtk, stats.mAtk, role, classId);
+    if (BotEquipmentCompatibility.isWeaponSlot(slot)) return BotWeaponCompatibility.scoreWeapon(stats.pAtk, stats.mAtk, role, classId);
     if (JEWEL_SLOTS.has(slot)) return Number(stats.mDef || 0);
     return Number(stats.pDef || 0) + Number(item.etc?.mp || 0);
 }
@@ -214,6 +218,17 @@ function rankIndex(rank) {
     return index < 0 ? 0 : index;
 }
 
+function recoveryWake(state = {}) {
+    const weapon = equippedInventoryItems(state.inventory).find(item => BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot)));
+    return [Number(state.level || 1), weapon ? rankIndex(weapon.etc?.rank) : -1, state.party?.partyId ? 1 : 0];
+}
+
+function recoveryEntryLive(entry, state, timestamp, wake) {
+    if (!Array.isArray(entry.wake)) return Number(entry.until || 0) > timestamp;
+    const current = wake || recoveryWake(state);
+    return entry.wake.length === 3 && entry.wake.every((value, n) => Number(value) === current[n]);
+}
+
 // One planner decision judges the same bot against every candidate source
 // (partyNeedAssessmentForSource per drop source, per material source), and
 // its readiness depends only on the bot. Like ClanRaidPolicy's per-pass
@@ -221,12 +236,28 @@ function rankIndex(rank) {
 // one planner decision (see readinessScoped below). Within a
 // call the planner changes equipment only on copied states/inventories.
 let readinessScope = null;
+const MAX_SOURCE_ASSESSMENTS = 128;
+const SOURCE_ASSESSMENTS = Object.freeze({
+    missing_weapon: Object.freeze({ need: 'required', reason: 'missing_weapon' }),
+    unprepared_support: Object.freeze({ need: 'required', reason: 'unprepared_support' }),
+    underleveled: Object.freeze({ need: 'required', reason: 'underleveled' }),
+    tight_level_margin: Object.freeze({ need: 'preferred', reason: 'tight_level_margin' }),
+    solo_ready: Object.freeze({ need: 'solo_ok', reason: 'solo_ready' })
+});
+
+function readinessRecord(state) {
+    if (!readinessScope || !state || typeof state !== 'object') return null;
+    let record = readinessScope.get(state);
+    if (!record) {
+        record = { readiness: computeCombatReadiness(state), assessments: null };
+        readinessScope.set(state, record);
+    }
+    return record;
+}
 
 function combatReadiness(state = {}) {
-    if (!readinessScope || !state || typeof state !== 'object') return computeCombatReadiness(state);
-    let readiness = readinessScope.get(state);
-    if (!readiness) readinessScope.set(state, readiness = computeCombatReadiness(state));
-    return { ...readiness };
+    const record = readinessRecord(state);
+    return record ? { ...record.readiness } : computeCombatReadiness(state);
 }
 
 function computeCombatReadiness(state = {}) {
@@ -236,7 +267,7 @@ function computeCombatReadiness(state = {}) {
     const interimState = interimClassId
         ? { ...state, party: null, stats: { ...(state.stats || {}), classId: interimClassId, role: undefined } }
         : null;
-    const weapon = equipped.find((item) => WEAPON_SLOTS.has(Number(item.etc?.slot || 0))
+    const weapon = equipped.find((item) => BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0))
         && (suitable(item, state, role, item.etc?.rank)
             || (interimState && suitable(item, interimState, roleFor(interimState), item.etc?.rank))));
     const armor = equipped.filter((item) => ARMOR_SLOTS.has(Number(item.etc?.slot || 0))
@@ -271,7 +302,7 @@ function suitable(item, state, role, requiredRank = gradeForLevel(state.level)) 
     const kind = item.template?.kind || '';
     const slot = Number(item.etc?.slot || 0);
     const classId = classIdFor(state);
-    if (WEAPON_SLOTS.has(slot)) return BotWeaponCompatibility.isSuitableWeapon(
+    if (BotEquipmentCompatibility.isWeaponSlot(slot)) return BotWeaponCompatibility.isSuitableWeapon(
         kind,
         item.template?.name,
         item.stats?.pAtk,
@@ -285,14 +316,42 @@ function suitable(item, state, role, requiredRank = gradeForLevel(state.level)) 
     if (slot === 8) return BotEquipmentCompatibility.usesShield(role, classId)
         && kind === 'Armor.Shield'
         && !hasEquippedTwoHandedWeapon(state);
-    if ([10, 11, 15].includes(slot)) return kind === BotEquipmentCompatibility.armorKindFor(role, classId);
+    if ([10, 11, 15].includes(slot)) {
+        const preferred = BotEquipmentCompatibility.armorKindFor(role, classId);
+        // The authored NG kit allows light/heavy fighter bridges before D
+        // masteries; native receipt and wish compatibility must agree with it.
+        return kind === preferred || rank === 'none' && ['Armor.Chain', 'Armor.Leather'].includes(preferred)
+            && ['Armor.Chain', 'Armor.Leather'].includes(kind);
+    }
     if ([6, 9, 12].includes(slot)) return kind === 'Armor.Wear';
     return JEWEL_SLOTS.has(slot) && kind === 'Armor.Jewel';
+}
+
+// Compatibility and the acquisition ceiling, independent of a desired grade.
+// Shared wish targets/recovery can buy a useful lower-grade improvement.
+function considerable(item, state = {}, role = roleFor(state), acquisitionRank = invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state)) {
+    const rank = String(item?.etc?.rank || 'none').toLowerCase();
+    return Sources.hasSource(item?.selfId) && RANKS.includes(rank) && rankIndex(rank) <= rankIndex(acquisitionRank)
+        && suitable(item, state, role, rank);
+}
+
+function acquisitionTargetAllowed(state = {}, plan = {}) {
+    const target = catalogItem(plan?.combine?.resultId || plan?.target?.selfId);
+    return !target || rankIndex(target.etc?.rank) <= rankIndex(invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state));
+}
+
+function missingPairedCSlot(state, item, progression) {
+    const slot = Number(item?.etc?.slot || 0);
+    if (!progression.required || rankIndex(gradeForLevel(state.level)) <= rankIndex('c')
+        || item.etc?.rank !== 'c' || !PAIRED_SLOTS[slot]) return 0;
+    const worn = equippedSlotsFor(state.inventory?.[item.selfId], slot);
+    return pairedSlots(slot).find(side => progression.gaps.has(side) && !worn.includes(side)) || 0;
 }
 
 // A profession change can leave a sword on a polearm fighter or a dagger on
 // an archer. Such a weapon must neither satisfy nor outscore the new kit.
 function ownedItemFitsBuild(item, role, classId) {
+    if (!isRealCatalogItem(item)) return false;
     // Starter clothes remain a usable no-grade baseline before masteries;
     // graded body armor must match the profession's chosen armor profile.
     if ([10, 11, 15].includes(Number(item.etc?.slot))
@@ -300,13 +359,14 @@ function ownedItemFitsBuild(item, role, classId) {
     // A retail starter weapon the class profile does not list (a caster's gloves)
     // is good enough to fight with (combatReadiness), not to keep: the kit buys
     // the class's own weapon first.
-    if (WEAPON_SLOTS.has(Number(item.etc?.slot || 0))
+    if (BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0))
         && BotEquipmentCompatibility.isStarterWeaponKind(item.template?.kind || '', classId)) return false;
     return suitable(item, { classId }, role, item.etc?.rank);
 }
 
 function isSlotUpgrade(item, ownedItems, role, classId) {
-    const slot = WEAPON_SLOTS.has(Number(item.etc?.slot || 0)) ? 'weapon' : Number(item.etc?.slot || 0);
+    if (!isRealCatalogItem(item)) return false;
+    const slot = BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0)) ? 'weapon' : Number(item.etc?.slot || 0);
     const rank = String(item.etc?.rank || 'none').toLowerCase();
     const score = itemScore(item, role, classId);
     const price = Number(item.template?.price || 0);
@@ -315,7 +375,7 @@ function isSlotUpgrade(item, ownedItems, role, classId) {
     // expensive progression tier.
     return !ownedItems.some((owned) => (
         ownedItemFitsBuild(owned, role, classId)
-        && (WEAPON_SLOTS.has(Number(owned.etc?.slot || 0)) ? 'weapon' : Number(owned.etc?.slot || 0)) === slot
+        && (BotEquipmentCompatibility.isWeaponSlot(Number(owned.etc?.slot || 0)) ? 'weapon' : Number(owned.etc?.slot || 0)) === slot
         && String(owned.etc?.rank || 'none').toLowerCase() === rank
         && (itemScore(owned, role, classId) > score
             || (itemScore(owned, role, classId) === score && Number(owned.template?.price || 0) >= price))
@@ -324,17 +384,17 @@ function isSlotUpgrade(item, ownedItems, role, classId) {
 
 function slotPriority(item) {
     const slot = Number(item?.etc?.slot || 0);
-    if (WEAPON_SLOTS.has(slot)) return 8;
+    if (BotEquipmentCompatibility.isWeaponSlot(slot)) return 8;
     if (ARMOR_SLOTS.has(slot)) return 4;
     return JEWEL_SLOTS.has(slot) ? 1 : 0;
 }
 
 function currentSlotScore(item, ownedItems = [], role, classId) {
-    const slot = WEAPON_SLOTS.has(Number(item?.etc?.slot || 0)) ? 'weapon' : Number(item?.etc?.slot || 0);
+    const slot = BotEquipmentCompatibility.isWeaponSlot(Number(item?.etc?.slot || 0)) ? 'weapon' : Number(item?.etc?.slot || 0);
     return ownedItems
         .filter((owned) => ownedItemFitsBuild(owned, role, classId))
         .filter((owned) => (
-            (WEAPON_SLOTS.has(Number(owned.etc?.slot || 0)) ? 'weapon' : Number(owned.etc?.slot || 0)) === slot
+            (BotEquipmentCompatibility.isWeaponSlot(Number(owned.etc?.slot || 0)) ? 'weapon' : Number(owned.etc?.slot || 0)) === slot
         ))
         .reduce((best, owned) => Math.max(best, itemScore(owned, role, classId)), 0);
 }
@@ -345,7 +405,7 @@ function candidateEffort(candidate, state, options = {}) {
     const spots = options.spots || [];
     const offer = marketOfferForTarget(item, state, options);
     const marketEffortValue = offer
-        ? (PurchaseFunding.budget(state, options.buyOrderEscrow) >= Number(offer.price || 0)
+        ? (PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true }) >= Number(offer.price || 0)
             ? 4
             : marketEffort(offer, state))
         : Infinity;
@@ -361,7 +421,7 @@ function candidateEffort(candidate, state, options = {}) {
     // drop sources have become too low-level for the buyer.
     const blades = combinationPurchase(candidate.recipe, state, options);
     const bladeEffort = blades
-        ? 8 + (blades.cost <= PurchaseFunding.spendable(state, options.buyOrderEscrow)
+        ? 8 + (blades.cost <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true })
             ? 4 : blades.cost / expectedAdenaPerKill(state))
         : Infinity;
 
@@ -384,7 +444,7 @@ function shortlistCandidates(candidates = [], options = {}) {
     if (options.recipeId) return candidates;
     const offset = Math.max(0, Math.floor(Number(options.shortlistOffset || 0)));
     const bySlot = candidates.reduce((groups, candidate) => {
-        const slot = WEAPON_SLOTS.has(Number(candidate.item.etc?.slot || 0))
+        const slot = BotEquipmentCompatibility.isWeaponSlot(Number(candidate.item.etc?.slot || 0))
             ? 'weapon'
             : String(candidate.item.etc?.slot || 0);
         groups[slot] = groups[slot] || [];
@@ -429,15 +489,23 @@ function opportunityScore(candidate, state, options = {}, precomputedEffort = un
     return (slotPriority(candidate.item) * improvement) / normalizedEffort;
 }
 
+function equipmentCandidate(item, state, role = roleFor(state)) {
+    return !!item && rankIndex(item.etc?.rank) <= rankIndex(gradeForLevel(state.level))
+        && suitable(item, state, role, item.etc?.rank);
+}
+function equipmentItemBetter(item, current, role, classId) {
+    return !current || itemScore(item, role, classId) > itemScore(current, role, classId)
+        || itemScore(item, role, classId) === itemScore(current, role, classId)
+            && Number(item.template?.price || 0) < Number(current.template?.price || 0);
+}
+
 function equipInventoryUpgrades(state = {}, inventory = {}) {
     const role = roleFor(state);
     const classId = classIdFor(state);
-    const allowedRank = rankIndex(gradeForLevel(state.level));
     const candidates = Object.values(inventory || {}).flatMap((entry) => {
         if (Number(entry?.amount || 0) < 1) return [];
         const item = ItemTemplateIndex.find(DataCache.items, entry.selfId);
-        const rank = rankIndex(item?.etc?.rank);
-        return item && rank <= allowedRank && suitable(item, state, role, item.etc?.rank) ? [{ entry, item }] : [];
+        return equipmentCandidate(item, state, role) ? [{ entry, item }] : [];
     });
     const pairGroup = (item) => {
         const slot = Number(item.etc?.slot || 0);
@@ -447,13 +515,31 @@ function equipInventoryUpgrades(state = {}, inventory = {}) {
     const best = ordinaryCandidates.reduce((selected, candidate) => {
         const key = equipmentSlotKey(candidate.item.etc?.slot);
         const current = selected.get(key);
-        if (!current || itemScore(candidate.item, role, classId) > itemScore(current.item, role, classId)
-            || itemScore(candidate.item, role, classId) === itemScore(current.item, role, classId)
-                && Number(candidate.item.template?.price || 0) < Number(current.item.template?.price || 0)) {
+        if (equipmentItemBetter(candidate.item, current?.item, role, classId)) {
             selected.set(key, candidate);
         }
         return selected;
     }, new Map());
+    if (!best.has('weapon')) {
+        // Legacy starter saves can have both a spare sword and training fists
+        // worn before the bot owns its preferred weapon. Resolve the conflict
+        // without stripping its last usable weapon or equipping new off-build gear.
+        const worn = Object.values(inventory || {}).flatMap((entry) => {
+            const item = ItemTemplateIndex.find(DataCache.items, entry.selfId);
+            return String(item?.template?.kind || '').startsWith('Weapon.')
+                && equippedSlotsFor(entry, item.etc?.slot).some(slot => slot === 7 || slot === 14)
+                ? [{ entry, item }] : [];
+        });
+        if (worn.length > 1) {
+            const starters = new Set((DataCache.newbieItems?.find(row => row.classId === classId)?.items || [])
+                .filter(item => item.equipped === true).map(item => Number(item.selfId)));
+            worn.sort((left, right) => Number(starters.has(Number(right.entry.selfId)))
+                - Number(starters.has(Number(left.entry.selfId)))
+                || itemScore(right.item, role, classId) - itemScore(left.item, role, classId)
+                || Number(left.entry.selfId) - Number(right.entry.selfId));
+            best.set('weapon', worn[0]);
+        }
+    }
     // A full body occupies both chest and legs. Decide that mutually-exclusive
     // set before applying equipment so inventory key order cannot flip the
     // result on every inventory refresh.
@@ -498,12 +584,13 @@ function equipInventoryUpgrades(state = {}, inventory = {}) {
             }
         });
     }
-    best.forEach(({ entry, item }, key) => {
+    best.forEach(({ entry, item }) => {
         const slot = Number(item.etc?.slot || 0);
         Object.values(next).forEach((owned) => {
             const ownedItem = ItemTemplateIndex.find(DataCache.items, owned.selfId);
-            const ownedKey = ownedItem ? equipmentSlotKey(ownedItem.etc?.slot) : String(owned.slot || 0);
-            if (ownedKey === key && Number(owned.selfId) !== Number(entry.selfId)) setUnequipped(owned);
+            const ownedSlot = Number(ownedItem?.etc?.slot || owned.slot || 0);
+            if (equipmentReplacementConflict(slot, ownedSlot)
+                && Number(owned.selfId) !== Number(entry.selfId)) setUnequipped(owned);
         });
         if (slot === 15) {
             [10, 11].forEach((blockedSlot) => Object.values(next).forEach((owned) => {
@@ -562,33 +649,48 @@ function equipInventoryUpgrades(state = {}, inventory = {}) {
 function preferredTarget(state = {}, options = {}) {
     const role = roleFor(state);
     const classId = classIdFor(state);
+    const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+    const progression = Progression.assess(state);
     const missingDualSword = missingRequiredDualSword(state, role, classId);
     const owned = inventoryMap(state.inventory);
     const ownedItems = inventoryItems(state.inventory);
     const craftRecipes = options.craftRecipes
-        ? options.craftRecipes.filter((recipe) => recipe.type === 'dwarven')
+        ? options.craftRecipes.filter((recipe) => recipe.type === 'dwarven' && Sources.allowsRecipe(recipe))
         : CraftShopService.publishedStationRecipes().recipes;
-    const recipes = ClanCrafting.clanIdFor(state) && !options.clanCrafting
-        ? [] : [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()];
+    const recipes = [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()];
     const recipeRank = options.recipeId
         ? String((DataCache.items || []).find((item) => Number(item.selfId) === Number(recipes.find((recipe) => Number(recipe.recipeId) === Number(options.recipeId))?.productId))?.etc?.rank || '')
         : null;
-    const recipesByProduct = new Map(recipes.map((recipe) => [Number(recipe.productId), recipe]));
+    const recipesByProduct = new Map(recipes.filter(recipe => Sources.allowsRecipe(recipe)).map((recipe) => [Number(recipe.productId), recipe]));
     const excluded = excludedTargetIds(options);
     const excludedMaterials = new Set((options.excludedMaterialIds || []).map(Number));
-    const allCandidates = (DataCache.items || [])
-        .filter((item) => suitable(item, state, role, recipeRank || gradeForLevel(state.level)))
+    const acquisitionState = options.wishTargetId ? Progression.preparation(state, progression) || state : state;
+    const acquisitionRank = Progression.acquisitionRankFor(acquisitionState, acquisitionState === state ? progression : undefined);
+    const closesC = progression.required && rankIndex(gradeForLevel(state.level)) > rankIndex('c');
+    const targetSlotFor = item => Number(options.wishSlot || missingPairedCSlot(state, item, progression) || item.etc?.slot || 0);
+    const allCandidates = (options.wishTargetId ? [catalogItem(options.wishTargetId)].filter(Boolean) : DataCache.items || [])
+        .filter(item => Sources.hasSource(item.selfId))
+        .filter((item) => rankIndex(item.etc?.rank) <= rankIndex(acquisitionRank))
+        .filter((item) => options.wishTargetId ? considerable(item, acquisitionState, role, acquisitionRank)
+            : suitable(item, state, role, recipeRank || acquisitionRank))
+        .filter((item) => !closesC || Progression.priority(item, targetSlotFor(item), progression) > 0)
         .filter((item) => !excluded.has(Number(item.selfId)))
-        .map((item) => ({ item, recipe: recipesByProduct.get(Number(item.selfId)) || null }))
+        .filter(item => !options.wishTargetId || Number(item.selfId) === Number(options.wishTargetId))
+        .map((item) => ({ item, slot: targetSlotFor(item), recipe: recipesByProduct.get(Number(item.selfId)) || null }))
         .filter(({ item, recipe }) => !recipeNeedsExcludedMaterial(recipe, state, excludedMaterials)
             || !!marketOfferForTarget(item, state, options))
         .filter(({ recipe }) => !options.recipeId || Number(recipe?.recipeId) === Number(options.recipeId))
-        .filter(({ item }) => Number(owned.get(Number(item.selfId)) || 0) < 1)
-        .filter(({ item }) => (missingDualSword && item.template?.kind === 'Weapon.Dual')
+        .filter(({ item }) => Number(owned.get(Number(item.selfId)) || 0) < 1
+            || missingPairedCSlot(state, item, progression)
+            || options.wishTargetId && PAIRED_SLOTS[options.wishSlot]
+                && !equippedSlotsFor(state.inventory?.[item.selfId], item.etc?.slot).includes(Number(options.wishSlot)))
+        .filter(({ item }) => options.wishTargetId && PAIRED_SLOTS[options.wishSlot]
+            || missingPairedCSlot(state, item, progression)
+            || (missingDualSword && item.template?.kind === 'Weapon.Dual')
             || isSlotUpgrade(item, ownedItems, role, classId));
-    const requiredRank = recipeRank || gradeForLevel(state.level);
+    const requiredRank = recipeRank || acquisitionRank;
     const hasCurrentGradeWeapon = ownedItems.some((item) => (
-        WEAPON_SLOTS.has(Number(item.etc?.slot || 0))
+        BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0))
         && ownedItemFitsBuild(item, role, classId)
         && rankIndex(item.etc?.rank) >= rankIndex(requiredRank)
     ));
@@ -596,11 +698,11 @@ function preferredTarget(state = {}, options = {}) {
     // covered, fill the rest of the kit before considering another weapon of
     // the same grade.
     const weaponFirst = !hasCurrentGradeWeapon || missingDualSword
-        ? allCandidates.filter(({ item }) => WEAPON_SLOTS.has(Number(item.etc?.slot || 0)))
-        : allCandidates.filter(({ item }) => !WEAPON_SLOTS.has(Number(item.etc?.slot || 0)));
-    const progressionCandidates = weaponFirst.length ? weaponFirst : allCandidates;
+        ? allCandidates.filter(({ item }) => BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0)))
+        : allCandidates.filter(({ item }) => !BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0)));
+    const progressionCandidates = options.wishTargetId ? allCandidates : weaponFirst.length ? weaponFirst : allCandidates;
     const cap = progressionPriceCap(requiredRank, state.level);
-    const affordable = progressionCandidates.filter(({ item }) => Number(item.template?.price || 0) <= cap);
+    const affordable = progressionCandidates.filter(({ item }) => options.wishTargetId || Number(item.template?.price || 0) <= cap);
     // The entry weapon for some weapon families costs more than the early
     // grade cap (for example, D bows and daggers). Retain the weapon-first
     // milestone rather than declaring progression complete; shortlisting
@@ -652,7 +754,7 @@ function preferredDropTarget(state = {}, options = {}) {
     const owned = inventoryMap(state.inventory);
     const excluded = excludedTargetIds(options);
     const candidates = (DataCache.items || [])
-        .filter((item) => suitable(item, state, role, 'none'))
+        .filter((item) => Sources.hasSource(item.selfId) && suitable(item, state, role, 'none'))
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => Number(owned.get(Number(item.selfId)) || 0) < 1)
         .sort((a, b) => itemScore(b, role, classId) - itemScore(a, role, classId) || Number(b.template?.price || 0) - Number(a.template?.price || 0));
@@ -671,6 +773,7 @@ function preferredNoGradeTarget(state = {}, options = {}) {
     const candidates = planned.items
         .map((desired) => ItemTemplateIndex.find(DataCache.items, desired.selfId))
         .filter(isRealCatalogItem)
+        .filter(item => Sources.hasSource(item.selfId))
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => {
             if (uniqueItems.has(Number(item.selfId))) return false;
@@ -689,6 +792,11 @@ function offerOrigin(state, options) {
     return options.origin || OfferOrder.farmingOrigin(state, (spotId) => SpotIndex.spotById(options.spots, spotId));
 }
 
+// The buyer's trip cost to each town (OfferOrder.tripCost) from where it buys.
+function offerTripCost(state, options) {
+    return OfferOrder.tripCost(state, { origin: offerOrigin(state, options) });
+}
+
 function marketOfferForTarget(target, state = {}, options = {}) {
     if (!target) return null;
     const maxPrice = options.maxMarketPrice === undefined ? Infinity : Math.max(0, Number(options.maxMarketPrice) || 0);
@@ -704,18 +812,18 @@ function marketOfferForTarget(target, state = {}, options = {}) {
         ...Object.keys(MarketOpportunity.TOWN_NPC_SELLERS || {}),
         'Giran'
     ].filter(Boolean))];
-    return towns
-        .map((town) => MarketOpportunity.bestOffer(target.selfId, {
-            town,
-            budget: maxPrice,
-            buyerCharacterId: state.characterId
-        }))
-        .filter(usable)
-        .sort((left, right) => OfferOrder.compareOffers(left, right, origin))[0] || null;
+    return MarketOpportunity.bestOffer(target.selfId, {
+        towns,
+        budget: maxPrice,
+        buyerCharacterId: state.characterId,
+        cost: offerTripCost(state, options),
+        accept: usable
+    });
 }
 
+// What one kill earns the bot: its measured hour value per kill.
 function expectedAdenaPerKill(state = {}) {
-    return Math.max(20, Number(state.level || 1) * 25);
+    return HuntEfficiency.hourValue(state).perKill;
 }
 
 function marketEffort(offer, state) {
@@ -745,7 +853,7 @@ function marketPlan(state = {}, target, offer, options = {}) {
     return {
         status: 'active',
         phase: GearLifecycle.phaseFor(state),
-        grade: gradeForLevel(state.level),
+        grade: invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state),
         role,
         strategy: 'market',
         soloSafe: true,
@@ -773,10 +881,7 @@ function npcOfferForTarget(target, state = {}, options = {}) {
         const offer = options.findMarketOffer(target, state, origin);
         return offer?.sourceType === 'npc' ? offer : null;
     }
-    return (MarketOpportunity.npcOffersAll(target.selfId) || [])
-        .filter((offer) => offer.available !== false)
-        .sort((left, right) => OfferOrder.compareOffers(left, right, origin)
-            || String(left.town || '').localeCompare(String(right.town || '')))[0] || null;
+    return OfferOrder.best(MarketOpportunity.npcOffersAll(target.selfId) || [], { cost: offerTripCost(state, options) });
 }
 
 function staticNpcItems(options = {}) {
@@ -807,7 +912,7 @@ function desiredNpcSlots(state = {}, plan = BotGear.planFor({ classId: classIdFo
 function itemMatchesDesiredSlot(item, desiredSlot) {
     const slot = Number(item?.etc?.slot || 0);
     const wanted = Number(desiredSlot || 0);
-    if (WEAPON_SLOTS.has(slot) && WEAPON_SLOTS.has(wanted)) return true;
+    if (BotEquipmentCompatibility.isWeaponSlot(slot) && BotEquipmentCompatibility.isWeaponSlot(wanted)) return true;
     if ([1, 2].includes(slot) && [1, 2].includes(wanted)) return true;
     if ([4, 5].includes(slot) && [4, 5].includes(wanted)) return true;
     return slot === wanted;
@@ -816,8 +921,8 @@ function itemMatchesDesiredSlot(item, desiredSlot) {
 function equippedItemAtSlot(state = {}, slot) {
     const wanted = Number(slot || 0);
     return equippedInventoryItems(state.inventory).find((item) => (
-        ownedItemFitsBuild(item, roleFor(state), classIdFor(state)) && (WEAPON_SLOTS.has(wanted)
-            ? WEAPON_SLOTS.has(Number(item.etc?.slot || 0))
+        ownedItemFitsBuild(item, roleFor(state), classIdFor(state)) && (BotEquipmentCompatibility.isWeaponSlot(wanted)
+            ? BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0))
             : Number(item.etc?.slot || 0) === wanted
                 // Full-body armour occupies both paperdoll body slots. Treat
                 // it as the current chest/legs item while evaluating the NPC
@@ -853,9 +958,11 @@ function npcCandidatesForSlot(state = {}, desiredSlot, maxRank, options = {}) {
 // What a bot may spend on NPC gear: its purchase budget (wallet plus its own
 // buy-order escrow) above the operating reserve.
 function npcPurchaseBudget(state = {}, options = {}) {
-    const reserveOptions = { weaponBridge: !!options.weaponBridge };
-    return { reserve: operationalAdenaReserve(state, options.buyOrderEscrow, reserveOptions),
-        spendable: PurchaseFunding.spendable(state, options.buyOrderEscrow, reserveOptions) };
+    // ARCH-NOTE: a missing usable weapon is survival; its bridge may spend the whole wallet.
+    const reserveOptions = { upperBound: true };
+    return { reserve: options.weaponBridge ? 0 : operationalAdenaReserve(state),
+        spendable: options.weaponBridge ? PurchaseFunding.budget(state, options.buyOrderEscrow)
+            : PurchaseFunding.spendable(state, options.buyOrderEscrow, reserveOptions) };
 }
 
 function staticNpcUpgradePlan(state = {}, options = {}) {
@@ -905,7 +1012,7 @@ function staticNpcUpgradePlan(state = {}, options = {}) {
     if (rankIndex(gradeForLevel(state.level)) > rankIndex('d')) return null;
     const role = roleFor(state);
     const starterWeapon = BotGear.planFor({ classId, level: 1 }).items
-        .find((item) => WEAPON_SLOTS.has(Number(item.slot)));
+        .find((item) => BotEquipmentCompatibility.isWeaponSlot(Number(item.slot)));
     const starterTemplate = catalogItem(starterWeapon?.selfId);
     const currentWeapon = equippedItemAtSlot(state, 7);
     const hasUpgradedWeapon = currentWeapon && (rankIndex(currentWeapon.etc?.rank) > rankIndex('none')
@@ -982,7 +1089,7 @@ function npcWeaponBridgePlan(state = {}, options = {}) {
         return dual && (!armed || dualSwordFunded(dual, state, options)) ? dual : null;
     }
     if (armed || !GearLifecycle.isGearFocusActive(state)) return null;
-    const slot = desiredNpcSlots(state).find((entry) => WEAPON_SLOTS.has(entry));
+    const slot = desiredNpcSlots(state).find((entry) => BotEquipmentCompatibility.isWeaponSlot(entry));
     if (!slot) return null;
     const role = roleFor(state);
     const classId = classIdFor(state);
@@ -1036,7 +1143,7 @@ function equipmentBridgeReason(state = {}, options = {}) {
     const plan = npcEquipmentBridgePlan(state, options);
     if (plan?.weaponBridge) return 'weapon_bridge';
     return plan?.equipmentBridge
-        && PurchaseFunding.shortfall(state, plan.market?.price, plan.market?.reserve, options.buyOrderEscrow) === 0
+        && Number(plan.market?.price) <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { itemId: plan.target?.selfId })
         ? 'class_armor_bridge' : null;
 }
 
@@ -1044,17 +1151,18 @@ function marketPlanForTarget(state = {}, targetId, options = {}) {
     const target = ItemTemplateIndex.find(DataCache.items, targetId);
     const role = roleFor(state);
     const ownedItems = inventoryItems(state.inventory);
-    if (!target || !suitable(target, state, role, gradeForLevel(state.level))) return null;
-    if (!isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
+    const acquisitionState = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state;
+    if (!target || !considerable(target, acquisitionState, role)) return null;
+    const pairedSlot = missingPairedCSlot(state, target, invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state));
+    if (!pairedSlot && !isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
     const offer = marketOfferForTarget(target, state, options);
-    return offer ? marketPlan(state, target, offer, { buyOrderEscrow: options.buyOrderEscrow }) : null;
+    return offer ? marketPlan(state, target, offer, { buyOrderEscrow: options.buyOrderEscrow, targetSlot: pairedSlot }) : null;
 }
 
 function fundedMarketPlanForTarget(state = {}, targetId, options = {}) {
     const market = marketPlanForTarget(state, targetId, options);
     return market && Number(market.market.price) > 0
-        && PurchaseFunding.shortfall(state, market.market.price,
-            operationalAdenaReserve(state, options.buyOrderEscrow), options.buyOrderEscrow) === 0
+        && Number(market.market.price) <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { itemId: market.target?.selfId })
         ? market : null;
 }
 
@@ -1069,9 +1177,9 @@ function marketRecoveryPlanForTarget(state = {}, targetId, options = {}) {
     // Once the requested upgrade has been acquired, recovery is complete.
     // Do not turn one failed weapon route into an endless sequence of
     // same-slot market replacements.
-    if (!suitable(failedTarget, state, role, gradeForLevel(state.level))
+    if (!considerable(failedTarget, state, role)
         || !isSlotUpgrade(failedTarget, ownedItems, role, classId)) return null;
-    const failedSlot = WEAPON_SLOTS.has(Number(failedTarget.etc?.slot || 0))
+    const failedSlot = BotEquipmentCompatibility.isWeaponSlot(Number(failedTarget.etc?.slot || 0))
         ? 'weapon'
         : Number(failedTarget.etc?.slot || 0);
     const excluded = excludedTargetIds(options);
@@ -1080,10 +1188,10 @@ function marketRecoveryPlanForTarget(state = {}, targetId, options = {}) {
         .filter((item) => Number(item.selfId) !== Number(targetId))
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => {
-            const slot = WEAPON_SLOTS.has(Number(item.etc?.slot || 0)) ? 'weapon' : Number(item.etc?.slot || 0);
+            const slot = BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0)) ? 'weapon' : Number(item.etc?.slot || 0);
             return slot === failedSlot;
         })
-        .filter((item) => suitable(item, state, role, gradeForLevel(state.level)))
+        .filter((item) => considerable(item, state, role))
         .filter((item) => isSlotUpgrade(item, ownedItems, role, classId))
         .filter((item) => Number(item.template?.price || 0) <= cap)
         .map((item) => ({ item, offer: marketOfferForTarget(item, state, options) }))
@@ -1139,6 +1247,7 @@ function equipmentTargetFulfilled(state = {}, plan = {}) {
 function clanGoalPlanLocked(state = {}, plan = state?.stats?.equipmentPlan) {
     const npcId = Number(plan?.next?.npcId || 0);
     return isClanOwnedPlan(plan)
+        && acquisitionTargetAllowed(state, plan)
         && !levelingRecoveryFor(state, plan)
         && !equipmentTargetFulfilled(state, plan)
         && !require('./EquipmentAcquisitionProgress').componentAcquired(state, plan)
@@ -1169,7 +1278,8 @@ function sourceWithinVoluntaryHuntBand(state = {}, source = {}) {
     const botLevel = Number(state.level || 0);
     const sourceLevel = Number(source.npcLevel || source.spotLevel || 0);
     if (!botLevel || !sourceLevel) return true;
-    return sourceLevel - botLevel >= BotTargetScorer.MIN_LEVEL_GAP;
+    const economic = state.economicLower || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
+    return sourceLevel - botLevel >= (economic ? -15 : BotTargetScorer.MIN_LEVEL_GAP);
 }
 
 function isPlanSourceViableForState(state = {}, plan = {}) {
@@ -1253,8 +1363,10 @@ function abandonAcquisition(state, itemId, timestamp = Date.now(), reason = 'mar
     if (Number(plan.target.selfId) !== Number(itemId)
         && Number(plan.next?.itemId) !== Number(itemId)
         && !(plan.materials || []).some((material) => Number(material.selfId) === Number(itemId))) return state;
+    const wake = recoveryWake(state);
     const recoveryTargets = (plan.recoveryTargets || []).filter((entry) => (
-        Number(entry.until) > timestamp && Number(entry.targetId) !== Number(plan.target.selfId)
+        recoveryEntryLive(entry, state, timestamp, wake)
+            && (Array.isArray(entry.wake) || Number(entry.targetId) !== Number(plan.target.selfId))
     ));
     recoveryTargets.push({ targetId: Number(plan.target.selfId), itemId: Number(itemId),
         reason, failedAt: timestamp, until: timestamp + acquisitionCooldown(state) });
@@ -1305,7 +1417,7 @@ function recipeNeedsExcludedMaterial(recipe, state, excluded, seen = new Set()) 
 }
 
 function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now()) {
-    const currentGrade = gradeForLevel(state.level);
+    const currentGrade = invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state);
     const currentLevel = Number(state.level || 1);
     const sameGrade = previousPlan?.grade === currentGrade;
     const levelingRecovery = levelingRecoveryFor(state, previousPlan, timestamp);
@@ -1314,11 +1426,17 @@ function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now(
     const sourceViable = !sourceNpcId || isPlanSourceViableForState(state, previousPlan);
     const modelCurrent = Number(previousPlan?.rateModelVersion || 0) >= RATE_MODEL_VERSION
         && String(previousPlan?.rateProfileSignature || '') === rateProfileSignature();
+    const wake = recoveryWake(state);
     const recoveryTargets = (previousPlan?.recoveryTargets || [])
-        .filter((entry) => Number(entry.until || 0) > timestamp && Number(entry.targetId || 0) > 0);
+        .filter((entry) => recoveryEntryLive(entry, state, timestamp, wake) && Number(entry.targetId || 0) > 0);
     // A retained route can fail on either side of a grade threshold. Keep
     // its failure and cooldown until expiry, even after another level-up.
-    const failure = directPlanFailure(state, previousPlan, timestamp)
+    // ARCH-NOTE: the old active plan may survive a replan; replaying its
+    // recorded failure immediately recreates dormancy on a wake event. Wait
+    // for the new plan to stamp its baseline before judging that route again.
+    const recordedFailure = (previousPlan?.recoveryTargets || []).some(entry => Array.isArray(entry.wake)
+        && entry.reason === 'combat_unviable' && Number(entry.targetId) === Number(previousPlan?.target?.selfId));
+    const failure = (!recordedFailure && directPlanFailure(state, previousPlan, timestamp))
             || partyRouteFailure(state, previousPlan, timestamp)
             || craftPlanFailure(state, previousPlan, timestamp);
     if (failure) {
@@ -1328,28 +1446,43 @@ function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now(
             itemId: failure.itemId,
             reason: failure.reason,
             failedAt: timestamp,
-            until: timestamp + (failure.itemId ? acquisitionCooldown(state) : DIRECT_ROUTE_COOLDOWN_MS)
+            // ARCH-NOTE: dormantWishes does not exclude a gear target yet;
+            // keep its numeric wake inputs in the planner's recovery list (max4).
+            ...(failure.reason === 'combat_unviable' ? { wake }
+                : { until: timestamp + (failure.itemId ? acquisitionCooldown(state) : DIRECT_ROUTE_COOLDOWN_MS) })
         };
         const index = recoveryTargets.findIndex((entry) => Number(entry.targetId) === failure.targetId);
         if (index >= 0) recoveryTargets[index] = recovery;
         else recoveryTargets.push(recovery);
     }
+    const dormant = recoveryTargets.filter(entry => entry.reason === 'combat_unviable' && Array.isArray(entry.wake))
+        .sort((a, b) => Number(b.failedAt) - Number(a.failedAt));
+    const dropped = new Set(dormant.slice(4));
+    for (let n = recoveryTargets.length - 1; n >= 0; n--) if (dropped.has(recoveryTargets[n])) recoveryTargets.splice(n, 1);
     const currentMarketRecovery = previousPlan?.strategy === 'market'
         ? recoveryTargets.find((entry) => Number(entry.targetId) === Number(previousPlan.target?.selfId || 0))
         : null;
+    const targetSupported = (!previousPlan?.target?.selfId || Sources.hasSource(previousPlan.target.selfId))
+        && (!previousPlan?.recipeId || Sources.allowsRecipe(previousPlan.recipeId));
+    const acquisitionAllowed = acquisitionTargetAllowed(state, previousPlan);
+    const targetAllowed = targetSupported && acquisitionAllowed;
     return {
         levelingRecovery,
-        planCurrent: !levelingRecovery && !ClanCrafting.isPersonalCraft(state, previousPlan) && Boolean(previousPlan)
+        planCurrent: targetAllowed && !levelingRecovery && Boolean(previousPlan)
             && sameGrade
             && Number(previousPlan.plannedForLevel || 0) === currentLevel,
-        routeCurrent: !levelingRecovery && !ClanCrafting.isPersonalCraft(state, previousPlan) && Boolean(previousPlan)
+        routeCurrent: targetAllowed && !levelingRecovery && Boolean(previousPlan)
             && sameGrade
             && sourceAllowed
             && sourceViable
             && modelCurrent
             && Number(previousPlan.plannedForLevel || 0) === currentLevel,
-        invalidSource: !sourceAllowed
+        invalidSource: !targetSupported
+            ? { reason: 'unsupported_item_source' }
+            : !sourceAllowed
             ? { npcId: sourceNpcId, reason: 'protected_raid_source' }
+            : !acquisitionAllowed
+            ? { reason: 'c_kit_incomplete' }
             : !sourceViable
                 ? { npcId: sourceNpcId, reason: 'level_too_low' }
                 : null,
@@ -1364,7 +1497,6 @@ function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now(
 function finalizePlan(state = {}, previousPlan = null, rawPlan = {}, context = {}, timestamp = Date.now()) {
     const recovery = context.levelingRecovery || levelingRecoveryFor(state, previousPlan, timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery, previousPlan);
-    if (ClanCrafting.isPersonalCraft(state, rawPlan)) return { status: 'deferred', strategy: 'none', reason: 'clan_managed_crafting', materials: [], next: null };
     if (clanGoalPlanLocked(state, previousPlan) && context?.allowClanGoalReplan !== true) {
         return previousPlan;
     }
@@ -1383,8 +1515,13 @@ function finalizePlan(state = {}, previousPlan = null, rawPlan = {}, context = {
     const currentCounter = rawPlan?.status === 'active' && rawPlan.strategy === 'direct_drop'
         ? targetCombatCounter(state, rawPlan.next?.npcId)
         : null;
+    const wokeDirectTarget = currentCounter && (previousPlan?.recoveryTargets || []).some(entry =>
+        entry.reason === 'combat_unviable' && Array.isArray(entry.wake)
+        && Number(entry.targetId) === Number(rawPlan.target?.selfId)
+        && !recoveryEntryLive(entry, state, timestamp));
     const targetProgress = currentCounter
         ? (sameDirectTarget && previousPlan.targetProgress
+            && !wokeDirectTarget
             && !counterRestarted(currentCounter, previousPlan.targetProgress)
             ? previousPlan.targetProgress
             : currentCounter)
@@ -1439,7 +1576,8 @@ function levelingRecoveryFor(state = {}, plan = state.stats?.equipmentPlan, time
     const death = state.stats?.deathExperience;
     // Old plans may already have been restamped at the reduced level while
     // retaining a target from the old grade. Recover those persisted routes too.
-    const gradeRegression = rankIndex(plan.grade) > rankIndex(gradeForLevel(level))
+    const acquisitionLevel = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state)?.level || level;
+    const gradeRegression = rankIndex(plan.grade) > rankIndex(gradeForLevel(acquisitionLevel))
         && Number(death?.expLost || 0) > 0
         && Number(death?.penaltyAppliedAt || 0) >= Number(plan.startedAt || 0);
     const pressure = SpotRiskPolicy.deathPressure(state, plan.next?.spotId);
@@ -1538,8 +1676,25 @@ function partyNeedAssessmentForSource(state = {}, source = {}) {
     if (source?.sourceKind === 'raid' || source?.raidBoss === true) {
         return { need: 'required', reason: 'raid_roster_required' };
     }
-    const readiness = combatReadiness(state);
-    const targetLevel = Number(source?.npcLevel || source?.spotLevel || Infinity);
+    const record = readinessRecord(state);
+    const readiness = record ? record.readiness : computeCombatReadiness(state);
+    const targetLevel = sourceTargetLevel(source);
+    if (record?.assessments?.has(targetLevel)) return SOURCE_ASSESSMENTS[record.assessments.get(targetLevel)];
+    const reason = sourceAssessmentReason(readiness, targetLevel);
+    if (record) {
+        // Many items share the same target level. Keep only primitive answers
+        // in this decision's existing scope; overflow computes normally.
+        record.assessments ||= new Map();
+        if (record.assessments.size < MAX_SOURCE_ASSESSMENTS) record.assessments.set(targetLevel, reason);
+    }
+    return SOURCE_ASSESSMENTS[reason];
+}
+
+function sourceTargetLevel(source) {
+    return Number(source?.npcLevel || source?.spotLevel || Infinity);
+}
+
+function sourceAssessmentReason(readiness, targetLevel) {
     const margin = readiness.effectiveLevel - targetLevel;
 
     // A support with no weapon/armour cannot be treated as a safe solo farmer,
@@ -1548,11 +1703,11 @@ function partyNeedAssessmentForSource(state = {}, source = {}) {
     // still progress alone and merely advertise a preferred party.
     const unpreparedSupport = ['healer', 'buffer'].includes(readiness.role)
         && readiness.armorCount < 2;
-    if (!readiness.hasWeapon) return { need: 'required', reason: 'missing_weapon' };
-    if (unpreparedSupport) return { need: 'required', reason: 'unprepared_support' };
-    if (margin < -2) return { need: 'required', reason: 'underleveled' };
-    if (margin < 0) return { need: 'preferred', reason: 'tight_level_margin' };
-    return { need: 'solo_ok', reason: 'solo_ready' };
+    if (!readiness.hasWeapon) return 'missing_weapon';
+    if (unpreparedSupport) return 'unprepared_support';
+    if (margin < -2) return 'underleveled';
+    if (margin < 0) return 'tight_level_margin';
+    return 'solo_ready';
 }
 
 function partyNeedForSource(state = {}, source = {}) {
@@ -1647,8 +1802,8 @@ function plannedMaterialAcquired(state, plan) {
 }
 
 function bestSourceForPlan(state = {}, plan = {}, spots = [], options = {}) {
+    if (!acquisitionTargetAllowed(state, plan)) return null;
     if (levelingRecoveryFor(state, plan, options.timestamp)) return null;
-    if (ClanCrafting.isPersonalCraft(state, plan) && !options.clanCrafting) return null;
     if (plan?.status !== 'active' || plannedMaterialAcquired(state, plan)) return null;
     const itemId = itemIdForPlan(plan);
     if (!itemId) return null;
@@ -1656,6 +1811,7 @@ function bestSourceForPlan(state = {}, plan = {}, spots = [], options = {}) {
 }
 
 function safeFallbackForPlan(state = {}, plan = {}, spots = [], options = {}) {
+    if (!acquisitionTargetAllowed(state, plan)) return null;
     if (!plan || !['active', 'blocked'].includes(plan.status)) return null;
     const itemId = plan.strategy === 'direct_drop'
         ? Number(plan.target?.selfId || 0)
@@ -1728,13 +1884,12 @@ function retargetPlanSource(state = {}, plan = {}, source = null) {
 function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options = {}) {
     const recovery = options.levelingRecovery || levelingRecoveryFor(state, previousPlan, options.timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery, previousPlan);
-    if (ClanCrafting.isPersonalCraft(state, previousPlan) && !options.clanCrafting) return planFor(state, { ...options, spots });
     const offerOptions = { ...options, origin: offerOrigin(state, { ...options, spots }) };
     const weaponBridge = npcEquipmentBridgePlan(state, offerOptions);
     if (weaponBridge) return weaponBridge;
     const targetId = Number(previousPlan?.target?.selfId || 0);
     const excluded = new Set((options.excludedTargetIds || []).map(Number).filter(Boolean));
-    if (!excluded.has(targetId)) {
+    if (!excluded.has(targetId) && acquisitionTargetAllowed(state, previousPlan)) {
         if (plannedMaterialAcquired(state, previousPlan)) {
             const refreshed = planFor(state, { ...options, spots, recipeId: previousPlan.recipeId });
             if (['active', 'component_ready', 'ready_to_craft', 'complete'].includes(refreshed?.status)) return refreshed;
@@ -1769,37 +1924,91 @@ function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options =
     };
 }
 
+// No spots, no sources. A caller without spots (a default `[]`, a new array
+// each call) must not evict the index built for the real spot list: the
+// cache holds one list, and the next wish review would rebuild it in full.
+const NO_SOURCES = new Map();
+// Static NPC metadata is shared across selections. Replacing either catalog
+// releases the previous atlas; it never retains actors, clans or selected spots.
+let sourceRewardAtlas = { rewards: null, npcs: null, byNpc: new Map(), byName: new Map() };
+function sourceRewardAtlasFor(rewards, npcs) {
+    if (sourceRewardAtlas.rewards === rewards && sourceRewardAtlas.npcs === npcs) return sourceRewardAtlas;
+    const byNpc = new Map();
+    const byName = new Map();
+    const append = (index, key, row) => {
+        const rows = index.get(key) || [];
+        rows.push(row);
+        index.set(key, rows);
+    };
+    rewards.forEach((reward, ordinal) => {
+        const npc = ItemTemplateIndex.find(npcs, reward.selfId);
+        const row = { reward, ordinal, npcLevel: Number(npc?.template?.level || 0),
+            protectedRaid: BotRaidSafety.isProtectedRaidEntity(npc) };
+        append(byNpc, Number(reward.selfId), row);
+        append(byName, String(reward.template?.name || '').trim().toLowerCase(), row);
+    });
+    sourceRewardAtlas = { rewards, npcs, byNpc, byName };
+    return sourceRewardAtlas;
+}
 function sourceIndexFor(spots = []) {
+    if (!spots?.length) return NO_SOURCES;
     const rewards = DataCache.npcRewards || [];
-    if (sourceIndexCache.spots === spots && sourceIndexCache.rewards === rewards) {
+    const npcs = DataCache.npcs;
+    if (sourceIndexCache.spots === spots && sourceIndexCache.rewards === rewards && sourceIndexCache.npcs === npcs) {
         return sourceIndexCache.byItemId;
     }
 
-    const npcById = new Map((DataCache.npcs || []).map((npc) => [Number(npc.selfId), npc]));
-    const npcLevels = new Map((DataCache.npcs || []).map((npc) => [
-        Number(npc.selfId),
-        Number(npc.template?.level || 0)
-    ]));
+    const atlas = sourceRewardAtlasFor(rewards, npcs);
+    const selectedRewards = new Set();
     const spotByNpc = new Map();
     const spotByName = new Map();
+    // Counts and raid decorations belong to this current selection.
+    // This scratch index dies after construction; records retain two numbers.
+    const spotCounts = new Map();
     const appendSpot = (index, key, spot) => {
         if (!key || !spot) return;
-        const existing = index.get(key) || [];
-        if (!existing.some((candidate) => candidate.id === spot.id)) existing.push(spot);
+        const existing = index.get(key) || new Map();
+        if (!existing.has(spot.id)) existing.set(spot.id, spot);
         index.set(key, existing);
     };
-    (spots || []).forEach((spot) => (spot.npcEntries || []).forEach((entry) => {
-        if (entry.selfId) appendSpot(spotByNpc, Number(entry.selfId), spot);
-        if (entry.name) appendSpot(spotByName, String(entry.name).trim().toLowerCase(), spot);
-    }));
+    (spots || []).forEach((spot) => {
+        let total = 0;
+        const byNpc = new Map();
+        for (const entry of spot.npcEntries || []) {
+            if (entry.selfId) {
+                const npcId = Number(entry.selfId);
+                if (npcId && !spotByNpc.has(npcId)) {
+                    for (const row of atlas.byNpc.get(npcId) || []) selectedRewards.add(row);
+                }
+                appendSpot(spotByNpc, npcId, spot);
+            }
+            if (entry.name) {
+                const name = String(entry.name).trim().toLowerCase();
+                if (name && !spotByName.has(name)) {
+                    for (const row of atlas.byName.get(name) || []) selectedRewards.add(row);
+                }
+                appendSpot(spotByName, name, spot);
+            }
+            const count = Math.max(1, Number(entry.count || 1));
+            const npcId = Number(entry.selfId);
+            total += count;
+            // Number(NaN) never matched the previous equality-based scan.
+            if (!Number.isNaN(npcId)) byNpc.set(npcId, (byNpc.has(npcId) ? byNpc.get(npcId) : 0) + count);
+        }
+        spotCounts.set(spot, { total, byNpc });
+    });
 
     const byItemId = new Map();
-    rewards.forEach((reward) => {
-        const protectedRaid = BotRaidSafety.isProtectedRaidEntity(npcById.get(Number(reward.selfId)));
+    // Scratch sets replace scans of each growing item's source list. A repeated
+    // reward object/spot/kind keeps its first record, as before; all joins die
+    // after construction, leaving only the current selected view.
+    const recordsByReward = new Map();
+    // Union ID/name matches, retaining original reward order for ties and aliases.
+    [...selectedRewards].sort((left, right) => left.ordinal - right.ordinal).forEach(({ reward, npcLevel, protectedRaid }) => {
         const spotsForNpc = [...new Map([
             ...(spotByNpc.get(Number(reward.selfId)) || []),
             ...(spotByName.get(String(reward.template?.name || '').trim().toLowerCase()) || [])
-        ].map((spot) => [spot.id, spot])).values()];
+        ]).values()];
         if (!spotsForNpc.length) return;
         // Only the explicit raid-source atlas may opt a protected NPC into
         // equipment planning. Mentioning that NPC in an ordinary spot never
@@ -1815,17 +2024,76 @@ function sourceIndexFor(spots = []) {
         ].flatMap(([kind, groups]) => groups.flatMap((group) => (
             (group.items || []).map((item) => ({ id: Number(item.selfId || 0), kind })).filter((item) => item.id)
         )));
-        eligibleSpots.forEach((spot) => itemKinds.forEach(({ id, kind }) => {
-            const entries = byItemId.get(id) || [];
-            if (!entries.some((entry) => entry.reward === reward && entry.spot.id === spot.id && entry.kind === kind)) {
-                entries.push({ reward, spot, kind, npcLevel: npcLevels.get(Number(reward.selfId)) || 0 });
+        eligibleSpots.forEach((spot) => {
+            // The same NPC/spot/kind serves many items. Its immutable index
+            // record is shared rather than copied into every item's list.
+            let recordsBySpot = recordsByReward.get(reward);
+            if (!recordsBySpot) {
+                recordsBySpot = new Map();
+                recordsByReward.set(reward, recordsBySpot);
             }
-            byItemId.set(id, entries);
-        }));
+            let records = recordsBySpot.get(spot.id);
+            if (!records) {
+                records = new Map();
+                recordsBySpot.set(spot.id, records);
+            }
+            itemKinds.forEach(({ id, kind }) => {
+                let entry = records.get(kind);
+                if (!entry) {
+                    const counts = spotCounts.get(spot);
+                    const record = { reward, spot, kind, npcLevel, totalCount: counts.total,
+                        sourceCount: counts.byNpc.get(Number(reward.selfId)) ?? 0 };
+                    entry = { record, itemIds: new Set() };
+                    records.set(kind, entry);
+                }
+                if (entry.itemIds.has(id)) return;
+                entry.itemIds.add(id);
+                const entries = byItemId.get(id) || [];
+                entries.push(entry.record);
+                byItemId.set(id, entries);
+            });
+        });
     });
 
-    sourceIndexCache = { spots, rewards, byItemId, resolved: new Map(), yields: new Map() };
+    sourceIndexCache = { spots, rewards, npcs, byItemId, resolved: new Map(), yields: new Map(),
+        plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
     return byItemId;
+}
+
+// The hunt-rule view of an index record: the fields the band, party and
+// capacity rules read. Materialized sources and source facts share it.
+function sourceTargetOf({ reward, spot, kind, npcLevel }) {
+    const raidBoss = spot?.raidBoss === true;
+    return { npcId: Number(reward.selfId), npcLevel: Number(npcLevel || spot?.avgLevel || 1), spotId: spot.id,
+        spotLevel: Number(spot.avgLevel || 1), sourceKind: raidBoss ? 'raid' : kind, raidBoss };
+}
+
+// One materialized source of an index record for a killer level.
+function materializeSource(entry, itemId, killerLevel, ratesKey) {
+    const { reward, spot, kind } = entry, target = sourceTargetOf(entry);
+    const { chance, expectedYield } = dropYieldFor(reward, itemId, kind, target.npcLevel, killerLevel, ratesKey);
+    if (!chance) return null;
+    return {
+        npcId: target.npcId,
+        npcName: reward.template?.name || `NPC ${reward.selfId}`,
+        kind,
+        chance,
+        expectedYield,
+        spotId: target.spotId,
+        spotLevel: target.spotLevel,
+        npcLevel: target.npcLevel,
+        capacity: LevelingRoutes.capacityForSpot(spot),
+        sourceKind: target.sourceKind,
+        raidBoss: target.raidBoss,
+        sharedEncounter: spot?.sharedEncounter === true,
+        raidEstimate: spot?.raidEstimate || null,
+        raidRosterSize: spot?.raidBoss === true
+            ? Math.max(RAID_MIN_ROSTER_LABOR, Number(spot.raidRosterSize || 0))
+            : null,
+        raidBossTemplateId: spot?.raidBoss === true
+            ? Number(spot.raidBossTemplateId || reward.selfId)
+            : null
+    };
 }
 
 function sourceForItem(itemId, spots = [], state = {}, options = {}) {
@@ -1835,69 +2103,273 @@ function sourceForItem(itemId, spots = [], state = {}, options = {}) {
     const cacheKey = `${Number(itemId)}:${Number(state.level || 0)}:${spoilCapable ? 1 : 0}:${allowRaidSources ? 1 : 0}`;
     if (sourceCache?.has(cacheKey)) return sourceCache.get(cacheKey);
     const sourceIndex = sourceIndexFor(spots);
-    const rates = ProgressionRates.profile();
-    const ratesKey = `${rates.drop}:${rates.spoil}:${rates.adena}`;
-    const resolvedKey = `${cacheKey}:${ratesKey}`;
-    if (sourceIndexCache.resolved.has(resolvedKey)) {
-        const cached = sourceIndexCache.resolved.get(resolvedKey);
-        sourceCache?.set(cacheKey, cached);
-        return cached;
+    // The resolved lists below belong to the cached spot list; no spots means none.
+    if (sourceIndex === NO_SOURCES) {
+        sourceCache?.set(cacheKey, []);
+        return [];
     }
-    const sources = (sourceIndex.get(Number(itemId)) || []).filter(({ kind, spot }) => (
-        (kind !== 'spoil' || spoilCapable)
-        && (spot?.raidBoss !== true || allowRaidSources)
-    )).map(({ reward, spot, kind, npcLevel }) => {
-        const sourceLevel = Number(npcLevel || spot?.avgLevel || 1);
-        const { chance, expectedYield } = dropYieldFor(reward, itemId, kind, sourceLevel, Number(state.level || 0), ratesKey);
-        if (!chance) return null;
-        return {
-            npcId: Number(reward.selfId),
-            npcName: reward.template?.name || `NPC ${reward.selfId}`,
-            kind,
-            chance,
-            expectedYield,
-            spotId: spot.id,
-            spotLevel: Number(spot.avgLevel || 1),
-            npcLevel: sourceLevel,
-            capacity: LevelingRoutes.capacityForSpot(spot),
-            sourceKind: spot?.raidBoss === true ? 'raid' : kind,
-            raidBoss: spot?.raidBoss === true,
-            sharedEncounter: spot?.sharedEncounter === true,
-            raidEstimate: spot?.raidEstimate || null,
-            raidRosterSize: spot?.raidBoss === true
-                ? Math.max(RAID_MIN_ROSTER_LABOR, Number(spot.raidRosterSize || 0))
-                : null,
-            raidBossTemplateId: spot?.raidBoss === true
-                ? Number(spot.raidBossTemplateId || reward.selfId)
-                : null
-        };
-    }).filter(Boolean)
+    const ratesKey = sourceYieldRatesKey();
+    const resolvedKey = `${cacheKey}:${ratesKey}`;
+    const entries = sourceIndex.get(Number(itemId)) || [];
+    const materialize = entry => materializeSource(entry, itemId, Number(state.level || 0), ratesKey);
+    const cached = sourceIndexCache.resolved.get(resolvedKey);
+    if (cached) {
+        const sources = Array.from(cached, ordinal => materialize(entries[ordinal]));
+        sourceCache?.set(cacheKey, sources);
+        return sources;
+    }
+    const ranked = entries.flatMap((entry, ordinal) => {
+        if ((entry.kind === 'spoil' && !spoilCapable) || (entry.spot?.raidBoss === true && !allowRaidSources)) return [];
+        const source = materialize(entry);
+        return source ? [{ source, ordinal, effort: sourceEffort(source, state, options) }] : [];
+    })
         // Effort once per source, not once per comparison.
-        .map((source) => ({ source, effort: sourceEffort(source, state, options) }))
-        .sort((a, b) => a.effort - b.effort || b.source.expectedYield - a.source.expectedYield)
-        .map((entry) => entry.source);
+        .sort((a, b) => a.effort - b.effort || b.source.expectedYield - a.source.expectedYield);
+    const sources = ranked.map(entry => entry.source);
     if (sourceIndexCache.resolved.size >= MAX_RESOLVED_SOURCE_CACHE) {
         sourceIndexCache.resolved.delete(sourceIndexCache.resolved.keys().next().value);
     }
-    sourceIndexCache.resolved.set(resolvedKey, sources);
+    const Ordinals = entries.length <= 65536 ? Uint16Array : Uint32Array;
+    sourceIndexCache.resolved.set(resolvedKey, Ordinals.from(ranked, entry => entry.ordinal));
     sourceCache?.set(cacheKey, sources);
     return sources;
+}
+
+function sourceCacheSize() {
+    return { resolved: sourceIndexCache.resolved.size,
+        packedBytes: [...sourceIndexCache.resolved.values()].reduce((bytes, row) => bytes + row.byteLength, 0),
+        yields: sourceIndexCache.yields.size + sourceIndexCache.plainYields.size };
+}
+
+function sourceYieldRatesKey() {
+    const rates = ProgressionRates.profile();
+    return `${rates.drop}:${rates.spoil}:${rates.adena}`;
+}
+
+// One synchronous projection reads one rate profile. Reuse the planner's
+// bounded yield pairs without its route sorting or NPC-level fallback.
+function sourceYieldReaderFor(killerLevel) {
+    const ratesKey = sourceYieldRatesKey();
+    return (source, itemId) => dropYieldFor(source.reward, itemId, source.kind,
+        source.npcLevel, killerLevel, ratesKey);
+}
+
+// Finite farm and spoil facts of one item for one bot (Task 2, D4-D7, D9):
+// every known source, eligible by the rules the bot hunts and spoils by, or
+// with the reason it is not. Hours for `units` come from the spot's kills
+// per hour (the same SpotEconomics row the bot chooses spots by) times the
+// yield and the NPC's share of the spot. An hour there costs the bot its own
+// hour (1, the hour measure) less what the spot gives back (valueHours);
+// travel to a spot other than the current one is a round trip to the
+// spot's regional town. Unknown is explicit, never free.
+// invoke(), not require(): a require() in the per-source loop re-resolved the
+// module path on every ready source (21% of the cold worker in a live profile).
+// A spot's regional town depends only on its fixed centre and the static
+// town regions: one answer per planning spot object, no per-bot state.
+const spotTowns = new WeakMap();
+function* spotTown(spot) {
+    if (!spotTowns.has(spot)) spotTowns.set(spot, spot.center ? (yield* invoke('GameServer/Bot/Economy/EconomicTrip').regionalTown(spot.center))?.name || null : null);
+    return spotTowns.get(spot);
+}
+// A driver slices the loop per SOURCE_FACT_STEP records: a step per record
+// cost more than the record itself (the wish drains it synchronously).
+// options.readyOnly (the wish's case): only ready facts are returned and
+// refusals are never built as objects (74% of records). options.counts (a
+// Map, for diagnostics) counts every record by 'ready' or its reason, in
+// record order; it implies readyOnly.
+const SOURCE_FACT_STEP = 64;
+// A source is executable only on ground the solo route executor admits.
+// Share profiles and spot verdicts for one projection, then discard them.
+function sourceRouteReader(state, options = {}) {
+    const allowed = new WeakMap();
+    const timestamp = options.timestamp ?? Date.now();
+    const excluded = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
+    const Spots = invoke('GameServer/Bot/AI/SpotService');
+    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
+    const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
+    let profiles = null;
+    return spot => {
+        if (!allowed.has(spot)) {
+            const soloOptions = { timestamp, occupancy: options.occupancy,
+                mode: 'solo', capacityStates: [state] };
+            profiles ||= invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(state, soloOptions);
+            allowed.set(spot, spot.raidBoss !== true && !excluded.has(String(spot.id))
+                && LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })
+                && (Spots.isSuitable(spot, Number(state.level || 1), soloOptions)
+                    || economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= Number(state.level || 1) - 15)
+                && Profiles.hasCapacityForStates(spot, [state], options.occupancy));
+        }
+        return allowed.get(spot);
+    };
+}
+
+function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
+    const facts = [], ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
+    const entries = sourceIndexFor(options.spots || []).get(Number(itemId)) || [];
+    const timestamp = options.timestamp ?? Date.now();
+    const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
+    const spotValue = options.spotValue
+        || require('../Economy/SpotEconomics').create(state, { timestamp, occupancy: options.occupancy });
+    const trips = options.trips || new Map();
+    const current = String(state.stats?.travel?.spotId || state.spotId || null);
+    const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly);
+    let spoiler = options.spoiler;
+    const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
+    for (let ordinal = 0; ordinal < entries.length; ordinal++) {
+        if (ordinal % SOURCE_FACT_STEP === 0) yield 'source';
+        // The fact reads the shared rule row of the record (yield and the
+        // per-level refusals), not a materialized source per entry.
+        const rule = rules.reasons[ordinal];
+        if (rule === FACT_RULE_NO_CHANCE) continue;
+        const entry = entries[ordinal], { spot, kind } = entry, expectedYield = rules.expected[ordinal];
+        let status = 'ineligible', reason = rule === FACT_RULE_RAID ? 'raid' : null;
+        if (!reason && kind === 'spoil') {
+            // The executor's rule: a learned Spoil, not the class (E189).
+            if (spoiler === undefined) spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
+                { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) }) || false;
+            if (!spoiler) reason = 'spoil_skill';
+        }
+        if (!reason && rule) reason = FACT_RULE_REASONS[rule];
+        if (!reason) {
+            const target = sourceTargetOf(entry);
+            if (!soloSafeForSource(state, target)) reason = 'party_needed';
+            else {
+                target.capacity = LevelingRoutes.capacityForSpot(spot);
+                if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
+            }
+            if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
+        }
+        let row = null, perHour = 0, trip = null, town = null;
+        if (!reason) {
+            status = 'unknown';
+            row = spotValue(entry.spot);
+            perHour = Number(row?.kills) * expectedYield
+                * Number(entry.sourceCount || 0) / Math.max(1, Number(entry.totalCount || 0));
+            if (!(perHour > 0)) reason = 'yield';
+            else if (!Number.isFinite(row.valueHours)) reason = 'income';
+        }
+        if (!reason) {
+            trip = { known: true, hours: 0, fees: 0 };
+            if (String(entry.spot.id) !== current) {
+                // A known town is read without a delegated generator per record.
+                town = spotTowns.has(entry.spot) ? spotTowns.get(entry.spot) : yield* spotTown(entry.spot);
+                // A caller with prepared routes (the wish) passes its own reader.
+                if (town && !trips.has(town)) trips.set(town, options.trip ? options.trip.details(town)
+                    : yield* invoke('GameServer/Bot/Economy/EconomicTrip').details(state, town));
+                trip = town ? trips.get(town) : { known: false };
+            }
+            if (!trip?.known) reason = 'route';
+        }
+        if (counts) counts.set(reason || 'ready', (counts.get(reason || 'ready') || 0) + 1);
+        const npcId = Number(entry.reward.selfId);
+        if (reason) {
+            if (!readyOnly) facts.push({ kind, spotId: spot.id, npcId, itemId: Number(itemId), units, expectedYield, status, reason });
+            continue;
+        }
+        const hours = units / perHour, netHourCost = Math.max(0, 1 - row.valueHours);
+        facts.push({ kind, spotId: spot.id, npcId, itemId: Number(itemId), units, expectedYield, status: 'ready',
+            perHour, hours, valueHours: row.valueHours, netHourCost,
+            town, tripHours: trip.hours, tripFees: trip.fees, costHours: hours * netHourCost + trip.hours });
+    }
+    return facts;
+}
+
+// The per-bot loop of sourceFacts re-derived, for every record, answers that
+// depend only on the record, the item, the killer level and the rates: the
+// yield pair, raid, a huntable NPC and the voluntary level band. One row per
+// item and level holds them, aligned with the index records; it lives with
+// the index (rebuilt with it) and follows the rate profile. Numbers only, no
+// object references: 9 bytes per record. FACT_RULE_NO_CHANCE is a record the
+// bot never sees (chance 0).
+const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_LEVEL_BAND = 3, FACT_RULE_NO_CHANCE = 255;
+const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt', 'level_band'];
+const NO_FACT_RULES = { entries: [], expected: new Float64Array(0), reasons: new Uint8Array(0) };
+function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLower = false) {
+    if (!entries.length) return NO_FACT_RULES;
+    if (sourceIndexCache.factRulesKey !== ratesKey) {
+        sourceIndexCache.factRules = new Map();
+        sourceIndexCache.factRulesKey = ratesKey;
+        sourceIndexCache.factRuleCells = 0;
+    }
+    const cache = sourceIndexCache.factRules, key = `${itemId}:${killerLevel}:${Number(economicLower)}`;
+    let rules = cache.get(key);
+    if (rules && rules.entries === entries) return rules;
+    if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.entries.length; }
+    const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
+    // This shared rule row already has the resolved economic band. Do not
+    // re-enter the actor's wish policy (and resolve its module) per record.
+    const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
+    for (let ordinal = 0; ordinal < entries.length; ordinal++) {
+        const entry = entries[ordinal], target = sourceTargetOf(entry);
+        const value = dropYieldFor(entry.reward, itemId, entry.kind, target.npcLevel, killerLevel, ratesKey);
+        if (!value.chance) { reasons[ordinal] = FACT_RULE_NO_CHANCE; continue; }
+        expected[ordinal] = value.expectedYield;
+        reasons[ordinal] = target.raidBoss ? FACT_RULE_RAID
+            : !sourceNpcHuntable(target.npcId) ? FACT_RULE_CANNOT_HUNT
+                : killerLevel && target.npcLevel && target.npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
+    }
+    rules = { entries, expected, reasons };
+    sourceIndexCache.factRuleCells += entries.length;
+    while (sourceIndexCache.factRuleCells > MAX_SOURCE_FACT_RULE_CELLS && cache.size) {
+        const [oldest, row] = cache.entries().next().value;
+        cache.delete(oldest);
+        sourceIndexCache.factRuleCells -= row.entries.length;
+    }
+    cache.set(key, rules);
+    return rules;
 }
 
 // A drop yield depends only on the reward, the item and the deep-blue level
 // penalty: keep it as a number pair per rate profile. Craft routes evaluate
 // many materials, so the bounded source lists above are rebuilt often; this
 // keeps a rebuild from recomputing every reward roll.
+// Without a deep-blue penalty (every fact the hunt band admits) the pair is
+// keyed by numbers, not a five-part string: the same bound, a cheaper read.
+const PLAIN_YIELD_ITEMS = 2 ** 20;
 function dropYieldFor(reward, itemId, kind, npcLevel, killerLevel, ratesKey) {
+    const npcId = Number(reward.selfId), item = Number(itemId);
+    if ((kind === 'drop' || kind === 'spoil') && Number.isInteger(npcId) && npcId >= 0 && npcId < 2 ** 31
+        && Number.isInteger(item) && item >= 0 && item < PLAIN_YIELD_ITEMS
+        && !ProgressionRates.deepBlueActive(npcLevel, killerLevel)) {
+        if (sourceIndexCache.plainRatesKey !== ratesKey) {
+            sourceIndexCache.plainYields = new Map();
+            sourceIndexCache.plainRatesKey = ratesKey;
+        }
+        const plain = sourceIndexCache.plainYields;
+        const key = (npcId * PLAIN_YIELD_ITEMS + item) * 2 + (kind === 'spoil' ? 1 : 0);
+        let value = plain.get(key);
+        if (!value) {
+            value = itemDropYield(reward, itemId, kind, { npcLevel, killerLevel });
+            if (plain.size + sourceIndexCache.yields.size >= MAX_SOURCE_YIELDS) evictSourceYield();
+            plain.set(key, value);
+        }
+        return value;
+    }
     const rule = ProgressionRates.deepBlueRule({ npcLevel, killerLevel });
     const penalty = rule.active ? Math.min(100, rule.penaltyPercent) : 0;
     const key = `${ratesKey}:${reward.selfId}:${itemId}:${kind}:${penalty}`;
     let value = sourceIndexCache.yields.get(key);
     if (!value) {
         value = itemDropYield(reward, itemId, kind, { npcLevel, killerLevel });
+        if (sourceIndexCache.plainYields.size + sourceIndexCache.yields.size >= MAX_SOURCE_YIELDS) evictSourceYield();
         sourceIndexCache.yields.set(key, value);
     }
     return value;
+}
+
+// Both yield maps share one bound; the larger gives up its oldest pair.
+function evictSourceYield() {
+    const { plainYields, yields } = sourceIndexCache;
+    const map = plainYields.size >= yields.size ? plainYields : yields;
+    map.delete(map.keys().next().value);
+}
+
+// A catalog NPC's huntability is static per loaded NPC table (the index
+// cache is rebuilt when that table changes).
+function sourceNpcHuntable(npcId) {
+    const huntable = sourceIndexCache.huntable;
+    if (!huntable.has(npcId)) huntable.set(npcId, isBotEligibleSourceNpcId(npcId));
+    return huntable.get(npcId);
 }
 
 function stationRecipeIds() {
@@ -2003,14 +2475,14 @@ function combinationPurchase(recipe, state, options = {}) {
 function dualSwordBridgePlan(state, options = {}) {
     if (!missingRequiredDualSword(state)) return null;
     const role = roleFor(state);
-    const maxRank = rankIndex(gradeForLevel(state.level));
+    const maxRank = rankIndex(invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state));
     const excluded = excludedTargetIds(options);
     const offers = new Map();
     const purchaseOptions = { ...options, npcOnly: true, findNpcOffer: item => {
         if (!offers.has(item.selfId)) offers.set(item.selfId, npcOfferForTarget(item, state, options));
         return offers.get(item.selfId);
     } };
-    const candidates = C4DualSwordCombinations.loadRecipes().flatMap(recipe => {
+    const candidates = C4DualSwordCombinations.loadRecipes().filter(recipe => Sources.allowsRecipe(recipe)).flatMap(recipe => {
         const item = catalogItem(recipe.productId);
         if (!item || rankIndex(item.etc?.rank) > maxRank || excluded.has(Number(item.selfId))
             || !suitable(item, state, role, item.etc?.rank)) return [];
@@ -2063,10 +2535,15 @@ function combinationBladeMarketPlan(target, materials, state, planningOptions) {
 }
 
 function rawPlanFor(state = {}, options = {}) {
+    if (options.wishTargetId && !Sources.hasSource(options.wishTargetId)
+        || options.recipeId && !Sources.allowsRecipe(options.recipeId)) return {
+        status: 'blocked', reason: 'unsupported_item_source', strategy: 'none', target: null,
+        recipeId: null, materials: [], next: null
+    };
     if (isCraftService(state)) {
         return { status: 'service', strategy: 'none', recipeId: null, materials: [], next: null };
     }
-    if (!GearLifecycle.isGearFocusActive(state)) {
+    if (!options.wishTargetId && !GearLifecycle.isGearFocusActive(state)) {
         return {
             status: 'deferred',
             phase: GearLifecycle.phaseFor(state),
@@ -2086,7 +2563,7 @@ function rawPlanFor(state = {}, options = {}) {
         recipeCatalog: options.craftRecipes ? new Map(options.craftRecipes.map(recipe => [Number(recipe.productId), recipe])) : null,
         sourceCache: options.sourceCache || new Map()
     };
-    const preparedTarget = !options.recipeId && rankIndex(gradeForLevel(state.level)) > rankIndex('d')
+    const preparedTarget = !options.recipeId && (options.wishTargetId || rankIndex(gradeForLevel(state.level)) > rankIndex('d'))
         ? preferredTarget(state, planningOptions)
         : null;
     const preparedCraftReady = preparedTarget?.recipe
@@ -2094,7 +2571,7 @@ function rawPlanFor(state = {}, options = {}) {
             .every((material) => material.missing <= 0 || CraftSupplementMaterials.isSupplementalMaterial(material.selfId));
     const forcedMarketPlan = marketRecoveryPlanForTarget(state, options.forceMarketTargetId, options);
     if (forcedMarketPlan) return forcedMarketPlan;
-    if (!options.recipeId && !preparedCraftReady) {
+    if (!options.recipeId && !options.wishTargetId && !preparedCraftReady) {
         const npcPlan = staticNpcUpgradePlan(state, planningOptions);
         if (npcPlan) return npcPlan;
         if (rankIndex(gradeForLevel(state.level)) <= rankIndex('d') && staticNpcKitAdequate(state, {
@@ -2105,12 +2582,11 @@ function rawPlanFor(state = {}, options = {}) {
         }
     }
     if (!GearLifecycle.allowsCrafting(state) || gradeForLevel(state.level) === 'none') {
-        const target = preferredNoGradeTarget(state, planningOptions) || preferredDropTarget(state, planningOptions);
+        const target = preparedTarget?.item || preferredNoGradeTarget(state, planningOptions) || preferredDropTarget(state, planningOptions);
         const source = target
             ? bestSourceForState(sourceForItem(target.selfId, planningOptions.spots || [], state, planningOptions), state, planningOptions)
             : null;
         const offer = marketOfferForTarget(target, state, planningOptions);
-        const directKills = source ? 1 / Math.max(source.expectedYield, 0.000001) : Infinity;
         const directEffort = source ? sourceEffort(source, state, planningOptions) : Infinity;
         const buy = offer && marketEffort(offer, state) <= directEffort;
         const sourceAssessment = source ? partyNeedAssessmentForSource(state, source) : null;
@@ -2193,7 +2669,7 @@ function rawPlanFor(state = {}, options = {}) {
         grade: String(target.item.etc?.rank || gradeForLevel(state.level)).toLowerCase(),
         role: roleFor(state),
         rateModelVersion: RATE_MODEL_VERSION,
-        target: { selfId: Number(target.item.selfId), name: target.item.template?.name || `Item ${target.item.selfId}`, slot: Number(target.item.etc?.slot || 0) },
+        target: { selfId: Number(target.item.selfId), name: target.item.template?.name || `Item ${target.item.selfId}`, slot: Number(target.slot || target.item.etc?.slot || 0) },
         recipeId: target.recipe ? Number(target.recipe.recipeId) : null,
         strategy,
         soloSafe,
@@ -2222,9 +2698,6 @@ function rawPlanFor(state = {}, options = {}) {
 function planFor(state = {}, options = {}) {
     const recovery = options.levelingRecovery || levelingRecoveryFor(state, state.stats?.equipmentPlan, options.timestamp);
     if (recovery) return levelingRecoveryPlan(state, recovery);
-    if (ClanCrafting.clanIdFor(state) && !options.clanCrafting && options.recipeId) {
-        options = { ...options, recipeId: null };
-    }
     const excluded = new Set((options.excludedTargetIds || []).map(Number).filter(Boolean));
     const maxExpectedKills = Number(options.maxExpectedKills);
     let plan;
@@ -2284,7 +2757,19 @@ function readinessScoped(fn) {
     };
 }
 
-module.exports = { RATE_MODEL_VERSION, DIRECT_FAILURE_RESOLVE_LIMIT, PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT, gradeForLevel, isCraftService, roleFor, itemScore, isRealCatalogItem, suitable, isSlotUpgrade, combatReadiness, progressionPriceCap, operationalAdenaReserve, equippedSlotsFor, equipInventoryUpgrades, preferredTarget, preferredDropTarget, preferredNoGradeTarget, marketOfferForTarget, marketPlanForTarget, fundedMarketPlanForTarget, marketRecoveryPlanForTarget, staticNpcUpgradePlan, staticNpcKitAdequate, npcWeaponBridgePlan, npcEquipmentBridgePlan, equipmentBridgeReason, itemDropChance, itemDropYield, partyNeedForSource, partyNeedReasonForSource, soloSafeForSource, sourceEffort, sourceWithinVoluntaryHuntBand, bestSourceForState, bestSourceForPlan, safeFallbackForPlan, retargetPlanSource, replacementPlanFor, sourceForItem, farmSourceForMaterial, missingMaterials, withMaterialFarmEffort, directPlanFailure, partyRouteFailure, abandonAcquisition, replanContextFor, levelingRecoveryFor, rateProfileSignature, withinExpectedKillLimit, isBotEligibleSourceNpcId, isPlanSourceEligible, isPlanSourceViableForState, isClanOwnedPlan, equipmentTargetFulfilled, clanGoalPlanLocked, finalizePlan, planFor, shouldFinishPreviousPlan, scoreSpot, sameObjective };
+module.exports = { equipmentCandidate, equipmentItemBetter, RATE_MODEL_VERSION, DIRECT_FAILURE_RESOLVE_LIMIT, PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT, gradeForLevel, isCraftService, roleFor, itemScore, isRealCatalogItem, suitable, considerable, isSlotUpgrade, combatReadiness, progressionPriceCap, operationalAdenaReserve, equippedSlotsFor, equipInventoryUpgrades, preferredTarget, preferredDropTarget, preferredNoGradeTarget, marketOfferForTarget, marketPlanForTarget, fundedMarketPlanForTarget, marketRecoveryPlanForTarget, staticNpcUpgradePlan, staticNpcKitAdequate, npcWeaponBridgePlan, npcEquipmentBridgePlan, equipmentBridgeReason, itemDropChance, itemDropYield, sourceIndexFor, partyNeedForSource, partyNeedReasonForSource, soloSafeForSource, sourceEffort, sourceWithinVoluntaryHuntBand, bestSourceForState, bestSourceForPlan, safeFallbackForPlan, retargetPlanSource, replacementPlanFor, sourceForItem, farmSourceForMaterial, missingMaterials, withMaterialFarmEffort, directPlanFailure, partyRouteFailure, abandonAcquisition, replanContextFor, levelingRecoveryFor, rateProfileSignature, withinExpectedKillLimit, isBotEligibleSourceNpcId, isPlanSourceEligible, isPlanSourceViableForState, isClanOwnedPlan, equipmentTargetFulfilled, clanGoalPlanLocked, finalizePlan, planFor, shouldFinishPreviousPlan, scoreSpot, sameObjective };
+
+// One decision outside this module (a wish review) that judges a bot against
+// many sources shares its readiness the same way.
+function withReadiness(fn) {
+    return readinessScoped(fn)();
+}
+module.exports.withReadiness = withReadiness;
+module.exports.acquisitionTargetAllowed = acquisitionTargetAllowed;
+module.exports.sourceCacheSize = sourceCacheSize;
+module.exports.sourceYieldReaderFor = sourceYieldReaderFor;
+module.exports.sourceFacts = sourceFacts;
+module.exports.sourceRouteReader = sourceRouteReader;
 
 // Only the exports that judge a bot against several sources share readiness.
 for (const name of ['preferredTarget', 'preferredDropTarget', 'preferredNoGradeTarget', 'staticNpcUpgradePlan',

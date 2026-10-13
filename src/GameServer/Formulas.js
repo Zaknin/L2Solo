@@ -1,3 +1,8 @@
+function magicFailureThreshold(attackerLevel, targetLevel, magicLevel) {
+    const effectiveMagicLevel = Number(magicLevel) > 0 ? Number(magicLevel) : (Number(attackerLevel) || 1);
+    return Math.round(Math.pow(1.3, (Number(targetLevel) || 1) - effectiveMagicLevel) * 100);
+}
+
 const Formulas = {
     SHIELD_DEFENSE_FAILED: 0,
     SHIELD_DEFENSE_SUCCEED: 1,
@@ -262,6 +267,19 @@ const Formulas = {
         return  (time / castSpd) * 333;
     },
 
+    // Lisvus L2Character.doCast (L2Character.java:1422-1466): a skill's cast
+    // time scales with the speed the caller passes (cast speed for magic,
+    // attack speed for physical skills), a spiritshot cuts a magic cast to
+    // 70%, a static skill keeps its base time, and a skill whose base time
+    // is at least 500 ms never casts faster than 500 ms.
+    calcSkillHitTime(baseHitTime, speed, { magic = false, spiritshot = false, staticHitTime = false } = {}) {
+        const base = Math.max(0, Number(baseHitTime) || 0);
+        if (staticHitTime) return base;
+        let hitTime = this.calcRemoteAtkTime(base, speed);
+        if (magic && spiritshot) hitTime = Math.floor(hitTime * 0.70);
+        return base >= 500 ? Math.max(500, hitTime) : hitTime;
+    },
+
     // Lisvus C4 calcAtkBreak: a casting target starts at 15%, incoming
     // damage raises the chance, MEN lowers it, and Concentration-style
     // effects modify the final ATTACK_CANCEL stat.
@@ -308,6 +326,16 @@ const Formulas = {
             + ((Number(criticalDamageAdd) || 0) * 6.5);
         return (70 * damage / Math.max(1, pDef))
             + (Math.max(0, Number(pAtkRnd) || 0) * Math.max(0, Math.min(1, Number(rng()) || 0)));
+    },
+
+    // Lisvus C4 magic critical rate in per mille (CharStat.getMCriticalHit,
+    // FuncMAtkCritical in Formulas.java:390-415): base 8, times the WIT bonus
+    // when the caster holds a weapon, times the magic-critical multipliers,
+    // plus flat bonuses, capped at 300 (MaxMCritRate). The WIT bonus is the
+    // server's own table, the one cast speed uses.
+    magicCriticalRate({ multiplier = 1, add = 0, wit = 0, weapon = false } = {}) {
+        const witBonus = weapon ? this.calcBaseMod.WIT(Number(wit) || 0) : 1;
+        return Math.min(300, Math.max(0, (8 * witBonus * multiplier) + add));
     },
 
     rollCritical(critical, rng = Math.random) {
@@ -431,10 +459,23 @@ const Formulas = {
     // Lisvus calcMagicSuccess: this older C4 failure roll is separate from
     // effect land-rate/resistance calculations and is used by Spoil handlers.
     calcMagicSuccess({ attackerLevel = 1, targetLevel = 1, magicLevel = 0 } = {}, rng = Math.random) {
-        const effectiveMagicLevel = Number(magicLevel) > 0 ? Number(magicLevel) : (Number(attackerLevel) || 1);
-        const levelDifference = (Number(targetLevel) || 1) - effectiveMagicLevel;
-        const failureThreshold = Math.round(Math.pow(1.3, levelDifference) * 100);
+        const failureThreshold = magicFailureThreshold(attackerLevel, targetLevel, magicLevel);
         return Math.floor(rng() * 10000) > failureThreshold;
+    },
+
+    // Lisvus Spoil.java (Spoil, Spoil Festival) and the extra SPOIL handler of
+    // Spoil Crush: a spoil lands only when calcMagicSuccess passes for the
+    // skill's C4 magic level against the target level. Hot casts and cold
+    // kills both roll it here.
+    calcSpoilSuccess({ skillId, skillLevel = 1, attackerLevel = 1, targetLevel = 1 } = {}, rng = Math.random) {
+        const semantic = invoke('GameServer/Skills/C4SkillRules').resolveCached({ selfId: Number(skillId), level: Number(skillLevel) || 1 });
+        return Formulas.calcMagicSuccess({ attackerLevel, targetLevel, magicLevel: semantic.magicLevel }, rng);
+    },
+
+    spoilSuccessChance({ skillId, skillLevel = 1, attackerLevel = 1, targetLevel = 1 } = {}) {
+        const semantic = invoke('GameServer/Skills/C4SkillRules').resolveCached({ selfId: Number(skillId), level: Number(skillLevel) || 1 });
+        const threshold = magicFailureThreshold(attackerLevel, targetLevel, semantic.magicLevel);
+        return Math.max(0, Math.min(1, (9999 - threshold) / 10000));
     },
 
     // Lisvus C4 Formulas.calcSkillSuccess. C4SkillEffects supplies the

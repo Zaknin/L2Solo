@@ -4,9 +4,10 @@ require('../src/Global');
 
 // H12 with H3: a bot keeps the consumables its class uses and the NPC buys the
 // rest, on the cold visit as on the hot one. No bot spends arrows, reads a
-// scroll of escape or resurrection, opens a chest with a key or drinks an
-// antidote; it drinks healing potions, so it keeps them up to its restock
-// target, strongest first. Enchant scrolls, crystals and Adena are not spare.
+// scroll of resurrection, opens a chest with a key or drinks an antidote; it
+// drinks healing potions and reads Scrolls of Escape for town trips (step 3.2,
+// H12 narrowed 2026-10-05), so it keeps them up to their restock targets.
+// Enchant scrolls, crystals and Adena are not spare.
 const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
@@ -16,15 +17,25 @@ DataCache.init();
 
 const line = (selfId, amount) => ({ selfId, amount, name: DataCache.items.find((entry) => entry.selfId === selfId)?.template?.name });
 const state = {
-    characterId: 9500001, level: 30, adena: 1000, phase: 'cold', activity: 'shopping',
+    // ARCH-NOTE: this real table spot consumes potions; the best-income fallback does not.
+    characterId: 9500001, level: 30, spotId: '-10_30', adena: 1000, phase: 'cold', activity: 'shopping',
     stats: { classId: 0, role: 'dps' },
     inventory: Object.fromEntries([
-        line(57, 1000), line(17, 500), line(736, 3), line(1661, 2), line(1831, 4),
+        // One Scroll of Escape above the carried target (ten since 71ff0f77) is surplus.
+        line(57, 1000), line(17, 500), line(736, invoke('GameServer/Bot/Travel/ScrollStock').TARGET_AMOUNT + 1), line(1661, 2), line(1831, 4),
         line(1060, 10), line(1061, 30), line(956, 1), line(1458, 40)
     ].map((entry) => [String(entry.selfId), entry]))
 };
 
 const target = HealingPotionStock.targetAmountFor(state);
+const potionStock = invoke('GameServer/Bot/Economy/EconomyContext').basics(state).stock('potions');
+// ARCH-NOTE: bag space only bounds an outing (1a1a2adc); with no town visit
+// history the stock horizon is the initial town-visit estimate. Keep a real
+// full stock plus 20 surplus, then check both sales.
+assert.strictEqual(potionStock.targetHours, invoke('GameServer/Bot/Economy/TownVisitInterval').targetHours(state.stats));
+assert.strictEqual(target, Math.ceil(potionStock.usePerHour * potionStock.targetHours));
+assert(target > 3);
+state.inventory[1061].amount = target + 20;
 assert.deepStrictEqual(HealingPotionStock.stockAmounts(state), { 1061: target },
     'the healing stock is kept strongest first up to the restock target');
 // One stock for the sale and the restock: potions at least as strong as the
@@ -42,7 +53,7 @@ assert.deepStrictEqual(HealingPotionStock.stockAmounts(quick), {}, 'Quick Healin
 assert.strictEqual(new Map(MarketListingPolicy.evaluate(quick, { unlimited: true, states: [] }).npc
     .map((entry) => [entry.selfId, entry.count])).get(1540), undefined, 'but the bot keeps them: it drinks them when nearly dead');
 const young = { ...state, level: 15, adena: 100000, inventory: { 57: line(57, 100000), 1060: line(1060, 3) } };
-assert.deepStrictEqual(HealingPotionStock.stockAmounts(young), { 1060: 3 }, 'below 20 the Lesser Healing Potion is the stock');
+assert.deepStrictEqual(HealingPotionStock.stockAmounts(young, { targetAmount: 3 }), { 1060: 3 }, 'below 20 the Lesser Healing Potion is the stock');
 for (const selfId of [17, 736, 1661, 1831, 1060]) {
     assert(ItemDisposition.isSpareConsumable({ selfId }), `${selfId} is a consumable no bot keeps`);
 }
@@ -52,11 +63,16 @@ for (const selfId of [57, 956, 1458, 1463, 5192, 5575, 4629]) {
     assert(!ItemDisposition.isSpareConsumable({ selfId }), `${selfId} is not a spare consumable`);
 }
 
-const npc = new Map(MarketListingPolicy.evaluate(state, { unlimited: true, states: [] }).npc
+// The enchant scroll is the market's (group E): with buyers of it on the
+// board, its own sale decides; it is never sold to the NPC as spare.
+const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
+const dealsAt = Date.now();
+for (let deal = 0; deal < 12; deal++) MarketCounters.deal(956, 6000, 1, dealsAt - (12 - deal) * 300000, 999999);
+const npc = new Map(MarketListingPolicy.evaluate(state, { unlimited: true, states: [], now: dealsAt }).npc
     .map((entry) => [entry.selfId, entry.count]));
 assert.deepStrictEqual([...npc.entries()].sort((a, b) => a[0] - b[0]),
-    [[17, 500], [736, 3], [1060, 10], [1061, 30 - target], [1661, 2], [1831, 4]],
-    'the cold visit sells arrows, scrolls of escape, keys, antidotes and the potion surplus to the NPC');
+    [[17, 500], [736, 1], [1060, 10], [1061, 20], [1661, 2], [1831, 4]],
+    'the cold visit sells arrows, keys, antidotes and the surplus of potions and Scrolls of Escape to the NPC');
 // The hot visit sells first, as the cold one: what it sells to the NPC is not
 // stored at the warehouse stop before the sale.
 const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');

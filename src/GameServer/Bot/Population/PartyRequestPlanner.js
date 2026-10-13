@@ -1,5 +1,59 @@
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 
+// How long an open party request may wait for a group, by its priority.
+function maxAgeMs(priority) {
+    return priority === 'required'
+        ? Math.max(30000, Number(Config.partyRequestMaxAgeMs) || 15 * 60 * 1000)
+        : Math.max(30000, Number(Config.partyPreferredMaxAgeMs) || 5 * 60 * 1000);
+}
+
+// How long an expired request rests before the bot asks again.
+function cooldownMs() {
+    return Math.max(30000, Number(Config.partyRequestCooldownMs) || 5 * 60 * 1000);
+}
+
+// An open request older than its age is deferred for the cooldown and
+// counted as one more attempt; any other request is returned as it is.
+function expire(request, now = Date.now()) {
+    if (request?.status !== 'open') return request;
+    if (now - Number(request.requestedAt || now) < maxAgeMs(request.priority)) return request;
+    return {
+        ...request,
+        status: 'deferred',
+        deferredUntil: now + cooldownMs(),
+        expiredAt: now,
+        attempts: Number(request.attempts || 0) + 1
+    };
+}
+
+// Party size and level spread: a clan equipment duty sets its own within
+// fixed bounds, any other party uses the defaults (the configured sizes
+// unless the caller gives its own).
+function limitsForObjective(objective = null, defaults = {}) {
+    const maxSize = Number(defaults.maxSize ?? Config.partyMaxSize);
+    const minSize = Number(defaults.minSize ?? Config.partyMinSize);
+    const clanEquipment = objective?.clanOperation === 'equipment'
+        && Number(objective?.clanId || 0) > 0;
+    if (!clanEquipment) return { maxSize, minSize, levelRange: defaults.levelRange };
+    const clanMaxSize = Math.max(2, Math.min(9, Number(objective.maxPartySize) || maxSize));
+    return {
+        maxSize: clanMaxSize,
+        minSize: Math.max(2, Math.min(clanMaxSize, Number(objective.minPartySize) || minSize)),
+        levelRange: Math.max(4, Number(objective.levelRange) || 99)
+    };
+}
+
+// The spot a party for this bot hunts: its objective's, else the next spot of
+// an active gear plan, else where the bot is. The SQL prefilter column
+// bot_life_state.partyObjectiveSpot follows it with the party request as the
+// objective (database/sql/sqlite.sql, migration 51).
+function objectiveSpot(state, objective = null) {
+    return objective?.spotId
+        || (state?.stats?.equipmentPlan?.status === 'active' ? state.stats.equipmentPlan.next?.spotId : null)
+        || state?.spotId
+        || null;
+}
+
 function partyObjectiveForPlan(plan) {
     if (!plan || !['active', 'blocked'].includes(plan.status) || !plan.next?.spotId) return null;
     const partyNeed = plan.clanGoal?.partyNeed
@@ -46,23 +100,28 @@ function partyRequestForPlan(state, plan, timestamp = Date.now()) {
     const previous = state?.stats?.partyRequest;
     // Travel and recovery are part of returning to solo hunting. Neither may
     // erase the recruitment cooldown before the bot gets its first fight.
-    if (require('./PartyAssemblyRecovery').coolingDown(state, timestamp)) return previous;
+    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)) return previous;
     if (plan?.levelingRecovery) return null;
     if (!partyRequestEligible(state)) return null;
     const sharedTarget = previous?.reason === 'shared_target' && ['open', 'deferred'].includes(previous.status)
         && plan?.status === 'active' && previous.spotId === plan.next?.spotId
         && Number(previous.npcId) === Number(plan.next?.npcId || plan.targetNpcId)
         ? { ...previous, status: 'open' } : null;
-    const objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan) || sharedTarget;
+    let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan) || sharedTarget;
+    if (objective?.priority === 'required' && objective.itemId && !objective.clanGoalKey && !objective.helpDeal) {
+        const context = invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state);
+        const amount = Math.max(1, Math.floor(Number(plan?.next?.amount || 1)));
+        // ARCH-NOTE: party value is pending; the help fee buys progress on its requested item.
+        const fee = Math.floor(Math.min(invoke('GameServer/Bot/Economy/PurchaseFunding').spendable(state, 0, { itemId: objective.itemId }),
+            Math.max(0, Number(context.worth(objective.itemId)) || 0) * amount));
+        if (fee > 0) objective = { ...objective, helpDeal: { payerId: Number(state.characterId),
+            itemId: Number(objective.itemId), count: amount, fee } };
+    }
     if (!objective) return null;
     const sameRequest = ['open', 'deferred'].includes(previous?.status)
         && previous.objectiveKey === objective.objectiveKey
         && Number(previous.itemId || 0) === Number(objective.itemId || 0)
         && Number(previous.targetId || 0) === Number(objective.targetId || 0);
-    const maxAge = objective.priority === 'required'
-        ? Math.max(30000, Number(Config.partyRequestMaxAgeMs) || 15 * 60 * 1000)
-        : Math.max(30000, Number(Config.partyPreferredMaxAgeMs) || 5 * 60 * 1000);
-    const cooldownMs = Math.max(30000, Number(Config.partyRequestCooldownMs) || 5 * 60 * 1000);
     const previousRequestedAt = sameRequest ? Number(previous.requestedAt || timestamp) : timestamp;
     const previousAttempts = sameRequest ? Number(previous.attempts || 0) : 0;
 
@@ -78,16 +137,16 @@ function partyRequestForPlan(state, plan, timestamp = Date.now()) {
         };
     }
 
-    if (sameRequest && previous.status === 'open' && timestamp - previousRequestedAt >= maxAge) {
-        return {
+    if (sameRequest && previous.status === 'open') {
+        const kept = {
             ...objective,
-            status: 'deferred',
+            status: 'open',
             requestedAt: previousRequestedAt,
-            deferredUntil: timestamp + cooldownMs,
-            expiredAt: timestamp,
-            attempts: previousAttempts + 1,
+            attempts: previousAttempts,
             lastMatchedAt: previous.lastMatchedAt || null
         };
+        const expired = expire(kept, timestamp);
+        if (expired !== kept) return expired;
     }
 
     return {
@@ -101,7 +160,7 @@ function partyRequestForPlan(state, plan, timestamp = Date.now()) {
 }
 
 function partyObjectiveForState(state) {
-    if (require('./PartyAssemblyRecovery').coolingDown(state)) return null;
+    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state)) return null;
     if (state?.stats?.equipmentPlan?.levelingRecovery) return null;
     const request = state?.stats?.partyRequest;
     const clanObjective = clanPartyObjectiveForState(state);
@@ -119,6 +178,11 @@ function partyObjectiveForState(state) {
 }
 
 module.exports = {
+    maxAgeMs,
+    cooldownMs,
+    expire,
+    limitsForObjective,
+    objectiveSpot,
     partyObjectiveForPlan,
     clanPartyObjectiveForState,
     partyRequestForPlan,

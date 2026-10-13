@@ -37,6 +37,7 @@ module.exports = {
        moveToLocation: require('./MoveToLocation'),
       protocolVersion: require('./ProtocolVersion'),
               purchase: require('./Purchase'),
+       multiSellChoose: require('./MultiSellChoose'),
       privateStoreSell: require('./PrivateStoreSell'),
        privateStoreBuy: require('./PrivateStoreBuy'),
  privateStoreManageSell: require('./PrivateStoreManageSell'),

@@ -1,8 +1,9 @@
 const PveEncounter = require('./ColdPveEncounter');
+const Assembly = require('./PartyHuntingAssembly');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
-const BackgroundDropResolver = invoke('GameServer/Bot/Population/BackgroundDropResolver');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+const ColdKillRewards = invoke('GameServer/Bot/Population/ColdKillRewards');
 const PartyAffinity = invoke('GameServer/Bot/Population/BackgroundPartyAffinity');
 const PartyLootAllocator = invoke('GameServer/Bot/Population/PartyLootAllocator');
 const PartyRewardMath = invoke('GameServer/Actor/PartyRewardMath');
@@ -10,15 +11,14 @@ const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const ClanRaidPolicy = invoke('GameServer/Clan/ClanRaidPolicy');
 const ColdRaidEncounter = require('./ColdRaidEncounter');
 
-const MAX_DROPS_PER_RESOLVE = 4;
 const RAID_RESOLVE_INTERVAL_MS = 15000;
+// A hunting party resolves again 45-135 s after a fight.
+const PARTY_RESOLVE_MIN_MS = 45000;
+const PARTY_RESOLVE_SPREAD_MS = 90000;
+const PARTY_RESOLVE_MAX_MS = PARTY_RESOLVE_MIN_MS + PARTY_RESOLVE_SPREAD_MS;
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
-}
-
-function randInt(rng, min, max) {
-    return Math.floor(rng() * (max - min + 1)) + min;
 }
 
 function memberVitals(state) {
@@ -36,71 +36,53 @@ function memberVitals(state) {
 }
 
 function estimateFightCount({ party, members, spot, elapsedMs }) {
-    const baseWindows = Math.max(1, Math.floor(elapsedMs / 12000));
+    // Windows are counted from at most the longest resolve interval: like a
+    // solo bot, a party does not catch up on a long gap such as a server stop.
+    const baseWindows = Math.max(1, Math.floor(Math.min(elapsedMs, PARTY_RESOLVE_MAX_MS) / 12000));
     const densityFactor = clamp(Number(spot.density || 1) / 3, 0.7, 2.2);
     const cohesionFactor = clamp(Number(party.cohesion || 0.65), 0.35, 1.15);
 
     // Party actions are individually simulated, so party size must not
-    // multiply work.  Keep the same short active window as solo combat.
-    return Math.max(1, Math.min(4, Math.round(baseWindows * densityFactor * cohesionFactor)));
+    // multiply work.  Keep the same short active window as solo combat:
+    // at most one fight per 12-second window of the elapsed time, as solo.
+    return Math.max(1, Math.min(baseWindows, Math.round(baseWindows * densityFactor * cohesionFactor)));
 }
 
 function distributeRewards({ members, spot, wins, defeatedNpcIds = [], overhitContexts = [], pressure, rng, timestamp }) {
     const expMultiplier = Number(pressure?.expMultiplier || 1);
     const rates = ProgressionRates.profile();
-    const memberProgression = members.map((state) => ({
-        exp: 0,
-        sp: 0,
-        profile: ColdCombatProfile.profileFor(state, timestamp)
+    const levels = members.map((state) => Number(state.level || 1));
+    const profiles = members.map((state) => ColdCombatProfile.profileFor(state, timestamp));
+    const spoilerIndex = members.findIndex((state) => BotRoles.isSpoiler(state));
+    const kills = Array.from({ length: wins }, (_, index) => ({
+        npcSelfId: defeatedNpcIds[index],
+        overhitContext: overhitContexts[index]
     }));
-    Array.from({ length: wins }).forEach((_, winIndex) => {
-        const progression = BackgroundDropResolver.progressionForFight({
-            spot, npcSelfId: defeatedNpcIds[winIndex], rng
-        });
-        const adjustedExp = invoke('GameServer/Progression/OverhitReward')
-            .resolveContext(overhitContexts[winIndex], progression.exp).adjustedExp;
-        PartyRewardMath.sharesForLevels(
-            members.map((state) => Number(state.level || 1)),
-            adjustedExp,
-            progression.sp
-        ).forEach((share) => {
-            memberProgression[share.index].exp += Math.round(share.exp * expMultiplier * rates.exp
-                * ColdCombatProfile.statMultiplier(memberProgression[share.index].profile, 'expMul', timestamp));
-            memberProgression[share.index].sp += Math.round(share.sp * expMultiplier * rates.sp);
+    const rewards = ColdKillRewards.roll({
+        spot,
+        kills,
+        killerLevel: Math.max(...levels),
+        rng,
+        spoiler: spoilerIndex >= 0 ? ColdKillRewards.spoilerFor(members[spoilerIndex], profiles[spoilerIndex]) : null,
+        dropOwners: members.length
+    });
+    const memberProgression = members.map(() => ({ exp: 0, sp: 0 }));
+    rewards.progression.forEach((kill) => {
+        PartyRewardMath.sharesForLevels(levels, kill.exp, kill.sp).forEach((share) => {
+            const gained = ColdKillRewards.scaledProgression(share, {
+                expMultiplier, rates, profile: profiles[share.index], timestamp
+            });
+            memberProgression[share.index].exp += gained.exp;
+            memberProgression[share.index].sp += gained.sp;
         });
     });
-    const partyKillerLevel = Math.max(...members.map((state) => Number(state.level || 1)));
-    const rewardRolls = Array.from({ length: wins }).map((_, index) => (
-        BackgroundDropResolver.rollRewardsForFight({
-            spot,
-            killerLevel: partyKillerLevel,
-            npcSelfId: defeatedNpcIds[index],
-            rng
-        })
-    ));
-    const totalAdena = rewardRolls.reduce((sum, rolled) => (
-        sum + (rolled === null
-            ? Math.round(randInt(rng, spot.rewards.adenaMin, spot.rewards.adenaMax) * rates.adena)
-            : rolled.adena)
-    ), 0);
-    const adenaPerMember = Math.floor(totalAdena / members.length);
-    const adenaRemainder = totalAdena - (adenaPerMember * members.length);
+    const adenaPerMember = Math.floor(rewards.adena / members.length);
+    const adenaRemainder = rewards.adena - (adenaPerMember * members.length);
     const loot = members.map(() => []);
-    const spoilerIndex = members.findIndex((state) => BotRoles.isSpoiler(state));
-    for (let win = 0; win < Math.min(wins, MAX_DROPS_PER_RESOLVE); win++) {
-        const drops = rewardRolls[win]?.items || [];
-        if (drops.length) {
-            loot[Math.min(members.length - 1, Math.floor(rng() * members.length))].push(...drops);
-        }
-        if (spoilerIndex >= 0) {
-            loot[spoilerIndex].push(...BackgroundDropResolver.rollSpoilForFight({
-                spot,
-                killerLevel: partyKillerLevel,
-                npcSelfId: defeatedNpcIds[win],
-                rng
-            }));
-        }
-    }
+    rewards.loot.forEach(({ drops, owner, spoil }) => {
+        if (drops.length) loot[owner].push(...drops);
+        if (spoilerIndex >= 0) loot[spoilerIndex].push(...spoil.map(item => ({ ...item, partySpoil: true })));
+    });
 
     return members.map((state, index) => ({
         state,
@@ -111,9 +93,59 @@ function distributeRewards({ members, spot, wins, defeatedNpcIds = [], overhitCo
     }));
 }
 
+function completedRaidResult(party, members, completed, timestamp) {
+    return {
+        memberResults: members.map(state => ({ state, result: {
+            patch: {}, events: [], memoryEvents: [],
+            materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000
+        } })), events: [], nextResolveAt: null,
+        partyPatch: { status: 'dissolved', nextResolveAt: null, stats: {
+            raidEncounter: completed, pveEncounter: null, restUntil: null,
+            partyBreakReason: 'raid_defeated', dissolvedAt: timestamp, lastResolveAt: timestamp
+        } },
+        debug: { reason: 'raid_already_defeated', fights: 0, wins: 0,
+            raidBossTemplateId: completed.bossTemplateId }
+    };
+}
+
 const BackgroundPartyResolver = {
+    resolveMeetingLifecycle({ party, members, timestamp = Date.now(), episodeId = null, assessRelationship = null }) {
+        if (!party || !members?.length || !Assembly.meetingPending(members)) return null;
+        // A confirmed hot victory is terminal even if a personal agreement is held.
+        if (party.stats?.objective?.sourceKind === 'raid' && party.stats?.raidEncounter?.status === 'defeated') {
+            return { ...completedRaidResult(party, members, party.stats.raidEncounter, timestamp), atomic: true };
+        }
+        // Membership survives a paid personal journey. The roster owner
+        // advances finite transitions without replacing the meeting leg.
+        const revival = require('./ColdPartyRevival').resolve({ party, members, timestamp, episodeId, assessRelationship });
+        if (revival) return revival;
+        const idleAt = timestamp + 30000;
+        const memberResults = members.map(state => {
+            let result;
+            if (state.activity === 'dead' || state.vitals.hp <= 0) {
+                result = BackgroundResolver.resolveDeathRecovery(state, timestamp);
+            } else if (state.activity === 'resting') {
+                const elapsedMs = Math.max(0, timestamp - Number(state.timing?.lastResolvedAt || timestamp));
+                result = BackgroundResolver.resolveRest(state, elapsedMs, timestamp);
+                if (!state.stats?.tradeMeeting && result.patch?.activity === 'hunting')
+                    result = { ...result, patch: { ...result.patch, activity: 'grouped' } };
+            } else if (state.stats?.tradeMeeting && state.activity === 'traveling') {
+                result = BackgroundResolver.resolveSolo({ state, spot: null, timestamp });
+            } else {
+                result = { patch: {}, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: idleAt };
+            }
+            return { state, result };
+        });
+        const nextResolveAt = Math.min(...memberResults.map(({ result }) => Number(result.nextResolveAt) || idleAt));
+        return { atomic: true, memberResults, events: [], nextResolveAt,
+            partyPatch: { stats: { lastResolveAt: timestamp } },
+            debug: { reason: 'party_meeting_lifecycle', fights: 0, wins: 0 } };
+    },
+
     resolve({ party, members, spot, pressure = {}, targetNpcId = 0, elapsedMs = 60000, rng = Math.random, timestamp = Date.now(),
         episodeId = null, assessRelationship = null }) {
+        const meeting = BackgroundPartyResolver.resolveMeetingLifecycle({ party, members, timestamp, episodeId, assessRelationship });
+        if (meeting) return meeting;
         if (!party || !members?.length || !spot) {
             return {
                 memberResults: [],
@@ -123,6 +155,7 @@ const BackgroundPartyResolver = {
                 debug: { reason: 'missing_party_members_or_spot' }
             };
         }
+        const targetOnSpot = ColdCombatProfile.spotSpawns(spot, targetNpcId) ? 1 : 0;
         const raidObjective = spot.raidBoss === true
             && party.stats?.objective?.sourceKind === 'raid'
             && Number(party.stats.objective.raidBossTemplateId || party.stats.objective.npcId)
@@ -138,18 +171,7 @@ const BackgroundPartyResolver = {
         const completed = party.stats?.raidEncounter?.status === 'defeated'
             ? party.stats.raidEncounter : raidSnapshot;
         if (raidObjective && completed?.status === 'defeated') {
-            return {
-                memberResults: members.map(state => ({ state, result: {
-                    patch: {}, events: [], memoryEvents: [],
-                    materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000
-                } })), events: [], nextResolveAt: null,
-                partyPatch: { status: 'dissolved', nextResolveAt: null, stats: {
-                    raidEncounter: completed, pveEncounter: null, restUntil: null,
-                    partyBreakReason: 'raid_defeated', dissolvedAt: timestamp, lastResolveAt: timestamp
-                } },
-                debug: { reason: 'raid_already_defeated', fights: 0, wins: 0,
-                    raidBossTemplateId: completed.bossTemplateId }
-            };
+            return completedRaidResult(party, members, completed, timestamp);
         }
 
         if (raidObjective && spot.raidWorldAvailable === false) {
@@ -356,6 +378,7 @@ const BackgroundPartyResolver = {
         let avoidedReason = null;
         const combatHelp = new Map();
         const memberShotActions = new Map();
+        const memberSoulCrystals = new Map();
         let combatMembers = members.map((state) => ({
             ...state,
             vitals: pending ? { ...state.vitals } : BackgroundResolver.applyStandingRegen(state, state.vitals, elapsedMs, timestamp)
@@ -391,6 +414,11 @@ const BackgroundPartyResolver = {
             for (const member of encounter.members) {
                 const id = Number(member.state.characterId);
                 memberShotActions.set(id, (memberShotActions.get(id) || 0) + Number(member.shotActions || 0));
+                if (member.soulCrystals?.length) {
+                    const outcomes = memberSoulCrystals.get(id) || [];
+                    outcomes.push(...member.soulCrystals);
+                    memberSoulCrystals.set(id, outcomes);
+                }
             }
             combatMembers = encounter.members.map((member) => ({
                 ...member.state,
@@ -451,11 +479,7 @@ const BackgroundPartyResolver = {
                     meta: { partyId: party.partyId, spotId: spot.id, fights, wins }
                 });
             } else {
-                if (!raid && BackgroundResolver.needsRest(state, vitals, {
-                    party: true,
-                    hpThreshold: 0.3,
-                    mpThreshold: 0.18
-                })) {
+                if (!raid && BackgroundResolver.needsRest(state, vitals, { party: true })) {
                     activity = 'resting';
                     resting += 1;
                 }
@@ -468,6 +492,7 @@ const BackgroundPartyResolver = {
                         activity,
                         spotId: spot.id,
                         deathCount,
+                        inventory: resolved.inventory || state.inventory,
                         vitals: {
                             hp,
                             maxHp: vitals.maxHp,
@@ -490,13 +515,15 @@ const BackgroundPartyResolver = {
                     events: [],
                     memoryEvents: memoryEvents.filter(event => event.sourceId === Number(state.characterId)),
                     materialize: { exp, sp, adena, items },
+                    soulCrystals: memberSoulCrystals.get(Number(state.characterId)) || [],
                     // One cold raid slice represents fifteen seconds of real
                     // combat. Keep an active boss on that cadence so a remote
                     // raid does not spend most of its lifetime sleeping
                     // between otherwise continuous combat rounds.
-                    nextResolveAt: timestamp + (raid ? RAID_RESOLVE_INTERVAL_MS : 45000 + Math.round(rng() * 90000)),
+                    nextResolveAt: timestamp + (raid ? RAID_RESOLVE_INTERVAL_MS : PARTY_RESOLVE_MIN_MS + Math.round(rng() * PARTY_RESOLVE_SPREAD_MS)),
                     debug: {
                         partyId: party.partyId,
+                        partyRoster: members.map(member => Number(member.characterId)).sort((a, b) => a - b).join(','),
                         fights,
                         wins,
                         losses,
@@ -506,6 +533,7 @@ const BackgroundPartyResolver = {
                         route: spot.route || null,
                         aggregate: true,
                         targetNpcId: Number(targetNpcId) || null,
+                        targetOnSpot,
                         defeatedNpcIds: [...defeatedNpcIds],
                         // A party resolve represents one shared encounter.  Its
                         // leader may be replaced or leave while the resulting
@@ -521,7 +549,8 @@ const BackgroundPartyResolver = {
             });
         });
 
-        const lootDistribution = PartyLootAllocator.transferGearDrops(memberResults);
+        const lootDistribution = require('./PartyAgreement').allocate(memberResults, party.stats?.agreement,
+            { rng, needScore: require('./PartyGoalPolicy').itemNeed }) || PartyLootAllocator.transferGearDrops(memberResults);
         let distributedMemberResults = lootDistribution.memberResults;
         let partyRestUntil = null;
 
@@ -654,6 +683,7 @@ const BackgroundPartyResolver = {
                 cohesion: clamp(Number(party.cohesion || 0.65) + cohesionDelta, 0.1, 1),
                 risk: clamp(Number(party.risk || 0.25) + riskDelta, 0.05, 0.95),
                 stats: {
+                    ...(lootDistribution.agreement ? { agreement: lootDistribution.agreement } : {}),
                     pveEncounter: raid ? null : pending,
                     ...(raid ? { raidEncounter: raidSnapshot } : {}),
                     assemblyWait: null,
@@ -675,7 +705,7 @@ const BackgroundPartyResolver = {
             },
             nextResolveAt: raidFailed || raidDefeated
                 ? null
-                : partyRestUntil || timestamp + (raid ? RAID_RESOLVE_INTERVAL_MS : 45000 + Math.round(rng() * 90000)),
+                : partyRestUntil || timestamp + (raid ? RAID_RESOLVE_INTERVAL_MS : PARTY_RESOLVE_MIN_MS + Math.round(rng() * PARTY_RESOLVE_SPREAD_MS)),
             debug: {
                 fights,
                 attemptedFights,
@@ -698,6 +728,7 @@ const BackgroundPartyResolver = {
                 summonActions,
                 potionsUsed,
                 targetNpcId: Number(targetNpcId) || null,
+                targetOnSpot,
                 raidBossTemplateId: raid ? Number(spot.raidBossTemplateId) : null,
                 raidDefeated: raidSnapshot?.status === 'defeated',
                 raidWinnerPartyId: raidSnapshot?.winnerPartyId || null,

@@ -1,3 +1,5 @@
+const ActorQueries = require('../../World/ActorSpatialQueries');
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const ServerResponse = invoke('GameServer/Network/Response');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const BotBuffs = invoke('GameServer/Bot/AI/BotBuffs');
@@ -85,10 +87,8 @@ function findVisiblePlayerByName(name, visiblePlayers) {
     if (!visible) return null;
 
     const World = invoke('GameServer/World/World');
-    return World.user.sessions.find((session) =>
-        isRealPlayer(session) &&
-        session.actor.fetchId() === visible.id
-    ) || null;
+    const session = ActorQueries.byId(World, visible.id);
+    return session && isRealPlayer(session) && session.actor.fetchId() === visible.id ? session : null;
 }
 
 function responseTargetSession(decision, visiblePlayers) {
@@ -294,6 +294,7 @@ function executeLegacy(session, decision, visiblePlayers) {
         session.followPlayerSession = null;
         session.partyCompanion = false;
         session.botStay = false;
+        refreshPartyMemberships([session], invoke);
         const reply = replyOutcome(session, decision.reply, targetSession);
         return { applied: true, reason: 'hunt', ...reply };
     }

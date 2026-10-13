@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const { randomUUID } = require('crypto');
 
 // Publish one persistent autonomous roster, never player-companion ownership.
@@ -55,14 +56,23 @@ async function form(sides, context, valid) {
             s.hotCompetitionHold = null;
         });
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
+        refreshPartyMemberships(sessions, invoke);
         sessions.find(s => s.actor.fetchId() === leaderId).backgroundHuntTarget = context.mob;
         const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
         if (existing) Metrics.recordPartyRecruit(1); else Metrics.recordPartyFormation();
         return { ok: true, partyId, recruited: !!existing };
     } finally {
-        sessions.forEach(s => { if (s.hotCompetitionCommit === token) s.hotCompetitionCommit = null; });
+        const cleared = [];
+        sessions.forEach(s => {
+            if (s.hotCompetitionCommit === token) {
+                s.hotCompetitionCommit = null;
+                cleared.push(s);
+            }
+        });
         if (existing) Lifecycle.pending.delete(existing.partyId);
         release();
+        const World = invoke('GameServer/World/World');
+        cleared.forEach(s => World.notifyUserStateChanged(s));
     }
 }
 module.exports = { form };

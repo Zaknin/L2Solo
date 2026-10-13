@@ -80,7 +80,7 @@ Database.init(() => {
     const stackableItemIds = (DataCache.items || [])
         .filter((item) => item.etc?.stackable === true)
         .map((item) => Number(item.selfId));
-    Database.compactStackableInventory(stackableItemIds, 'compact-stackable-inventory-v2').then((result) => {
+    Database.compactStackableInventory(stackableItemIds, 'compact-stackable-inventory-v3').then((result) => {
         if (!result.skipped && result.rowsRemoved > 0) {
             utils.infoSuccess('DB', 'compacted stackable inventory groups=%d rows=%d', result.groups, result.rowsRemoved);
             return Database.reclaimUnusedSpace();
@@ -99,6 +99,10 @@ Database.init(() => {
         await invoke('GameServer/ClanHall/Runtime').start();
         const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
         await AfkTrade.init();
+        // Every bot's persona before any bot decides (BotPersona.of).
+        await invoke('GameServer/Bot/AI/BotPersona').loadAll().then((count) => {
+            utils.infoSuccess('BotPersona', 'loaded %d personas', count);
+        }).catch((error) => utils.infoWarn('BotPersona', 'persona load failed: %s', error.message));
 
         invoke('GameServer/World/Generics/NativeKnowledgeBase').warmup();
 
@@ -111,9 +115,6 @@ Database.init(() => {
         });
 
         BotManager.init();
-        AfkTrade.matchBotDemand().catch((error) => {
-            utils.infoWarn('AfkTrade', 'restored shop matching failed: %s', error.message);
-        });
         WorldObserver.init();
         DevConsole.init();
         if (process.env.L2NODE_HOT_LOAD_TEST === '1') {

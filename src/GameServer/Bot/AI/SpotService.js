@@ -1,7 +1,9 @@
-const GRID_SIZE = 6000;
+const { SPOT_CELL_SIZE } = invoke('GameServer/World/WorldConstants');
 const DEFAULT_LEVEL_RANGE = 3;
 const DEFAULT_MIN_HUNT_LEVEL_GAP = -7;
 const DEFAULT_MAX_HUNT_LEVEL_GAP = 3;
+// The farthest hunting spot a hot bot reaches on foot; beyond it, SoE or a gatekeeper.
+const MAX_WALK_SPOT_DISTANCE = 12000;
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
@@ -66,8 +68,8 @@ function constrainToSpotGrid(spot, locX, locY) {
     const gridX = Number(match[1]);
     const gridY = Number(match[2]);
     return {
-        locX: Math.max(gridX * GRID_SIZE, Math.min((gridX + 1) * GRID_SIZE - 1, locX)),
-        locY: Math.max(gridY * GRID_SIZE, Math.min((gridY + 1) * GRID_SIZE - 1, locY))
+        locX: Math.max(gridX * SPOT_CELL_SIZE, Math.min((gridX + 1) * SPOT_CELL_SIZE - 1, locX)),
+        locY: Math.max(gridY * SPOT_CELL_SIZE, Math.min((gridY + 1) * SPOT_CELL_SIZE - 1, locY))
     };
 }
 
@@ -78,8 +80,8 @@ function partitionedAreaAt(loc) {
 }
 
 function spotIdAt(loc) {
-    const gx = Math.floor(Number(loc.locX) / GRID_SIZE);
-    const gy = Math.floor(Number(loc.locY) / GRID_SIZE);
+    const gx = Math.floor(Number(loc.locX) / SPOT_CELL_SIZE);
+    const gy = Math.floor(Number(loc.locY) / SPOT_CELL_SIZE);
     const area = partitionedAreaAt(loc);
     return {
         id: `${gx}_${gy}${area ? `:${area.id}` : ''}`,
@@ -137,6 +139,7 @@ function isSuitable(spot, targetLevel, options = {}) {
 }
 
 const SpotService = {
+    MAX_WALK_SPOT_DISTANCE,
     spots: null,
 
     reset() {
@@ -251,9 +254,11 @@ const SpotService = {
         return SpotIndex.spotById(this.ensureIndexed(), id);
     },
 
-    findCurrentSpot(loc) {
+    // `spots`: a catalogue with the same cell ids (SpotProfiles), for callers
+    // without the live world such as the cold worker.
+    findCurrentSpot(loc, spots = null) {
         if (!loc || !Number.isFinite(Number(loc.locX)) || !Number.isFinite(Number(loc.locY))) return null;
-        return this.findById(spotIdAt(loc).id);
+        return spots ? SpotIndex.spotById(spots, spotIdAt(loc).id) : this.findById(spotIdAt(loc).id);
     },
 
     containsLocation(spot, loc) {
@@ -274,7 +279,7 @@ const SpotService = {
         const levelRange = options.levelRange || DEFAULT_LEVEL_RANGE;
         const currentSpotId = status.spot?.id;
         const minDistance = options.minDistance || 1200;
-        const maxDistance = options.maxDistance || 90000;
+        const maxDistance = options.maxDistance || (options.walkOnly === true ? MAX_WALK_SPOT_DISTANCE : 90000);
         const routeState = {
             characterId: status.characterId,
             name: status.name,

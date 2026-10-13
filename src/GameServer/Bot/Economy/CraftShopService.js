@@ -3,14 +3,18 @@ const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
 const BotEconomyPricing = invoke('GameServer/Bot/Economy/BotEconomyPricing');
+const { isServiceCrafter, craftLevelFor, canCraft } = require('./CraftEligibility');
+const ProgressionCap = invoke('GameServer/Progression/ProgressionCap');
+
+const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 
 const MAX_PUBLIC_RECIPES = 16;
-const CRAFT_LOC_Z = -3466;
+const CRAFT_LOC_Z = ShopPlaces.PLAZAS.Giran.locZ;
 const craftLoc = (locX, locY) => Object.freeze({ locX, locY, locZ: CRAFT_LOC_Z });
-// These are the captured sellable limits of the Giran plaza, inset by the
-// normal 60-unit store margin.  Keep service crafters on this outer frame:
-// the large central column remains completely free for player movement.
-const GIRAN_CRAFT_OUTER = Object.freeze({ minX: 80971, maxX: 82887, minY: 147722, maxY: 149490 });
+// The sellable limits of the Giran plaza, inset by its store margin.  Keep
+// service crafters on this outer frame: the large central column remains
+// completely free for player movement.
+const GIRAN_CRAFT_OUTER = Object.freeze(ShopPlaces.stallBounds('Giran'));
 
 function perimeterStalls(bounds, count) {
     const width = bounds.maxX - bounds.minX;
@@ -39,7 +43,7 @@ const STATION_LAYOUT = [
     ['b', 'heavy', 'B Heavy: Blue Wolf & Doom', [386, 390, 406, 410, 422, 392, 408, 412, 428, 384]],
     ['b', 'robe', 'B Robes: Avadon, Blue Wolf & Doom', [372, 374, 376, 426, 398, 402, 400, 404]],
     ['b', 'light', 'B Light: Blue Wolf & Doom', [394, 410, 422, 396, 412, 428]],
-    ['b', 'weapons', 'B Grade Weapons'],
+    ['b', 'weapons', 'B Weapons: Top', [439, 459, 461, 463, 465, 467, 469, 471, 473]],
     ['b', 'jewelry', 'B Jewelry: Black Ore', [335, 337, 339]],
     ['a', 'heavy', 'A Heavy: Dark Crystal & Tallum', [554, 562, 564, 546, 538, 534, 556, 566, 548, 540]],
     ['a', 'robe', 'A Robes: DC, Tallum, Nightmare, Majestic', [526, 524, 528, 530]],
@@ -61,7 +65,15 @@ const STATION_LAYOUT = [
     // the catalogue intentionally mirrors the entry, mid and late tiers.
     ['c', 'weapons', 'C Weapons: Entry', [191, 192, 198, 199, 201, 205], 'c_weapons_entry'],
     ['c', 'weapons', 'C Weapons: Mid', [208, 209, 213, 214, 216, 217, 312], 'c_weapons_mid'],
-    ['c', 'weapons', 'C Weapons: Late', [220, 222, 223, 228, 230, 234, 237, 238, 240], 'c_weapons_late']
+    ['c', 'weapons', 'C Weapons: Late', [220, 222, 223, 228, 230, 234, 237, 238, 240], 'c_weapons_late'],
+    // B needs both entry weapons and physical/caster blunts. Selecting one
+    // recipe per weapon kind hid axes behind the most expensive staff.
+    ['b', 'weapons', 'B Weapons: Entry', [437, 441, 443, 445, 447, 449, 451, 453, 455, 457], 'b_weapons_entry'],
+    // Preserve every existing account slot. These native 100% recipes fill
+    // the entry B sets; Avadon robes, circlet, gloves and boots already have services.
+    ['b', 'armor', 'B Armor: Zubei Sets', [342, 344, 434, 424, 430, 432, 362, 364, 368, 370], 'b_armor_zubei'],
+    ['b', 'armor', 'B Armor: Avadon Heavy & Light', [358, 360, 366, 479], 'b_armor_avadon'],
+    ['b', 'jewelry', 'B Jewelry: Adamantite', [329, 331, 333], 'b_jewelry_entry']
 ];
 
 // Position groups independently from generated account slots.  Existing craft
@@ -70,12 +82,12 @@ const STATION_LAYOUT = [
 const STATION_LOCATION_ORDER = Object.freeze([
     'd_heavy', 'd_robe', 'd_light', 'd_weapons', 'd_jewelry',
     'c_heavy', 'c_robe', 'c_light', 'c_weapons_entry', 'c_weapons_mid', 'c_weapons_late', 'c_weapons_top', 'c_jewelry',
-    'b_heavy', 'b_robe', 'b_light', 'b_weapons', 'b_jewelry',
+    'b_armor_zubei', 'b_armor_avadon', 'b_heavy', 'b_robe', 'b_light', 'b_weapons_entry', 'b_weapons', 'b_jewelry_entry', 'b_jewelry',
     'a_heavy', 'a_robe', 'a_light', 'a_weapons', 'a_jewelry', 'a_heavy_elite',
     's_heavy', 's_robe', 's_light', 's_weapons', 's_jewelry',
     'resource_core', 'resource_master'
 ]);
-// 31 offers fit on the outer frame at a regular 238-unit interval.  If the
+// 35 offers fit on the outer frame at a regular 211-unit interval. If the
 // catalogue grows beyond this compact ring, add a second full perimeter around
 // the central column rather than filling its interior in partial rows.
 const GiranCraftStalls = perimeterStalls(GIRAN_CRAFT_OUTER, STATION_LOCATION_ORDER.length);
@@ -92,45 +104,6 @@ const CraftStations = Object.freeze(STATION_LAYOUT.map(([grade, category, title,
         loc: Object.freeze({ ...(stationLocations.get(id) || GiranCraftStalls[index]) })
     });
 }));
-
-function isServiceCrafter(state = {}) {
-    const classId = Number(state.classId || state.stats?.classId || 0);
-    return classId === 56 || classId === 57;
-}
-
-// Craft level = the Create Item level the class line has learned by this
-// character level, read from the skill tree like a hot character's skills: a
-// Warsmith keeps the levels it learned as an Artisan. Kept per class, indexed
-// by character level.
-const CREATE_ITEM_SKILL_ID = 172;
-const craftLevelRows = new Map();
-let craftLevelsTree = null;
-let ColdCombatProfile = null;
-
-function craftLevelFor(state = {}) {
-    // A hot actor passes the level of the skill it has learned.
-    const learned = state.craftLevel ?? state.stats?.dwarvenCraftLevel;
-    if (learned !== undefined && learned !== null) return Number(learned) || 0;
-    const classId = Number(state.classId || state.stats?.classId || 0);
-    const level = Number(state.level || 1);
-    if (craftLevelsTree !== DataCache.skillTree) {
-        craftLevelRows.clear();
-        craftLevelsTree = DataCache.skillTree;
-    }
-    let row = craftLevelRows.get(classId);
-    if (!row) craftLevelRows.set(classId, row = []);
-    if (row[level] === undefined) {
-        ColdCombatProfile ||= invoke('GameServer/Bot/Population/ColdCombatProfile');
-        row[level] = ColdCombatProfile.treeSkillLevel(classId, level, CREATE_ITEM_SKILL_ID);
-    }
-    return row[level];
-}
-
-// Whether this character crafts the recipe: only crafter classes craft, even
-// when another dwarf has Create Item from its class line.
-function canCraft(state = {}, recipe = {}) {
-    return isServiceCrafter(state) && craftLevelFor(state) >= Number(recipe.level || 0);
-}
 
 function stationForSlot(slot) {
     const rawSlot = Math.abs(Number(slot) || 0);
@@ -165,7 +138,7 @@ function stationFor(state = {}) {
 }
 
 function portfolioStationFor(state = {}) {
-    if (state.stats?.craftStationId || Number(state.stats?.generatedIndex || 0) >= 10000) {
+    if (isStationService(state)) {
         return stationFor(state);
     }
     const craftLevel = craftLevelFor(state);
@@ -186,9 +159,16 @@ function productPrice(recipe) {
     return Math.max(100, Math.min(1000000, BotEconomyPricing.scalePrice(Math.round(value * 0.03) + Number(recipe.mpCost || 0) * 10)));
 }
 
-// Recipes and items are datapack data: the dwarven recipe lists and what the
-// Giran stations publish are built once per item catalogue.
-const STATION_SERVICE = Object.freeze({ level: 70, stats: Object.freeze({ classId: 57 }) });
+// The Giran station crafters: level-70 Warsmiths, seeded at the content cap.
+const STATION_CRAFTER = Object.freeze({ classId: 57, level: 70 });
+
+function stationCrafter() {
+    return { classId: STATION_CRAFTER.classId, level: ProgressionCap.clampLevel(STATION_CRAFTER.level) };
+}
+
+// Recipes and items are datapack data: the dwarven recipe lists are built once
+// per item catalogue, what the Giran stations publish once per item catalogue
+// and station crafter level.
 let catalog = null;
 
 function recipeCatalog() {
@@ -200,7 +180,7 @@ function recipeCatalog() {
         unique.set(Number(recipe.recipeId), recipe);
     });
     const dwarven = [...unique.values()].sort((a, b) => Number(a.recipeId) - Number(b.recipeId));
-    catalog = { items: DataCache.items, dwarven, byCraftLevel: new Map(), published: null };
+    catalog = { items: DataCache.items, dwarven, byCraftLevel: new Map(), published: null, publishedLevel: null };
     return catalog;
 }
 
@@ -210,7 +190,7 @@ function availableRecipes(state) {
     const current = recipeCatalog();
     if (!current.byCraftLevel.has(craftLevel)) {
         current.byCraftLevel.set(craftLevel, Object.freeze(
-            current.dwarven.filter((recipe) => Number(recipe.level || 0) <= craftLevel)
+            current.dwarven.filter((recipe) => canCraft(state, recipe))
         ));
     }
     return current.byCraftLevel.get(craftLevel);
@@ -253,8 +233,9 @@ function stationRecipes(station, allowedRecipes) {
 // with the first station (in station order) that publishes it.
 function publishedStationRecipes() {
     const current = recipeCatalog();
-    if (current.published) return current.published;
-    const allowed = availableRecipes(STATION_SERVICE);
+    const crafter = stationCrafter();
+    if (current.published && current.publishedLevel === crafter.level) return current.published;
+    const allowed = availableRecipes(crafter);
     const stationByRecipeId = new Map();
     const recipes = [];
     for (const station of CraftStations) {
@@ -265,6 +246,7 @@ function publishedStationRecipes() {
             recipes.push(recipe);
         }
     }
+    current.publishedLevel = crafter.level;
     current.published = Object.freeze({
         recipes: Object.freeze(recipes),
         ids: new Set(stationByRecipeId.keys()),
@@ -294,15 +276,20 @@ function normalizeEntries(entries, state) {
     }).slice(0, MAX_PUBLIC_RECIPES);
 }
 
+// A Giran station crafter: the server's public infrastructure, not an
+// ordinary player (its seeded station id, account or reserved slot). An
+// ordinary generated bot's index is a timestamp, far above the slot range.
+function isStationService(state = {}) {
+    return Boolean(state.stats?.craftStationId) || serviceStationSlot(state) !== null;
+}
+
 function profileFor(state = {}) {
     const current = state.stats?.craftShop || {};
     const station = stationFor(state);
-    const isStationService = Boolean(state.stats?.craftStationId)
-        || Number(state.stats?.generatedIndex || 0) >= 10000;
     // Public station configuration is owned by the server.  Do not retain a
     // persisted snapshot here: it would prevent a changed catalogue, title or
     // placement from reaching an already-seeded service crafter.
-    const preserveCustomShop = !isStationService;
+    const preserveCustomShop = !isStationService(state);
     const entries = preserveCustomShop ? normalizeEntries(current.entries, state) : [];
     const published = entries.length ? entries : generatedEntries(state);
     return {
@@ -319,14 +306,21 @@ function ensureRecipes(characterId, profile) {
     const recipeIds = [...new Set((profile?.entries || []).map((entry) => Number(entry.recipeId)).filter(Number.isSafeInteger))];
     return recipeIds.reduce((chain, recipeId) => (
         chain.then(() => Database.setCharacterRecipe(characterId, recipeId, 'dwarven'))
-    ), Promise.resolve()).then(() => profile);
+    ), Promise.resolve()).then(() => {
+        invoke('GameServer/Bot/Economy/CraftWorkshopService').recipesChanged(characterId);
+        return profile;
+    });
 }
 
 module.exports = {
+    productPrice,
     MAX_PUBLIC_RECIPES,
     GiranCraftStalls,
     CraftStations,
+    STATION_CRAFTER,
+    stationCrafter,
     isServiceCrafter,
+    isStationService,
     craftLevelFor,
     canCraft,
     stationForSlot,

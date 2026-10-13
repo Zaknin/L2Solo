@@ -36,20 +36,24 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
             const afterClassId = Number(nextState.stats?.classProgressionClassId ?? nextState.stats?.classId ?? beforeClassId);
             const changed = Number(state.stats?.classProgressionLevel || 0) < Number(nextState.level || 1)
                 || beforeClassId !== afterClassId;
-            const transitions = (nextState.stats?.classTransitions || []).slice((state.stats?.classTransitions || []).length);
-            const skillClasses = [...new Set([beforeClassId, ...transitions, afterClassId].filter(Number.isFinite))];
-            const skills = changed ? [...skillClasses.flatMap(classId => require('./ColdCombatProfile').skillRecordsFromTree(classId, nextState.level))
-                .reduce((byId, skill) => byId.set(Number(skill.selfId), skill), new Map()).values()] : [];
+            const durable = {
+                ...(changed ? { classId: afterClassId } : {}),
+                ...(memberResult.soulCrystals?.length ? { soulCrystals: memberResult.soulCrystals } : {})
+            };
             if (nextParty.status === 'dissolved') nextState = require('./BackgroundPartyLifecycle').releaseMember(
                 nextState, timestamp, nextParty.stats.partyBreakReason, nextParty.stats.objective);
             return { nextState, token: grants.find(grant => Number(grant.characterId) === Number(state.characterId)),
                 atomicGroup, options: { allowParty: true, allowLifecycle: true },
-                proposal: { baseState: state, result: memberResult, durable: changed ? { classId: afterClassId, skills } : null } };
+                proposal: { baseState: state, result: memberResult, durable: Object.keys(durable).length ? durable : null } };
         }));
-        const committed = await Owner.commitAndReleaseBatch(entries);
+        const committed = await Owner.commitAndReleaseBatch(entries, { journalReason: 'raid' });
         committed.forEach(row => Raid.acknowledge(id, row.characterId, row.ok));
         if (committed.some(row => !row.ok)) return { ok: false, reason: 'raid_commit_rejected' };
-        Parties.acceptRow(committed[0].raidPartyRow);
+        for (const row of committed) {
+            const current = Life.cachedState(row.characterId);
+            if (current) await Life.reviewTrainingAfterCommit(current);
+        }
+        const committedParty = Parties.acceptRow(committed[0].raidPartyRow);
         Authority.accept(committed[0].raidRow);
         if (nextParty.stats.raidEncounter?.status === 'defeated') await require('./ColdRaidWorldBridge').settle(nextParty,
             { respawnAt: committed[0].raidRespawnAt });
@@ -60,7 +64,7 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
         const Metrics = require('./PopulationMetrics');
         Metrics.recordPartyResolve(); Metrics.recordCombat(result.debug);
         if (nextParty.status === 'dissolved') Metrics.recordPartyDissolution();
-        return { ok: true, party: Parties.find(party.partyId), debug: result.debug };
+        return { ok: true, party: committedParty, debug: result.debug };
     } finally {
         Raid.abort(id);
         await Owner.releaseBatch(grants, { releaseInvalidated: true });

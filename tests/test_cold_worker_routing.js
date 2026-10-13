@@ -171,7 +171,7 @@ try {
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: {}
-    }, currentSpot, null, [], { occupancy: {} });
+    }, currentSpot, null, [], { occupancy: {}, spots: new Map(), wishLeaf: null });
     assert.strictEqual(solo.mode, 'solo');
     assert.strictEqual(solo.spotId, targetSpot.id);
     assert.deepStrictEqual(solo.destinations['1'], destinationFor({ characterId: 1 }));
@@ -240,7 +240,7 @@ try {
     coordinator.contextIndex = savedIndex;
     SpotProfiles.findForState = routeTargetForState;
 
-    const sharedIndex = { occupancy: {} };
+    const sharedIndex = { occupancy: {}, spots: new Map(), wishLeaf: null };
     const batchRouteFor = (characterId) => coordinator.routeFor({
         characterId,
         phase: 'cold',
@@ -498,7 +498,7 @@ try {
         { characterId: 2, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 }, stats: {} },
         { characterId: 3, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 4, locY: 5, locZ: 6 }, stats: {} }
     ];
-    const partyRoute = coordinator.routeFor(members[0], currentSpot, party, members, { occupancy: {} });
+    const partyRoute = coordinator.routeFor(members[0], currentSpot, party, members, { occupancy: {}, spots: new Map(), wishLeaf: null });
     assert.strictEqual(partyRoute.mode, 'party');
     assert.strictEqual(Object.keys(partyRoute.destinations).length, 2);
     assert.deepStrictEqual(partyRoute.destinations['3'], destinationFor(members[1]));
@@ -520,7 +520,7 @@ try {
         assert.strictEqual(repairedRoute.cause, 'position_mismatch');
         assert.strictEqual(repairedRoute.reason, 'party_spot_replan');
         const Kernel = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
-        const departing = Kernel.beginRouteTravelState(displacedMembers[1], repairedRoute, 1000);
+        const departing = require('../src/GameServer/Bot/Population/HuntingTravel').beginHuntingTrip(displacedMembers[1], repairedRoute, 1000);
         assert.strictEqual(departing.loc.locZ, 160, 'repair uses ordinary travel, not an instant move');
         assert.strictEqual(Kernel.finishPartyRouteTravelState(departing, 2000), null);
         const arrived = Kernel.finishPartyRouteTravelState(departing, 1000 + repairedRoute.travelMs);
@@ -528,10 +528,10 @@ try {
         assert.strictEqual(arrived.spotId, lair.id);
         for (const patch of [{ phase: 'hot' }, { activity: 'resting' }, { stats: { pvpEncounter: { key: 'fighting' } } }]) {
             const blockedMembers = [displacedMembers[0], { ...displacedMembers[1], ...patch }];
-            assert.strictEqual(coordinator.routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, { occupancy: {} }), null);
+            assert.strictEqual(coordinator.routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, { occupancy: {}, spots: new Map(), wishLeaf: null }), null);
         }
         const validMembers = displacedMembers.map(m => ({ ...m, loc: dungeonPoint }));
-        assert.strictEqual(coordinator.routeFor(validMembers[0], lair, displacedParty, validMembers, { occupancy: {} }), null,
+        assert.strictEqual(coordinator.routeFor(validMembers[0], lair, displacedParty, validMembers, { occupancy: {}, spots: new Map(), wishLeaf: null }), null,
             'valid positions do not cause endless repair journeys');
         // Route planning uses full cached members even when the worker payload is compact.
         LifeState.cachedState = id => displacedMembers.find(m => m.characterId === id);
@@ -644,13 +644,13 @@ try {
         level: 16,
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
-        stats: { equipmentPlan: requestPlan }
+        stats: { equipmentPlan: requestPlan, partyRequest: request }
     }, currentSpot, null, [], {
         occupancy: {},
         spots: new Map([[fallbackSpot.id, fallbackSpot]])
     });
     assert.strictEqual(fallbackRoute.spotId, fallbackSpot.id,
-        'a no-party required plan must route to a safe fallback instead of its party-only source');
+        'a bot waiting for a required party must route to a safe fallback instead of its party-only source');
 
     GearAcquisitionPlanner.safeFallbackForPlan = originalSafeFallbackForPlan;
     const profiles = [currentSpot, targetSpot];
@@ -673,14 +673,16 @@ try {
                 stats: { equipmentPlan: {
                     status: 'active', strategy: 'direct_drop',
                     partyNeed: 'required', target: { selfId: 1 }
-                } }
+                }, partyRequest: request }
             }, currentSpot, null, [], {
                 profiles,
                 spots: new Map(profiles.map((spot) => [spot.id, spot])),
                 occupancy: {}
             });
         }
-        assert.strictEqual(rewardScans, 1,
+        // b93aef45 keeps one static reward atlas per rewards/npcs table, so the
+        // atlas built by an earlier route in this file may already serve both.
+        assert(rewardScans <= 1,
             'repeated cold fallback routes must reuse the reward index across context batches');
     } finally {
         delete rewards.forEach;

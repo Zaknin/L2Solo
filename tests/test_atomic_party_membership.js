@@ -79,6 +79,31 @@ Database.init();
     assert(preparedMembers.every((entry) => Number(entry.snapshot.timing.nextResolveAt) === firstPartyDue),
         'atomic party assignment must align member scheduling with the durable party row');
 
+    const Meetings = require('../src/GameServer/AfkTrade/TradeMeetingService');
+    const preparation = { token: 'party-admission-preparing', actorA: 3200001, actorB: 3200002,
+        seqA: 1, seqB: 1, town: 'Giran', point: { locX: 0, locY: 0, locZ: 0 },
+        lines: [{ payer: 0, itemId: 1, selfId: 1867, count: 1, price: 100 }],
+        parties: [0, 1].map(() => ({ revision: 0, sequence: 1, needRevision: 0,
+            phase: 'cold', ownerId: 'legacy_main', leaseId: null, hotAt: 0,
+            route: { fee: 0, scroll: false, method: 'walk', durationMs: 0 } })) };
+    Meetings.stage(preparation);
+    assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row, members: preparedMembers })).reason,
+        'party_trade_busy', 'a queued membership cannot pass a current bilateral preparation');
+    assert.equal((await Database.execute(['SELECT COUNT(*) n FROM bot_background_parties WHERE partyId=?', [preparedParty.row.partyId]]))[0].n, 0);
+    assert.equal((await Database.execute(['SELECT COUNT(*) n FROM bot_life_state WHERE partyId=?', [preparedParty.row.partyId]]))[0].n, 0);
+    Meetings.discard(preparation.token);
+    // Existing native commitments are checked directly, even without service
+    // enrollment or a stats marker in a stale cached lifecycle projection.
+    await Database.execute([`INSERT INTO board_trade_meetings(token,terms,actorA,actorB,seqA,seqB,town,locX,locY,locZ,routeA,routeB)
+        VALUES ('party-admission-native','{}',3200001,3200002,1,1,'Giran',0,0,0,'{}','{}')`]);
+    assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row, members: preparedMembers })).reason,
+        'party_trade_busy', 'accepted native trade fences both hot and cold party admission');
+    await Database.execute(["DELETE FROM board_trade_meetings WHERE token='party-admission-native'"]);
+
+    const staleAssignment = preparedMembers.map(entry => ({ ...entry, expectedSimulationRevision: 999,
+        expectedSimulationLeaseId: '' }));
+    assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row,
+        members: staleAssignment })).reason, 'membership_conflict', 'first goal cannot create a party after a version change');
     const committed = await Database.commitBackgroundPartyMembership({
         party: preparedParty.row,
         members: preparedMembers,
@@ -107,7 +132,7 @@ Database.init();
     ]);
     assert(savedMembers.every((row) => row.partyId === 'bgp_atomic_success' && row.activity === 'grouped'));
     assert(savedMembers.every((row) => !JSON.parse(row.statsJson).partyRequest));
-    assert.deepStrictEqual((await Database.execute([
+    assert.deepStrictEqual((await Database.readHistory([
         'SELECT characterId, eventType, summary, weight, createdAt, metaJson FROM bot_life_events WHERE characterId = ?',
         [3200001]
     ]))[0], {
@@ -118,6 +143,55 @@ Database.init();
         createdAt: 500,
         metaJson: '{"partyId":"bgp_atomic_success","memberIds":[3200001,3200002]}'
     });
+
+    await Database.execute([`INSERT INTO board_trade_meetings(token,terms,actorA,actorB,seqA,seqB,town,locX,locY,locZ,routeA,routeB)
+        VALUES ('party-admission-retained','{}',3200001,3200002,1,1,'Giran',0,0,0,'{}','{}')`]);
+    const retainedStates = await LifeState.statesForParty('bgp_atomic_success');
+    const retainedAssignments = retainedStates.map(member => LifeState.preparePartyAssignment(member,
+        'bgp_atomic_success', member.stats.role, 3200001, firstPartyDue));
+    assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row, members: retainedAssignments })).ok,
+        true, 'legacy accepted merchants retain their current native party owner');
+    const transferStates = await LifeState.statesForParty('bgp_atomic_success');
+    const transferParty = PartyState.prepareCommit({ ...preparedParty.snapshot, partyId: 'bgp_forbidden_transfer' });
+    const transfers = transferStates.map(member => LifeState.preparePartyAssignment(member,
+        transferParty.snapshot.partyId, member.stats.role, 3200001, firstPartyDue));
+    assert.equal((await Database.commitBackgroundPartyMembership({ party: transferParty.row, members: transfers })).reason,
+        'party_trade_busy', 'changing party is a new admission even when the actor was already grouped');
+    assert.equal((await Database.execute(['SELECT COUNT(*) n FROM bot_background_parties WHERE partyId=?', ['bgp_forbidden_transfer']]))[0].n, 0);
+    assert.equal((await Database.execute(['SELECT COUNT(*) n FROM bot_life_state WHERE partyId=?', ['bgp_atomic_success']]))[0].n, 2);
+    await Database.execute(["DELETE FROM board_trade_meetings WHERE token='party-admission-retained'"]);
+
+    const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
+    const goalMembers = await LifeState.statesForParty('bgp_atomic_success');
+    const [goalParty] = await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['bgp_atomic_success']]);
+    const goalInput = { partyId: goalParty.partyId, expectedUpdatedAt: goalParty.updatedAt,
+        leaderId: goalParty.leaderId, memberIds: JSON.parse(goalParty.memberIdsJson),
+        sources: Calculation.sources(goalMembers), updatedAt: goalParty.updatedAt + 1,
+        statsJson: JSON.stringify({ objective: { spotId: 'cruma', objectiveKey: 'joint:cruma:0' } }) };
+    for (const field of ['updatedAt', 'revision', 'ownerId', 'leaseId']) {
+        const changed = structuredClone(goalInput);
+        changed.sources[0][field] = typeof changed.sources[0][field] === 'number'
+            ? changed.sources[0][field] + 1 : changed.sources[0][field] + ':changed';
+        assert.equal((await Database.commitBackgroundPartyGoals(changed)).reason, 'party_goal_member_changed', field);
+    }
+    for (const [column, value, original] of [['phase', 'hot', 'cold'], ['partyId', 'other-party', goalParty.partyId]]) {
+        await Database.execute([`UPDATE bot_life_state SET ${column}=? WHERE characterId=?`, [value, goalInput.memberIds[0]]]);
+        assert.equal((await Database.commitBackgroundPartyGoals(goalInput)).reason, 'party_goal_member_changed', column);
+        await Database.execute([`UPDATE bot_life_state SET ${column}=? WHERE characterId=?`, [original, goalInput.memberIds[0]]]);
+    }
+    assert.equal((await Database.commitBackgroundPartyGoals({ ...goalInput,
+        expectedUpdatedAt: goalInput.expectedUpdatedAt - 1 })).reason, 'party_goals_changed');
+    assert.equal((await Database.commitBackgroundPartyGoals({ ...goalInput,
+        leaderId: goalInput.memberIds[1] })).reason, 'party_goals_changed');
+    const lifeBeforeGoal = await Database.execute(['SELECT * FROM bot_life_state WHERE partyId=? ORDER BY characterId', [goalParty.partyId]]);
+    const goalCommitted = await Database.commitBackgroundPartyGoals(goalInput);
+    assert.equal(goalCommitted.ok, true);
+    assert.equal(goalCommitted.partyRow.statsJson, goalInput.statsJson);
+    assert.equal(goalCommitted.partyRow.updatedAt, goalInput.updatedAt);
+    assert.deepEqual(await Database.execute(['SELECT * FROM bot_life_state WHERE partyId=? ORDER BY characterId', [goalParty.partyId]]),
+        lifeBeforeGoal, 'joint goal publication never rewrites members or their leases');
+    assert.equal((await Database.commitBackgroundPartyGoals(goalInput)).reason, 'party_goals_changed', 'duplicate result rejected');
+    console.log('PASS conditional joint goals: member/party/lease fences, duplicate rejection, no member writes');
 
     const conflictMembers = await LifeState.statesByIds([3200003, 3200004], {
         ownerId: 'legacy_main',

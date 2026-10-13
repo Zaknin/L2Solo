@@ -1,3 +1,5 @@
+const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
+const { raiseDecision } = require('../DecisionEvents');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -7,8 +9,6 @@ const BotTownTravel  = invoke('GameServer/Bot/AI/BotTownTravel');
 const BotWarehouse   = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const BotEquipmentUpgrade = invoke('GameServer/Bot/AI/BotEquipmentUpgrade');
 const LifeState      = invoke('GameServer/Bot/Population/BotLifeState');
-const GoalExecutor   = invoke('GameServer/Bot/Goals/GoalExecutor');
-const Cooldown       = invoke('GameServer/Bot/Population/Cooldown');
 const BotEventJournal = invoke('GameServer/Bot/AI/BotEventJournal');
 const WorkflowTelemetry = invoke('GameServer/Bot/AI/BotWorkflowTelemetry');
 const CompanionNavigationRecovery = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
@@ -23,6 +23,14 @@ const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy')
 
 const COMPANION_EQUIPMENT_FAILURE_RETRY_MS = 5 * 60 * 1000;
 
+// The store a shopping target stands for: its stall's, or a board record's
+// (an ad has no stall: it is dealt with by record, MarketOpportunity.offerTarget).
+function targetStore(target) {
+    if (target?.recordId) return { store: invoke('GameServer/AfkTrade/AfkTradeService').recordStore(target.recordId), name: target.name };
+    const actor = findStoreSession(target?.actorId)?.actor;
+    return { store: actor?.fetchPrivateStore?.() || null, name: actor?.fetchName?.() || target?.name, actor };
+}
+
 function findStoreSession(actorId) {
     const BotManager = invoke('GameServer/Bot/BotManager');
     return BotManager.findSessionById(actorId)
@@ -31,26 +39,30 @@ function findStoreSession(actorId) {
         || null;
 }
 
-async function sellInventoryToAfk(bot, store, coldState = null) {
+// sale: selfId -> units, what the bot decided to sell into this record
+// (TradeService.findAfkBuyerForActor); without it, every line it can fill.
+async function sellInventoryToAfk(bot, store, coldState = null, sale = null) {
     const sold = [];
     let state = coldState;
+    const left = sale ? new Map(Object.entries(sale).map(([selfId, units]) => [Number(selfId), Number(units)])) : null;
     const candidates = TradeService.sellableActorItems(bot, coldState).map((item) => ({
         objectId: Number(item.fetchId?.()),
         selfId: Number(item.fetchSelfId?.()),
         amount: Number(item.fetchAmount?.())
     })).filter((item) => item.amount > 0);
     for (const item of candidates) {
-        const projection = invoke('GameServer/AfkTrade/AfkTradeService').findProjection(
-            PROJECTION_ID_FOR_STORE(store)
-        );
-        const currentStore = projection?.actor?.fetchPrivateStore?.() || store;
+        const currentStore = invoke('GameServer/AfkTrade/AfkTradeService').recordStore(store?.shopId) || store;
         const line = currentStore.items?.find((entry) => Number(entry.selfId) === item.selfId && Number(entry.count) > 0);
         if (!line) continue;
-        const qty = Math.min(item.amount, Number(line.count));
+        const qty = Math.min(item.amount, Number(line.count), left ? Number(left.get(item.selfId) || 0) : Infinity);
+        if (qty <= 0) continue;
+        if (left) left.set(item.selfId, left.get(item.selfId) - qty);
         const result = await invoke('GameServer/AfkTrade/AfkTradeService').sellToShop(
             bot.fetchId(), currentStore, item.selfId, qty,
             { objectId: item.objectId, expectedPrice: line.price, coldState: state }
         );
+        if (result.pending) return { pending: true, coldState: result.state || state,
+            itemsSold: sold.reduce((sum, line) => sum + line.qty, 0), totalAdena: sold.reduce((sum, line) => sum + line.totalAdena, 0), sold };
         state = result.coldState || state;
         sold.push({ qty, name: line.name || item.selfId, totalAdena: result.totalPrice });
     }
@@ -60,10 +72,6 @@ async function sellInventoryToAfk(bot, store, coldState = null) {
         sold,
         coldState: state
     };
-}
-
-function PROJECTION_ID_FOR_STORE(store) {
-    return Number(store?.projectionObjectId || store?.merchantObjectId || 900000000 + Number(store?.shopId || 0));
 }
 
 function formatAdena(value) {
@@ -76,13 +84,13 @@ function formatAdena(value) {
 // town could still fill and deliver a second copy.
 async function withdrawBuyOrderFor(bot, selfId) {
     const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
-    const order = AfkTrade.findOwnerProjection(bot.fetchId())?.shop;
-    if (Number(order?.storeType) !== AfkTrade.BUY) return;
-    if (!(order.lines || []).some((line) => Number(line.selfId) === Number(selfId))) return;
+    const ordered = AfkTrade.ownerRecords(bot.fetchId()).some((record) => Number(record.storeType) === AfkTrade.BUY
+        && (record.lines || []).some((line) => Number(line.selfId) === Number(selfId) && Number(line.count) > 0));
+    if (!ordered) return;
     try {
         // Before the new item is equipped: the withdrawal reloads the backpack
         // from the database to return the escrow.
-        await invoke('GameServer/Bot/Economy/BotAfkMarketService').withdraw(bot.fetchId());
+        await invoke('GameServer/Bot/Economy/BotAfkMarketService').withdrawBuyAds(bot.fetchId(), selfId);
     } catch (error) {
         utils.infoWarn('Shopping', 'buy order withdrawal failed for %s: %s', bot.fetchName(), error.message);
     }
@@ -97,7 +105,8 @@ function clearCompletedMarketPlan(session, bot, purchase) {
     const componentPurchase = combineResultId > 0
         && Number(equipmentPlan?.target?.selfId || 0) !== combineResultId;
     const stats = { ...(state.stats || {}) };
-    if (!componentPurchase) delete stats.equipmentPlan;
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, purchase.selfId);
+    if (!componentPurchase && !crystalInput) delete stats.equipmentPlan;
     session.coldLifeState = {
         ...state,
         adena: Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || state.adena || 0),
@@ -113,6 +122,7 @@ function clearCompletedMarketPlan(session, bot, purchase) {
             }
         }
     };
+    refreshPartyMemberships([session], invoke);
 }
 
 function continueEquipmentShopping(session, bot, BotAI, errand) {
@@ -134,7 +144,7 @@ function continueEquipmentShopping(session, bot, BotAI, errand) {
         Number(errand.purchaseCount || 0) + 1,
         excludedSlots
     );
-    if (!next) return false;
+    if (!next || next.pending) return false;
 
     session.companionShopping = next;
     session.shoppingTarget = next.target;
@@ -235,12 +245,14 @@ function prepareEquipmentMarketStop(session, bot, town, BotAI) {
     const unseal = invoke('GameServer/Bot/AI/BotMammonUnseal').plan(session,bot,town,{
         ...session.coldLifeState,stats:{...session.coldLifeState?.stats,classId:bot.fetchClassId()}
     });
-    if (!unseal && (plan?.strategy !== 'market' || Number(plan.target?.selfId || 0) <= 0)) return false;
+    if (!unseal && session.partyCompanion === true
+        && (plan?.strategy !== 'market' || Number(plan.target?.selfId || 0) <= 0)) return false;
 
     // One indexed lookup per town visit is enough. If the offer disappears,
     // the normal purchase failure cooldown handles the next attempt.
-    session.shoppingEquipmentPlanChecked = true;
     const errand = unseal || CompanionEquipmentShopping.planErrand(session, bot, town);
+    if (errand?.pending) return true;
+    session.shoppingEquipmentPlanChecked = true;
     if (!errand) return false;
     session.companionShopping = errand;
     session.shoppingTarget = errand.target;
@@ -253,7 +265,8 @@ function prepareEquipmentMarketStop(session, bot, town, BotAI) {
 function prepareWarehouseStop(session, bot, town, BotAI) {
     if (session.shoppingServicePhase === 'warehouse') return true;
     if (session.shoppingWarehouseDone || !usesWarehouseStop(session)) return false;
-    if (!BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
+    if (!BotWarehouse.hasActorWithdrawalCandidates(bot, session.coldLifeState)
+        && !BotWarehouse.hasActorDepositCandidates(bot, session.coldLifeState, shoppingNpcSale(session))) {
         session.shoppingWarehouseDone = true;
         return false;
     }
@@ -275,8 +288,80 @@ function prepareWarehouseStop(session, bot, town, BotAI) {
     return true;
 }
 
+// The visible executor uses the same selected workshop, material quantities,
+// native funding and durable attempt receipt as the distant customer.
+function workshopTarget(session, bot) {
+    const physical = LifeState.cachedState(bot.fetchId()) || session.coldLifeState;
+    const plan = session.coldLifeState?.stats?.equipmentPlan || physical?.stats?.equipmentPlan;
+    if (plan?.strategy !== 'craft' || !['active', 'component_ready', 'ready_to_craft'].includes(plan.status)) return null;
+    const saved = physical && { ...physical, stats: { ...physical.stats, equipmentPlan: plan } };
+    const Recipes = invoke('GameServer/Items/C4RecipeItems');
+    const ColdCraft = invoke('GameServer/Bot/Economy/ColdCraftingService');
+    const state = { ...saved, inventory: LifeState.inventorySummaryFromItems(bot.backpack.fetchItems()) };
+    const finalRecipe = Recipes.resolveByRecipeId(plan.recipeId);
+    const recipe = ColdCraft.readyRecipeFor(state, finalRecipe);
+    const station = recipe && ColdCraft.stationForRecipe(recipe.recipeId, state);
+    if (!station?.workshop) return null;
+    return { workshop: true, name: 'workshop', town: station.townName,
+        locX: station.loc.locX, locY: station.loc.locY, locZ: station.loc.locZ,
+        state, recipe, finalRecipe, station };
+}
+async function craftAtWorkshop(session, bot, target) {
+    if (session.workshopCrafting) return;
+    session.workshopCrafting = true;
+    const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+    try {
+        const { recipe, finalRecipe, station, state } = target;
+        const batches = Math.min(64, invoke('GameServer/Bot/Economy/ColdCraftingService')
+            .requiredCraftCount(finalRecipe, recipe, state));
+        if (!batches && !session.workshopOriginal) return;
+        const options = { batches: Math.min(batches, Math.max(1, Number(station.capacityBatches || batches))),
+            expectedRevision: station.revision, funding: { r: Number(state.stats.equipmentPlan.valueRate || 0) },
+            ...(session.workshopOriginal ? { original: session.workshopOriginal } : {}) };
+        let result;
+        try { result = await Workshops.craft(station.characterId, recipe.recipeId, bot.fetchId(), options); }
+        catch (error) {
+            if (!error.economyCommand) throw error;
+            session.workshopOriginal = error.economyCommand;
+            result = await Workshops.craft(station.characterId, recipe.recipeId, bot.fetchId(), { original: error.economyCommand });
+        }
+        session.workshopOriginal = undefined;
+        if (session.actor !== bot || bot.fetchIsOnline?.() === false) return;
+        const items = await invoke('Database').fetchItems(bot.fetchId());
+        const byId = new Map(items.map(row => [Number(row.id), row]));
+        const backpack = bot.backpack;
+        for (const item of [...backpack.fetchItems()]) {
+            const row = byId.get(Number(item.fetchId()));
+            if (!row) backpack.items = backpack.fetchItems().filter(other => other !== item);
+            else { item.setAmount(row.amount); byId.delete(Number(row.id)); }
+        }
+        for (const row of byId.values()) backpack.insertItem(row.id, row.selfId, row);
+        backpack.inventoryRevision = Number(backpack.inventoryRevision || 0) + 1;
+        session.coldLifeState = LifeState.cachedState(bot.fetchId()) || result.customerState;
+        session.dataSendToMe?.(ServerResponse.itemsList(backpack.fetchItems()));
+        invoke('GameServer/Bot/Economy/EconomyContext').forget(bot.fetchId());
+        session.shoppingTarget = undefined;
+        session.shoppingServicePhase = undefined;
+        session.shoppingDoneAnnounced = false;
+        raiseDecision(session, 'town');
+    } catch (error) {
+        if (!session.workshopOriginal) {
+            session.shoppingTarget = undefined;
+            session.shoppingServicePhase = undefined;
+            raiseDecision(session, 'town');
+        }
+        utils.infoWarn('Workshop', '%s: %s', bot.fetchName(), error.message);
+    } finally { session.workshopCrafting = false; }
+}
+
 module.exports = {
+    workshopTarget, craftAtWorkshop,
     tick(session, bot, Generics, BotAI) {
+        if (require('../../../AfkTrade/TradeMeetingService').hasPreparation(bot.fetchId())
+            || session.coldLifeState?.stats?.tradeMeeting || invoke('GameServer/Bot/Population/BotLifeState').cachedState(bot.fetchId())?.stats?.tradeMeeting) {
+            return;
+        }
+        invoke('GameServer/Bot/Economy/HotBoardReviewService').naturalBreak(session, 2);
         if (session.partyCompanion === true && session.followPlayerSession && !session.companionShopping) {
             session.plan = 'following';
             session.shoppingTarget = undefined;
@@ -296,8 +381,25 @@ module.exports = {
 
         const closestTown = BotAI.getClosestTown(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
 
-        prepareEquipmentMarketStop(session, bot, closestTown, BotAI);
-        prepareWarehouseStop(session, bot, closestTown, BotAI);
+        const Improvements = invoke('GameServer/Bot/Economy/BotImprovementService');
+        const hotEconomy = invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session);
+        const personalCraft = require('../../Economy/WishProviders').personalCraftPlan(hotEconomy.state, hotEconomy);
+        if (personalCraft && session.coldLifeState) session.coldLifeState = { ...session.coldLifeState,
+            stats: { ...session.coldLifeState.stats, equipmentPlan: personalCraft } };
+        const selected = Improvements.chosen(null, hotEconomy);
+        if (selected && selected.kind !== 'enchant') {
+            const station = Improvements.stationTarget(bot, selected);
+            if (station) { session.shoppingTarget = station; session.shoppingServicePhase = 'improvement'; }
+        } else if (session.shoppingServicePhase === 'improvement') {
+            session.shoppingTarget = undefined; session.shoppingServicePhase = undefined;
+        }
+
+        // ARCH-NOTE: a held workshop target is not rebuilt each tick; a stale
+        // station revision fails the craft, which clears the phase and retries.
+        const paidCraft = !session.companionShopping && session.shoppingServicePhase !== 'workshop' && workshopTarget(session, bot);
+        if (paidCraft) { session.shoppingTarget = paidCraft; session.shoppingServicePhase = 'workshop'; }
+        if (session.shoppingServicePhase !== 'workshop' && prepareEquipmentMarketStop(session, bot, closestTown, BotAI) && !session.companionShopping) return;
+        if (session.shoppingServicePhase !== 'workshop') prepareWarehouseStop(session, bot, closestTown, BotAI);
 
         if (!session.shoppingTarget) {
             const BotManager = invoke('GameServer/Bot/BotManager');
@@ -308,15 +410,7 @@ module.exports = {
             const afkBuyer = TradeService.findAfkBuyerForActor(bot, closestTown, session.coldLifeState);
 
             if (afkBuyer && (!buyer || Number(afkBuyer.score) >= Number(buyer.preview?.totalAdena || 0))) {
-                const offer = afkBuyer.offer;
-                session.shoppingTarget = {
-                    actorId: offer.projection.actor.fetchId(),
-                    name: offer.sourceName,
-                    locX: offer.locX,
-                    locY: offer.locY,
-                    locZ: offer.locZ,
-                    town: offer.town || closestTown.name
-                };
+                session.shoppingTarget = { ...MarketOpportunity.offerTarget(afkBuyer.offer, closestTown.name), sale: afkBuyer.sale };
                 TownChatter.say(session, BotAI, 'buyer-selected', Speech.lines('town.buyer-selected', { merchant: session.shoppingTarget.name, town: session.shoppingTarget.town }));
             } else if (buyer) {
                 session.shoppingTarget = {
@@ -332,6 +426,7 @@ module.exports = {
                 session.shoppingTarget = townMerchantTarget(closestTown, bot);
                 if (!session.shoppingTarget) {
                     session.plan = 'hunting';
+                    raiseDecision(session, 'town');
                     session.shoppingDoneAnnounced = false;
                     session.preShopLocation = undefined;
                     clearShoppingServiceState(session);
@@ -416,6 +511,8 @@ module.exports = {
                 const returningToCompanion = session.partyCompanion === true && companionResume?.followPlayerSession?.actor?.fetchIsOnline?.();
                 deferEquipmentRetry(session);
                 session.plan = returningToCompanion ? 'following' : 'hunting';
+                // ARCH-NOTE: an unreachable shopping route also ends this town visit.
+                if (session.plan === 'hunting') raiseDecision(session, 'town');
                 session.shoppingDoneAnnounced = false;
                 session.shoppingTarget = undefined;
                 session.companionShopping = undefined;
@@ -435,6 +532,18 @@ module.exports = {
                 bot.automation?.abortAll?.(bot);
                 TownChatter.say(session, BotAI, 'shop-unreachable', Speech.lines('town.shop-unreachable'), { priority: 'coordination' });
             }
+            return;
+        }
+
+        if (session.shoppingServicePhase === 'workshop') {
+            craftAtWorkshop(session, bot, target);
+            return;
+        }
+        if (session.shoppingServicePhase === 'improvement') {
+            Improvements.reviewHot(session).then(result => {
+                if (result) { session.shoppingTarget = undefined; session.shoppingServicePhase = undefined;
+                    session.shoppingDoneAnnounced = false; session.plan = 'hunting'; raiseDecision(session, 'town'); }
+            }).catch(error => utils.infoWarn('Improvement', '%s', error));
             return;
         }
 
@@ -535,6 +644,7 @@ module.exports = {
             try {
                 const BotSupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
                 const purchased = await BotSupplyErrand.purchaseAtDestination(bot, companionErrand);
+                if (purchased.pending) return;
                 if (!purchased.ok || Number(purchased.delta) !== Number(companionErrand.amount)) {
                     throw new Error(purchased.reason || 'purchase_delta_mismatch');
                 }
@@ -549,7 +659,7 @@ module.exports = {
                     amount: Number(companionErrand.amount),
                     purchasedAt: Date.now()
                 };
-                WorkflowTelemetry.recordSupply(companionErrand.workflowId, 'return', {
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(companionErrand.workflowId, 'return', {
                     botId: bot.fetchId(),
                     playerId: companionErrand.playerId,
                     itemSelfId: companionErrand.itemId,
@@ -580,7 +690,7 @@ module.exports = {
             ? Speech.lines('town.supply-purchase-failed.short-adena')
             : Speech.lines('town.supply-purchase-failed.unavailable'), { priority: 'coordination' });
                 utils.infoWarn('Shopping', 'requested supply purchase failed for %s: %s', bot.fetchName(), error.message);
-                WorkflowTelemetry.recordSupply(companionErrand.workflowId, 'return', {
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(companionErrand.workflowId, 'return', {
                     botId: bot.fetchId(),
                     playerId: companionErrand.playerId,
                     itemSelfId: companionErrand.itemId,
@@ -593,33 +703,26 @@ module.exports = {
 
         if (companionErrand?.kind === 'market_purchase') {
             let purchaseSucceeded = false;
-            const sellerSession = findStoreSession(companionErrand.target.actorId);
-            const seller = sellerSession?.actor;
-            const store = seller?.fetchPrivateStore?.();
+            const { store, name: sellerName } = targetStore(companionErrand.target);
             try {
-                const storeItem = store?.items?.find((item) => Number(item.selfId) === Number(companionErrand.itemId));
+                const storeItem = store?.items?.find((item) => Number(item.selfId) === Number(companionErrand.itemId)
+                    && (store.afkTrade !== true || Number(item.afkTradeLineId) === Number(companionErrand.lineId)));
+                if (store?.afkTrade === true && !storeItem) throw new Error('afk_trade_stock_changed');
                 const bought = store?.afkTrade === true
                     ? await invoke('GameServer/AfkTrade/AfkTradeService').buyFromShop(
-                        bot.fetchId(), store, companionErrand.itemId, 1,
-                        { expectedPrice: companionErrand.price, coldState: session.coldLifeState }
+                        bot.fetchId(), store, companionErrand.itemId, companionErrand.amount || 1,
+                        { lineId: companionErrand.lineId, expectedPrice: companionErrand.price, coldState: session.coldLifeState,
+                            funding: companionErrand.funding }
                     )
-                    : await TradeService.buyFromStore(bot, store, companionErrand.itemId, 1, {
-                    afterPurchase: sellerSession?.coldMarketState
-                        ? async (purchaseResult) => {
-                            const updatedSeller = await LifeState.applyMarketSale(sellerSession.coldMarketState, {
-                                selfId: companionErrand.itemId,
-                                price: purchaseResult.totalAdena / purchaseResult.qty,
-                                buyerCharacterId: bot.fetchId(),
-                                storeItem
-                            }, purchaseResult.qty);
-                            if (updatedSeller) sellerSession.coldMarketState = updatedSeller;
-                        }
-                        : null
-                    });
+                    : await TradeService.buyFromStore(bot, store, companionErrand.itemId, companionErrand.amount || 1);
+                if (bought.pending) return;
                 const boughtSummary = store?.afkTrade === true
                     ? { qty: bought.amount, name: storeItem?.name || companionErrand.itemName, totalAdena: bought.totalPrice }
                     : bought;
-                if (bought.coldState) session.coldLifeState = bought.coldState;
+                if (bought.coldState) {
+                    session.coldLifeState = bought.coldState;
+                    refreshPartyMemberships([session], invoke);
+                }
                 await withdrawBuyOrderFor(bot, companionErrand.itemId);
                 BotEquipmentUpgrade.applyBestUpgrades(session, { force: true });
                 session.companionEquipmentRetryAt = undefined;
@@ -627,27 +730,18 @@ module.exports = {
                     selfId: companionErrand.itemId,
                     price: boughtSummary.totalAdena / boughtSummary.qty,
                     sourceType: companionErrand.sourceType || 'private_store',
-                    sourceId: store?.ownerId || seller.fetchId()
+                    sourceId: store?.ownerId || companionErrand.target.actorId
                 });
-                session.lastTradeSummary = `bought ${boughtSummary.qty}x ${boughtSummary.name} from ${seller.fetchName()} for ${formatAdena(boughtSummary.totalAdena)}a`;
-                TownChatter.say(session, BotAI, 'market-gear-purchased', Speech.lines('town.market-gear-purchased', { item: boughtSummary.name, seller: seller.fetchName() }),
-                    { values: { item: boughtSummary.name, seller: seller.fetchName() } });
+                session.lastTradeSummary = `bought ${boughtSummary.qty}x ${boughtSummary.name} from ${sellerName} for ${formatAdena(boughtSummary.totalAdena)}a`;
+                TownChatter.say(session, BotAI, 'market-gear-purchased', Speech.lines('town.market-gear-purchased', { item: boughtSummary.name, seller: sellerName }),
+                    { values: { item: boughtSummary.name, seller: sellerName } });
                 purchaseSucceeded = true;
-
-                if (!store.items.some((item) => Number(item.count || 0) > 0) && sellerSession?.coldMarketState) {
-                    const returnState = GoalExecutor.finishMarketVisit(sellerSession.coldMarketState);
-                    if (returnState) {
-                        await Cooldown.transitionToColdState(sellerSession, {
-                            ...returnState,
-                            stats: { ...(returnState.stats || {}), marketStore: null }
-                        }, 'market_sold_out');
-                    }
-                }
             } catch (err) {
                 deferEquipmentRetry(session);
                 session.lastTradeSummary = `could not buy ${companionErrand.itemName || companionErrand.itemId}`;
                 TownChatter.say(session, BotAI, 'market-offer-gone', Speech.lines('town.market-offer-gone'));
             }
+            if (purchaseSucceeded) await invoke('GameServer/Bot/BotSkillTraining').review(session);
             if (purchaseSucceeded && continueEquipmentShopping(session, bot, BotAI, companionErrand)) return;
             this.scheduleRestock(session, bot, Generics, BotAI);
             return;
@@ -660,15 +754,20 @@ module.exports = {
                     .find((candidate) => (
                         Number(candidate.sourceId) === Number(companionErrand.sourceId)
                         && Number(candidate.price) === Number(companionErrand.price)
+                        && ['locX', 'locY', 'locZ'].every(key => candidate[key] == null
+                            || Number(candidate[key]) === Number(companionErrand.target[key]))
                     ));
                 if (!offer) throw new Error('npc_offer_unavailable');
-                const store = {
-                    storeType: 1,
-                    items: [{ selfId: companionErrand.itemId, price: offer.price, count: 1 }]
-                };
-                const bought = await TradeService.buyFromStore(bot, store, companionErrand.itemId, 1, {
-                    expectedUnitPrice: companionErrand.price
-                });
+                const seller = { ...offer, locX: Number(companionErrand.target.locX),
+                    locY: Number(companionErrand.target.locY), locZ: Number(companionErrand.target.locZ) };
+                const result = await invoke('GameServer/Bot/Economy/NpcRestockPlan').purchaseForActor(bot, {
+                    town: offer.town, seller, extras: [{ selfId: companionErrand.itemId,
+                        amount: companionErrand.amount || 1, offer: seller, funding: companionErrand.funding, autoEquip: true }] });
+                if (session.actor !== bot || !LifeState.hotRow(bot.fetchId())) return;
+                const line = result.receipts.flatMap(row => row.lines || [])
+                    .find(row => Number(row.selfId) === Number(companionErrand.itemId));
+                if (!result.ok || !line) throw Error('npc_offer_unavailable');
+                const bought = { qty: line.amount, name: offer.itemName, totalAdena: line.amount * line.unitPrice };
                 await withdrawBuyOrderFor(bot, companionErrand.itemId);
                 BotEquipmentUpgrade.applyBestUpgrades(session, { force: true });
                 session.companionEquipmentRetryAt = undefined;
@@ -689,6 +788,7 @@ module.exports = {
             ? Speech.lines('town.npc-gear-purchase-failed.short-adena')
             : Speech.lines('town.npc-gear-purchase-failed.unavailable'), { priority: 'coordination' });
             }
+            if (purchaseSucceeded) await invoke('GameServer/Bot/BotSkillTraining').review(session);
             if (purchaseSucceeded && continueEquipmentShopping(session, bot, BotAI, companionErrand)) return;
             this.scheduleRestock(session, bot, Generics, BotAI);
             return;
@@ -701,28 +801,27 @@ module.exports = {
 
         let soldToBuyer = false;
 
-        if (session.shoppingTarget?.actorId) {
-            const buyerSession = findStoreSession(session.shoppingTarget.actorId);
-            const buyer = buyerSession?.actor;
-            const store = buyer && buyer.fetchPrivateStore ? buyer.fetchPrivateStore() : null;
+        if (session.shoppingTarget?.actorId || session.shoppingTarget?.recordId) {
+            const { store, actor: buyer, name: buyerName } = targetStore(session.shoppingTarget);
 
             if (store && store.storeType === 3) {
                 try {
                     const result = store.afkTrade === true
-                        ? await sellInventoryToAfk(bot, store, session.coldLifeState)
+                        ? await sellInventoryToAfk(bot, store, session.coldLifeState, session.shoppingTarget.sale || null)
                         : await TradeService.sellInventoryToStore(bot, store, {
                         buyerActor: buyer,
-                        state: session.coldLifeState,
-                        afterTrade: store.budgetBacked === true && buyerSession?.coldMarketState
-                            ? () => LifeState.syncMarketSession(buyerSession, 'hot_bot_market_buy_fill')
-                            : null
+                        state: session.coldLifeState
                         });
-                    if (result.coldState) session.coldLifeState = result.coldState;
+                    if (result.pending) return;
+                    if (result.coldState) {
+                        session.coldLifeState = result.coldState;
+                        refreshPartyMemberships([session], invoke);
+                    }
                     if (result.itemsSold > 0) {
                         soldToBuyer = true;
                         const sample = result.sold.slice(0, 3).map((line) => `${line.qty}x ${line.name}`).join(', ');
-                        session.lastTradeSummary = `sold ${result.itemsSold} to ${buyer.fetchName()} for ${formatAdena(result.totalAdena)}a`;
-                        TownChatter.say(session, BotAI, 'loot-sold', Speech.lines('town.loot-sold', { items: sample, buyer: buyer.fetchName(), adena: formatAdena(result.totalAdena) }));
+                        session.lastTradeSummary = `sold ${result.itemsSold} to ${buyerName} for ${formatAdena(result.totalAdena)}a`;
+                        TownChatter.say(session, BotAI, 'loot-sold', Speech.lines('town.loot-sold', { items: sample, buyer: buyerName, adena: formatAdena(result.totalAdena) }));
                     }
                 } catch (err) {
                     utils.infoWarn("Shopping", "buyer sale failed for %s: %s", bot.fetchName(), err);
@@ -742,29 +841,18 @@ module.exports = {
     },
 
     scheduleRestock(session, bot, Generics, BotAI) {
-        setTimeout(() => {
-            const plan = ShotStock.planForActor(bot);
-            const current = ShotStock.shotAmount(bot, plan);
-            const amount = Math.max(0, ShotStock.PURCHASE_TARGET_AMOUNT - current);
-            const expectedCost = amount * Number(plan.price || 0);
-
-            ShotStock.purchaseActorRestock(bot, {
-                plan,
-                targetAmount: ShotStock.PURCHASE_TARGET_AMOUNT
-            }).then(async (result) => {
-                if (!result.ok) {
-                    TownChatter.say(session, BotAI, 'shots-too-expensive', Speech.lines('town.shots-too-expensive', { item: ShotStock.describe(plan), adena: result.adena || 0, cost: result.cost || expectedCost }),
-                        { priority: 'coordination', values: { item: ShotStock.describe(plan) } });
-                    return;
-                }
-
-                if (result.delta > 0) {
-                    TownChatter.say(session, BotAI, 'shots-restocked', Speech.lines('town.shots-restocked', { count: result.delta, item: ShotStock.describe(plan), cost: formatAdena(result.cost) }));
-                } else {
-                    TownChatter.say(session, BotAI, 'shots-already-stocked', Speech.lines('town.shots-already-stocked', { item: ShotStock.describe(plan) }));
-                }
-                session.dataSendToOthers(ServerResponse.skillStarted(bot, bot.fetchId(), { fetchSelfId: () => 2001, fetchCalculatedHitTime: () => 500, fetchReuseTime: () => 500 }), bot);
-
+        if (session.shoppingRestock) return;
+        let completeRestock;
+        const restockWork = new Promise(resolve => { completeRestock = resolve; });
+        session.shoppingRestock = restockWork;
+        setTimeout(async () => {
+            if (session.actor !== bot || session.plan !== 'shopping' || session.shoppingRestock !== restockWork) {
+                completeRestock();
+                return;
+            }
+            try {
+                const plan = ShotStock.planForActor(bot);
+                const expectedCost = 0;
                 const potionPlan = HealingPotionStock.purchasePotionFor(bot);
                 const potionTown = session.shoppingTarget?.town
                     || session.coldLifeState?.currentRegion
@@ -773,19 +861,32 @@ module.exports = {
                         bot.fetchLocY(),
                         bot.fetchLocZ()
                     )?.name;
-                const potionOffer = potionTown
-                    ? MarketOpportunity.npcOffers(potionPlan.selfId, potionTown)
-                        .filter((offer) => offer.available !== false && Number(offer.price || 0) > 0)
-                        .sort((left, right) => Number(left.price) - Number(right.price))[0]
-                    : null;
-                const potionResult = potionOffer
-                    ? await HealingPotionStock.purchaseActorRestock(bot, {
-                        potion: potionPlan,
-                        unitPrice: potionOffer.price
-                    })
-                    : { ok: false, reason: 'no_local_offer' };
-                if (potionResult.ok && potionResult.changed) {
-                    TownChatter.say(session, BotAI, 'healing-potions-restocked', Speech.lines('town.healing-potions-restocked', { count: potionResult.amount, item: potionResult.potion.name, reserve: formatAdena(potionResult.reserve) }));
+                const potionPrice = HealingPotionStock.localNpcPrice(potionPlan, potionTown);
+                const NpcRestock = invoke('GameServer/Bot/Economy/NpcRestockPlan');
+                const shotQuote = NpcRestock.quoteFor(plan.selfId, potionTown);
+                const board = await ShotStock.purchaseActorRestock(bot, { plan, town: potionTown || null,
+                    unitPrice: shotQuote?.price, potionUnitPrice: potionPrice || undefined, skipNpc: true });
+                if (session.actor !== bot || !LifeState.hotRow(bot.fetchId())) return;
+                const basket = await NpcRestock.purchaseForActor(bot, { town: potionTown });
+                if (session.actor !== bot || !LifeState.hotRow(bot.fetchId())) return;
+                const lines = basket.receipts.flatMap(row => row.lines || []);
+                const potion = lines.find(row => Number(row.selfId) === Number(potionPlan.selfId));
+                if (potion) TownChatter.say(session, BotAI, 'healing-potions-restocked', Speech.lines('town.healing-potions-restocked', {
+                    count: potion.amount, item: potionPlan.name, reserve: formatAdena(HealingPotionStock.operationalReserve(bot)) }));
+                const shot = lines.find(row => Number(row.selfId) === Number(plan.selfId));
+                const result = { ok: basket.ok && board.ok, delta: Number(board.delta || 0) + Number(shot?.amount || 0),
+                    cost: Number(board.cost || 0) + Number(shot?.amount || 0) * Number(shot?.unitPrice || 0),
+                    adena: Number(bot.backpack.fetchItemFromSelfId(57)?.fetchAmount?.() || 0) };
+                if (!result.ok) {
+                    TownChatter.say(session, BotAI, 'shots-too-expensive', Speech.lines('town.shots-too-expensive', { item: ShotStock.describe(plan), adena: result.adena || 0, cost: result.cost || expectedCost }),
+                        { priority: 'coordination', values: { item: ShotStock.describe(plan) } });
+                } else {
+                    if (result.delta > 0) {
+                        TownChatter.say(session, BotAI, 'shots-restocked', Speech.lines('town.shots-restocked', { count: result.delta, item: ShotStock.describe(plan), cost: formatAdena(result.cost) }));
+                    } else {
+                        TownChatter.say(session, BotAI, 'shots-already-stocked', Speech.lines('town.shots-already-stocked', { item: ShotStock.describe(plan) }));
+                    }
+                    session.dataSendToOthers(ServerResponse.skillStarted(bot, bot.fetchId(), { fetchSelfId: () => 2001, fetchCalculatedHitTime: () => 500, fetchReuseTime: () => 500 }), bot);
                 }
                 if (session.coldLifeState) {
                     session.coldLifeState = {
@@ -793,13 +894,20 @@ module.exports = {
                         adena: Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || 0),
                         inventory: LifeState.inventorySummaryFromItems(bot.backpack?.fetchItems?.() || [])
                     };
+                    refreshPartyMemberships([session], invoke);
                 }
-            }).catch((err) => {
-                utils.infoWarn('Shopping', 'shot restock failed for %s: %s', bot.fetchName(), err.message);
-            });
+            } catch (err) {
+                utils.infoWarn('Shopping', 'consumable restock failed for %s: %s', bot.fetchName(), err.message);
+            } finally {
+                completeRestock();
+            }
         }, 4000);
 
-        setTimeout(() => {
+        setTimeout(async () => {
+            await restockWork;
+            if (session.actor !== bot || session.plan !== 'shopping' || session.shoppingRestock !== restockWork) return;
+            if (!LifeState.hotRow(bot.fetchId())) return;
+            session.shoppingRestock = undefined;
             const companionResume = session.resumeAfterShopping;
             const returningToCompanion = session.partyCompanion === true && companionResume?.followPlayerSession?.actor?.fetchIsOnline?.();
             const townBuffVisit = HotTownRebuff.syncVisit(session, bot, BotAI);
@@ -808,6 +916,9 @@ module.exports = {
             session.plan = rebuffBeforeLeaving
                 ? 'getting_buffed'
                 : (returningToCompanion ? 'following' : 'hunting');
+            // ARCH-NOTE: shopping may finish with a buff stop; that continuation
+            // belongs to this town event and returning from the buff raises nothing.
+            if (!returningToCompanion) raiseDecision(session, 'town');
             Promise.resolve(BotEventJournal.record({
                 botId: bot.fetchId(),
                 eventType: 'shopping_completed',
@@ -887,6 +998,8 @@ module.exports = {
             session.plan = session.partyCompanion === true && leaderSession?.actor?.fetchIsOnline?.()
                 ? 'following'
                 : 'hunting';
+            // ARCH-NOTE: hidden supply errands already advance in their cold round.
+            if (session.plan === 'hunting' && !wasSupplyErrand) raiseDecision(session, 'town');
             session.shoppingDoneAnnounced = false;
             session.shoppingTarget = undefined;
             session.companionShopping = undefined;
@@ -895,6 +1008,7 @@ module.exports = {
             clearShoppingServiceState(session);
             if (session.coldLifeState) {
                 session.coldLifeState = { ...session.coldLifeState, activity: session.plan };
+                refreshPartyMemberships([session], invoke);
             }
             const restoreHot = () => {
                 session.supplyErrandPhase = undefined;
@@ -918,7 +1032,7 @@ module.exports = {
                     TownChatter.say(session, BotAI, 'supply-return', options.deliveryReady === true
             ? Speech.lines('town.supply-return.ready')
             : Speech.lines('town.supply-return.empty'), { priority: 'coordination' });
-                    WorkflowTelemetry.recordSupply(workflowId, 'return', {
+                    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(workflowId, 'return', {
                         botId: bot.fetchId(),
                         playerId: leaderSession?.actor?.fetchId?.() || null,
                         deliveryReady: options.deliveryReady === true
@@ -932,7 +1046,7 @@ module.exports = {
                 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
                 Promise.resolve().then(() => PopulationService.markHot(session, 'supply_errand_leader_offline')).catch(() => null).then(() => {
                     restoreHot();
-                    WorkflowTelemetry.recordSupply(workflowId, 'return', {
+                    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(workflowId, 'return', {
                         botId: bot.fetchId(),
                         deliveryReady: false,
                         leaderOnline: false

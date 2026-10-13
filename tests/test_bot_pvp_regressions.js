@@ -1,5 +1,17 @@
+require('./helpers/databaseIsolation');
+delete process.env.L2NODE_CONFIG_FILE;
+delete process.env.L2NODE_SHARED_CONFIG_FILE;
+delete process.env.N53_GAME_ROOT;
+const fixture = require('./helpers/isolatedSocialDatabase')('late-pvp-membership');
+process.once('exit', () => require('node:fs').rmSync(fixture.directory, { recursive: true, force: true }));
 const assert = require('assert');
 require('../src/Global');
+fixture.assertConfigured(options.default);
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const World = invoke('GameServer/World/World');
 const Defense = invoke('GameServer/Bot/AI/BotPvpDefense');
 const Threats = invoke('GameServer/Bot/AI/BotPvpThreats');
@@ -53,7 +65,8 @@ function actor(id, options = {}) {
             fetchCombats: () => true },
         automation: { abortAll() { value.moving = false; }, replenishVitals() {} },
         skillset: { fetchSkills: () => value.skills, get skills() { return value.skills; }, fetchSkill: id => value.skills.find(skill => skill.fetchSelfId() === id) },
-        backpack: { fetchItems: () => [{ fetchSelfId: () => 999999, fetchPrice: () => value.gear, fetchEquipped: () => true }],
+        backpack: { fetchItems: () => [{ fetchSelfId: () => 999999, fetchPrice: () => value.gear, fetchEquipped: () => true,
+            fetchSlot: () => 7, fetchRank: () => value.rank || 'none' }],
             fetchEquippedArmors: () => [] }
     });
 }
@@ -61,7 +74,9 @@ function actor(id, options = {}) {
 function session(actor, options = {}) {
     const session = { actor, accountId: `bot_${actor.id}`, aiActive: true, plan: 'hunting', packets: [],
         persona: { traits: { caution: 0.3, assertiveness: 0.8, empathy: 0.4, resilience: 0.8 } }, ...options,
+        fetchAccountId() { return this.accountId; },
         dataSendToOthers(packet) { this.packets.push(packet); } };
+    if (session.accountId === 'player') session.accountId = `player_${actor.id}`;
     actor.session = session;
     return session;
 }
@@ -73,7 +88,8 @@ function setup(options = {}, mode = 'hunting') {
     const own = session(bot, { plan: mode });
     const enemy = actor(nextId++, { flag: 1 });
     const attacker = session(enemy, { accountId: 'player', aiActive: false });
-    World.user = { sessions: [own, attacker] };
+    World.user = { sessions: [], revision: 0 };
+    World.insertUser(own); World.insertUser(attacker);
     World.npc = { spawns: [] };
     World.fetchNpcsInRadius = () => [];
     return { bot, own, enemy, attacker };
@@ -120,10 +136,12 @@ Potions.tryUseInCombat = () => false;
     assert(!own.pvpDefense);
 }
 {
-    const { bot, own, enemy } = setup({ level: 80 });
+    // U26: the fight is decided one against one (levels are hidden); the second
+    // attacker joins the encounter already under way.
+    const { bot, own, enemy } = setup({ cp: 100 });
     const extra = actor(nextId++, { level: 45, flag: 1 });
-    World.user.sessions.push(session(extra, { accountId: 'player', aiActive: false }));
-    Threats.record(bot, enemy, now); Threats.record(bot, extra, now); tick(own);
+    World.insertUser(session(extra, { accountId: 'player', aiActive: false }));
+    Threats.record(bot, enemy, now); tick(own); Threats.record(bot, extra, now); tick(own);
     extra.hp = 20;
     extra.effects.sleep = { key: 'sleep', type: 'debuff', expiresAt: Date.now() + 10000 };
     tick(own);
@@ -147,12 +165,14 @@ Potions.tryUseInCombat = () => false;
     const solo = Risk.defenseDecision(own, [enemy]);
     const ally = session(actor(nextId++, { level: 80 }));
     own.coldLifeState = ally.coldLifeState = { party: { partyId: 'friendly' } };
-    World.user.sessions.push(ally);
+    World.insertUser(ally);
+    World.refreshPartyMemberships([own]);
     const grouped = Risk.defenseDecision(own, [enemy]);
     assert(grouped.score > solo.score, 'nearby allies count toward expected success');
     const guard = session(actor(nextId++, { level: 80 }));
     attacker.coldLifeState = guard.coldLifeState = { party: { partyId: 'hostile' } };
-    World.user.sessions.push(guard);
+    World.insertUser(guard);
+    World.refreshPartyMemberships([attacker]);
     assert(Risk.defenseDecision(own, [enemy]).score < grouped.score, 'a weak target is not evaluated separately from its party');
     bot.fetchCollectivePAtk = () => 200;
     const plain = Risk.combatStrength(bot).power;
@@ -170,7 +190,9 @@ Potions.tryUseInCombat = () => false;
 }
 {
     Chat.reset(); Ambient.reset();
-    const { bot, own, enemy } = setup(); enemy.level = 10;
+    // U26: the remembered killer is feared; a visibly better weapon (not a hidden
+    // level) is what makes the revenge winnable.
+    const { bot, own, enemy } = setup({ rank: 'c' });
     grievance(own, enemy);
     Ambient.record(own, 'conversation', now);
     assert(Chat.canSend(own, 'revenge', now), 'ordinary conversation does not consume the conflict budget');
@@ -190,7 +212,9 @@ Potions.tryUseInCombat = () => false;
     let populationReads = 0;
     for (let i = 0; i < 10000; i++) {
         const a = actor(nextId++);
-        World.user.sessions.push({ get actor() { populationReads++; return a; } });
+        const registered = session(a);
+        Object.defineProperty(registered, 'actor', { get() { populationReads++; return a; } });
+        World.insertUser(registered);
     }
     const clock = Date.now;
     try {
@@ -200,7 +224,21 @@ Potions.tryUseInCombat = () => false;
         for (let i = 0; i < 500; i++) { Threats.members(own); Index.actor(own.actor.id); }
         assert.strictEqual(populationReads, 0, '500 lookups must not rescan 10,000 unrelated actors');
         now += Index.REFRESH_MS + 1; Threats.members(own);
-        assert(populationReads > 0, 'membership snapshots refresh on a bounded interval');
+        // ARCH-NOTE: native membership is published by its addressed writers;
+        // only the explicit legacy injected-world branch polls a snapshot.
+        assert.strictEqual(populationReads, 0, 'native membership does not rescan unrelated actors after the legacy interval');
+        const joined = session(actor(nextId++));
+        World.insertUser(joined);
+        own.coldLifeState = joined.coldLifeState = { party: { partyId: 'addressed_membership' } };
+        World.refreshPartyMemberships([own, joined]);
+        assert.deepStrictEqual(Threats.members(own), [own, joined], 'a published join is visible immediately in original registration order');
+        now += Index.REFRESH_MS + 1;
+        assert.deepStrictEqual(Threats.members(own), [own, joined], 'elapsed time preserves the published membership');
+        joined.coldLifeState = { party: { partyId: 'other_membership' } };
+        World.refreshPartyMemberships([joined]);
+        assert.deepStrictEqual(Threats.members(own), [own], 'a published leave removes the original session immediately');
+        assert.deepStrictEqual(Threats.members(joined), [joined], 'a published leave cannot inherit the old party');
+        assert.strictEqual(populationReads, 0, 'addressed join and leave never inspect the 10,000 unrelated actors');
     } finally { Date.now = clock; }
 }
 {
@@ -209,8 +247,8 @@ Potions.tryUseInCombat = () => false;
         Chat.reset();
         const { bot, own, enemy } = setup(); enemy.level = 10;
         grievance(own, enemy);
-        const strong = actor(nextId++, { level: 80, gear: 10000000, flag: 1 });
-        World.user.sessions.push(session(strong, { accountId: 'player2' }));
+        const strong = actor(nextId++, { rank: 'c', flag: 1 }); // U26: visibly stronger, not a hidden level and price
+        World.insertUser(session(strong, { accountId: 'player2' }));
         Chat.record(session(actor(nextId++)), 'revenge', now);
         Revenge.request(own, enemy, 'revenge', ['Pending revenge warning.'], true, now, () => 0);
         assert(own.pendingPvpProvocation);
@@ -230,7 +268,8 @@ Potions.tryUseInCombat = () => false;
     Chat.reset();
 }
 {
-    const { bot, own, enemy } = setup({ level: 10 }); enemy.level = 80;
+    // U26: visibly stronger (not a hidden level); his own summon matches the bot's.
+    const { bot, own, enemy } = setup(); enemy.rank = 'c'; enemy.summon = { isDead: () => false };
     const summon = actor(nextId++, { level: 10, x: 400, controlMode: 'attack', attackTargetId: 12345, hits: true, moving: true });
     summon.fetchOwnerId = () => bot.id;
     summon.fetchKind = () => 'Summon';
@@ -266,7 +305,8 @@ Potions.tryUseInCombat = () => false;
             const leader = session(actor(nextId++), { accountId: 'human' });
             own.partyCompanion = true; own.followPlayerSession = leader;
             const ally = session(actor(nextId++), { partyCompanion: true, followPlayerSession: leader });
-            World.user.sessions.push(leader, ally);
+            World.insertUser(leader); World.insertUser(ally);
+            World.refreshPartyMemberships([own]);
             Index.invalidate();
             bot.skills = [{ fetchSelfId: () => 1069, fetchSkillType: () => Rules.EFFECT,
                 fetchTargetKind: () => 'enemy', fetchSemantic: () => ({ effect, effectType: 'debuff', sourceTarget: 'one' }),
@@ -283,6 +323,7 @@ Potions.tryUseInCombat = () => false;
             assert(new Attack().blockedPvpDefense(ally, ally.actor, enemy), 'queued damage must respect the reservation');
             assert(!Threats.protectedTarget(ally, enemy, now + 8001), 'protection still expires');
             ally.followPlayerSession = session(actor(nextId++), { accountId: 'other_leader' });
+            World.refreshPartyMemberships([ally]);
             assert(!Threats.protectedTarget(ally, enemy, now), 'leaving the party drops its reservations immediately');
         }
     }

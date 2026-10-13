@@ -41,7 +41,8 @@ function record(source, mob, now = Date.now(), rng = Math.random) {
         !invoke('GameServer/World/ArenaCombatRules').isArenaParticipant(attacker) &&
         !invoke('GameServer/World/ArenaCombatRules').isArenaParticipant(claim.owner)) {
         claim.memoryEvent = { key: `mob:${randomUUID()}`, sourceId: Number(claim.owner.fetchId()),
-            targetId: Number(attacker.fetchId()), type: 'mob_contested', at: now };
+            targetId: Number(attacker.fetchId()), type: 'mob_contested', at: now,
+            lossExp: Math.max(0, Number(mob.fetchRewardExp?.() || mob.rewards?.exp || mob.model?.exp || 0)) };
         claim.memoryEvent = invoke('GameServer/Clan/ClanSocialEvidence').attach(claim.memoryEvent,
             claim.owner, attacker, claim.memoryEvent.key, 'aggression');
     }
@@ -63,7 +64,8 @@ function record(source, mob, now = Date.now(), rng = Math.random) {
     const lines = Voice.trait(session, 'assertiveness') > 0.6
         ? [`${name}, I started on this mob. Back off.`, `Find your own mob, ${name}. I'm not sharing this one.`]
         : [`${name}, I was already fighting this mob. Please find another.`, `I don't like you taking my mob, ${name}.`];
-    const attack = rng() < attackChance(session, attacker, now) && Risk.defenseDecision(session, [attacker]).action === 'fight';
+    const attack = rng() < attackChance(session, attacker, now)
+        && Risk.defenseDecision(session, [attacker], { key: Revenge.decisionKey(session, attacker, 'mob_competition', now) }).action === 'fight';
     const started = Revenge.request(session, attacker, 'mob_competition', lines, attack, now, rng);
     return started;
 }

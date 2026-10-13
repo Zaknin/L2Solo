@@ -1,0 +1,164 @@
+'use strict';
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { Worker } = require('node:worker_threads');
+const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
+const timestamp = Date.now();
+const epoch = 'party-goal-native';
+const members = [701, 702].map(characterId => ({ characterId, phase: 'cold', updatedAt: timestamp,
+    level: 20, activity: 'resting', adena: 10000, inventory: {},
+    spotId: 'execution-ground', stats: { classId: 0 }, timing: { nextResolveAt: timestamp + 3600000 },
+    simulation: { ownerId: 'legacy_main', revision: 2, leaseId: null },
+    vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 } }));
+const party = { partyId: 'goal-worker', memberIds: [701, 702], leaderId: 701,
+    stats: { objective: { clanGoalKey: 'clan-native', spotId: 'protected' } } };
+const observer = String.raw`
+const assert=require('node:assert/strict');
+parentPort.on('message',message=>{
+    if(!message.queryProbe)return;
+    if(message.queryProbe==='hold-meeting'||message.queryProbe==='hold-refresh') {
+        const held={input:{mode:message.queryProbe==='hold-meeting'?'meeting':'refresh',state:kernel.states.get(701).state}};
+        occupationPlanner.waiting.set(701,held);
+        module.exports.heldMeeting=held;
+    }
+    if(message.queryProbe==='release-meeting'||message.queryProbe==='release-refresh') {
+        assert.strictEqual(occupationPlanner.waiting.get(701),module.exports.heldMeeting);
+        occupationPlanner.waiting.delete(701);
+    }
+    if(message.queryProbe==='hold-lifecycle') {
+        kernel.commanding.add(701);kernel.commandStartedAt.set(701,{kind:'lifecycle'});
+    }
+    if(message.queryProbe==='release-lifecycle') {
+        kernel.commanding.delete(701);kernel.commandStartedAt.delete(701);
+    }
+    parentPort.postMessage({probe:message.queryProbe,slots:[...occupationPlanner.slots.values()].map(entry=>({
+        id:entry.id,recipeBook:entry.input.recipeBook,knownShotRecipes:entry.input.knownShotRecipes,
+        canonical:entry.input.state===kernel.states.get(entry.id)?.state}))});
+});`;
+const wrapper = String.raw`
+const fs=require('node:fs'),path=require('node:path'),Module=require('node:module');
+const {parentPort,workerData}=require('node:worker_threads');
+const loaded=new Module(workerData.workerPath,module);loaded.filename=workerData.workerPath;
+loaded.paths=Module._nodeModulePaths(path.dirname(workerData.workerPath));
+loaded._compile(fs.readFileSync(workerData.workerPath,'utf8')+workerData.observer,workerData.workerPath);`;
+const worker = new Worker(wrapper, { eval: true,
+    workerData: { workerEpoch: epoch, observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') },
+    resourceLimits: { maxOldGenerationSizeMb: 256 } });
+const messages = []; let fault;
+worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });
+async function wait(predicate) {
+    const deadline = Date.now() + 12000;
+    while (!messages.some(predicate)) {
+        if (fault) throw fault;
+        if (Date.now() > deadline) throw Error('party goal native reply timeout');
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return messages.find(predicate);
+}
+function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, epoch, payload, id)); }
+(async () => {
+    await wait(message => message.type === 'ready' && message.payload.phase === 'loaded');
+    post('init', { config: { pvpAggression: 0 } }, 'init');
+    await wait(message => message.type === 'ready' && message.payload.phase === 'running');
+    post('pause', {}, 'pause');
+    post('snapshot_page', { rows: members.map(state => ({ state, context: { recipeBook: null, knownShotRecipes: [999] } })),
+        initial: true, done: true, ack: true }, 'snapshot');
+    await wait(message => message.msgId === 'snapshot');
+    const request = { party, members, escrows: [0, 0], recipeKnowledge: members.map(() => ({ recipeBook: null, knownShotRecipes: [] })),
+        timestamp, replyBy: Date.now() + 5000 };
+    post('party_goal_request', request, 'goals');
+    const response = await wait(message => message.type === 'party_goal_result' && message.msgId === 'goals');
+    assert.equal(response.payload.ok, true, response.payload.reason);
+    assert.deepEqual(response.payload.joint.objective, party.stats.objective);
+    assert.equal(response.payload.joint.memberGoals.length, 2);
+    assert.deepEqual(response.payload.sources, Calculation.sources(members));
+    assert(!messages.some(message => message.type === 'fault'), 'native worker loads no forbidden dependency');
+    worker.postMessage({ queryProbe: 'canonical' });
+    const prepared = await wait(message => message.probe === 'canonical');
+    assert.equal(prepared.slots.filter(row => row.id > 0).length, 2);
+    assert(prepared.slots.filter(row => row.id > 0).every(row => row.knownShotRecipes.length === 0),
+        'current query knowledge replaces the old worker recipe context');
+    const incomeSpot = { id: '-10_10', minLevel: 14, maxLevel: 14, avgLevel: 14, density: 20,
+        tagsAuthoritative: true, tags: ['starter', 'normal_hp'], npcEntries: [], center: { locX: 0, locY: 0 } };
+    post('catalog_page', { catalog: 'spots', rows: [incomeSpot], done: true }, 'income-spots');
+    const incomeMembers = members.map(member => ({ ...member, spotId: incomeSpot.id, updatedAt: timestamp + 10 }));
+    post('party_goal_request', { ...request, members: incomeMembers, party: { ...party, spotId: incomeSpot.id,
+        startedAt: timestamp - 600000, stats: { objective: { spotId: incomeSpot.id } } },
+        replyBy: Date.now() + 5000 }, 'income');
+    const income = await wait(message => message.type === 'party_goal_result' && message.msgId === 'income');
+    assert.equal(income.payload.ok, true, income.payload.reason);
+    assert.equal(income.payload.joint.lastIncomeReviewAt, timestamp);
+    assert.equal(income.payload.joint.incomeReviews.length, members.length);
+    assert(Protocol.validateEnvelope(income, 'worker').ok, 'native worker income packet is admitted on main');
+    assert(income.payload.joint.incomeReviews.every(row => row.partySource === 'table_party'),
+        'the worker uses its planning catalogue for native party forecasts');
+    const changed = structuredClone(members); changed[0].updatedAt++; changed[0].stats.partyRequest = { spotId: 'fresh-request' };
+    post('party_goal_request', { ...request, members: changed, replyBy: Date.now() + 5000 }, 'changed');
+    const fresh = await wait(message => message.type === 'party_goal_result' && message.msgId === 'changed');
+    assert.equal(fresh.payload.ok, true, fresh.payload.reason);
+    assert.equal(fresh.payload.joint.memberGoals[0].spotId, 'fresh-request', 'complete new input supersedes old mirror');
+    assert.deepEqual(fresh.payload.sources, Calculation.sources(changed));
+    worker.postMessage({ queryProbe: 'private-release' });
+    const released = await wait(message => message.probe === 'private-release');
+    assert(released.slots.every(row => row.id <= 0 || row.canonical), 'no completed planner slot retains a private query snapshot');
+    worker.postMessage({queryProbe:'hold-meeting'});
+    await wait(message=>message.probe==='hold-meeting');
+    post('party_goal_request',{...request,replyBy:Date.now()+5000},'during-meeting');
+    const blocked=await wait(message=>message.type==='party_goal_result'&&message.msgId==='during-meeting');
+    assert.equal(blocked.payload.reason,'party_goal_member_busy','party advice cannot cancel native trade preparation');
+    worker.postMessage({queryProbe:'release-meeting'});
+    await wait(message=>message.probe==='release-meeting');
+    worker.postMessage({queryProbe:'hold-refresh'});
+    await wait(message=>message.probe==='hold-refresh');
+    post('party_goal_request',{...request,replyBy:Date.now()+5000},'during-refresh');
+    const refresh=await wait(message=>message.type==='party_goal_result'&&message.msgId==='during-refresh');
+    assert.equal(refresh.payload.reason,'party_goal_member_busy','party advice cannot drop pending economic refresh');
+    worker.postMessage({queryProbe:'release-refresh'});
+    await wait(message=>message.probe==='release-refresh');
+    worker.postMessage({queryProbe:'hold-lifecycle'});
+    await wait(message=>message.probe==='hold-lifecycle');
+    post('party_goal_request',{...request,replyBy:Date.now()+5000},'during-lifecycle');
+    const lifecycle=await wait(message=>message.type==='party_goal_result'&&message.msgId==='during-lifecycle');
+    assert.equal(lifecycle.payload.ok,true,'a lifecycle command waiting for main review may request party advice');
+    worker.postMessage({queryProbe:'release-lifecycle'});
+    await wait(message=>message.probe==='release-lifecycle');
+    const page = (pageIndex, id, replyBy = Date.now() + 5000) => post('party_goal_request', {
+        ...(pageIndex === 0 ? { party } : { partyId: party.partyId }), members: [members[pageIndex]], escrows: [0],
+        timestamp, replyBy, pageIndex, pageCount: 2 }, id);
+    const pageDeadline = Date.now() + 5000;
+    page(0, 'paged', pageDeadline); page(1, 'paged', pageDeadline);
+    const paged = await wait(message => message.type === 'party_goal_result' && message.msgId === 'paged');
+    assert.equal(paged.payload.ok, true, paged.payload.reason);
+    assert.deepEqual(paged.payload.sources, Calculation.sources(members));
+    page(1, 'out-of-order');
+    const disordered = await wait(message => message.type === 'party_goal_result' && message.msgId === 'out-of-order');
+    assert.equal(disordered.payload.reason, 'party_goal_page_order');
+    page(0, 'missing-page', Date.now() + 100);
+    const missing = await wait(message => message.type === 'party_goal_result' && message.msgId === 'missing-page');
+    assert.equal(missing.payload.reason, 'party_goal_expired');
+    page(0, 'duplicate-page', pageDeadline); page(0, 'duplicate-page', pageDeadline);
+    const duplicate = await wait(message => message.type === 'party_goal_result' && message.msgId === 'duplicate-page');
+    assert.equal(duplicate.payload.ok, false); assert.equal(duplicate.payload.reason, 'party_goal_page_changed');
+    const slotDeadline = Date.now() + 200;
+    page(0, 'slot-a', slotDeadline); page(0, 'slot-b', slotDeadline); page(0, 'slot-c', slotDeadline);
+    const busy = await wait(message => message.type === 'party_goal_result' && message.msgId === 'slot-c');
+    assert.equal(busy.payload.reason, 'party_goal_busy', 'partial assemblies share the same admission bound');
+    await wait(message => message.type === 'party_goal_result' && message.msgId === 'slot-a');
+    await wait(message => message.type === 'party_goal_result' && message.msgId === 'slot-b');
+    const nine = Array.from({ length: 9 }, (_, i) => ({ ...members[0], characterId: 710 + i,
+        stats: { ...members[0].stats, transportFixture: 'x'.repeat(140000) } }));
+    const largeParty = { ...party, leaderId: 710, memberIds: nine.map(member => member.characterId) };
+    const largeDeadline = Date.now() + 5000;
+    for (let i = 0; i < nine.length; i++) post('party_goal_request', {
+        ...(i === 0 ? { party: largeParty } : { partyId: largeParty.partyId }),
+        members: [nine[i]], escrows: [0], timestamp, replyBy: largeDeadline, pageIndex: i, pageCount: 9 }, 'nine');
+    const largest = await wait(message => message.type === 'party_goal_result' && message.msgId === 'nine');
+    assert.equal(largest.payload.ok, true, largest.payload.reason);
+    assert.equal(largest.payload.joint.memberGoals.length, 9, 'complete maximum roster survives multiple pages');
+    post('party_goal_request', { ...request, replyBy: timestamp }, 'expired');
+    const expired = await wait(message => message.type === 'party_goal_result' && message.msgId === 'expired');
+    assert.equal(expired.payload.ok, false);
+    console.log('PASS native 256MiB worker: complete source replacement, protected goal, expired request; wire bytes',
+        Protocol.byteLength(Protocol.envelope('party_goal_request', epoch, request)), Protocol.byteLength(response));
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => worker.terminate());

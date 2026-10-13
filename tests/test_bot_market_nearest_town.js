@@ -1,11 +1,16 @@
 const assert = require('assert');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('test_bot_market_nearest_town');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
+const Database = invoke('Database');
+Database.init();
 
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const OfferOrder = require('../src/GameServer/Bot/Economy/OfferOrder');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpcPlanningCatalog');
 const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
@@ -46,16 +51,24 @@ function mainThreadPlanning() {
             'Talking Island': { sourceType: 'npc', town: 'Talking Island', price: 74, locX: -84318, locY: 244579, available: true, count: Infinity },
             'Gludio': { sourceType: 'npc', town: 'Gludio', price: 90, locX: -14225, locY: 123540, available: true, count: Infinity }
         };
-        MarketOpportunity.bestOffer = (_selfId, { town }) => sellers[town] || null;
+        // The planner asks once for its towns; the one order weighs the trip.
+        MarketOpportunity.bestOffer = (_selfId, { towns, cost, accept }) => OfferOrder.best(
+            towns.map((town) => sellers[town]).filter((offer) => offer && accept(offer)), { cost });
         const target = { selfId: 48, template: { name: 'Short Gloves' } };
         const nearIsland = { characterId: 8, loc: townCenters['Talking Island'] };
         assert.strictEqual(Planner.marketOfferForTarget(target, nearIsland)?.town, 'Talking Island',
             'a market search near Talking Island buys there at the same price');
         assert.strictEqual(Planner.marketOfferForTarget(target, { characterId: 9, loc: townCenters['Dark Elven Village'] })?.town,
             'Dark Elven Village');
+        // The one order weighs the trip (б5): price plus the trip's time at the
+        // buyer's hour and the gatekeeper fee (from Talking Island about 21k
+        // to Gludio, 24k to the Dark Elven Village).
         sellers['Talking Island'] = { ...sellers['Talking Island'], price: 80 };
-        assert.strictEqual(Planner.marketOfferForTarget(target, nearIsland)?.town, 'Dark Elven Village',
-            'a lower price still wins over distance');
+        assert.strictEqual(Planner.marketOfferForTarget(target, nearIsland)?.town, 'Talking Island',
+            'a few Adena cheaper does not pay for the trip');
+        sellers['Talking Island'] = { ...sellers['Talking Island'], price: 30000 };
+        assert.strictEqual(Planner.marketOfferForTarget(target, nearIsland)?.town, 'Gludio',
+            'a price lower by more than the trip wins: the lowest price with the trip');
     } finally {
         MarketOpportunity.bestOffer = originalBestOffer;
     }
@@ -138,7 +151,15 @@ function selectionPlansFromHuntingSpot() {
     const { selectAcquisitionPlan } = invoke('GameServer/Bot/AI/GearPlanSelection');
     const spots = [{ id: 'origin-spot', center: townCenters['Orc Village'] }];
     const wanderer = { ...npcKitState(townCenters['Dwarven Village']), spotId: 'origin-spot', phase: 'cold', activity: 'hunting' };
-    const plan = selectAcquisitionPlan(wanderer, null, { spots, occupancy: {} }).acquisitionPlan;
+    // Since d4322a21 the selection plans gear only when the bot's economy
+    // chose that gear wish as its activity; here the economy's own focused
+    // gear wish is the chosen purchase.
+    const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(wanderer, { spots, occupancy: {} });
+    const gear = economy.network.queue.find((wish) => wish.key === economy.network.focus?.[0] && wish.object?.slot);
+    assert(gear, 'the fixture economy focuses a gear wish');
+    const preparedEconomy = { ...economy, network: { ...economy.network,
+        activity: { ...economy.network.activity, kind: 'buy', activity: 'shopping', rootKey: gear.key } } };
+    const plan = selectAcquisitionPlan(wanderer, null, { spots, occupancy: {}, preparedEconomy }).acquisitionPlan;
     assert.strictEqual(plan?.market?.town, 'Orc Village',
         `the selection must buy near the hunting ground, got ${plan?.strategy} ${plan?.market?.town}`);
 }
@@ -152,4 +173,4 @@ function selectionPlansFromHuntingSpot() {
     companionSupplyErrand();
     await clanWorkerPlanning();
     console.log('Bot market nearest town checks passed');
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+})().catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => { Database.close(); require('node:fs').rmSync(isolated.directory, { recursive: true, force: true }); });

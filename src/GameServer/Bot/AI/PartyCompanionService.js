@@ -1,8 +1,10 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const ServerResponse = invoke('GameServer/Network/Response');
 const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const PartyCombatState = invoke('GameServer/Bot/AI/PartyCombatState');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const BotEventJournal = invoke('GameServer/Bot/AI/BotEventJournal');
+const Karma = invoke('GameServer/Karma');
 
 const DEFAULT_PARTY_DISTRIBUTION = 1;
 const DEFAULT_PARTY_SETTINGS = {
@@ -160,6 +162,13 @@ function setDistribution(leaderSession, distribution) {
 function botSessions() {
     const BotManager = invoke('GameServer/Bot/BotManager');
     return BotManager.sessions || [];
+}
+
+// A companion with karma does not follow the player into a town (peace zone):
+// it waits where it is and catches up once the player is outside a town again.
+function staysOutOfTown(companion, destination) {
+    return Karma.closesTowns(companion?.fetchKarma?.())
+        && utils.isInPeaceZone(Number(destination?.locX), Number(destination?.locY));
 }
 
 function isActiveCompanion(session, leaderSession) {
@@ -842,14 +851,16 @@ function cancelCompanionAction(companionSession) {
     invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(companionSession, actor);
 }
 
-function detachState(companionSession, plan = 'hunting') {
+function detachState(companionSession, plan = 'hunting', preserveTakeover = false) {
     try { invoke('GameServer/Bot/BotTradeService').cleanup(companionSession, 'party_detach'); } catch (_) { /* optional hot trade modules */ }
     invoke('GameServer/Bot/AI/HotBotPolicyOverlay').clearForPartyDetach(companionSession);
     cancelCompanionAction(companionSession);
     companionSession.plan = plan;
     companionSession.followPlayerSession = null;
     companionSession.partyCompanion = false;
+    if (!preserveTakeover) invoke('GameServer/Bot/Population/BotLifeState').releasePlayerPartyTakeover(companionSession);
     invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
+    refreshPartyMemberships([companionSession], invoke);
     companionSession.botStay = false;
     companionSession.stayLocation = null;
     companionSession.currentTargetId = undefined;
@@ -888,6 +899,8 @@ const PartyCompanionService = {
     formationSlotFor,
 
     formationTargetFor,
+
+    staysOutOfTown,
 
     beginRegroup,
     holdParty,
@@ -953,11 +966,28 @@ const PartyCompanionService = {
         return false;
     },
 
-    resolveLootSession(looterSession, selfId, target) {
+    resolveLootSession(looterSession, selfId, target, { spoil = false } = {}) {
         const leaderSession = partyLeaderSession(looterSession);
         const members = lootMembersForLeader(leaderSession, target);
         if (!leaderSession || members.length <= 1) return looterSession;
 
+        const background = leaderSession.hotBackgroundPartyId
+            ? invoke('GameServer/Bot/Population/BackgroundPartyState').find(leaderSession.hotBackgroundPartyId) : null;
+        const agreement = background?.stats?.agreement;
+        if (agreement) {
+            const payer = agreement.help?.status === 'funded' && Number(agreement.help.itemId) === Number(selfId)
+                ? members.find(member => Number(member.actor.fetchId()) === Number(agreement.help.payerId)) : null;
+            if (payer) return payer;
+            if (spoil && agreement.spoil === 'spoiler') return looterSession;
+            if (agreement.mode === 'turn') return nextTurnMember(leaderSession, members) || looterSession;
+            if (agreement.mode === 'random') return randomMember(members) || looterSession;
+            if (agreement.mode === 'need') {
+                const Context = invoke('GameServer/Bot/Economy/EconomyContext');
+                const scores = members.map(session => ({ session, value: Context.forActor(session.actor, session).itemUsefulness(Number(selfId)) }));
+                const best = Math.max(...scores.map(entry => Number(entry.value) || 0));
+                return randomMember(scores.filter(entry => Number(entry.value) === best).map(entry => entry.session)) || looterSession;
+            }
+        }
         const distribution = distributionForLeader(leaderSession);
         if (distribution === 1 || distribution === 2) {
             return randomMember(members) || looterSession;
@@ -999,7 +1029,7 @@ const PartyCompanionService = {
     bringToLeader(leaderSession, companionSession) {
         if (!isActiveCompanion(companionSession, leaderSession)) return false;
         const destination = formationTargetFor(companionSession);
-        if (!destination) return false;
+        if (!destination || staysOutOfTown(companionSession.actor, destination)) return false;
 
         companionSession.lastFollowMoveTarget = null;
         companionSession.stuckTicks = 0;
@@ -1038,6 +1068,9 @@ const PartyCompanionService = {
             const bot = companionSession?.actor;
             if (!bot || bot.fetchIsOnline?.() === false || bot.isDead?.()) {
                 return { ok: false, reason: 'party_member_unavailable' };
+            }
+            if (!require('../../AfkTrade/TradeMeetingService').canJoinParty(bot.fetchId(), companionSession.coldLifeState, companionSession)) {
+                return { ok: false, reason: 'party_trade_busy' };
             }
             if (companionSession.partyCompanion === true || companionSession.followPlayerSession) {
                 return { ok: false, reason: 'party_member_already_attached' };
@@ -1095,6 +1128,7 @@ const PartyCompanionService = {
             invoke('GameServer/Bot/BotAI').cancelScheduledTick(companionSession);
         });
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
+        refreshPartyMemberships(roster, invoke);
 
         leaderSession.dataSendToMe?.(ServerResponse.joinParty(1));
         roster.forEach((companionSession) => {
@@ -1124,6 +1158,7 @@ const PartyCompanionService = {
         const leader = leaderSession?.actor;
         const bot = companionSession?.actor;
         if (!leader || !bot) return false;
+        if (!require('../../AfkTrade/TradeMeetingService').canJoinParty(bot.fetchId(), companionSession.coldLifeState, companionSession)) return false;
         // An autonomous hot roster has one lifecycle owner. Do not leave its
         // other actors orphaned by attaching a single member to a player.
         if (companionSession.hotBackgroundPartyId || companionSession.hotCompetitionCommit) return false;
@@ -1150,6 +1185,7 @@ const PartyCompanionService = {
         companionSession.followPlayerSession = leaderSession;
         companionSession.partyCompanion = true;
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
+        refreshPartyMemberships([companionSession], invoke);
         companionSession.botStay = false;
         companionSession.stayLocation = null;
         companionSession.currentTargetId = undefined;
@@ -1198,7 +1234,7 @@ const PartyCompanionService = {
         }
 
         clearPullerIfDetached(leaderSession, companionSession);
-        detachState(companionSession, options.plan || 'hunting');
+        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true);
 
         if (options.message) {
             BotManager.botSay(companionSession, options.message);
@@ -1227,6 +1263,7 @@ const PartyCompanionService = {
         members.forEach((memberSession) => {
             this.detach(leaderSession, memberSession, {
                 ...options,
+                preserveTakeover: !!restoration,
                 rebuildWindow: false,
                 refreshPanel: false
             });
@@ -1241,6 +1278,12 @@ const PartyCompanionService = {
                 utils.infoWarn('BotParty', 'failed to restore autonomous party %s: %s',
                     restoration.partyId, error?.message || error);
                 return { ok: false, reason: 'party_restore_failed' };
+            }).then(async (result) => {
+                if (!result?.ok) {
+                    const Life = invoke('GameServer/Bot/Population/BotLifeState');
+                    await Promise.all(members.map(member => Life.releasePlayerPartyTakeover(member)));
+                }
+                return result;
             });
             leaderSession.partyTakeoverRestorePromise = restorationPromise;
             restorationPromise.finally(() => {
@@ -1256,7 +1299,7 @@ const PartyCompanionService = {
         const leaderSession = companionSession?.followPlayerSession || null;
         if (!companionSession?.partyCompanion) return false;
         if (leaderSession) clearPullerIfDetached(leaderSession, companionSession);
-        detachState(companionSession, options.plan || 'hunting');
+        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true);
         if (leaderSession) {
             refreshLeaderView(leaderSession, options);
         }

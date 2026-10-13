@@ -7,6 +7,174 @@ const RaidBossState = invoke('GameServer/World/RaidBossState');
 const RaidBossMinionManager = invoke('GameServer/World/RaidBossMinionManager');
 const RaidEntityIndex = invoke('GameServer/World/RaidEntityIndex');
 const NpcObjectIndex = require('./NpcObjectIndex');
+const CharacterLocationRuntime = require('./CharacterLocationRuntime');
+const PvpPartyMembershipKeys = require('./PvpPartyMembershipKeys');
+const PlayerActivitySignal = require('../Bot/Population/PlayerActivitySignal');
+const userLocationIndexes = new WeakMap();
+const userChangeListeners = new Set();
+const actorPublicationListeners = new Set();
+let currentActorPublication = Object.freeze({ binding: null });
+let currentUser;
+
+function notifyUserChange(id) {
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    for (const listener of userChangeListeners) {
+        try { listener(id); }
+        catch (error) { utils.infoWarn('World', 'user change listener failed: %s', error.message); }
+    }
+}
+
+function currentActorPublicationRuntime(runtime) {
+    return !!runtime && runtime.binding === currentActorPublication.binding
+        && CharacterLocationRuntime.isCurrentWorld(currentUser, runtime.binding);
+}
+
+function notifyActorPublication(runtime, kind, record, cause) {
+    // Dirty evidence retains the native record; listener failures cannot mask
+    // a pending native error, including when publication runs from finally.
+    try {
+        const publication = currentActorPublication;
+        const envelope = Object.freeze(record
+            ? { kind, binding: publication.binding, record, cause }
+            : { kind, binding: publication.binding, cause });
+        const listeners = [...actorPublicationListeners];
+        for (const listener of listeners) {
+            if (!actorPublicationListeners.has(listener)) continue;
+            try {
+                if (publication !== currentActorPublication) break;
+                if (kind !== 'reset') {
+                    if (!currentActorPublicationRuntime(runtime)) break;
+                    if (kind === 'upsert' && !currentActorRecord(runtime, record)) break;
+                    if (kind === 'remove' && runtime.index.getSource(record.id, 'actor') === record) break;
+                }
+                listener(envelope);
+            } catch (error) {
+                try { utils.infoWarn('World', 'actor publication listener failed: %s', error?.message); }
+                catch { /* Diagnostics are observational, including in finally. */ }
+            }
+        }
+    } catch { /* Publication must preserve the native return or original error. */ }
+}
+
+function createUserLocationIndex(user) {
+    const runtime = { index: CharacterLocationRuntime.index, binding: CharacterLocationRuntime.bindWorld(user), sessions: new Map(),
+        nextOrder: 0, retiredActors: new WeakSet() };
+    userLocationIndexes.set(user, runtime);
+    return runtime;
+}
+
+function currentUserLocationIndex(user) {
+    const runtime = user && userLocationIndexes.get(user);
+    return CharacterLocationRuntime.isCurrentWorld(user, runtime?.binding) ? runtime : null;
+}
+
+function registeredActor(runtime, session, actor, id, membership) {
+    return Object.freeze({ id, session, actor, source: actor, phase: 'hot', order: membership.order,
+        token: Symbol('user-registration'), loc: () => projectedActorLoc(actor),
+        get spotId() { return membership.spotId ?? null; },
+        get realPlayer() { return membership.realPlayer === true; },
+        get retired() { return runtime.retiredActors.has(actor); } });
+}
+
+function currentActorRecord(runtime, record) {
+    return !!record && runtime.sessions.get(record.session)?.registered === record
+        && record.session.actor === record.actor && runtime.index.getSource(record.id, 'actor') === record;
+}
+
+function rawCoordinate(value) {
+    if (value !== null && !['number', 'string', 'boolean'].includes(typeof value)) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function rawActorLoc(actor) {
+    if (typeof actor.fetchLocX !== 'function' || typeof actor.fetchLocY !== 'function') return null;
+    const rawX = actor.fetchLocX(), rawY = actor.fetchLocY();
+    const locX = rawCoordinate(rawX), locY = rawCoordinate(rawY);
+    return locX !== null && locY !== null ? { locX, locY } : null;
+}
+
+function refreshActorPresence(runtime, record) {
+    if (!currentActorRecord(runtime, record)) return false;
+    const targetId = Number(record.actor.fetchDestId?.() || 0);
+    return runtime.index.updateActorPresence(record.id, record, {
+        online: record.actor.fetchIsOnline?.() === true,
+        realPlayer: !!record.session.accountId && !String(record.session.accountId).startsWith('bot_'),
+        targetId: Number.isFinite(targetId) && targetId > 0 ? targetId : 0
+    });
+}
+
+function partyMembershipPacket(runtime, record) {
+    if (!currentActorRecord(runtime, record)) return null;
+    return { record, keys: [...new Set(PvpPartyMembershipKeys(record.session))] };
+}
+
+function publishPartyMembership(runtime, packet) {
+    if (!packet || !currentActorRecord(runtime, packet.record)) return false;
+    const { record, keys } = packet;
+    return runtime.index.updateGroups(record.id, 'actor', record, 'pvp_party', keys, record.order);
+}
+
+function attachRegisteredActor(runtime, session, membership, explicit = false) {
+    const actor = session.actor;
+    const id = Number(actor?.fetchId?.());
+    if (!currentActorPublicationRuntime(runtime) || runtime.sessions.get(session) !== membership
+        || session.actor !== actor) return null;
+    const previous = membership.registered;
+    if (previous && previous.actor === actor && previous.id === id) {
+        if (currentActorRecord(runtime, previous)) return previous;
+        if (!explicit) return null;
+    }
+    const removed = [];
+    let accepted = null;
+    try {
+        if (previous && runtime.index.getSource(previous.id, 'actor') === previous) {
+            runtime.index.removeSource(previous.id, 'actor', previous.source);
+            removed.push(previous);
+            if (previous.actor !== actor) runtime.retiredActors.add(previous.actor);
+        }
+        membership.registered = null;
+        if (previous) notifyUserChange(previous.id);
+        if (!currentActorPublicationRuntime(runtime) || runtime.sessions.get(session) !== membership
+            || session.actor !== actor) return null;
+        if (!actor || !Number.isSafeInteger(id) || id <= 0) return null;
+        const displaced = runtime.index.getSource(id, 'actor');
+        if (displaced && displaced.actor !== actor) {
+            runtime.retiredActors.add(displaced.actor);
+        }
+        const record = registeredActor(runtime, session, actor, id, membership);
+        runtime.index.setSource(id, 'actor', record, { indexed: false });
+        accepted = record;
+        if (displaced && displaced !== record) removed.push(displaced);
+        membership.registered = record;
+        membership.cellX = membership.cellY = undefined;
+        membership.actor = null;
+        refreshActorPresence(runtime, record);
+        publishPartyMembership(runtime, partyMembershipPacket(runtime, record));
+        notifyUserChange(id);
+        return record;
+    } finally {
+        for (const record of removed) notifyActorPublication(runtime, 'remove', record, 'replace');
+        if (accepted) notifyActorPublication(runtime, 'upsert', accepted, 'attach');
+    }
+}
+
+function removeIndexedSession(runtime, session) {
+    const membership = runtime?.sessions.get(session);
+    if (!membership) return;
+    const registered = membership.registered;
+    let removed = false;
+    try {
+        if (registered && runtime.index.getSource(registered.id, 'actor') === registered) {
+            removed = runtime.index.removeSource(registered.id, 'actor', registered.source);
+            runtime.retiredActors.add(registered.actor);
+        }
+        runtime.sessions.delete(session);
+        if (registered) notifyUserChange(registered.id);
+    } finally {
+        if (removed) notifyActorPublication(runtime, 'remove', registered, 'remove');
+    }
+}
 
 function actorLoc(actor) {
     return {
@@ -14,6 +182,28 @@ function actorLoc(actor) {
         locY: actor.fetchLocY(),
         locZ: actor.fetchLocZ()
     };
+}
+
+function indexedActorLoc(actor) {
+    return {
+        locX: Number(actor.fetchLocX?.()),
+        locY: Number(actor.fetchLocY?.()),
+        locZ: Number(actor.fetchLocZ?.())
+    };
+}
+
+function usableActorLoc(loc) {
+    return Number.isFinite(loc.locX) && Number.isFinite(loc.locY) && Number.isFinite(loc.locZ);
+}
+
+function projectedActorLoc(actor) {
+    return { locX: Number(actor.fetchLocX?.() ?? 0), locY: Number(actor.fetchLocY?.() ?? 0), locZ: 0 };
+}
+
+function usableProjection(actor) {
+    if (typeof actor.fetchLocX !== 'function' || typeof actor.fetchLocY !== 'function') return false;
+    const loc = projectedActorLoc(actor);
+    return Number.isFinite(loc.locX) && Number.isFinite(loc.locY);
 }
 
 function actorIdForTarget(target) {
@@ -40,7 +230,7 @@ function coldBotTell(playerSession, state, text) {
     });
 }
 
-const CLIENT_VISIBILITY_RADIUS = 6000;
+const { CLIENT_VISIBILITY_RADIUS, NPC_GRID_SIZE } = invoke('GameServer/World/WorldConstants');
 const CLIENT_VISIBILITY_RADIUS_SQUARED = CLIENT_VISIBILITY_RADIUS * CLIENT_VISIBILITY_RADIUS;
 
 function isBotSession(session) {
@@ -55,6 +245,20 @@ function isVisibleFrom(creature, candidate) {
     const dx = Number(candidate.actor.fetchLocX() ?? 0) - Number(creature.fetchLocX());
     const dy = Number(candidate.actor.fetchLocY() ?? 0) - Number(creature.fetchLocY());
     return (dx * dx) + (dy * dy) < CLIENT_VISIBILITY_RADIUS_SQUARED;
+}
+
+function visibleUserSessions(user, session, creature, realOnly) {
+    const runtime = currentUserLocationIndex(user);
+    if (!runtime) return [];
+    const loc = { locX: Number(creature?.fetchLocX?.()), locY: Number(creature?.fetchLocY?.()), locZ: 0 };
+    if (!Number.isFinite(loc.locX) || !Number.isFinite(loc.locY)) return [];
+    return runtime.index.nearSources(loc, CLIENT_VISIBILITY_RADIUS, { view: 'actor', kind: 'all',
+        accept: (record) => !record.retired
+            && record.session !== session && (!realOnly || !isBotSession(record.session))
+            && record.actor.fetchIsOnline?.() === true })
+        .sort((left, right) => left.order - right.order)
+        .filter((record) => isVisibleFrom(creature, record.session))
+        .map((record) => record.session);
 }
 
 function nameDistance(left, right) {
@@ -123,13 +327,26 @@ function waitForBotSession(BotManager, name, attempts = 40) {
 }
 
 const World = {
+    actorSpatialIndex: true,
+    get user() { return currentUser; },
+    set user(user) {
+        const binding = CharacterLocationRuntime.bindWorld(user);
+        currentUser = user;
+        if (binding !== currentActorPublication.binding) {
+            currentActorPublication = Object.freeze({ binding });
+            notifyActorPublication(null, 'reset', null, 'reset');
+        }
+    },
+    get actorPublicationBinding() { return currentActorPublication.binding; },
     waitForBotSession,
+    isBotSession,
 
     async init() {
         NpcDecay.stop(this);
         RaidBossMinionManager.stop(this);
         DayNightSpawnManager.stop(this);
         this.user  = { sessions : [], revision: 0 };
+        createUserLocationIndex(this.user);
         this.gameTime = GameTime;
         this.npc   = {
             spawns: [], grid: {}, nextId: 1000000,
@@ -152,8 +369,12 @@ const World = {
     },
 
     insertUser(session) {
+        const runtime = currentUserLocationIndex(this.user) ?? createUserLocationIndex(this.user);
         const exists = this.user.sessions.find((ob) => session.fetchAccountId() === ob.fetchAccountId());
-        if (exists) {
+        if (exists && exists !== session) {
+            // Retire before destroying the socket: synchronous/late cleanup
+            // from the previous session cannot alter its replacement.
+            removeIndexedSession(runtime, exists);
             if (exists.socket && typeof exists.socket.destroy === 'function') {
                 exists.socket.destroy();
             } else if (exists.socket && typeof exists.socket.resetAndDestroy === 'function') {
@@ -162,20 +383,223 @@ const World = {
             this.user.sessions = this.user.sessions.filter((ob) => session.fetchAccountId() !== ob.fetchAccountId());
             this.user.sessions.push(session);
         }
-        else {
+        else if (!exists) {
             this.user.sessions.push(session);
         }
+        // Explicit registration is authoritative, including reconnecting the
+        // same session/actor. Delayed setters alone cannot undo retirement.
+        const restored = session.actor && runtime.retiredActors.delete(session.actor);
+        if (!runtime.sessions.has(session)) runtime.sessions.set(session, { actor: null, id: null, order: ++runtime.nextOrder });
+        attachRegisteredActor(runtime, session, runtime.sessions.get(session), true);
+        this.updateUserLocation(session);
+        if (restored) notifyUserChange(Number(session.actor.fetchId?.()));
         this.user.revision += 1;
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     },
 
     removeUser(session) {
+        removeIndexedSession(currentUserLocationIndex(this.user), session);
         const wasPresent = this.user.sessions.includes(session);
         this.user.sessions = this.user.sessions.filter((ob) => ob !== session);
         this.user.revision += 1;
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         // Build the packet after removal so its online object ID becomes zero.
         if (wasPresent) invoke('GameServer/Clan/ClanService').broadcastMemberPresence(session.actor);
+    },
+
+    updateUserLocation(session, actor = session?.actor) {
+        const runtime = userLocationIndexes.get(this.user);
+        const membership = runtime?.sessions.get(session);
+        if (!membership || !actor || session.actor !== actor) return false;
+        // A session owns one actor registration. Ordinary moves need no token
+        // receipt and no allocation; cells retain a pointer to the live actor.
+        const record = membership.actor === actor ? membership.registered
+            : attachRegisteredActor(runtime, session, membership);
+        if (!record || record.retired || runtime.index.getSource(record.id, 'actor') !== record) return false;
+        const online = actor.fetchIsOnline?.() !== false;
+        const rawX = actor.fetchLocX?.(), rawY = actor.fetchLocY?.(), z = Number(actor.fetchLocZ?.());
+        const usable = Number.isFinite(Number(rawX)) && Number.isFinite(Number(rawY)) && Number.isFinite(z);
+        // Client visibility retains nullish XY as zero; real-player proximity
+        // above still requires the actor's actual finite XYZ coordinates.
+        const x = Number(rawX ?? 0), y = Number(rawY ?? 0);
+        const indexed = online && typeof actor.fetchLocX === 'function' && typeof actor.fetchLocY === 'function'
+            && Number.isFinite(x) && Number.isFinite(y);
+        const cellX = Math.floor(x / runtime.index.cellSize), cellY = Math.floor(y / runtime.index.cellSize);
+        const spotId = session.currentSpot?.id ?? null;
+        if (membership.cellX === cellX && membership.cellY === cellY && membership.spotId === spotId
+            && membership.online === online && membership.usable === usable && membership.indexed === indexed) return online && usable;
+        const changed = membership.online !== online || membership.usable !== usable;
+        membership.online = online; membership.usable = usable; membership.indexed = indexed;
+        membership.spotId = spotId;
+        membership.realPlayer = online && usable && PlayerActivitySignal.isRealPlayerSession(session);
+        runtime.index.updateSource(record.id, 'actor', actor, { indexed });
+        refreshActorPresence(runtime, record);
+        membership.actor = actor; membership.id = record.id;
+        membership.cellX = cellX; membership.cellY = cellY;
+        if (changed) notifyUserChange(record.id);
+        // ARCH-NOTE: actor location publications had only the cold stream as a
+        // reader. It has no worker consumer, so moves publish nothing. Attach,
+        // retirement and removal continue to publish their ownership changes.
+        return online && usable;
+    },
+
+    retireUserActor(session, actor) {
+        const runtime = currentUserLocationIndex(this.user);
+        const membership = runtime?.sessions.get(session);
+        if (!membership || !actor) return false;
+        const previous = membership.registered;
+        if (previous?.actor !== actor || !currentActorRecord(runtime, previous)) return false;
+        runtime.retiredActors.add(actor);
+        membership.realPlayer = false;
+        // Renew the common raw record even for the same actor so an in-flight
+        // registration token cannot survive terminal retirement/restoration.
+        const retired = registeredActor(runtime, session, actor, previous.id, membership);
+        let accepted = false;
+        try {
+            runtime.index.setSource(previous.id, 'actor', retired, { indexed: false });
+            accepted = true;
+            membership.registered = retired;
+            refreshActorPresence(runtime, retired);
+            publishPartyMembership(runtime, partyMembershipPacket(runtime, retired));
+            notifyUserChange(previous.id);
+            membership.actor = null;
+            membership.id = null;
+            membership.cellX = membership.cellY = undefined;
+            return true;
+        } finally {
+            if (accepted) notifyActorPublication(runtime, 'upsert', retired, 'retire');
+        }
+    },
+
+    registeredActorById(id) {
+        const runtime = currentUserLocationIndex(this.user);
+        const record = runtime?.index.getSource(Number(id), 'actor');
+        return runtime && currentActorRecord(runtime, record) ? record : null;
+    },
+
+    actorSessionsNear(loc, radius, accept = null) {
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return [];
+        return runtime.index.nearSources({ ...loc, locZ: loc.locZ ?? 0 }, radius, { view: 'actor', kind: 'all',
+            accept: record => !record.retired && (!accept || accept(record.session)) })
+            .sort((a, b) => a.order - b.order).map(record => record.session);
+    },
+
+    actorPresenceSessions(kind = 'onlineHuman', targetId = null) {
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return [];
+        return runtime.index.presenceSources({ kind, targetId }).filter(record => currentActorRecord(runtime, record))
+            .map(record => record.session);
+    },
+
+    actorPresenceCount() {
+        return currentUserLocationIndex(this.user)?.index.presenceSize() ?? 0;
+    },
+
+    nearestRealPlayer(loc) {
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return { record: null, session: null, distance: Infinity, count: 0 };
+        let record = null, distanceSquared = Infinity;
+        const x = Number(loc?.locX), y = Number(loc?.locY);
+        for (const candidate of runtime.index.presenceSources({ kind: 'onlineHuman' })) {
+            if (candidate.retired || candidate.actor.fetchIsOnline?.() !== true) continue;
+            const dx = Number(candidate.actor.fetchLocX?.()) - x, dy = Number(candidate.actor.fetchLocY?.()) - y;
+            const d = dx * dx + dy * dy;
+            if (d < distanceSquared || (d === distanceSquared && candidate.order < record?.order)) {
+                record = candidate; distanceSquared = d;
+            }
+        }
+        return { record, session: record?.session ?? null, distance: Math.sqrt(distanceSquared), count: runtime.index.presenceSize() };
+    },
+
+    botRealPlayerIndex: true,
+
+    botVisibleRealPlayers(session, bot) {
+        if (!session || !bot) return [];
+        const point = rawActorLoc(bot);
+        if (!point) return [];
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return [];
+        const records = runtime.index.nearSources({ ...point, locZ: 0 }, CLIENT_VISIBILITY_RADIUS, {
+            view: 'actor', kind: 'all',
+            accept: record => {
+                if (record.retired || record.session === session) return false;
+                const candidate = record.session, actor = record.actor;
+                return !!actor.fetchIsOnline?.() && !!candidate.accountId
+                    && !String(candidate.accountId).startsWith('bot_')
+                    && !!rawActorLoc(actor);
+            }
+        });
+        records.sort((left, right) => left.order - right.order);
+        return records.map(record => record.session);
+    },
+
+    pvpPartyMembershipIndex: true,
+    pvpPartyMembershipKeys: PvpPartyMembershipKeys,
+
+    pvpPartySessionsForKey(key) {
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return [];
+        const sessions = [];
+        for (const record of runtime.index.groupSources(key)) {
+            if (currentActorRecord(runtime, record)) sessions.push(record.session);
+        }
+        return sessions;
+    },
+
+    refreshPartyMemberships(changedSessions) {
+        if (!Array.isArray(changedSessions) && !(changedSessions instanceof Set)) {
+            throw new TypeError('invalid_party_membership_sources');
+        }
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) return 0;
+        const packets = [];
+        for (const session of new Set(changedSessions)) {
+            const record = runtime.sessions.get(session)?.registered;
+            const packet = partyMembershipPacket(runtime, record);
+            if (packet) packets.push(packet);
+        }
+        let updated = 0;
+        for (const packet of packets) if (publishPartyMembership(runtime, packet)) updated += 1;
+        return updated;
+    },
+
+    notifyUserStateChanged(session, actor = session?.actor) {
+        const runtime = currentUserLocationIndex(this.user);
+        const record = runtime?.sessions.get(session)?.registered;
+        if (!record || record.retired || record.actor !== actor || session.actor !== actor
+            || !currentActorRecord(runtime, record)) return false;
+        notifyUserChange(record.id);
+        return true;
+    },
+
+    updateUserPresence(session, actor = session?.actor) {
+        const runtime = userLocationIndexes.get(this.user);
+        const record = runtime?.sessions.get(session)?.registered;
+        if (!record || record.actor !== actor || session.actor !== actor || record.retired) return false;
+        return refreshActorPresence(runtime, record);
+    },
+
+    subscribeUserChanges(listener) {
+        if (typeof listener !== 'function') return () => {};
+        userChangeListeners.add(listener);
+        return () => userChangeListeners.delete(listener);
+    },
+
+    subscribeActorPublications(listener) {
+        if (typeof listener !== 'function') throw new TypeError('invalid_actor_publication_listener');
+        actorPublicationListeners.add(listener);
+        return () => actorPublicationListeners.delete(listener);
+    },
+
+    realPlayerSessionsNear(loc, radius) {
+        const runtime = currentUserLocationIndex(this.user);
+        if (!runtime) throw new Error('character_location_index_uninitialized');
+        return runtime.index.nearSources(loc, radius, { view: 'actor', kind: 'player',
+            accept: (record) => !record.retired
+                && usableActorLoc(indexedActorLoc(record.actor))
+                && PlayerActivitySignal.isRealPlayerSession(record.session) })
+            .map((record) => record.session);
     },
 
     fetchUser(id) {
@@ -199,20 +623,11 @@ const World = {
     },
 
     fetchVisibleUsers(session, creature) {
-        return (this.user.sessions || []).filter((ob) => (
-            session !== ob &&
-            ob.actor?.fetchIsOnline() === true &&
-            isVisibleFrom(creature, ob)
-        ));
+        return visibleUserSessions(this.user, session, creature, false);
     },
 
     fetchVisibleRealPlayers(session, creature) {
-        return (this.user.sessions || []).filter((ob) => (
-            session !== ob &&
-            !isBotSession(ob) &&
-            ob.actor?.fetchIsOnline() === true &&
-            isVisibleFrom(creature, ob)
-        ));
+        return visibleUserSessions(this.user, session, creature, true);
     },
 
     askForTeamUp(session, actor, data) {
@@ -267,7 +682,7 @@ const World = {
             BotManager.botTell(targetSession, session, availability.partyDecision
                 ? PersonaPartyDecisionPolicy.reply(availability.partyDecision)
                 : `I can't join right now: ${availability.reasonText}.`);
-            console.info(
+            if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
                 'BotParty :: %s refused %s: %s distance=%s',
                 bot?.fetchName() || 'unknown',
                 actor?.fetchName() || 'unknown',
@@ -377,7 +792,7 @@ const World = {
                 BotSocialMemory.recordEvent(session, state, 'party_refused', availability.reason);
                 session.dataSendToMe(ServerResponse.actionFailed());
                 coldBotTell(session, state, `I can't join right now: ${availability.reasonText}.`);
-                console.info(
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
                     'BotParty :: %s refused remote invite from %s: %s',
                     state.name || lookup,
                     actor?.fetchName() || 'unknown',
@@ -475,7 +890,7 @@ const World = {
                     return false;
                 }
 
-                console.info(
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
                     'BotRemoteChat :: %s replied to %s reason=%s',
                     state.name || lookup,
                     actor?.fetchName() || 'unknown',
@@ -537,7 +952,7 @@ const World = {
                     coldBotTell(session, target.coldLifeState || target, result.reply);
                 }
                 if (!result.ok) session.dataSendToMe(ServerResponse.actionFailed());
-                console.info(
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
                     'BotParty :: command join request player=%s target=%s party=%s result=%s applied=%s',
                     actor.fetchName?.() || 'unknown',
                     speaker?.actor?.fetchName?.() || target.name || lookup || 'unknown',
@@ -638,9 +1053,8 @@ const World = {
     },
 
     npcGridKey(npc) {
-        const GRID_SIZE = 6000;
-        const gx = Math.floor(npc.fetchLocX() / GRID_SIZE);
-        const gy = Math.floor(npc.fetchLocY() / GRID_SIZE);
+        const gx = Math.floor(npc.fetchLocX() / NPC_GRID_SIZE);
+        const gy = Math.floor(npc.fetchLocY() / NPC_GRID_SIZE);
         return `${gx}_${gy}`;
     },
 
@@ -701,9 +1115,8 @@ const World = {
     },
 
     fetchNpcsInRadius(locX, locY, radius) {
-        const GRID_SIZE = 6000;
-        const bgx = Math.floor(locX / GRID_SIZE);
-        const bgy = Math.floor(locY / GRID_SIZE);
+        const bgx = Math.floor(locX / NPC_GRID_SIZE);
+        const bgy = Math.floor(locY / NPC_GRID_SIZE);
         const npcs = [];
         
         for (let dx = -1; dx <= 1; dx++) {

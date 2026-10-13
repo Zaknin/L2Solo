@@ -58,14 +58,14 @@ async function main() {
             const state = Life.cachedState(id);
             assert.equal(JSON.parse(row.statsJson).clanId, clanId, 'authoritative membership repairs durable state');
             assert.equal(state.stats.clanId, clanId, 'cache receives corrected membership');
-            assert(!state.stats.equipmentPlan, 'old grouped personal crafting is removed');
+            assert.deepEqual(state.stats.equipmentPlan, personalPlan, 'joining keeps the personal craft goal');
             assert.equal(row.partyId, 'old-personal', 'recovery does not disband the party');
             assert.deepEqual(JSON.parse(row.inventorySummary), inventory);
             assert.equal(row.hp, 321);
             assert.equal(row.mp, 123);
-            assert.equal(Disposition.saleCandidates(state).length, 0, 'resources cannot leak into personal sales');
+            assert(Disposition.saleCandidates(state).some(row => row.selfId === 1864), 'unrequested resources remain personal sale stock');
         }
-        assert.equal(JSON.parse((await partyRow('old-personal')).statsJson).objective, null);
+        assert.equal(JSON.parse((await partyRow('old-personal')).statsJson).objective.strategy, 'craft');
         assert.equal(JSON.parse((await partyRow('clan-production')).statsJson).objective.clanGoalKey, 'clan-test');
         assert.equal(JSON.parse((await partyRow('solo-production')).statsJson).objective.strategy, 'craft');
         assert.deepEqual(Life.cachedState(ids[2]).stats.equipmentPlan, clanPlan, 'valid clan manufacturing remains');
@@ -76,12 +76,12 @@ async function main() {
 
         const staleParty = await Parties.createOrUpdate({ partyId: 'old-personal', leaderId: ids[0], memberIds: ids.slice(0, 2),
             stats: { objective: { strategy: 'craft', targetSelfId: 3 }, acquisitionGoal: personalPlan } });
-        assert.equal(staleParty.stats.objective, null, 'stale party persistence cannot restore personal crafting');
-        assert.equal(staleParty.stats.acquisitionGoal, null);
+        assert.equal(staleParty.stats.objective.strategy, 'craft', 'membership preserves a personal craft party');
+        assert.deepEqual(staleParty.stats.acquisitionGoal, personalPlan);
         const refreshed = await Life.upsertState({ ...Life.cachedState(ids[0]), stats: {
             ...Life.cachedState(ids[0]).stats, equipmentPlan: personalPlan } });
-        assert(!refreshed.stats.equipmentPlan);
-        assert(!JSON.parse((await lifeRow(ids[0])).statsJson).equipmentPlan);
+        assert.deepEqual(refreshed.stats.equipmentPlan, personalPlan);
+        assert.deepEqual(JSON.parse((await lifeRow(ids[0])).statsJson).equipmentPlan, personalPlan);
 
         // Every founder is updated, including a bot currently owned by a worker.
         const founders = ids.slice(4, 7);
@@ -93,7 +93,7 @@ async function main() {
         for (const id of founders) {
             assert.equal(JSON.parse((await lifeRow(id)).statsJson).clanId, created.clanId);
             assert.equal(Life.cachedState(id).stats.clanId, created.clanId);
-            assert(!Life.cachedState(id).stats.equipmentPlan);
+            assert.deepEqual(Life.cachedState(id).stats.equipmentPlan, personalPlan);
         }
         assert.equal((await lifeRow(founders[1])).simulationOwner, 'cold_simulation_owner');
         assert.equal(await Life.upsertState(staleFounder), null, 'pre-membership lifecycle snapshot is fenced');
@@ -102,7 +102,7 @@ async function main() {
         const joined = await Database.joinAutonomousClan({ clanId: created.clanId, characterId: ids[7], maxBotMemberShare: 1 });
         assert(joined.ok, JSON.stringify(joined));
         assert.equal(Life.cachedState(ids[7]).stats.clanId, created.clanId);
-        assert(!Life.cachedState(ids[7]).stats.equipmentPlan);
+        assert.deepEqual(Life.cachedState(ids[7]).stats.equipmentPlan, personalPlan);
 
         const hotActor = { effects: {}, fetchId: () => ids[7], fetchName: () => 'Membership7', fetchLevel: () => 20,
             fetchClanId: () => 0, fetchClassId: () => 4, fetchExp: () => 0, fetchSp: () => 0,
@@ -113,11 +113,6 @@ async function main() {
         const cooled = await Life.markCold(session, 'membership_handoff');
         assert.equal(cooled.stats.clanId, created.clanId, 'a delayed hot actor update cannot erase committed membership on cooldown');
         assert(cooled.stats.clanMembershipVersion > 0);
-        session.coldMarketState = { ...cooled, stats: { ...cooled.stats, clanId: 0, clanMembershipVersion: 0,
-            marketStore: { loc: cooled.loc, items: [], expiresAt: Date.now() + 60000 } } };
-        const cooledMerchant = await Life.markCold(session, 'membership_merchant_handoff');
-        assert.equal(cooledMerchant.stats.clanId, created.clanId, 'an open shop can cool after joining a clan');
-        assert.equal(cooledMerchant.activity, 'merchant');
 
         // A membership change invalidates work already running on the old revision.
         await Life.upsertState({ ...Life.cachedState(ids[3]), stats: { generatedCold: true, clanId: 0 } });
@@ -143,7 +138,7 @@ async function main() {
             leaseId: 'membership-race', timestamp: timestamp + 3, leaseUntil: timestamp + 60000,
             patch: { statsJson: JSON.stringify({ ...JSON.parse(merged.row.statsJson), equipmentPlan: personalPlan }) } });
         assert(sanitized.ok, JSON.stringify(sanitized));
-        assert(!JSON.parse(sanitized.row.statsJson).equipmentPlan, 'current worker writes also discard personal clan crafting');
+        assert.deepEqual(JSON.parse(sanitized.row.statsJson).equipmentPlan, personalPlan, 'worker writes keep personal clan crafting');
         await Database.removeCharacterFromClan(ids[3], 0);
         assert.equal(Life.cachedState(ids[3]).stats.clanId, 0);
         const dissolved = await Database.dissolveClan({ clanId: created.clanId, leaderId: founders[0] });

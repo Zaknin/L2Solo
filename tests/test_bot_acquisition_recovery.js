@@ -2,9 +2,7 @@ const assert = require('assert');
 require('../src/Global');
 const DataCache = invoke('GameServer/DataCache');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
-const Listing = invoke('GameServer/Bot/Economy/ColdMarketListingService');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const Goals = invoke('GameServer/Bot/Goals/GoalState');
 const Recipes = invoke('GameServer/Items/C4RecipeItems');
 DataCache.init();
 
@@ -17,18 +15,14 @@ async function run() {
         inventory: {}, stats: { classId: 34, role: 'buffer', equipmentPlan: plan,
             marketStore: { storeType: 3, expiresAt: now, items: [{ selfId: 75, count: 1 }] } } };
     const originalSave = LifeState.upsertState;
-    const originalClear = Goals.clear;
-    let cleared = false;
     LifeState.upsertState = async (value) => value;
-    Goals.clear = async (id, status) => { cleared = id === 42 && status === 'abandoned'; };
     try {
-        assert.strictEqual((await Listing.resolve(state, now - 1)).closed, false);
-        const expired = await Listing.resolve(state, now);
-        assert(expired.closed && cleared, 'an expired unfilled shop must abandon its stale goal');
-        assert.strictEqual(expired.state.stats.equipmentPlan.status, 'abandoned');
-        assert.strictEqual(expired.state.stats.marketWanted, null);
-        assert.strictEqual(expired.state.activity, 'hunting', 'a missing return destination must not strand the buyer in shopping');
-        const remembered = JSON.parse(JSON.stringify(expired.state));
+        // The physical buy stall that abandoned the plan on expiry is gone
+        // (step 3.3: a buy ad returns its escrow and the bot reviews again);
+        // the planner's own abandonment stands for it here.
+        const abandoned = Planner.abandonAcquisition(state, 75, now);
+        assert.strictEqual(abandoned.stats.equipmentPlan.status, 'abandoned');
+        const remembered = JSON.parse(JSON.stringify(abandoned));
         const context = Planner.replanContextFor(remembered, remembered.stats.equipmentPlan, now + 1);
         assert(context.excludedTargetIds.includes(2566));
         assert(context.excludedMaterialIds.includes(75));
@@ -45,7 +39,6 @@ async function run() {
         assert(variants.size > 1, 'comparable dual routes must not synchronize the whole population');
     } finally {
         LifeState.upsertState = originalSave;
-        Goals.clear = originalClear;
     }
 
     assert.strictEqual(Planner.abandonAcquisition(state, 1869, now), state,
@@ -89,12 +82,65 @@ async function run() {
     const nestedState = { ...state, activity: 'hunting', inventory: { 1869: { selfId: 1869, amount: 2 } },
         stats: { ...state.stats, equipmentPlan: { ...plan, marketFallback: true,
             next: { itemId: 1869, amount: 3, requiredTotal: 3 } } } };
-    const nestedGoal = needs.evaluate(nestedState, { now }).find((goal) => goal.type === 'buy_craft_material');
-    assert.strictEqual(nestedGoal.target.itemId, 1869);
-    assert.strictEqual(nestedGoal.target.amount, 1, 'nested-component shopping must subtract ingredients already collected');
-    nestedState.inventory[1869].amount = 3;
-    assert(!needs.evaluate(nestedState, { now }).some((goal) => goal.type === 'buy_craft_material'),
-        'a completed ingredient must not create another WTB goal');
+    // The common economy now owns the missing quantity. The goal adapter
+    // forwards its selected shopping leaf and resolves the displayed name.
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const { capture, ColdEconomyDecisions } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+    const decisions = new ColdEconomyDecisions();
+    const full = Economy.forState(nestedState);
+    const originalContext = Economy.forState;
+    let selected = { activity: 'shopping', itemId: 1869, amount: 1, price: 10, rootKey: 'ingredient' };
+    const publish = input => {
+        const snapshot = { ...input, stats: { ...input.stats, ...full.statsPacket } };
+        decisions.accept(input.characterId, capture({ ...full, network: { ...full.network, activity: selected } }, snapshot, input));
+        return snapshot;
+    };
+    const evaluate = input => needs.evaluate(publish(input), { now, decisions, errand: null });
+    Economy.forState = () => { throw Error('cold_needs_main_network_forbidden'); };
+    try {
+        const beforePurchase = publish(nestedState);
+        const nestedGoal = needs.evaluate(beforePurchase, { now, decisions, errand: null }).find((goal) => goal.type === 'buy_craft_material');
+        assert.strictEqual(nestedGoal.target.itemId, 1869);
+        assert.strictEqual(nestedGoal.target.amount, 1, 'shopping forwards the missing quantity from the economy');
+        const ingredientName = DataCache.items.find((item) => Number(item.selfId) === 1869).template.name;
+        assert.strictEqual(nestedGoal.target.itemName, ingredientName, 'a buy ad names the material, not its id (T25)');
+        const filled = { ...beforePurchase, inventory: { 1869: { selfId: 1869, amount: 3 } } };
+        assert.deepStrictEqual(needs.evaluate(filled, { now, decisions, errand: null }), [],
+            'the captured missing quantity is filled by the one newly acquired ingredient');
+        const noneHeld = { ...nestedState, inventory: {} };
+        selected = { ...selected, amount: 3, price: 30 };
+        const noneHeldGoal = evaluate(noneHeld).find((goal) => goal.type === 'buy_craft_material');
+        assert.strictEqual(noneHeldGoal.target.amount, 3);
+        assert.strictEqual(noneHeldGoal.target.itemName, ingredientName,
+            'a bot holding none of the material still names it (T25)');
+        const beforePartial = publish(noneHeld);
+        const afterPartial = { ...beforePartial, inventory: { 1869: { selfId: 1869, amount: 2 } } };
+        const remainder = needs.evaluate(afterPartial, { now, decisions, errand: null })[0];
+        assert.strictEqual(remainder.target.amount, 1, 'two newly acquired copies reduce missing three to one');
+        assert.strictEqual(remainder.target.adena, 10, 'partial acquisition preserves the native unit price');
+        assert.strictEqual(remainder.plan.estimatedCost, 10);
+        assert.deepStrictEqual(needs.evaluate({ ...afterPartial,
+            inventory: { 1869: { selfId: 1869, amount: 3 } } }, { now, decisions, errand: null }), []);
+        const hot = { ...nestedState, phase: 'hot' };
+        const hotEconomy = { ...full, state: hot, network: { ...full.network,
+            activity: { ...selected, amount: 1, price: 10 } } };
+        assert.strictEqual(needs.evaluate(hot, { now, economy: hotEconomy, errand: null })[0].target.amount, 1,
+            'a fresh hot context carries a missing quantity despite already holding two copies');
+        const named = { ...nestedState, inventory: { 1869: { selfId: 1869, amount: 2, name: 'Iron Ore' } } };
+        assert.strictEqual(evaluate(named)[0].target.itemName, 'Iron Ore');
+        selected = { ...selected, itemId: 391, amount: 1, price: 30000, rootKey: 'power:391' };
+        const beforeGear = publish(noneHeld);
+        assert.strictEqual(needs.evaluate(beforeGear, { now, decisions, errand: null }).length, 1);
+        assert.deepStrictEqual(needs.evaluate({ ...beforeGear,
+            inventory: { 391: { selfId: 391, amount: 1 } } }, { now, decisions, errand: null }), [],
+            'acquiring a requested physical gear copy still drops its old request');
+        selected = null;
+        nestedState.inventory[1869].amount = 3;
+        assert(!evaluate(nestedState).some((goal) => goal.type === 'buy_craft_material'),
+            'a completed ingredient without a shopping leaf must not create another WTB goal');
+    } finally {
+        Economy.forState = originalContext;
+    }
 
     const disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const reserves = disposition.reservedCraftAmounts(state);

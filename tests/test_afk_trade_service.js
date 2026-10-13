@@ -149,7 +149,7 @@ function sessionFor(accountId, row, items) {
         }
     });
     assert.strictEqual(
-        MarketOpportunity.findOffers(1865, { town: shops[0].town, buyerCharacterId: customerId })[0].sourceType,
+        MarketOpportunity.bestOffer(1865, { town: shops[0].town, buyerCharacterId: customerId }).sourceType,
         'afk_player_store',
         'equal-price bot offer must yield to the player AFK shop'
     );
@@ -283,9 +283,13 @@ function sessionFor(accountId, row, items) {
         title: 'Soulshot: C-grade x1000', lines: [{ objectId: shotObject, selfId: 1464,
             name: 'Soulshot: C-grade', count: 1000, price: 1, stackable: true }] });
     await AfkTrade.buyFromShop(customerId, AfkTrade.findOwnerProjection(botId).actor.fetchPrivateStore(), 1464, 501);
-    assert(!AfkTrade.findOwnerProjection(botId), 'a residual shot lot below 500 must leave the market');
+    const remainderShop = AfkTrade.findOwnerProjection(botId);
+    assert(remainderShop, 'a positive residual lot remains listed until its owner reviews or closes it');
+    assert.strictEqual(remainderShop.shop.lines.find(line => line.selfId === 1464).count, 499,
+        'the current lot policy has no hard minimum of 500 shots');
+    await AfkTrade.stop(botId);
     assert.strictEqual((await Database.fetchItems(botId)).filter(row => row.selfId === 1464)
-        .reduce((sum, row) => sum + row.amount, 0), 499, 'the small remainder is returned intact to its owner');
+        .reduce((sum, row) => sum + row.amount, 0), 499, 'closing the shop returns the small remainder intact to its owner');
     await Database.createAccount('bot_shot_order', 'pw');
     const orderOwner = Number((await Database.createCharacter('bot_shot_order', character('ShotOrder'))).insertId);
     await Database.setItem(orderOwner, { selfId: 57, name: 'Adena', amount: 1000 });
@@ -294,10 +298,10 @@ function sessionFor(accountId, row, items) {
         lines: [{ objectId: matchObject, selfId: 1463, name: 'Soulshot: D-grade', count: 1000, price: 1, stackable: true }] });
     await AfkTrade.publishBot(orderOwner, { ...placement, storeType: AfkTrade.BUY, title: 'WTB shots',
         lines: [{ selfId: 1463, name: 'Soulshot: D-grade', count: 501, price: 1, stackable: true }] });
-    assert.strictEqual((await AfkTrade.matchAfkOrders(orderOwner)).trades.length, 1);
-    assert(!AfkTrade.findOwnerProjection(botId), 'automatic order matching must also remove small shot remainders');
-    assert.strictEqual((await Database.fetchItems(botId)).filter(row => row.selfId === 1463)
-        .reduce((sum, row) => sum + row.amount, 0), 499);
+    // A crossing buy ad and sell line make no deal by themselves: someone
+    // must come to the town (E45).
+    assert(AfkTrade.findOwnerProjection(botId), 'the shop stands');
+    assert.strictEqual(AfkTrade.ownerRecords(orderOwner).length, 1, 'the buy ad stands');
     await AfkTrade._resetForTests();
     await Database.close();
     clean();

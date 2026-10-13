@@ -95,6 +95,54 @@ assert.strictEqual(timingAttack.calculatedSkillHitTime(castActor, {
     fetchHitTime: () => 5000,
     fetchSemantic: () => ({ staticHitTime: true })
 }, true), 5000, 'static hit times must ignore both cast speed and spiritshots');
+assert.strictEqual(timingAttack.calculatedSkillHitTime(castActor, {
+    fetchHitTime: () => 600,
+    fetchSemantic: () => ({})
+}, true), 500, 'a spiritshot cast of a 600 ms magic skill (300 ms scaled, 210 ms with the shot) stops at the 500 ms floor');
+assert.strictEqual(timingAttack.calculatedSkillHitTime(castActor, {
+    fetchHitTime: () => 400,
+    fetchSemantic: () => ({})
+}, true), 140, 'a magic skill with a base cast time under 500 ms has no floor');
+const fastFighter = { ...actor(), fetchCollectiveAtkSpd: () => 999, spiritshotLoaded: true };
+assert.strictEqual(timingAttack.calculatedSkillHitTime(fastFighter, {
+    fetchHitTime: () => 1080,
+    fetchSemantic: () => ({})
+}, false), 500, 'C4: a physical skill with a base of at least 500 ms has the same 500 ms floor (360 ms scaled)');
+assert.strictEqual(Math.round(timingAttack.calculatedSkillHitTime(fastFighter, {
+    fetchHitTime: () => 1800,
+    fetchSemantic: () => ({})
+}, false)), 600, 'a physical skill scales with attack speed and ignores a loaded spiritshot');
+assert.strictEqual(Math.round(timingAttack.calculatedSkillHitTime(fastFighter, {
+    fetchHitTime: () => 300,
+    fetchSemantic: () => ({})
+}, false)), 100, 'a physical skill with a base cast time under 500 ms has no floor');
+
+// Formulas.calcSkillHitTime is the one cast-time rule for hot, cold and the raid estimate
+// (rounded: the speed ratio leaves float noise such as 999.9999999999999).
+const hitTime = (base, speed, options) => Math.round(Formulas.calcSkillHitTime(base, speed, options) * 1000) / 1000;
+assert.strictEqual(hitTime(1000, 333, { magic: true }), 1000, 'base cast time at speed 333');
+assert.strictEqual(hitTime(1000, 333, { magic: true, spiritshot: true }), 699, 'spiritshot: 70% of a magic cast, whole ms');
+assert.strictEqual(hitTime(1000, 333, { spiritshot: true }), 1000, 'spiritshot does not speed up a physical skill');
+assert.strictEqual(hitTime(500, 1332, { magic: true }), 500, 'magic, base 500 ms: 500 ms floor');
+assert.strictEqual(hitTime(498, 999, { magic: true }), 166, 'magic, base under 500 ms: no floor');
+assert.strictEqual(hitTime(500, 1332), 500, 'physical, base 500 ms: 500 ms floor');
+assert.strictEqual(hitTime(300, 999), 100, 'physical, base under 500 ms: no floor');
+assert.strictEqual(hitTime(5000, 1332, { magic: true, spiritshot: true, staticHitTime: true }), 5000,
+    'a static skill keeps its base cast time');
+
+// Formulas.magicCriticalRate: C4 base 8 per mille, times the WIT bonus with a weapon, cap 300.
+const mCrit = (options) => Math.round(Formulas.magicCriticalRate(options) * 10) / 10;
+assert.strictEqual(mCrit({}), 8, 'C4 base magic critical rate is 8 per mille');
+assert.strictEqual(Formulas.rollCritical(Formulas.magicCriticalRate({}), () => 0.0079), true, 'rng 0.0079 crits at 8 per mille');
+assert.strictEqual(Formulas.rollCritical(Formulas.magicCriticalRate({}), () => 0.009), false, 'rng 0.009 does not crit at 8 per mille');
+assert.strictEqual(mCrit({ wit: 30 }), 8, 'without a weapon WIT does not count');
+assert.strictEqual(mCrit({ wit: 20, weapon: true }), 8.4, 'WIT 20 with a weapon: 8.4 per mille');
+assert.strictEqual(mCrit({ wit: 30, weapon: true }), 13.7, 'WIT 30 with a weapon: 13.7 per mille');
+assert.strictEqual(mCrit({ wit: 40, weapon: true }), 22.3, 'WIT 40 with a weapon: 22.3 per mille');
+assert.strictEqual(mCrit({ multiplier: 4 }), 32, 'Wild Magic level 2 quadruples the rate');
+assert.strictEqual(mCrit({ add: 10 }), 18, 'flat bonuses add after the multipliers');
+assert.strictEqual(mCrit({ multiplier: 100, wit: 40, weapon: true }), 300, 'capped at 300 per mille');
+assert.strictEqual(mCrit({ add: -50 }), 0, 'never below zero');
 
 const attack = new Attack();
 const magicActor = actor();
