@@ -562,6 +562,7 @@ const tests = [
     'tests/test_bot_orc_mystic_starter_weapon.js',
     'tests/test_bot_dual_class_interim_weapon.js',
     'tests/test_craft_station_catalog.js',
+    'tests/test_craft_station_saved_upgrade.js',
     'tests/test_b_grade_craft_progression.js',
     'tests/test_cold_worker_message_rejection.js',
     'tests/test_cold_commit_queue.js',

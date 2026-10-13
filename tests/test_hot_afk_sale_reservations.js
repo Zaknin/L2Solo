@@ -111,6 +111,22 @@ async function run() {
         bot, null, { say() {} });
     assert.deepStrictEqual(limited, [[ANIMAL_BONE, 5]], 'the decided units only');
 
+    // A sale chosen before the bot selected a symbol must be checked against
+    // the current dye reserve when the hot bot finally reaches the buyer.
+    const DYE = 4601;
+    const dyeBot = { ...bot, backpack: { fetchItems: () => [item(DYE, 50)] } };
+    const dyeState = { ...state, inventory: { [DYE]: { selfId: DYE, amount: 50 } },
+        stats: { classId: 55, hennas: [], wishFocus: ['henna:157', 0, 0] } };
+    store.items.push({ selfId: DYE, name: 'Dye', count: 50, price: 100 });
+    limited.length = 0;
+    await ShoppingState.sellAndRestock({ shoppingTarget: { actorId: 940001, sale: { [DYE]: 50 } }, coldLifeState: dyeState },
+        dyeBot, null, { say() {} });
+    assert.deepStrictEqual(limited, [], 'a stale held sale cannot take the newly selected symbol dye');
+    assert.deepStrictEqual(TradeService.sellableActorItems(dyeBot, { ...dyeState,
+        stats: { ...dyeState.stats, wishFocus: ['stock:shots', 0, 0] } }).map(row => row.fetchSelfId()), [DYE],
+    'dropping the symbol releases the stack to the normal sale path');
+    store.items.pop();
+
     // The buyer search of a shopping or companion bot weighs the same items,
     // by the cold bots' sale decision: buy ads in Gludio for all three, the
     // reserved varnish and the pet-locked stems paying the most.
