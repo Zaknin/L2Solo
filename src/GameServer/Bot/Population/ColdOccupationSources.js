@@ -78,6 +78,9 @@ function* reservations(state) {
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const plan = Disposition.equipmentInputPlan(state);
+    for (const [id, amount] of Object.entries(Disposition.retainedEquipmentAmounts(state))) {
+        reserved[id] = Math.max(Number(reserved[id] || 0), amount); yield 'ingredient';
+    }
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
     if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')

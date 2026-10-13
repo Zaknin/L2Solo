@@ -317,8 +317,7 @@ function inventoryCleanupNeed(state = {}, options = {}) {
 // the unfinished kit. Legacy paused plans retain their exchange/recipe/combine
 // metadata even though GearPlanSelection records strategy='none'. Resolve a
 // reservation-only view; never reactivate their travel or crafting action.
-function equipmentInputPlan(state) {
-    const plan = state?.stats?.equipmentPlan;
+function equipmentInputPlan(state, plan = state?.stats?.equipmentPlan) {
     if (plan?.status !== 'deferred' || plan.reason !== 'wish_focus') return plan;
     const strategy = plan.exchange?.kind === 'luxury_exchange' ? 'luxury_exchange'
         : plan.recipeId ? 'craft' : plan.combine ? 'market' : null;
@@ -362,6 +361,21 @@ function reservedCombinationAmounts(state, plan = equipmentInputPlan(state)) {
         reserved[selfId] = Math.max(Number(reserved[selfId] || 0), Number(requirement.amount || 0));
         return reserved;
     }, {});
+}
+
+// A lower-grade bridge can replace the executable goal while its later kit
+// still owns collected inputs. Only one retained personal goal is permitted.
+function retainedEquipmentAmounts(state) {
+    const owner = state?.stats?.equipmentPlan;
+    const retained = owner?.inputPreparation;
+    if (!retained || owner.reason === 'cancelled') return {};
+    const plan = equipmentInputPlan(state, retained);
+    if (plan?.strategy === 'none' || plan?.status !== 'active') return {};
+    const craft = reservedCraftAmounts(state, plan), combine = reservedCombinationAmounts(state, plan);
+    const exchange = plan.strategy === 'luxury_exchange' ? Object.fromEntries(
+        (plan.materials || []).map(row => [row.selfId, Number(row.amount)])) : {};
+    return Object.fromEntries([...new Set([...Object.keys(craft), ...Object.keys(combine), ...Object.keys(exchange)])]
+        .map(id => [id, Math.max(Number(craft[id] || 0), Number(combine[id] || 0), Number(exchange[id] || 0))]));
 }
 
 function reservedUpgradeAmounts(state) {
@@ -409,6 +423,8 @@ function reservedEquipmentAmounts(state, options = {}) {
     const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
     const combination = reservedCombinationAmounts(state, exchange);
     const upgrades = reservedUpgradeAmounts(state);
+    for (const [id, amount] of Object.entries(retainedEquipmentAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
         for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
     for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
@@ -445,7 +461,7 @@ function reservationInputKey(state = {}) {
         ? quantities(plan.combine.requirements) : null;
     return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
         plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
-        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)]);
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -697,6 +713,7 @@ module.exports = {
     reservedCraftAmounts,
     reservedEquipmentAmounts,
     equipmentInputPlan,
+    retainedEquipmentAmounts,
     reservationInputKey,
     saleCandidates,
     selectedCraftAmounts,

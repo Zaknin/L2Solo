@@ -31,7 +31,16 @@ assert(!Match.soloSurvival(Match.stateProfiles({ level: 29, stats: { classId: 12
 const fragile = { ...mage, maxHp: 20 };
 const servitor = { role: 'dps', maxHp: 2000, pDef: 300, pAtk: 300, atkSpd: 300, skills: [] };
 assert(!Match.soloSurvival([fragile], target).eligible);
-assert(Match.soloSurvival([fragile, servitor], target).eligible, 'a real summon contributes damage and tanking');
+assert(Match.soloSurvival([fragile, servitor], target).eligible, 'native profiles retain tanking allies');
+const withSummon = owner => Match.coldProfiles(owner, { stats: { coldCombat: {
+    summon: { ...servitor, active: true, hp: servitor.maxHp, expiresAt: at + 60000 }
+} } }, at);
+assert(!Match.soloSurvival(withSummon(fragile), target).eligible,
+    'a cold summon cannot lend its HP and defense to a fragile owner');
+const durable = { ...mage, skills: [], maxHp: 150 };
+assert(!Match.soloSurvival([durable], target).eligible);
+assert(Match.soloSurvival(withSummon(durable), target).eligible,
+    'summon damage still helps an owner survive a fight');
 
 const bow = { role: 'archer', pAtk: 100, pDef: 100, maxHp: 1000, atkSpd: 300,
     weaponMask: 32, equipment: { weaponKind: 'Weapon.Bow' }, skills: [] };
@@ -181,7 +190,7 @@ async function run() {
         { spotId: 'danger', exp: -100, cycleMs: 10000, timestamp: at });
     assert(Efficiency.scores(losing, at).get('danger') < 0, 'an exclusively losing history still lowers its route score');
     const legacy = { ...losing, stats: { ...losing.stats, huntEfficiency: losing.stats.huntEfficiency
-        .map(row => ({ ...row, signature: row.signature.replace('net-xp-v1:', ''), exp: 10000 })) } };
+        .map(row => ({ ...row, signature: `legacy-gross:${row.signature}`, exp: 10000 })) } };
     assert.strictEqual(Efficiency.scores(legacy, at).size, 0, 'legacy gross-reward samples cannot bias net-XP routing');
     console.log('Solo survival, safer routing, cross-window deaths, persistent recovery and net death XP passed');
 }

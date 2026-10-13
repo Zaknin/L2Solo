@@ -50,6 +50,25 @@ try {
     assert.equal(calls, 51, 'reset releases the memo along with its context');
     Economy.forget(1);
     assert.equal(Economy.size().context, 0);
+    const previous = { status: 'active', strategy: 'luxury_exchange', target: { selfId: 76, slot: 7 },
+        exchange: { kind: 'luxury_exchange' }, materials: [{ selfId: 1458, amount: 12 }] };
+    const bridgeState = { ...state, characterId: 2, level: 40, stats: { classId: 0, equipmentPlan: previous },
+        inventory: { 1458: { selfId: 1458, amount: 20, stackable: true } } };
+    Planner.combatReadiness = () => ({ hasWeapon: false });
+    Planner.npcEquipmentBridgePlan = () => ({ status: 'active', strategy: 'npc', weaponBridge: true,
+        target: { selfId: 129, slot: 7 } });
+    const contextBridge = Economy.forState(bridgeState, deps);
+    contextBridge.plan.network = { focus: ['C-weapon'],
+        queue: [{ key: 'C-weapon', funded: true, object: { itemId: 76, slot: 7 } }],
+        activity: { rootKey: 'C-weapon', key: 'C-market', activity: 'shopping' } };
+    const selected = Selection.selectAcquisitionPlan(bridgeState, previous, {
+        spots, timestamp: deps.timestamp, planningOptions: { board } }).acquisitionPlan;
+    assert.equal(selected.target.selfId, 129, 'the executable goal buys the D bridge');
+    assert.equal(selected.inputPreparation?.target.selfId, 76, 'normal selection retains the later C goal');
+    const transported = JSON.parse(JSON.stringify({ ...bridgeState,
+        stats: { ...bridgeState.stats, equipmentPlan: selected } }));
+    assert.equal(invoke('GameServer/Bot/Economy/ItemDisposition').retainedEquipmentAmounts(transported)[1458], 12,
+        'the C input ownership survives saved state serialization');
     console.log('test_gear_plan_memo: ok');
 } finally { Object.assign(Planner, original); fs.rmSync(directory, { recursive: true, force: true }); }
 process.exit(0);

@@ -9,6 +9,28 @@ const OfferOrder = invoke('GameServer/Bot/Economy/OfferOrder');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
+function withBridgeInputPreparation(state, previous, next) {
+    if (!next?.weaponBridge || !['active', 'deferred'].includes(next.status)) return next;
+    const retained = previous?.inputPreparation || previous;
+    if (!retained?.target?.selfId || retained.reason === 'cancelled' || previous?.reason === 'cancelled'
+        || GearAcquisitionPlanner.isClanOwnedPlan(retained)) return next;
+    const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
+    const target = Index.find(Data.items, Number(retained.combine?.resultId || retained.target.selfId));
+    const bridge = Index.find(Data.items, Number(next.combine?.resultId || next.target?.selfId));
+    const ranks = ['none', 'd', 'c', 'b', 'a', 's'];
+    if (!target || !bridge || ranks.indexOf(target.etc?.rank) < 2
+        || ranks.indexOf(target.etc?.rank) <= ranks.indexOf(bridge.etc?.rank)
+        || !GearAcquisitionPlanner.considerable(target, state)
+        || GearAcquisitionPlanner.equipmentTargetFulfilled(state, retained)) return next;
+    const inputPreparation = { status: 'deferred', strategy: 'none', reason: 'wish_focus',
+        target: retained.target, exchange: retained.exchange, recipeId: retained.recipeId,
+        materials: retained.materials, combine: retained.combine };
+    const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+    const proposed = { ...state, stats: { ...state.stats, equipmentPlan: { ...next, inputPreparation } } };
+    if (!Object.keys(Disposition.retainedEquipmentAmounts(proposed)).length) return next;
+    return { ...next, inputPreparation };
+}
+
 function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null } = {}) {
     if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
     const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
@@ -125,16 +147,16 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         ? previousPlan
         : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
     const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
-    const acquisitionPlan = {
+    const acquisitionPlan = withBridgeInputPreparation(state, previousPlan, {
         ...costedPlan,
         ...(costedPlan.target?.selfId === wishTargetId ? { target: { ...costedPlan.target, slot: Number(chosen.object.slot) } } : {}),
         marketFallback: finalizedPlan.status === 'active' && finalizedPlan.strategy === 'craft'
             && Number(finalizedPlan.acquisitionProgress?.at || finalizedPlan.startedAt || timestamp) + 20 * 60 * 1000 <= timestamp
-    };
+    });
     const result = { acquisitionPlan: { ...acquisitionPlan },
         replanContext, reusablePartyRequest, excludedSpotIds };
     economy.gearPlanMemo = { key, spots, result };
     return { ...result, economy };
 }
 
-module.exports = { selectAcquisitionPlan };
+module.exports = { selectAcquisitionPlan, withBridgeInputPreparation };

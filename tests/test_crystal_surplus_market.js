@@ -12,6 +12,7 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Listing = invoke('GameServer/Bot/Economy/MarketListingPolicy');
 const Supplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const Native = require('./helpers/nativeMarketFixture');
 const sellerId = 938002, buyerId = 938001;
 const point = { locX: 83396, locY: 147904, locZ: -3400 };
@@ -54,6 +55,26 @@ async function run() {
     const resumedCraft = { strategy: 'none', status: 'deferred', reason: 'wish_focus', recipeId: 1,
         target: { selfId: 76, slot: 7 }, materials: [{ selfId: 1458, amount: 6 }] };
     assert.equal(count(state(1458, { equipmentPlan: resumedCraft })), 14, 'deferred personal craft retains its collected inputs');
+    const bridge = Selection.withBridgeInputPreparation(state(), paused,
+        { strategy: 'npc', status: 'active', weaponBridge: true, target: { selfId: 129, slot: 7 } });
+    assert(bridge.inputPreparation, 'a D weapon bridge keeps the unfinished C input goal');
+    assert.equal(Selection.withBridgeInputPreparation(state(), { ...paused, reason: 'cancelled' },
+        { ...bridge, inputPreparation: undefined }).inputPreparation, undefined,
+        'a bridge does not revive a cancelled C goal');
+    const bridgeState = state(1458, { equipmentPlan: bridge });
+    assert.equal(count(bridgeState), 8, 'the executable D goal cannot sell C inputs');
+    const bridgeIterator = invoke('GameServer/Bot/Population/ColdOccupationSources').reservations(bridgeState);
+    let bridgeStep; do { bridgeStep = bridgeIterator.next(); } while (!bridgeStep.done);
+    assert.equal(bridgeStep.value[1458], 12, 'worker reservations keep C inputs across the bridge');
+    assert.equal(count(state(1458, { equipmentPlan: { ...bridge, reason: 'cancelled' } })), 20);
+    assert.equal(count(state(1458, { classId: 37, equipmentPlan: bridge })), 20,
+        'a class change releases an incompatible retained target');
+    const fulfilledBridge = state(1458, { equipmentPlan: bridge });
+    fulfilledBridge.inventory[76] = { selfId: 76, amount: 1, equipped: true, equippedSlots: [7], slot: 7 };
+    assert.equal(count(fulfilledBridge), 20, 'a fulfilled C target releases retained inputs');
+    assert.notEqual(Disposition.reservationInputKey(bridgeState),
+        Disposition.reservationInputKey(state(1458, { equipmentPlan: { ...bridge, inputPreparation: undefined } })),
+        'reservation caches distinguish the retained C goal');
     const sourceIterator = invoke('GameServer/Bot/Population/ColdOccupationSources').reservations(
         state(1458, { equipmentPlan: paused }));
     let sourceStep; do { sourceStep = sourceIterator.next(); } while (!sourceStep.done);
@@ -85,7 +106,7 @@ async function run() {
     await Database.setItem(sellerId, { selfId: 1458, name: 'Crystal: D-Grade', amount: 20, stackable: true });
     for (const id of [sellerId, buyerId]) await Life.upsertState({ ...state(), characterId: id,
         accountName: `bot_crystal_${id}`, inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
-        stats: { classId: 0, money: [1000, 0, 0, 0], ...(id === sellerId ? { equipmentPlan: paused } : {}) },
+        stats: { classId: 0, money: [1000, 0, 0, 0], ...(id === sellerId ? { equipmentPlan: bridge } : {}) },
         vitals: { hp: 100, maxHp: 100 } }, 'fixture');
     async function accept(amount, token) {
         const old = (await Database.fetchAfkTradeShops(buyerId)).filter(row => row.kind === 'buy_ad');
