@@ -12,25 +12,33 @@ module.exports = function(session, parts) {
     }
 
     const targetSession = World.user.sessions.find(ob => ob.actor && ob.actor.fetchName().toLowerCase() === targetName.toLowerCase());
+    // The grant is the character's that was named; its messages are not sent
+    // after Restart to another character on either connection.
+    const actor = session.actor;
     if (targetSession && targetSession.actor) {
-        const backpack = targetSession.actor.backpack;
+        const target = targetSession.actor;
+        const backpack = target.backpack;
+        const notify = () => {
+            if (targetSession.actor === target) {
+                targetSession.dataSendToMe(ServerResponse.userInfo(target));
+                targetSession.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
+                targetSession.dataSendToMe(ServerResponse.speak(target, { kind: 0, text: `Received ${amount} Adena from Admin.` }));
+            }
+            if (session !== targetSession && session.actor === actor) {
+                session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to ${target.fetchName()}.` }));
+            }
+        };
         // The writes are returned so that a failure reaches the NPC dialog's
         // log; only a missing stack gets a new one (a failed update of an
         // existing stack must not fall through to a second stack).
         return backpack.stackableExists(57).then((item) => {
             const total = item.fetchAmount() + amount;
-            return Database.updateItemAmount(targetSession.actor.fetchId(), item.fetchId(), total).then(() => {
+            return Database.updateItemAmount(target.fetchId(), item.fetchId(), total).then(() => {
                 backpack.updateAmount(item.fetchId(), total);
-                targetSession.dataSendToMe(ServerResponse.userInfo(targetSession.actor));
-                targetSession.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-                
-                targetSession.dataSendToMe(ServerResponse.speak(targetSession.actor, { kind: 0, text: `Received ${amount} Adena from Admin.` }));
-                if (session !== targetSession) {
-                    session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to ${targetSession.actor.fetchName()}.` }));
-                }
+                notify();
             });
         }, () => {
-            return Database.setItem(targetSession.actor.fetchId(), {
+            return Database.setItem(target.fetchId(), {
                 selfId: 57,
                 name: "Adena",
                 amount: amount,
@@ -38,13 +46,7 @@ module.exports = function(session, parts) {
                 slot: 0
             }).then((packet) => {
                 backpack.insertItem(Number(packet.insertId), 57, { amount: amount });
-                targetSession.dataSendToMe(ServerResponse.userInfo(targetSession.actor));
-                targetSession.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-                
-                targetSession.dataSendToMe(ServerResponse.speak(targetSession.actor, { kind: 0, text: `Received ${amount} Adena from Admin.` }));
-                if (session !== targetSession) {
-                    session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to ${targetSession.actor.fetchName()}.` }));
-                }
+                notify();
             });
         });
     } else {
@@ -57,7 +59,7 @@ module.exports = function(session, parts) {
                     if (adenaItem) {
                         const total = adenaItem.amount + amount;
                         return Database.updateItemAmount(charId, adenaItem.id, total).then(() => {
-                            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
+                            if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
                         });
                     } else {
                         return Database.setItem(charId, {
@@ -67,12 +69,12 @@ module.exports = function(session, parts) {
                             equipped: false,
                             slot: 0
                         }).then(() => {
-                            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
+                            if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
                         });
                     }
                 });
             } else {
-                session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Character with name "${targetName}" does not exist.` }));
+                if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Character with name "${targetName}" does not exist.` }));
             }
         });
     }

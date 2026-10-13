@@ -123,6 +123,69 @@ async function main() {
 
         // After a failed request the guard is released and the next one runs.
         assert.notStrictEqual(failed.session.clanLevelUpPending, true, 'a failed request releases the guard');
+
+        // E256: the clan write is held while the connection selects another
+        // character. The clan data changes; no Clan Manager reply reaches the other character.
+        const other = actorFixture(4600002, 0);
+        const heldLevel = await fixture();
+        let releaseLevel;
+        Database.updateClanLevel = (clanId, level) => new Promise((resolve) => {
+            heldLevel.levelWrites.push(level);
+            releaseLevel = resolve;
+        });
+        const heldRequest = Clan(heldLevel.session, ['clan', 'level-up']);
+        await ticks();
+        heldLevel.session.actor = other;
+        releaseLevel();
+        await heldRequest;
+        await ticks();
+        assert.deepStrictEqual(heldLevel.levelWrites, [1], 'the clan level write stays');
+        assert.strictEqual(heldLevel.clan.level, 1);
+        assert.deepStrictEqual(heldLevel.pages, [], 'no level-up page reaches another character');
+        assert.deepStrictEqual(heldLevel.said, [], 'no level-up message reaches another character');
+
+        const heldFour = await fixture();
+        heldFour.clan.level = 3;
+        let releaseFour;
+        const synced = [];
+        const ClanAllianceService = invoke('GameServer/Clan/ClanAllianceService');
+        const originalSync = ClanAllianceService.syncInventory;
+        const originalRaise = Database.raisePlayerClanToFour;
+        try {
+            ClanAllianceService.syncInventory = async (session) => { synced.push(session.actor.fetchId()); };
+            Database.raisePlayerClanToFour = () => new Promise((resolve) => { releaseFour = () => resolve({ ok: true, sp: 5 }); });
+            const fourRequest = Clan(heldFour.session, ['clan', 'level-up']);
+            await ticks();
+            heldFour.session.actor = other;
+            releaseFour();
+            await fourRequest;
+            await ticks();
+        } finally {
+            ClanAllianceService.syncInventory = originalSync;
+            Database.raisePlayerClanToFour = originalRaise;
+        }
+        assert.strictEqual(heldFour.clan.level, 4, 'the level four write stays');
+        assert.strictEqual(heldFour.actor.fetchSp(), 5, 'the leader who paid keeps the new SP');
+        assert.deepStrictEqual(synced, [], 'the other character inventory is not rebuilt');
+        assert.deepStrictEqual(heldFour.pages, [], 'no level-four page reaches another character');
+
+        const heldCreate = await fixture();
+        const originalCreate = ClanService.create;
+        let releaseCreate;
+        try {
+            ClanService.create = () => new Promise((resolve) => {
+                releaseCreate = () => resolve({ ok: true, clan: { id: 78, name: 'Created', level: 0, members: [] } });
+            });
+            const createRequest = Clan(heldCreate.session, ['clan', 'create', 'Created']);
+            heldCreate.session.actor = other;
+            releaseCreate();
+            await createRequest;
+            await ticks();
+        } finally {
+            ClanService.create = originalCreate;
+        }
+        assert.deepStrictEqual(heldCreate.pages, [], 'no create page reaches another character');
+        assert.deepStrictEqual(heldCreate.said, [], 'no create message reaches another character');
         console.log('clan level-up bypass checks passed');
     } finally {
         Object.assign(Database, {

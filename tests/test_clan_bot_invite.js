@@ -176,6 +176,25 @@ function fakeActor(id, name, options = {}) {
             assert.strictEqual(answer.code, 'missing_invite', 'an answer from another character is refused like an expired invite');
             assert.strictEqual(added, 0, 'the replacement character must not join the clan');
             assert.strictEqual(invitedSession.pendingClanInvite, null, 'the stale invite is consumed');
+
+            // E256: the join write is held; meanwhile the connection selects another
+            // character. The write stays the invited character's; the session gets no join UI.
+            invitedSession.actor = invitedPlayer;
+            let releaseJoin;
+            const joined = [];
+            ClanService.addMember = (_clan, actor) => new Promise((resolve) => {
+                joined.push(actor.fetchId());
+                releaseJoin = () => resolve({ ok: true, clan, member: { id: actor.fetchId() } });
+            });
+            RequestJoinPledge.consume(inviterSession, { targetId: invitedPlayer.fetchId() });
+            invitedSession.sent = [];
+            const pending = RequestAnswerJoinPledge.consume(invitedSession, { answer: 1 });
+            invitedSession.actor = replacement;
+            releaseJoin();
+            const heldAnswer = await pending;
+            assert.strictEqual(heldAnswer.ok, true, 'the invited character joined');
+            assert.deepStrictEqual(joined, [invitedPlayer.fetchId()], 'the write is for the invited character');
+            assert.deepStrictEqual(invitedSession.sent, [], 'no join UI reaches the session of another character');
         } finally {
             World.user = { sessions: originalWorldSessions || [] };
             ClanService.findById = originalFindById;

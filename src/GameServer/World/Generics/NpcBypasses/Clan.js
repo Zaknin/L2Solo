@@ -88,7 +88,11 @@ function createForm(session) {
 }
 
 function createClan(session, name) {
-    return ClanService.create(session.actor, name).then((result) => {
+    // The clan is the character's that asked; the Clan Manager reply is not
+    // sent after Restart to another character on the same connection.
+    const actor = session.actor;
+    return ClanService.create(actor, name).then((result) => {
+        if (session.actor !== actor) return;
         if (!result.ok) {
             sendHtml(session, page(errorText(result.code) + returnLink()));
             return;
@@ -97,13 +101,13 @@ function createClan(session, name) {
         const clan = result.clan;
         ClanService.refreshOnlineMembers(clan);
         session.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan));
-        session.dataSendToMe(ServerResponse.pledgeShowMemberListAll(clan, session.actor));
-        session.dataSendToMe(ServerResponse.userInfo(session.actor));
+        session.dataSendToMe(ServerResponse.pledgeShowMemberListAll(clan, actor));
+        session.dataSendToMe(ServerResponse.userInfo(actor));
         speak(session, `Clan ${clan.name} has been created.`);
         sendHtml(session, page(`Clan <font color="LEVEL">${clan.name}</font> has been created.` + returnLink()));
     }).catch((err) => {
         utils.infoWarn('Clan', 'create clan failed: %s', err.message);
-        sendHtml(session, page('Failed to create clan.' + returnLink()));
+        if (session.actor === actor) sendHtml(session, page('Failed to create clan.' + returnLink()));
     });
 }
 
@@ -184,17 +188,24 @@ function levelUp(session) {
         if (session.clanLevelUpPending) return;
         session.clanLevelUpPending = true;
         return Database.raisePlayerClanToFour({ clanId: clan.id, characterId: actor.fetchId() }).then(async result => {
-            if (!result.ok) { sendHtml(session, page(errorText(result.code, result) + returnLink())); return result; }
+            if (!result.ok) {
+                if (session.actor === actor) sendHtml(session, page(errorText(result.code, result) + returnLink()));
+                return result;
+            }
             actor.setSp(result.sp);
             clan.level = 4;
-            await invoke('GameServer/Clan/ClanAllianceService').syncInventory(session);
             ClanService.onlineSessions(clan).forEach(member => member.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan)));
+            // The level is the clan's; the inventory sync and the replies are
+            // for the leader who paid, not for another character after Restart.
+            if (session.actor !== actor) return result;
+            await invoke('GameServer/Clan/ClanAllianceService').syncInventory(session);
+            if (session.actor !== actor) return result;
             session.dataSendToMe(ServerResponse.userInfo(actor));
             sendHtml(session, page('Clan level increased to <font color="LEVEL">4</font>.' + returnLink()));
             return result;
         }).catch(error => {
             utils.infoWarn('Clan', 'level four upgrade failed: %s', error.message);
-            sendHtml(session, page('Failed to increase clan level.' + returnLink()));
+            if (session.actor === actor) sendHtml(session, page('Failed to increase clan level.' + returnLink()));
         }).finally(() => { session.clanLevelUpPending = false; });
     }
 
@@ -205,7 +216,7 @@ function levelUp(session) {
     session.clanLevelUpPending = true;
     return new Promise((resolve) => resolve(spendLevelCost(session, requirement))).then((spent) => {
         if (!spent.ok) {
-            sendHtml(session, page(errorText(spent.code, spent) + returnLink()));
+            if (session.actor === actor) sendHtml(session, page(errorText(spent.code, spent) + returnLink()));
             return;
         }
 
@@ -213,6 +224,7 @@ function levelUp(session) {
             ClanService.onlineSessions(clan).forEach((memberSession) => {
                 memberSession.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan));
             });
+            if (session.actor !== actor) return;
             session.dataSendToMe(ServerResponse.statusUpdate(actor.fetchId(), statusParams(actor)));
             session.dataSendToMe(ServerResponse.userInfo(actor));
             speak(session, `Clan level increased to ${clan.level}.`);
@@ -220,7 +232,7 @@ function levelUp(session) {
         });
     }).catch((err) => {
         utils.infoWarn('Clan', 'level up failed: %s', err.message);
-        sendHtml(session, page('Failed to increase clan level.' + returnLink()));
+        if (session.actor === actor) sendHtml(session, page('Failed to increase clan level.' + returnLink()));
     }).finally(() => { session.clanLevelUpPending = false; });
 }
 

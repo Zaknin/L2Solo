@@ -48,7 +48,10 @@ function createOrUpdate(session, buffer) {
     const macro = readMacro(buffer);
     if (!validMacro(macro)) return;
 
-    const characterId = session.actor.fetchId();
+    // The macro is the character's that made it; its list is not sent after
+    // Restart to another character on the same connection.
+    const actor = session.actor;
+    const characterId = actor.fetchId();
     Database.fetchMacros(characterId).then((macros) => {
         const exists = macros.some((stored) => stored.id === macro.id);
         if (!exists && macros.length >= MAX_MACROS) return;
@@ -57,6 +60,7 @@ function createOrUpdate(session, buffer) {
         return Database.setMacro(characterId, macro).then(() => {
             const updated = macros.filter((stored) => stored.id !== macro.id);
             updated.push(macro);
+            if (session.actor !== actor) return;
             sendMacros(session, updated);
         });
     }).catch((error) => utils.infoWarn('Macro', 'failed to store macro: %s', error.message));
@@ -66,12 +70,16 @@ function remove(session, buffer) {
     const packet = new ReceivePacket(buffer);
     packet.readD();
     const macroId = packet.data[0];
-    const characterId = session.actor.fetchId();
+    const actor = session.actor;
+    const characterId = actor.fetchId();
 
     Database.deleteMacro(characterId, macroId)
         .then(() => Database.deleteMacroShortcuts(characterId, macroId))
         .then(() => Database.fetchMacros(characterId))
-        .then((macros) => sendMacros(session, macros))
+        .then((macros) => {
+            if (session.actor !== actor) return;
+            sendMacros(session, macros);
+        })
         .catch((error) => utils.infoWarn('Macro', 'failed to delete macro: %s', error.message));
 }
 

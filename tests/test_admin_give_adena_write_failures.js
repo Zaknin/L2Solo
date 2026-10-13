@@ -122,6 +122,24 @@ async function main() {
         assert.deepStrictEqual(offlineOk.unhandled, []);
         assert.strictEqual(offlineOk.logged, 0);
         assert(offlineOk.said.includes('Successfully gave 50 Adena to offline character Offline.'));
+        // E256: the write is held while the connection selects another character.
+        // The Adena stays the first character's; no grant message reaches the other one.
+        const held = onlineFixture();
+        const writes = [];
+        let releaseWrite;
+        Database.updateItemAmount = (characterId, itemId, total) => new Promise((resolve) => {
+            writes.push([characterId, itemId, total]);
+            releaseWrite = resolve;
+        });
+        utils.infoWarn = () => {};
+        NpcTalkResponse(held.session, { link: 'admin-give-adena Online 50' });
+        await ticks();
+        held.session.actor = { fetchId: () => 4800009, fetchName: () => 'Other', backpack: { fetchItems: () => [] } };
+        releaseWrite();
+        await ticks();
+        assert.deepStrictEqual(writes, [[4800001, 5001, 150]], 'the write is for the character that was granted');
+        assert.strictEqual(held.cash.value, 150, 'the granted character keeps the Adena in memory');
+        assert.deepStrictEqual(held.said, [], 'no grant message reaches the session of another character');
         console.log('admin give-adena write failure checks passed');
     } finally {
         Object.assign(Database, {
