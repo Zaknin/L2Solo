@@ -16,6 +16,55 @@ const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const Errands = require('../src/GameServer/Bot/Population/CombinedErrandPolicy');
 const id = 719112, sellerId = 719113;
 
+async function nativeSavedGoal() {
+    const characterId = 719114, Data = invoke('GameServer/DataCache');
+    await Database.createAccount('bot_goal_probe', 'test');
+    await Database.execute([`INSERT INTO characters(id,username,name,classId,race,level,exp,sp,maxHp,maxMp,hp,mp,
+        sex,face,hair,hairColor,locX,locY,locZ,newbie,newbieShotsReceived)
+        VALUES(?,'bot_goal_probe','NativeGoalProbe',0,0,30,?,0,187,74,187,74,0,0,0,0,81100,148000,-3466,-1,0)`,
+    [characterId, Number(Data.experience[29])]]);
+    const kit = require('./fixtures/profitable_stock_state').kitFor(0, 30);
+    const lookup = invoke('GameServer/Bot/Population/ColdNpcPlanningCatalog').createLookup(
+        invoke('GameServer/Bot/Population/ColdSimulationCoordinator').npcPlanningCatalogRows());
+    const missing = kit.entries.find(item => [6, 9, 12].includes(Number(item.slot))
+        && kit.inventory[item.selfId].amount === 1 && lookup.offersFor(item.selfId).length > 0);
+    assert(missing, 'the native goal actor has one canonical NPC wearable gap');
+    await Database.setItem(characterId, { selfId: 57, name: 'Adena', amount: 1000000, slot: 0 });
+    for (const item of kit.entries.filter(item => item.selfId !== missing.selfId)) {
+        const template = Data.items.find(row => Number(row.selfId) === Number(item.selfId));
+        await Database.setItem(characterId, { selfId: Number(item.selfId), name: template.template.name,
+            amount: 1, equipped: true, slot: Number(item.slot), enchant: 0 });
+    }
+    const state = await Life.upsertState({ characterId, accountName: 'bot_goal_probe', name: 'NativeGoalProbe',
+        level: 30, exp: Number(Data.experience[29]), adena: 1000000, phase: 'cold', activity: 'hunting',
+        currentRegion: 'Giran', spotId: '7_20', loc: { locX: 81100, locY: 148000, locZ: -3466 },
+        inventory: Life.inventorySummaryFromItems(await Database.fetchItems(characterId)),
+        vitals: { hp: 187, maxHp: 187, mp: 74, maxMp: 74 }, timing: {},
+        stats: { classId: 0, role: 'dps' } }, 'saved_native_goal_fixture');
+    const timestamp = Date.now();
+    const captured = await require('./helpers/workerEconomyDecision')(state, { timestamp, nativeRoutes: true });
+    const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+    const native = Decisions.compact(captured.decision);
+    assert.equal(native.key, Decisions.stateKey(state));
+    assert.equal(native.updatedAt, state.updatedAt);
+    const chosen = captured.queue.find(row => row.key === native.activity?.rootKey);
+    assert(native.activity?.activity === 'shopping' && !native.activity.funding && chosen?.object?.slot
+        && chosen.funded && Array.isArray(captured.statsPacket.money),
+    `positive saved goal native prerequisite: ${JSON.stringify({ activity: native.activity, queue: captured.queue, money: captured.statsPacket.money })}`);
+    const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
+    invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.accept(characterId, captured.decision);
+    const goal = await GoalService.review(accepted, { now: timestamp });
+    assert(goal?.current, 'the independent native funded actor receives a persisted goal');
+    assert.equal(goal.current.plan.wishKey, native.activity.rootKey);
+    assert.equal(goal.current.plan.economyActivity, native.activity.activity);
+    assert.equal(goal.current.target.itemId, chosen.object.itemId);
+    const [goalRow] = await Database.execute(['SELECT goalJson FROM bot_goal_state WHERE characterId=?', [characterId]]);
+    const [lifeRow] = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=?', [characterId]]);
+    assert(goalRow && JSON.parse(goalRow.goalJson).plan.wishKey === native.activity.rootKey);
+    for (const key of ['economyInputKey', 'inputKey', 'marketTrades', 'inputHash', 'priceBeliefs'])
+        assert(!(lifeRow.statsJson + goalRow.goalJson).includes('"' + key + '"'), key + ' must not be saved for the positive actor');
+}
+
 async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, heldPacket = null } = {}) {
     const { Worker } = require('node:worker_threads');
     const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
@@ -77,7 +126,8 @@ async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, he
         assert(Array.isArray(packet.money) && packet.money.length >= 4 && packet.money[1] > 0,
             'the actual worker economy produces a positive money floor');
         assert(request.precomputedPlan.economyDecision, 'the packet comes with the native worker economy decision');
-        assert(!request.precomputedPlan.plannedState.stats.money, 'money travels in the packet, not in the old planned state');
+        assert.strictEqual(request.precomputedPlan.plannedState.stats.money, packet.money,
+            'native execution state and stats packet share one canonical money array');
         if (huntSpot) {
             assert.equal(request.state.activity, 'hunting');
             assert.equal(request.precomputedPlan.plannedState.activity, 'hunting');
@@ -112,15 +162,46 @@ async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, he
                     projectClassProgression: true, timestamp });
             }
         };
+        const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
+        const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const originalReconcile = DecisionEvents.reconcile, reconciled = [];
+        const sectionBits = { build: 1, combat: 2, supply: 4, benefits: 8,
+            sources: 16, occupation: 32, funding: 64, relations: 128 };
+        DecisionEvents.reconcile = function (...args) {
+            const [before, after, at] = args;
+            if (Number(before?.characterId) === state.characterId || Number(after?.characterId) === state.characterId) {
+                assert.equal(before.characterId, state.characterId);
+                assert.equal(after.characterId, state.characterId);
+                const changed = Sections.events(before, after, at);
+                for (const name of changed) assert(Object.hasOwn(sectionBits, name), `unknown native decision section ${name}`);
+                const expected = { decisionSeq: after.stats?.decisionSeq,
+                    activityLeaf: after.stats?.activityLeaf, wishDirty: after.stats?.wishDirty };
+                if (changed.length) {
+                    expected.decisionSeq = Math.max(Number(before.stats?.decisionSeq) || 0, Number(after.stats?.decisionSeq) || 0) + 1;
+                    expected.activityLeaf = 0;
+                    expected.wishDirty = changed.reduce((bits, name) => bits | sectionBits[name], 0);
+                }
+                reconciled.push({ changed, expected });
+            }
+            return originalReconcile.apply(this, args);
+        };
         Economy.forState = () => { throw Error('main must consume the worker packet without rebuilding wishes'); };
         try {
-            const prepared = await Life.applyResolve.call(receiver, applyInput, request.precomputedResult,
-                { statsPacket: packet, workerAdmission: admission });
+            let prepared;
+            try {
+                prepared = await Life.applyResolve.call(receiver, applyInput, request.precomputedResult,
+                    { statsPacket: packet, workerAdmission: admission });
+            } finally { DecisionEvents.reconcile = originalReconcile; }
+            assert.equal(reconciled.length, huntSpot ? 1 : 0, 'only the first native hunting preparation reconciles its event sections');
             assert(prepared, 'native main prepare returns the functional projected state');
             assert.deepEqual(prepared.stats.money, packet.money, 'the real money queue survives main preparation');
             for (const [key, value] of Object.entries(packet)) {
-                if (!huntSpot || !['decisionSeq', 'activityLeaf'].includes(key)) assert.deepEqual(prepared.stats[key], value);
+                const expected = huntSpot && ['decisionSeq', 'activityLeaf', 'wishDirty'].includes(key)
+                    ? reconciled[0].expected[key] : value;
+                assert.deepEqual(prepared.stats[key], expected, `native packet field ${key} obeys its preparation contract`);
             }
+            if (huntSpot) for (const [key, expected] of Object.entries(reconciled[0].expected))
+                assert.equal(prepared.stats[key], expected, `native event-boundary ${key}: ${reconciled[0].changed.join(',')}`);
             const materializedMoney = Number(request.precomputedResult.materialize.adena)
                 + request.precomputedResult.materialize.items.filter(row => row.selfId === 57)
                     .reduce((sum, row) => sum + Number(row.amount || 0), 0);
@@ -149,7 +230,7 @@ async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, he
             assert.equal(preparations, huntSpot ? 2 : 1, 'a stale worker cannot prepare, merge or write its packet');
             assert.equal(JSON.stringify(applyInput), originalInput, 'the old canonical input stays unchanged');
             console.log(`Native ${activity}/${heldPacket ? 'held_focus' : 'changed_focus'} packet survives main projection/admission; unfunded spend and stale source refused`);
-        } finally { Economy.forState = originalForState; }
+        } finally { Economy.forState = originalForState; DecisionEvents.reconcile = originalReconcile; }
         send('shutdown', {}, 'packet-shutdown');
         await reply(value => value.type === 'drained' && value.msgId === 'packet-shutdown');
         assert.equal(await exit, 0);
@@ -195,9 +276,19 @@ async function run() {
         // Main consumes a real worker-shaped decision for the same native plan.
         const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
         const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-        coordinator.economyDecisions.accept(id, Decisions.capture(planned.economy, state));
+        const decision = Decisions.capture(planned.economy, state);
+        const native = Decisions.compact(decision);
+        coordinator.economyDecisions.accept(id, decision);
         const goal = await GoalService.review(state);
-        assert(goal?.current, 'the native plan receives a native goal review');
+        if (native.activity) {
+            assert(goal?.current, 'an actual selected activity receives a native goal review');
+            assert.equal(goal.current.plan.wishKey, native.activity.rootKey);
+        } else {
+            assert.equal(goal, null, 'the unchanged heavy actor defers when its actual native decision has no activity');
+            const rows = await Database.execute(['SELECT goalJson FROM bot_goal_state WHERE characterId=?', [id]]);
+            assert.deepEqual(rows, [], 'deferred heavy actor does not manufacture a persisted goal');
+        }
+        await nativeSavedGoal();
 
         for (let i = 0; i < 30; i++) await Database.execute([
             'INSERT INTO warehouse_items(characterId,selfId,name,amount,enchant) VALUES(?,1864,\'Stem\',1,0)', [id]]);
@@ -246,7 +337,7 @@ async function run() {
         assert.equal(stats.huntEfficiency[0].adena, 123);
         assert.equal(stats.huntEfficiency[0].at, 1791200000000);
         assert.equal(stats.huntEfficiency[0].cycleMs, 1234.56789);
-        const serialized = row.statsJson + goalRow.goalJson;
+        const serialized = row.statsJson + (goalRow?.goalJson || '');
         for (const key of ['economyInputKey', 'inputKey', 'marketTrades', 'inputHash', 'priceBeliefs'])
             assert(!serialized.includes('"' + key + '"'), key + ' must not be saved');
         assert.notEqual(options.default.Database.path, require('node:path').resolve('tmp/nodel2.sqlite'));
