@@ -5,6 +5,7 @@ const BuffCatalog = invoke('GameServer/Effects/BuffCatalog');
 const EffectTicker = invoke('GameServer/Effects/EffectTicker');
 const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const EffectStats = invoke('GameServer/Effects/EffectStats');
+const ToggleSkills = invoke('GameServer/Skills/ToggleSkills');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const Formulas = invoke('GameServer/Formulas');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -1006,12 +1007,19 @@ function applyCleanse(session, target, semantic) {
         removed.push(...EffectStore.removeByCategory(target, entry.category, entry.maxLevel ?? Infinity));
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) {
             refreshStats(target?.session || session, target);
         }
         refreshEffects(session, target);
     }
     return removed;
+}
+
+// Dispel paths remove toggles too: clear their actor flags (Silent Move,
+// Fake Death) the same way a manual toggle-off does.
+function cleanupRemovedState(session, target, removed) {
+    removed.forEach((effect) => ToggleSkills.cleanupState(target?.session || session, target, effect));
 }
 
 function applyCancel(session, target, semantic, rng) {
@@ -1027,6 +1035,7 @@ function applyCancel(session, target, semantic, rng) {
         }
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) {
             refreshStats(target?.session || session, target);
         }
@@ -1127,6 +1136,7 @@ function applyNegate(session, target, semantic) {
         if (EffectStore.remove(target, effect.key)) removed.push(effect);
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) refreshStats(target?.session || session, target);
         refreshEffects(session, target);
     }
@@ -1144,6 +1154,7 @@ function applyBane(session, target, semantic, rng) {
     });
 
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) refreshStats(target?.session || session, target);
         refreshEffects(session, target);
     }

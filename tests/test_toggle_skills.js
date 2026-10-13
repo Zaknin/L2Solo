@@ -182,6 +182,29 @@ function wait(ms) {
     assert.strictEqual(EffectStore.list(drainingOrc).length, 0, 'Soul Cry should auto-remove when periodic MP drain cannot be paid');
     assert.strictEqual(EffectStats.add(drainingOrc, 'pAtkAdd'), 0, 'Auto-removed Soul Cry should drop its P.Atk bonus');
 
+    // Cancel (applyCancel) and NPC Cancel 4094 (applyNegate) remove the
+    // Silent Move effect; actor.silentMoving, read first by NpcAggro, must follow.
+    const C4SkillEffects = invoke('GameServer/Skills/C4SkillEffects');
+    for (const cancelSkill of [
+        new SkillModel({ selfId: 1056, name: 'Cancel', level: 12, spell: true, power: 25, mp: 0, hp: 0, distance: 600 }),
+        new SkillModel({ selfId: 4094, name: 'NPC Cancel', level: 9, spell: true, power: 0, mp: 0, hp: 0, distance: 600 })
+    ]) {
+        const sneak = actor(100);
+        sneak.fetchCollectiveMDef = () => 10;
+        ToggleSkills.handleRequest(session(sneak), sneak, toggleSkill(221, 'Silent Move', 1));
+        assert.strictEqual(sneak.silentMoving, true, 'Silent Move should enable silent moving');
+        const caster = actor(100);
+        caster.fetchCollectiveMAtk = () => 1000;
+        const outcome = C4SkillEffects.execute(session(caster), caster, sneak, cancelSkill, {
+            magicSkill: true,
+            rng: () => 0,
+            attack: { clearLoadedShot() {} }
+        });
+        assert.strictEqual(outcome.cancelled.length, 1, `${cancelSkill.fetchName()} should remove Silent Move`);
+        assert.strictEqual(EffectStore.list(sneak).length, 0, `${cancelSkill.fetchName()} should leave no Silent Move effect`);
+        assert.strictEqual(sneak.silentMoving, false, `${cancelSkill.fetchName()} should clear the silent moving flag`);
+    }
+
     console.log('Toggle skill checks passed');
 })().catch((err) => {
     console.error(err);
