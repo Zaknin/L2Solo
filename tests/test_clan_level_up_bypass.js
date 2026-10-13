@@ -186,6 +186,25 @@ async function main() {
         }
         assert.deepStrictEqual(heldCreate.pages, [], 'no create page reaches another character');
         assert.deepStrictEqual(heldCreate.said, [], 'no create message reaches another character');
+
+        // E265: the dissolve is held while the leader's connection selects another character.
+        const heldDissolve = await fixture();
+        const originalDissolve = ClanService.dissolve;
+        let releaseDissolve;
+        try {
+            ClanService.dissolve = () => new Promise((resolve) => {
+                releaseDissolve = () => resolve({ ok: true, clan: { id: 77, name: 'Fixture' }, sessions: [], memberIds: [] });
+            });
+            const dissolveRequest = Clan(heldDissolve.session, ['clan', 'dissolve']);
+            heldDissolve.session.actor = other;
+            releaseDissolve();
+            await dissolveRequest;
+            await ticks();
+        } finally {
+            ClanService.dissolve = originalDissolve;
+        }
+        assert.deepStrictEqual(heldDissolve.pages, [], 'no dissolve page reaches another character');
+        assert.deepStrictEqual(heldDissolve.said, [], 'no dissolve message reaches another character');
         console.log('clan level-up bypass checks passed');
     } finally {
         Object.assign(Database, {

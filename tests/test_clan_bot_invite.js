@@ -316,6 +316,33 @@ function fakeActor(id, name, options = {}) {
             assert.strictEqual(actor.fetchClanJoinExpiryTime(), 0, 'dissolve should not apply a join penalty');
             assert.strictEqual(actor.fetchClanCreateExpiryTime(), 0, 'dissolve should not apply a create penalty');
         });
+
+        // E265: the dissolve write is held while a member connection selects a
+        // character of another clan. Only the dissolved clan's characters are cleared.
+        Database.fetchClanCharacters = () => Promise.resolve(managedMembers);
+        await ClanService.reload();
+        const heldClan = ClanService.findById(managedClanRow.id);
+        const heldLeader = fakeActor(2000010, 'Warden', { clanId: heldClan.id, clanPrivileges: ClanRules.CP_ALL, title: 'Chief' });
+        const heldMember = fakeActor(2000011, 'ColdMina', { clanId: heldClan.id, title: 'Scout' });
+        const otherClanActor = fakeActor(2000012, 'Captain', { clanId: 6000008, clanPrivileges: 2047, title: 'Captain' });
+        const heldLeaderSession = new PlayerSession(heldLeader);
+        const heldMemberSession = new PlayerSession(heldMember);
+        World.user = { sessions: [heldLeaderSession, heldMemberSession] };
+        let releaseDissolve;
+        Database.dissolveClan = () => new Promise((resolve) => {
+            releaseDissolve = () => resolve({ ok: true, memberIds: [2000010, 2000011] });
+        });
+        const heldDissolve = ClanService.dissolve(heldLeader);
+        heldMemberSession.actor = otherClanActor;
+        releaseDissolve();
+        const heldResult = await heldDissolve;
+        assert.strictEqual(heldResult.ok, true);
+        assert.strictEqual(otherClanActor.fetchClanId(), 6000008, 'the other character keeps its clan');
+        assert.strictEqual(otherClanActor.fetchTitle(), 'Captain', 'the other character keeps its title');
+        assert.strictEqual(otherClanActor.fetchClanPrivileges(), 2047, 'the other character keeps its privileges');
+        assert.strictEqual(heldMember.fetchClanId(), 0, 'the dissolved clan member is cleared');
+        assert.strictEqual(heldLeader.fetchClanId(), 0, 'the leader is cleared');
+        assert.deepStrictEqual(heldResult.sessions, [heldLeaderSession], 'dissolve UI goes only to sessions still on a dissolved member');
     } finally {
         Database.fetchClans = originalFetchClans;
         Database.fetchClanCharacters = originalFetchClanCharacters;

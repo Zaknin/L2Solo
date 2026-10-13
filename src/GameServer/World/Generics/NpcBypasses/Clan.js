@@ -56,9 +56,10 @@ function dissolveConfirm(session) {
 }
 
 function dissolveClan(session) {
-    return ClanService.dissolve(session.actor).then((result) => {
+    const actor = session.actor;
+    return ClanService.dissolve(actor).then((result) => {
         if (!result.ok) {
-            sendHtml(session, page(errorText(result.code) + returnLink()));
+            if (session.actor === actor) sendHtml(session, page(errorText(result.code) + returnLink()));
             return result;
         }
 
@@ -68,12 +69,14 @@ function dissolveClan(session) {
             memberSession.dataSendToOthers?.(ServerResponse.charInfo(memberSession.actor), memberSession.actor);
             memberSession.dataSendToOthers?.(ServerResponse.relationChanged(memberSession.actor), memberSession.actor);
         });
+        // result.sessions holds only connections still on a dissolved member.
+        if (session.actor !== actor) return result;
         speak(session, `Clan ${result.clan.name} has been dissolved.`);
         sendHtml(session, page(`Clan <font color="LEVEL">${result.clan.name}</font> has been dissolved.`));
         return result;
     }).catch((err) => {
         utils.infoWarn('Clan', 'dissolve clan failed: %s', err.message);
-        sendHtml(session, page('Failed to dissolve clan.' + returnLink()));
+        if (session.actor === actor) sendHtml(session, page('Failed to dissolve clan.' + returnLink()));
         return { ok: false, code: 'dissolve_failed' };
     });
 }
