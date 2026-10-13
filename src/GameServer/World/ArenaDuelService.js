@@ -304,7 +304,9 @@ function restoreEffects(session, actor, effects = []) {
         // login restore does (CharacterStatus.restoreEffects), and a toggle's
         // MP/HP drain as ToggleSkills.activate does, before the expiry timer:
         // each apply* call clears the key's timers first.
-        if (restored.dot) EffectTicker.applyDot(session, actor, actor, restored);
+        // A self-sourced dot reaches 0 HP without Die on an NPC-side actor (summon
+        // ids are below 2000000), so a summon's restored dot stays inert, as before.
+        if (restored.dot && !actor.fetchKind) EffectTicker.applyDot(session, actor, actor, restored);
         if (restored.manaDot) EffectTicker.applyManaDot(session, actor, actor, restored);
         if (restored.healthDot) EffectTicker.applyHealthDot(session, actor, actor, restored);
         if (restored.manaHot) EffectTicker.applyManaHot(session, actor, actor, restored);

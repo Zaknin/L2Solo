@@ -360,6 +360,49 @@ async function arenaLifecycleChecks() {
         periodic.forEach((effect) => EffectStore.remove(player.actor, effect.key));
         ticker.clearAll(player.actor);
 
+        // A restored dot on a summon must stay inert: the self-damage path only
+        // runs Die for ids >= 2000000, so a ticking summon would sit at 0 HP alive.
+        {
+            const SummonControl = invoke('GameServer/Npc/SummonControl');
+            const FullBuff = invoke('GameServer/World/Generics/NpcBypasses/AdminFullBuff');
+            const originalActiveSummon = SummonControl.activeSummon;
+            const originalRefreshSummon = FullBuff.refreshSummon;
+            let summonHp = 500;
+            const summon = {
+                fetchId: () => 1000777,
+                fetchKind: () => 'Summon',
+                fetchHp: () => summonHp,
+                setHp: (value) => { summonHp = value; },
+                fetchMaxHp: () => 500,
+                state: { fetchDead: () => false }
+            };
+            try {
+                player.actor.setLocXYZH({ ...Arena.NPC, head: 0 });
+                assert.strictEqual(await ArenaDuelService.select(player, sourceSession.actor.fetchId()), true);
+                player.actor.setLocXYZH({ locX: 73350, locY: 142760, locZ: -3778, head: 0 });
+                await wait(350);
+                assert.strictEqual(ArenaDuelService.active?.enteredArena, true, 'fourth duel should be entered');
+                SummonControl.activeSummon = () => summon;
+                FullBuff.refreshSummon = () => {};
+                ArenaDuelService.active.playerSummonBefore = summon;
+                ArenaDuelService.active.playerSummonEffectsBefore = [{
+                    key: 'summon_poison', id: 9005, level: 1, name: 'Summon Poison', type: 'debuff',
+                    expiresAt: Date.now() + 60000, dot: { damage: 3, intervalMs: 40, count: 500 }
+                }];
+                ArenaDuelService.release(player, 'test_release_summon');
+                assert(EffectStore.list(summon).some((effect) => effect.key === 'summon_poison'),
+                    'the summon effect is restored');
+                assert.strictEqual(summon.effectTimers?.summon_poison, undefined,
+                    'a restored dot must not tick on a summon');
+                await wait(150);
+                assert.strictEqual(summonHp, 500, 'a summon with a restored dot keeps its HP');
+            } finally {
+                SummonControl.activeSummon = originalActiveSummon;
+                FullBuff.refreshSummon = originalRefreshSummon;
+                invoke('GameServer/Effects/EffectTicker').clearAll(summon);
+            }
+        }
+
         BotManager.sessions = [];
         const coldCharacterId = 9902001;
         const weaponDefinition = DataCache.items.find((entry) => (
