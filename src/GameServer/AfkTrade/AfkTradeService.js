@@ -251,12 +251,12 @@ function projectionStore(shop) {
         town: shop.town || null,
         packageSale: Number(shop.packageSale) === 1,
         revision: Number(shop.revision || 1),
-        items: (shop.lines || []).filter((line) => Number(line.count) > 0).map((line) => ({
+        items: (shop.lines || []).filter((line) => Number(line.availableCount ?? line.count) > 0).map((line) => ({
             afkTradeLineId: Number(line.id),
             objectId: Number(line.sourceObjectId || (PROJECTION_ID_BASE - Number(line.id))),
             selfId: Number(line.selfId),
             name: line.name || itemName(line.selfId),
-            count: Number(line.count),
+            count: Number(line.availableCount ?? line.count),
             price: Number(line.price),
             ...(line.pricing ? { pricing: line.pricing } : {}),
             fills: Number(line.fills || 0),

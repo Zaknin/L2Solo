@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const Service = require('../src/GameServer/AfkTrade/TradeMeetingService');
 let lifeListener, marketListener, boardListener, playerListener;
 let revision = 0;
+const refreshedRecords = [];
 const state = { characterId: 1, phase: 'cold', simulation: { revision: 0, ownerId: 'legacy_main' }, timing: {} };
 const native = { recoverTradeMeetings: async () => [],
     fetchAfkTradeShop: async () => ({ id: 1, ownerId: 2, storeType: 1, custodyPolicy: 1,
@@ -17,6 +18,7 @@ global.invoke = name => ({
         subscribeMarketReviewChanges: fn => { marketListener = fn; return () => { marketListener = null; }; }
     },
     'GameServer/AfkTrade/AfkTradeService': {
+        refreshRecord: record => refreshedRecords.push(record.ownerId),
         subscribeBoardChanges: fn => { boardListener = fn; return () => { boardListener = null; }; }
     },
     'GameServer/World/World': { registeredActorById: () => null,
@@ -77,6 +79,11 @@ function request(n) {
         assert.equal((await Service.receipt(original.token, original.actorA)).outcome, 'completed', 'cleaned terminal receipt is owner bounded');
         assert.equal((await Service.accept(original.token, original.actorA)).outcome, 'completed', 'bot acceptance retries use the same cleaned receipt');
         await assert.rejects(Service.accept(original.token, 99), /preparation_missing/);
+        native.fetchAfkTradeShops = async actor => [{ id: actor, ownerId: actor }];
+        native.acceptTradeMeeting = async () => ({ pending: true,
+            meeting: { id: 8, actorA: 3, actorB: 4, revision: 1, state: 'accepted' }, coldLifeRows: {} });
+        await Service.accept(Service.stage(request(1)));
+        assert.deepEqual(refreshedRecords, [3, 4], 'native acceptance without cold snapshots still publishes held stock for both online actors');
         console.log('Meeting preparation: stale caller, one per actor, source invalidation, disconnect and bounded release passed');
     } finally { Service.reset(); assert.equal(marketListener, null, 'reset removes the authority event subscription'); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

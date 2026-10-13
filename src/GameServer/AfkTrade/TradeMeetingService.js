@@ -95,6 +95,18 @@ function acceptRows(result) {
         }
     }
 }
+async function refreshMeetingRecords(row) {
+    if (!db().fetchAfkTradeShops) return;
+    for (const actor of [row.actorA, row.actorB]) {
+        try {
+            for (const record of await db().fetchAfkTradeShops(actor)) afk().refreshRecord(record);
+        } catch (error) {
+            // Publication must not strand already committed custody before
+            // wake can start the paid route or acknowledge a terminal receipt.
+            utils.infoWarn('AfkTrade', 'meeting records for %d: %s', actor, error.message);
+        }
+    }
+}
 async function syncActors(row) {
     for (const id of [row.actorA, row.actorB]) {
         const session = sessionFor(id);
@@ -220,6 +232,7 @@ async function accepted(result) {
     const row = result.meeting;
     if (row.state === 'accepted') { enroll(row.actorA, row.id); enroll(row.actorB, row.id); }
     else { unenroll(row.actorA, row.id); unenroll(row.actorB, row.id); }
+    if (result.coldLifeRows) await refreshMeetingRecords(row);
     await syncActors(row).catch(error => utils.infoWarn('AfkTrade', 'meeting inventory presentation: %s', error.message));
     notifyPlayerTravel(row);
     wake(row.actorA); wake(row.actorB);
@@ -239,7 +252,7 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
     const record = await db().fetchAfkTradeShop(store.shopId);
     if (!record || record.custodyPolicy !== 1) throw Error('trade_meeting_quote_changed');
     const line = record.lines.find(row => row.selfId === itemId && (!options.lineId || row.id === options.lineId));
-    if (!line || !Number.isSafeInteger(amount) || amount <= 0 || amount > line.count
+    if (!line || !Number.isSafeInteger(amount) || amount <= 0 || amount > Number(line.availableCount ?? line.count)
         || options.expectedPrice !== undefined && line.price !== options.expectedPrice
         || options.expectedRevision !== undefined && record.revision !== options.expectedRevision) throw Error('trade_meeting_quote_changed');
     const buyer = record.storeType === 1 ? characterId : record.ownerId, seller = record.storeType === 1 ? record.ownerId : characterId;
@@ -382,6 +395,7 @@ async function processMeeting(id, meetingId) {
     if (row.state !== 'accepted') {
         await syncActors(row);
         await afk().settleOwners([row.actorA, row.actorB]);
+        await refreshMeetingRecords(row);
         for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
         unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
         return;

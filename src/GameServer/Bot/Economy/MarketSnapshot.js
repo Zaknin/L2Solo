@@ -50,7 +50,9 @@ function snapshot() {
     const dynamicStores = AfkTrade.activeShops().filter((shop) => String(shop.ownerAccount || '').startsWith('bot_'))
         .map((shop) => ({ storeType: shop.storeType, side: Number(shop.storeType) === 3 ? 'wtb' : 'wts',
             source: 'afk_bot', kind: shop.kind || 'shop', custodyPolicy: shop.custodyPolicy,
-            conditional: Number(shop.custodyPolicy) === 1, town: shop.town, items: shop.lines || [] }));
+            conditional: Number(shop.custodyPolicy) === 1, town: shop.town,
+            items: (shop.lines || []).map(line => ({ ...line, count: line.availableCount ?? line.count }))
+                .filter(line => Number(line.count) > 0) })).filter(store => store.items.length);
     const bids = publicBuyOffers(dynamicStores);
     dynamicStores.forEach((store) => {
         const side = Number(store.storeType || 1) === 3 ? 'wtb' : 'wts';
@@ -115,7 +117,7 @@ function itemMeta(selfId, itemsById = cachedItemsById()) {
 function normalizeStoreItems(items = [], itemsById = cachedItemsById(), priceFor = null) {
     return (items || []).map((line) => {
         const selfId = Number(line?.selfId || 0);
-        const count = Math.max(0, Math.floor(Number(line?.count || 0)));
+        const count = Math.max(0, Math.floor(Number(line?.availableCount ?? line?.count ?? 0)));
         const meta = itemMeta(selfId, itemsById);
         const price = Math.max(0, Math.floor(Number(priceFor ? priceFor(line) : line?.price) || 0));
         return selfId > 0 && count > 0 ? {
