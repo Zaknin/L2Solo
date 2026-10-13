@@ -2523,42 +2523,46 @@ function sendFile(request, response, filePath) {
     });
 }
 
-function route(request, response) {
-    const url = new URL(request.url, 'http://localhost');
+// The bare roots redirect to the application. Returns true when it answered the request.
+function redirectObserverRoot(response, url) {
     if (url.pathname === '/' || url.pathname === '/observer') {
         response.writeHead(302, { Location: '/observer/' });
         response.end();
-        return;
+        return true;
     }
+    return false;
+}
 
+// World reads: the cached snapshot, the bootstrap frame, character search, clan social state and world status. Returns true when it answered the request.
+function serveWorldReads(request, response, url) {
     if (url.pathname === '/observer/api/snapshot') {
         snapshotJson()
             .then((json) => sendSnapshotJson(request, response, json))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/world/bootstrap') {
         worldBootstrap()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/characters/search') {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         searchPlayers({ execute: (query) => Database.execute(query, 'observer:character-search'),
             query: url.searchParams.get('q'), limit: url.searchParams.get('limit'), classes: classCatalog(),
             onlineIds: realPlayerSessions().map((session) => session.actor.fetchId()) })
             .then((characters) => sendJson(response, { characters }))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clans/social') {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         sendJson(response, (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').inspect() : { enabled: false });
-        return;
+        return true;
     }
     if (url.pathname === '/observer/api/world/status') {
         try {
@@ -2566,57 +2570,69 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Loopback-only control: teleport an online player to a live raid boss. Returns true when it answered the request.
+function handleTeleportControl(request, response, url) {
     if (url.pathname === '/observer/api/control/teleport-player-to-raid') {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         if (!loopbackRequest(request)) {
             sendJson(response, { ok: false, error: 'loopback_only' }, 403);
-            return;
+            return true;
         }
         readJsonBody(request)
             .then((payload) => teleportPlayerToRaid(payload.playerName, payload.bossTemplateId))
             .then((result) => sendJson(response, result, result.ok ? 200 : 400))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Market reads: the cached market listing and one item's price history. Returns true when it answered the request.
+function serveMarketReads(request, response, url) {
     if (url.pathname === '/observer/api/market') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
         marketJson()
             .then((entry) => sendCachedJson(request, response, entry))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/market/history') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
         marketHistorySnapshot(url.searchParams.get('itemId'), url.searchParams.get('range'))
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, /invalid_market_item/.test(err.message) ? 400 : 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Knowledge base reads: catalogue meta, item and NPC lists and details. Returns true when it answered the request.
+function serveKnowledgeReads(response, url) {
     if (url.pathname === '/observer/api/knowledge/meta') {
         try {
             sendJson(response, knowledgeBaseService().meta());
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/knowledge/items') {
@@ -2625,7 +2641,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     const knowledgeItemMatch = url.pathname.match(/^\/observer\/api\/knowledge\/items\/(\d+)$/);
@@ -2636,7 +2652,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/knowledge/npcs') {
@@ -2645,7 +2661,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     const knowledgeNpcMatch = url.pathname.match(/^\/observer\/api\/knowledge\/npcs\/(\d+)$/);
@@ -2656,9 +2672,13 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Incremental world changes, the clan list and the clan-order item search. Returns true when it answered the request.
+function serveChangesAndClanReads(request, response, url) {
     if (url.pathname === '/observer/api/world/changes') {
         worldChanges(url.searchParams.get('since'))
             .then((data) => {
@@ -2674,21 +2694,21 @@ function route(request, response) {
                 sendJson(response, data);
             })
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clans') {
         clanSnapshot()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clan-order-items') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
         try {
             sendJson(response, {
@@ -2698,13 +2718,17 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Player-managed clan orders: craft preview, create, edit and state transitions. Returns true when it answered the request.
+function handleClanOrderRoutes(request, response, url) {
     const craftPreviewMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/craft-preview$/);
     if (craftPreviewMatch) {
         if (request.method !== 'POST') {
-            response.writeHead(405, { Allow: 'POST' }); response.end(); return;
+            response.writeHead(405, { Allow: 'POST' }); response.end(); return true;
         }
         readJsonBody(request, 32768).then(async payload => {
             const clan = await ClanGoalService.clanProjectionById(Number(craftPreviewMatch[1]));
@@ -2724,7 +2748,7 @@ function route(request, response) {
             return { ok: true, plan: { kind: plan.kind, reasonCode: plan.reasonCode, craft } };
         }).then(result => sendJson(response, result, result.ok ? 200 : 400))
             .catch(err => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderCreateMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders$/);
@@ -2732,13 +2756,13 @@ function route(request, response) {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request, 32768)
             .then((payload) => createPlayerManagedClanOrder(clanOrderCreateMatch[1], payload))
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderEditMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders\/(\d+)$/);
@@ -2746,7 +2770,7 @@ function route(request, response) {
         if (request.method !== 'PATCH') {
             response.writeHead(405, { Allow: 'PATCH' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request, 32768)
             .then(async (payload) => {
@@ -2756,7 +2780,7 @@ function route(request, response) {
             })
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderTransitionMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders\/(\d+)\/(pause|resume|replan|cancel)$/);
@@ -2764,7 +2788,7 @@ function route(request, response) {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request)
             .then((payload) => transitionPlayerManagedClanOrder(
@@ -2775,9 +2799,13 @@ function route(request, response) {
             ))
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Clan crest: read (GET), replace (POST) and delete (DELETE) on one path. Returns true when it answered the request.
+function handleClanCrest(request, response, url) {
     const clanCrestMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/crest$/);
     if (clanCrestMatch) {
         if (request.method === 'POST') {
@@ -2785,34 +2813,38 @@ function route(request, response) {
                 .then((payload) => updatePlayerManagedClanCrest(clanCrestMatch[1], payload))
                 .then((result) => sendJson(response, result, clanCrestMutationStatus(result)))
                 .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-            return;
+            return true;
         }
         if (request.method === 'DELETE') {
             deletePlayerManagedClanCrest(clanCrestMatch[1])
                 .then((result) => sendJson(response, result, clanCrestMutationStatus(result)))
                 .catch((err) => sendJson(response, { ok: false, error: err.message }, 500));
-            return;
+            return true;
         }
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET, POST, DELETE' });
             response.end();
-            return;
+            return true;
         }
         clanCrest(clanCrestMatch[1])
             .then((crest) => crest
                 ? sendClanCrest(request, response, crest, url)
                 : sendJson(response, { error: 'Clan crest not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Detail reads: bot relationships, clan, bot, actor collections and actor detail. Returns true when it answered the request.
+function serveDetailReads(request, response, url) {
     const relationshipMatch = url.pathname.match(/^\/observer\/api\/bot\/(\d+)\/relationships$/);
     if (relationshipMatch) {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         invoke('WorldObserver/Relationships').detail(relationshipMatch[1])
             .then(data => sendJson(response, data || { error: 'Bot not found' }, data ? 200 : 404))
             .catch(err => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     const clanMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)$/);
@@ -2822,7 +2854,7 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Clan not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     const botMatch = url.pathname.match(/^\/observer\/api\/bot\/(\d+)$/);
@@ -2832,17 +2864,17 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Bot not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     const collectionMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)\/(inventory|warehouse|skills|pvp|board)$/);
     if (collectionMatch) {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         actorCollection(collectionMatch[1], Number(collectionMatch[2]), collectionMatch[3], {
             offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 100)
         }).then(data => sendJson(response, data || { error: 'Character not found' }, data ? 200 : 404))
             .catch(error => sendJson(response, { error: error.message }, error.message === 'invalid_profile_collection' ? 400 : 500));
-        return;
+        return true;
     }
 
     const actorMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)$/);
@@ -2852,11 +2884,15 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Actor not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Static delivery: item icons, application pages and public files under /observer/. Returns true when it answered the request.
+function serveStatic(request, response, url) {
     if (url.pathname === '/observer/item-icons/supplemental.json') {
-        sendFile(request, response, path.join(ITEM_ICON_CATALOG_DIR, 'supplemental.json')); return;
+        sendFile(request, response, path.join(ITEM_ICON_CATALOG_DIR, 'supplemental.json')); return true;
     }
 
     const itemIconMatch = url.pathname.match(/^\/observer\/item-icons\/([^/]+)$/);
@@ -2871,25 +2907,25 @@ function route(request, response) {
         if (!filePath) {
             response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
             response.end('Not found');
-            return;
+            return true;
         }
         sendFile(request, response, filePath);
-        return;
+        return true;
     }
 
     if (/^\/observer\/database(?:\/(?:items|npcs)(?:\/\d+)?)?\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'knowledge-base.html'));
-        return;
+        return true;
     }
 
     if (/^\/observer\/market\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'market.html'));
-        return;
+        return true;
     }
 
     if (/^\/observer\/(?:world|overview|characters|parties|dungeons\/[a-z0-9_-]+|rankings|raid-bosses(?:\/\d+)?|clans(?:\/\d+)?(?:\/map)?|actors\/(?:bot|player)\/\d+)\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'index.html'));
-        return;
+        return true;
     }
 
     if (url.pathname.startsWith('/observer/')) {
@@ -2899,11 +2935,27 @@ function route(request, response) {
         if (!filePath.startsWith(PUBLIC_DIR)) {
             response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
             response.end('Forbidden');
-            return;
+            return true;
         }
         sendFile(request, response, filePath);
-        return;
+        return true;
     }
+    return false;
+}
+
+// Checks run in this exact order; each group answers or passes the request on.
+function route(request, response) {
+    const url = new URL(request.url, 'http://localhost');
+    if (redirectObserverRoot(response, url)) return;
+    if (serveWorldReads(request, response, url)) return;
+    if (handleTeleportControl(request, response, url)) return;
+    if (serveMarketReads(request, response, url)) return;
+    if (serveKnowledgeReads(response, url)) return;
+    if (serveChangesAndClanReads(request, response, url)) return;
+    if (handleClanOrderRoutes(request, response, url)) return;
+    if (handleClanCrest(request, response, url)) return;
+    if (serveDetailReads(request, response, url)) return;
+    if (serveStatic(request, response, url)) return;
 
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     response.end('Not found');
