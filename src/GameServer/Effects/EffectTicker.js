@@ -100,6 +100,11 @@ function scheduleExpiry(session, target, effect) {
         if (target.activeBuffs?.[effect.key] && target.activeBuffs[effect.key] <= Date.now()) {
             delete target.activeBuffs[effect.key];
         }
+        // Same order as the manual removals: remove, cleanupState, refresh. An
+        // expired non-toggle effect (Dance of Shadow) may carry silentMoving
+        // that a toggle turned off earlier left standing; it recomputes the flag
+        // from the store and is a no-op for effects without such stats.
+        invoke('GameServer/Skills/ToggleSkills').cleanupState(session, target, effect);
         if (Object.keys(effect.stats || {}).length > 0 || effect.conditionalStats?.length > 0) {
             refreshStats(target.session || session, target);
         }

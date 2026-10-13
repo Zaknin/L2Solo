@@ -205,6 +205,38 @@ function wait(ms) {
         assert.strictEqual(sneak.silentMoving, false, `${cancelSkill.fetchName()} should clear the silent moving flag`);
     }
 
+    // E287: Dance of Shadow (366, not a toggle) also carries silentMoving. Silent
+    // Move turned off while the dance runs leaves the flag true; the dance
+    // expiring must recompute it, or mobs ignore the actor for good.
+    const EffectTicker = invoke('GameServer/Effects/EffectTicker');
+    const dancer = actor(100);
+    const dancerSession = session(dancer);
+    const silentMove = toggleSkill(221, 'Silent Move', 1);
+    ToggleSkills.handleRequest(dancerSession, dancer, silentMove);
+    assert.strictEqual(dancer.silentMoving, true, 'Silent Move should enable silent moving');
+    const dance = EffectStore.apply(dancer, {
+        key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+        stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 40
+    });
+    EffectTicker.scheduleExpiry(dancerSession, dancer, dance);
+    ToggleSkills.handleRequest(dancerSession, dancer, silentMove);
+    assert.strictEqual(dancer.silentMoving, true, 'Dance of Shadow keeps silent moving after Silent Move is turned off');
+    await wait(120);
+    assert.strictEqual(EffectStore.list(dancer).length, 0, 'Dance of Shadow should have expired');
+    assert.strictEqual(dancer.silentMoving, false, 'Expired Dance of Shadow should clear the silent moving flag');
+
+    // A dance expiring while Silent Move is still on must not drop the flag.
+    const keeper = actor(100);
+    const keeperSession = session(keeper);
+    ToggleSkills.handleRequest(keeperSession, keeper, silentMove);
+    EffectStore.apply(keeper, {
+        key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+        stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 40
+    });
+    EffectTicker.scheduleExpiry(keeperSession, keeper, EffectStore.list(keeper).find((entry) => entry.key === 'dance_of_shadow'));
+    await wait(120);
+    assert.strictEqual(keeper.silentMoving, true, 'Expired dance must keep silent moving while Silent Move is on');
+
     console.log('Toggle skill checks passed');
 })().catch((err) => {
     console.error(err);
