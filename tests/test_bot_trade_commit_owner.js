@@ -100,6 +100,18 @@ function fixture(tag) {
         assert.strictEqual(b.trade.state, 'committed');
         assert.strictEqual(b.trade.cancelReason, undefined, 'a committed trade carries no cancel reason');
         assert.strictEqual(writes.length, 2);
+        // A throw after the database write (here: the memory update) still
+        // detaches the committed trade and releases the bot's reservation.
+        const c = fixture('C');
+        c.player.actor.backpack.insertItem = () => { throw new Error('forced memory failure'); };
+        assert.strictEqual(c.bot.botTradeReservations.size, 1);
+        const failing = BotTradeService.commit(c.player);
+        held.shift()();
+        await assert.rejects(failing, /forced memory failure/, 'the throw still reaches the caller');
+        assert.strictEqual(c.trade.state, 'committed');
+        assert.strictEqual(c.player.activeTrade, null, 'the player is not left holding a dead trade');
+        assert.strictEqual(c.bot.activeTrade, null, 'the bot is not left busy with a dead trade');
+        assert.strictEqual(c.bot.botTradeReservations.size, 0, 'the reservation is released');
         console.log('Bot trade commit owner checks passed');
     } finally {
         Database.transferInventoryBetweenCharacters = originalTransfer;

@@ -631,36 +631,42 @@ async function finishCommit(trade, playerSession, entries, databaseTransfers) {
     }
 
     // The database holds the transfer now; the trade is committed even if the
-    // memory update below throws, so it never stays in 'committing'.
+    // memory update below throws, so it never stays in 'committing'. A throw
+    // still reaches the caller, but the committed trade is always detached
+    // and its reservations released, or both sessions would stay busy.
     trade.state = 'committed';
     trade.commitPromise = null;
-    applyLocalTransfers(moved, entries);
-    trade.playerConfirmed = true;
-    trade.botConfirmed = true;
-    trade.completedAt = now();
-    const result = {
-        ok: true,
-        tradeId: trade.id,
-        direction: trade.direction,
-        negotiationId: trade.negotiationId || null,
-        partnerSession: trade.botSession,
-        // A side whose session plays another character now: the caller sends
-        // that session nothing about this trade.
-        playerActorChanged: trade.playerSession.actor !== trade.playerActor,
-        botActorChanged: trade.botSession.actor !== trade.botActor,
-        moved: publicMoved(entries)
-    };
-    recordSupplyTrade(trade, 'completed', 'native_trade_commit', true, {
-        moved: result.moved
-    });
-    if (trade.botSession.pendingResourceDelivery?.tradeId === trade.id) {
-        trade.botSession.pendingResourceDelivery = undefined;
+    let result;
+    try {
+        applyLocalTransfers(moved, entries);
+        trade.playerConfirmed = true;
+        trade.botConfirmed = true;
+        trade.completedAt = now();
+        result = {
+            ok: true,
+            tradeId: trade.id,
+            direction: trade.direction,
+            negotiationId: trade.negotiationId || null,
+            partnerSession: trade.botSession,
+            // A side whose session plays another character now: the caller sends
+            // that session nothing about this trade.
+            playerActorChanged: trade.playerSession.actor !== trade.playerActor,
+            botActorChanged: trade.botSession.actor !== trade.botActor,
+            moved: publicMoved(entries)
+        };
+        recordSupplyTrade(trade, 'completed', 'native_trade_commit', true, {
+            moved: result.moved
+        });
+        if (trade.negotiationId) {
+            try { invoke('GameServer/Bot/Economy/BotNegotiationService').completeTrade(trade); } catch (_) { /* optional negotiation module */ }
+        }
+    } finally {
+        if (trade.botSession.pendingResourceDelivery?.tradeId === trade.id) {
+            trade.botSession.pendingResourceDelivery = undefined;
+        }
+        releaseReservations(trade);
+        clearAttachedTrade(trade);
     }
-    if (trade.negotiationId) {
-        try { invoke('GameServer/Bot/Economy/BotNegotiationService').completeTrade(trade); } catch (_) { /* optional negotiation module */ }
-    }
-    releaseReservations(trade);
-    clearAttachedTrade(trade);
     // Keep replay data serializable and detached from live session graphs.
     playerSession.lastBotTradeCompletion = {
         completedAt: trade.completedAt,
