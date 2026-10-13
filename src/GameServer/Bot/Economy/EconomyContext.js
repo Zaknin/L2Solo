@@ -204,32 +204,47 @@ function bandsHold(state, bands = []) {
     }
     return true;
 }
-// One verdict "the held plan is still valid" (L70), shared with the card
-// (calculationHolds): the band-aware structure, bag slots/weight tier and
-// the hard money/funding events cut through at once; soft money,
-// observation and horizon changes wait for their kind's delay since the
-// last actual decision. A raised event (wishDirty) always rebuilds.
-function decisionHolds(state, held, timestamp, deps, deferred = null) {
-    if (!held || held.bandHash === undefined || held.plan.pending
-        || extensions.size || deps.nodes?.length || deps.withNodes && !held.projection) return false;
-    const stats = state.stats || {}, baseline = held.plan.statsPacket.wishSections;
-    const sameDecision = Number(stats.decisionSeq || 0) === Number(held.plan.statsPacket.decisionSeq || 0)
-        || held.key === inputKey(state, { ...deps, timestamp });
-    if (!sameDecision || stats.wishDirty || Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
-        && Number(state.vitals?.mp) !== held.mp) return false;
-    if (Sections.moneyEvent(state, baseline, timestamp)) return false;
-    const bands = held.plan.quantityBands || [];
-    if (!bandsHold(state, bands) || fnv1a32(sectionKeys(fieldActivity(state, held.activity),
-        { ...deps, timestamp }, bands).structural) !== held.bandHash) return false;
-    if (JSON.stringify(bagSafety(state, timestamp)) !== JSON.stringify(held.plan.bagSafety)) return false;
-    if (Sections.observationEvent(state, baseline, timestamp, deps.mode)
-        || Sections.horizonEvent(state, baseline, held.plan.hunt.expPerHour, held.plan.persona, timestamp)) return false;
+// The event part of the one verdict "the held plan is still valid" (L70),
+// called by both held-plan stores: the cache entry (decisionHolds) and the
+// card (ColdEconomyDecision.canReuse). A raised event (wishDirty) and a
+// crafter's MP cut through at once; money is hard below the lower cash
+// bound or on a moved funding mark; soft money, observation and horizon
+// changes wait for their kind's delay since the last actual decision.
+// held: { baseline, mp, expPerHour, persona } of the last actual decision.
+function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null) {
+    const stats = state.stats || {}, baseline = held.baseline;
+    if (stats.wishDirty || Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
+        && Number(state.vitals?.mp) !== Number(held.mp)) return false;
+    if (Sections.moneyEvent(state, baseline, timestamp) || Sections.observationEvent(state, baseline, timestamp, deps.mode)
+        || Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return false;
     if (deferred) {
         if (Sections.meaningfulMoney(state, baseline)) deferred.push('money');
         if (Sections.observationChanged(state, baseline, timestamp, deps.mode)) deferred.push('observation');
-        if (Sections.horizonChanged(state, baseline, held.plan.hunt.expPerHour, held.plan.persona)) deferred.push('horizon');
+        if (Sections.horizonChanged(state, baseline, held.expPerHour, held.persona)) deferred.push('horizon');
     }
     return true;
+}
+// The cache store of the verdict: the shared events, then the band-aware
+// structure of the build (as its calculation fence) and bag slots/weight.
+function decisionHolds(state, held, timestamp, deps, deferred = null) {
+    if (!held || held.bandHash === undefined || held.plan.pending
+        || extensions.size || deps.nodes?.length || deps.withNodes && !held.projection) return false;
+    const stats = state.stats || {};
+    const sameDecision = Number(stats.decisionSeq || 0) === Number(held.plan.statsPacket.decisionSeq || 0)
+        || held.key === inputKey(state, { ...deps, timestamp });
+    if (!sameDecision || !heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
+        expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred)) return false;
+    const bands = held.plan.quantityBands || [];
+    if (!bandsHold(state, bands) || fnv1a32(sectionKeys(fieldActivity(state, held.activity),
+        { ...deps, timestamp }, bands).structural) !== held.bandHash) return false;
+    const safety = bagSafety(state, timestamp), heldSafety = held.plan.bagSafety;
+    return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
+}
+// Soft market/crowd never excuses the held leaf's own offer, funding and
+// route: they are checked exactly through the existing authority.
+function ownLeafHolds(state, plan, deps) {
+    const leaf = plan.network?.activity;
+    return !leaf || acceptedActivityHolds(state, leaf, deps);
 }
 function occupancyToken(deps, id) {
     const row = deps.occupancy?.get?.(id) || deps.occupancy?.[id];
@@ -377,15 +392,13 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
         const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
         if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;
     }
-    if (key !== sectionKeys(state, deps, bands).structural) {
-        const field = fieldActivity(state, options.activity);
-        if (field === state || key !== sectionKeys(field, deps, bands).structural) return false;
-    }
+    // options.activity is the fence's own build activity, so one key compares.
+    if (key !== sectionKeys(fieldActivity(state, options.activity), deps, bands).structural) return false;
     const reads = new Map();
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;
     if (!Object.hasOwn(options, 'baseline') || Sections.softDue(options.baseline, 'market', options.timestamp ?? Date.now())) return false;
-    if (Diagnostics.active()) Diagnostics.count('advisory', 'soft_deferred', 'market');
+    if (options.countDeferral && Diagnostics.active()) Diagnostics.count('advisory', 'soft_deferred', 'market');
     return true;
 }
 // A retained leaf is calculation data. Recheck its native source, physical
@@ -691,16 +704,17 @@ function forState(state = {}, deps = {}) {
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
     const key = inputKey(state, { ...deps, timestamp });
-    const sections = sectionKeys(state, { ...deps, timestamp });
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
     // Market items read and the spot crowd are soft (L70): a moved token
     // rebuilds only once the market delay since the last actual decision
-    // has passed; every hard condition above still cuts through at once.
+    // has passed, and never while the held leaf's own offer, funding or
+    // route fails; every hard condition above still cuts through at once.
     const deferred = diagnostic ? [] : null;
     if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred)) && (!deps.withNodes || held.projection)
         && (marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads)
-            || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) && (deferred?.push('market'), true))) {
+            || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
+                && ownLeafHolds(state, held.plan, deps) && (deferred?.push('market'), true))) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
@@ -718,6 +732,7 @@ function forState(state = {}, deps = {}) {
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
             fenceData: { sections: held.sections, reads: held.reads, spots: held.spotReads } });
     }
+    const sections = sectionKeys(state, { ...deps, timestamp });
     const started = diagnostic ? performance.now() : 0;
     // Identity replacement is the worker's technical safety backstop, not an
     // economic event. An input-key mismatch is named as a dependency change;
@@ -1244,6 +1259,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

@@ -373,9 +373,8 @@ function advisory(economy, state) {
     if (!(fence instanceof Uint8Array)) return null;
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
-        activityLeaf: Number(state.stats?.activityLeaf || 0), activity: state.activity };
+        activityLeaf: Number(state.stats?.activityLeaf || 0), activity: state.activity, mp: Number(state.vitals?.mp) };
 }
-const FIELD_ACTIVITIES = ['hunting', 'resting', 'traveling'];
 // Before an action the card is executed (activityPick), so only a hunter
 // reuses it. After a result it is only restamped and published: the bot's
 // own hunting/resting/travelling inside one decision is not an event (L70).
@@ -388,16 +387,16 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
     if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
-        || !(options.afterResult ? FIELD_ACTIVITIES.includes(state.activity) : state.activity === 'hunting')
         || state.incomingPending) return false;
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    if (!(options.afterResult ? Economy.FIELD_ACTIVITIES.has(state.activity) : state.activity === 'hunting')) return false;
     const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
-    if (Sections.moneyEvent(state, baseline, timestamp) || Sections.observationEvent(state, baseline, timestamp, deps.mode)
-        || Sections.capability(state, timestamp) !== baseline.build) return false;
+    if (Sections.capability(state, timestamp) !== baseline.build) return false;
+    // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
-    if (Sections.horizonEvent(state, baseline, baseline.expHour, persona, timestamp)) return false;
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, baseline, timestamp })
+    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps)) return false;
+    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, baseline, timestamp, countDeferral: true })
         && Economy.acceptedActivityHolds(state, leaf, deps, current);
 }
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
