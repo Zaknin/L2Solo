@@ -209,7 +209,7 @@ function bandsHold(state, bands = []) {
 // the hard money/funding events cut through at once; soft money,
 // observation and horizon changes wait for their kind's delay since the
 // last actual decision. A raised event (wishDirty) always rebuilds.
-function decisionHolds(state, held, keys, timestamp, deps, deferred = null) {
+function decisionHolds(state, held, timestamp, deps, deferred = null) {
     if (!held || held.bandHash === undefined || held.plan.pending
         || extensions.size || deps.nodes?.length || deps.withNodes && !held.projection) return false;
     const stats = state.stats || {}, baseline = held.plan.statsPacket.wishSections;
@@ -698,7 +698,7 @@ function forState(state = {}, deps = {}) {
     // rebuilds only once the market delay since the last actual decision
     // has passed; every hard condition above still cuts through at once.
     const deferred = diagnostic ? [] : null;
-    if ((held?.key === key || decisionHolds(state, held, sections, timestamp, deps, deferred)) && (!deps.withNodes || held.projection)
+    if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred)) && (!deps.withNodes || held.projection)
         && (marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads)
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) && (deferred?.push('market'), true))) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
