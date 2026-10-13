@@ -11,6 +11,7 @@ const ManorData      = invoke('GameServer/Manor/ManorData');
 const NpcSkills      = invoke('GameServer/Npc/NpcSkills');
 const EffectStats    = invoke('GameServer/Effects/EffectStats');
 const EffectStore    = invoke('GameServer/Effects/EffectStore');
+const EffectTicker   = invoke('GameServer/Effects/EffectTicker');
 const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const TownGuard = invoke('GameServer/Npc/TownGuard');
 const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool');
@@ -97,6 +98,9 @@ class Npc extends NpcModel {
         this.timer.petFeed = undefined;
         this.automation.stopReplenish();
         this.attack.clearTimers?.();
+        // Despawn without death (quest NPC, minion, day/night, unsummon) must
+        // not leave effect timers that later refresh a removed NPC.
+        EffectTicker.clearAll(this);
         this.abortCombatState(session);
     }
 
