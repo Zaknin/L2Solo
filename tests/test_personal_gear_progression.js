@@ -227,10 +227,26 @@ function verify() {
     const originals = { index: Planner.sourceIndexFor, facts: Planner.sourceFacts };
     try {
         Planner.sourceIndexFor = () => new Map([[1804, [{ kind: 'drop' }, { kind: 'spoil' }]]]);
-        Planner.sourceFacts = function* () { return ['drop', 'spoil'].map((kind, at) => ({ status: 'ready', kind,
-            spotId: kind, npcId: 1, hours: .01 + at * .01, costHours: .01 + at * .01,
-            netHourCost: 1, town: 'Giran', tripHours: 0, tripFees: 0 })); };
-        const spoilContext = { ...ctx, board: spoilBoard };
+        Planner.sourceFacts = function* (_state, _itemId, _units, options = {}) {
+            const facts = ['drop', 'spoil'].map((kind, at) => ({ status: 'ready', kind,
+                spotId: kind, npcId: 1, hours: .01 + at * .01, costHours: .01 + at * .01,
+                netHourCost: 1, town: 'Giran', tripHours: 0, tripFees: 0 }));
+            const { bestForWish } = options;
+            if (!bestForWish) return facts;
+            let best = null, bestCost = Infinity;
+            for (const fact of facts) {
+                if (bestForWish.spoilOnly && fact.kind !== 'spoil') continue;
+                const cost = bestForWish.progressionRequired
+                    ? fact.hours + fact.tripHours + fact.tripFees / Math.max(1, bestForWish.hourAdena)
+                    : fact.costHours;
+                if (best && !(cost < bestCost)) continue;
+                best = fact; bestCost = cost;
+            }
+            return best ? [best] : [];
+        };
+        const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
+        assert.equal(Trip.key(spoiler), ctx.routeKey, 'matching native travel inputs permit prepared route reuse');
+        const spoilContext = Economy.forState(spoiler, { board: spoilBoard, timestamp, spots: [], routeRows: ctx.routeRows });
         const demand = Providers.build(spoiler, spoilContext, { spots: [{}] });
         const root = demand.nodes.find(row => row.key === 'resale:1804');
         assert.equal(root?.object.amount, 2, 'recipe supply is bounded by actual market demand');
