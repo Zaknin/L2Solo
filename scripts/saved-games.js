@@ -152,11 +152,7 @@ function validateDatabase(file) {
     const fd = fs.openSync(file, 'r');
     try { fs.readSync(fd, header, 0, 16, 0); } finally { fs.closeSync(fd); }
     if (header.toString() !== 'SQLite format 3\u0000') fail('The save is not a valid SQLite database.');
-    const db = new DatabaseSync(file, { readOnly: true });
-    try {
-        const rows = db.prepare('PRAGMA quick_check').all();
-        if (rows.length !== 1 || rows[0].quick_check !== 'ok') fail('Database integrity check failed.');
-    } finally { db.close(); }
+    Restore.quickCheckDatabase(file, () => fail('Database integrity check failed.'));
 }
 
 function openStoppedDatabase(file) {
