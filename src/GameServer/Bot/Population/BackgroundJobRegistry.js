@@ -1,5 +1,6 @@
 const DiagnosticConfig = require('./PopulationConfig');
 let activeRegistry = null;
+const STOPPED_BEFORE_START = Symbol('stopped_before_start');
 
 function finiteNumber(value, fallback = 0) {
     const parsed = Number(value);
@@ -135,8 +136,11 @@ class Registry {
             if (DiagnosticConfig.developerDiagnostics) job.lastStartedAt = now;
             DiagnosticConfig.developerDiagnostics && (this.metrics.started += 1);
             job.promise = Promise.resolve()
-                .then(() => job.run())
+                // A stop() between this tick and the microtask fences the job:
+                // shutdown flushes and closes the database after stop().
+                .then(() => (this.started ? job.run() : STOPPED_BEFORE_START))
                 .then((result) => {
+                    if (result === STOPPED_BEFORE_START) return null;
                     DiagnosticConfig.developerDiagnostics && (job.completed += 1);
                     DiagnosticConfig.developerDiagnostics && (this.metrics.completed += 1);
                     if (result?.skipped === true) {
