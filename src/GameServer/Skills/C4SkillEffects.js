@@ -784,7 +784,7 @@ function fetchSummonNpcData(skill) {
 }
 
 function fetchSummonNpcFallback(DataCache, skill) {
-    const skillData = DataCache.skills?.find((entry) => Number(entry.selfId) === Number(skill.fetchSelfId?.()));
+    const skillData = DataCache.skills == null ? undefined : ItemTemplateIndex.findRequired(DataCache.skills, skill.fetchSelfId?.());
     const currentLevel = Number(skill.fetchLevel?.()) || 1;
     const levelCandidates = (skillData?.levels || [])
         .map((level) => ({

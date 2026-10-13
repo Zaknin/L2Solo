@@ -302,7 +302,7 @@ const DataCache = {
     },
 
     fetchSkillFromSelfId(selfId, callback) {
-        const item = structuredClone(DataCache.skills.find((ob) => ob.selfId === selfId));
+        const item = structuredClone(ItemTemplateIndex.findStrictRequired(DataCache.skills, selfId));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown Skill SelfId %d', selfId);
     },
 

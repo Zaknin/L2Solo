@@ -285,7 +285,7 @@ function awardBaseSkills(characterId, classId) {
         return Promise.all(levelOne
             .filter((skill) => !existingIds.has(Number(skill.selfId)))
             .map((skill) => {
-                const details = DataCache.skills.find((row) => row.selfId === skill.selfId);
+                const details = ItemTemplateIndex.findStrictRequired(DataCache.skills, skill.selfId);
                 if (!details) return Promise.resolve(null);
                 const owned = {
                     ...skill,

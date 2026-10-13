@@ -6806,9 +6806,9 @@ const Database = {
             if (Number(known?.level || 0) >= Number(skillLevel)) return { learned: false, reason: 'already_known' };
             const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
             const training = Catalog.nextTraining(character.classId, character.level, skillSelfId, known?.level || 0);
-            const definition = invoke('GameServer/DataCache').skills.find((row) => Number(row.selfId) === Number(skillSelfId));
+            const definition = ItemTemplateIndex.findRequired(invoke('GameServer/DataCache').skills, skillSelfId);
             if (!training || training.level !== Number(skillLevel)
-                || !definition?.levels?.some((row) => Number(row.level) === training.level)) {
+                || definition?.levels == null || !require('./GameServer/Skills/SkillRankIndex').has(definition.levels, training.level)) {
                 return { learned: false, reason: 'ineligible_rank' };
             }
             // Static workshops are authored infrastructure, rather than a

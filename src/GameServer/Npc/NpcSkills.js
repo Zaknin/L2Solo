@@ -1,3 +1,4 @@
+const SkillRankIndex = require('../Skills/SkillRankIndex');
 const SkillModel = invoke('GameServer/Model/Skill');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
 
@@ -139,8 +140,7 @@ function instantiate(row) {
     }
 
     const levels = template.levels || [];
-    const level = levels.find((entry) => Number(entry.level) === row.level)
-        || levels[Math.max(0, Math.min(levels.length - 1, row.level - 1))];
+    const level = SkillRankIndex.findOrPosition(levels, row.level);
 
     if (!level) {
         return null;

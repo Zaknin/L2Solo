@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
 const DataCache = invoke('GameServer/DataCache');
 const SkillModel = invoke('GameServer/Model/Skill');
@@ -127,7 +129,7 @@ function safeCombatProvider(session, leaderSession, skill) {
 }
 
 function resurrectionScrollSkill() {
-    const source = (DataCache.skills || []).find((skill) => Number(skill.selfId) === RESURRECTION_SCROLL_SKILL_ID);
+    const source = ItemTemplateIndex.findNumericRowRequired(DataCache.skills || [], RESURRECTION_SCROLL_SKILL_ID);
     if (!source) {
         // Bot AI may begin a hot-session tick while the datapack cache is
         // still warming. The C4 rules are keyed by selfId, so this sourced
@@ -150,7 +152,7 @@ function resurrectionScrollSkill() {
         });
     }
     const level = Number(source.levels?.[0]?.level) || 1;
-    const levelData = source.levels?.find((entry) => Number(entry.level) === level) || {};
+    const levelData = SkillRankIndex.find(source.levels ?? [], level) || {};
     return new SkillModel({ ...utils.crushOb(source), ...levelData, level });
 }
 

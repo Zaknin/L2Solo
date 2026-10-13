@@ -1,3 +1,4 @@
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const { fnv1a32 } = require('../Fnv1a');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
@@ -294,10 +295,9 @@ function effectiveBase(profile, stat, timestamp, sources) {
 }
 
 function skillDefinition(selfId, level) {
-    const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(selfId));
+    const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], selfId);
     if (!skill) return null;
-    const definition = (skill.levels || []).find((row) => number(row.level) === number(level))
-        || (skill.levels || []).filter((row) => number(row.level) <= number(level)).at(-1)
+    const definition = SkillRankIndex.findFiniteOrLastEligible(skill.levels || [], level)
         || null;
     return definition ? { ...skill.template, ...skill.time, ...definition } : null;
 }
@@ -346,7 +346,7 @@ function skillsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
         const definition = skillDefinition(entry.selfId, learned.level) || {};
         return {
             selfId: number(entry.selfId), level: number(learned.level, 1), passive: skill?.template?.passive === true,
@@ -361,7 +361,7 @@ function skillSnapshotsFromRecords(records = []) {
     return records.map((record) => {
         const selfId = number(record.selfId);
         const requestedLevel = number(record.level, 1);
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === selfId);
+        const skill = ItemTemplateIndex.findNumericRowRequired(DataCache.skills || [], selfId);
         if (!skill) return null;
         const definition = skillDefinition(selfId, requestedLevel);
         if (!definition) return null;
@@ -398,9 +398,8 @@ function skillRecordsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
-        const definition = (skill?.levels || []).find((row) => number(row.level) === number(learned.level))
-            || (skill?.levels || []).filter((row) => number(row.level) <= number(learned.level)).at(-1);
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
+        const definition = SkillRankIndex.findFiniteOrLastEligible(skill?.levels || [], learned.level);
         if (!skill || !definition) return null;
         return {
             selfId: number(entry.selfId),
