@@ -867,7 +867,7 @@ function forState(state = {}, deps = {}) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
         context.statsPacket = { wishFocus: context.network.focus, dormantWishes: context.network.dormant,
             decisionSeq: context.network.decisionSeq, activityLeaf: context.network.activityLeaf,
-            money: state.stats?.money || [0, 0, base.survivalReserve, 0] };
+            money: state.stats?.money || [0, 0, base.survivalReserve, 0], stockTargets: state.stats?.stockTargets || stockTargets(base) };
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
             if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
@@ -930,7 +930,7 @@ function forState(state = {}, deps = {}) {
     const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
     context.statsPacket = { wishFocus: network.focus, dormantWishes: network.dormant,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
-        money: Funding.packetFor(network, context.hourAdena, base.survivalReserve), wishDirty: 0 };
+        money: Funding.packetFor(network, context.hourAdena, base.survivalReserve), stockTargets: stockTargets(base), wishDirty: 0 };
     let cumulative = base.survivalReserve;
     for (const wish of network.queue) { cumulative += cashCharge(wish); cash.watch(cumulative); }
     const watchedWish = network.gap || network.queue.find(wish => wish.key === network.focus?.[0]);
@@ -1144,6 +1144,22 @@ function view(state, plan, deps, built = {}) {
         kitCost, () => context.statsPacket.money));
     return context;
 }
+// The plan's own potion and shot targets, published with its money packet
+// (L72): the sale list keeps what the plan decided under spot occupancy
+// instead of a second earning-spot search. A changed potion or shot item
+// (level, weapon) has no published target yet and reads the foundation.
+function stockTargets(base) {
+    const potions = base.stock('potions'), shots = base.stock('shots');
+    return [potions.itemId, potions.target, shots.itemId, shots.target];
+}
+function keptTargets(state = {}, deps = {}) {
+    const row = state.stats?.stockTargets, ShotStock = invoke('GameServer/Inventory/ShotStock'), plan = ShotStock.planForState(state);
+    if (Array.isArray(row) && row[0] === invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId
+        && row[2] === plan.selfId)
+        return { potions: row[1], shots: { itemId: row[2], target: row[3], beginnerCurrent: ShotStock.beginnerAmount(state, plan) } };
+    const base = basics(state, deps);
+    return { potions: base.stock('potions').target, shots: base.stock('shots') };
+}
 function survivalReserve(state = {}) {
     return Array.isArray(state.stats?.money) ? positive(state.stats.money[2]) : basics(state).survivalReserve;
 }
@@ -1289,6 +1305,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

@@ -164,6 +164,29 @@ try {
             { ...options, leaf: { activity: 'shopping', kind: 'buy', itemId: 1835, amount: target - amount + 1 } }), false,
         'a held shots purchase keeps the shots exact');
     }
+    // (j) the build publishes its potion and shot targets; the sale list keeps
+    // by them without a second earning-spot search (L72).
+    {
+        const { state, economy } = decided(93013);
+        const potions = economy.stock('potions'), shots = economy.stock('shots');
+        assert.deepEqual(state.stats.stockTargets, [potions.itemId, potions.target, shots.itemId, shots.target],
+            'the packet carries the plan\'s own stock targets');
+        const Route = require('../src/GameServer/Bot/Economy/EquipmentIncomeRoute'), select = Route.select;
+        let searches = 0;
+        Route.select = (...args) => { searches++; return select(...args); };
+        try {
+            const marked = { ...state, stats: { ...state.stats, stockTargets: [potions.itemId, 7, shots.itemId, 11] } };
+            const read = Economy.keptTargets(marked);
+            assert.equal(read.potions, 7);
+            assert.equal(read.shots.target, 11);
+            assert.equal(read.shots.itemId, shots.itemId);
+            assert.equal(searches, 0, 'a published target needs no earning-spot search');
+            invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(marked, { unlimited: true });
+            assert.equal(searches, 0, 'the sale list reads the published targets');
+            const other = Economy.keptTargets({ ...marked, stats: { ...marked.stats, stockTargets: [potions.itemId, 7, shots.itemId + 1, 11] } });
+            assert(searches > 0 && other.shots.target === shots.target, 'another shot item falls back to the foundation');
+        } finally { Route.select = select; }
+    }
     // (b) hard events rebuild at once.
     {
         const { state, economy } = decided(93002, 1e6);

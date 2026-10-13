@@ -532,13 +532,14 @@ function saleCandidates(state, options = {}) {
         reserved[id] = Math.max(Number(reserved[id] || 0), amount + Number(clan[id] || 0));
     for (const [id, amount] of Object.entries(options.reserved || {}))
         reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
-    // Potions, crafter ammunition and travel scrolls use restock reserves.
+    // Potions, crafter ammunition and travel scrolls use restock reserves:
+    // the held plan's published targets (L72), else the foundation.
     // Ordinary bots retain their current ammunition independently of forecasts.
-    const basics = options.keptAmounts ? null
-        : invoke('GameServer/Bot/Economy/EconomyContext').basics(state, { saleReservations: reserved });
+    const targets = options.keptAmounts ? null
+        : invoke('GameServer/Bot/Economy/EconomyContext').keptTargets(state, { saleReservations: reserved });
     const kept = options.keptAmounts || {
-        ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: basics.stock('potions').target }),
-        ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, basics),
+        ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: targets.potions }),
+        ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, null, targets.shots),
         ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) };
     for (const [selfId, amount] of Object.entries(kept)) {
         reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount + Number(clan[selfId] || 0));

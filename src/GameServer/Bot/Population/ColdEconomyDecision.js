@@ -419,7 +419,7 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     economy.wallet = require('../Economy/PurchaseFunding').budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
-        wishSections: state.stats.wishSections, wishDirty: 0 };
+        stockTargets: state.stats.stockTargets, wishSections: state.stats.wishSections, wishDirty: 0 };
     Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
     Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });
