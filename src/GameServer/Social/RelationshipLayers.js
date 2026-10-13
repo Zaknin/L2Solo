@@ -18,9 +18,11 @@ function persistent(row, at) {
     const spans = durations(row?.traits);
     return { grudge: decay(row?.grudge, elapsed, spans.middle), gratitude: decay(row?.gratitude, elapsed, spans.middle) };
 }
+// Events that add grudge (durable layer) or raise the short-lived value; every other type counts as positive.
+const NEGATIVE_EVENTS = new Set(['mob_contested', 'loot_taken', 'attacked', 'killed', 'aided_opponent', 'party_kicked', 'party_wiped', 'ignored_loot_request', 'insulted']);
 function apply(row, event) {
     const at = hours(row, event), prior = persistent(row, at);
-    const negative = ['mob_contested', 'loot_taken', 'attacked', 'killed', 'aided_opponent', 'party_kicked', 'party_wiped', 'ignored_loot_request', 'insulted'].includes(event.type);
+    const negative = NEGATIVE_EVENTS.has(event.type);
     const loss = positive(event.hours);
     return { ...prior, gameAt: at, traits: event.traits || row?.traits || {},
         grudge: prior.grudge + (negative ? loss : 0), gratitude: prior.gratitude + (!negative ? loss : 0) };
@@ -28,7 +30,7 @@ function apply(row, event) {
 function fast(previous, event) {
     const at = hours(previous, event), span = durations(event.traits).fast;
     const old = (Number(previous?.value) || 0) * 0.5 ** (Math.max(0, at - positive(previous?.gameAt)) / span);
-    const negative = ['mob_contested', 'loot_taken', 'attacked', 'killed', 'aided_opponent', 'party_kicked', 'party_wiped', 'ignored_loot_request', 'insulted'].includes(event.type);
+    const negative = NEGATIVE_EVENTS.has(event.type);
     return { value: old + (negative ? positive(event.hours) : -positive(event.hours)), gameAt: at, halfLife: span };
 }
 function fastValue(row, at) {
