@@ -70,13 +70,55 @@ async function run() {
         assert(!ItemDisposition.isSpareConsumable({ selfId }), `${selfId} is not a spare consumable`);
     }
 
-    // The enchant scroll is the market's (group E): with buyers of it on the
-    // board, its own sale decides; it is never sold to the NPC as spare.
+    // A current own quote keeps the enchant scroll out of spare cleanup.
+    // A new market draw may still choose the NPC despite a funded buyer.
     const dealsAt = Date.now();
     await world.buyer([[956, 1]], state.characterId);
+    const database = invoke('Database'), afk = invoke('GameServer/AfkTrade/AfkTradeService');
+    let [seller] = await database.execute(['SELECT id,classId,level FROM characters WHERE id=?', [state.characterId]]);
+    if (!seller) {
+        const account = `bot_stock_seller_${state.characterId}`;
+        await database.createAccount(account, 'fixture');
+        const inserted = await database.createCharacter(account, { name: 'StockSeller', race: 0, classId: state.stats.classId,
+            maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, ...world.town() });
+        await database.execute(['UPDATE characters SET id=?,level=? WHERE id=?',
+            [state.characterId, state.level, Number(inserted.insertId)]]);
+        [seller] = await database.execute(['SELECT id,classId,level FROM characters WHERE id=?', [state.characterId]]);
+    }
+    assert.strictEqual(seller.id, state.characterId);
+    assert.strictEqual(seller.classId, state.stats.classId);
+    assert.strictEqual(seller.level, state.level);
+    const scroll = DataCache.items.find(entry => entry.selfId === 956);
+    if (!(await database.fetchItems(state.characterId)).some(item => Number(item.selfId) === 956)) {
+        await database.setItem(state.characterId, { selfId: 956, name: scroll.template.name,
+            amount: state.inventory[956].amount, enchant: 0, equipped: false, slot: 0 });
+    }
+    const beforeQuote = await database.fetchItems(state.characterId);
+    const physicalScroll = beforeQuote.find(item => Number(item.selfId) === 956);
+    assert.strictEqual(Number(physicalScroll.amount), 1);
+    assert.strictEqual(Number(physicalScroll.enchant), 0);
+    const quote = await database.createAfkTradeShop(state.characterId, { kind: 'sell_ad', storeType: 1,
+        town: 'Giran', ...world.town(), lines: [{ objectId: physicalScroll.id, selfId: 956, count: 1,
+            price: Number(scroll.template.price), enchant: 0, stackable: false }] });
+    assert.strictEqual(quote.shop.ownerId, state.characterId);
+    assert.strictEqual(quote.shop.custodyPolicy, 1);
+    assert.strictEqual(Number(quote.shop.lines[0].sourceObjectId), Number(physicalScroll.id));
+    assert.deepStrictEqual(await database.fetchItems(state.characterId), beforeQuote,
+        'the actual conditional quote keeps the same physical scroll in the seller bag');
+    afk.refreshRecord(quote.shop);
+    const ownerLine = afk.boardIndex().ownerLines(state.characterId).find(entry => entry.selfId === 956);
+    assert.strictEqual(ownerLine.ownerId, state.characterId);
+    assert.strictEqual(ownerLine.recordId, quote.shop.id);
+    assert.strictEqual(ownerLine.custodyPolicy, 1);
+    assert.strictEqual(ownerLine.count, 1);
+    assert.strictEqual(ownerLine.enchant, 0);
+    assert.strictEqual(ownerLine.price, Number(scroll.template.price));
     const economy = world.economyFor(state);
-    const npc = new Map(MarketListingPolicy.evaluate(state, { unlimited: true, states: [], now: dealsAt,
-        economy, board: invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() }).npc
+    const visit = MarketListingPolicy.evaluate(state, { unlimited: true, states: [], now: dealsAt,
+        economy, board: afk.boardIndex() });
+    assert(visit.listings.some(entry => entry.selfId === 956 && entry.count === 1 && entry.marketReason === 'kept_line'),
+        'the native visit respects the actual current own quote, without fixing a new market draw');
+    const npc = new Map(visit.npc
         .map((entry) => [entry.selfId, entry.count]));
     assert.deepStrictEqual([...npc.entries()].sort((a, b) => a[0] - b[0]),
         [[17, 500], [736, 1], [1060, 10], [1061, 20], [1661, 2], [1831, 4]],
