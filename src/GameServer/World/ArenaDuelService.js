@@ -248,10 +248,19 @@ function applySelfBuffs(session, actor) {
         });
 }
 
+// actor.silentMoving is read first by NpcAggro and is recomputed only by
+// ToggleSkills.cleanupState; effects removed or restored here must resync it.
+function syncSilentMoving(actor, effects) {
+    const silentMoving = effects.find((effect) => effect?.stats?.silentMoving);
+    if (silentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(actor.session, actor, silentMoving);
+}
+
 function clearArenaEffects(actor) {
     if (!actor) return;
     EffectTicker.clearAll(actor);
-    EffectStore.list(actor).forEach((effect) => EffectStore.remove(actor, effect.key));
+    const cleared = EffectStore.list(actor);
+    cleared.forEach((effect) => EffectStore.remove(actor, effect.key));
+    syncSilentMoving(actor, cleared);
     actor.activeBuffs = {};
 }
 
@@ -292,6 +301,7 @@ function restoreEffects(session, actor, effects = []) {
         });
         if (restored) EffectTicker.scheduleExpiry(session, actor, restored);
     });
+    syncSilentMoving(actor, effects);
 }
 
 function managerDistanceSquared(actor) {
@@ -527,7 +537,9 @@ function release(session, reason = 'released') {
     stopPlayerCombatAction(duel.playerSession, duel.player, { abortCombat: !playerDied });
     if (duel.player && duel.enteredArena === true) {
         EffectTicker.clearAll(duel.player);
-        EffectStore.list(duel.player).forEach((effect) => EffectStore.remove(duel.player, effect.key));
+        const cleared = EffectStore.list(duel.player);
+        cleared.forEach((effect) => EffectStore.remove(duel.player, effect.key));
+        syncSilentMoving(duel.player, cleared);
         duel.player.activeBuffs = {};
     }
     if (duel.playerSession && !playerDied && duel.player && duel.enteredArena === true && duel.playerEffectsBefore) {

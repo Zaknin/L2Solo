@@ -951,6 +951,10 @@ function applyEffect(session, target, skill, semantic, source = session?.actor) 
         target.automation?.abortMovement?.(target, { notifyClient: false });
         EffectRestrictions.stopMovement(target?.session || session, target);
     }
+    // A displaced Silent Move source leaves actor.silentMoving stale (NpcAggro
+    // reads it first); recompute it from the store, then refresh as before.
+    const displacedSilentMoving = effect.removedEffects.find((removed) => removed.stats?.silentMoving);
+    if (displacedSilentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(target?.session || session, target, displacedSilentMoving);
     if (hasStats(effect) || effect.removedEffects.some(hasStats)) {
         refreshStats(target?.session || session, target);
     }

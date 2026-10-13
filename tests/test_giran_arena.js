@@ -283,7 +283,14 @@ async function arenaLifecycleChecks() {
         ArenaDuelService.active.botSession.dataSendToOthers = (packet) => {
             if (packet?.[0] === 0x12) deleteBroadcasts += 1;
         };
+        // E291: a Silent Move flag left by an arena effect must not outlive the
+        // duel reset that removes the effect.
+        EffectStore.apply(player.actor, {
+            key: 'silent_move', id: 221, type: 'buff', toggle: true, stats: { silentMoving: true }, durationMs: 0
+        });
+        player.actor.silentMoving = true;
         ArenaDuelService.release(player, 'test_release');
+        assert.strictEqual(player.actor.silentMoving, false, 'duel release should clear the silent moving flag with the effect');
         assert.strictEqual(deleteBroadcasts, 1, 'clone deletion must be broadcast to every nearby real player');
         assert.strictEqual(EffectStore.list(player.actor).length, 0, 'arena-only buffs disappear on release');
 

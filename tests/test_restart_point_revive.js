@@ -113,6 +113,17 @@ assert.deepStrictEqual(
     'death should send the native empty short-buff payload'
 );
 
+// E291: dying with Silent Move on must clear the silentMoving flag NpcAggro
+// reads first, or the revived actor stays invisible to aggressive mobs.
+dyingActor.state.setDead(false);
+EffectStore.apply(dyingActor, { key: 'silent_move', id: 221, type: 'buff', toggle: true, stats: { silentMoving: true }, durationMs: 0 });
+dyingActor.silentMoving = true;
+assert.strictEqual(EffectStore.list(dyingActor).length, 1, 'Silent Move should be stored before the second death');
+die({ dataSendToMeAndOthers() {} }, dyingActor);
+assert.strictEqual(dyingActor.state.fetchDead(), true, 'second death should mark the actor dead');
+assert.deepStrictEqual(EffectStore.list(dyingActor), [], 'second death should remove Silent Move');
+assert.strictEqual(dyingActor.silentMoving, false, 'death should clear the silent moving flag with the effect');
+
 const packets = [];
 const actor = {
     hp: 0,

@@ -237,6 +237,37 @@ function wait(ms) {
     await wait(120);
     assert.strictEqual(keeper.silentMoving, true, 'Expired dance must keep silent moving while Silent Move is on');
 
+    // E291: slot-limit eviction removes the oldest counted buff. When it is a
+    // silentMoving buff, C4SkillEffects must recompute the flag: with Silent
+    // Move still on it stays true, with no other source it clears.
+    const DataCache = invoke('GameServer/DataCache');
+    DataCache.init();
+    const wildMagicData = DataCache.skills.find((entry) => entry.selfId === 1303);
+    const wildMagic = new SkillModel({ ...utils.crushOb(wildMagicData), ...wildMagicData.levels.find((entry) => entry.level === 1) });
+    for (const withToggle of [true, false]) {
+        const evictee = actor(100);
+        const evicteeSession = session(evictee);
+        if (withToggle) ToggleSkills.handleRequest(evicteeSession, evictee, silentMove);
+        EffectStore.apply(evictee, {
+            key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+            stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 60000
+        });
+        evictee.silentMoving = true;
+        for (let index = 0; index < 19; index += 1) {
+            EffectStore.apply(evictee, { key: `filler_${index}`, id: 5000 + index, level: 1, name: `Filler ${index}`, stats: { pDefMul: 1.01 }, durationMs: 60000 });
+        }
+        assert.strictEqual(EffectStore.list(evictee).some((entry) => entry.key === 'dance_of_shadow'), true, 'Dance of Shadow should still be stored before the eviction');
+        const caster2 = actor(100);
+        const cast = C4SkillEffects.execute(session(caster2), caster2, evictee, wildMagic, {
+            magicSkill: true, rng: () => 0, attack: { clearLoadedShot() {} }
+        });
+        assert(cast.effect, 'Wild Magic should land and push the oldest buff out');
+        assert.strictEqual(EffectStore.list(evictee).some((entry) => entry.key === 'dance_of_shadow'), false, 'Dance of Shadow should be evicted as the oldest counted buff');
+        assert.strictEqual(evictee.silentMoving, withToggle, withToggle
+            ? 'Eviction of a dance must keep silent moving while Silent Move is on'
+            : 'Eviction of the only silent moving source should clear the flag');
+    }
+
     console.log('Toggle skill checks passed');
 })().catch((err) => {
     console.error(err);
