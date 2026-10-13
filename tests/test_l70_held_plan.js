@@ -121,6 +121,40 @@ try {
             loc: own.stats.travel.to, stats: { ...own.stats, travel: null } }, accepted, at(T + 1000), { afterResult: true }),
         null, 'the arrival (location and spot) stays exact');
     }
+    // (i) shots used between the survival line and the target: noise below
+    // the bot's own error; the survival line and any rise stay hard (lever 3).
+    {
+        const shotBag = shots => Life.inventorySummaryFromItems([
+            { id: 1, selfId: 1, amount: 1, equipped: 1, slot: 7 },
+            { id: 2, selfId: 1835, amount: shots, equipped: 0, slot: 0 },
+            { id: 3, selfId: 1869, amount: 100000, equipped: 0, slot: 0 }]);
+        const probe = Economy.basics({ ...subject(93012, 1e6), inventory: shotBag(1) }, deps).stock('shots');
+        const floor = Math.max(1, Math.ceil(probe.survivalTarget - (probe.beginnerCurrent || 0)));
+        const target = Math.ceil(probe.target - (probe.beginnerCurrent || 0));
+        assert(probe.itemId === 1835 && floor + 2 < target, 'fixture: room between the survival line and the target '
+            + JSON.stringify([floor, target]));
+        const amount = target - 1;
+        let state = { ...subject(93012, 1e6), inventory: shotBag(amount) };
+        const economy = Economy.forState(state, deps);
+        state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+        const accepted = Decisions.advisory(economy, state);
+        const band = Economy.decodeCalculationFence(accepted.fence)[3].find(row => row[0] === 1835);
+        assert(band && band[2] === amount && band[1] >= floor && band[1] < amount,
+            'shots below the target have a consumption band ' + JSON.stringify(band));
+        const used = shots => ({ ...state, inventory: shotBag(shots), updatedAt: state.updatedAt + 1, stats: { ...state.stats } });
+        const before = builds;
+        assert.strictEqual(Economy.forState(used(amount - 1), at(T + 1000)).plan, economy.plan, 'one shot used inside the band');
+        assert.equal(builds, before);
+        Economy.forgetContext(state.characterId);
+        assert(Decisions.refreshAdvisory(used(amount - 1), accepted, at(T + 1000), { afterResult: true }), 'the card holds too');
+        assert(Decisions.refreshAdvisory(used(band[1]), accepted, at(T + 1000), { afterResult: true }), 'the band edge holds');
+        assert.equal(Decisions.refreshAdvisory(used(band[1] - 1), accepted, at(T + 1000), { afterResult: true }), null,
+            'use beyond the error or the survival line rebuilds');
+        assert.equal(Decisions.refreshAdvisory(used(floor - 1), accepted, at(T + 1000), { afterResult: true }), null,
+            'below the survival line rebuilds at once');
+        assert.equal(Decisions.refreshAdvisory(used(amount + 1), accepted, at(T + 1000), { afterResult: true }), null,
+            'a rise below the target stays exact');
+    }
     // (b) hard events rebuild at once.
     {
         const { state, economy } = decided(93002, 1e6);
@@ -250,7 +284,7 @@ try {
         assert(Sections.softDue(wishSections, 'observation', T + 5 * MINUTE));
         assert.equal(Sections.softDue(wishSections, 'market', T + 9 * MINUTE), false);
     }
-    console.log('PASS L70 held plan: own result reuse and restamp, own-spot trip, hard events, soft market delay, reconcile kept, shared money verdict');
+    console.log('PASS L70 held plan: own result reuse and restamp, own-spot trip, shot use below target, hard events, soft market delay, reconcile kept, shared money verdict');
 } finally {
     Providers.build = originalBuild;
     fs.rmSync(dir, { recursive: true, force: true });

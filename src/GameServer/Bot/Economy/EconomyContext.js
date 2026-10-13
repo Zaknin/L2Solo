@@ -269,7 +269,8 @@ function quantityBands(state, context, projection) {
     const bands = [], stock = new Map();
     for (const kind of ['shots', 'potions', 'scrolls']) {
         const row = context.stock(kind);
-        if (row?.itemId && row.target > 0) stock.set(Number(row.itemId), Math.max(1, Math.ceil(row.target - positive(row.beginnerCurrent))));
+        if (row?.itemId && row.target > 0) stock.set(Number(row.itemId), [Math.max(1, Math.ceil(row.target - positive(row.beginnerCurrent))),
+            kind === 'shots' ? row : null]);
     }
     const reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(state);
     const used = new Set((projection?.nodes || []).filter(node => node.key.startsWith('item:')).map(node => Number(node.key.slice(5))));
@@ -280,8 +281,21 @@ function quantityBands(state, context, projection) {
             || row.acceptedCustomer || row.assignedClan || row.available === false || positive(reserved[id])
             || (row.stackable ?? template?.etc?.stackable) !== true) continue;
         if (stock.has(itemId)) {
-            const target = stock.get(itemId);
+            const [target, shots] = stock.get(itemId);
             if (amount >= target) bands.push([itemId, target, null, amount]);
+            else if (shots && shots.unitPrice > 0) {
+                // Shots between the survival line and the target: each unit
+                // only moves the restock wish's amount, price and value
+                // together. Consumption below the bot's own error (money and
+                // hours) is noise; the survival line (survival reserve,
+                // `needed`) and an empty stack (use rate, planned slot) stay
+                // hard, and any rise is the purchase's own event.
+                const floor = Math.max(1, Math.ceil(shots.survivalTarget - positive(shots.beginnerCurrent)));
+                const allowance = Math.floor(Math.min(positive(context.hourAdena) * error / shots.unitPrice,
+                    shots.benefitPerUnit > 0 ? error / shots.benefitPerUnit : Infinity));
+                const low = Math.max(floor, amount - allowance);
+                if (amount >= floor && low < amount) bands.push([itemId, low, amount, amount]);
+            }
             continue;
         }
         // Only existing free stacks absent from every admitted requirement.
