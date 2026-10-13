@@ -3,6 +3,36 @@
     if (typeof module !== 'undefined' && module.exports) module.exports = filters;
     if (root) root.WorldObserverActorFilters = filters;
 }(typeof globalThis !== 'undefined' ? globalThis : this, () => {
+    const classDirectories = new WeakMap();
+    function firstClass(catalog, classId) {
+        // Public directories are mutable exports, with no native-loader ID
+        // guarantee. Validate keys/order; borrowed payload names stay current.
+        if (!Array.isArray(catalog)) return catalog.find(item => Number(item?.classId) === classId);
+        let index = classDirectories.get(catalog);
+        if (index && index.rows.length === catalog.length) {
+            try {
+                for (let position = 0; position < catalog.length; position++) {
+                    const row = catalog[position], raw = row?.classId;
+                    if (row !== index.rows[position] || !Object.is(raw, index.keys[position])) { index = null; break; }
+                }
+            } catch { return catalog.find(item => Number(item?.classId) === classId); }
+        } else index = null;
+        if (!index) {
+            index = { rows: [...catalog], keys: [], first: new Map(), scanRequired: false };
+            for (const row of catalog) {
+                try {
+                    const raw = row?.classId;
+                    index.keys.push(raw);
+                    if (raw !== null && ['object', 'function'].includes(typeof raw)) { index.scanRequired = true; continue; }
+                    const id = Number(raw);
+                    if (!Number.isNaN(id) && !index.first.has(id)) index.first.set(id, row);
+                } catch { index.scanRequired = true; }
+            }
+            classDirectories.set(catalog, index);
+        }
+        if (index.scanRequired) return catalog.find(item => Number(item?.classId) === classId);
+        return index.first.get(classId);
+    }
     function className(actor, catalog = []) {
         const directName = actor?.className || actor?.build?.className;
         if (directName) return directName;
@@ -11,7 +41,7 @@
         const classId = Number(rawClassId);
         if (!Number.isInteger(classId) || classId < 0) return null;
 
-        const entry = catalog.find((item) => Number(item?.classId) === classId);
+        const entry = firstClass(catalog, classId);
         return entry?.className || entry?.label || entry?.name || null;
     }
 

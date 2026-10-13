@@ -28,16 +28,7 @@ function entries(classId) {
     const trees = invoke('GameServer/DataCache').skillTree || [];
     if (trees !== treeSource) { treeSource = trees; indexed = new Map(); }
     if (!indexed.has(Number(classId))) {
-        const skills = new Map();
-        for (const ancestor of ClassProgression.lineage(classId)) {
-            for (const entry of trees.find((row) => Number(row.classId) === ancestor)?.skills || []) {
-                const held = skills.get(Number(entry.selfId)) || { ...entry, levels: [] };
-                const ranks = new Map(held.levels.map((row) => [Number(row.level), row]));
-                for (const row of entry.levels || []) ranks.set(Number(row.level), row);
-                skills.set(Number(entry.selfId), { ...entry, levels: [...ranks.values()].sort((a, b) => a.level - b.level) });
-            }
-        }
-        indexed.set(Number(classId), [...skills.values()]);
+        indexed.set(Number(classId), ClassProgression.mergedSkillTrees(trees, ClassProgression.lineage(classId), 'books'));
     }
     return indexed.get(Number(classId));
 }

@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const { fnv1a32 } = require('../Fnv1a');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
@@ -39,7 +40,7 @@ function number(value, fallback = 0) {
 }
 
 function classTemplate(classId) {
-    return (DataCache.classTemplates || []).find((entry) => Number(entry.classId) === Number(classId)) || {};
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId) || {};
 }
 
 function itemTemplate(selfId) {

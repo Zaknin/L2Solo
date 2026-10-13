@@ -1,3 +1,4 @@
+const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
@@ -106,7 +107,7 @@ function profileForIndex(index, base = baseForIndex(index), seedProfile = null) 
 }
 
 function classInfo(classId) {
-    return DataCache.classTemplates.find((template) => template.classId === classId) || null;
+    return ClassProgression.firstClassRow(DataCache.classTemplates, classId, 'strict') || null;
 }
 
 function vitalsFor(template, level) {
@@ -249,7 +250,7 @@ function migratePopulationAppearances(states = []) {
 }
 
 function awardBaseGear(characterId, classId) {
-    const items = DataCache.newbieItems.find((row) => row.classId === classId)?.items || [];
+    const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items || [];
     const starterTemplates = items.filter((item) => item.equipped === true)
         .map((item) => ItemTemplateIndex.findStrict(DataCache.items, item.selfId));
     const hasTwoHandedWeapon = starterTemplates.some((template) => (
@@ -277,7 +278,7 @@ function awardBaseGear(characterId, classId) {
 }
 
 function awardBaseSkills(characterId, classId) {
-    const skillTree = DataCache.skillTree.find((row) => row.classId === classId);
+    const skillTree = ClassProgression.firstClassRow(DataCache.skillTree, classId, 'strict');
     const skills = skillTree?.skills || [];
     const levelOne = skills.filter((skill) => skill.levels.find((level) => level.pLevel === 1));
     return Database.fetchSkills(characterId).then((existing) => {

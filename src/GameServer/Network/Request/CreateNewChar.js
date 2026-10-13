@@ -1,3 +1,5 @@
+const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const ServerResponse = invoke('GameServer/Network/Response');
 const Shared         = invoke('GameServer/Network/Shared');
@@ -79,7 +81,7 @@ function consume(session, data) {
 }
 
 function fetchSpawnPoints(classId) {
-    return DataCache.newbieSpawns.find(ob => ob.classId === classId)?.spawns;
+    return ClassProgression.firstClassRow(DataCache.newbieSpawns, classId, 'strict')?.spawns;
 }
 
 function awardBaseSkills(id, classId) {
@@ -98,7 +100,7 @@ function awardBaseSkills(id, classId) {
 }
 
 function awardBaseGear(id, classId) {
-    const items = DataCache.newbieItems.find(ob => ob.classId === classId)?.items;
+    const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items;
 
     (items ?? []).forEach((item) => {
         item.slot = ItemTemplateIndex.findStrict(DataCache.items, item.selfId)?.etc?.slot ?? 0;
@@ -112,7 +114,7 @@ function awardBaseShots(id, classId) {
 }
 
 function awardBaseShortcuts(id, classId) {
-    const shortcuts = DataCache.newbieShortcuts.find((ob) => ob.classId === classId)?.shortcuts ?? [];
+    const shortcuts = ClassProgression.firstClassRow(DataCache.newbieShortcuts, classId, 'strict')?.shortcuts ?? [];
     shortcuts.forEach((shortcut) => {
         Database.setShortcut(id, shortcut);
     });

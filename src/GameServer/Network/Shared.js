@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ServerResponse = invoke('GameServer/Network/Response');
 const DataCache      = invoke('GameServer/DataCache');
 const Database       = invoke('Database');
@@ -5,7 +6,7 @@ const Database       = invoke('Database');
 const Shared = {
     fetchClassInformation: (classId) => {
         return new Promise((success, fail) => {
-            let model = DataCache.classTemplates.find(ob => ob.classId === classId);
+            let model = ClassProgression.firstClassRow(DataCache.classTemplates, classId, 'strict');
             return model ? success(model) : fail();
         });
     },

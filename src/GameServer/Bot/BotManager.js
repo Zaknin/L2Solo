@@ -1,3 +1,4 @@
+const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ActorQueries = require('../World/ActorSpatialQueries');
 const refreshPartyMemberships = require('../World/PartyMembershipPublication');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
@@ -778,7 +779,7 @@ const BotManager = {
     },
 
     awardBaseGear(id, classId) {
-        const items = DataCache.newbieItems.find(ob => ob.classId === classId)?.items ?? [];
+        const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items ?? [];
         const hasTwoHandedWeapon = items.some((item) => {
             const template = ItemTemplateIndex.findStrict(DataCache.items, item.selfId);
             return Number(template?.etc?.slot || 0) === 14 &&

@@ -47,8 +47,7 @@ function normalizedClassId(value) {
 function className(value) {
     const classId = normalizedClassId(value);
     if (classId === null) return null;
-    return (DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === classId)
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId)
         ?.template?.class || null;
 }
 

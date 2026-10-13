@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../GameServer/Item/ItemTemplateIndex');
 const http = require('http');
 const fs = require('fs');
@@ -209,19 +210,12 @@ function normalizedClassId(value) {
 function className(value) {
     const classId = normalizedClassId(value);
     if (classId === null) return null;
-    return (DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === classId)
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId)
         ?.template?.class || null;
 }
 
 function classCatalog() {
-    return (DataCache.classTemplates || [])
-        .map((template) => ({
-            classId: normalizedClassId(template.classId),
-            className: template.template?.class || null
-        }))
-        .filter((entry) => entry.classId !== null && entry.className)
-        .sort((left, right) => left.className.localeCompare(right.className, 'en', { sensitivity: 'base' }));
+    return ClassProgression.classDirectory(DataCache.classTemplates || []);
 }
 
 const RACE_NAMES = Object.freeze({
@@ -239,8 +233,7 @@ function normalizedRaceId(value, classId = null) {
     }
     const normalized = normalizedClassId(classId);
     if (normalized === null) return null;
-    const raceId = Number((DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === normalized)
+    const raceId = Number(ClassProgression.firstClassRow(DataCache.classTemplates || [], normalized)
         ?.template?.race);
     return Number.isInteger(raceId) && RACE_NAMES[raceId] ? raceId : null;
 }

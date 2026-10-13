@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Database = invoke('Database');
@@ -129,8 +130,7 @@ function rememberInventory(ownerId, state) {
 }
 
 function appearance(row, items) {
-    const classInfo = (DataCache.classTemplates || [])
-        .find((entry) => Number(entry.classId) === Number(row.classId));
+    const classInfo = ClassProgression.firstClassRow(DataCache.classTemplates || [], row.classId);
     return {
         model: { ...row, ...utils.crushOb(classInfo || {}) },
         paperdoll: utils.tupleAlloc(16, {}),

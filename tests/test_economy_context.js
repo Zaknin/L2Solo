@@ -76,6 +76,14 @@ async function run() {
     assert.equal(waiting.statsPacket.decisionSeq, 7);
     assert.equal(waiting.statsPacket.activityLeaf, 88, 'unknown incoming does not renew the tendency roll');
     assert.deepEqual(waiting.statsPacket.wishFocus, ['power:101:7', 1, 50]);
+    const immutableState = { ...base, characterId: 990011 };
+    const immutableContext = Economy.forState(immutableState, {
+        incoming: ['power:101:7', 1, 50], money: [0, 1, 10, 40]
+    });
+    Object.freeze(immutableContext.plan);
+    assert.throws(() => { immutableContext.gearPlanMemo = {}; }, TypeError,
+        'the actual gear-plan setter preserves strict-mode writes to a frozen plan');
+    Economy.forget(immutableState.characterId);
     if (process.argv.includes('--producer-status')) {
         const Life = invoke('GameServer/Bot/Population/BotLifeState');
         const Craft = invoke('GameServer/Bot/Economy/ColdWealthCraftService');

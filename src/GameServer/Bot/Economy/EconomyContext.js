@@ -1,4 +1,5 @@
 'use strict';
+const ClassProgression = invoke('GameServer/ClassProgression');
 
 const GearThreat = require('./GearThreat');
 
@@ -479,7 +480,7 @@ function foundation(state, deps, persona, timestamp, price) {
     const hasBagForecast = spotTable?.stacks !== null && spotTable?.stacks !== undefined;
     if (hasBagForecast) {
         const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), Data = invoke('GameServer/DataCache');
-        const race = state.stats?.race ?? Data.classTemplates?.find(row => Number(row.classId) === Number(state.stats?.classId || 0))?.template?.race;
+        const race = state.stats?.race ?? (Data.classTemplates == null ? undefined : ClassProgression.firstClassRow(Data.classTemplates, state.stats?.classId || 0))?.template?.race;
         // ARCH-NOTE: size the E9 bag interval on the bag after its
         // planned kit stacks exist. Otherwise an empty shot/potion row uses
         // no slot, its refill uses one, and the shorter interval immediately
