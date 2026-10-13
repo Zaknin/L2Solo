@@ -299,13 +299,17 @@ function restoreEffects(session, actor, effects = []) {
             ...effect,
             ...(remaining > 0 ? { durationMs: remaining } : {})
         });
-        if (restored) EffectTicker.scheduleExpiry(session, actor, restored);
-        // The arena cleared the tickers with the effects; a toggle's MP/HP drain
-        // is started by ToggleSkills.activate, so restart it here (no new cost).
-        if (restored?.toggle === true) {
-            if (restored.manaDot) EffectTicker.applyManaDot(session, actor, actor, restored);
-            if (restored.healthDot) EffectTicker.applyHealthDot(session, actor, actor, restored);
-        }
+        if (!restored) return;
+        // The arena cleared the tickers with the effects. Restart them as the
+        // login restore does (CharacterStatus.restoreEffects), and a toggle's
+        // MP/HP drain as ToggleSkills.activate does, before the expiry timer:
+        // each apply* call clears the key's timers first.
+        if (restored.dot) EffectTicker.applyDot(session, actor, actor, restored);
+        if (restored.manaDot) EffectTicker.applyManaDot(session, actor, actor, restored);
+        if (restored.healthDot) EffectTicker.applyHealthDot(session, actor, actor, restored);
+        if (restored.manaHot) EffectTicker.applyManaHot(session, actor, actor, restored);
+        if (restored.hot) EffectTicker.applyHot(session, actor, actor, restored);
+        EffectTicker.scheduleExpiry(session, actor, restored);
     });
     syncSilentMoving(actor, effects);
 }

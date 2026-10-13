@@ -325,6 +325,41 @@ async function arenaLifecycleChecks() {
         invoke('GameServer/Effects/EffectTicker').clearAll(player.actor);
         player.actor.silentMoving = false;
 
+        // E295: periodic non-toggle effects (hot, manaHot, dot, manaDot) active
+        // before a duel are restored with their tickers, as the login restore does.
+        player.actor.setLocXYZH({ ...Arena.NPC, head: 0 });
+        const periodic = [
+            { key: 'test_hot', id: 9001, name: 'Test HoT', hot: { heal: 5, intervalMs: 40, count: 500 } },
+            { key: 'test_mana_hot', id: 9002, name: 'Test MP HoT', manaHot: { heal: 5, intervalMs: 40, count: 500 } },
+            { key: 'test_dot', id: 9003, name: 'Test DoT', type: 'debuff', dot: { damage: 3, intervalMs: 40, count: 500 } },
+            { key: 'test_mana_dot', id: 9004, name: 'Test MP DoT', type: 'debuff', manaDot: { damage: 1, intervalMs: 40, count: 500 } }
+        ];
+        periodic.forEach((effect) => EffectStore.apply(player.actor, { level: 1, type: 'buff', durationMs: 60000, ...effect }));
+        assert.strictEqual(await ArenaDuelService.select(player, sourceSession.actor.fetchId()), true);
+        player.actor.setLocXYZH({ locX: 73350, locY: 142760, locZ: -3778, head: 0 });
+        await wait(350);
+        assert.strictEqual(ArenaDuelService.active?.enteredArena, true, 'third duel should be entered');
+        ArenaDuelService.release(player, 'test_release_periodic');
+        periodic.forEach((effect) => {
+            assert(EffectStore.list(player.actor).some((entry) => entry.key === effect.key),
+                `${effect.key} is restored after the duel`);
+            assert(player.actor.effectTimers?.[effect.key],
+                `restored ${effect.key} must restart its periodic ticker`);
+            assert.strictEqual(Object.keys(player.actor.effectExpiryTimers || {}).includes(effect.key), true,
+                `restored ${effect.key} keeps its expiry timer`);
+        });
+        const ticker = invoke('GameServer/Effects/EffectTicker');
+        ['test_dot', 'test_mana_dot'].forEach((key) => ticker.clear?.(player.actor, key));
+        player.actor.setHp(Math.max(1, player.actor.fetchMaxHp() - 100));
+        player.actor.setMp(Math.max(1, player.actor.fetchMaxMp() - 100));
+        const hpBeforeHot = player.actor.fetchHp();
+        const mpBeforeHot = player.actor.fetchMp();
+        await wait(150);
+        assert(player.actor.fetchHp() > hpBeforeHot, 'restored heal-over-time must heal');
+        assert(player.actor.fetchMp() > mpBeforeHot, 'restored mana-heal-over-time must restore MP');
+        periodic.forEach((effect) => EffectStore.remove(player.actor, effect.key));
+        ticker.clearAll(player.actor);
+
         BotManager.sessions = [];
         const coldCharacterId = 9902001;
         const weaponDefinition = DataCache.items.find((entry) => (
