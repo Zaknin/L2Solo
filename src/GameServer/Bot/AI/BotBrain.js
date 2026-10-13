@@ -1085,6 +1085,8 @@ const BotBrain = {
                         reason: grantedAdmission?.reason || 'inference_budget_unavailable',
                         telemetry: { outcome: grantedAdmission?.reason || 'inference_budget_unavailable' }
                     };
+                    // The turn was already reported as started, so answer like the instant refusal.
+                    fallbackReply(session, requestContext, providerResult.reason);
                     return providerResult;
                 }
                 const stageMetadata = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? ({
