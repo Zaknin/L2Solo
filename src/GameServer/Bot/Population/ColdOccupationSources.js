@@ -13,39 +13,18 @@ const Price = require('../Economy/PriceDecision');
 const OfferQuery = require('../Economy/OfferQuery');
 const { QUOTE_DEPTH } = Price;
 const EMPTY = Object.freeze([]);
-let fixedBuy, npcByItem, mpRates, townByName, townOrdinal, gearByRank, npcSellerTowns;
+let fixedBuy, npcOfferView, mpRates, townByName, townOrdinal, gearByRank;
+const npcOffersFor = id => npcOfferView?.offersFor(id) || EMPTY;
 
 function initialise() {
     if (fixedBuy) return;
-    fixedBuy = new Map(); npcByItem = new Map(); mpRates = new Map(); npcSellerTowns = new Set();
+    fixedBuy = new Map(); mpRates = new Map();
     gearByRank = new Map();
     townByName = new Map(); townOrdinal = new Map();
     for (const town of Object.values(Towns.towns)) { townOrdinal.set(town.name, townOrdinal.size); townByName.set(town.name, town); }
-    // allOffers() has prices but no town/source authority. Index actual static
-    // seller spawns once, using TownServiceCatalog's same 7500-unit town bound.
-    const Shops = require('../../World/Generics/NpcShopBuyLists'), sellers = new Set(Shops.npcIds());
-    const nativeOffers = new Map();
-    for (const zone of Data.npcSpawns || []) for (const spawn of zone.spawns || []) {
-        const sourceId = Number(spawn.selfId);
-        if (!sellers.has(sourceId)) continue;
-        for (const loc of spawn.coords || []) {
-            if (![loc.locX, loc.locY, loc.locZ].every(Number.isFinite)) continue;
-            const town = Towns.getClosestTown(loc.locX, loc.locY, loc.locZ);
-            if (!town || Math.hypot(town.locX - loc.locX, town.locY - loc.locY) > 7500) continue;
-            npcSellerTowns.add(town.name);
-            for (const row of Shops.fetchForNpc(sourceId)) {
-                const key = `${row.selfId}:${town.name}`, held = nativeOffers.get(key);
-                if (!held || Number(row.price) < held.price || Number(row.price) === held.price && sourceId < held.sourceId)
-                    nativeOffers.set(key, Object.freeze({ selfId: Number(row.selfId), price: Number(row.price),
-                        sourceId, sourceType: 'npc', town: town.name, repeatable: true }));
-            }
-        }
-    }
-    for (const row of nativeOffers.values()) {
-        if (!npcByItem.has(row.selfId)) npcByItem.set(row.selfId, []);
-        npcByItem.get(row.selfId).push(row);
-    }
-    for (const rows of npcByItem.values()) Object.freeze(rows);
+    // Retain the original startup-time stock/rates, borrowing the shared shop
+    // owner's snapshot instead of constructing a private item/town index.
+    npcOfferView = require('../../Knowledge/GameDataCatalogue').native().npcTownOffers();
     for (const item of Data.items || []) {
         invoke('GameServer/Bot/Economy/MarketCounters').counterOf(item.selfId);
         const crystals = Number(item.etc?.cristals), rank = String(item.etc?.rank || '');
@@ -274,7 +253,7 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
         }
         const own = ownStock.get(Number(recipe.productId));
         result.push(...yield* require('../Economy/ShotSalePolicy').exits(state, recipe, { board, timestamp,
-            trip, prepareTrip: ensureTrip, npcOffersFor: id => npcByItem.get(Number(id)) || [], read,
+            trip, prepareTrip: ensureTrip, npcOffersFor, read,
             reserve: Number(stock?.itemId) === Number(recipe.productId)
                 ? Math.max(0, Number(stock.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
                     - Number(state.acceptedIncoming?.[recipe.productId] || 0)) : 0,
@@ -286,7 +265,7 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
     const preparePurchase = function* (owner, id, amount, query = {}) {
         read(id);
         // Static NPC stock is the only unlimited ingredient source admitted here.
-        const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? npcByItem.get(Number(id)) || EMPTY : EMPTY;
+        const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? npcOffersFor(id) : EMPTY;
         const towns = new Set(npcOffers.map(offer => offer.town));
         for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
         for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
@@ -300,7 +279,7 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
             // Null is one static adjacency edge. The consumer yields before
             // skipping it, including catalogue entries with no observed quote.
             yield null; read(gear.selfId);
-            for (const offer of npcByItem.get(gear.selfId) || []) {
+            for (const offer of npcOffersFor(gear.selfId)) {
                 const price = Number(offer.price);
                 if (price > 0) yield { ...gear, source: 'npc', price, cash: price, count: 1,
                     town: offer.town, ownerId: 0, repeatable: true };
@@ -324,8 +303,8 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
 
 module.exports = { initialise, prepare, exitValue, craftLabour, reservations, feasibility, tripDetails, regionalTown, QUOTE_DEPTH, recipeIndex,
     fixedBuyerOffersFor,
-    hasNpcSellerInTown: town => { initialise(); return npcSellerTowns.has(town); },
-    npcOffersFor: id => npcByItem?.get(Number(id)) || [],
-    catalogCounts: () => ({ npcItems: npcByItem?.size || 0,
-        npcQuotes: [...(npcByItem?.values() || [])].reduce((sum, rows) => sum + rows.length, 0),
+    hasNpcSellerInTown: town => { initialise(); return npcOfferView?.hasSellerInTown(town) || false; },
+    npcOffersFor,
+    catalogCounts: () => ({ npcItems: npcOfferView?.itemCount || 0,
+        npcQuotes: npcOfferView?.quoteCount || 0,
         staticBuyItems: fixedBuy?.size || 0, teleportEdges: Routes.teleportPoints().length, townPairs: townByName?.size || 0 }) };

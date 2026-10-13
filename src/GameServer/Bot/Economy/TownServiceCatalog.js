@@ -23,6 +23,7 @@ const GENERIC_MERCHANT_TITLES = Object.freeze(new Set([
 ]));
 
 let cachedSpawns = null;
+let cachedSpawnsLength = null;
 let cachedRows = EMPTY;
 let cachedByRoleTown = Object.freeze({});
 
@@ -48,11 +49,12 @@ function build() {
     const spawns = DataCache.npcSpawns;
     if (!Array.isArray(spawns) || !spawns.length) {
         cachedSpawns = spawns;
+        cachedSpawnsLength = spawns?.length;
         cachedRows = EMPTY;
         cachedByRoleTown = Object.freeze({});
         return;
     }
-    if (cachedSpawns === spawns) return;
+    if (cachedSpawns === spawns && cachedSpawnsLength === spawns.length) return;
 
     const sellerIds = new Set((NpcShopBuyLists.npcIds?.() || []).map(Number));
     const gatekeeperIds = new Set(Object.keys(GatekeeperTeleports.lists || {}).map(Number));
@@ -108,6 +110,7 @@ function build() {
         .forEach((town) => Object.freeze(byTown[town])));
 
     cachedSpawns = spawns;
+    cachedSpawnsLength = spawns.length;
     cachedRows = Object.freeze(rows);
     cachedByRoleTown = Object.freeze(Object.fromEntries(Object.entries(byRoleTown)
         .map(([role, byTown]) => [role, Object.freeze(byTown)])));

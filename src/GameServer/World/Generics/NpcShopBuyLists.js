@@ -1179,25 +1179,101 @@ function flatten(listNames) {
 // their prices depend only on the progression rate, so each seller's built
 // list is indexed by item once per rate.
 let rowIndexRate = null;
+let rowIndexItems = null, rowIndexItemsLength = null;
 const rowIndexes = new Map();
 
 function rowIndexForNpc(npcSelfId) {
     const rate = progressionMultiplier();
-    if (rowIndexRate !== rate) {
+    DataCache ||= invoke('GameServer/DataCache');
+    if (rowIndexRate !== rate || rowIndexItems !== DataCache.items || rowIndexItemsLength !== DataCache.items?.length) {
         rowIndexRate = rate;
+        rowIndexItems = DataCache.items; rowIndexItemsLength = DataCache.items?.length;
         rowIndexes.clear();
     }
     const key = String(npcSelfId);
     if (!rowIndexes.has(key)) {
         const index = new Map();
-        for (const row of flatten(NPC_LISTS[npcSelfId])) {
+        const rows = Object.freeze(flatten(NPC_LISTS[npcSelfId]));
+        for (const row of rows) {
             const selfId = Number(row.selfId);
             if (!index.has(selfId)) index.set(selfId, row);
         }
-        rowIndexes.set(key, index);
+        rowIndexes.set(key, { index, rows });
     }
     return rowIndexes.get(key);
 }
+
+let townOfferView, townPriceView;
+
+function viewInputs(rate) {
+    return { spawns: DataCache.npcSpawns, length: DataCache.npcSpawns?.length,
+        rate, items: DataCache.items, itemsLength: DataCache.items?.length,
+        reader: module.exports.rowsForNpc };
+}
+function sameInputs(held, rate) {
+    return held && held.spawns === DataCache.npcSpawns && held.length === DataCache.npcSpawns?.length
+        && held.rate === rate && held.items === DataCache.items && held.itemsLength === DataCache.items?.length
+        && held.reader === module.exports.rowsForNpc;
+}
+
+// The cold occupation reader holds this shared snapshot at its original
+// initialise moment. New callers can request a current source/rate view.
+// Preserve its stricter raw-coordinate admission and raw item-ID/town keys.
+function townOffers() {
+    DataCache ||= invoke('GameServer/DataCache');
+    const rate = progressionMultiplier();
+    if (!Array.isArray(DataCache.npcSpawns)) return null;
+    if (sameInputs(townOfferView, rate)) return townOfferView.view;
+    const inputs = viewInputs(rate);
+    const Towns = invoke('GameServer/World/TownRespawn');
+    const sellers = new Set(module.exports.npcIds()), towns = new Set(), offers = new Map(), byItem = new Map();
+    for (const zone of inputs.spawns) for (const spawn of zone.spawns || []) {
+        const sourceId = Number(spawn.selfId);
+        if (!sellers.has(sourceId)) continue;
+        for (const loc of spawn.coords || []) {
+            if (![loc.locX, loc.locY, loc.locZ].every(Number.isFinite)) continue;
+            const town = Towns.getClosestTown(loc.locX, loc.locY, loc.locZ);
+            if (!town || Math.hypot(town.locX - loc.locX, town.locY - loc.locY) > 7500) continue;
+            towns.add(town.name);
+            for (const row of inputs.reader(sourceId)) {
+                const key = `${row.selfId}:${town.name}`, held = offers.get(key);
+                if (!held || Number(row.price) < held.price || Number(row.price) === held.price && sourceId < held.sourceId)
+                    offers.set(key, Object.freeze({ selfId: Number(row.selfId), price: Number(row.price),
+                        sourceId, sourceType: 'npc', town: town.name, repeatable: true }));
+            }
+        }
+    }
+    for (const row of offers.values()) {
+        if (!byItem.has(row.selfId)) byItem.set(row.selfId, []);
+        byItem.get(row.selfId).push(row);
+    }
+    for (const rows of byItem.values()) Object.freeze(rows);
+    const view = Object.freeze({ offersFor: id => byItem.get(Number(id)) || EMPTY,
+        hasSellerInTown: town => towns.has(town), itemCount: byItem.size, quoteCount: offers.size });
+    townOfferView = { ...inputs, view };
+    return view;
+}
+
+// Market valuation uses TownServiceCatalog's seller admission (including
+// numeric coordinates), then folds all full shop rows by numeric item ID.
+// rowForNpc keeps the FIRST numeric row; this minimum-positive view must not.
+function townPriceForItem(selfId) {
+    DataCache ||= invoke('GameServer/DataCache');
+    const rate = progressionMultiplier();
+    if (!sameInputs(townPriceView, rate)) {
+        const inputs = viewInputs(rate);
+        const TownNpcCatalog = invoke('GameServer/Bot/Economy/TownNpcCatalog');
+        const sellers = new Set(TownNpcCatalog.rows().map(row => Number(row.npcSelfId))), prices = new Map();
+        for (const seller of sellers) for (const row of inputs.reader(seller)) {
+            const price = Number(row.price || 0), id = Number(row.selfId);
+            if (price > 0) prices.set(id, Math.min(price, prices.get(id) ?? Infinity));
+        }
+        townPriceView = { ...inputs, prices };
+    }
+    return townPriceView.prices.get(Number(selfId)) ?? null;
+}
+
+const EMPTY = Object.freeze([]);
 
 module.exports = {
     fetchForNpc(npcSelfId) {
@@ -1207,8 +1283,14 @@ module.exports = {
     // The first row of fetchForNpc(npcSelfId) for this item, or null. The row
     // is shared: read it, do not modify it.
     rowForNpc(npcSelfId, selfId) {
-        return rowIndexForNpc(npcSelfId).get(Number(selfId)) || null;
+        return rowIndexForNpc(npcSelfId).index.get(Number(selfId)) || null;
     },
+
+    // Full strict-ID-deduplicated rows, borrowed from the same native index.
+    // Numeric aliases remain separate for consumers which fold prices.
+    rowsForNpc(npcSelfId) { return rowIndexForNpc(npcSelfId).rows; },
+    townOffers,
+    townPriceForItem,
 
     npcIds() {
         return Object.keys(NPC_LISTS).map(Number);

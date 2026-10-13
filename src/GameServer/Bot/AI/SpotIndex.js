@@ -4,6 +4,7 @@
 // table of its own.
 const tables = new WeakMap();
 const EMPTY = Object.freeze([]);
+const weights = new WeakMap();
 
 function tableFor(spots) {
     let built = tables.get(spots);
@@ -43,4 +44,25 @@ function spotsForNpc(spots, npcId) {
     return built.byNpc.get(Number(npcId)) || EMPTY;
 }
 
-module.exports = { tableFor, spotById, spotsForNpc };
+// Planner composition weights deliberately differ from physical integer
+// counts: fractional weights are admitted, negatives/NaN contribute zero,
+// and repeated numeric NPC IDs are summed in their original entry order.
+function npcWeights(spot, npcId) {
+    if (!spot) return null;
+    const entries = spot.npcEntries || EMPTY;
+    let built = weights.get(spot);
+    if (!built || built.entries !== entries || built.length !== entries.length) {
+        let totalCount = 0;
+        const byNpc = new Map();
+        for (const entry of entries) {
+            const count = Math.max(0, Number(entry.count) || 0), id = Number(entry.selfId);
+            totalCount += count;
+            if (!Number.isNaN(id)) byNpc.set(id, (byNpc.get(id) || 0) + count);
+        }
+        built = { entries, length: entries.length, totalCount, byNpc };
+        weights.set(spot, built);
+    }
+    return { count: built.byNpc.get(Number(npcId)) || 0, totalCount: built.totalCount };
+}
+
+module.exports = { tableFor, spotById, spotsForNpc, npcWeights };

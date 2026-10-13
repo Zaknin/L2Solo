@@ -9,6 +9,7 @@ const ProgressionCap = invoke('GameServer/Progression/ProgressionCap');
 const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 
 const MAX_PUBLIC_RECIPES = 16;
+const EMPTY_RECIPES = Object.freeze([]);
 const CRAFT_LOC_Z = ShopPlaces.PLAZAS.Giran.locZ;
 const craftLoc = (locX, locY) => Object.freeze({ locX, locY, locZ: CRAFT_LOC_Z });
 // The sellable limits of the Giran plaza, inset by its store margin.  Keep
@@ -164,15 +165,14 @@ function stationCrafter() {
 let catalog = null;
 
 function recipeCatalog() {
-    if (catalog?.items === DataCache.items) return catalog;
-    const itemIds = new Set((DataCache.items || []).map((item) => Number(item.selfId)));
-    const unique = new Map();
-    Object.values(C4RecipeItems.loadRecipeItems() || {}).forEach((recipe) => {
-        if (recipe?.type !== 'dwarven' || !itemIds.has(Number(recipe.productId))) return;
-        unique.set(Number(recipe.recipeId), recipe);
-    });
-    const dwarven = [...unique.values()].sort((a, b) => Number(a.recipeId) - Number(b.recipeId));
-    catalog = { items: DataCache.items, dwarven, byCraftLevel: new Map(), published: null, publishedLevel: null };
+    // This entry point historically loads native recipe scrolls. Public
+    // optional catalogue queries themselves remain read-only/non-loading.
+    C4RecipeItems.loadRecipeItems();
+    const dwarven = require('../../Knowledge/GameDataCatalogue').native().dwarvenRecipesForItems() || EMPTY_RECIPES;
+    if (catalog?.dwarven === dwarven) return catalog;
+    // Eligibility and station publication remain this policy's owned views;
+    // the static recipe/product relation belongs to RecipeCatalog.
+    catalog = { dwarven, byCraftLevel: new Map(), published: null, publishedLevel: null };
     return catalog;
 }
 

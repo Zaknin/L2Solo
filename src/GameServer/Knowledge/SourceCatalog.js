@@ -7,6 +7,12 @@ const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const SpotIndex = require('../Bot/AI/SpotIndex');
 const EMPTY = Object.freeze([]);
 
+// Numeric first-match semantics match the legacy reward reader. This lookup
+// needs no selected spots or full reward/raid atlas.
+function rewardForNpc(npcId) {
+    return ItemTemplateIndex.find(DataCache.npcRewards, npcId) || null;
+}
+
 // No spots, no sources. A caller without spots (a default `[]`, a new array
 // each call) must not evict the index built for the real spot list: the
 // cache holds one list, and the next wish review would rebuild it in full.
@@ -226,4 +232,4 @@ function potentialSpawnData() {
     return require('./SpawnCatalog').potentialSpawnData();
 }
 
-module.exports = { sourcesByItem, rawSourcesForItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData, rewardSelectedAtSpot };
+module.exports = { sourcesByItem, rawSourcesForItem, rewardForNpc, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData, rewardSelectedAtSpot };

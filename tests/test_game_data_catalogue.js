@@ -36,10 +36,22 @@ try {
         assert.deepEqual(c.selectedNpcSpots(1, []), []);
         assert.equal(c.potentialSpawnData(), null);
         assert.equal(c.spawnsForNpc(1), null);
+        assert.equal(c.raidBossDefinitions(), null);
+        assert.equal(c.rewardForNpc(1), null);
+        assert.equal(c.dwarvenRecipesForItems(), null);
+        assert.equal(c.npcTownOffers(), null);
+        assert.equal(c.spotNpcWeights(null, 1), null);
         assert.equal(recipeReads, 0);
     } finally { fs.readFileSync = readFile; }
 
     DataCache.init();
+    const loadedItems = DataCache.items;
+    try {
+        DataCache.items = undefined;
+        assert.equal(c.dwarvenRecipesForItems(), null, 'recipe stock cannot declare missing product data empty');
+        DataCache.items = [];
+        assert.deepEqual(c.dwarvenRecipesForItems(), [], 'known empty product data has known empty recipe stock');
+    } finally { DataCache.items = loadedItems; }
     const A = [{ id: 'A', npcEntries: [{ selfId: 1, count: 2 }] }];
     const B = [{ id: 'B', npcEntries: [{ selfId: 1, count: 3 }] }];
     const plannerMap = c.sourceIndexFor(A);

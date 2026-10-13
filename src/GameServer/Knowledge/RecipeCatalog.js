@@ -3,6 +3,7 @@
 const NativeRecipes = require('../Items/C4RecipeItems');
 const EMPTY = Object.freeze([]);
 let catalog = null;
+let dwarvenCatalog = null;
 
 // Freeze the quantities observed at the first build of a declared source
 // revision. Unannounced edits to its mutable author objects are not a public
@@ -63,6 +64,22 @@ function recipeItemRows(owner = NativeRecipes) {
         : Object.values(owner.loadRecipeItems() || {});
 }
 
+// Station stock selects recipe-scroll rows, admits only present products,
+// and keeps the last numeric recipe-ID variant before sorting by that ID.
+// This is separate from first-match recipe/product resolution.
+function dwarvenRecipesForItems(items, owner = NativeRecipes) {
+    const recipeRows = recipeItemRows(owner);
+    if (dwarvenCatalog?.items === items && dwarvenCatalog.itemsLength === items?.length
+        && dwarvenCatalog.recipeRows === recipeRows) return dwarvenCatalog.rows;
+    const itemIds = new Set((items || EMPTY).map(item => Number(item.selfId))), unique = new Map();
+    for (const recipe of recipeRows) {
+        if (recipe?.type === 'dwarven' && itemIds.has(Number(recipe.productId))) unique.set(Number(recipe.recipeId), recipe);
+    }
+    const rows = Object.freeze([...unique.values()].sort((a, b) => Number(a.recipeId) - Number(b.recipeId)));
+    dwarvenCatalog = { items, itemsLength: items?.length, recipeRows, rows };
+    return rows;
+}
+
 // A craft recheck never loads or builds the full catalog. Startup primes it;
 // an unprimed process safely uses the original per-recipe validation instead.
 function preparedInputsFor(recipe) {
@@ -85,4 +102,4 @@ function inputsFor(recipe) {
     return prepared;
 }
 
-module.exports = { rows, recipesUsing, recipesForProduct, ingredientsForRecipe, revision, recipeItemRows, warmup, preparedInputsFor, inputsFor };
+module.exports = { rows, recipesUsing, recipesForProduct, ingredientsForRecipe, revision, recipeItemRows, dwarvenRecipesForItems, warmup, preparedInputsFor, inputsFor };

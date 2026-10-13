@@ -123,6 +123,20 @@ try {
         help: { status: 'proposed', payerId: state.characterId, itemId: 1 } }), alone * 2);
     assert.equal(Income.itemHours(state, spot, 100, goal, [state, peer], {
         help: { status: 'funded', payerId: state.characterId, itemId: 1 } }), alone);
+    const nativeNpcs = Data.npcs, nativeRewards = Data.npcRewards;
+    try {
+        Data.npcs = [{ ...nativeNpcs[0], selfId: '990130' },
+            { selfId: 990130, template: { level: 80 } }];
+        Data.npcRewards = [{ ...nativeRewards[0], selfId: '990130' }, { selfId: 990130, rewards: [] }];
+        const weighted = { ...spot, npcEntries: [{ selfId: '990130', count: .25 },
+            { selfId: 990130, count: .75 }, { selfId: 42, count: 3 },
+            { selfId: 990130, count: -9 }, { selfId: 990130, count: 'bad' }] };
+        assert.equal(Income.itemHours(state, weighted, 100, goal, [state]), alone * 4,
+            'party acquisition keeps first numeric reward/NPC and fractional duplicate weights');
+        weighted.npcEntries.push({ selfId: 990130, count: 4 });
+        assert.equal(Income.itemHours(state, weighted, 100, goal, [state]), alone * 8 / 5,
+            'growing a static composition refreshes the same positive-weight rule');
+    } finally { Data.npcs = nativeNpcs; Data.npcRewards = nativeRewards; }
     const itemSpots = [spot, spots[1]];
     const itemState = { ...state, stats: { ...state.stats, partyRequest: goal,
         equipmentPlan: { next: { ...goal, amount: 1 } } } };

@@ -89,19 +89,7 @@ const REGION_LABELS = [
 ];
 
 function raidBossCatalog() {
-    const templates = new Map((DataCache.npcs || [])
-        .filter((npc) => npc?.template?.raidBoss === true)
-        .map((npc) => [Number(npc.selfId), npc]));
-    const seen = new Set();
-    return (DataCache.npcSpawns || [])
-        .flatMap((group) => group?.spawns || [])
-        .map((spawn) => ({ spawn, npc: templates.get(Number(spawn?.selfId)) }))
-        .filter(({ spawn, npc }) => {
-            const id = Number(spawn?.selfId || 0);
-            if (!npc || !Number.isInteger(id) || id <= 0 || seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        })
+    return (GameCatalogue.native().raidBossDefinitions() || [])
         .map(({ spawn, npc }) => ({
             id: Number(npc.selfId),
             name: npc.template.name || spawn.name || `Raid boss ${npc.selfId}`,
