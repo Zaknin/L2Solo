@@ -15,6 +15,7 @@ const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 
 const originalInvoke = global.invoke;
+const npcShopTables = originalInvoke('GameServer/World/Generics/NpcShopBuyLists');
 const forbidden = /^(Database|GameServer\/World(?:\/|$)|GameServer\/Bot\/BotManager|GameServer\/Network(?:\/|$)|Server$)/;
 const stubs = new Map([
     ['Database', new Proxy({ isReady: () => false }, {
@@ -60,10 +61,12 @@ const stubs = new Map([
     }],
     // Immutable map boundaries only; no live World, geodata or database access.
     ['GameServer/World/WorldAreaCatalog', { resolve: originalInvoke('GameServer/World/WorldAreaCatalog').resolve }],
+    ['GameServer/World/TownRespawn', originalInvoke('GameServer/World/TownRespawn')],
     // The game clock is a pure function of the timestamp (cold night bonuses).
     ['GameServer/World/GameTime', originalInvoke('GameServer/World/GameTime')],
     ['GameServer/World/WorldConstants', originalInvoke('GameServer/World/WorldConstants')],
-    ['GameServer/World/Generics/NpcShopBuyLists', { allEntries: () => [] }]
+    ['GameServer/World/Generics/NpcShopBuyLists', { allEntries: () => [],
+        townOffers: npcShopTables.townOffers }]
 ]);
 
 global.invoke = (module) => {
