@@ -150,6 +150,9 @@ let nativeRouteSequence = 0;
 const publicWorkshopIndex = new (require('../Economy/PublicWorkshopIndex').PublicWorkshopIndex)();
 const publicWorkshopKeys = new Map(), workshopRevisions = new Map(), workshopDigests = new Map(), workshopScopeDigests = new Map();
 const digestToken = value => value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
+// A known empty workshop in the one shape the context key and the decision
+// packing read; a missing field would key a different planning input.
+const noWorkshop = () => ({ known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 });
 function workshopsFor(recipeId, state) { return publicWorkshopIndex.candidates(recipeId, Number(state?.characterId || 0)); }
 function changeWorkshop(key, row) {
     const previous = publicWorkshopKeys.get(key);
@@ -235,7 +238,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             // Fresh physical incoming is delivered in the native owner snapshot.
             // Reuse the bounded graph/seed; no price or private plan from another actor.
             const economy = Context.forState(input.state, { board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
-                timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 },
+                timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: noWorkshop(),
                 buyOrderEscrow: input.buyOrderEscrow, npcOffersFor: OccupationSources.npcOffersFor,
                 caller: 'meeting_prepare', trigger: request.token });
             yield 'candidate';
@@ -322,7 +325,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             input.economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(input.state, {
                 board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
-                buyOrderEscrow: input.buyOrderEscrow, workshop: { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 },
+                buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
                 caller: 'economy_refresh', trigger: 'native_own_action' });
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
@@ -336,7 +339,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 const mask = input.board?.ownerLines(input.state.characterId)?.length
                     ? yield* OccupationSources.feasibility(input.state, input) : null;
                 return eligible && !input.recipesKnown ? { ...ColdEconomyDecision.unknownWorkshop(), feasibility: mask }
-                    : { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0, feasibility: mask };
+                    : { ...noWorkshop(), feasibility: mask };
             }
         }
         const prepared = yield* OccupationSources.prepare(input.state, input);
