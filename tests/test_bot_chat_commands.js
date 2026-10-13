@@ -224,14 +224,14 @@ try {
     BotManager.sessions = [greetSession];
     player.fetchDestId = () => 0;
     BotManager.botSay = (sourceSession, _text, targetSession) => greetings.push({ sourceSession, targetSession });
-    for (const greeting of ['hi', 'hi!', 'привет all', 'ку', 'Hello']) {
+    for (const greeting of ['hi', 'hi!', 'привет all', 'ку', 'Hello', 'hiii', 'hiya', 'helloo', 'приветик', 'Приветствую', 'кукуку']) {
         greetings.length = 0;
         BotManager.handlePlayerSpeak(playerSession, { text: greeting });
         assert.strictEqual(greetings.length, 1, `"${greeting}" should still get a greeting reply`);
         assert.strictEqual(greetings[0].sourceSession, greetSession);
         assert.strictEqual(greetings[0].targetSession, playerSession);
     }
-    for (const notGreeting of ['this', 'купи', 'which']) {
+    for (const notGreeting of ['this', 'купи', 'which', 'куда', 'hiking']) {
         greetings.length = 0;
         BotManager.handlePlayerSpeak(playerSession, { text: notGreeting });
         assert.strictEqual(greetings.length, 0, `"${notGreeting}" contains a greeting substring but is not a greeting`);
