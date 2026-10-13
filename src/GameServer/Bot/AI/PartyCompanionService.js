@@ -883,6 +883,8 @@ function clearPullerIfDetached(leaderSession, companionSession) {
 }
 
 const PartyCompanionService = {
+    isActiveCompanion,
+
     MAX_PARTY_MEMBERS,
     MAX_COMPANIONS,
 

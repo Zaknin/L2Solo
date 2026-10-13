@@ -715,6 +715,8 @@ const World = {
 
             BotSocialMemory.recordEvent(session, targetSession, 'party_formed', source);
             setTimeout(() => {
+                // The bot may be dismissed within this second.
+                if (!PartyCompanionService.isActiveCompanion(targetSession, session)) return;
                 BotManager.botTell(
                     targetSession,
                     session,

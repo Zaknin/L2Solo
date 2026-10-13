@@ -91,6 +91,35 @@ async function run() {
         });
         assert.strictEqual(hunterInvite, true, 'ordinary friend invite must preserve the synchronous native party path');
         assert.strictEqual(attached, hunter);
+
+        // The delayed "joined" reply must not fire for a bot dismissed
+        // within that second. Attach/detach are simulated by the same state
+        // fields the real attach sets and detachState clears.
+        PartyCompanionService.attach = (leader, companion) => {
+            companion.followPlayerSession = leader;
+            companion.partyCompanion = true;
+            return true;
+        };
+        const tells = [];
+        BotManager.botTell = (botSession, targetSession, text) => tells.push({ botSession, targetSession, text });
+        let pendingReply = null;
+        global.setTimeout = (callback) => { pendingReply = callback; return 0; };
+
+        const dismissed = { accountId: 'bot_dismissed', actor: actor(80004, 'DismissedHunter'), plan: 'hunting' };
+        assert.strictEqual(World.inviteBotCompanion(player, player.actor, dismissed, 1, 'friend_const', { forceFriend: true }), true);
+        assert.strictEqual(typeof pendingReply, 'function', 'join reply should be scheduled');
+        dismissed.followPlayerSession = null;
+        dismissed.partyCompanion = false;
+        pendingReply();
+        assert.deepStrictEqual(tells, [], 'a bot dismissed before the reply timer must not say it joined');
+
+        pendingReply = null;
+        const staying = { accountId: 'bot_staying', actor: actor(80005, 'StayingHunter'), plan: 'hunting' };
+        assert.strictEqual(World.inviteBotCompanion(player, player.actor, staying, 1, 'friend_const', { forceFriend: true }), true);
+        pendingReply();
+        assert.strictEqual(tells.length, 1, 'a bot still in the party should send its join reply');
+        assert.strictEqual(tells[0].botSession, staying);
+        assert.strictEqual(tells[0].targetSession, player);
     } finally {
         BotSocialMemory.getSnapshot = originals.snapshot;
         BotSocialMemory.recordEvent = originals.recordEvent;
