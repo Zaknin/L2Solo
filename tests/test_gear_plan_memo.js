@@ -14,10 +14,17 @@ const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const board = new BoardIndex(), spots = [];
 const deps = { spots, timestamp: 1e12, board };
 const fresh = { status: 'active', strategy: 'market', target: { selfId: 2, slot: 7 }, market: { price: 1 } };
+function preparedEconomyFor(state) {
+    const economy = Economy.forState(state, deps);
+    economy.network = { ...economy.network, focus: ['probe'],
+        queue: [{ key: 'probe', funded: true, object: { itemId: 2, slot: 7 } }],
+        activity: { rootKey: 'probe', key: 'probe-market', activity: 'shopping' } };
+    return economy;
+}
 const original = { ...Planner };
 let calls = 0;
 try {
-    Object.assign(Planner, { combatReadiness: () => ({ hasWeapon: true }), replanContextFor: () => ({}),
+    Object.assign(Planner, { combatReadiness: () => ({ hasWeapon: true }), replanContextFor: () => ({ routeCurrent: true }),
         clanGoalPlanLocked: () => false, planFor: () => { calls++; return fresh; },
         shouldFinishPreviousPlan: () => false, finalizePlan: (_state, _previous, raw) => raw,
         withMaterialFarmEffort: plan => plan });
@@ -25,14 +32,13 @@ try {
         const state = { characterId: id, level: 30, adena: 1000, phase: 'cold', activity: 'hunting',
             stats: { classId: 0 }, inventory: {}, loc: { locX: 0, locY: 0 }, timing: {} };
         const context = Economy.forState(state, deps);
-        context.plan.network = { focus: ['probe'], queue: [{ key: 'probe', funded: true, object: { itemId: 2, slot: 7 } }],
-            activity: { rootKey: 'probe', key: 'probe-market', activity: 'shopping' } };
         const options = { spots, timestamp: deps.timestamp, planningOptions: { board } };
-        const first = Selection.selectAcquisitionPlan(state, null, options);
+        const first = Selection.selectAcquisitionPlan(state, null, { ...options, preparedEconomy: preparedEconomyFor(state) });
         const memo = context.gearPlanMemo;
         assert.ok(memo, 'the context owns its gear memo');
         assert.equal(first.economy.plan, context.plan);
-        assert.deepEqual(Selection.selectAcquisitionPlan(state, null, options).acquisitionPlan, first.acquisitionPlan);
+        assert.deepEqual(Selection.selectAcquisitionPlan(state, null,
+            { ...options, preparedEconomy: preparedEconomyFor(state) }).acquisitionPlan, first.acquisitionPlan);
         assert.equal(calls, id, 'one planner call per unchanged context/key');
         assert.equal(context.gearPlanMemo, memo);
     }
@@ -44,9 +50,8 @@ try {
         stats: { classId: 0 }, inventory: {}, loc: { locX: 0, locY: 0 }, timing: {} };
     const context = Economy.forState(state, deps);
     assert.equal(context.gearPlanMemo, undefined);
-    context.plan.network = { focus: ['probe'], queue: [{ key: 'probe', funded: true, object: { itemId: 2, slot: 7 } }],
-        activity: { rootKey: 'probe', key: 'probe-market', activity: 'shopping' } };
-    Selection.selectAcquisitionPlan(state, null, { spots, timestamp: deps.timestamp, planningOptions: { board } });
+    Selection.selectAcquisitionPlan(state, null, { spots, timestamp: deps.timestamp,
+        planningOptions: { board }, preparedEconomy: preparedEconomyFor(state) });
     assert.equal(calls, 51, 'reset releases the memo along with its context');
     Economy.forget(1);
     assert.equal(Economy.size().context, 0);

@@ -42,12 +42,22 @@ let before = shadow();
 const first = Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:new_key': 1 }, 'first build has no previous key');
 
-before = shadow(); clock += 7000;
+// Publication replaces the facts object while retaining the checked decision.
+before = shadow();
 Economy.forgetContext(901, 'state_publication');
+const publicationState = state();
+const publication = Economy.forState(publicationState, deps);
+assert.strictEqual(publication.plan, first.plan, 'publication retains the same decision');
+assert.strictEqual(publication.state, publicationState, 'the view reads the newly published facts');
+assert.notStrictEqual(publication.state, first.state, 'publication supplies a new facts object');
+assert.deepEqual(delta(before, shadow()), {}, 'publication without changed inputs is not a rebuild');
+
+before = shadow(); clock += 7000;
+Economy.forgetContext(901, 'explicit_invalidation');
 const republished = state();
 const second = Economy.forState(republished, deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:5_15s': 1,
-    'context:shadow_released:state_publication': 1, 'context:shadow_plan:same_key:same_plan': 1 },
+    'context:shadow_released:explicit_invalidation': 1, 'context:shadow_plan:same_key:same_plan': 1 },
 'a released context with an equal key is counted with its gap, release reason and the repeated plan');
 assert.deepEqual(second.statsPacket, first.statsPacket, 'counting never changes the decision');
 
@@ -74,7 +84,7 @@ Economy.forState({ ...republished, adena: 5000 }, deps);
 
 // An unkept build stays unkept even when an older kept context of the actor is released later.
 Economy.forState(state(), { ...deps, rememberContext: false });
-Economy.forgetContext(901, 'state_publication');
+Economy.forgetContext(901, 'explicit_invalidation');
 before = shadow(); clock += 200000;
 Economy.forState(state(), deps);
 changed = delta(before, shadow());
