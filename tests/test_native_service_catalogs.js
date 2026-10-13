@@ -65,7 +65,7 @@ const HennaService = hennaLoad('src/GameServer/Henna/HennaService.js');
 assert.equal(HennaService.symbol(8), symbols[3]);
 HennaService.STAT_KEYS.pop();
 assert.equal(Henna.STAT_KEYS.length, 6, 'service vocabulary array remains independently mutable');
-const sparseClass = [,,1];
+const sparseClass = Object.assign(Array(3), { 2: 1 });
 trees[5] = sparseClass;
 assert.deepEqual(Henna.availableForClass(5), [symbols[1]]);
 assert.equal(Henna.symbolForClass(5, 91), symbols[1]);

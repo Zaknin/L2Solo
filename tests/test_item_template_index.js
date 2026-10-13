@@ -112,6 +112,6 @@ assert.throws(() => Index.findRequired(Array(1), 7), TypeError, 'an optional num
 assert.strictEqual(Index.findFinite([{ selfId: 7 }, null], 7)?.selfId, 7);
 assert.strictEqual(Index.findFinite([], symbol), undefined, 'an empty finite scan never converts its query');
 assert.throws(() => Index.findFinite([null, { selfId: 7 }], 7), TypeError);
-assert.throws(() => Index.findLast([, { selfId: 7 }], 7), TypeError, 'LAST builders retain sparse-row errors');
+assert.throws(() => Index.findLast(Object.assign(Array(2), { 1: { selfId: 7 } }), 7), TypeError, 'LAST builders retain sparse-row errors');
 assert.strictEqual(Index.currentLastIndex(undefined).size, 0, 'current optional source retains the empty fallback');
 console.log('Item template index FIRST/LAST, ID types, lifetimes and required-input checks passed');

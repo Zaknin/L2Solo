@@ -83,7 +83,8 @@ async function run() {
     hot.backpack.fetchItems = () => [fetch(57), held];
     // Mirror the native hot kit, not an unrelated empty cold combat profile.
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const { physicalInventory, ...mirrored } = Economy.stateForActor(hot);
+    const mirrored = { ...Economy.stateForActor(hot) };
+    delete mirrored.physicalInventory;
     // The worker receives the native plain inventory projection; hot Item
     // methods belong only to the main-thread actor.
     const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(mirrored);

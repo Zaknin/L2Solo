@@ -39,7 +39,9 @@ function projectSource(spot) {
     const world = invoke('GameServer/World/World');
     const boss = invoke('GameServer/World/RaidEntityIndex').bossByTemplateId(world, spot.raidBossTemplateId);
     const revision = invoke('GameServer/Bot/Population/ColdRaidAuthority').get(`raid:${spot.raidBossTemplateId}`).revision;
-    const { raidAuthority, raidExternallyEngaged, ...source } = spot;
+    const source = { ...spot };
+    delete source.raidAuthority;
+    delete source.raidExternallyEngaged;
     return { ...source, raidInstanceId: instanceId(boss), raidAuthorityRevision: revision,
         raidWorldAvailable: !!boss && !boss.isDead?.() && Number(boss.fetchHp?.()) > 0 };
 }

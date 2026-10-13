@@ -381,7 +381,7 @@ async function execute(action, options = {}) {
     let result;
     try {
         switch (actionType) {
-            case ACTION_TYPES.PLAN:
+            case ACTION_TYPES.PLAN: {
                 // The beneficiary got its item (BotLifeState.enqueueEquipmentGoalAdvance):
                 // below level 3 the equipment goal is the production goal, so pick the
                 // next one now instead of at the next 15-min production review.
@@ -415,6 +415,7 @@ async function execute(action, options = {}) {
                     })
                     : await GoalService.resolveClan(clan, { actionId: Number(action.id), reviewCauses: payload.reasons || [] });
                 break;
+            }
             case ACTION_TYPES.CONTRIBUTION:
                 result = await EconomyService.resolveClan(clan, { deadlineAt });
                 break;

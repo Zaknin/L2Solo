@@ -3998,7 +3998,8 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
         || !Roster.same(nextStats.objective?.fullRoster, marker)) return 'raid_roster_incomplete';
     if (hotMembers && Roster.admitted(party) && proof.startedAt > 0 && !party.stats.raidAdmission.startedAt) {
         const { startedAt, execution, ...next } = proof;
-        const { startedAt: previousStart, ...previous } = party.stats.raidAdmission;
+        const previous = { ...party.stats.raidAdmission };
+        delete previous.startedAt;
         if (!openingAtImpact || JSON.stringify(next) !== JSON.stringify(previous)
             || execution?.at !== startedAt || !marker.memberIds.includes(execution?.attackerId)
             || execution?.targetId <= 0 || execution?.bossId <= 0 || execution?.raidInstanceId !== marker.raidInstanceId)

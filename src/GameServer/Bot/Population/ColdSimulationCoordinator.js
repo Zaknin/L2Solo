@@ -1276,7 +1276,7 @@ class ColdSimulationCoordinator {
             isPartyLeader: !!party,
             party,
             ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
-                ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
+                ? { raidOwner: invoke('Database').clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
             route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })

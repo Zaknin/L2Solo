@@ -99,11 +99,11 @@ const books = Progression.mergedSkillTrees(trees, Progression.lineage(1), 'books
 assert.deepEqual(books[0].levels.map(row => row.level), [1, 2, 3]);
 assert.equal(books[0].baseOnly, undefined, 'book metadata uses the current entry only');
 assert.notEqual(books[1], independent, 'book entries remain caller-owned projections');
-const sparseSkills = [{ classId: 0, skills: [, base] }];
+const sparseSkills = [{ classId: 0, skills: Object.assign(Array(2), { 1: base }) }];
 assert.deepEqual(Progression.mergedSkillTrees(sparseSkills, [0]), [base], 'cold forEach skips sparse skill slots');
 assert.throws(() => Progression.mergedSkillTrees(sparseSkills, [0], 'books'), TypeError, 'book for-of rejects sparse skills');
 const sparseRanks = [{ classId: 0, skills: [{ selfId: 7, levels: [{ level: 1 }] }] },
-    { classId: 1, skills: [{ selfId: 7, levels: [, { level: 2 }] }] }];
+    { classId: 1, skills: [{ selfId: 7, levels: Object.assign(Array(2), { 1: { level: 2 } }) }] }];
 assert.deepEqual(Progression.mergedSkillTrees(sparseRanks, [0, 1])[0].levels.map(row => row.level), [1, 2]);
 assert.throws(() => Progression.mergedSkillTrees(sparseRanks, [0, 1], 'books'), TypeError);
 assert.equal(Progression.currentTreeSkill(trees, 1, 7), child);

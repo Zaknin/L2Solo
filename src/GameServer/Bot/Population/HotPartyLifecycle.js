@@ -639,7 +639,7 @@ function openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpac
     Parties.acceptRow(result.party);
     return true;
 }
-async function confirmMarkedRaidStart(party, sessions, timestamp = Date.now()) {
+async function confirmMarkedRaidStart(party) {
     const Roster = require('../../Clan/ClanRaidRoster');
     // Compatibility reader: opening is now committed at the executor impact,
     // before the hit, rather than promoted asynchronously on a later AI tick.

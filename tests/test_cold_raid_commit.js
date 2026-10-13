@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const fs = require('node:fs');
 const isolated = require('./helpers/isolatedSocialDatabase')('cold-raid-commit');
 require('../src/Global');
 isolated.assertConfigured(options.default);

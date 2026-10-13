@@ -1068,7 +1068,7 @@ function buildProjection(state, ctx, deps) {
         const candidate = { nodes: keptNodes.filter(node => node.key.startsWith('item:') && descriptorInputs.has(node.key))
             .map(node => ({ node, inputs: descriptorInputs.get(node.key) })) };
         if (Buffer.byteLength(JSON.stringify(candidate)) <= 8192) sourceSections = structuredClone(candidate);
-    } catch (_) {}
+    } catch (_) { /* An uncloneable candidate falls back to calculation. */ }
     return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
 }
 // Only public recipe rows and a prepared route can prove a usable service.

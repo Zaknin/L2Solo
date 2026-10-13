@@ -178,7 +178,6 @@ async function criticCases() {
             JSON.stringify({ selected: second.selection, scan: second.recruitment.scan }));
         assert.equal(pages[2].classIds.includes(54), true, 'continuation skips exhausted craft query');
         assert(second.recruitment.remaining >= 0);
-        const sp = team.requirements.find(row => row.kind === 'spoil');
         const available = member(base + 800, 55, [{ selfId: 254, level: 1 }, { selfId: 42, level: 1 }]);
         const mixedProspects = await Life.statesByIds([partialCrafter, goodSpoiler]);
         for (const patch of [{ phase: 'hot' }, { partyId: 'foreign' }, { recruitmentReserved: true }]) {
