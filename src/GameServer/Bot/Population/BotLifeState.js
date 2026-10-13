@@ -176,7 +176,11 @@ function itemStackable(selfId, item = {}) {
 function normalizeInventoryStackability(inventory = {}) {
     return Object.fromEntries(Object.entries(InventorySummary.canonicalize(inventory)).map(([key, item]) => {
         const selfId = Number(item?.selfId || key);
-        return [key, { ...(item || {}), stackable: itemStackable(selfId, item) }];
+        const normalized = { ...(item || {}), stackable: itemStackable(selfId, item) };
+        // A formerly non-stackable type (dyes, recipes) now has one physical
+        // stack. Old per-copy identities must not keep counting as bag slots.
+        if (normalized.stackable) delete normalized.instances;
+        return [key, normalized];
     }));
 }
 

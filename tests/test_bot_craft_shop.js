@@ -117,8 +117,8 @@ async function run() {
     assert.notStrictEqual(invalid.entries[0]?.recipeId, 999999, 'persisted offers must be revalidated against craft level and recipe data');
     assert.strictEqual(invalid.title, 'Custom smith');
 
-    assert.strictEqual(CraftShopService.CraftStations.length, 32, 'Giran must expose the full D/C/B/A/S market, resources and progressive C/B weapons');
-    assert.strictEqual(new Set(CraftShopService.GiranCraftStalls.map((loc) => `${loc.locX}:${loc.locY}:${loc.locZ}`)).size, 32, 'every craft station must have its own stall');
+    assert.strictEqual(CraftShopService.CraftStations.length, 35, 'Giran includes entry B armor and jewelry alongside progressive weapons');
+    assert.strictEqual(new Set(CraftShopService.GiranCraftStalls.map((loc) => `${loc.locX}:${loc.locY}:${loc.locZ}`)).size, 35, 'every craft station must have its own stall');
     assert(CraftShopService.GiranCraftStalls.every((loc) => ShopPlaces.isStallArea('Giran', loc)), 'every craft station must remain in the actual sellable Giran plaza footprint');
     const outer = { minX: 80971, maxX: 82887, minY: 147722, maxY: 149490 };
     const width = outer.maxX - outer.minX;

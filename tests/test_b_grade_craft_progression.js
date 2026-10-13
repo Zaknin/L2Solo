@@ -24,39 +24,41 @@ function equipped(inventory, selfId, slot) {
         equippedCount: slots.length, equippedSlots: slots, slot };
 }
 
-function verify(recipeId, missing = false) {
+function verify(recipeId, missing = false, slot = 14, classId = 3) {
     const recipe = Recipes.resolveByRecipeId(recipeId);
     const variants = Recipes.resolveVariantsByProductId(recipe.productId);
-    assert(variants.some(row => row.successRate === 60));
+    assert(variants.some(row => row.successRate < 100));
     assert(variants.includes(recipe) && recipe.successRate === 100);
     assert.equal(Recipes.resolveByProductId(recipe.productId), variants[0], 'existing callers keep their canonical recipe');
     assert(Object.isFrozen(variants), 'the shared native variant catalogue cannot be changed by a review');
     const station = Shops.publishedStationRecipes().stationByRecipeId.get(recipeId);
     assert(station, 'the exact native recipe is published');
-    const state = { characterId: 990410, name: 'CraftBuyer', level: 55, classId: 3,
+    const state = { characterId: 990410, name: 'CraftBuyer', level: 55, classId,
         phase: 'cold', activity: 'hunting', currentRegion: 'Giran', adena: 100000000,
         loc: { locX: 81100, locY: 148000, locZ: -3466 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 }, inventory: {},
-        stats: { classId: 3, exp: Data.experience[54] + 1,
-            wishFocus: [`power:${recipe.productId}:14`, 0, 0],
+        stats: { classId, exp: Data.experience[54] + 1,
+            wishFocus: [`power:${recipe.productId}:${slot}`, 0, 0],
             persona: { primaryDrive: 'progression', understanding: 1,
                 traits: { ambition: 0, commitment: 0, caution: 0, empathy: 0, sociability: 0 } } } };
-    for (const row of Gear.planFor({ classId: 3, level: 40 }).items) equipped(state.inventory, row.selfId, row.slot);
+    for (const row of Gear.planFor({ classId, level: 40 }).items) equipped(state.inventory, row.selfId, row.slot);
     assert.equal(Progression.assess(state).required, false, 'the C milestone is closed');
-    // Other slots are already top B; the real weapon improvement remains a
+    // Other slots are already top B; the selected equipment improvement remains a
     // choice of sources, with only this published recipe's complete stock.
-    for (const [slot, rows] of Providers.gearCandidates(state)) {
-        if ([7, 14].includes(slot)) continue;
-        for (const row of Object.values(state.inventory)) if (row.equippedSlots?.includes(slot)) {
-            row.equippedSlots = row.equippedSlots.filter(side => side !== slot);
+    const conflicts = [7, 14].includes(slot) ? [7, 14]
+        : [10, 11, 15].includes(slot) ? [slot, 15, ...(slot === 15 ? [10, 11] : [])] : [slot];
+    for (const [otherSlot, rows] of Providers.gearCandidates(state)) {
+        if (conflicts.includes(otherSlot)) continue;
+        for (const row of Object.values(state.inventory)) if (row.equippedSlots?.includes(otherSlot)) {
+            row.equippedSlots = row.equippedSlots.filter(side => side !== otherSlot);
             row.equippedCount = row.equippedSlots.length; row.equipped = row.equippedCount > 0;
         }
-        equipped(state.inventory, rows[0].selfId, slot);
+        equipped(state.inventory, rows[0].selfId, otherSlot);
     }
     for (const material of recipe.materials) state.inventory[material.selfId] = { selfId: material.selfId, amount: material.amount };
     for (const id of [1464, 1061, 736]) state.inventory[id] = { selfId: id, amount: 100000 };
-    const fragment = recipe.materials.find(row => /(?:Head|Edge|Blade)/.test(Data.items.find(item => item.selfId === row.selfId)?.template.name));
-    assert(fragment, 'native B weapon requires its key material');
+    const fragment = recipe.materials[1];
+    assert(fragment && fragment.selfId !== recipe.recipeItemId, 'native B equipment requires its key material');
     const board = new BoardIndex();
     if (missing) {
         state.inventory[fragment.selfId].amount--;
@@ -72,16 +74,16 @@ function verify(recipeId, missing = false) {
         workshops: id => id === recipeId ? [service] : [], rememberContext: false });
     const productNode = context.projection.nodes.find(row => row.key === `item:${recipe.productId}`);
     assert(productNode?.paths.some(row => row.kind === 'craft' && row.recipeId === recipeId),
-        'the published 100% variant survives the earlier unavailable 60% variant');
+        'the published 100% variant survives the earlier unavailable lower-success variant');
     const leaf = context.network.activity;
-    assert.equal(leaf?.rootKey, `power:${recipe.productId}:14`, 'native network accepts the B weapon goal');
+    assert.equal(leaf?.rootKey, `power:${recipe.productId}:${slot}`, 'native network accepts the B equipment goal');
     assert.equal(leaf.activity, missing ? 'shopping' : 'crafting');
     assert.equal(missing ? leaf.itemId : leaf.recipeId, missing ? fragment.selfId : recipeId);
     const plan = Providers.personalCraftPlan(state, context);
     assert.equal(plan?.recipeId, recipeId);
     assert.equal(plan.craftProviders[recipeId].characterId, service.characterId);
     assert.equal(plan.target.selfId, recipe.productId);
-    assert.equal(plan.target.slot, 14, 'the selected paperdoll slot reaches the equipment receipt');
+    assert.equal(plan.target.slot, slot, 'the selected paperdoll slot reaches the equipment receipt');
     if (!missing) readyFixtures.set(recipeId, { state: { ...state,
         stats: { ...state.stats, ...context.statsPacket } }, plan, station });
     return { recipeId, productId: recipe.productId, missing, activity: leaf.activity };
@@ -91,6 +93,7 @@ async function verifyNativeCrafts() {
     const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
     const Craft = invoke('GameServer/Bot/Economy/ColdCraftingService');
     const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+    const owners = new Map();
     fixture.assertConfigured(options.default);
     async function seed(accountName, name, classId, level, inventory, loc, stats) {
         await Database.createAccount(accountName, 'fixture');
@@ -117,15 +120,17 @@ async function verifyNativeCrafts() {
         await Database.init(); await Life.init();
         for (const [recipeId, { state, plan, station }] of readyFixtures) {
             const recipe = Recipes.resolveByRecipeId(recipeId);
-            let owner = await seed(Craft.crafterAccount(station), `Forge${recipeId}`, 57, 70,
-                { 57: { selfId: 57, amount: 1000 } }, station.loc, { craftStationId: station.id });
+            let owner = owners.has(station.id) ? Life.cachedState(owners.get(station.id))
+                : await seed(Craft.crafterAccount(station), `Forge${recipeId}`, 57, 70,
+                    { 57: { selfId: 57, amount: 1000 } }, station.loc, { craftStationId: station.id });
+            owners.set(station.id, owner.characterId);
             await Shops.ensureRecipes(owner.characterId, Shops.profileFor(owner));
             owner = await Workshops.review(Life.cachedState(owner.characterId));
             const provider = { ...plan.craftProviders[recipeId], characterId: owner.characterId };
-            let buyer = await seed(`bot_b_craft_${recipeId}`, `Buyer${recipeId}`, 3, 55,
+            let buyer = await seed(`bot_b_craft_${recipeId}`, `Buyer${recipeId}`, state.classId, 55,
                 { ...state.inventory, 57: { selfId: 57, amount: state.adena } }, station.loc,
                 { ...state.stats, equipmentPlan: { ...plan, craftProviders: { ...plan.craftProviders, [recipeId]: provider } } });
-            const before = buyer.adena, ownerBefore = owner.adena;
+            const before = buyer.adena, ownerBefore = (await Database.fetchItems(owner.characterId)).find(row => row.selfId === 57).amount;
             const committedPlan = buyer.stats.equipmentPlan;
             buyer = await Life.upsertState({ ...buyer, stats: { ...buyer.stats, equipmentPlan: {
                 ...committedPlan, recipeId: Recipes.resolveByProductId(recipe.productId).recipeId } } }, 'b_other_recipe');
@@ -149,8 +154,9 @@ async function verifyNativeCrafts() {
             buyer = await Life.upsertState(result.state, 'b_craft_receipt');
             const physical = await Database.fetchItems(buyer.characterId);
             const product = physical.filter(row => row.selfId === recipe.productId);
-            assert.equal(product.length, 1, 'one native B weapon receipt');
-            assert.equal(Number(product[0].equipped), 1, 'the B weapon is physically worn');
+            assert.equal(product.length, 1, 'one native B equipment receipt');
+            assert.equal(Number(product[0].equipped), 1, 'the B equipment is physically worn');
+            assert.equal(Number(product[0].slot), plan.target.slot, 'paired jewelry and full body armor keep their selected paperdoll slot');
             assert.equal(buyer.inventory[recipe.productId].equippedCount, 1);
             assert.equal(buyer.stats.equipmentPlan, undefined, 'the accepted craft plan closes after equipment receipt');
             for (const material of recipe.materials)
@@ -159,13 +165,16 @@ async function verifyNativeCrafts() {
             assert.equal((await Database.fetchItems(owner.characterId)).find(row => row.selfId === 57).amount,
                 ownerBefore + provider.price, 'the station receives the paid fee in its physical wallet');
             assert.equal((await Craft.craft({ ...buyer, activity: 'crafting' }, () => 0)).crafted, false,
-                'a completed equipment receipt never crafts another weapon');
+                'a completed equipment receipt never crafts the equipment again');
         }
-        console.log('PASS native B craft receipts: selected variants -> station fee -> one equipped Lance/Great Axe -> closed plan');
+        console.log('PASS native B craft receipts: selected variants -> station fee -> equipped weapons, Adamantite, Zubei and Avadon -> closed plan');
     } finally { await Database.close(); }
 }
 
-const results = [verify(461), verify(461, true), verify(457), verify(457, true)];
+const cases = [[461], [457], [329, 2], [331, 5], [333, 3], [342, 10],
+    [362, 10, 8], [368, 10, 12], [358, 10], [366, 15, 8], [479, 8, 5]];
+const results = cases.flatMap(([recipeId, slot = 14, classId = 3]) =>
+    [verify(recipeId, false, slot, classId), verify(recipeId, true, slot, classId)]);
 console.log(`PASS B recipe variants and native craft/material goals (${isMainThread ? 'main' : 'worker'})`);
 if (isMainThread) {
     const workerCheck = new Promise((resolve, reject) => {
