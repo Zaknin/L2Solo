@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
@@ -11,7 +12,7 @@ async function apply(state, { takes: wanted = [], gives = [], variables = state.
     const actor = state.session.actor;
     const next = { state: status, variables: { ...variables, revision: String(state.getInt('revision') + 1) } };
     const rewards = gives.flatMap(([selfId, amount]) => {
-        const template = DataCache.items.find(item => item.selfId === selfId);
+        const template = ItemTemplateIndex.findStrictRequired(DataCache.items, selfId);
         if (!template) throw new Error(`Missing quest item ${selfId}`);
         const item = { selfId, amount, name: template.template.name, stackable: template.etc.stackable };
         return item.stackable ? [item] : Array.from({ length: amount }, () => ({ ...item, amount: 1 }));

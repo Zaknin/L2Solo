@@ -10,9 +10,13 @@ isolated.assertConfigured(options.default);
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const SourceCatalog = require('../src/GameServer/Knowledge/SourceCatalog');
+const SpawnCatalog = require('../src/GameServer/Knowledge/SpawnCatalog');
+const GameCatalogue = require('../src/GameServer/Knowledge/GameDataCatalogue').native();
 const ItemTemplateIndex = require('../src/GameServer/Item/ItemTemplateIndex');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const originalRewards = DataCache.npcRewards, originalNpcs = DataCache.npcs;
+const originalSpawns = DataCache.npcSpawns;
 const originalFind = ItemTemplateIndex.find;
 
 // Reference is the pre-atlas algorithm: global reward traversal and current
@@ -130,12 +134,72 @@ try {
     for (const spots of [[normalSpot], [aliasSpot], [raidSpot], [raidSpot, aliasSpot, normalSpot],
         [{ ...raidSpot, raidBoss: false }], [{ ...raidSpot, raidBossTemplateId: normal.selfId }],
         [{ ...normalSpot, raidBoss: true, raidBossTemplateId: normal.selfId }]]) parity(spots);
+    assert.equal(GameCatalogue.item('1869'), originalFind(DataCache.items, 1869));
+    assert.equal(GameCatalogue.npc(String(normal.selfId)), originalFind(originalNpcs, normal.selfId));
+    const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
+    const shopId = shops.npcIds().find(id => shops.fetchForNpc(id).length);
+    const shopItem = shops.fetchForNpc(shopId)[0];
+    assert.equal(GameCatalogue.npcShopRow(String(shopId), String(shopItem.selfId)), shops.rowForNpc(shopId, shopItem.selfId));
+
+    const topology = [normalSpot, aliasSpot,
+        { id: 'zero', npcEntries: [{ selfId: normal.selfId, count: 0 }] },
+        { id: 'unknown', npcEntries: [{ selfId: normal.selfId }] },
+        { id: 'invalid', npcEntries: [{ selfId: normal.selfId, count: -1 }] }];
+    const topologyIndex = Planner.sourceIndexFor(topology);
+    assert.equal(GameCatalogue.sourceIndexFor(topology), topologyIndex);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(normal.selfId, topology).map(row => [row.spot.id, row.count, row.totalCount]),
+        [['normal', 3, 3], ['zero', 0, 0], ['unknown', null, null], ['invalid', null, null]], 'ID counts use raw valid numbers; name-only aliases prove no ID count');
+    assert.equal(GameCatalogue.selectedSpotNpcs('alias', topology).npcEntries, aliasSpot.npcEntries);
+    assert.equal(GameCatalogue.selectedSpotNpcs('unknown', topology).totalCount, null);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(normal.selfId, []), []);
+    assert.equal(Planner.sourceIndexFor(topology), topologyIndex, 'empty topology queries preserve the populated selected view');
+    const legacyZero = [...topologyIndex.values()].flat().find(row => row.spot.id === 'zero');
+    assert.equal(legacyZero.sourceCount, 1, 'planner source weights retain their original fallback');
+    parity(topology);
+    assert.deepEqual(GameCatalogue.sourcesForItem(1869, { spots: topology, kind: 'drop' }), GameCatalogue.sourcesForItem(1869, { spots: topology, kind: 'drops' }));
+    assert.equal(GameCatalogue.sourcesForItem(1869, { spots: topology }), null, 'source kind is required');
+
+    const definitions = [{ bounds: [{ locX: 1, locY: 2, minZ: -4, maxZ: -2 }], spawns: [
+        { selfId: normal.selfId, total: 2, period: 'day', coords: [{ locX: 1, locY: 2 }, { locX: 3, locY: 4 }] },
+        { selfId: normal.selfId, total: 3, period: 'night', coords: [] }] }];
+    DataCache.npcSpawns = definitions;
+    const potential = GameCatalogue.potentialSpawnData();
+    assert.equal(potential.groups, definitions);
+    assert.equal(potential.population, 'definition_only');
+    assert.equal(potential.totalSemantics, 'per_explicit_coordinate_or_random_total_in_bounds');
+    assert.equal(potential.groups[0].spawns[0].total, 2, 'total stays per coordinate, not inferred population');
+    const bounded = SpawnCatalog.boundedSpawnZones();
+    assert.deepEqual(bounded, [{ group: definitions[0], centerX: 1, centerY: 2 }]);
+    assert.equal(SpawnCatalog.boundedSpawnZones(), bounded, 'the source owns its prepared bound-centre relation');
+    assert.deepEqual(SpawnCatalog.npcIdsForSpawnZone(definitions[0]), [normal.selfId]);
+    definitions[0].spawns.push({ selfId: String(normal.selfId) }, { selfId: 0 }, { selfId: undefined });
+    assert.deepEqual(SpawnCatalog.npcIdsForSpawnZone(definitions[0]), [normal.selfId, String(normal.selfId), 0, undefined],
+        'zone NPC IDs retain strict Set keys and first spawn order, including raw missing/zero IDs');
+    definitions.push({ bounds: [{ locX: '1', locY: 2 }, { locX: 3, locY: 4 }], spawns: [] },
+        { bounds: [], spawns: [{ selfId: 99999 }] });
+    assert.deepEqual(SpawnCatalog.boundedSpawnZones().map(row => [row.centerX, row.centerY]), [[1, 2], [6.5, 3]],
+        'grown sources keep raw zone order, skip unbounded zones and preserve native string-coordinate arithmetic');
+    DataCache.npcSpawns = definitions.slice();
+    assert.notEqual(GameCatalogue.potentialSpawnData().revision, potential.revision);
+    assert.notEqual(SpawnCatalog.boundedSpawnZones(), bounded, 'a replaced source gets its own prepared centres');
+    DataCache.npcSpawns = originalSpawns;
 
     // Same reward reached through both aliases produces one row per kind;
     // source order follows the catalog, rather than the selected-entry order.
     const loot = (selfId, name) => ({ selfId, template: { name }, rewards: [
         { items: [{ selfId: 1869 }, { selfId: 1869 }, { selfId: 1870 }] }],
         spoils: [{ items: [{ selfId: 1869 }] }] });
+    const repeated = loot(16, ' Shared ');
+    const namedRewards = [repeated, null, { selfId: 20, template: { name: 'shared' }, rewards: [], spoils: [] },
+        { selfId: 17, template: { name: 'SHARED' }, spoils: [{}] }, repeated];
+    const namedRows = SourceCatalog.rewardRowsForName(' SHARED ', namedRewards);
+    assert.deepEqual(namedRows.map(row => [row.reward, row.ordinal]), [[repeated, 0], [namedRewards[3], 3], [repeated, 4]],
+        'the shared name atlas retains every nonempty loot/spoil duplicate in source order');
+    assert.equal(SourceCatalog.rewardRowsForName('shared', namedRewards), namedRows);
+    assert.deepEqual(SourceCatalog.rewardRowsForName('shared', null), []);
+    namedRewards.push(loot(18, 'Shared'));
+    assert.deepEqual(SourceCatalog.rewardRowsForName('shared', namedRewards).map(row => row.ordinal), [0, 3, 4, 5]);
+    assert.notEqual(SourceCatalog.rewardRowsForName('shared', namedRewards.slice()), namedRows);
     DataCache.npcRewards = [loot(16, 'Shared'), loot(17, 'Shared'), loot(16, 'Other')];
     const aliases = [{ id: 'first', npcEntries: [
         { selfId: 17, name: ' shared ', count: 4 }, { selfId: 16, name: 'Other', count: 2 },
@@ -147,6 +211,17 @@ try {
     parity(aliases);
     const chosen = Planner.sourceIndexFor(aliases).get(1869);
     assert.deepEqual(chosen.map(row => DataCache.npcRewards.indexOf(row.reward)), [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]);
+    assert.deepEqual(GameCatalogue.selectedNpcSpots(16, aliases), [], 'the canonical last name-only row proves no NPC16 link');
+    assert.equal(GameCatalogue.selectedSpotNpcs('first', aliases).spot, aliases[2]);
+    const canonicalAliases = [...aliases, { id: 'first', npcEntries: [
+        { selfId: '16', count: 0 }, { selfId: 16, count: 5 }, { selfId: 17, count: 2 }] }];
+    const reverse = GameCatalogue.selectedSpotNpcs('first', canonicalAliases);
+    const forward16 = GameCatalogue.selectedNpcSpots(16, canonicalAliases), forward17 = GameCatalogue.selectedNpcSpots(17, canonicalAliases);
+    assert.equal(forward16.length, 1); assert.equal(forward17.length, 1);
+    assert.equal(forward16[0].spot, reverse.spot); assert.equal(forward17[0].spot, reverse.spot);
+    assert.deepEqual([forward16[0].count, forward17[0].count, forward16[0].totalCount, reverse.totalCount], [5, 2, 7, 7]);
+    assert.equal(reverse.npcEntries, canonicalAliases[3].npcEntries);
+    parity(canonicalAliases);
     parity(structuredClone(aliases));
     DataCache.npcRewards.push(DataCache.npcRewards[0]);
     DataCache.npcRewards = DataCache.npcRewards.slice();
@@ -166,6 +241,7 @@ try {
     };
     const spots = [raidSpot, normalSpot, aliasSpot];
     const first = Planner.sourceIndexFor(spots), digest = summary(first);
+    assert.equal(first, SourceCatalog.sourcesByItem(spots), 'planner readers use the shared source relation view');
     assert.equal(traversals, 1);
     assert.equal(visits, originalRewards.length);
     assert.equal(npcLookups, originalRewards.length, 'one metadata lookup per static reward');
@@ -190,7 +266,8 @@ try {
     const npc = originalFind(originalNpcs, normal.selfId);
     DataCache.npcs = originalNpcs.map(row => row === npc ? { ...row, template: { ...row.template, level: 99 } } : row);
     const changedNpcs = Planner.sourceIndexFor(spots);
-    assert.equal(traversals, 2);
+    assert.equal(traversals, 1, 'NPC replacement refreshes metadata without rebuilding reward-name rows');
+    assert.equal(npcLookups, originalRewards.length * 2, 'every reward gets its replacement NPC metadata once');
     assert.equal([...changedNpcs.values()].flat().find(row => row.reward === normal).npcLevel, 99);
     DataCache.npcs = originalNpcs.map(row => row === npc ? { ...row, template: { ...row.template, raidBoss: true } } : row);
     assert(![...Planner.sourceIndexFor(spots).values()].flat().some(row => row.reward === normal),
@@ -209,9 +286,9 @@ try {
     // Excludes selected-view records, whole-worker memory and runtime timing.
     let atlasRetainedHeapBytes = null;
     if (global.gc) {
-        const source = fs.readFileSync(require.resolve('../src/GameServer/Bot/AI/GearAcquisitionPlanner'), 'utf8');
+        const source = fs.readFileSync(require.resolve('../src/GameServer/Knowledge/SourceCatalog'), 'utf8');
         const start = source.indexOf('let sourceRewardAtlas =');
-        const end = source.indexOf('function sourceIndexFor(', start);
+        const end = source.indexOf('function sourcesByItem(', start);
         const context = { ItemTemplateIndex, BotRaidSafety };
         vm.createContext(context);
         vm.runInContext(source.slice(start, end) + '; this.atlasFor = sourceRewardAtlasFor;', context);
@@ -231,6 +308,7 @@ try {
 } finally {
     ItemTemplateIndex.find = originalFind;
     DataCache.npcRewards = originalRewards; DataCache.npcs = originalNpcs;
+    DataCache.npcSpawns = originalSpawns;
     fs.rmSync(isolated.directory, { recursive: true, force: true });
 }
 process.exit(0);

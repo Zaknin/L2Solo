@@ -1,3 +1,5 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const { fnv1a32 } = require('../Fnv1a');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
@@ -38,7 +40,7 @@ function number(value, fallback = 0) {
 }
 
 function classTemplate(classId) {
-    return (DataCache.classTemplates || []).find((entry) => Number(entry.classId) === Number(classId)) || {};
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId) || {};
 }
 
 function itemTemplate(selfId) {
@@ -294,10 +296,9 @@ function effectiveBase(profile, stat, timestamp, sources) {
 }
 
 function skillDefinition(selfId, level) {
-    const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(selfId));
+    const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], selfId);
     if (!skill) return null;
-    const definition = (skill.levels || []).find((row) => number(row.level) === number(level))
-        || (skill.levels || []).filter((row) => number(row.level) <= number(level)).at(-1)
+    const definition = SkillRankIndex.findFiniteOrLastEligible(skill.levels || [], level)
         || null;
     return definition ? { ...skill.template, ...skill.time, ...definition } : null;
 }
@@ -346,7 +347,7 @@ function skillsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
         const definition = skillDefinition(entry.selfId, learned.level) || {};
         return {
             selfId: number(entry.selfId), level: number(learned.level, 1), passive: skill?.template?.passive === true,
@@ -361,7 +362,7 @@ function skillSnapshotsFromRecords(records = []) {
     return records.map((record) => {
         const selfId = number(record.selfId);
         const requestedLevel = number(record.level, 1);
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === selfId);
+        const skill = ItemTemplateIndex.findNumericRowRequired(DataCache.skills || [], selfId);
         if (!skill) return null;
         const definition = skillDefinition(selfId, requestedLevel);
         if (!definition) return null;
@@ -398,9 +399,8 @@ function skillRecordsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
-        const definition = (skill?.levels || []).find((row) => number(row.level) === number(learned.level))
-            || (skill?.levels || []).filter((row) => number(row.level) <= number(learned.level)).at(-1);
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
+        const definition = SkillRankIndex.findFiniteOrLastEligible(skill?.levels || [], learned.level);
         if (!skill || !definition) return null;
         return {
             selfId: number(entry.selfId),
@@ -525,7 +525,40 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
         : state.characterId || saved ? [] : skillsFromTree(classId, level);
 }
 
+// One economy build (EconomyContext.forState) is synchronous and reads the
+// bot's own profile at one timestamp several times: the income route's
+// target matchup, the gear source facts and skill gains (with their own
+// build's night flag) and a repeated bag safety (L75). Nothing in the build
+// writes the profile's inputs (inventory rows, coldCombat, level, class,
+// hennas); the planners work on copies. The scope holds that one profile
+// until the build returns. Options only feed the night of statSources, so a
+// night flag equal to the timestamp's own night is the same profile; another
+// state, timestamp, night or option (a night probe) builds as before.
+// Equipment preparation only shares item rows and never changes a profile's
+// values. Each caller gets its own top-level copy, as from a fresh build.
+let profileScope = null;
+function withProfileScope(state, work) {
+    const outer = profileScope;
+    profileScope = { state, timestamp: NaN, profile: null };
+    try { return work(); }
+    finally { profileScope = outer; }
+}
+function sharedOptions(options, timestamp) {
+    for (const key in options) if (key !== 'night' || options.night !== GameTime.isNight(timestamp)) return false;
+    return true;
+}
+
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
+    const scope = profileScope !== null && profileScope.state === state && sharedOptions(options, timestamp) ? profileScope : null;
+    if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
+    const profile = buildProfile(state, timestamp, options);
+    if (scope === null) return profile;
+    scope.timestamp = timestamp;
+    scope.profile = profile;
+    return { ...profile };
+}
+
+function buildProfile(state, timestamp, options) {
     const saved = state.stats?.coldCombat;
     const classId = number(saved?.classId, number(state.stats?.classId, number(state.classId)));
     const template = classTemplate(classId);
@@ -845,21 +878,30 @@ function releaseBuild(key) {
         if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
     }
 }
-function powerKey(state = {}, timestamp = Date.now()) {
+function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
     const saved = state.stats?.coldCombat || {};
+    const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'
         ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
-            row.enchant, (row.equippedSlots || []).join('.'), (row.instances || []).filter((item) => item.equipped)
+            row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
     const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
         .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
-    return [saved.classId, state.stats?.classId, state.classId, state.level, worn, (state.stats?.hennas || []).join(','),
+    // Main publishes the current class in stats; worker hydration may also
+    // carry its alias at the root. Both forms have the same native build.
+    return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
         JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects].join('|');
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
+}
+function buildInputKey(state = {}, timestamp = Date.now()) {
+    // Lifecycle may publish the implicit worn slot explicitly. That is the
+    // same build, although the internal raw cache key can be reconstructed.
+    const text = powerKey(state, timestamp, true), entry = buildGainsFor(state, timestamp);
+    return entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
 }
 function powerFor(state = {}, timestamp = Date.now(), options = {}) {
     const profile = profileFor(state, timestamp, options);
@@ -960,7 +1002,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

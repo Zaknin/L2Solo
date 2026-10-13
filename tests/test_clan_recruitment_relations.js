@@ -3,13 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-recruitment-relations');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 // Who joins which clan: the author's suitability weighs friendship with the
 // clan's members (socialAffinity, 0.20), which needs the candidate's remembered
 // relations.
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-recruitment-relations.sqlite');
+const databasePath = isolated.world;
 const Database = invoke('Database');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const Service = invoke('GameServer/Clan/ClanSimulationService');
@@ -27,7 +29,7 @@ async function main() {
     seed.prepare(`INSERT INTO bot_life_state(characterId, accountName, characterName, level, adena, activity, phase,
         inventorySummary, statsJson, updatedAt) VALUES (?, 'bot_pop_recruit', 'Candidate', 30, 0, 'hunting', 'cold', '{}', '{"generatedCold":true}', 1)`).run(CANDIDATE);
     seed.close();
-    options.default.Database.path = path.relative(rootDir, databasePath);
+    isolated.assertConfigured(options.default);
     Database.init();
     try {
         // The candidate remembers a friend from shared hunts.
@@ -49,6 +51,7 @@ async function main() {
         console.log('Clan recruitment relation checks passed');
     } finally {
         await Database.close();
+        fs.rmSync(isolated.directory, { recursive: true, force: true });
     }
 }
 

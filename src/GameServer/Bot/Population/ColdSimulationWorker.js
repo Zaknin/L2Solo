@@ -15,6 +15,7 @@ const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 
 const originalInvoke = global.invoke;
+const npcShopTables = originalInvoke('GameServer/World/Generics/NpcShopBuyLists');
 const forbidden = /^(Database|GameServer\/World(?:\/|$)|GameServer\/Bot\/BotManager|GameServer\/Network(?:\/|$)|Server$)/;
 const stubs = new Map([
     ['Database', new Proxy({ isReady: () => false }, {
@@ -60,16 +61,23 @@ const stubs = new Map([
     }],
     // Immutable map boundaries only; no live World, geodata or database access.
     ['GameServer/World/WorldAreaCatalog', { resolve: originalInvoke('GameServer/World/WorldAreaCatalog').resolve }],
+    ['GameServer/World/TownRespawn', originalInvoke('GameServer/World/TownRespawn')],
     // The game clock is a pure function of the timestamp (cold night bonuses).
     ['GameServer/World/GameTime', originalInvoke('GameServer/World/GameTime')],
     ['GameServer/World/WorldConstants', originalInvoke('GameServer/World/WorldConstants')],
-    ['GameServer/World/Generics/NpcShopBuyLists', { allEntries: () => [] }]
+    ['GameServer/World/Generics/NpcShopBuyLists', { allEntries: () => [],
+        townOffers: npcShopTables.townOffers }]
 ]);
 
+// A name passes the boundary check once; hot paths call invoke() per decision.
+const allowedModules = new Set();
 global.invoke = (module) => {
     if (stubs.has(module)) return stubs.get(module);
-    if (forbidden.test(String(module || ''))) {
-        throw new Error(`cold worker forbidden dependency: ${module}`);
+    if (!allowedModules.has(module)) {
+        if (forbidden.test(String(module || ''))) {
+            throw new Error(`cold worker forbidden dependency: ${module}`);
+        }
+        if (typeof module === 'string') allowedModules.add(module);
     }
     return originalInvoke(module);
 };
@@ -704,6 +712,21 @@ let eventLoopDelay = null;
 
 // The owner notices moved counters only during its own natural resolve.
 const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
+function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
+    if (!owner?.context || !Object.isExtensible(owner.context)) return;
+    const current = kernel.states.get(Number(owner.state.characterId));
+    if (current?.state !== owner.state || current.context !== owner.context) return;
+    // The fence must describe this exact state; the build activity and a
+    // trip to the held leaf's own spot compare as in the card (L70). A read
+    // market token already deferred by the reused plan stays soft (L70).
+    if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
+        .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections, activity: advisory.activity,
+            leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()) }))) advisory = null;
+    Reflect.defineProperty(owner.context, 'wishAdvisory', {
+        value: advisory, writable: true, configurable: true, enumerable: false
+    });
+}
+
 function reviewMarket(state, timestamp, economy) {
     const board = boardReady();
     if (!board || state?.phase !== 'cold') return null;
@@ -935,7 +958,8 @@ function startKernel(config = {}) {
             buyOrderEscrow: kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow
         }),
         projectResolve: async (state, result, timestamp) => {
-            let economy = null, seenKey = null;
+            const owner = kernel.states.get(Number(state.characterId));
+            let economy = null, seenKey = null, refreshed = null, observedDeps = null, economyEdges = null;
             const resolved = await LifeStateProjector.prepareResolve(state, result, {
                 persist: false,
                 timestamp,
@@ -946,9 +970,28 @@ function startKernel(config = {}) {
                     const routeRows = await occupationFor(projected, timestamp, context, 'wish');
                     const workshop = await occupationFor(projected, timestamp,
                         { ...context, routeRows, routeKey: EconomicTrip.key(projected) });
-                    return { occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows };
+                    return { spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
+                        board: boardReady(), buyOrderEscrow: context.buyOrderEscrow };
                 },
-                onEconomy: (built, seen) => { economy = built; seenKey = ColdEconomyDecision.stateKey(seen); }
+                economyFor: (projected, deps) => {
+                    observedDeps = deps;
+                    refreshed = !projected.party?.partyId && !projected.partyId
+                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true }) : null;
+                    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+                    // Both native stock gates read one prepared foundation;
+                    // the same edges also drive the action after projection.
+                    const stock = refreshed?.economy || Economy.basics(projected, deps);
+                    economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
+                        .edges(state, projected, owner?.context || {}, timestamp,
+                            { stockFor: (_state, kind) => stock.stock(kind) });
+                    if (economyEdges) refreshed = null;
+                    return refreshed?.economy || Economy.forState(projected, deps);
+                },
+                onEconomy: (built, seen) => {
+                    economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
+                    rememberWishAdvisory(owner, refreshed?.advisory || ColdEconomyDecision.advisory(built, seen),
+                        refreshed ? null : seen, observedDeps);
+                }
             });
             const projected = resolved;
             const beforeLevel = Number(state.stats?.classProgressionLevel || 0);
@@ -966,8 +1009,6 @@ function startKernel(config = {}) {
             if (state.stats?.tradeMeeting) return { state: projected,
                 durable: Object.keys(durable).length ? durable : null };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
-            const planner = invoke('GameServer/Bot/Population/ColdEconomyPlan');
-            const economyEdges = planner.edges(state, projected, context, timestamp);
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
             const economyPlan = preparedAction?.economyPlan || null;
@@ -983,8 +1024,10 @@ function startKernel(config = {}) {
                 buffOffer: invoke('GameServer/Bot/Economy/ColdBuffOffer').project(projected,
                     kernel.occupancy.members(projected.spotId, 'physical'), timestamp),
                 // Main reads this instead of building the network again.
-                ...(economy && projected ? { economyDecision: { ...ColdEconomyDecision.capture({ ...economy,
-                    shot: economyPlan?.shot || null }, projected), key: seenKey } } : {})
+                ...(economy && projected ? { economyDecision: refreshed
+                    ? { ...refreshed.decision, updatedAt: Number(projected.updatedAt || 0), key: seenKey }
+                    : { ...ColdEconomyDecision.capture({ ...economy,
+                        shot: economyPlan?.shot || null }, projected), key: seenKey } } : {})
             };
         },
         planPartyRequirement: ({ state, context, timestamp }) => invoke('GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
@@ -1004,11 +1047,55 @@ function startKernel(config = {}) {
             const workshop = await occupationFor(state, timestamp,
                 { ...context, routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-            const preparedEconomy = Economy.forState(state, { spots, occupancy, timestamp, board: boardReady(),
-                buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows });
+            const deps = { spots, occupancy, timestamp, board: boardReady(),
+                buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
+            const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
+            const retainedPlan = previousPlan?.status === 'active' && nativeReplan.routeCurrent
+                && !nativeReplan.failure && !nativeReplan.invalidSource
+                ? GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp)
+                : previousPlan;
+            // Failure counters and recovery deadlines are live native facts,
+            // even when the expensive wish calculation still holds.
+            const deferredHolds = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+                && !previousPlan.levelingRecovery
+                && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
+            const planHolds = !previousPlan
+                || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
+                // Native wish_focus retains inactive target/history fields,
+                // not a current route/quote. Their old level/rate stamps do
+                // not grant authority: the current advisory fence below does.
+                // A wake/expiry still goes through the native planner.
+                || deferredHolds
+                || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
+                    && JSON.stringify(retainedPlan) === JSON.stringify(previousPlan);
+            // A proved ordinary solo round keeps its accepted native plan.
+            // Party waiting, failed targets and excluded grounds still take
+            // the existing planner; no new choice is made from a thin card.
+            const excluded = invoke('GameServer/Bot/Population/SpotRiskPolicy').excludedSpotIdsForStates([state], timestamp);
+            const refreshed = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
+                && planHolds && !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery
+                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps) : null;
+            if (refreshed && !excluded.has(String(refreshed.economy.network.activity?.spotId))) {
+                const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
+                rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
+                const leaf = refreshed.economy.network.activity;
+                return { statsPacket: refreshed.economy.statsPacket,
+                    activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
+                    economyDecision: refreshed.decision, previousPlan, acquisitionPlan: previousPlan,
+                    partyRequest: null, reusablePartyRequest: false, replanFailure: null,
+                    targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState };
+            }
+            // Build the renewed proof against the native live history, so a
+            // consumed wake/expiry does not invalidate it again on publication.
+            const preparationState = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+                ? { ...state, stats: { ...state.stats,
+                    equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
+            const preparedEconomy = Economy.forState(preparationState, deps);
             const selectedAcquisition = GearPlanSelection
-                .selectAcquisitionPlan(state, previousPlan, {
-                    spots, occupancy, timestamp, preparedEconomy,
+                .selectAcquisitionPlan(preparationState, previousPlan, {
+                    spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
                     planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
                 });
             const { replanContext, reusablePartyRequest, excludedSpotIds, economy } = selectedAcquisition;
@@ -1024,7 +1111,7 @@ function startKernel(config = {}) {
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
-            const plannedStats = { ...(state.stats || {}), equipmentPlan: acquisitionPlan };
+            const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };
             if (partyRequest) plannedStats.partyRequest = partyRequest;
             else delete plannedStats.partyRequest;
             // A waiter that is resting finishes its rest first.
@@ -1040,6 +1127,9 @@ function startKernel(config = {}) {
             const routedState = beginHuntingTrip(plannedState, context?.route, timestamp) || plannedState;
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
+            const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
+            rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
+                ColdEconomyDecision.advisory(economy, seen, preparationState.activity), seen, deps);
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,

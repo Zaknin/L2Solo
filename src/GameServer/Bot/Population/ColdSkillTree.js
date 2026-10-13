@@ -9,56 +9,12 @@ function number(value, fallback = 0) {
     return Number.isFinite(resolved) ? resolved : fallback;
 }
 
-const FIRST_CLASS_TO_BASE = new Map(
-    Object.entries(ClassProgression.firstProfMap)
-        .flatMap(([baseClassId, classIds]) => classIds.map((classId) => [number(classId), number(baseClassId)]))
-);
-const SECOND_CLASS_TO_FIRST = new Map(
-    Object.entries(ClassProgression.secondProfMap)
-        .flatMap(([firstClassId, classIds]) => classIds.map((classId) => [number(classId), number(firstClassId)]))
-);
-
-function parentClassId(classId) {
-    const normalized = number(classId);
-    const thirdParent = number(ClassProgression.getThirdClass(normalized)?.parentClassId, NaN);
-    if (Number.isFinite(thirdParent)) return thirdParent;
-    return SECOND_CLASS_TO_FIRST.get(normalized)
-        ?? FIRST_CLASS_TO_BASE.get(normalized)
-        ?? null;
-}
-
 function classProgressionIds(classId) {
-    const ids = [];
-    const seen = new Set();
-    let current = number(classId);
-    while (Number.isFinite(current) && current >= 0 && !seen.has(current)) {
-        seen.add(current);
-        ids.unshift(current);
-        const parent = parentClassId(current);
-        if (parent === null || parent === current) break;
-        current = parent;
-    }
-    return ids;
+    return ClassProgression.coldLineage(classId);
 }
 
 function skillTreeEntries(classId) {
-    const entries = new Map();
-    classProgressionIds(classId).forEach((id) => {
-        const tree = (DataCache.skillTree || []).find((entry) => number(entry.classId) === id);
-        (tree?.skills || []).forEach((entry) => {
-            const selfId = number(entry.selfId);
-            const previous = entries.get(selfId);
-            if (!previous) {
-                entries.set(selfId, entry);
-                return;
-            }
-
-            const levels = new Map((previous.levels || []).map((row) => [number(row.level), row]));
-            (entry.levels || []).forEach((row) => levels.set(number(row.level), row));
-            entries.set(selfId, { ...previous, ...entry, levels: [...levels.values()] });
-        });
-    });
-    return [...entries.values()];
+    return ClassProgression.mergedSkillTrees(DataCache.skillTree || [], classProgressionIds(classId), 'cold');
 }
 
 // The highest level row of a tree entry that a character of `level` has learned.

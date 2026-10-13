@@ -221,41 +221,49 @@ check('a wish review is rebuilt only by changes on items it read (design 16.5)',
     const { BoardIndex, SELL } = invoke('GameServer/AfkTrade/BoardIndex');
     const board = new BoardIndex();
     const spots = invoke('GameServer/Bot/Population/SpotProfiles').ensure();
+    // L70: a read market token is soft; each expected rebuild below comes
+    // once the market delay since the last actual decision has passed.
+    const MARKET_DELAY = invoke('GameServer/Bot/Economy/DecisionSections').SOFT_DELAY.market;
+    let clock = Date.now();
     const deps = { board, spots };
+    const now = () => ({ ...deps, timestamp: clock });
     const state = { characterId: 902, phase: 'cold', activity: 'hunting', level: 35, adena: 50,
         inventory: { 1: { selfId: 1, amount: 1, equipped: true, equippedCount: 1, slot: 7 } },
         loc: { locX: 80000, locY: 148000, locZ: -3500 }, currentRegion: 'Giran',
         stats: { classId: 1, exp: Data.experience[34], persona: { traits: { commitment: .5, caution: .5,
             resilience: .5, ambition: .5, empathy: .5, sociability: .5, assertiveness: .5 }, understanding: .8 } },
         timing: {}, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
-    const context = Economy.forState(state, deps);
-    assert.equal(Economy.forState(state, deps).plan, context.plan);
+    const context = Economy.forState(state, now());
+    assert.equal(Economy.forState(state, now()).plan, context.plan);
     // a line and a deal of an item nobody here looked at
     const unread = 1 + Math.max(...Data.items.map(item => Number(item.selfId)));
     board.put({ id: 11, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: unread, count: 1, price: 10 }] });
-    assert.equal(Economy.forState(state, deps).plan, context.plan, 'another item on the board rebuilds nobody');
+    assert.equal(Economy.forState(state, now()).plan, context.plan, 'another item on the board rebuilds nobody');
     // an item the review priced while it was built
     const wished = context.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
     assert.ok(wished, 'fixture: a wished item');
     board.put({ id: 12, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
-    const rebuilt = Economy.forState(state, deps);
+    clock += MARKET_DELAY;
+    const rebuilt = Economy.forState(state, now());
     assert.notEqual(rebuilt.plan, context.plan, 'a line of a wished item rebuilds');
-    assert.equal(Economy.forState(state, deps).plan, rebuilt.plan);
+    assert.equal(Economy.forState(state, now()).plan, rebuilt.plan);
     // a deal in the counter of an item the review read
     Counters.deal(wished, 1000, 1, Date.now(), 7, null, 8);
-    const afterDeal = Economy.forState(state, deps);
+    clock += MARKET_DELAY;
+    const afterDeal = Economy.forState(state, now());
     assert.notEqual(afterDeal.plan, rebuilt.plan, 'a deal in the counter of a read item rebuilds');
     // an item first read later through the context (worth) joins the watched items
     const lazy = Data.items.map(item => Number(item.selfId)).find(id => id > 1000 && id !== wished && afterDeal.price(id) >= 0);
-    assert.equal(Economy.forState(state, deps).plan, afterDeal.plan);
+    assert.equal(Economy.forState(state, now()).plan, afterDeal.plan);
     board.put({ id: 13, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: lazy, count: 1, price: 10 }] });
-    assert.notEqual(Economy.forState(state, deps).plan, afterDeal.plan, 'a later price read is watched too');
+    clock += MARKET_DELAY;
+    assert.notEqual(Economy.forState(state, now()).plan, afterDeal.plan, 'a later price read is watched too');
     // a later board look through the context (a market look) does not widen the review's inputs
-    const held = Economy.forState(state, deps);
+    const held = Economy.forState(state, now());
     const looked = Data.items.map(item => Number(item.selfId)).find(id => id > 2000 && id !== wished && id !== lazy);
     held.board.first(looked, SELL);
     board.put({ id: 14, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: looked, count: 1, price: 10 }] });
-    assert.equal(Economy.forState(state, deps).plan, held.plan, 'a board look after the review is not its input');
+    assert.equal(Economy.forState(state, now()).plan, held.plan, 'a board look after the review is not its input');
 });
 
 check('basics() and stockFor() give what forState gives, without building a network', () => {
@@ -349,8 +357,9 @@ check('five books reuse the own before profile and cached gains on later reviews
     const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
     // A cold bot carries the MP cap its resolver stored; craft facts read it, not the profile.
     // Clan book wishes retain their existing gain cache. Personal bots sell
-    // skill books instead of reviewing them as equipment improvements.
-    const state = base({ characterId: 820, level: 51, stats: { ...base().stats, clanId: 7 },
+    // skill books instead of reviewing them as equipment improvements. Only a
+    // clan with a warehouse (clan level 1+) takes custody; membership alone is personal.
+    const state = base({ characterId: 820, level: 51, clanLevel: 1, stats: { ...base().stats, clanId: 7 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
     const original = { profile: Profile.profileFor, books: Books.missingBooks, opportunities: Policy.opportunities };
     let ownCalls = 0, bookReads = 0;
@@ -365,7 +374,8 @@ check('five books reuse the own before profile and cached gains on later reviews
         Providers.build(state, ctx, { spots: [] });
         assert.equal(ownCalls, 1, 'all five gains stay in the build');
         const readCount = bookReads;
-        Providers.build({ ...state, stats: { ...state.stats, clanId: 0 } }, ctx, { spots: [] });
+        assert.ok(readCount > 0, 'a clan member with a warehouse reviews skill books');
+        Providers.build({ ...state, clanLevel: 0, stats: { ...state.stats, clanId: 0 } }, ctx, { spots: [] });
         assert.equal(bookReads, readCount, 'personal bot reviews never nominate skill books');
     } finally { Profile.profileFor = original.profile; Books.missingBooks = original.books; Policy.opportunities = original.opportunities; }
 });

@@ -95,6 +95,14 @@ function wait(ms) {
         assert.strictEqual(second.messages.at(-1).type, 'resume',
             'worker must resume once every pause reason has cleared');
 
+        coordinator.lastHeartbeatAt = Date.now() - 37000;
+        coordinator.lastWatchdogAt = Date.now() - 37000;
+        coordinator.watchdog();
+        assert.notStrictEqual(second.terminated, true,
+            'a main thread that slept with the Mac must not count its own sleep against the worker');
+        assert(Date.now() - coordinator.lastHeartbeatAt < 2000, 'the stall is credited to the heartbeat clock');
+
+        coordinator.lastWatchdogAt = 0;
         coordinator.lastHeartbeatAt = Date.now() - 20000;
         coordinator.watchdog();
         assert.strictEqual(second.terminated, true, 'a dead worker must be terminated so the restart path can recover leases');

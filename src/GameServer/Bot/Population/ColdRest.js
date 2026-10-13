@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const DataCache = invoke('GameServer/DataCache');
 const Formulas = invoke('GameServer/Formulas');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
@@ -16,8 +17,7 @@ function midpointBand(levelBand) {
 
 function coldPassiveRegenAdd(state, skillId, stat) {
     const classId = Number(state.stats?.classId ?? state.classId);
-    const skill = (DataCache.skillTree || []).find((tree) => Number(tree.classId) === classId)?.skills
-        ?.find((entry) => Number(entry.selfId) === skillId);
+    const skill = ClassProgression.currentTreeSkill(DataCache.skillTree || [], classId, skillId);
     const level = Number(state.level || midpointBand(state.levelBand));
     const skillLevel = (skill?.levels || [])
         .filter((entry) => Number(entry.pLevel) <= level)
@@ -30,7 +30,7 @@ function coldPassiveRegenAdd(state, skillId, stat) {
 function coldRestRegenPerTick(state, options = {}) {
     const level = Math.max(1, Number(state.level || midpointBand(state.levelBand)) || 1);
     const classId = Number(state.stats?.classId ?? state.classId);
-    const template = (DataCache.classTemplates || []).find((entry) => Number(entry.classId) === classId) || {};
+    const template = ClassProgression.firstClassRow(DataCache.classTemplates || [], classId) || {};
     const baseStats = template.base || {};
     const hpBase = Number(DataCache.revitalize?.hp?.[level]) || 0;
     const mpBase = Number(DataCache.revitalize?.mp?.[level]) || 0;

@@ -109,4 +109,26 @@ try {
 }
 assert.deepStrictEqual(CraftShopService.publishedStationRecipes().recipes.map((recipe) => Number(recipe.recipeId)),
     [...firstStation.keys()], 'the maximum cap publishes the full catalogue again');
+
+const nativeSource = C4RecipeItems.nativeSource, loadedSource = C4RecipeItems.loadedSource;
+const early = { recipeId: 77, productId: 501, type: 'dwarven', level: 1, materials: [] };
+const last = { ...early, recipeId: '77' }, lower = { ...early, recipeId: 22 };
+const absentProduct = { ...early, recipeId: 88, productId: 502 };
+const common = { ...early, recipeId: 99, type: 'common' };
+const fixtureRows = [early, last, lower, absentProduct, common];
+const fixtureSource = { rows: fixtureRows, revision: fixtureRows,
+    recipeItems: { 100: early, 101: last, 102: lower, 103: absentProduct, 104: common } };
+try {
+    C4RecipeItems.nativeSource = () => fixtureSource;
+    C4RecipeItems.loadedSource = () => fixtureSource;
+    DataCache.items = [{ selfId: 501 }];
+    assert.deepStrictEqual(CraftShopService.availableRecipes(stationService), [lower, last],
+        'station reader keeps scroll order, last numeric recipe-ID variant, exact dwarven type and present products');
+    DataCache.items.push({ selfId: 502 });
+    assert.deepStrictEqual(CraftShopService.availableRecipes(stationService), [lower, last, absentProduct],
+        'an appended product refreshes the same shared recipe relation');
+} finally {
+    C4RecipeItems.nativeSource = nativeSource; C4RecipeItems.loadedSource = loadedSource;
+    DataCache.items = originalItems;
+}
 console.log('Craft station catalogue checks passed');

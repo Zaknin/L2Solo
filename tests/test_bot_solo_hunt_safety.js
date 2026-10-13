@@ -228,9 +228,12 @@ async function run() {
     for (let i = 0; i < 3; i++) losing.stats.huntEfficiency = Efficiency.record(losing,
         { spotId: 'danger', exp: -100, cycleMs: 10000, timestamp: at });
     assert(Efficiency.scores(losing, at).get('danger') < 0, 'an exclusively losing history still lowers its route score');
-    const legacy = { ...losing, stats: { ...losing.stats, huntEfficiency: losing.stats.huntEfficiency
-        .map(row => ({ ...row, signature: `legacy-gross:${row.signature}`, exp: 10000 })) } };
-    assert.strictEqual(Efficiency.scores(legacy, at).size, 0, 'legacy gross-reward samples cannot bias net-XP routing');
+    for (const legacySignature of [signature => signature.replace('net-income-v3:', 'net-xp-v1:'),
+        signature => `legacy-gross:${signature}`]) {
+        const legacy = { ...losing, stats: { ...losing.stats, huntEfficiency: losing.stats.huntEfficiency
+            .map(row => ({ ...row, signature: legacySignature(row.signature), exp: 10000 })) } };
+        assert.strictEqual(Efficiency.scores(legacy, at).size, 0, 'legacy gross-reward samples cannot bias net-XP routing');
+    }
     console.log('Solo survival, safer routing, cross-window deaths, persistent recovery and net death XP passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

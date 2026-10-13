@@ -1,19 +1,13 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const DataCache = invoke('GameServer/DataCache');
 const EnchantRules = invoke('GameServer/Items/C4EnchantRules');
 
 const MAX_OPERATIONS = 64;
-let templateSource = null;
-let templateIndex = new Map();
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (items !== templateSource) {
-        templateSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 function itemKind(item, template = templateFor(item?.selfId)) {
@@ -235,7 +229,7 @@ async function enchantSafe(state, options = {}) {
     if (!state || state.phase === 'hot' || !state.characterId || !hasPotential(state)) {
         return { state, enchanted: false, operations: [] };
     }
-    const rows = await Database.fetchItems(state.characterId);
+    const rows = await Database.fetchItems(state.characterId, 'cold_safe_enchant');
     const operations = plan(rows, options);
     if (!operations.length) return { state, enchanted: false, operations: [] };
 

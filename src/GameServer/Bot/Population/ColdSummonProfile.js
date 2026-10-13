@@ -3,7 +3,7 @@ const DataCache = invoke('GameServer/DataCache');
 
 function summonNpcStats(profile, details) {
     const direct = ItemTemplateIndex.find(DataCache.npcs, details.npcId);
-    const skill = (DataCache.skills || []).find((entry) => Number(entry.selfId) === Number(details.skillId));
+    const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], details.skillId);
     const skillLevel = Number(details.skillLevel || 1);
     const levelCandidates = (skill?.levels || [])
         .map((level) => ({

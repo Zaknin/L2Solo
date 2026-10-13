@@ -217,7 +217,20 @@ const suppliedOptions = (extra = {}) => options({ ...extra, demandFor: selfId =>
     selfId, applicableUnits: 1000, delayHours: 0,
     availability: { from: extra.now ?? now, until: extra.now ?? now }
 }) });
-const sale = MarketListingPolicy.evaluate(state, suppliedOptions());
+function observeDisposition(options) {
+    const TendencyRoll = require('../src/GameServer/Bot/AI/TendencyRoll');
+    const originalRoll = TendencyRoll.roll;
+    const calls = [];
+    TendencyRoll.roll = function (...key) {
+        const value = originalRoll.apply(this, key);
+        calls.push({ key: [...key], value });
+        return value;
+    };
+    try { return { result: MarketListingPolicy.evaluate(state, options), calls }; }
+    finally { TendencyRoll.roll = originalRoll; }
+}
+const firstQuote = observeDisposition(suppliedOptions());
+const sale = firstQuote.result;
 assert.strictEqual(sale.listings.length, MarketListingPolicy.BOARD_SLOTS, 'eight board slots: 3 shop lines + 5 sell ads');
 assert.strictEqual(sale.decisions.filter((decision) => decision.reason === 'no_board_slot').length,
     items.length - MarketListingPolicy.BOARD_SLOTS, 'the rest is kept, not dumped');
@@ -225,12 +238,26 @@ for (const listing of sale.listings) {
     assert(listing.price > 0 && listing.marketReason === 'expected_value');
     assert.strictEqual(listing.count, 100, 'all units of the lot');
 }
-const again = MarketListingPolicy.evaluate(state, suppliedOptions());
+const sameQuote = observeDisposition(suppliedOptions());
+const again = sameQuote.result;
 assert.deepStrictEqual(again.listings.map((item) => [item.selfId, item.price]), sale.listings.map((item) => [item.selfId, item.price]),
     'one decision point, one roll: the same answer when asked again');
-const other = MarketListingPolicy.evaluate(state, suppliedOptions({ now: now + 1 }));
-assert(other.listings.some((item, at) => item.selfId !== sale.listings[at]?.selfId || item.price !== sale.listings[at].price)
-    || other.listings.length !== sale.listings.length, 'another decision point rolls anew');
+const freshQuote = observeDisposition(suppliedOptions({ now: now + 1 }));
+const decisionCalls = quote => quote.calls.filter(call => call.key.length === 4 && call.key[0] === 'dispose');
+const firstCalls = decisionCalls(firstQuote);
+assert.strictEqual(firstCalls.length, items.length);
+assert.deepStrictEqual(new Set(firstCalls.map(call => call.key[2])), new Set(items),
+    'every original material reaches the actual native disposition roll');
+for (const call of firstCalls) assert.deepStrictEqual(call.key, ['dispose', state.characterId, call.key[2], now]);
+assert(firstCalls.every(call => call.value >= 0 && call.value < 1));
+assert.deepStrictEqual(decisionCalls(sameQuote), firstCalls,
+    'the same point uses the same actual key and native roll');
+const freshCalls = decisionCalls(freshQuote);
+assert.strictEqual(freshCalls.length, items.length);
+assert.deepStrictEqual(new Set(freshCalls.map(call => call.key[2])), new Set(items));
+for (const call of freshCalls) assert.deepStrictEqual(call.key, ['dispose', state.characterId, call.key[2], now + 1],
+    'a new point reaches native selection with a new actual key, even if the same price wins');
+assert(freshQuote.result.listings.every(item => item.price > 0));
 // Only selected lines carry their current quote and public event cursors.
 assert.strictEqual('book' in sale, false, 'no personal item book is returned');
 for (const listing of sale.listings) {

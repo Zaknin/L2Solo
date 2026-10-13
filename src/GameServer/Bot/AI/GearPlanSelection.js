@@ -9,6 +9,15 @@ const OfferOrder = invoke('GameServer/Bot/Economy/OfferOrder');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
+function deferredWishPlan(previousPlan, replanContext) {
+    const plan = { ...previousPlan, status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus' };
+    // Consume the native recovery wake/expiry once, retaining the inactive
+    // target and its historical stamps for a later acquisition decision.
+    if (previousPlan?.recoveryTargets || replanContext.recoveryTargets?.length) plan.recoveryTargets = replanContext.recoveryTargets;
+    if (previousPlan?.levelingRecovery && !replanContext.levelingRecovery) delete plan.levelingRecovery;
+    return plan;
+}
+
 function withBridgeInputPreparation(state, previous, next) {
     if (!next?.weaponBridge || !['active', 'deferred'].includes(next.status)) return next;
     const retained = previous?.inputPreparation || previous;
@@ -31,7 +40,7 @@ function withBridgeInputPreparation(state, previous, next) {
     return { ...next, inputPreparation };
 }
 
-function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null } = {}) {
+function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
     if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
     const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
         spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
@@ -49,8 +58,9 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     if (!activeGear && !GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) {
         // Acquisition metadata remains resumable, but cannot override the
         // common engine's book, social, sale or production activity.
-        return { acquisitionPlan: { ...previousPlan, status: 'deferred', strategy: 'none', next: null,
-            reason: 'wish_focus' }, replanContext: {},
+        const replanContext = preparedReplanContext || GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
+        const acquisitionPlan = deferredWishPlan(previousPlan, replanContext);
+        return { acquisitionPlan, replanContext,
             reusablePartyRequest: false, excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
     }
     // The selected item's native funding gate reads the packet made by this
@@ -60,15 +70,19 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         .map(row => [row.selfId, row.enchant, row.slot].join(':')).sort().join(',');
     const materials = (previousPlan?.materials || []).map(row => [row.selfId,
         Math.min(row.amount, Number(state.inventory?.[row.selfId]?.amount || 0))].join(':')).join(',');
+    const replanContext = preparedReplanContext || GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
     const key = [state.level, state.stats?.classId, bag, materials, wishTargetId,
         chosen?.funded, activity?.key, previousPlan?.status, previousPlan?.acquisitionProgress?.failures,
         previousPlan?.target?.selfId, state.stats?.partyRequest?.status,
-        state.stats?.clanEquipmentOrder?.revision].join('|');
+        state.stats?.clanEquipmentOrder?.revision, JSON.stringify(replanContext)].join('|');
     const held = economy.gearPlanMemo;
-    if (held?.key === key && held.spots === spots && !state.stats?.lastResolveDebug?.failed) {
+    if (held?.key === key && held.spots === spots && replanContext.routeCurrent
+        && !replanContext.failure && !replanContext.invalidSource) {
         // A transport copy retains the current native progress/claims; only
         // the expensive choice is cached, never a stale whole state.
-        return { ...held.result, acquisitionPlan: previousPlan || held.result.acquisitionPlan, economy };
+        return { ...held.result, replanContext,
+            acquisitionPlan: GearAcquisitionPlanner.finalizePlan(state, previousPlan,
+                previousPlan || held.result.acquisitionPlan, replanContext, timestamp), economy };
     }
     const excludedSpotIds = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
     // Equal-price towns are ranked from the bot's hunting ground, for every caller.
@@ -77,7 +91,6 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const clanRaidPlan = GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)
         && previousPlan?.next?.sourceKind === 'raid';
     if (clanRaidPlan) planOptions.allowRaidSources = true;
-    const replanContext = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
     const weaponBridgePlan = !GearAcquisitionPlanner.combatReadiness(state).hasWeapon
         ? GearAcquisitionPlanner.npcEquipmentBridgePlan(state, planOptions) : null;
     const clanGoalLocked = !weaponBridgePlan
@@ -159,4 +172,4 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     return { ...result, economy };
 }
 
-module.exports = { selectAcquisitionPlan, withBridgeInputPreparation };
+module.exports = { selectAcquisitionPlan, deferredWishPlan, withBridgeInputPreparation };

@@ -117,6 +117,7 @@ async function verifyQueueStats(clanId) {
 async function main() {
     seedDatabase();
     options.default.Database.path = path.relative(rootDir, databasePath);
+    options.default.Database.historyPath = `${databasePath}.history`;
     Database.init();
     try {
         const created = await Database.createAutonomousClan({
@@ -280,7 +281,13 @@ async function main() {
         } finally {
             Database.claimClanAction = originalClaimClanAction;
         }
-        assert.strictEqual(first.claimed >= 2, true, 'planner and first executable action must be claimed');
+        const firstActions = (await Database.fetchClanActions({ clanId: created.clanId, limit: 20 })).map(action => {
+            const result = JSON.parse(action.resultJson || '{}');
+            return { type: action.actionType, status: action.status, reason: result.reason || result.code,
+                goal: result.goal && { type: result.goal.type, status: result.goal.status, target: result.goal.target } };
+        });
+        assert.strictEqual(first.claimed >= 2, true,
+            `planner and first executable action must be claimed: ${JSON.stringify({ first, actions: firstActions })}`);
         assert.strictEqual(first.succeeded >= 2, true, 'claimed actions must resolve');
         assert.strictEqual(first.resolved, 2, 'each admitted claim must reach a terminal state');
         assert.strictEqual(first.leftRunning, 0);

@@ -4,8 +4,7 @@
 const CONTINUE_CHANCE = 0.4;
 const MAX_DROPS = 10;
 const BeginnerShots = require('./Items/C4BeginnerShots');
-const STARTER_IDS = new Set(require('../../data/Templates/Items/items.json')
-    .flatMap(row => row.items.map(item => Number(item.selfId))));
+const STARTER_IDS = require('./Knowledge/StarterItemCatalog').importIds(require('../../data/Templates/Items/items.json'));
 const HERO_IDS = new Set(Array.from({ length: 11 }, (_, i) => 6611 + i));
 
 function value(item, method, key, fallback) {

@@ -17,7 +17,8 @@ DataCache.init();
 const now = 1800000000000;
 const board = new BoardIndex({ groupOf: Counters.counterOf });
 const state = { characterId: 4242, name: 'AdapterTrader', phase: 'cold', level: 40,
-    adena: 50000, currentRegion: 'Giran', stats: { generatedCold: true },
+    adena: 50000, currentRegion: 'Giran', activity: 'hunting',
+    loc: { ...invoke('GameServer/World/TownRespawn').towns.giran_town }, stats: { generatedCold: true },
     inventory: { 1864: { selfId: 1864, amount: 100, kind: 'Other.Material' } } };
 Counters.reset();
 for (let deal = 0; deal < 60; deal++) Counters.deal(1864, 3000, 20, now - (60 - deal) * 60000, 1);

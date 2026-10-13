@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../../../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../../../Skills/SkillRankIndex');
 const ServerResponse = invoke('GameServer/Network/Response');
 const EffectStore = invoke('GameServer/Effects/EffectStore');
 const EffectTicker = invoke('GameServer/Effects/EffectTicker');
@@ -160,10 +162,10 @@ function profileForActor(actor) {
 }
 
 function skillData(selfId, level) {
-    const source = activeSkills.find((skill) => Number(skill.selfId) === Number(selfId));
+    const source = ItemTemplateIndex.findRequired(activeSkills, selfId);
     if (!source) return null;
 
-    const levelData = source.levels.find((row) => Number(row.level) === Number(level));
+    const levelData = SkillRankIndex.find(source.levels, level);
     if (!levelData) return null;
 
     return {

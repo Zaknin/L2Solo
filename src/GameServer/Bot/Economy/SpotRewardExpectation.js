@@ -16,8 +16,10 @@ let spotValueCount = 0;
 let rewardGroups = new WeakMap();
 const npcValues = new Map();
 
-function refresh() {
-    const current = [Rates.profile(), Data.npcs, Data.npcs?.length, Data.npcRewards,
+// rates: the profile a caller read a moment earlier in the same synchronous
+// call (SpotValueTable), so one rate read serves both revision checks (L75).
+function refresh(rates = Rates.profile()) {
+    const current = [rates, Data.npcs, Data.npcs?.length, Data.npcRewards,
         Data.npcRewards?.length, Data.items, Data.items?.length, Data.skills, Data.skills?.length];
     if (current.some((value, index) => value !== revision[index])) {
         revision = current;
@@ -115,7 +117,8 @@ function npcValue(entry, killerLevel) {
 // the spoiler's learned skill controls landing, independently of the killer.
 function value(spot, killerLevel, { spoilSkillLevel = 0, spoilerLevel = killerLevel } = {}) {
     if (!spot || typeof spot !== 'object') return null;
-    refresh();
+    const rates = Rates.profile();
+    refresh(rates);
     const key = `${killerLevel}:${spoilSkillLevel}:${spoilSkillLevel > 0 ? spoilerLevel : 0}`;
     let rows = spotValues.get(spot);
     if (rows?.has(key)) return { ...rows.get(key) };
@@ -128,7 +131,7 @@ function value(spot, killerLevel, { spoilSkillLevel = 0, spoilerLevel = killerLe
         // Native ColdKillRewards uses this fallback only when no reward data
         // exists. It must not fabricate ordinary loot for that NPC.
         held.adena += share * (entry.reward ? reward.adena
-            : (Number(spot.rewards?.adenaMin || 0) + Number(spot.rewards?.adenaMax || 0)) / 2 * Rates.profile().adena);
+            : (Number(spot.rewards?.adenaMin || 0) + Number(spot.rewards?.adenaMax || 0)) / 2 * rates.adena);
         held.drop += share * reward.drop;
         if (spoilSkillLevel > 0) held.spoil += share * reward.spoil
             * invoke('GameServer/Formulas').spoilSuccessChance({ skillId: 254,
@@ -150,4 +153,4 @@ function spoilSkillLevel(state) {
         .find(skill => Number(skill.selfId) === 254)?.level || 0);
 }
 
-module.exports = { value, spoilSkillLevel, revision() { refresh(); return revisionId; }, MAX_NPC_VALUES, MAX_SPOT_VALUES };
+module.exports = { value, spoilSkillLevel, revision(rates) { refresh(rates); return revisionId; }, MAX_NPC_VALUES, MAX_SPOT_VALUES };

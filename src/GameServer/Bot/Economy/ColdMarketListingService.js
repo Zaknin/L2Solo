@@ -14,6 +14,10 @@ const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 
 const SELL_RETRY_DELAY_MS = 30 * 60 * 1000;
 
+function stoppedDeposit(warehouse) {
+    return { state: warehouse.state, listed: false, reason: warehouse.reason, warehouse, aborted: true };
+}
+
 function marketTown(name) {
     return TownPathfinder.towns.find((town) => town.name === name)
         || MarketTownPolicy.marketTown(name)
@@ -93,7 +97,8 @@ function open(state, options = {}) {
             BotWarehouse.depositCold({
                 ...cleanup.state,
                 stats: { ...cleanup.state.stats, marketSellRetryAfter: state.stats.marketSellRetryAfter }
-            }).then((warehouse) => ({ ...cleanup, state: warehouse.state, reason: 'sell_retry_cleanup' }))
+            }).then((warehouse) => warehouse.aborted ? stoppedDeposit(warehouse)
+                : ({ ...cleanup, state: warehouse.state, reason: 'sell_retry_cleanup' }))
         ));
     }
     const deferSellRetry = (nextState) => ({
@@ -137,7 +142,7 @@ function open(state, options = {}) {
     const marketState = liquidatedState || saleState;
     const items = market.listings;
     if (!items.length) {
-        return BotWarehouse.depositCold(marketState).then((warehouse) => ({
+        return BotWarehouse.depositCold(marketState).then((warehouse) => warehouse.aborted ? stoppedDeposit(warehouse) : ({
             state: deferSellRetry(warehouse.state || marketState),
             listed: false,
             reason: buyerSale.sold
@@ -162,7 +167,7 @@ function open(state, options = {}) {
         const boardState = board.state || marketState;
         if (board.shopTown) return travelToShopTown(boardState, board, timestamp);
         if (!board.listed) {
-            return BotWarehouse.depositCold(boardState).then((warehouse) => ({
+            return BotWarehouse.depositCold(boardState).then((warehouse) => warehouse.aborted ? stoppedDeposit(warehouse) : ({
                 state: deferSellRetry(warehouse.state || boardState),
                 listed: false,
                 reason: board.reason || 'board_refused',
@@ -174,6 +179,7 @@ function open(state, options = {}) {
         }
         MarketTelemetry.listingOpened({ speculative: false });
         return BotWarehouse.depositCold(boardState).then((warehouse) => {
+            if (warehouse.aborted) return stoppedDeposit(warehouse);
             const deposited = warehouse.state || boardState;
             const stored = deferSellRetry(deposited);
             const returning = GoalExecutor.finishMarketVisit(stored, timestamp, { recoverMissingReturn: true }) || stored;

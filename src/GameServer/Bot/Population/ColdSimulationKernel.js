@@ -10,6 +10,7 @@ const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
+const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const BotErrands = require('./BotErrands');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
@@ -456,6 +457,20 @@ class RetainedStateMap extends Map {
                 }
             }
             throw error;
+        }
+        // Worker calculation advice belongs to this existing native owner.
+        // Publication replaces transport context, but is not a new decision.
+        // Keep advice off enumerable state/context DTOs; readers still prove
+        // every dependency before reuse, and retirement releases the owner.
+        const publishedContext = this.get(id)?.context;
+        const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
+        const wishAdvisory = supplied ? entry.context.wishAdvisory : current?.context?.wishAdvisory;
+        if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
+            && Object.isExtensible(publishedContext)) {
+            Reflect.defineProperty(publishedContext, 'wishAdvisory', {
+                value: entry.state?.phase === 'cold' ? wishAdvisory : null,
+                writable: true, configurable: true, enumerable: false
+            });
         }
         if (this.#skillDtos) {
             let staged;
@@ -980,6 +995,7 @@ class ColdSimulationKernel {
 
     dueCandidates(timestamp = this.now(), capacity = this.maxBatch, decisionBudget = { remaining: 64 }) {
         this.partyCapacityBlocked = false;
+        this.duePicked = 0;
         const limit = Math.max(0, Math.min(this.maxBatch, Number(capacity) || 0));
         const candidates = [];
         let commandsSelected = 0;
@@ -995,9 +1011,11 @@ class ColdSimulationKernel {
                 if (head.dueAt > timestamp) break;
                 if (head.alarmKind === 'decision') {
                     if (decisionBudget.remaining <= 0) break;
+                    DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
                     this.drainDecisionDeadlines(timestamp, decisionBudget);
                     continue;
                 }
+                DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
                 this.drainOperationalAlarms(timestamp);
                 continue;
             }
@@ -1009,6 +1027,7 @@ class ColdSimulationKernel {
             const entry = head;
             if (entry.meetingTravel) meetingSelected = true;
             this.heap.remove(entry);
+            DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
             this.consumeHeapEntry(entry);
             const id = Number(entry.characterId);
             // A catalog page may race an ACK and carry a newer revision while
@@ -1366,24 +1385,46 @@ class ColdSimulationKernel {
         });
     }
 
+    // Diagnostics only: why a scheduler tick sent no claim. `no_claim`: the tick
+    // still took due work (a command, a busy or requeued bot, an alarm). For a
+    // not-yet-due head, how far away the next heap entry (bot or alarm) is: how
+    // often a wake at the earliest entry would fire instead of the 20 ms poll.
+    countEmptyTick(timestamp) {
+        if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
+        const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
+        if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        EconomyDiagnostics.count('worker_tick', 'empty', 'not_due');
+        EconomyDiagnostics.count('worker_tick_gap', gap < 20 ? 'lt20ms' : gap < 100 ? 'lt100ms' : gap < 1000 ? 'lt1s' : 'ge1s');
+    }
+
     tick() {
         DiagnosticConfig.developerDiagnostics && (this.stats.loopRuns += 1);
         this.stats.lastLoopAt = this.now();
         const decisionBudget = { remaining: 64 };
         this.drainDecisionDeadlines(this.stats.lastLoopAt, decisionBudget);
         this.recoverStalled(this.stats.lastLoopAt);
-        if (this.paused || this.stopping) return;
+        if (this.paused || this.stopping) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'paused');
+            return;
+        }
         const capacity = this.maxInFlight - this.claiming.size - this.inFlight.size - this.commanding.size;
         if (capacity <= 0) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'no_capacity');
             // Completed work owns these slots until main acknowledges its
             // commit. Drain it on the scheduler tick instead of leaving a
             // full (especially player-sized) window idle until the flush timer.
             this.flushDue();
             return;
         }
-        const candidates = this.dueCandidates(this.now(), capacity, decisionBudget);
+        const timestamp = this.now();
+        const candidates = this.dueCandidates(timestamp, capacity, decisionBudget);
         if (this.partyCapacityBlocked) this.flushDue();
-        if (!candidates.length) return;
+        if (!candidates.length) {
+            DiagnosticConfig.developerDiagnostics && this.countEmptyTick(timestamp);
+            return;
+        }
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'claimed');
         DiagnosticConfig.developerDiagnostics && (this.stats.selected += candidates.length);
         const requestId = `claim:${this.nextClaimRequest++}`;
         for (const candidate of candidates) {
@@ -1754,6 +1795,7 @@ class ColdSimulationKernel {
                 episodeId: run.grants.get(Number(run.party.leaderId))?.leaseId,
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 party: run.party,
+                raidOwner: this.states.get(Number(run.party.leaderId))?.context?.raidOwner || null,
                 members: run.members,
                 spot: run.spot,
                 pressure: run.pressure,

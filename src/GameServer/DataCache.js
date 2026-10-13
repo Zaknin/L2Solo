@@ -20,6 +20,11 @@ const DataCache = {
         DataCache.experience      = validateModel(path + 'Templates/Experience/experience');
         DataCache.revitalize      = validateModel(path + 'Templates/Revitalize/revitalize');
         DataCache.skillTree       = validateModel(path + 'Skills/Tree/tree');
+        // Loaded catalog IDs/order are fixed after expansion. Payload rows stay
+        // borrowed; independently supplied/replaced sources are read fresh.
+        for (const source of [DataCache.classTemplates, DataCache.newbieShortcuts, DataCache.newbieSpawns, DataCache.skillTree]) {
+            ClassProgression.registerLoadedSource(source);
+        }
         const C4LateTownGatekeepers = invoke('GameServer/World/C4LateTownGatekeepers');
         const C4SevenSignsDungeonTeleports = invoke('GameServer/World/C4SevenSignsDungeonTeleports');
         DataCache.npcs            = applyNpcAiTypes([
@@ -302,12 +307,12 @@ const DataCache = {
     },
 
     fetchSkillFromSelfId(selfId, callback) {
-        const item = structuredClone(DataCache.skills.find((ob) => ob.selfId === selfId));
+        const item = structuredClone(ItemTemplateIndex.findStrictRequired(DataCache.skills, selfId));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown Skill SelfId %d', selfId);
     },
 
     fetchSkillTreeFromClassId(classId, callback) {
-        const item = structuredClone(DataCache.skillTree.find((ob) => ob.classId === classId));
+        const item = structuredClone(ClassProgression.firstClassRow(DataCache.skillTree, classId, 'strict'));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown SkillTree ClassId %d', classId);
     }
 };

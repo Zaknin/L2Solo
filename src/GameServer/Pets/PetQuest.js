@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
@@ -6,7 +7,7 @@ async function step(state, variables, takes = [], gives = [], status = 'started'
     const actor = state.session.actor;
     const next = { state: status, variables: Object.fromEntries(Object.entries(variables).map(([key,value]) => [key,String(value)])) };
     const rewards = gives.map(([selfId, amount]) => {
-        const template = DataCache.items.find(item => item.selfId === selfId);
+        const template = ItemTemplateIndex.findStrictRequired(DataCache.items, selfId);
         if (!template) throw new Error(`Missing pet quest item ${selfId}`);
         return {selfId, amount, name: template.template.name, stackable: template.etc.stackable};
     });

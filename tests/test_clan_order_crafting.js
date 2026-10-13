@@ -5,10 +5,11 @@ const { once } = require('events');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-order-crafting');
 require('../src/Global');
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-order-crafting.sqlite');
+const databasePath = isolated.world;
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const GoalService = invoke('GameServer/Clan/ClanGoalService');
@@ -63,7 +64,7 @@ async function projection() {
 
 async function main() {
     seedDatabase();
-    options.default.Database.path = path.relative(rootDir, databasePath);
+    isolated.assertConfigured(options.default);
     Database.init(); DataCache.init(); await LifeState.init(); await BackgroundPartyState.init();
     const Recipes = invoke('GameServer/Items/C4RecipeItems');
     const Cold = invoke('GameServer/Bot/Economy/ColdCraftingService');
@@ -261,6 +262,6 @@ async function main() {
         assert.strictEqual(deliveries.length, 1);
         assert((await Database.fetchItems(deliveries[0].characterId)).some(row => row.selfId === 439 && row.equipped), 'the compatible recipient must equip the crafted armor');
         console.log('Manual clan crafting checks passed');
-    } finally { await Database.close(); removeDatabaseFiles(); }
+    } finally { await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

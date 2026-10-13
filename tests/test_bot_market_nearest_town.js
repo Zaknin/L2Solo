@@ -145,22 +145,83 @@ function clanPlanKeepsTown() {
     }
 }
 
-// The shared plan selection (worker, resolve, party refresh) ranks equal-price
-// towns from the bot's hunting ground itself: its callers pass no origin.
+// The shared plan selection (worker, resolve, party refresh) compares NPC
+// costs from the hunting ground itself: its callers pass no origin.
 function selectionPlansFromHuntingSpot() {
     const { selectAcquisitionPlan } = invoke('GameServer/Bot/AI/GearPlanSelection');
-    const spots = [{ id: 'origin-spot', center: townCenters['Orc Village'] }];
-    const wanderer = { ...npcKitState(townCenters['Dwarven Village']), spotId: 'origin-spot', phase: 'cold', activity: 'hunting' };
-    // Since d4322a21 the selection plans gear only when the bot's economy
-    // chose that gear wish as its activity; here the economy's own focused
-    // gear wish is the chosen purchase.
-    const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(wanderer, { spots, occupancy: {} });
-    const gear = economy.network.queue.find((wish) => wish.key === economy.network.focus?.[0] && wish.object?.slot);
-    assert(gear, 'the fixture economy focuses a gear wish');
-    const preparedEconomy = { ...economy, network: { ...economy.network,
-        activity: { ...economy.network.activity, kind: 'buy', activity: 'shopping', rootKey: gear.key } } };
-    const plan = selectAcquisitionPlan(wanderer, null, { spots, occupancy: {}, preparedEconomy }).acquisitionPlan;
-    assert.strictEqual(plan?.market?.town, 'Orc Village',
+    const huntCenter = { locX: -14225, locY: 123540, locZ: 0 };
+    const spots = [{ id: 'origin-spot', center: huntCenter }];
+    const original = { ...npcKitState(townCenters['Dwarven Village']), spotId: 'origin-spot', phase: 'cold', activity: 'hunting' };
+    assert.strictEqual(selectAcquisitionPlan(original, null, { spots, occupancy: {} }).acquisitionPlan.status, 'deferred',
+        'the original unarmed actor cannot force shopping over its native activity');
+    const lookup = ColdNpcPlanningCatalog.createLookup(npcPlanningCatalogRows());
+    const kit = require('./fixtures/profitable_stock_state').kitFor(0, original.level);
+    const wanderer = { ...original, exp: Number(DataCache.experience[13]), currentRegion: 'Dwarven Village',
+        loc: { ...original.loc, locZ: 0 }, stats: { ...original.stats }, inventory: structuredClone(kit.inventory) };
+    wanderer.inventory[57] = { selfId: 57, name: 'Adena', amount: wanderer.adena, stackable: true };
+    assert.strictEqual(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(wanderer).required, false);
+    const missing = kit.entries.find(entry => Number(entry.slot) > 0 && ![7, 14].includes(Number(entry.slot))
+        && wanderer.inventory[entry.selfId].amount === 1
+        && lookup.offersFor(entry.selfId).some(offer => offer.town === 'Orc Village'));
+    assert(missing, 'the native NG kit has a single-slot wearable sold by canonical Orc NPCs');
+    delete wanderer.inventory[missing.selfId];
+    const timestamp = Date.now();
+    const review = () => invoke('GameServer/Bot/Economy/EconomyContext').forState(wanderer, {
+        spots, timestamp, routeRows: require('./fixtures/native_gear_economy').prepareRoutes(wanderer),
+        npcOffersFor: id => lookup.offersFor(id)
+    });
+    let economy = review();
+    const shot = economy.stock('shots');
+    if (shot.survivalMissing > 0) {
+        assert(Number.isFinite(shot.survivalMissing) && Number.isInteger(shot.survivalMissing));
+        assert.strictEqual(shot.itemId, invoke('GameServer/Inventory/ShotStock').planForState(wanderer).selfId);
+        assert.strictEqual(shot.ownedUsePerHour, shot.usePerHour);
+        const current = Number(wanderer.inventory[shot.itemId]?.amount || 0);
+        assert.strictEqual(shot.current, current);
+        wanderer.inventory[shot.itemId] = { ...(wanderer.inventory[shot.itemId] || {}),
+            selfId: shot.itemId, amount: current + shot.survivalMissing, stackable: true, equipped: false };
+        economy = review();
+        assert.strictEqual(economy.stock('shots').current, current + shot.survivalMissing);
+    }
+    assert.strictEqual(economy.stock('shots').survivalMissing, 0);
+    const activity = economy.network.activity;
+    const gear = economy.network.queue.find(wish => wish.key === activity?.rootKey);
+    const diagnostic = () => JSON.stringify({ missing: [missing.selfId, missing.slot], activity,
+        queue: economy.network.queue.slice(0, 6).map(wish => [wish.key, wish.object?.itemId, wish.object?.slot, wish.funded, wish.price]),
+        money: economy.statsPacket.money, admission: economy.projection?.admission && {
+            candidates: economy.projection.admission.candidates,
+            pending: (economy.projection.admission.pending || []).slice(0, 8),
+            admitted: (economy.projection.admission.admitted || []).slice(0, 8) },
+        towns: lookup.offersFor(gear?.object?.itemId || missing.selfId).map(offer => offer.town) });
+    assert(['hunting', 'shopping', 'crafting'].includes(activity?.activity) && !activity.funding
+        && gear?.object?.slot && gear.funded && Array.isArray(economy.statsPacket.money),
+    `native nearest-town gear prerequisite: ${diagnostic()}`);
+    const offers = lookup.offersFor(gear.object.itemId);
+    const gludio = offers.find(offer => offer.town === 'Gludio');
+    const gludin = offers.find(offer => offer.town === 'Gludin');
+    assert(gludio && gludin && gludio.price > 0 && gludin.price > 0,
+        `the actual selected gear has canonical NPC offers in Gludio and Gludin: ${diagnostic()}`);
+    const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
+    const fromHunt = Trip.read(wanderer, 'Gludio', { origin: huntCenter });
+    const fromPosition = Trip.read(wanderer, 'Gludio');
+    assert(fromHunt.known && fromPosition.known,
+        `native trips from Gludio hunt-origin and Dwarven position are both known: ${JSON.stringify({ fromHunt, fromPosition })}`);
+    const physicalOnly = selectAcquisitionPlan(wanderer, null, { spots: [], timestamp,
+        planningOptions: lookup.plannerOptions, preparedEconomy: economy }).acquisitionPlan;
+    assert(physicalOnly?.status === 'active' && physicalOnly.strategy === 'market'
+        && physicalOnly.market?.sourceType === 'npc' && physicalOnly.market.price > 0
+        && physicalOnly.target?.selfId === gear.object.itemId,
+    `native physical-position NPC plan: ${JSON.stringify(physicalOnly)}; ${diagnostic()}`);
+    const plan = selectAcquisitionPlan(wanderer, null, { spots, timestamp,
+        planningOptions: lookup.plannerOptions, preparedEconomy: economy }).acquisitionPlan;
+    assert(plan?.status === 'active' && plan.strategy === 'market' && plan.market?.sourceType === 'npc'
+        && plan.market.price > 0 && plan.target?.selfId === gear.object.itemId,
+    `native nearest-town NPC plan: ${JSON.stringify(plan)}; ${diagnostic()}`);
+    assert.notStrictEqual(physicalOnly.market.town, 'Gludio', 'the Dwarven physical position chooses another NPC town');
+    assert(offers.some(offer => offer.town === physicalOnly.market.town && offer.price === physicalOnly.market.price),
+        'the physical-position choice uses its canonical NPC quote');
+    assert.strictEqual(plan.market.price, gludio.price, 'the hunting-origin choice uses the canonical Gludio NPC quote');
+    assert.strictEqual(plan?.market?.town, 'Gludio',
         `the selection must buy near the hunting ground, got ${plan?.strategy} ${plan?.market?.town}`);
 }
 

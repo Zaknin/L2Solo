@@ -216,6 +216,32 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     const members = roster(session).filter(s => Threats.alive(s.actor) && !s.hotRaidCasualtyAt);
     if (!members.length) return true;
     const owner = members.find(s => s.actor.fetchId() === party.leaderId) || members[0];
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (Roster.markerFor(party) && !Roster.held(party)) {
+        const registered = roster(session);
+        const marker = Roster.markerFor(party);
+        const Lifecycle = invoke('GameServer/Bot/Population/HotPartyLifecycle');
+        if (Roster.admitted(party) && Roster.nativeHotStarted(party)) {
+            Lifecycle.confirmMarkedRaidStart(party, registered, now).catch(() => {});
+            return true;
+        }
+        if (!Roster.exact(registered.map(member => Number(member.actor.fetchId())), marker.memberIds)
+            || members.length !== 9 || members.some(member => Threats.distance(member.actor, owner.actor) > 700)) {
+            Tactics.stop(session, bot); bot.unselect?.(); session.currentTargetId = undefined;
+            session.lastDecision = { action: 'raid_roster_wait', partyId: party.partyId, at: now };
+            return true;
+        }
+        if (!Roster.admitted(party)) {
+            if (holdForRaidPreparation(session, owner, members, Generics, now)) return true;
+            Lifecycle.openMarkedRaid(party, registered, now).catch(error =>
+                utils.infoWarn('BotParty', 'marked admission %s: %s', party.partyId, error.message));
+            Tactics.stop(session, bot); bot.unselect?.(); session.currentTargetId = undefined;
+            session.lastDecision = { action: 'raid_roster_admission', partyId: party.partyId, at: now };
+            return true;
+        }
+        // The native offensive impact owns the final current-input fence.
+        // Tick dispatch must not recapture nine inventories for every actor.
+    }
     const RaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
     const heldRaidPlan = owner.backgroundHuntTarget && RaidSafety.isProtectedRaidEntity(owner.backgroundHuntTarget)
         ? RaidSafety.botClanRaidCombatPlan(owner, owner.backgroundHuntTarget) : null;

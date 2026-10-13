@@ -48,6 +48,7 @@ async function wallet(id) {
 async function main() {
     seedDatabase();
     options.default.Database.path = path.relative(rootDir, databasePath);
+    options.default.Database.historyPath = `${databasePath}.history`;
     Database.init();
     await Database.initClanHalls(); // creates the dues cursor table, as the server start does
     try {

@@ -78,15 +78,21 @@ try {
             deps: { ...deps, timestamp: timestamp + 120000 } },
         ...[2, 12, 16].map(classId => ({ state: { ...saved, stats: { ...saved.stats, classId } }, deps })),
         { state: { ...saved, inventory: {} }, deps }, { state: { ...saved, level: 39 }, deps }];
+    let repeatedSourceControls = 0;
     for (const fixture of cases) {
         const old = review(reference, fixture.state, fixture.deps), fresh = review(current, fixture.state, fixture.deps);
         assert.deepEqual(fresh.output, old.output, 'whole native projection/network/packet/watch/order matches 9318ccab');
         assert.equal(fresh.randomReads, old.randomReads, 'reuse does not add or remove a decision roll');
-        assert(fresh.computations < old.computations, 'same classification is reused in real sources');
+        assert(fresh.computations <= old.computations, 'reuse never adds classification work, including an empty source path');
+        if (old.computations > 0) {
+            assert(fresh.computations < old.computations, 'same classification is reused in real sources');
+            repeatedSourceControls++;
+        }
         assert(fresh.computations <= 87, 'one result for each actually read target level');
         console.log(JSON.stringify({ classId: fixture.state.stats.classId, level: fixture.state.level,
             baseline: old.computations, scoped: fresh.computations, randomReads: fresh.randomReads }));
     }
+    assert(repeatedSourceControls > 0, 'at least one nonempty native path proves repeated-source reuse');
     assert.equal(invoke('Database').isReady(), false);
     console.log('test_wish_source_assessment_scope: eight exact complete native outcomes PASS');
 } finally {

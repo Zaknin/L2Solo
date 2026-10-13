@@ -156,7 +156,7 @@ try {
     assert.deepStrictEqual(stops, [7], 'without any buy need there is nothing to wait for');
     stops.length = 0;
 
-    // At40+ the unchanged class build still supplies candidate equipment.
+    // At40+ the physical worn weapon leaves class-build candidates available.
     // The actual accepted one-leaf decision determines which order stands.
     const weapon = BotGear.planFor({ classId: 0, level: 40 }).items.find((item) => Number(item.slot) === 7);
     const chest = BotGear.planFor({ classId: 0, level: 40 }).items.find((item) => Number(item.slot) === 10);
@@ -165,10 +165,11 @@ try {
         vitals: { hp: 600, maxHp: 1000, mp: 300, maxMp: 500 }, party: {},
         stats: { generatedCold: true, classId: 0, build: { grade: 'c', classId: 0, level: 40 },
             equipment: [{ selfId: weapon.selfId, slot: 7, rank: 'c', name: weapon.name }] },
-        inventory: {}
+        inventory: { [weapon.selfId]: { selfId: weapon.selfId, amount: 1, equipped: true,
+            equippedCount: 1, equippedSlots: [7], slot: 7 } }
     };
     const buildNative = await nativeChoice.capture(buildGoalBot, {}, 'original_build_driven_chest_order');
-    assert.strictEqual(buildNative.goals.length, 1, 'one actual class-build leaf reaches the reader');
+    assert.strictEqual(buildNative.goals.length, 1, 'one actual native leaf reaches the reader');
     assert.strictEqual(buildNative.goals[0].priority, 50);
     const expectedKeep = buildNative.read.activity.activity === 'shopping'
         && Number(buildNative.read.activity.itemId) === Number(chest.selfId)

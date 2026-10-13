@@ -23,6 +23,7 @@ const adapters = {
     'GameServer/DataCache': { items: [item] },
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
+    'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
     'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn() },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), buildGainsFor: () => ({}),
@@ -31,6 +32,7 @@ const adapters = {
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? [recipe] : [], resolveByRecipeId: id => id === 301 ? recipe : null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => true },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
     'GameServer/Bot/Economy/MarketCounters': { moveOf: () => 0, counterOf: () => 'armor c' },
@@ -91,13 +93,17 @@ const provider = load('WishProviders.js' , name => {
     // catalogue) and the shared equipment rule (82e5323c, d300b1b7).
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true,
         allowsRecipe: recipe => !!recipe };
-    if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), acquisitionRankFor: () => 'c', gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
+    if (name === '../AI/PersonalGearProgression') return {
+        assess: () => ({ required: false, gaps: new Map() }),
+        // This fixture has no C-kit gap, so acquisition uses the planner's current grade.
+        acquisitionRankFor: state => adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].gradeForLevel(state.level),
+        gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };
     if (name === './BotLuxuryExchange') return { recipes: () => new Map() };
     if (name === '../AI/BotEquipmentCompatibility') return require('../src/GameServer/Bot/AI/BotEquipmentCompatibility');
     if (name === '../../Item/ItemTemplateIndex') return require('../src/GameServer/Item/ItemTemplateIndex');
     if (name === './PriceDecision') return producerPrice;
-    if (name === './ShotTradeDemand') return { isShot: () => false, forecast: () => null };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
+    if (name === './ShotTradeDemand') return require('../src/GameServer/Bot/Economy/ShotTradeDemand');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './EconomicValuation') return valuation;
     // Synthetic origins are admitted; the solver is the network under test.

@@ -267,7 +267,7 @@ async function snapshotFor(clan, previousGoal = null, options = {}) {
     const key = `${fingerprint(clan, previousGoal)}:${availabilityKey}`;
     prune(startedAt);
     const cached = cache.get(key);
-    if (cached && startedAt - cached.createdAt <= CACHE_TTL_MS) {
+    if (cached && startedAt - cached.createdAt <= CACHE_TTL_MS && !(options.reviewCauses || []).includes('recruitment_input')) {
         DiagnosticConfig.developerDiagnostics && (metrics.cacheHits += 1);
         return { ...cached.value, cacheHit: true };
     }
@@ -326,7 +326,7 @@ async function snapshotFor(clan, previousGoal = null, options = {}) {
     };
     // An input event received while planning was awaiting belongs to a fresh
     // review; it must not reinstall this older candidate snapshot in the cache.
-    if (cacheGroups.get(clanId) === group) {
+    if (cacheGroups.get(clanId) === group && !planning.recruitment?.continuation && !clan.state?.recruitmentDemand) {
         cache.set(key, { clanId, createdAt: Date.now(), value });
         group.add(key);
     }

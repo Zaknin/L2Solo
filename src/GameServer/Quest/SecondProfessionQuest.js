@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 // C4 second-profession trials share transactional hand-ins and personal spawns.
 const Step = require('./QuestStep');
 const World = invoke('GameServer/World/World');
@@ -10,8 +11,8 @@ const count = (state, id) => state.session.actor.backpack.fetchItems()
 const has = (state, takes) => takes.every(([id, amount]) => count(state, id) >= amount);
 const link = (id, event, label) => `<a action="bypass -h quest ${id} ${event}">${label}</a>`;
 const page = (state, text, action = '') => `<html><body>${state.quest.name}:<br><br>${text}<br><br>${action}</body></html>`;
-const itemName = id => DataCache.items.find(item => item.selfId === id)?.template.name || String(id);
-const npcName = id => DataCache.npcs.find(npc => npc.selfId === id)?.template.name || String(id);
+const itemName = id => ItemTemplateIndex.findStrictRequired(DataCache.items, id)?.template.name || String(id);
+const npcName = id => ItemTemplateIndex.findStrictRequired(DataCache.npcs, id)?.template.name || String(id);
 
 async function step(state, cond, options = {}) {
     const accepting = !state.isStarted() && !state.isCompleted();

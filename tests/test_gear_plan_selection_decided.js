@@ -19,7 +19,7 @@ const at = 1800000000000;
 const state = { characterId: 9400001, level: 30, inventory: {}, stats: { classId: 0, role: 'dps' } };
 const calls = [];
 const record = (name, result) => (...args) => { calls.push({ name, args }); return result; };
-const fresh = { status: 'active', strategy: 'market', target: { selfId: 2, slot: 7 }, market: { price: 1, sourceType: 'npc' } };
+let fresh;
 
 function stubPlanner() {
     calls.length = 0;
@@ -39,24 +39,22 @@ function stubPlanner() {
     });
 }
 
-// MVP-1: a gear wish without a prepared route is never the activity; these
-// checks pin the selection once the economy has chosen gear.
-function gearEconomy() {
-    const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { spots: [], timestamp: at });
-    const gear = economy.network.queue.find(wish => wish.object?.slot);
-    assert(gear, 'fixture: the economy has a gear wish');
-    return { ...economy, network: { ...economy.network,
-        activity: { ...economy.network.activity, activity: 'hunting', kind: 'money', rootKey: gear.key } } };
-}
-
 function run() {
+    // The original unarmed, cashless actor cannot force acquisition metadata
+    // over the native common activity.
+    const poor = GearPlanSelection.selectAcquisitionPlan(state, null, { spots: [], timestamp: at });
+    assert.strictEqual(poor.acquisitionPlan.status, 'deferred');
+    const native = require('./fixtures/native_gear_economy')({ characterId: state.characterId, timestamp: at });
+    fresh = native.plan;
+    const selectedOptions = () => ({ spots: [...native.spots], timestamp: at,
+        planningOptions: native.planningOptions, preparedEconomy: native.economy });
     const original = { ...Planner };
     const excluded = SpotRiskPolicy.excludedSpotIdsForStates;
     try {
         // Backoff spots are excluded from the plan's source search.
         stubPlanner();
         SpotRiskPolicy.excludedSpotIdsForStates = () => new Set(['backoff-spot']);
-        GearPlanSelection.selectAcquisitionPlan(state, null, { spots: [], timestamp: at, preparedEconomy: gearEconomy() });
+        GearPlanSelection.selectAcquisitionPlan(native.member, null, selectedOptions());
         const planned = calls.find((call) => call.name === 'planFor');
         assert(planned?.args[1].excludedSpotIds.has('backoff-spot'), 'a spot under backoff is excluded from the source search');
         SpotRiskPolicy.excludedSpotIdsForStates = excluded;
@@ -64,17 +62,17 @@ function run() {
         // A blocked plan is replaced, its failed target excluded.
         stubPlanner();
         const blocked = { status: 'blocked', strategy: 'direct_drop', target: { selfId: 69, slot: 7 }, next: { npcId: 20001 } };
-        const replaced = GearPlanSelection.selectAcquisitionPlan(state, blocked, { spots: [], timestamp: at, preparedEconomy: gearEconomy() });
+        const replaced = GearPlanSelection.selectAcquisitionPlan(native.member, blocked, selectedOptions());
         const replacement = calls.find((call) => call.name === 'replacementPlanFor');
         assert(replacement, 'a blocked plan is replaced');
         assert.deepStrictEqual(replacement.args[3].excludedTargetIds, [69], 'the replacement excludes the failed target');
-        assert.strictEqual(replaced.acquisitionPlan.target.selfId, 2);
+        assert.strictEqual(replaced.acquisitionPlan.target.selfId, native.plan.target.selfId);
 
         // A clan raid plan keeps its raid sources.
         stubPlanner();
         const raid = { status: 'active', strategy: 'direct_drop', target: { selfId: 70, slot: 7 },
             next: { npcId: 25001, sourceKind: 'raid' }, clanGoal: { clanId: 6000001, goalKey: 'clan-equipment:6000001:1:70:7' } };
-        GearPlanSelection.selectAcquisitionPlan(state, raid, { spots: [], timestamp: at });
+        GearPlanSelection.selectAcquisitionPlan(native.member, raid, selectedOptions());
         const source = calls.find((call) => call.name === 'bestSourceForPlan');
         assert.strictEqual(source?.args[3].allowRaidSources, true, 'a clan raid plan searches raid sources');
         const raidPlan = calls.find((call) => ['replacementPlanFor', 'planFor'].includes(call.name));

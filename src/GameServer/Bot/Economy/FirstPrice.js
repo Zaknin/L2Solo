@@ -177,9 +177,8 @@ function crystalSources(id) {
     if (!gearByCrystal || crystalRevision !== revision) {
         crystalRevision = revision;
         gearByCrystal = new Map();
-        for (const gear of DataCache.items) {
-            const crystals = Number(gear?.etc?.cristals || 0);
-            const crystalId = CRYSTAL_IDS[String(gear?.etc?.rank || '').toUpperCase()];
+        for (const { gear, crystals, rank } of require('../../Knowledge/CrystalCatalog').facts(DataCache.items)) {
+            const crystalId = CRYSTAL_IDS[rank.toUpperCase()];
             if (!Sources.hasSource(gear.selfId) || !(crystals > 0) || !crystalId) continue;
             if (!gearByCrystal.has(crystalId)) gearByCrystal.set(crystalId, []);
             gearByCrystal.get(crystalId).push({ gear, crystals });

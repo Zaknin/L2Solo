@@ -64,7 +64,11 @@ function picked(offer) {
 // remote search sees board records in every town and no NPC; with one, a
 // cheaper NPC there keeps the bot off the board.
 {
+    const orc = invoke('GameServer/Bot/Economy/MarketTownPolicy').NO_GRADE_MARKETS
+        .find(market => market.name === 'Orc Village');
+    assert(orc && [orc.locX, orc.locY, orc.locZ].every(Number.isFinite), 'C7: the authored Orc market has a real travel centre');
     const state = { characterId: 991201, accountName: 'bot_991201', phase: 'cold', level: 20, adena: 1000000,
+        loc: { locX: orc.locX, locY: orc.locY, locZ: orc.locZ }, currentRegion: orc.name, activity: 'hunting',
         inventory: {}, stats: { generatedCold: true } };
     const goal = (marketTown) => ({ type: 'upgrade_gear', status: 'active', target: { itemId: SWORD, adena: 900000 },
         plan: { expectedBenefit: 'market_search_for_weapon', marketTown, estimatedCost: 900000 } });

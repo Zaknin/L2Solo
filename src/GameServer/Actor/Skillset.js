@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../Skills/SkillRankIndex');
 const SkillModel = invoke('GameServer/Model/Skill');
 const DataCache  = invoke('GameServer/DataCache');
 const Database   = invoke('Database');
@@ -5,9 +7,7 @@ const CommonCraftSkills = invoke('GameServer/Crafting/CommonCraftSkills');
 
 function definedLevel(skill, requestedLevel) {
     const levels = skill?.levels || [];
-    return levels.find((entry) => Number(entry.level) === Number(requestedLevel))
-        || levels.filter((entry) => Number(entry.level) <= Number(requestedLevel)).at(-1)
-        || null;
+    return SkillRankIndex.findOrLastEligible(levels, requestedLevel) || null;
 }
 
 class Skillset {
@@ -32,13 +32,11 @@ class Skillset {
     // character id in SQLite.
     populateSnapshot(ownedSkills = []) {
         this.resetSkills();
-        const skillLevel = (skill, requestedLevel) => skill?.levels?.find((entry) => (
-            Number(entry.level) === Number(requestedLevel)
-        )) || skill?.levels?.filter((entry) => Number(entry.level) <= Number(requestedLevel)).at(-1);
+        const skillLevel = (skill, requestedLevel) => SkillRankIndex.findOrLastEligible(skill?.levels ?? [], requestedLevel);
 
         (ownedSkills || []).forEach((ownedSkill) => {
             const row = ownedSkill?.model || ownedSkill;
-            const definition = DataCache.skills?.find((skill) => Number(skill.selfId) === Number(row?.selfId));
+            const definition = ItemTemplateIndex.findRequired(DataCache.skills ?? [], row?.selfId);
             if (!definition) return;
             const level = skillLevel(definition, row.level);
             if (!level) return;
@@ -94,7 +92,7 @@ class Skillset {
                 const stored = ownedSkills.find((skill) => Number(skill.selfId) === selfId);
                 if (Number(stored?.level) >= level) return undefined;
 
-                const definition = DataCache.skills.find((skill) => skill.selfId === selfId);
+                const definition = ItemTemplateIndex.findStrictRequired(DataCache.skills, selfId);
                 const resolved = definedLevel(definition, level);
                 if (!definition || !resolved) {
                     utils.infoWarn('Datapack', 'automatic Skill SelfId %d Level %d is undefined', selfId, level);
@@ -127,7 +125,7 @@ class Skillset {
             const onTrained = typeof trainedDescriptor?.value === 'function' ? trainedDescriptor.value : null;
             const trainingResult = { spentSp: 0, consumedBooks: [], learnedCount: 0 };
             const createOrUpdateSkill = (skill) => {
-                const skillDetails = DataCache.skills.find((item) => item.selfId === skill.selfId);
+                const skillDetails = ItemTemplateIndex.findStrictRequired(DataCache.skills, skill.selfId);
                 if (!skillDetails) {
                     // A tree entry without a definition used to leave this promise pending forever.
                     // That is especially harmful during class transfer: the class is persisted before
@@ -151,7 +149,7 @@ class Skillset {
                         const ranks = skill.levels.filter((row) => Number(row.pLevel) <= Number(level)
                             && Number(row.level) > Number(storedLevel || 0)).sort((a, b) => a.level - b.level);
                         return (async () => {
-                            for (const rank of ranks.filter((row) => skillDetails.levels.some((defined) => Number(defined.level) === Number(row.level)))) {
+                            for (const rank of ranks.filter((row) => SkillRankIndex.has(skillDetails.levels, row.level))) {
                                 const result = await Database.learnBotSkill(id, skill.selfId, rank.level, skillOptions || {});
                                 if (!result.learned) break;
                                 trainingResult.spentSp += Number(result.spentSp || 0);

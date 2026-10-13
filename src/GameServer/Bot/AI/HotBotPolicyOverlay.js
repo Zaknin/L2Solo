@@ -15,14 +15,6 @@ function now() {
     return Date.now();
 }
 
-function actorId(session) {
-    return Number(session?.actor?.fetchId?.() || 0) || null;
-}
-
-function actorName(session) {
-    return session?.actor?.fetchName?.() || session?.name || null;
-}
-
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }

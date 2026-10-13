@@ -7,7 +7,8 @@ const { DatabaseSync } = require('node:sqlite');
 require('../src/Global');
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-party-candidate-projection-performance.sqlite');
+const directory = fs.mkdtempSync(path.join(rootDir, 'tmp', 'party-candidate-projection-'));
+const databasePath = path.join(directory, 'world.sqlite');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -70,9 +71,13 @@ try {
 }
 
 options.default.Database.path = path.relative(rootDir, databasePath);
+options.default.Database.historyPath = path.join(directory, 'history.sqlite');
 ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
 DataCache.init();
 Database.init();
+// Native background threads are unref'ed. Keep this executable fixture alive
+// through its awaited close/reopen check, and fail a lost async completion.
+const completionDeadline = setTimeout(() => { throw Error('party projection fixture did not complete within 60s'); }, 60000);
 
 (async () => {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -122,7 +127,7 @@ Database.init();
             partyObjectiveSpot: 'spot-0'
         }
     );
-    const scalarFields = `characterId, characterName, level, activity, spotId,
+    const scalarFields = `characterId, characterName, bot_life_state.level, activity, spotId,
         activityStartedAt, updatedAt, simulationOwner, simulationRevision,
         phase, partyId, partyObjectiveSpot, partyRequestStatus, partyRequestPriority`;
     const projectedFields = ['role', 'generatedIndex', 'partyRequestJson',
@@ -212,4 +217,7 @@ Database.init();
     console.error(error);
     try { await Database.close(); } catch (_) {}
     process.exitCode = 1;
+}).finally(() => {
+    clearTimeout(completionDeadline);
+    fs.rmSync(directory, { recursive: true, force: true });
 });

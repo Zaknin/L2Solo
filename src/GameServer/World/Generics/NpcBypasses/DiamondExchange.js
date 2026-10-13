@@ -1,4 +1,5 @@
-const data = require('../../../../../data/Items/dimensional_diamond_exchanges.json');
+const Catalog = require('../../../Items/DimensionalDiamondCatalog');
+const data = Catalog.data;
 const Service = invoke('GameServer/Quest/QuestService');
 const Profession = invoke('GameServer/SecondProfession');
 const Database = invoke('Database');
@@ -15,12 +16,12 @@ function render(session, message = '') {
 
 module.exports = function diamondExchange(session, parts) {
     return Service.mutate(session, async () => {
-        if (!data.npcs.includes(session.activeNpcTalk?.selfId) || !Profession.nearbyNpc(session)) {
+        if (!Catalog.hasNpc(session.activeNpcTalk?.selfId) || !Profession.nearbyNpc(session)) {
             return session.dataSendToMe(Response.actionFailed());
         }
         if (!parts[1]) return render(session);
         const itemId = Number(parts[1]);
-        if (!data.recipes.some(row => row.itemId === itemId)) return;
+        if (!Catalog.hasRecipe(itemId)) return;
         let rows;
         try { rows = await Database.exchangeDimensionalDiamond(session.actor.fetchId(), itemId); }
         catch (error) { return render(session, 'The exchange could not be completed. Check your Dimensional Diamonds.'); }

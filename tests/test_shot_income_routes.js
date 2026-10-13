@@ -106,7 +106,13 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
         const selected = Policy.unpackStep(Policy.packStep(result.selected));
         assert.equal(selected?.recipeTarget, recipeId, `actual worker invests in a shot storefront recipe ${recipeId}`);
         assert.equal(selected.recipeRoute.exit[0], -2, 'listing forecast survives the bounded command codec');
-        const native = Shots.recheck(state, selected.recipeRoute);
+        // The worker decided at `now`. Observed demand decays with time, and
+        // a lot that barely fits the forecast (recipe 21: 476 shots against
+        // about 480 willing buyers) loses a batch after seconds of a slow run;
+        // the executor is checked at the decision moment, not after the probe.
+        const atDecision = check => { const clock = Date.now; Date.now = () => now;
+            try { return check(); } finally { Date.now = clock; } };
+        const native = atDecision(() => Shots.recheck(state, selected.recipeRoute));
         assert(native && native.profit > 0, `native executor accepts the storefront income for ${recipeId}`);
         assert.equal(native.exit.type, 'listing');
         assert.equal(native.exit.repeatable, false, 'observed demand is a forecast, never perpetual funding');
@@ -121,7 +127,7 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
                     { name: 'market', from: null, to: 0, full: true, rows: rows.map(row => [row[0], row]), removed: [], last: true }
                 ] }] });
             assert(refreshed.selected?.craft?.ownReserve > 0, 'native economy refresh retains the real personal shot reserve');
-            const checked = Shots.recheck(producer, refreshed.selected.craft);
+            const checked = atDecision(() => Shots.recheck(producer, refreshed.selected.craft));
             assert(checked && checked.expectedSold > 0, 'the native batch produces a commercial surplus after its personal reserve');
             assert(checked.expectedSold <= checked.batches * recipe.productCount - refreshed.selected.craft.ownReserve,
                 'native recheck cannot count personal shots as sold');

@@ -42,6 +42,9 @@ async function seed(index) {
     await Database.createAccount(account, 'fixture');
     const id = Number((await Database.createCharacter(account, { name: `Mutation${index}`, race: 0, classId: 10,
         maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, locX: 0, locY: 0, locZ: 0 })).insertId);
+    const clanId = Number((await Database.createClan({ name: `MutationClan${index}`, leaderId: id })).insertId);
+    await Database.updateClanLevel(clanId, 1);
+    await Database.updateCharacterClan(id, clanId, 0, 0, 0);
     await Database.updateCharacterExperience(id, 14, Number(Data.experience[13]) + 1, 10000);
     await Database.setItem(id, { selfId: 1049, name: 'Spellbook: Ice Bolt', amount: 2 });
     return { id, account };

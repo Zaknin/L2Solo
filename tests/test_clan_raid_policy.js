@@ -255,6 +255,34 @@ try {
         'reserve two healing buffers without unnecessarily reserving a third');
     assert.equal(RaidPolicy.composition(noHealer).ready, true);
 
+    const ownedIds = members.map(entry => entry.characterId);
+    const externalDamage = [member(701, 0), member(702, 9)];
+    const optionalOverlord = member(703, 51, { level: 55 });
+    const ownFirst = RaidPolicy.selectRaidMembers([...members, ...externalDamage, optionalOverlord], null, null,
+        { preferredMemberIds: ownedIds });
+    assert(ownFirst.includes(members[2]) && !ownFirst.includes(optionalOverlord),
+        'preferred owned Prophet must precede optional foreign Overlord, keeping two joins instead of three');
+    assert.equal(ownFirst.filter(entry => !ownedIds.includes(entry.characterId)).length, 2);
+    const optionalSinger = member(704, 21);
+    const ownBeforeOptionalMusic = RaidPolicy.selectRaidMembers([...members, ...externalDamage, optionalSinger], null, null,
+        { preferredMemberIds: ownedIds });
+    assert(ownedIds.every(id => ownBeforeOptionalMusic.some(entry => entry.characterId === id)),
+        'optional foreign music cannot evict a preferred owned member');
+
+    const legacyNoHealer = [member(800, 4), member(801, 17, { level: 58 }), member(802, 17, { level: 57 }),
+        member(803, 52, { level: 45 }), member(804, 51, { level: 46 }), member(805, 21), member(806, 34),
+        member(807, 0), member(808, 9), member(809, 10), member(810, 7)];
+    assert.deepEqual(RaidPolicy.selectRaidMembers(legacyNoHealer).map(entry => entry.characterId),
+        [800, 803, 804, 805, 806, 807, 808, 809, 810],
+        'legacy no-healer fallback uses priority-sorted Orc buffers and retains all six damage members');
+
+    const ownedCrafter = member(811, 57, { level: 48, testReadiness: fillerReadiness });
+    const optionalFillers = [member(812, 55, { level: 55, testReadiness: fillerReadiness }),
+        member(813, 57, { level: 54, testReadiness: fillerReadiness })];
+    const fillOwnFirst = RaidPolicy.assessment({ members: [...members, ownedCrafter, ...optionalFillers] }, profile, null,
+        { preferredMemberIds: [...ownedIds, 811] });
+    assert(fillOwnFirst.eligible.includes(ownedCrafter), 'filler extension preserves owned preference before level ordering');
+
     readinessCalls = 0;
     const readinessCache = new Map();
     assert.equal(RaidPolicy.assessment({ members }, profile, null, { readinessCache }).ready, true);

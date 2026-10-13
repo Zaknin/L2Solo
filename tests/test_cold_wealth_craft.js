@@ -46,7 +46,7 @@ async function run() {
     boardLine(980005, 4541, 10, 16000);
     const originalState = { characterId: 9001, accountName: 'bot_pop_test', name: 'Crafter', phase: 'cold',
         activity: 'shopping', currentRegion: 'Giran', loc: { locX: 83396, locY: 147904, locZ: -3400 },
-        level: 60, adena: 500000, vitals: { mp: 100 }, inventory: {},
+        level: 60, adena: 400000, vitals: { mp: 100 }, inventory: {},
         stats: { classId: 57, generatedIndex: 1787947094937 }, persona: { primaryDrive: 'wealth' } };
     const native = await nativeChoice.capture(originalState, { nativeRoutes: true }, 'wealth_original_before_unit_overrides');
     const state = native.state;
@@ -176,7 +176,7 @@ async function run() {
     const blocked = await Service.execute(state, { ...unit, template: DataCache.items[0], r: ratio });
     assert.strictEqual(blocked.crafted, false);
     assert.strictEqual(blocked.reason, 'purchase_failed');
-    assert.strictEqual(blocked.state.adena, 500000);
+    assert.strictEqual(blocked.state.adena, originalState.adena);
     assert.deepStrictEqual(blocked.state.inventory, {});
     assert.strictEqual(blocked.state.vitals.mp, 100);
     assert.deepStrictEqual(blocked.state.stats.money, nativePacket);
@@ -196,7 +196,7 @@ async function run() {
     const repeat = await Service.tryCraft(state, 1000001);
     for (const current of [result, repeat]) {
         assert.strictEqual(current.crafted, false, 'unchanged original service state cannot craft without a funded native gain');
-        assert.strictEqual(current.state.adena, 500000);
+        assert.strictEqual(current.state.adena, originalState.adena);
         assert.deepStrictEqual(current.state.inventory, {});
         assert.strictEqual(current.state.vitals.mp, 100);
     }

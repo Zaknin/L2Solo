@@ -336,6 +336,10 @@ function state(characterId, revision, activity = 'hunting') {
         'a late rejection must not release a newer lease');
     assert((await Owner.release(freshClaim, { timestamp: 6600 })).ok);
 
+    // Developer diagnostics: an item read counts under its call-site tag.
+    await Database.fetchItems(characterId, 'owner_probe');
+    assert.strictEqual(invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts['item_list:call:owner_probe'], 1);
+
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');
     console.log('Cold simulation owner claim, CAS, handoff, and recovery checks passed');

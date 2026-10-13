@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../Skills/SkillRankIndex');
 const Runtime = require('./Runtime');
 const support = require('../../../data/ClanHalls/support.json');
 const Effects = invoke('GameServer/Effects/EffectStore');
@@ -11,8 +13,8 @@ let cachedSpawns,
 function skillFor(entry) {
     const key = `${entry.id}:${entry.level}`;
     if (skills.has(key)) return skills.get(key);
-    const data = invoke('GameServer/DataCache').skills.find((s) => s.selfId === entry.id);
-    const level = data?.levels.find((l) => l.level === entry.level);
+    const data = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').skills, entry.id);
+    const level = data ? SkillRankIndex.findStrict(data.levels, entry.level) : undefined;
     if (!level) return null;
     const skill = new (invoke('GameServer/Model/Skill'))({ ...utils.crushOb(data), ...level });
     skills.set(key, skill);

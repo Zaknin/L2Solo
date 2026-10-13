@@ -32,4 +32,18 @@ function decorateSpot(spot) {
         raidWorldAvailable: !!boss && !boss.isDead?.() && Number(boss.fetchHp?.()) > 0 };
 }
 
-module.exports = { instanceId, otherParticipants, decorateSpot };
+// Equipment selection needs only these native source scalars. Encounter
+// admission still uses decorateSpot's participant and authority snapshot.
+function projectSource(spot) {
+    if (!spot?.raidBoss) return spot;
+    const world = invoke('GameServer/World/World');
+    const boss = invoke('GameServer/World/RaidEntityIndex').bossByTemplateId(world, spot.raidBossTemplateId);
+    const revision = invoke('GameServer/Bot/Population/ColdRaidAuthority').get(`raid:${spot.raidBossTemplateId}`).revision;
+    const source = { ...spot };
+    delete source.raidAuthority;
+    delete source.raidExternallyEngaged;
+    return { ...source, raidInstanceId: instanceId(boss), raidAuthorityRevision: revision,
+        raidWorldAvailable: !!boss && !boss.isDead?.() && Number(boss.fetchHp?.()) > 0 };
+}
+
+module.exports = { instanceId, otherParticipants, decorateSpot, projectSource };

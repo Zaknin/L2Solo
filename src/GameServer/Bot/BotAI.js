@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const DiagnosticConfig = require('./Population/PopulationConfig');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const { raiseDecision } = require('./AI/DecisionEvents');
@@ -41,7 +42,7 @@ function getRandomPhrase(category, ...args) {
 
 function newbieSpawnCoords(classId) {
     const DataCache = invoke('GameServer/DataCache');
-    return DataCache.newbieSpawns.find(ob => ob.classId === classId)?.spawns ?? [{ locX: -84318, locY: 244579, locZ: -3730 }];
+    return ClassProgression.firstClassRow(DataCache.newbieSpawns, classId, 'strict')?.spawns ?? [{ locX: -84318, locY: 244579, locZ: -3730 }];
 }
 
 function isRealPlayerSession(session) {

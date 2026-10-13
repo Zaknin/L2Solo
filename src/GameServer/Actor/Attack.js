@@ -102,6 +102,7 @@ class Attack {
     meleeHit(session, creature) {
         if (session?.pvpHandoffPending) return;
         const actor = session.actor;
+        const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
 
         if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
             return;
@@ -221,6 +222,7 @@ class Attack {
                 // Check every melee victim again at impact, including polearm
                 // secondary targets. Already-launched arrows keep travelling.
                 if (!rangedAttack && !AttackRange.isWithinRange(actor, target, attackRange)) return;
+                if (!invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
 
                 if (!entry.hitLanded || entry.hit.damage <= 0) this.recordPlayerAggression(session, actor, target);
                 if (entry.hitLanded) {
@@ -282,6 +284,7 @@ class Attack {
     remoteHit(session, creature, skill) {
         if (session?.pvpHandoffPending) return;
         const actor = session.actor;
+        const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
         const corpseTarget = ['corpse_mob', 'corpse_player', 'corpse_pet', 'corpse_ally']
             .includes(skill.fetchTargetKind?.());
 
@@ -427,6 +430,8 @@ class Attack {
                 invoke('GameServer/World/Generics/NpcDecay').decay(invoke('GameServer/World/World'), creature);
             }
             executionTargets.forEach((target) => {
+                if ((skill.fetchTargetKind?.() === 'enemy' || corpseAreaCast)
+                    && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
                 if (skill.fetchTargetKind?.() === 'enemy') invoke('GameServer/Bot/AI/BotMobCompetition').record(actor, target);
                 this.restoreShotState(actor, shotState);
                 const outcome = SkillEffects.execute(session, actor, target, skill, {

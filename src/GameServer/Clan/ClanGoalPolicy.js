@@ -7,10 +7,6 @@ function number(value, fallback = 0) {
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function uniqueIds(values = []) {
-    return [...new Set((values || []).map((value) => number(value)).filter(Boolean))].sort((a, b) => a - b);
-}
-
 function roleRank(role) {
     return { tank: 0, healer: 1, buffer: 2, dps: 3, mage: 4, crafter: 5, spoiler: 6 }[role] ?? 9;
 }

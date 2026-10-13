@@ -66,28 +66,39 @@ assert.strictEqual(SpotRiskPolicy.excludedSpotIdsForStates([relocated], backoff.
 // cushion. C1/E3 main goals instead read a real accepted worker decision and
 // its funded queue; the removed 81/72 ladder and flat plan reserve are not inputs.
 DataCache.init();
-const gearState = (level, adena, equipmentPlan) => ({
-    characterId: 7, name: 'NativeInvestment', phase: 'cold', activity: 'hunting', level,
-    exp: Number(DataCache.experience[level - 1]), adena, updatedAt: NOW, spotId: 'starter',
-    currentRegion: 'Gludio', loc: { locX: -14464, locY: 128288, locZ: -3250 }, timing: {}, inventory: {},
+const stock = require('./fixtures/profitable_stock_state');
+const kit = stock.kitFor(0, 30);
+const lookup = invoke('GameServer/Bot/Population/ColdNpcPlanningCatalog').createLookup(
+    invoke('GameServer/Bot/Population/ColdSimulationCoordinator').npcPlanningCatalogRows());
+const missing = kit.entries.find(entry => [6, 9, 12].includes(Number(entry.slot))
+    && kit.inventory[entry.selfId].amount === 1 && lookup.offersFor(entry.selfId).length > 0);
+assert(missing, 'the physical native D kit has a single-slot wearable sold by canonical NPCs');
+const gearState = (adena, equipmentPlan) => {
+    const inventory = structuredClone(kit.inventory);
+    delete inventory[missing.selfId];
+    inventory[57] = { selfId: 57, name: 'Adena', amount: adena, stackable: true };
+    return {
+    characterId: 7, name: 'NativeInvestment', phase: 'cold', activity: 'hunting', level: 30,
+    exp: Number(DataCache.experience[29]), adena, updatedAt: NOW, spotId: '7_20',
+    currentRegion: 'Giran', loc: { locX: 81100, locY: 148000, locZ: -3466 }, timing: {}, inventory,
     persona: { primaryDrive: 'wealth', traits: {} },
     vitals: { hp: 900, maxHp: 1000, mp: 400, maxMp: 500 }, party: {},
-    stats: { classId: 0, deaths: 3, fightsResolved: 10, spotRisk: { spotId: 'starter', deathsAtEntry: 1, fightsAtEntry: 2 },
-        build: { grade: level >= 40 ? 'c' : 'd', classId: 0, level },
-        equipment: [{ selfId: 1, slot: 7, rank: 'none', name: 'Short Sword' }], equipmentPlan }
-});
-const needsOptions = { spot: { id: 'starter', risk: 1, route: { id: 'starter_route' } } };
-const rich = await captureAndRead(gearState(40, 100000000), { timestamp: NOW, needsOptions });
+    stats: { classId: 0, deaths: 3, fightsResolved: 10,
+        spotRisk: { spotId: '7_20', deathsAtEntry: 1, fightsAtEntry: 2 }, equipmentPlan }
+    };
+};
+const needsOptions = { spot: { ...stock.spotFor('7_20'), risk: 1, route: { id: '7_20_route' } } };
+const rich = await captureAndRead(gearState(100000000), { timestamp: NOW, needsOptions, nativeRoutes: true });
 assert.strictEqual(rich.state.adena, 100000000, 'capturing wishes does not spend the rich wallet');
 
 // Declared own escrow enters the existing native snapshot context; compare
 // E3 on its actual returned packet. No physical buy order is created here.
 const escrow = 9000;
-const held = await captureAndRead(gearState(40, 3000), { timestamp: NOW,
-    context: { buyOrderEscrow: escrow }, needsOptions });
+const held = await captureAndRead(gearState(3000), { timestamp: NOW,
+    context: { buyOrderEscrow: escrow }, needsOptions, nativeRoutes: true });
 assert.strictEqual(Funding.spendable(held.state, escrow, { r: held.state.stats.money[1] }),
     expectedSpendable(held.state, { escrow, r: held.state.stats.money[1] }));
-const unheld = await captureAndRead(gearState(40, 3000), { timestamp: NOW, needsOptions });
+const unheld = await captureAndRead(gearState(3000), { timestamp: NOW, needsOptions, nativeRoutes: true });
 assert.strictEqual(Funding.spendable(unheld.state, 0, { r: unheld.state.stats.money[1] }),
     expectedSpendable(unheld.state, { r: unheld.state.stats.money[1] }));
 
@@ -97,7 +108,7 @@ const chest = DataCache.items.find((entry) => String(entry.etc?.rank || '').toLo
 assert(chest, 'the original market-plan fixture uses an authored D chest');
 const plan = { status: 'active', strategy: 'market', target: { selfId: chest.selfId, slot: 10 },
     market: { town: 'Gludio', price: 100000, reserve: 30000, sourceType: 'npc' } };
-const planned = await captureAndRead(gearState(20, 125000, plan), { timestamp: NOW, needsOptions });
+const planned = await captureAndRead(gearState(125000, plan), { timestamp: NOW, needsOptions, nativeRoutes: true });
 const allowance = Funding.spendable(planned.state, 0, { itemId: chest.selfId });
 let itemRatio = 0;
 for (let at = 4; at + 2 < planned.state.stats.money.length; at += 3) {

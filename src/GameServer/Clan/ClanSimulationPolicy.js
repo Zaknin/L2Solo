@@ -174,10 +174,11 @@ function clanSuitability(candidate = {}, clan = {}, options = {}) {
     const memberIds = members.map((member) => number(member.id ?? member.characterId)).filter(Boolean);
     const role = rosterRole(candidate);
     const needs = options.rosterNeeds || rosterNeeds(members, options.desiredRoles);
-    const roleNeed = needs[role] ? 1 : 0;
-    const targetMemberCount = desiredMemberCount(clan.level, options);
+    const roleNeed = options.roleNeed === undefined ? (needs[role] ? 1 : 0) : Number(!!options.roleNeed);
+    const targetMemberCount = options.targetMemberCount === undefined ? desiredMemberCount(clan.level, options)
+        : Math.min(ClanRules.memberLimit(clan.level), Math.max(members.length, Number(options.targetMemberCount) || members.length));
     const memberGap = Math.max(0, targetMemberCount - members.length);
-    const growthNeed = memberGap > 0;
+    const growthNeed = options.growthNeed === undefined ? memberGap > 0 : !!options.growthNeed;
     const historyScore = clamp(partyHistoryRuns(candidate) / 4);
     const affinityScore = socialAffinity(candidate, memberIds);
     const fullness = ClanRules.memberLimit(number(clan.level)) > 0
@@ -197,7 +198,7 @@ function clanSuitability(candidate = {}, clan = {}, options = {}) {
     const reasonCodes = [];
     if (!roleNeed && !growthNeed) reasonCodes.push(Contracts.REASON_CODES.JOIN_UNSUITABLE);
     return {
-        ok: score >= number(options.threshold ?? Contracts.config.existingClanSuitabilityThreshold),
+        ok: options.contextualAllowed !== false && score >= number(options.threshold ?? Contracts.config.existingClanSuitabilityThreshold),
         score,
         role,
         roleNeed: !!roleNeed,
@@ -215,7 +216,8 @@ function selectExistingClan(candidate, clans = [], options = {}) {
             const limit = ClanRules.memberLimit(number(clan.level));
             return Array.isArray(clan.members) && clan.members.length < limit;
         })
-        .map((clan) => ({ clan, suitability: clanSuitability(candidate, clan, options) }))
+        .map((clan) => ({ clan, suitability: clanSuitability(candidate, clan, { ...options,
+            ...(options.contextForClan?.(candidate, clan) || {}) }) }))
         .filter((entry) => entry.suitability.ok)
         .sort((left, right) => right.suitability.score - left.suitability.score
             || number(left.clan.id) - number(right.clan.id));

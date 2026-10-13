@@ -14,6 +14,7 @@ DataCache.init();
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
+const PveEncounter = require('../src/GameServer/Bot/Population/ColdPveEncounter');
 
 // resolveFight and castCycle are module-private: compile a second copy of
 // each file that also exports them.
@@ -77,11 +78,22 @@ function fighter(id, classId, level, gear, extra = {}) {
     if (extra.shots) {
         const selfId = ShotStock.planForState(state).selfId;
         inventory[selfId] = { selfId, amount: extra.shots };
+        state.spotId = { 2: '28_10', 12: '31_7', 16: '9_35', 5: '18_7' }[classId];
+        assert(state.spotId, 'every shot fixture needs its verified native economic spot');
     }
     state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, ColdCombatProfile.skillRecordsFromTree(classId, level), TS);
     const profile = ColdCombatProfile.profileFor(state, TS);
     const hp = extra.hpRatio ? Math.round(profile.maxHp * extra.hpRatio) : profile.maxHp;
     return { ...state, vitals: { hp, mp: profile.maxMp } };
+}
+function assertNativeHeldPolicy(state) {
+    if (!state.spotId) return;
+    assert.strictEqual(invoke('GameServer/ProgressionRates').profile().multiplier, 1);
+    const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, TS);
+    assert.strictEqual(hunt.spotId, state.spotId, 'the actual native economic hunt supports this shot actor');
+    const plan = ShotStock.combatPlanForState(state);
+    assert(ShotStock.usePolicy(state, { timestamp: TS, plan }).usePerHour > 0,
+        'native owned-shot permission precedes the physical golden');
 }
 function spotFor(npcId) {
     const npc = DataCache.npcs.find((n) => n.selfId === npcId);
@@ -117,7 +129,14 @@ const paladinShots = fighter(1017, 5, 60, { ...chain('Weapon.Sword'), shield: tr
 
 // ---------- solo fights ----------
 function soloOutcome(state, npcId, seed, fightLimitMs = 60000, maxActions = 400) {
-    const r = withSeed(seed, (rng) => resolveFight({ state, spot: spotFor(npcId), pressure: {}, targetNpcId: npcId,
+    const spot = spotFor(npcId);
+    // An already engaged bot must finish even if it would now decline a new
+    // voluntary fight. Pin the combat engine through its native saved encounter.
+    const mob = ColdCombatProfile.npcForSpot(spot, () => 0.5, { preferredNpcId: npcId });
+    const encounter = PveEncounter.save(null, PveEncounter.key([state], spot, npcId), mob, mob.maxHp, TS,
+        { botReadyAt: 0, mobReadyAt: 0 });
+    const engaged = { ...state, stats: { ...state.stats, pveEncounter: encounter } };
+    const r = withSeed(seed, (rng) => resolveFight({ state: engaged, spot, pressure: {}, targetNpcId: npcId,
         rng, timestamp: TS, fightLimitMs, maxActions }));
     if (r.avoided) return { avoided: r.reason };
     return { won: r.won, died: r.died, hp: r.hp, mp: r.mp, charges: r.charges,
@@ -129,9 +148,10 @@ function soloOutcome(state, npcId, seed, fightLimitMs = 60000, maxActions = 400)
 }
 // [name, fighter, npc, seed, fight limit ms, action limit]
 // Mobs re-picked when the C4 passive rules (robe sets, Final Fortress off at full HP)
-// changed a fight from its scenario (the sorcerers won, warlock and paladin avoided the old mob).
+// changed a fight from its scenario. The safety gate now declines a fresh
+// sorcerer pull; these records exercise combat after an encounter has begun.
 const SOLO = [
-    ['sorcerer dies after a self-heal', sorcerer, 241, 1],
+    ['sorcerer wins without a futile self-heal', sorcerer, 241, 1],
     ['gladiator charges', gladiator, 5135, 2],
     ['bishop', bishop, 583, 3],
     ['warlock servitor, heals, potion', warlock, 239, 4],
@@ -139,7 +159,7 @@ const SOLO = [
     ['swordsinger songs', swordsinger, 129, 6],
     ['tyrant', tyrant, 5135, 7],
     ['paladin', paladin, 146, 8],
-    ['sorcerer 40 dies', sorcerer40, 88, 9],
+    ['sorcerer 40 survives without a futile self-heal', sorcerer40, 88, 9],
     ['bladedancer dances', bladedancer, 5135, 10],
     ['gladiator times out', gladiator, 5135, 14, 4000, 400],
     ['paladin runs out of actions', paladin, 122, 15, 60000, 10],
@@ -148,15 +168,15 @@ const SOLO = [
     ['bishop with spiritshots', bishopShots, 583, 3]
 ];
 const SOLO_GOLDEN = {
-    'sorcerer dies after a self-heal': { won: false, died: true, hp: 0, mp: 2365, charges: 0, actions: 24, durationMs: 23669, skillUses: 8, shotActions: 0, heals: 4, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 1, mobHp: null, botReadyAt: null },
+    'sorcerer wins without a futile self-heal': { won: true, died: false, hp: 733, mp: 2422, charges: 0, actions: 11, durationMs: 9895, skillUses: 5, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'gladiator charges': { won: true, died: false, hp: 1389, mp: 384, charges: 0, actions: 18, durationMs: 11315, skillUses: 10, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'bishop': { won: true, died: false, hp: 1014, mp: 2489, charges: 0, actions: 19, durationMs: 19877, skillUses: 7, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
-    'warlock servitor, heals, potion': { won: true, died: false, hp: 345, mp: 2237, charges: 0, actions: 81, durationMs: 54630, skillUses: 12, shotActions: 0, heals: 12, musicUses: 0, summonUses: 1, summonActions: 34, potionsUsed: 1, mobHp: null, botReadyAt: null },
+    'warlock servitor, heals, potion': { won: true, died: false, hp: 651, mp: 2286, charges: 0, actions: 42, durationMs: 30366, skillUses: 8, shotActions: 0, heals: 4, musicUses: 0, summonUses: 1, summonActions: 14, potionsUsed: 1, mobHp: null, botReadyAt: null },
     'necromancer corpse servitor': { won: true, died: false, hp: 1140, mp: 2432, charges: 0, actions: 4, durationMs: 3442, skillUses: 2, shotActions: 0, heals: 0, musicUses: 0, summonUses: 1, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'swordsinger songs': { won: true, died: false, hp: 1141, mp: 13, charges: 0, actions: 33, durationMs: 24336, skillUses: 6, shotActions: 0, heals: 0, musicUses: 6, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'tyrant': { won: true, died: false, hp: 1717, mp: 691, charges: 0, actions: 7, durationMs: 3655, skillUses: 4, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'paladin': { won: true, died: false, hp: 1490, mp: 643, charges: 0, actions: 23, durationMs: 20867, skillUses: 8, shotActions: 0, heals: 1, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
-    'sorcerer 40 dies': { won: false, died: true, hp: 0, mp: 1400, charges: 0, actions: 37, durationMs: 40576, skillUses: 12, shotActions: 0, heals: 10, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
+    'sorcerer 40 survives without a futile self-heal': { won: true, died: false, hp: 365, mp: 1533, charges: 0, actions: 15, durationMs: 14170, skillUses: 6, shotActions: 0, heals: 2, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'bladedancer dances': { won: true, died: false, hp: 604, mp: 13, charges: 0, actions: 35, durationMs: 26083, skillUses: 6, shotActions: 0, heals: 0, musicUses: 6, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'gladiator times out': { won: false, died: false, hp: 1579, mp: 679, charges: 0, actions: 6, durationMs: 4000, skillUses: 3, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: 1306, botReadyAt: 216 },
     'paladin runs out of actions': { won: false, died: false, hp: 1398, mp: 774, charges: 0, actions: 10, durationMs: 7518, skillUses: 2, shotActions: 0, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: 534, botReadyAt: 1127 },
@@ -164,9 +184,22 @@ const SOLO_GOLDEN = {
     'sorcerer with spiritshots': { won: true, died: false, hp: 979, mp: 2464, charges: 0, actions: 7, durationMs: 4516, skillUses: 4, shotActions: 4, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null },
     'bishop with spiritshots': { won: true, died: false, hp: 1121, mp: 2542, charges: 0, actions: 14, durationMs: 11548, skillUses: 4, shotActions: 4, heals: 0, musicUses: 0, summonUses: 0, summonActions: 0, potionsUsed: 0, mobHp: null, botReadyAt: null }
 };
+const unsafeFreshPull = withSeed(1, rng => resolveFight({ state: sorcerer, spot: spotFor(241), pressure: {},
+    targetNpcId: 241, rng, timestamp: TS, fightLimitMs: 60000, maxActions: 400 }));
+assert.deepStrictEqual({ avoided: unsafeFreshPull.avoided, reason: unsafeFreshPull.reason },
+    { avoided: true, reason: 'no_safe_solo_target' }, 'a dangerous fresh solo target is still declined');
+const safeFreshPull = withSeed(2, rng => resolveFight({ state: gladiator, spot: spotFor(5135), pressure: {},
+    targetNpcId: 5135, rng, timestamp: TS, fightLimitMs: 60000, maxActions: 400 }));
+assert(safeFreshPull.won, 'a survivable fresh solo target still enters combat');
+const doomed = { ...sorcerer, vitals: { ...sorcerer.vitals, hp: 1 } };
+const doomedFight = soloOutcome(doomed, 241, 1);
+assert(doomedFight.died && doomedFight.hp === 0, 'an already engaged, critically wounded bot can still die');
+const soloObserved = [];
 for (const [name, state, npcId, seed, limitMs, maxActions] of SOLO) {
-    assert.deepStrictEqual(soloOutcome(state, npcId, seed, limitMs, maxActions), SOLO_GOLDEN[name], `solo: ${name}`);
+    assertNativeHeldPolicy(state);
+    soloObserved.push([name, soloOutcome(state, npcId, seed, limitMs, maxActions)]);
 }
+for (const [name, actual] of soloObserved) assert.deepStrictEqual(actual, SOLO_GOLDEN[name], `solo: ${name}`);
 
 // ---------- party fights ----------
 function partyOutcome(members, npcId, seed) {
@@ -210,6 +243,7 @@ const PARTY_GOLDEN = {
             [1016, 1290, 2542, 6, 4, 4, 0, 0, 0]] }
 };
 for (const [name, members, npcId, seed] of PARTY) {
+    members.forEach(assertNativeHeldPolicy);
     assert.deepStrictEqual(partyOutcome(members, npcId, seed), PARTY_GOLDEN[name], `party: ${name}`);
 }
 
@@ -217,7 +251,11 @@ for (const [name, members, npcId, seed] of PARTY) {
 // Solo limits set to the party's (15 s, 96 actions); the tank role keeps the
 // party's mob turn from drawing a random target among one member.
 for (const [name, state, npcId, seed] of SOLO) {
-    const member = { ...state, stats: { ...state.stats, role: 'tank' } };
+    const spot = spotFor(npcId);
+    const mob = ColdCombatProfile.npcForSpot(spot, () => 0.5, { preferredNpcId: npcId });
+    const encounter = PveEncounter.save(null, PveEncounter.key([state], spot, npcId), mob, mob.maxHp, TS,
+        { botReadyAt: 0, mobReadyAt: 0 });
+    const member = { ...state, stats: { ...state.stats, role: 'tank', pveEncounter: encounter } };
     const solo = withSeed(seed, (rng) => resolveFight({ state: member, spot: spotFor(npcId), pressure: {}, targetNpcId: npcId,
         rng, timestamp: TS, fightLimitMs: 15000, maxActions: 96 }));
     const party = withSeed(seed, (rng) => Resolver.resolvePartyFight({ members: [member], spot: spotFor(npcId), targetNpcId: npcId, rng, timestamp: TS }));

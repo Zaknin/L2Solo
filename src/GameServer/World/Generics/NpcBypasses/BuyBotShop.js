@@ -3,6 +3,7 @@ const Item           = invoke('GameServer/Item/Item');
 const DataCache      = invoke('GameServer/DataCache');
 const ItemTemplateIndex = require('../../../Item/ItemTemplateIndex');
 const BotManager     = invoke('GameServer/Bot/BotManager');
+const SpawnCatalog = require('../../../Knowledge/SpawnCatalog');
 
 module.exports = function(session, parts) {
     session.activeAdminShop = null;
@@ -41,17 +42,7 @@ module.exports = function(session, parts) {
 
     // 2. Находим зоны спавна в радиусе 25,000 от торговца
     const targetZones = [];
-    DataCache.npcSpawns.forEach(zone => {
-        if (!zone.bounds || zone.bounds.length === 0) return;
-        
-        let sumX = 0, sumY = 0;
-        zone.bounds.forEach(pt => {
-            sumX += pt.locX;
-            sumY += pt.locY;
-        });
-        const centerX = sumX / zone.bounds.length;
-        const centerY = sumY / zone.bounds.length;
-        
+    SpawnCatalog.boundedSpawnZones().forEach(({ group: zone, centerX, centerY }) => {
         const dx = centerX - botX;
         const dy = centerY - botY;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -64,11 +55,7 @@ module.exports = function(session, parts) {
     // 3. Собираем уникальные ID монстров из этих зон
     const monsterIds = new Set();
     targetZones.forEach(zone => {
-        if (zone.spawns) {
-            zone.spawns.forEach(spawn => {
-                monsterIds.add(spawn.selfId);
-            });
-        }
+        SpawnCatalog.npcIdsForSpawnZone(zone).forEach(id => monsterIds.add(id));
     });
 
     // 4. Собираем уникальные ID выпадающих предметов (исключаем Adena [57])

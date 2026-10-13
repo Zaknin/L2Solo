@@ -52,7 +52,7 @@ function create(definition) {
     const allowed = state => identity(state) && holdsPrerequisite(state);
     const step = (state, options) => require('./QuestStep').apply(state, options);
     const stageFor = state => d.stages[state.getInt('cond') - 1];
-    const itemName=id=>invoke('GameServer/DataCache').items.find(x=>x.selfId===id)?.template?.name||`item ${id}`;
+    const itemName=id=>ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id)?.template?.name||`item ${id}`;
     const npcName=id=>ItemTemplateIndex.findStrict(invoke('GameServer/DataCache').npcs, id)?.template?.name||`NPC ${id}`;
     const describe=stage=>stage?.sources ? `Collect what you need from ${stage.sources.map(c=>npcName(c.npc)).join(', ')}.`
         : stage?.deliveries ? `Deliver the supplies to ${stage.deliveries.map(c=>npcName(c.npc)).join(', ')}.`

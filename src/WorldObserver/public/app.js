@@ -736,11 +736,6 @@ function raidBossStatusLabel(status) {
     return RAID_BOSS_STATUS_LABELS[status] || RAID_BOSS_STATUS_LABELS.missing;
 }
 
-function raidBossCoordinates(loc) {
-    if (!loc) return 'Coordinates unavailable';
-    return `${number(Math.round(Number(loc.locX || 0)))} · ${number(Math.round(Number(loc.locY || 0)))} · ${number(Math.round(Number(loc.locZ || 0)))}`;
-}
-
 function filteredRaidBosses() {
     const query = state.raidBossSearch.trim().toLowerCase();
     return raidBossItems().filter((boss) => {
@@ -3058,17 +3053,6 @@ function decisionReason(decision) {
         || readableDecisionValue(decision.reason)
         || readableDecisionValue(decision.route)
         || (decision.targetNpcId ? `NPC ${decision.targetNpcId}` : null);
-}
-
-function renderDecisions(actor) {
-    const decision = actor.decisions?.combat || actor.decisions?.hunt || actor.decisions?.role || actor.roleDecision || actor.lastResolve;
-    if (!decision) return '';
-    const reason = decisionReason(decision);
-    if (!reason) return '';
-    return `<section class="inspector-block compact-block">
-        <div class="inspector-block-title"><h3>Last decision</h3><span>${text(humanizeToken(decision.action || 'resolve'))}</span></div>
-        <p class="muted-copy">${text(reason)}</p>
-    </section>`;
 }
 
 function renderSignals(actor) {

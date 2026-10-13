@@ -10,6 +10,8 @@
 const { isMainThread } = require('node:worker_threads');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+// Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
+let CraftInputReservations = null, PurchaseFunding = null, DecisionSections = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -47,6 +49,7 @@ const SHOT = 32768;
 const FEASIBILITY = 65536;
 const URGENCY_STAGE = 1, URGENCY_SHOTS = 2, URGENCY_POTIONS = 3;
 const MAX_BYTES = 800, MAX_SHOT_BYTES = 128;
+const MAX_ADVISORY_BYTES = 4096;
 const COMMAND_HEADER_BYTES = Buffer.byteLength(JSON.stringify(['00000000-0000-0000-0000-000000000000', 5, Number.MAX_SAFE_INTEGER]));
 const MAX_SHOT_PAYLOAD_BYTES = MAX_SHOT_BYTES - COMMAND_HEADER_BYTES;
 function workshopValues(value) {
@@ -258,13 +261,13 @@ function capture(economy, state, seen = state) {
     if (economy?.network?.quantityPrepared) for (const row of queue) visit(row.plan);
     const activity = leaf ? new CompactActivity(leaf) : null;
     if (activity) {
-        const reserved = require('../Economy/CraftInputReservations').selectedCraftAmounts(seen, economy?.network);
+        const reserved = (CraftInputReservations ||= require('../Economy/CraftInputReservations')).selectedCraftAmounts(seen, economy?.network);
         const rows = Object.entries(reserved).filter(([, amount]) => amount > 0).map(([id, amount]) => [Number(id), amount]);
         if (rows.length) activity.craftReservations = rows;
     }
     if (activity?.activity === 'shopping') {
         activity.heldAtDecision = heldFor(seen, activity.itemId);
-        const r = require('../Economy/PurchaseFunding').rootRatio(wish);
+        const r = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).rootRatio(wish);
         if (r > 0) activity.r = r;
     }
     let clan = null;
@@ -330,9 +333,9 @@ function preparedCardWorth(decision, id, state, moneyPrice, understanding, enabl
     return NaN;
 }
 
-function view(state, decision, deps = {}) {
+function view(state, decision, deps = {}, preparedBase = null) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const base = Economy.basics(state, deps), packet = state.stats?.money;
+    const base = preparedBase || Economy.basics(state, deps), packet = state.stats?.money;
     const valid = Array.isArray(packet) && packet.length >= 4;
     const hourAdena = valid ? Number(packet[0]) : base.hourAdena;
     const moneyPrice = valid ? Number(packet[1]) : hourAdena > 0 ? 1 / hourAdena : 0;
@@ -350,7 +353,7 @@ function view(state, decision, deps = {}) {
             ? base.stock('shots').targetHours : decision.urgency === URGENCY_POTIONS
                 ? base.stock('potions').targetHours
                 : invoke('GameServer/Bot/Economy/EconomicValuation').stageHours(state, base.hunt.expPerHour, base.persona),
-        board: deps.board || invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(),
+        board: deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null),
         network: { activity }, activity, wish,
         craftReservations: Object.fromEntries(activity?.craftReservations || []),
         watchList: (decision?.watch || []).map(row => ({ itemId: row[0], amount: row[1], worth: row[2], kind: kindFor(row[3]) })),
@@ -362,6 +365,67 @@ function economyFor(state, deps = {}) {
     if (isMainThread && state?.phase === 'cold') return view(state,
         (deps.decisions || invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions).decided(state), deps);
     return invoke('GameServer/Bot/Economy/EconomyContext').forState(state, deps);
+}
+// A compact accepted decision is advisory calculation data, never a lease,
+// quote or permission to spend. Keep it at the existing worker entry owner;
+// there is no saved per-bot graph and no second decision map.
+// activity: the state the economy was built on, when the published state
+// already left it (a trip started after the build).
+function advisory(economy, state, activity = state.activity) {
+    const card = capture(economy, state);
+    const fence = economy?.calculationFence;
+    if (!(fence instanceof Uint8Array)) return null;
+    if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
+    return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
+        activityLeaf: Number(state.stats?.activityLeaf || 0), activity, mp: Number(state.vitals?.mp) };
+}
+// The bot's own hunting/resting/travelling inside one decision is not an
+// event (L70). After a result the card is only restamped and published.
+// Before an action it is executed only through a hunter's target
+// (activityPick.npcId, ColdSimulationKernel); a resting or travelling bot's
+// step is resolveRest/resolveTravel of its own state (BackgroundResolver),
+// the same after a rebuild. A traveller without a trip record falls
+// through to a fight there, so it takes the rebuild.
+function canReuse(state, accepted, deps = {}, current = null, options = {}) {
+    if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
+        || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
+        || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
+    // The ordinary fight path resumes hunting even when its accepted next
+    // economic step is a purchase or liquidation. Commands still prepare via
+    // their native owner; unknown/completed/impossible leaves never reuse.
+    const leaf = accepted.card.activity;
+    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
+        || state.incomingPending) return false;
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    if (!Economy.FIELD_ACTIVITIES.has(state.activity) || !options.afterResult && state.activity === 'traveling'
+        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return false;
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
+    const baseline = state.stats.wishSections;
+    if (Sections.capability(state, timestamp) !== baseline.build) return false;
+    // The same event verdict as the cache entry (L70), incl. a crafter's MP.
+    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
+    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps)) return false;
+    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true })
+        && Economy.acceptedActivityHolds(state, leaf, deps, current);
+}
+function refreshAdvisory(state, accepted, deps = {}, options = {}) {
+    let base;
+    const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
+    if (!canReuse(state, accepted, deps, current, options)) return null;
+    // This new result is fenced to the actual publication, wallet and MP;
+    // never relax ColdEconomyDecisions.matches or any native write guard.
+    const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
+        key: stateKey(state), flags: 0 });
+    const economy = view(state, decision, deps, current());
+    economy.inputKey = String(decision.inputHash);
+    economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
+    economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
+        decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
+        stockTargets: state.stats.stockTargets, wishSections: state.stats.wishSections, wishDirty: 0 };
+    Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
+        decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
+    Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });
+    return { economy, decision, advisory: { ...accepted, card: decision } };
 }
 
 // Compare the existing compact economic output, without decoding it or
@@ -480,5 +544,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, kindCode, kindFor, compact, workshopValues,
-    unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, canReuse, refreshAdvisory, kindCode, kindFor, compact, workshopValues,
+    unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

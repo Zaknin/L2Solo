@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const EnchantScrolls = invoke('GameServer/Items/C4EnchantScrolls');
@@ -7,8 +8,6 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const depositQueues = new Map();
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
-let templateSource = null;
-let templateIndex = new Map();
 
 function isLegacyMainState(state) {
     return String(state?.simulation?.ownerId || 'legacy_main') === 'legacy_main';
@@ -231,54 +230,61 @@ async function releaseActorAtWarehouse(actor, state, session, target) {
 
 async function depositColdUnlocked(state, candidates) {
     const [rows, warehouseRows] = await Promise.all([
-        Database.fetchItems(state.characterId),
+        Database.fetchItems(state.characterId, 'warehouse_deposit_cold'),
         Database.fetchWarehouseItems(state.characterId)
     ]);
     const retained = storedAmounts(warehouseRows);
-    const inventory = { ...(state.inventory || {}) };
     const stored = [];
     const overflow = [];
-    for (const candidate of candidates) {
-        const amount = retentionAmount(candidate, retained.get(Number(candidate.selfId)));
-        let remaining = amount;
-        const excess = overflowCandidate(candidate, Number(candidate.amount || 0) - amount);
-        const sources = rows
-            .filter((row) => Number(row.selfId) === Number(candidate.selfId) && !row.equipped)
-            .sort((left, right) => Number(right.enchant || 0) - Number(left.enchant || 0) || Number(left.id) - Number(right.id));
-        // Do not change the cold summary when the physical row changed under us.
-        if (sources.reduce((sum, source) => sum + Number(source.amount || 0), 0) < Number(candidate.amount || 0)) continue;
-        if (excess) overflow.push(excess);
-        for (const source of sources) {
-            if (remaining <= 0) break;
-            const amount = Math.min(remaining, Number(source.amount || 0));
-            await Database.transferInventoryToWarehouse(state.characterId, {
-                id: source.id,
-                selfId: candidate.selfId,
-                name: candidate.name,
-                amount,
-                stackable: !!candidate.stackable,
-                petData: source.petData
-            });
-            source.amount = Number(source.amount || 0) - amount;
-            remaining -= amount;
+    const stopped = () => ({ state: LifeState.cachedState(state.characterId) || state,
+        count: stored.reduce((sum, item) => sum + item.amount, 0), items: stored, overflow,
+        aborted: true, reason: 'economy_state_changed' });
+    try {
+        for (const candidate of candidates) {
+            const amount = retentionAmount(candidate, retained.get(Number(candidate.selfId)));
+            let remaining = amount;
+            const excess = overflowCandidate(candidate, Number(candidate.amount || 0) - amount);
+            const sources = rows
+                .filter((row) => Number(row.selfId) === Number(candidate.selfId) && !row.equipped)
+                .sort((left, right) => Number(right.enchant || 0) - Number(left.enchant || 0) || Number(left.id) - Number(right.id));
+            // Do not change the cold summary when the physical row changed under us.
+            if (sources.reduce((sum, source) => sum + Number(source.amount || 0), 0) < Number(candidate.amount || 0)) continue;
+            if (excess) overflow.push(excess);
+            let deposited = null;
+            for (const source of sources) {
+                if (remaining <= 0) break;
+                const amount = Math.min(remaining, Number(source.amount || 0));
+                const before = LifeState.cachedState(state.characterId);
+                const transfer = await Database.transferInventoryToWarehouse(state.characterId, {
+                    id: source.id,
+                    selfId: candidate.selfId,
+                    name: candidate.name,
+                    amount,
+                    stackable: !!candidate.stackable,
+                    petData: source.petData
+                }, { coldState: state });
+                source.amount = Number(source.amount || 0) - amount;
+                remaining -= amount;
+                if (!deposited) { deposited = { selfId: candidate.selfId, name: candidate.name, amount: 0 }; stored.push(deposited); }
+                deposited.amount += amount;
+                if (before && LifeState.cachedState(state.characterId) !== before) return stopped();
+                if (!transfer?.coldLifeRow) throw new Error('warehouse_projection_missing');
+                const projected = LifeState.acceptInventoryProjection(transfer.coldLifeRow);
+                if (!projected) return stopped();
+                // Keep the visit's unsaved metadata; only inventory authority
+                // comes from the committed physical projection.
+                state = { ...state, inventory: projected.inventory, adena: projected.adena,
+                    vitals: projected.vitals, simulation: projected.simulation, updatedAt: projected.updatedAt };
+            }
+            retained.set(Number(candidate.selfId), Number(retained.get(Number(candidate.selfId)) || 0) + amount);
         }
-        inventory[String(candidate.selfId)] = {
-            ...inventory[String(candidate.selfId)],
-            amount: Math.max(0, Number(inventory[String(candidate.selfId)]?.amount || 0) - amount),
-            ...(Array.isArray(inventory[String(candidate.selfId)]?.instances) ? {
-                instances: inventory[String(candidate.selfId)].instances.map((instance) => {
-                    const source = sources.find((row) => Number(row.id) === Number(instance.id));
-                    return source ? { ...instance, amount: Number(source.amount) } : instance;
-                }).filter((instance) => Number(instance.amount) > 0)
-            } : {})
-        };
-        retained.set(Number(candidate.selfId), Number(retained.get(Number(candidate.selfId)) || 0) + amount);
-        if (amount > 0) stored.push({ selfId: candidate.selfId, name: candidate.name, amount });
+    } catch (error) {
+        if (error?.message === 'economy_state_changed' || error?.message === 'warehouse_owner_changed') return stopped();
+        throw error;
     }
     if (!stored.length && !overflow.length) return { state, count: 0, items: [], overflow: [] };
     const depositedState = {
         ...state,
-        inventory,
         stats: stored.length
             ? { ...(state.stats || {}), lastWarehouseDeposit: { items: stored, at: Date.now() } }
             : { ...(state.stats || {}) }
@@ -302,12 +308,7 @@ function depositCold(state) {
 }
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (items !== templateSource) {
-        templateSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 function historicalGearOverflow(items = [], maxUnits = 16) {

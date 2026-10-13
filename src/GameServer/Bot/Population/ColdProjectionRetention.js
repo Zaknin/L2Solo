@@ -42,7 +42,10 @@ class ColdProjectionRetention {
     }
 
     reset() {
-        this.entries = new WeakMap();
+        // One projection per character. Keyed by the state object, a replaced
+        // party member stayed alive through its partner's projection, and kept
+        // its own projection, with the partner's older state, alive in turn.
+        this.entries = new Map();
         this.prepared = new WeakMap();
         this.dirty = new WeakMap();
     }
@@ -68,7 +71,7 @@ class ColdProjectionRetention {
     remember(entry) {
         const prepared = this.prepared.get(entry?.context);
         if (!prepared || prepared.state !== entry.state || this.stateFor(entry.state.characterId) !== entry.state) return false;
-        this.entries.set(entry.state, { ...prepared, entry });
+        this.entries.set(Number(entry.state.characterId), { ...prepared, entry });
         return true;
     }
 
@@ -76,9 +79,12 @@ class ColdProjectionRetention {
         const unavailable = reason => ({ ok: false, reason });
         if (!Number.isSafeInteger(characterId) || characterId <= 0) return unavailable('invalid_character');
         const state = this.stateFor(characterId);
-        if (!state) return unavailable('missing_state');
-        const record = this.entries.get(state);
-        if (!record) return unavailable('missing_projection');
+        if (!state) {
+            this.entries.delete(characterId);
+            return unavailable('missing_state');
+        }
+        const record = this.entries.get(characterId);
+        if (!record || record.state !== state) return unavailable('missing_projection');
         if (!record.epoch || record.epoch !== this.epoch()) return unavailable('projection_epoch_changed');
         if (state.phase !== 'cold' || !same(record.own, stateStamp(state))) return unavailable('projection_state_changed');
         if (record.sequence !== (this.dirty.get(state) || 0)) return unavailable('projection_dirty');

@@ -1,3 +1,4 @@
+const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ActorQueries = require('../World/ActorSpatialQueries');
 const refreshPartyMemberships = require('../World/PartyMembershipPublication');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
@@ -318,7 +319,6 @@ const BotManager = {
 
     init() {
         if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotManager :: Initializing automated bots...");
-        BotSocialMemory.init();
         BotFriendship.init();
         PopulationService.init();
         GoalService.init();
@@ -778,7 +778,7 @@ const BotManager = {
     },
 
     awardBaseGear(id, classId) {
-        const items = DataCache.newbieItems.find(ob => ob.classId === classId)?.items ?? [];
+        const items = StarterItemCatalog.firstClassRow(DataCache.newbieItems, classId)?.items ?? [];
         const hasTwoHandedWeapon = items.some((item) => {
             const template = ItemTemplateIndex.findStrict(DataCache.items, item.selfId);
             return Number(template?.etc?.slot || 0) === 14 &&

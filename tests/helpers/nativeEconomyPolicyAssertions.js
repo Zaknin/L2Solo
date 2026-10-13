@@ -42,14 +42,14 @@ function assertFunding(state) {
 
 // Capture in the actual worker, then use the actual main acceptance/readers.
 // The native selected activity is an observation; no shopping/selling leaf is supplied.
-async function captureAndRead(state, { timestamp, context = {}, needsOptions = {} } = {}) {
+async function captureAndRead(state, { timestamp, context = {}, needsOptions = {}, nativeRoutes = false } = {}) {
     const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Needs = invoke('GameServer/Bot/Goals/NeedsEvaluator');
     const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
     const decisions = Coordinator.economyDecisions;
     const before = structuredClone(state);
-    const captured = await nativeDecision(state, { timestamp, context });
+    const captured = await nativeDecision(state, { timestamp, context, nativeRoutes });
     assert.deepEqual(state, before, 'worker projection cannot mutate the supplied main fixture');
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     const native = Decision.compact(captured.decision);

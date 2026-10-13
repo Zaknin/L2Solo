@@ -1,5 +1,6 @@
 'use strict';
 
+const SkillRankIndex = require('./SkillRankIndex');
 const data = require('../../../data/Skills/c4-skill-books.json');
 const ClassProgression = require('../ClassProgression');
 const books = new Map(data.skills);
@@ -7,7 +8,6 @@ const bookIds = new Set(books.values());
 let treeSource = null;
 let indexed = new Map();
 let definitionSource = null;
-let definedRanks = new Map();
 // Static first-rank attack ids only, bounded by the native spellbook catalogue
 // (275 ids). Replaced with the skill-definition source; no per-bot state.
 let valued = new Set();
@@ -16,29 +16,19 @@ function ranksFor(skillId) {
     const definitions = invoke('GameServer/DataCache').skills || [];
     if (definitions !== definitionSource) {
         definitionSource = definitions;
-        definedRanks = new Map(definitions.map((skill) => [Number(skill.selfId),
-            new Set((skill.levels || []).map((rank) => Number(rank.level)))]));
+        SkillRankIndex.ranksForSkill(definitions, skillId);
         const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
         valued = new Set(Profile.skillSnapshotsFromRecords([...books.keys()].map(selfId => ({ selfId, level: 1 })))
             .filter(Profile.isAttackSkill).map(skill => Number(skill.selfId)));
     }
-    return definedRanks.get(Number(skillId));
+    return SkillRankIndex.ranksForSkill(definitions, skillId);
 }
 
 function entries(classId) {
     const trees = invoke('GameServer/DataCache').skillTree || [];
     if (trees !== treeSource) { treeSource = trees; indexed = new Map(); }
     if (!indexed.has(Number(classId))) {
-        const skills = new Map();
-        for (const ancestor of ClassProgression.lineage(classId)) {
-            for (const entry of trees.find((row) => Number(row.classId) === ancestor)?.skills || []) {
-                const held = skills.get(Number(entry.selfId)) || { ...entry, levels: [] };
-                const ranks = new Map(held.levels.map((row) => [Number(row.level), row]));
-                for (const row of entry.levels || []) ranks.set(Number(row.level), row);
-                skills.set(Number(entry.selfId), { ...entry, levels: [...ranks.values()].sort((a, b) => a.level - b.level) });
-            }
-        }
-        indexed.set(Number(classId), [...skills.values()]);
+        indexed.set(Number(classId), ClassProgression.mergedSkillTrees(trees, ClassProgression.lineage(classId), 'books'));
     }
     return indexed.get(Number(classId));
 }
