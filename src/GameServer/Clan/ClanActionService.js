@@ -637,7 +637,11 @@ const ClanActionService = {
         const safeLimit = Math.max(1, Math.min(100, Math.floor(number(options.limit, Config.actionBatchSize))));
         const batchStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         const bootstrapStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
-        return bootstrap().finally(() => {
+        return bootstrap().catch((error) => {
+            // Recovery is retried by the next pass; the queued actions still run.
+            utils.infoWarn('ClanAction', 'bootstrap failed: %s', error?.message || error);
+            return { attempted: 0, created: 0, error: error?.message || String(error) };
+        }).finally(() => {
             DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'bootstrap', Date.now() - bootstrapStartedAt);
         }).then(async (boot) => {
             const summary = {

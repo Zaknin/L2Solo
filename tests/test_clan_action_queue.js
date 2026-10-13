@@ -247,6 +247,18 @@ async function main() {
         Database.ensurePlayerManagedClans = async () => { throw new Error('injected bootstrap failure'); };
         try {
             await assert.rejects(ClanActionService.bootstrap(), /injected bootstrap failure/);
+            // Nor may it stop the queued actions of that pass.
+            const originalClaim = Database.claimClanAction;
+            let claimsDuringFailedBootstrap = 0;
+            Database.claimClanAction = async () => { claimsDuringFailedBootstrap += 1; return { action: null }; };
+            let failedBootstrapBatch;
+            try {
+                failedBootstrapBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
+            } finally {
+                Database.claimClanAction = originalClaim;
+            }
+            assert.strictEqual(failedBootstrapBatch.bootstrap.error, 'injected bootstrap failure');
+            assert.strictEqual(claimsDuringFailedBootstrap, 1, 'a failed bootstrap must not stop the action queue');
         } finally {
             Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
         }
