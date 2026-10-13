@@ -286,7 +286,10 @@ function activateNearPlayer(playerSession, state) {
                 if (!targetSession) return { ok: false, reason: 'activation_session_timeout' };
 
                 const ChatArrivalState = invoke('GameServer/Bot/AI/ChatArrivalState');
-                ChatArrivalState.start(targetSession, playerSession);
+                // start refuses a bot without an actor or a player who went offline meanwhile.
+                if (!ChatArrivalState.start(targetSession, playerSession)) {
+                    return { ok: false, reason: 'arrival_not_started' };
+                }
                 return { ok: true, targetSession, activation };
             });
         });

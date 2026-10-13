@@ -240,6 +240,32 @@ async function main() {
             LifeState.findByName = originalFindByName;
             BotManager.findSessionByName = originalFindSession;
         }
+
+        // The player leaves while the bot is being activated: arrival cannot start.
+        const originalActivation = PopulationService.requestActivation;
+        const originalPlayerOnline = playerSession.actor.fetchIsOnline;
+        const lateSession = { accountId: 'bot_cold_chat', actor: actor(9102, 'ColdChatBot', 180) };
+        try {
+            BotManager.findSessionByName = (name) => String(name).toLowerCase() === 'coldchatbot' ? lateSession : null;
+            PopulationService.requestActivation = async () => {
+                playerSession.actor.fetchIsOnline = () => false;
+                return { ok: true, reason: 'remote_chat_come' };
+            };
+            OpenRouterGateway.setTransport(async (_url, init) => {
+                requests.push(JSON.parse(init.body));
+                return response({ choices: [{ message: { content: JSON.stringify({
+                    action: 'come_to_player', reply: 'I am coming over.', reason: 'explicit_request', confidence: 0.98
+                }) } }] });
+            });
+            const lateArrival = await BotRemoteChat.replyForState(playerSession, state, 'come to me again');
+            assert.strictEqual(lateArrival.actionResult.ok, false, 'arrival that did not start is not a success');
+            assert.strictEqual(lateArrival.action, 'say');
+            assert.notStrictEqual(lateSession.chatArrivalActive, true);
+        } finally {
+            playerSession.actor.fetchIsOnline = originalPlayerOnline;
+            PopulationService.requestActivation = originalActivation;
+            BotManager.findSessionByName = originalFindSession;
+        }
         console.log('Cold bot chat checks passed');
     } finally {
         options.default.OpenRouter = originalConfig;
