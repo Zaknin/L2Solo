@@ -100,6 +100,27 @@ async function main() {
         assert.deepEqual(owners, [5], 'the request is owned by the character that asked');
         select(6); releaseRequest(); await write;
         assert.equal(pages, 0, 'the result page does not reach another character');
+        // Same rule for the legacy remove and const pages (legacy HTML client).
+        let releaseRemove, releaseConst;
+        const nativeVersion = session.nativeFriendsVersion;
+        const originalRemove = Friends.remove, originalToggle = Friends.toggleConst, originalFriends = Friends.listFriends;
+        try {
+            Friends.remove = () => new Promise((resolve) => { releaseRemove = () => resolve({ ok: true }); });
+            Friends.toggleConst = () => new Promise((resolve) => { releaseConst = () => resolve({ ok: true, selected: true }); });
+            Friends.listFriends = async () => { pages++; return []; };
+            session.nativeFriendsVersion = 0;
+            select(5); const removing = FriendsMenu(session, ['bot-friends', 'remove', '900', '0']);
+            select(6); releaseRemove(); await removing;
+            assert.equal(pages, 0, 'the remove page does not reach another character');
+            assert.equal(session.botFriendsView, undefined, 'the new character keeps its own friends view');
+            select(5); const toggling = FriendsMenu(session, ['bot-friends', 'const', '900', '0']);
+            select(6); releaseConst(); await toggling;
+            assert.equal(pages, 0, 'the const page does not reach another character');
+            assert.equal(session.botFriendsView, undefined, 'the new character keeps its own friends view');
+        } finally {
+            Friends.remove = originalRemove; Friends.toggleConst = originalToggle; Friends.listFriends = originalFriends;
+            session.nativeFriendsVersion = nativeVersion;
+        }
     } finally {
         LifeState.findByName = originals.find; Friends.request = originals.request;
         Friends.listCandidates = originals.candidates; Friends.selectedCount = originals.count;
