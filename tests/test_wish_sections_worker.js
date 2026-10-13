@@ -153,6 +153,130 @@ module.exports.wishSectionsProbe = async id => {
                 context: { ...kernel.states.get(id).context, wishAdvisory: advice } });
             return { state: candidate, deps, advice };
         };
+        // Actual native stock purchases and one-shot surplus liquidation can
+        // be the selected next economic step while the bot is still hunting.
+        // An unchanged round/publication never needs a second source graph.
+        const Tendency = invoke('GameServer/Bot/AI/TendencyRoll'), roll = Tendency.roll;
+        const checkEconomicLeaf = async activity => {
+            const offerRecord = 920930, board = boardReady();
+            if (activity === 'selling') board.put({ id: offerRecord, ownerId: 920931, storeType: 1,
+                town: 'Giran', revision: 1, lines: [{ lineId: 920932, selfId: 1463, count: 100000, price: 1, enchant: 0 }] });
+            const wallet = activity === 'shopping' ? 10000000 : 50;
+            // Native worn D equipment removes the fixture's mandatory
+            // beginner-weapon recovery, which otherwise outranks stock roots.
+            const worn = [[166, 7], [347, 10], [377, 11], [40, 12], [45, 6], [606, 9], [627, 8],
+                [847, 1], [847, 2], [890, 4], [890, 5], [910, 3]];
+            const inventory = Life.inventorySummaryFromItems([
+                ...worn.map(([selfId, slot], at) => ({ id: 920900 + at, selfId, amount: 1, equipped: 1, slot })),
+                { id: 920920, selfId: 57, amount: wallet, equipped: 0, slot: 0 },
+                { id: 920921, selfId: 1463, amount: 1, equipped: 0, slot: 0 },
+                { id: 920922, selfId: 1869, amount: 1000, equipped: 0, slot: 0 },
+                { id: 920923, selfId: 17, amount: 1000, equipped: 0, slot: 0 }]);
+            let candidate = { ...ordinaryOwner.state, adena: wallet, inventory,
+                stats: { ...ordinaryOwner.state.stats, wishFocus: null, dormantWishes: [], activityLeaf: 0,
+                    wishSections: undefined, wishDirty: 0, huntEfficiency: [], equipmentPlan: null } };
+            const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
+            assert.equal(Index.find(Data.items, 166).etc.rank, 'd', 'the native physical weapon really has D grade');
+            assert.equal(invoke('GameServer/Inventory/ShotStock').planForState(candidate).selfId, 1463,
+                'the actual supplied shots match the native worn-weapon plan');
+            const bag = invoke('GameServer/Bot/Population/SurvivalFloor').stateInventory(candidate, Data.items);
+            assert(bag.load < Profile.profileFor(candidate, clock).maxLoad, 'the fixture can physically carry its owned stock');
+            let selectedProbability = 0;
+            // Drive only the native roll. The harness observes the actual
+            // eligible candidates and their native weight function below.
+            // No source/funding filter, returned leaf or card is replaced.
+            globalThis.wishSectionChooseRoll = (rows, weight, original) => {
+                if (!rows.some(row => row.activity)) return original;
+                const at = rows.findIndex(row => row.activity === activity
+                    && (activity === 'shopping' ? row.kind === 'buy' && row.rootKey.startsWith('power:')
+                        : row.kind === 'liquidate' && row.funding));
+                assert(at >= 0, 'the requested leaf must already be eligible: ' + JSON.stringify(rows.map(row => [row.activity, row.kind, row.rootKey])));
+                const weights = rows.map(row => Math.max(0, Number(weight(row)) || 0));
+                assert(weights.every(Number.isFinite));
+                const total = weights.reduce((sum, value) => sum + value, 0);
+                const chance = index => Tendency.MIN / rows.length + (1 - Tendency.MIN)
+                    * (total > 0 ? weights[index] / total : 1 / rows.length);
+                selectedProbability = chance(at);
+                assert(selectedProbability > 0);
+                return weights.slice(0, at).reduce((sum, _, index) => sum + chance(index), 0) + selectedProbability / 2;
+            };
+            const prepared = await prepareNative(candidate, clock);
+            delete globalThis.wishSectionChooseRoll;
+            assert(selectedProbability > 0, 'the native positive-probability choice was observed');
+            candidate = prepared.state;
+            const accepted = prepared.advice, leaf = accepted.card.activity;
+            assert.equal(leaf.activity, activity, 'the fixture selects its real native economic leaf: ' + JSON.stringify(leaf));
+            assert.equal(leaf.kind, activity === 'shopping' ? 'buy' : 'liquidate');
+            if (activity === 'shopping') assert(leaf.rootKey.startsWith('power:'), 'the actual funded equipment wish remains the purchase owner');
+            assert(ColdEconomyDecision.refreshAdvisory(candidate, accepted, prepared.deps),
+                'current native resources and observed source prove this economic leaf');
+            const before = builds, focus = candidate.stats.wishFocus, seq = candidate.stats.decisionSeq;
+            for (let at = 0; at < 4; at++) {
+                Economy.forgetContext(id);
+                const entry = kernel.states.get(id);
+                const plan = await kernel.planLifecycle({ state: candidate, context: entry.context, timestamp: clock });
+                assert.equal(builds, before, 'a funding hunt reuses the native buy/sale preparation after eviction');
+                assert.equal(plan.activityPick.activity, activity);
+                const result = await kernel.projectResolve(plan.plannedState, {
+                    patch: {}, materialize: { exp: 1, sp: 1, adena: 1, items: [] },
+                    debug: { fights: 0, wins: 0 }, events: [], nextResolveAt: clock + 60000
+                }, ++clock);
+                candidate = result.state;
+                assert.equal(candidate.adena, wallet + at + 1, 'physical funding is always current');
+                assert.equal(candidate.inventory[57].amount, candidate.adena);
+                assert.deepEqual(candidate.stats.wishFocus, focus);
+                assert.equal(candidate.stats.decisionSeq, seq);
+                assert.equal(candidate.stats.activityLeaf, prepared.state.stats.activityLeaf);
+                kernel.upsert({ state: publication(candidate), context: { ...entry.context } });
+                candidate = kernel.states.get(id).state;
+                assert(kernel.states.get(id).context.wishAdvisory, 'native canonical publication retains buy/sale advice');
+            }
+            assert.equal(builds, before, 'four native before/after round preparations keep the selected economic leaf');
+            const fresh = kernel.states.get(id).context.wishAdvisory;
+            const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+            const packet = candidate.stats.money;
+            let fundedPrice = 0;
+            for (let at = 5; at < packet.length; at += 3) fundedPrice = Math.max(fundedPrice, packet[at]);
+            const changedWallet = activity === 'shopping' ? 0 : Math.ceil(packet[2] + fundedPrice + packet[3]);
+            const moneyChanged = { ...candidate, adena: changedWallet, inventory: { ...candidate.inventory,
+                57: { ...candidate.inventory[57], amount: changedWallet } } };
+            if (activity === 'selling') {
+                assert.equal(Funding.moneyReached(candidate), false);
+                assert.equal(Funding.moneyReached(moneyChanged), true, 'the actual native funding goal is now complete');
+            }
+            assert.equal(ColdEconomyDecision.refreshAdvisory(moneyChanged, fresh, prepared.deps), null,
+                'native affordability loss or funding completion reaches reconsideration');
+            const removed = activity === 'shopping' ? 166 : leaf.items[0];
+            const noItem = { ...candidate, inventory: { ...candidate.inventory } }; delete noItem.inventory[removed];
+            assert.equal(ColdEconomyDecision.refreshAdvisory(noItem, fresh, prepared.deps), null,
+                'physical item disappearance never reuses the accepted purchase/sale');
+            const owned = { ...candidate, inventory: { ...candidate.inventory,
+                166: { ...candidate.inventory[166], instances: [{ ...candidate.inventory[166].instances[0], id: 920899 }] } } };
+            assert.equal(ColdEconomyDecision.refreshAdvisory(owned, fresh, prepared.deps), null,
+                'a changed physical owner cannot borrow a buy/sale proof');
+            if (activity === 'shopping') {
+                const complete = { ...candidate, inventory: { ...candidate.inventory,
+                    [leaf.itemId]: { ...candidate.inventory[leaf.itemId], selfId: leaf.itemId,
+                        amount: ColdEconomyDecision.heldFor(prepared.state, leaf.itemId) + leaf.amount } } };
+                assert.equal(ColdEconomyDecision.refreshAdvisory(complete, fresh, prepared.deps), null,
+                    'completed purchases return to native goal selection');
+                assert.equal(leaf.sourceType, 'npc', 'the positive-probability fixture uses a real native NPC quote');
+                assert.equal(ColdEconomyDecision.refreshAdvisory(candidate, fresh, { ...prepared.deps, npcOffersFor: () => [] }), null,
+                    'an unavailable actual NPC quote cannot reuse a prepared purchase');
+                board.put({ id: offerRecord, ownerId: 920931, storeType: 1,
+                    town: leaf.town, revision: 1, lines: [{ lineId: 920932, selfId: leaf.itemId,
+                        count: 100, price: Math.max(1, Math.floor(leaf.unitPrice / 2)), enchant: 0 }] });
+                assert.equal(ColdEconomyDecision.refreshAdvisory(candidate, fresh, prepared.deps), null,
+                    'a real better supplier publication changes the native item/source dependency');
+                const beforeSourceFailure = builds;
+                await kernel.planLifecycle({ state: candidate, context: kernel.states.get(id).context, timestamp: clock });
+                assert(builds > beforeSourceFailure, 'actual supplier failure reaches native source selection');
+            }
+            board.remove(offerRecord); kernel.states.set(id, ordinaryOwner);
+        };
+        try { await checkEconomicLeaf('shopping'); await checkEconomicLeaf('selling'); }
+        finally { delete globalThis.wishSectionChooseRoll; Tendency.roll = roll;
+            boardReady().remove(920930); kernel.states.set(id, ordinaryOwner); }
         const assertRecoveryReplan = async (history, timestamp, change = subject => subject) => {
             const initial = { ...state, stats: { ...state.stats, equipmentPlan: { ...planBefore, ...history } } };
             const prepared = await prepareNative(initial, clock);
@@ -292,6 +416,12 @@ const { parentPort, workerData } = require('node:worker_threads');
 // Resource/ownership normalization runs its actual code and dependencies.
 const loadJS = Module._extensions['.js'];
 Module._extensions['.js'] = (loaded, filename) => {
+    if (filename.endsWith('/Economy/WishNetwork.js')) {
+        const source = fs.readFileSync(filename, 'utf8'), marker = 'function choose(rows, weight, roll) {';
+        if (!source.includes(marker)) throw Error('native wish choose function missing');
+        return loaded._compile(source.replace(marker, marker
+            + '\n    if (globalThis.wishSectionChooseRoll) roll = globalThis.wishSectionChooseRoll(rows, weight, roll);'), filename);
+    }
     if (filename.endsWith('/BotLifeState.js')) return loaded._compile(fs.readFileSync(filename, 'utf8')
         + '\nmodule.exports.wishSectionNormalize = normalize;', filename);
     return loadJS(loaded, filename);

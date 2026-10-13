@@ -379,17 +379,20 @@ function canReuse(state, accepted, deps = {}) {
     if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
         || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
         || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
-    // The ordinary fight path resumes hunting. Commands, unknown sources and
-    // completed/impossible targets go through the full native preparation.
+    // The ordinary fight path resumes hunting even when its accepted next
+    // economic step is a purchase or liquidation. Commands still prepare via
+    // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
-    if (!leaf || leaf.activity !== 'hunting' || state.activity !== 'hunting' || state.incomingPending) return false;
+    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
+        || state.activity !== 'hunting' || state.incomingPending) return false;
     const Sections = require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
     if (Sections.meaningfulMoney(state, baseline) || Sections.observationChanged(state, baseline, timestamp, deps.mode)
         || Sections.capability(state, timestamp) !== baseline.build) return false;
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
     if (Sections.horizonChanged(state, baseline, baseline.expHour, persona)) return false;
-    return invoke('GameServer/Bot/Economy/EconomyContext').calculationHolds(state, accepted.fence, deps);
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    return Economy.calculationHolds(state, accepted.fence, deps) && Economy.acceptedActivityHolds(state, leaf, deps);
 }
 function refreshAdvisory(state, accepted, deps = {}) {
     if (!canReuse(state, accepted, deps)) return null;

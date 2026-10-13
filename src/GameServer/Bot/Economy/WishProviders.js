@@ -343,6 +343,8 @@ function buildProjection(state, ctx, deps) {
         if (!sourceIndex?.has(Number(id))) return null;
         const factsKey = spoilOnly ? `spoil:${id}` : Number(id);
         if (!farmFacts.has(factsKey)) {
+            const input = ctx.nodeInputs?.begin();
+            try {
             if (spoiler === undefined && sourceIndex.get(Number(id)).some(entry => entry.kind === 'spoil'))
                 spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state, { skills: Profile.skillsFor(state) }) || false;
             // Only the best ready fact comes back; with diagnostics every record is
@@ -360,9 +362,13 @@ function buildProjection(state, ctx, deps) {
                 for (const [reason, amount] of reasons) Diagnostics.count('provider', 'source_fact', reason, amount);
                 Diagnostics.count('provider', 'source_path', best ? 'ready' : reasons.size ? 'refused' : 'no_source');
             }
-            farmFacts.set(factsKey, best);
+            farmFacts.set(factsKey, { best, inputs: input && { items: [...input.items], spots: [...input.spots], bag: [...input.bag] } });
+            } finally { if (input) ctx.nodeInputs.end(); }
         }
-        const best = farmFacts.get(factsKey);
+        const { best, inputs } = farmFacts.get(factsKey);
+        // A later retained candidate may reuse a fact first read in a rejected
+        // arena. Reattach every competing source read, including absent paths.
+        if (inputs) ctx.nodeInputs.keep(inputs);
         return best ? { kind: best.kind, activity: 'hunting', costHours: best.hours * best.netHourCost, readyHours: best.hours,
             spotId: best.spotId, npcId: best.npcId, itemId: Number(id), amount: 1,
             ...(best.town ? { town: best.town, tripHours: best.tripHours, tripFees: best.tripFees } : {}) } : null;
@@ -989,14 +995,7 @@ function buildProjection(state, ctx, deps) {
     for (const node of deps.nodes || []) { if (node.need) root(node); else add(node); }
     const moneyPaths = ctx.hunt.perHour > 0 ? [{ activity: 'hunting', kind: 'money',
         spotId: ctx.bestSpotId, incomePerHour: ctx.hunt.perHour, riskHours: ctx.expectedDeathHours }] : [];
-    const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
-    const saleState = Warehouse.saleState(state);
-    const sale = invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(saleState, {
-        preparedReservations: invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(saleState),
-        keptAmounts: { ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, ctx),
-            ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: ctx.stock('potions').target }),
-            ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) }
-    }).filter(row => row.npcComparable && !values.has(Number(row.selfId)));
+    const sale = liquidationCandidates(state, ctx).filter(row => !values.has(Number(row.selfId)));
     const saleValue = sale.reduce((sum, row) => sum + ctx.buyback(row.selfId) * row.count, 0);
     if (saleValue > 0) {
         // NPC buyback is the same across towns. Compare the prepared routes
@@ -1121,4 +1120,14 @@ function personalCraftPlan(state, context) {
         materials: finalRecipe.materials.map(row => ({ ...row })), craftProviders: providers,
         componentRecipes: components, valueRate: Number(wish.ratio || 0), source: 'wish_network' };
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, recipeIds, knownWorkshop, personalCraftPlan, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+function liquidationCandidates(state, ctx) {
+    const saleState = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').saleState(state);
+    const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+    return Disposition.saleCandidates(saleState, {
+        preparedReservations: Disposition.reservedEquipmentAmounts(saleState),
+        keptAmounts: { ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, ctx),
+            ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: ctx.stock('potions').target }),
+            ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) }
+    }).filter(row => row.npcComparable);
+}
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, recipeIds, knownWorkshop, personalCraftPlan, liquidationCandidates, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };

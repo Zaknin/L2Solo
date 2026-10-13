@@ -9,11 +9,13 @@ const Providers = require('./WishProviders');
 const Sections = require('./DecisionSections');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
+const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 const FENCE_BYTES = 4096;
+const FENCE_RAW_BYTES = 65536, FENCE_SPOTS = 4096;
 const SOURCE_MEMO_LIMIT = 8;
 const fenceEncoder = new TextEncoder(), fenceDecoder = new TextDecoder();
 let routeAnchors = new WeakMap();
@@ -251,22 +253,90 @@ function calculationFence(state, sections, reads, spots, deps, bands = [], safet
         if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
         items.push(id, indexes.get(token));
     }
-    const bytes = fenceEncoder.encode(JSON.stringify([sectionKeys(state, deps, bands).structural,
-        [tokens, items], [...spots], bands, safety]));
-    return bytes.byteLength <= FENCE_BYTES ? bytes : null;
+    return encodeCalculationFence([sectionKeys(state, deps, bands).structural,
+        [tokens, items], [...spots], bands, safety], !isMainThread);
+}
+// Grid ids and occupancy versions stay exact. Canonical coordinates share
+// successive differences; dungeon/noncanonical ids keep their original keys.
+// Only the worker compresses large proofs, and only the existing owner keeps
+// their <=4KB result. No hash, global dictionary or saved dependency list.
+function encodeCalculationFence(fields, compact = true) {
+    const plain = fenceEncoder.encode(JSON.stringify(fields));
+    if (!compact || plain.byteLength <= 2048) return plain.byteLength <= FENCE_BYTES ? plain : null;
+    if (plain.byteLength > FENCE_RAW_BYTES || fields[2].length > FENCE_SPOTS) return null;
+    const tokens = [], indexes = new Map(), grid = [], other = [];
+    for (const [id, token] of fields[2]) {
+        if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
+        const parts = typeof id === 'string' && /^(?:0|[1-9]\d*|-[1-9]\d*)_(?:0|[1-9]\d*|-[1-9]\d*)$/.test(id)
+            ? id.split('_').map(Number) : null;
+        if (parts?.every(Number.isSafeInteger)) grid.push([parts[0], parts[1], indexes.get(token)]);
+        else other.push([id, token]);
+    }
+    grid.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const coordinates = []; let x = 0, y = 0;
+    for (const row of grid) {
+        if (!Number.isSafeInteger(row[0] - x) || !Number.isSafeInteger(row[1] - y)) return null;
+        coordinates.push(row[0] - x, row[1] - y, row[2]); x = row[0]; y = row[1];
+    }
+    const packed = fenceEncoder.encode(JSON.stringify([fields[0], fields[1], [tokens, coordinates, other], fields[3], fields[4]]));
+    if (packed.byteLength > FENCE_RAW_BYTES) return null;
+    const compressed = deflateRawSync(packed, { level: 6 });
+    if (compressed.byteLength + 1 > FENCE_BYTES) return null;
+    const result = new Uint8Array(compressed.byteLength + 1); result[0] = 1; result.set(compressed, 1);
+    return result;
+}
+function decodeCalculationFence(fence) {
+    if (!(fence instanceof Uint8Array) || !fence.byteLength || fence.byteLength > FENCE_BYTES) return null;
+    let fields;
+    try {
+        fields = JSON.parse(fenceDecoder.decode(fence[0] === 1
+            ? inflateRawSync(fence.subarray(1), { maxOutputLength: FENCE_RAW_BYTES }) : fence));
+        if (fence[0] === 1) {
+            const encoded = fields?.[2];
+            if (!Array.isArray(encoded) || encoded.length !== 3) return null;
+            const [tokens, coordinates, other] = encoded;
+            if (!Array.isArray(tokens) || tokens.length > FENCE_SPOTS || tokens.some(token => typeof token !== 'string')
+                || !Array.isArray(coordinates) || coordinates.length % 3 || !Array.isArray(other)
+                || coordinates.length / 3 + other.length > FENCE_SPOTS) return null;
+            const spots = []; let x = 0, y = 0;
+            for (let at = 0; at < coordinates.length; at += 3) {
+                const token = coordinates[at + 2];
+                if (!Number.isSafeInteger(coordinates[at]) || !Number.isSafeInteger(coordinates[at + 1])
+                    || !Number.isSafeInteger(token) || token < 0 || token >= tokens.length) return null;
+                x += coordinates[at]; y += coordinates[at + 1];
+                if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) return null;
+                spots.push([`${x}_${y}`, tokens[token]]);
+            }
+            fields[2] = spots.concat(other);
+        }
+    } catch (_) { return null; }
+    if (!Array.isArray(fields) || fields.length !== 5 || typeof fields[0] !== 'string'
+        || !Array.isArray(fields[1]) || fields[1].length !== 2 || !Array.isArray(fields[1][0])
+        || fields[1][0].some(token => typeof token !== 'string') || !Array.isArray(fields[1][1]) || fields[1][1].length % 2
+        || !Array.isArray(fields[2]) || fields[2].length > FENCE_SPOTS
+        || fields[2].some(row => !Array.isArray(row) || row.length !== 2
+            || !['string', 'number'].includes(typeof row[0]) || typeof row[1] !== 'string')
+        || !Array.isArray(fields[3]) || fields[3].some(row => !Array.isArray(row) || row.length !== 4
+            || !Number.isSafeInteger(row[0]) || row[0] <= 0 || !Number.isFinite(row[1]) || row[1] < 1
+            || !Number.isFinite(row[3]) || row[3] < row[1]
+            || row[2] !== null && (!Number.isFinite(row[2]) || row[2] < row[1]))
+        || fields[4] !== null && (!Array.isArray(fields[4]) || fields[4].length !== 3 || !fields[4].every(Number.isFinite))) return null;
+    const [tokens, items] = fields[1];
+    const itemIds = new Set();
+    for (let at = 0; at < items.length; at += 2) {
+        if (!Number.isSafeInteger(items[at]) || items[at] < 0 || itemIds.has(items[at])
+            || !Number.isSafeInteger(items[at + 1]) || items[at + 1] < 0 || items[at + 1] >= tokens.length) return null;
+        itemIds.add(items[at]);
+    }
+    if (new Map(fields[2]).size !== fields[2].length) return null;
+    return fields;
 }
 function calculationHolds(state, fence, deps = {}) {
     if (!(fence instanceof Uint8Array) || fence.byteLength > FENCE_BYTES || extensions.size || deps.nodes?.length) return false;
     deps = resolved(state, deps);
     if (deps.workshops && !deps.workshopRevision && !deps.inputKey) return false;
-    let fields;
-    try { fields = JSON.parse(fenceDecoder.decode(fence)); } catch (_) { return false; }
-    if (!Array.isArray(fields) || fields.length !== 5 || !Array.isArray(fields[3])) return false;
-    if (!Array.isArray(fields[1]) || fields[1].length !== 2 || !Array.isArray(fields[1][0])
-        || !Array.isArray(fields[1][1]) || fields[1][1].length % 2 || !Array.isArray(fields[2])
-        || fields[3].some(row => !Array.isArray(row) || row.length !== 4
-            || !(Number(row[1]) >= 1) || !(Number(row[3]) >= row[1])
-            || row[2] !== null && !(Number(row[2]) >= row[1]))) return false;
+    const fields = decodeCalculationFence(fence);
+    if (!fields) return false;
     const [key, [tokens, items], spots, bands, safety] = fields;
     for (const [id, low, high] of bands) {
         const amount = Number(state.inventory?.[id]?.amount);
@@ -279,6 +349,30 @@ function calculationHolds(state, fence, deps = {}) {
         if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;
     }
     return key === sections.structural && marketHolds(deps.board, reads, deps) && spotsHold(deps, spots);
+}
+// A retained leaf is calculation data. Recheck its native source, physical
+// resources and funding now; execution still uses the existing command/CAS.
+function acceptedActivityHolds(state, leaf, deps = {}) {
+    if (leaf.activity === 'hunting') return true;
+    deps = resolved(state, deps, false);
+    const trip = deps.tripCost || Trip.preparedReader(deps.routeRows || [], { hourAdena: positive(state.stats?.money?.[0]) });
+    const route = trip.details?.(leaf.town);
+    if (!route?.known || !Number.isFinite(route.fees) || route.fees > positive(state.adena)) return false;
+    if (leaf.activity === 'shopping' && leaf.kind === 'buy' && leaf.itemId > 0 && leaf.amount > 0
+        && leaf.unitPrice > 0 && ['npc', 'configured_store', 'afk'].includes(leaf.sourceType)) {
+        const remaining = invoke('GameServer/Bot/Population/ColdEconomyDecision').remainingToOrder(leaf, state);
+        if (!(remaining > 0)) return false;
+        const offer = require('./WishPurchaseEvidence').reader(state, { board: deps.board, trip }, deps)(leaf.itemId);
+        if (!offer || offer.sourceType !== leaf.sourceType || offer.town !== leaf.town
+            || offer.unitPrice !== leaf.unitPrice || offer.availableUnits < remaining) return false;
+        const Funding = require('./PurchaseFunding');
+        return Funding.spendable(state, deps.buyOrderEscrow, Funding.nativeTerms(leaf, leaf.itemId)) >= remaining * offer.unitPrice + route.fees;
+    }
+    if (leaf.activity === 'selling' && leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
+        && invoke('GameServer/Bot/Population/ColdOccupationSources').hasNpcSellerInTown(leaf.town)) {
+        return Providers.liquidationCandidates(state, basics(state, deps)).some(row => leaf.items.includes(Number(row.selfId)));
+    }
+    return false;
 }
 // The market as an input of one bot: the board lines and the counter of each
 // item its review read, as tokens at the time of reading. The context stays
@@ -616,7 +710,7 @@ function forState(state = {}, deps = {}) {
     const read = id => { id = Number(id);
         for (const local of nodeScopes) local.items.set(id, marketToken(sourceBoard, id, deps));
         if (reads.has(id)) return;
-        if (scope) { if (!scope.has(id)) scope.set(id, marketToken(sourceBoard, id, deps)); return; }
+        if (scope) { if (!scope.items.has(id)) scope.items.set(id, marketToken(sourceBoard, id, deps)); return; }
         reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
@@ -640,7 +734,7 @@ function forState(state = {}, deps = {}) {
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
-        sourceSpot: id => { spotReads.set(id, occupancyToken(deps, id));
+        sourceSpot: id => { (scope?.spots || spotReads).set(id, occupancyToken(deps, id));
             for (const local of nodeScopes) local.spots.set(id, occupancyToken(deps, id)); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
@@ -656,8 +750,11 @@ function forState(state = {}, deps = {}) {
             keep: input => { for (const [id] of input.items) read(id);
                 for (const [id] of input.spots) context.sourceSpot(id);
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
-        readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
-            keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); } } } };
+        readScope: { open: () => (scope = { items: new Map(), spots: new Map() }), close: () => { scope = null; },
+            keep: kept => {
+                for (const [id, token] of kept.items) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); }
+                for (const [id, token] of kept.spots) if (!spotReads.has(id)) spotReads.set(id, token);
+            } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
         ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
@@ -773,7 +870,6 @@ function forState(state = {}, deps = {}) {
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     plan.bagSafety = bagSafety(state, timestamp);
-    plan.calculationFence = calculationFence(state, sections, reads, spotReads, deps, plan.quantityBands, plan.bagSafety);
     // Source memo belongs only to the bounded cache owner. A planning view
     // or a group closure must never retain a second copy outside that cap.
     const retainedSourceMemo = projection.sourceSections;
@@ -938,9 +1034,10 @@ function view(state, plan, deps, built = {}) {
     // The plan is the identity of one decision for memos kept beside it
     // (a refused trip, the gear plan choice), not this view object.
     Object.defineProperty(context, 'plan', { value: plan });
-    Object.defineProperty(context, 'calculationFence', { get: () => built.fenceData
-        ? calculationFence(state, built.fenceData.sections, built.fenceData.reads, built.fenceData.spots, deps,
-            plan.quantityBands, plan.bagSafety) : plan.calculationFence });
+    let fence;
+    Object.defineProperty(context, 'calculationFence', { get: () => fence === undefined
+        ? (fence = built.fenceData ? calculationFence(state, built.fenceData.sections, built.fenceData.reads, built.fenceData.spots, deps,
+            plan.quantityBands, plan.bagSafety) : null) : fence });
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
@@ -1101,6 +1198,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

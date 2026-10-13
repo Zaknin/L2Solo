@@ -110,7 +110,7 @@ try {
     stocked = { ...stocked, stats: { ...stocked.stats, ...stockContext.statsPacket } };
     const stockAdvice = Decisions.advisory(stockContext, stocked);
     assert(stockAdvice);
-    const proof = JSON.parse(new TextDecoder().decode(stockAdvice.fence));
+    const proof = Economy.decodeCalculationFence(stockAdvice.fence);
     const shotBand = proof[3].find(row => row[0] === 1835);
     assert(shotBand, 'real native stock target provides the reuse boundary');
     assert(proof[3].some(row => row[0] === 1869), 'the native unrelated free material is reusable');
@@ -284,6 +284,31 @@ try {
             assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
         }
     } finally { Providers.build = nativeProviders; Tendency.roll = heldRoll; }
+    // Scope pruning keeps common inputs and both admitted alternatives, not
+    // only the winner; discarded arenas cannot bloat or invalidate the card.
+    const scopedProvider = Providers.build;
+    Providers.build = (bot, ctx, options) => {
+        ctx.sourceSpot('scope-common');
+        const first = ctx.readScope.open(); ctx.sourceSpot('scope-first'); ctx.readScope.close();
+        const second = ctx.readScope.open(); ctx.sourceSpot('scope-second'); ctx.readScope.close();
+        ctx.readScope.open(); ctx.sourceSpot('scope-discarded'); ctx.readScope.close();
+        ctx.readScope.keep(first); ctx.readScope.keep(second);
+        return originalBuild(bot, ctx, options);
+    };
+    try {
+        const subject = { ...state, characterId: 92099 };
+        const scoped = Economy.forState(subject, { ...deps, rememberContext: false });
+        const fields = Economy.decodeCalculationFence(scoped.calculationFence);
+        assert(fields, 'the scoped proof remains bounded');
+        const sources = new Map(fields[2]);
+        for (const id of ['scope-common', 'scope-first', 'scope-second']) assert(sources.has(id));
+        assert.equal(sources.has('scope-discarded'), false);
+        for (const id of ['scope-common', 'scope-first', 'scope-second']) assert.equal(Economy.calculationHolds(subject,
+            scoped.calculationFence, { ...deps, occupancy: new Map([[id, { count: 1 }]]) }), false,
+            'a change to any retained competing source forces native reconsideration');
+        assert(Economy.calculationHolds(subject, scoped.calculationFence,
+            { ...deps, occupancy: new Map([['scope-discarded', { count: 1 }]]) }));
+    } finally { Providers.build = scopedProvider; }
     Economy.forget(state.characterId);
     assert.equal(Profile.size().ownerBuilds >= 0, true);
     console.log('PASS money/XP/combat reuse, fresh funding, source sections, publication/eviction, accumulation/loss, coalesced level/death and untouched expiry');
