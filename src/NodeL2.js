@@ -32,20 +32,26 @@ function shutdown(signal) {
     utils.infoWarn('DB', 'flushing buffered character state before %s', signal);
     const forceExit = setTimeout(() => process.exit(0), 15000);
     forceExit.unref?.();
-    Promise.resolve().then(() => invoke('GameServer/Bot/Population/PopulationService').stop())
-        .catch((error) => utils.infoWarn('ColdWorker', 'cold simulation drain failed: %s', error.message))
-        .then(() => CharacterWriteQueue.flushAll())
-        .catch((error) => utils.infoWarn('DB', 'final buffered flush failed: %s', error.message))
-        .then(() => PathfindingWorkerPool.shutdown())
-        .then(() => invoke('GameServer/Clan/ClanPlanningCoordinator').shutdown())
-        .then(() => LangfuseTracing.shutdown())
-        .then(async () => {
+    // Each step logs its own failure and the next steps still run, so the
+    // database is always closed.
+    (async () => {
+        try { await invoke('GameServer/Bot/Population/PopulationService').stop(); }
+        catch (error) { utils.infoWarn('ColdWorker', 'cold simulation drain failed: %s', error.message); }
+        try { await CharacterWriteQueue.flushAll(); }
+        catch (error) { utils.infoWarn('DB', 'final buffered flush failed: %s', error.message); }
+        try { await PathfindingWorkerPool.shutdown(); }
+        catch (error) { utils.infoWarn('Pathfinding', 'pathfinding worker shutdown failed: %s', error.message); }
+        try { await invoke('GameServer/Clan/ClanPlanningCoordinator').shutdown(); }
+        catch (error) { utils.infoWarn('ClanPlan', 'clan planning worker shutdown failed: %s', error.message); }
+        try { await LangfuseTracing.shutdown(); }
+        catch (error) { utils.infoWarn('Langfuse', 'tracing shutdown failed: %s', error.message); }
+        try {
             const result = await invoke('GameServer/Social/InteractionMemoryRuntime').events.drain();
             if (!result.drained) utils.infoWarn('InteractionMemory', 'shutdown left %d unwritten episodes', result.pending);
-        })
-        .then(() => Database.close())
-        .catch((error) => utils.infoWarn('DB', 'graceful SQLite close failed: %s', error.message))
-        .finally(() => process.exit(0));
+        } catch (error) { utils.infoWarn('InteractionMemory', 'shutdown drain failed: %s', error.message); }
+        try { await Database.close(); }
+        catch (error) { utils.infoWarn('DB', 'graceful SQLite close failed: %s', error.message); }
+    })().finally(() => process.exit(0));
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
