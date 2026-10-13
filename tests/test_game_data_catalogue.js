@@ -45,6 +45,24 @@ try {
     } finally { fs.readFileSync = readFile; }
 
     DataCache.init();
+    // Cold workers replace live-world invoke services. Native catalogue
+    // queries still read the same pure static owners without those services.
+    const cataloguePath = require.resolve('../src/GameServer/Knowledge/GameDataCatalogue');
+    const savedCatalogue = require.cache[cataloguePath], originalInvoke = global.invoke;
+    try {
+        global.invoke = name => {
+            if (name === 'GameServer/World/Generics/NpcShopBuyLists') return { allEntries: () => [] };
+            if (name === 'GameServer/World/TownRespawn') throw Error('live world service is unavailable');
+            return originalInvoke(name);
+        };
+        delete require.cache[cataloguePath];
+        const workerCatalogue = require(cataloguePath).native();
+        const offers = workerCatalogue.npcTownOffers();
+        assert(offers && offers.itemCount > 0, 'native town stock uses the pure owner under worker service restrictions');
+    } finally {
+        global.invoke = originalInvoke;
+        require.cache[cataloguePath] = savedCatalogue;
+    }
     const loadedItems = DataCache.items;
     try {
         DataCache.items = undefined;

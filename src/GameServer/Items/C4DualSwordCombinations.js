@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 
 const RECIPE_ID_OFFSET = 900000;
@@ -166,7 +167,7 @@ function aggregateMaterials(leftId, rightId) {
 function loadRecipes() {
     if (itemSource === DataCache.items) return recipes;
     itemSource = DataCache.items;
-    const items = new Map((DataCache.items || []).map((item) => [Number(item.selfId), item]));
+    const items = ItemTemplateIndex.lastIndex(DataCache.items || [], loadRecipes);
     recipes = COMBINATIONS.flatMap(([productId, leftId, rightId, stationKey]) => {
         const product = items.get(Number(productId));
         const left = items.get(Number(leftId));

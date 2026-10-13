@@ -55,8 +55,6 @@ const PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT = 2;
 const PAIRED_SLOTS = Object.freeze({ 1: 2, 2: 1, 4: 5, 5: 4 });
 const NPC_GEAR_MAX_RANK = 'd';
 let staticNpcItemIdsCache = null;
-let itemCatalogSource = null;
-let itemCatalogById = new Map();
 
 function rateProfileSignature() {
     const rates = ProgressionRates.profile();
@@ -84,12 +82,7 @@ function withinExpectedKillLimit(plan, maxExpectedKills = Infinity) {
 }
 
 function catalogItem(selfId) {
-    const items = DataCache.items || [];
-    if (itemCatalogSource !== items) {
-        itemCatalogSource = items;
-        itemCatalogById = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return itemCatalogById.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, catalogItem) || null;
 }
 
 function catalogNpc(selfId) {
@@ -665,7 +658,7 @@ function preferredTarget(state = {}, options = {}) {
     const learningRecipe = recipe => require('../../Clan/ClanCraftingPolicy').recipeForProvider(recipe, options.craftProviders?.[recipe.recipeId]);
     const recipes = canonicalRecipes.map(learningRecipe);
     const recipeRank = options.recipeId
-        ? String((DataCache.items || []).find((item) => Number(item.selfId) === Number(recipes.find((recipe) => Number(recipe.recipeId) === Number(options.recipeId))?.productId))?.etc?.rank || '')
+        ? String(ItemTemplateIndex.findRequired(DataCache.items || [], recipes.find((recipe) => Number(recipe.recipeId) === Number(options.recipeId))?.productId)?.etc?.rank || '')
         : null;
     const recipesByProduct = new Map(recipes.map((recipe) => [Number(recipe.productId), recipe]));
     const excluded = excludedTargetIds(options);

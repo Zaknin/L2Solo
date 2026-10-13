@@ -80,7 +80,9 @@ function native() {
     const recipes = () => recipeOwner ||= require('./RecipeCatalog');
     const sources = () => sourceOwner ||= require('./SourceCatalog');
     const items = () => itemOwner ||= require('../Item/ItemTemplateIndex');
-    const shops = () => shopOwner ||= invoke('GameServer/World/Generics/NpcShopBuyLists');
+    // Native static data remains available when a worker replaces live-world
+    // services in invoke(). The canonical loader is data-only in that process.
+    const shops = () => shopOwner ||= require('../World/Generics/NpcShopBuyLists');
     const nativeRecipes = () => nativeRecipeOwner ||= require('../Items/C4RecipeItems');
     const spawns = () => spawnOwner ||= require('./SpawnCatalog');
     const hasRecipes = () => !!nativeRecipes().loadedSource();

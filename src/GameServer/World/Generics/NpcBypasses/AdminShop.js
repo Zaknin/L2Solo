@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../../Item/ItemTemplateIndex');
 const ServerResponse = invoke('GameServer/Network/Response');
 const Item           = invoke('GameServer/Item/Item');
 const DataCache      = invoke('GameServer/DataCache');
@@ -9,7 +10,7 @@ function itemIdsForSource(source) {
         return source;
     }
 
-    const available = ids => ids.filter(id => DataCache.items.some(item => item.selfId === id));
+    const available = ids => ids.filter(id => ItemTemplateIndex.hasStrictRequired(DataCache.items, id));
     if (source === 'pet:food') return available([...new Set(Object.values(TYPES).flatMap(type => type.food))]);
     if (source === 'pet:equipment') return available(Object.keys(gear).map(Number));
     if (source === 'pet:summons') return available(Object.keys(TYPES).map(Number).filter(id => id !== 4425));

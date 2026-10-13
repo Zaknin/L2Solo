@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { randomBytes } = require('crypto');
 const { managers, tickets } = require('./PetExchangeData');
 const NpcIndex = require('../World/NpcObjectIndex');
@@ -33,7 +34,7 @@ async function exchange(session, token, ticketId) {
     session.activePetExchange = null;
     const entry = tickets[ticketId];
     if (!entry) throw new Error('Unknown pet ticket.');
-    if (!DataCache.items.some(item => item.selfId === entry.itemId)) throw new Error('Pet item is unavailable.');
+    if (!ItemTemplateIndex.hasStrictRequired(DataCache.items, entry.itemId)) throw new Error('Pet item is unavailable.');
     const actor = session.actor;
     const ticket = actor.backpack.fetchItemFromSelfId(Number(ticketId));
     if (!ticket || ticket.fetchAmount() < 1) throw new Error('You do not have the matching Pet Exchange Ticket.');

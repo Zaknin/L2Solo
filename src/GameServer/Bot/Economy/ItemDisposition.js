@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const BeginnerShots = require('../../Items/C4BeginnerShots');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const DataCache = invoke('GameServer/DataCache');
@@ -32,16 +33,9 @@ const SHOT_PRODUCT_RANK = Object.freeze({
     3948: 'd', 3949: 'c', 3950: 'b', 3951: 'a', 3952: 's'
 });
 
-let templateIndexSource = null;
-let templateIndex = new Map();
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (templateIndexSource !== items) {
-        templateIndexSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 // Canonical quest classification cannot be overridden by a saved gear kind.

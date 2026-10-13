@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const WeaponMask = invoke('GameServer/Skills/WeaponMask');
@@ -10,7 +11,6 @@ const weaponStat = kind => ({ 'Weapon.Bow': 'bowWpnVuln', 'Weapon.Knife': 'dagge
     'Weapon.Blunt': 'bluntWpnVuln', 'Weapon.BigBlunt': 'bluntWpnVuln' })[kind];
 const number = (value, fallback = 1) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const positive = value => Math.max(1, number(value));
-let npcSource, npcCount = 0, npcIndex = new Map();
 // Resolved on first use (the cold worker loads this module before them);
 // invoke() re-resolves the path on every call inside spot scans.
 let DataCacheModule, HuntingTargetPolicy, ColdCombatProfile;
@@ -21,13 +21,7 @@ const coldCombatProfile = () => ColdCombatProfile
     || (ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile'));
 
 function npcTemplate(id) {
-    const source = dataCache().npcs || [];
-    if (npcSource !== source || npcCount !== source.length) {
-        npcSource = source;
-        npcCount = source.length;
-        npcIndex = new Map(source.map(npc => [Number(npc.selfId), npc]));
-    }
-    return npcIndex.get(Number(id));
+    return ItemTemplateIndex.findLastByLength(dataCache().npcs, id, npcTemplate);
 }
 
 // A scan owns this snapshot: do not retain live effects, equipment or learned

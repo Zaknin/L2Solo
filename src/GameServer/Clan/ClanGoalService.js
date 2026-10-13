@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Database = invoke('Database');
@@ -167,8 +168,7 @@ async function clanProjectionById(clanId) {
 }
 
 function bloodMarkSourceLevel() {
-    return number((DataCache.npcs || [])
-        .find((npc) => number(npc.selfId) === number(Config.bloodMarkSourceNpcId))
+    return number(ItemTemplateIndex.findFinite(DataCache.npcs, Config.bloodMarkSourceNpcId)
         ?.template?.level, 60);
 }
 

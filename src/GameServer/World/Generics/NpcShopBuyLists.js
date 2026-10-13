@@ -1225,7 +1225,7 @@ function townOffers() {
     if (!Array.isArray(DataCache.npcSpawns)) return null;
     if (sameInputs(townOfferView, rate)) return townOfferView.view;
     const inputs = viewInputs(rate);
-    const Towns = invoke('GameServer/World/TownRespawn');
+    const Towns = require('../TownRespawn');
     const sellers = new Set(module.exports.npcIds()), towns = new Set(), offers = new Map(), byItem = new Map();
     for (const zone of inputs.spawns) for (const spawn of zone.spawns || []) {
         const sourceId = Number(spawn.selfId);

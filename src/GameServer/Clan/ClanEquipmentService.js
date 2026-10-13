@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Crafting = require('./ClanCraftingPolicy');
@@ -809,7 +810,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             previousMember,
             previousGoal,
             GearAcquisitionPlanner.equippedSlotsFor,
-            (selfId) => (DataCache.items || []).find((item) => number(item.selfId) === number(selfId)) || null
+            (selfId) => ItemTemplateIndex.findFinite(DataCache.items, selfId) || null
         )
         : false;
     const warehouseRows = await Database.fetchClanWarehouseItems(clan.id);

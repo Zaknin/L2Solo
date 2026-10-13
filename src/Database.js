@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('./GameServer/Item/ItemTemplateIndex');
 const BeginnerShots = require('./GameServer/Items/C4BeginnerShots');
 const fs = require('fs');
 const DiagnosticConfig = require('./GameServer/Bot/Population/PopulationConfig');
@@ -2726,7 +2727,7 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
         const outcome = Native.outcomeFor(rule, crystal.stage, step.npcId, step.roll);
         const targetId = outcome === 'success' ? crystal.nextId : outcome === 'broken' ? crystal.brokenId : null;
         if (!targetId || targetId !== step.toId) throw Error('cold_soul_crystal_outcome_changed');
-        const target = invoke('GameServer/DataCache').items.find(row => row.selfId === targetId);
+        const target = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, targetId);
         if (!target) throw Error('cold_soul_crystal_template_missing');
         guard();
         write('UPDATE items SET selfId = ?, name = ? WHERE id = ? AND characterId = ?', [targetId,target.template.name,item.id,characterId]);
@@ -7329,7 +7330,7 @@ const Database = {
             if (!recipe) throw new Error('Invalid dimensional diamond exchange');
             const diamonds = all('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 7562 AND equipped = 0 ORDER BY id', [characterId]);
             if (diamonds.reduce((sum, item) => sum + item.amount, 0) < recipe.cost) throw new Error('Not enough dimensional diamonds');
-            const template = require('./GameServer/DataCache').items.find(item => item.selfId === itemId);
+            const template = ItemTemplateIndex.findStrictRequired(require('./GameServer/DataCache').items, itemId);
             if (!template?.etc.stackable) throw new Error('Missing teleport scroll template');
             const changed = new Set();
             let remaining = recipe.cost;
@@ -7841,7 +7842,7 @@ const Database = {
             validate();
             const catalog = invoke('GameServer/Items/C4WeaponSAExchange');
             const recipe = catalog.resolve(npcId, recipeId);
-            const target = recipe && invoke('GameServer/DataCache').items.find(item => item.selfId === recipe.productId);
+            const target = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
             const weapon = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceObjectId, characterId]);
             if (!recipe || !target || !weapon || weapon.selfId !== expectedSelfId || weapon.selfId !== recipe.sourceId
                 || weapon.enchant !== expectedEnchant || weapon.amount !== 1 || weapon.equipped) throw Error('weapon_sa_source_changed');
@@ -7875,7 +7876,7 @@ const Database = {
             validate?.();
             const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             const recipe = row && invoke('GameServer/Items/C4Unseal').resolve(row.selfId, productId);
-            const item = recipe && invoke('GameServer/DataCache').items.find(i => i.selfId === recipe.productId);
+            const item = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
             if (!item || Number(row.amount) !== 1 || Number(row.equipped) !== 0) throw Error('unseal_source_changed');
             // Update in place: enchant and all other instance metadata survive.
             write('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -8095,7 +8096,7 @@ const Database = {
                     throw Error('improvement_source_changed');
                 const claimed = new Set(), selected = []; let total = 0;
                 for (const input of inputs) {
-                    const id = Number(input.selfId), count = Number(input.amount), template = invoke('GameServer/DataCache').items.find(row => row.selfId === id);
+                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id);
                     if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !Crystals.reward(template)
                         || Crystals.free(source, id) < count || selected.length + count > Crystals.BATCH_LIMIT)
                         throw Error('improvement_source_changed');
@@ -8110,7 +8111,7 @@ const Database = {
                 for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
                 if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
                 else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(1458,?,?,0,0,?)',
-                    [invoke('GameServer/DataCache').items.find(row => row.selfId === 1458).template.name, amount, characterId]);
+                    [ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, 1458).template.name, amount, characterId]);
                 changedIds.push(...claimed, 1458); result = 'crystallize';
             } else if (proposal.kind === 'luxury_exchange') {
                 const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
@@ -8139,7 +8140,7 @@ const Database = {
                         throw Error('improvement_missing_materials');
                     consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
                 }
-                const product = invoke('GameServer/DataCache').items.find(row => row.selfId === recipe.itemId);
+                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.itemId);
                 for (let count = 0; count < recipe.amount; count++) mutate(
                     'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
                     [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
@@ -8153,7 +8154,7 @@ const Database = {
                 if (recipe?.station !== 'blacksmith' || recipe.operation !== 'install' || !item || item.amount !== 1
                     || recipe.sourceId !== item.selfId || item.selfId !== proposal.itemId
                     || item.enchant !== proposal.from) throw Error('improvement_source_changed');
-                const product = invoke('GameServer/DataCache').items.find(row => row.selfId === recipe.productId);
+                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
                 if (!product) throw Error('improvement_missing_template');
                 for (const cost of SA.costs(recipe)) { consume(cost.selfId, cost.amount); changedIds.push(cost.selfId); }
                 mutate('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -8170,7 +8171,7 @@ const Database = {
                     ON CONFLICT(characterId,questId) DO UPDATE SET state='started',variables=excluded.variables`, [characterId]);
                 if (!held.length || [4662,4663,4664].includes(held[0].selfId)) {
                     if (held[0]) { consume(held[0].selfId, 1); changedIds.push(held[0].selfId); }
-                    const source = invoke('GameServer/DataCache').items.find(row => row.selfId === proposal.starterId);
+                    const source = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, proposal.starterId);
                     mutate('INSERT INTO items(selfId,name,amount,characterId) VALUES(?,?,1,?)', [source.selfId,source.template.name,characterId]);
                     changedIds.push(proposal.starterId);
                 }

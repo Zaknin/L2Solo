@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const EnchantScrolls = invoke('GameServer/Items/C4EnchantScrolls');
@@ -7,8 +8,6 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const depositQueues = new Map();
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
-let templateSource = null;
-let templateIndex = new Map();
 
 function isLegacyMainState(state) {
     return String(state?.simulation?.ownerId || 'legacy_main') === 'legacy_main';
@@ -309,12 +308,7 @@ function depositCold(state) {
 }
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (items !== templateSource) {
-        templateSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 function historicalGearOverflow(items = [], maxUnits = 16) {

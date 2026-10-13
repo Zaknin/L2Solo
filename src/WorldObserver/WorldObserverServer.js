@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../GameServer/Item/ItemTemplateIndex');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -460,8 +461,6 @@ function equipmentSlot(slot) {
     return EQUIPMENT_SLOTS[Number(slot)] || (slot ? `slot ${slot}` : 'other');
 }
 
-let itemTemplateIndex = null;
-let itemTemplateSource = null;
 let itemIconCatalogCache = null;
 let knowledgeBaseServiceCache = null;
 let clanOrderItemCatalogSource = null;
@@ -1310,12 +1309,7 @@ function itemIconFilePath(fileName) {
 }
 
 function itemTemplate(selfId) {
-    const items = DataCache.items || [];
-    if (!itemTemplateIndex || itemTemplateSource !== items) {
-        itemTemplateSource = items;
-        itemTemplateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return itemTemplateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, itemTemplate) || null;
 }
 
 function liveEquippedItems(actor) {
