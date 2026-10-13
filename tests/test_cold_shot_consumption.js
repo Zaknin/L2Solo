@@ -26,7 +26,8 @@ const base = { characterId: 901, name: 'Fighter', level: 12, phase: 'cold', acti
                 atkSpd: 379, critical: 0, accur: 100, pDef: 120, mDef: 50, evasion: 0, bonusMp: 0, shieldPDef: 0 },
             skills: [], effects: [] } } };
 Cold.npcForSpot = () => ({ level: 12, maxHp: 100000, pAtk: 1, pAtkRnd: 0,
-    pDef: 200, mDef: 100, accur: 1, evasion: 0, critical: 0, atkSpd: 500 });
+    pDef: 200, mDef: 100, accur: 1, evasion: 0, critical: 0, atkSpd: 500,
+    aggressiveInterruption: true });
 function assertNativeHeldPolicy(state) {
     const hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, at);
     assert.strictEqual(hunt.spotId, state.spotId, 'the actual native economic hunt supports this actor');
@@ -75,7 +76,7 @@ function checkSpendingActions() {
     const caster = fightAlone(withSkills([windStrike], { ...wand, classId: 10, vitals: { mp: 100000, maxMp: 100000 } }),
         { evasion: 1000 });
     const healer = fightAlone(withSkills([heal], { ...wand, classId: 15, vitals: { hp: 100, mp: 100000, maxMp: 100000 } }),
-        { evasion: 1000, pAtk: 400 });
+        { evasion: 1000, pAtk: 1 });
     // A physical skill spends its soulshot at use, even when it misses.
     const skill = fightAlone(withSkills([powerStrike], { vitals: { mp: 100000, maxMp: 100000 } }), { evasion: 1000 });
     assert(skill.skillUses > 0 && skill.shotActions === skill.skillUses, 'a physical skill spends a shot hit or miss');
