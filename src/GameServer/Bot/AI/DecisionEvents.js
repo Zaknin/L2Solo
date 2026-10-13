@@ -51,7 +51,7 @@ function marksFor(session, actor) {
         Object.values(actor.effects || {}).filter(effect => !effect.expiresAt || effect.expiresAt > timestamp)
             .map(effect => [effect.id, effect.key, effect.stats]), stats.recipes, stats.workshop]);
     return { level, weight: bag.weight, bag: bag.full,
-        build, horizon, money: Sections.fundingMark(physical), meaningfulMoney: Sections.meaningfulMoney(physical),
+        build, horizon, money: Sections.fundingMark(physical), meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp),
         relations: Sections.hash([stats.memoryRevision, stats.relations, session.hotBackgroundPartyId, stats.clanId]) };
 }
 function observe(session, actor) {

@@ -29,6 +29,28 @@ function meaningfulMoney(state, baseline = state.stats?.wishSections) {
     return crosses(wallet, baseline) || baseline.funding !== fundingMark(state)
         || Number(baseline.moneyError) >= 0 && Math.abs(wallet - baseline.wallet) > baseline.moneyError;
 }
+// L70 event priorities (docs/principles.md section 3 point 5): a soft change
+// is re-examined at the bot's own next decision point once its kind's delay
+// since the last actual decision has passed. Wall clock, not rate-scaled: a
+// delay never starts a reconsideration by itself, it only lets one through.
+const SOFT_DELAY = Object.freeze({ money: 60 * 1000, observation: 5 * 60 * 1000,
+    horizon: 5 * 60 * 1000, market: 10 * 60 * 1000 });
+function softDue(baseline, kind, timestamp = Date.now()) {
+    const at = Number(baseline?.at);
+    // A baseline saved before L70 has no decision time: behave as before.
+    return !Number.isFinite(at) || Number(timestamp) - at >= SOFT_DELAY[kind];
+}
+// Hard: the held option became unaffordable or its funding/obligation mark
+// moved. Soft: a newly payable next wish or a drift beyond the bot's error.
+function moneyEvent(state, baseline = state.stats?.wishSections, timestamp = Date.now()) {
+    if (!baseline) return false;
+    const wallet = positive(state.adena);
+    const [low, high] = baseline.cashBounds || [-1, null];
+    if (wallet < low || baseline.funding !== fundingMark(state)) return true;
+    const soft = high !== null && high !== undefined && wallet >= high
+        || Number(baseline.moneyError) >= 0 && Math.abs(wallet - baseline.wallet) > baseline.moneyError;
+    return soft && softDue(baseline, 'money', timestamp);
+}
 function incomeError(state, persona) {
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
     return Learning.knowledgeEnabled() ? Learning.stageError(.03 + .25 * (1 - Number(persona?.understanding ?? .3)),
@@ -52,6 +74,10 @@ function observationChanged(state, baseline, timestamp, mode) {
     const current = sample(state, timestamp, mode);
     return learnedChange(current, baseline.sample || [], positive(baseline.incomeError));
 }
+function observationEvent(state, baseline, timestamp, mode) {
+    if (!baseline) return true;
+    return softDue(baseline, 'observation', timestamp) && observationChanged(state, baseline, timestamp, mode);
+}
 function bounds(wallet) {
     const result = [-1, null];
     return { result, watch: price => {
@@ -66,7 +92,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode) {
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
     const profileKey = invoke('GameServer/Bot/Population/ColdCombatProfile').buildInputKey(state, context.timestamp);
     const night = profileKey.endsWith('|n') ? 1 : profileKey.endsWith('|d') ? 0 : -1;
-    return { wallet: positive(state.adena), cashBounds, funding: fundingMark(actual), moneyError, night,
+    return { at: Number(context.timestamp), wallet: positive(state.adena), cashBounds, funding: fundingMark(actual), moneyError, night,
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...semanticFacts(state, context.timestamp), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
@@ -89,6 +115,10 @@ function horizonChanged(state, baseline, expPerHour, persona) {
     const horizon = require('./EconomicValuation').stageHours(state, expPerHour, persona);
     return Math.abs(horizon - Number(baseline.horizon || 0)) > Math.abs(Number(baseline.horizon || 0)) * positive(baseline.incomeError);
 }
+function horizonEvent(state, baseline, expPerHour, persona, timestamp) {
+    if (!baseline) return true;
+    return softDue(baseline, 'horizon', timestamp) && horizonChanged(state, baseline, expPerHour, persona);
+}
 function isEmptyWishPlan(plan) {
     return plan?.status === 'deferred' && plan.strategy === 'none'
         && plan.next == null && plan.reason === 'wish_focus'
@@ -110,7 +140,7 @@ function events(before, after, timestamp = Date.now()) {
     if (previousFact('build') !== current.build) { sections.add('build'); sections.add('benefits'); sections.add('sources'); }
     const oldStats = before.stats || {};
     if (previousFact('relations') !== current.relations) sections.add('relations');
-    if (meaningfulMoney(after, represented || oldStats.wishSections)
+    if (moneyEvent(after, represented || oldStats.wishSections, timestamp)
         || !previous.funding && fundingMark(before) !== fundingMark(after)) sections.add('funding');
     if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') sections.add('occupation');
     if (current.riskDeaths > previousFact('riskDeaths')) { sections.add('combat'); sections.add('occupation'); }
@@ -118,4 +148,5 @@ function events(before, after, timestamp = Date.now()) {
     if (previousFact('supply') !== current.supply) sections.add('supply');
     return [...sections];
 }
-module.exports = { capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError, sample, bounds, snapshot, semanticFacts, events, hash, isEmptyWishPlan };
+module.exports = { capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
+    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, hash, isEmptyWishPlan };
