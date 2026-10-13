@@ -119,7 +119,8 @@ const BotFriendship = {
         });
         const previous = rosterWrites.get(playerId) || Promise.resolve();
         const next = previous.then(change, change);
-        const tracked = next.finally(() => {
+        // The caller gets the failure through `next`; the stored copy must not reject unhandled.
+        const tracked = next.catch(() => {}).finally(() => {
             if (rosterWrites.get(playerId) === tracked) rosterWrites.delete(playerId);
         });
         rosterWrites.set(playerId, tracked);
