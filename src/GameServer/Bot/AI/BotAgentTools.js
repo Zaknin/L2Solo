@@ -1092,6 +1092,7 @@ function rejectionReply(result = {}) {
         case 'incompatible_item':
         case 'not_an_upgrade':
         case 'no_safe_upgrade': return 'I could not find a safe equipment upgrade for this situation.';
+        case 'reserved_exchange_material': return 'I am keeping that item as material for an equipment exchange.';
         case 'unsafe_combat_state': return 'I am in combat. I will finish this fight before starting that request.';
         case 'skill_not_learned':
         case 'skill_not_combat_eligible':

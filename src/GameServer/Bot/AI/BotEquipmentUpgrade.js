@@ -261,11 +261,18 @@ function bestUpgradeSlot(actor, item, plannedScores) {
     }, null)?.slot || null;
 }
 
+// A worn item is never hidden; an unworn one reserved as a luxury-exchange
+// material must stay in the backpack for the exchange.
+function isReservedExchangeMaterial(session, item) {
+    if (item.fetchEquipped()) return false;
+    const plan = session?.coldLifeState?.stats?.equipmentPlan;
+    return plan?.strategy === 'luxury_exchange'
+        && Boolean(plan.materials?.some(row => Number(row.selfId) === Number(item.fetchSelfId())));
+}
+
 function findBestUpgrades(session) {
     const actor = session?.actor;
-    const items = (actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : []).filter(item => item.fetchEquipped()
-        || !session.coldLifeState?.stats?.equipmentPlan?.materials?.some(row => Number(row.selfId) === Number(item.fetchSelfId())
-            && session.coldLifeState.stats.equipmentPlan.strategy === 'luxury_exchange'));
+    const items = (actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : []).filter(item => !isReservedExchangeMaterial(session, item));
     const suitableItems = items.filter((item) => isSuitableItem(actor, item));
     const torsoUpgrades = findTorsoUpgrades(actor, suitableItems);
     const plannedScores = new Map();
@@ -322,6 +329,7 @@ function safeCandidate(session, itemId) {
     const items = actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : [];
     const item = items.find((candidate) => Number(candidate.fetchId?.()) === Number(itemId || 0));
     if (!item) return { item: null, slot: null, reason: 'item_not_found' };
+    if (isReservedExchangeMaterial(session, item)) return { item, slot: null, reason: 'reserved_exchange_material' };
     if (!isSuitableItem(actor, item)) return { item, slot: null, reason: 'incompatible_item' };
     if (ArmorPolicy.ARMOR_SLOTS.has(Number(item.fetchSlot()))
         && ArmorPolicy.completeSets(items.filter(candidate => isSuitableItem(actor,candidate,true))).length) {
