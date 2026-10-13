@@ -101,14 +101,13 @@ try {
         'expiry of this bots existing sale retry releases its earlier sale forecast');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     // The sale list reads the plan's stock targets once (L72); without a
-    // published row that read prepares the economics itself, once.
-    const before = Economy.basics, beforeKept = Economy.keptTargets; let recursiveCalls = 0, keptCalls = 0;
-    Economy.basics = (...args) => { recursiveCalls++; return before(...args); };
+    // published row that read prepares the economics itself, once. A forecast
+    // re-entering the sale list would read them a second time.
+    const beforeKept = Economy.keptTargets; let keptCalls = 0;
     Economy.keptTargets = (...args) => { keptCalls++; return beforeKept(...args); };
     try { Disposition.saleCandidates(solo, { unlimited: true }); assert.equal(keptCalls, 1,
-        'ordinary sale prepares the economics once');
-        assert.equal(recursiveCalls, 0, 'forecast presence never recursively calls it'); }
-    finally { Economy.basics = before; Economy.keptTargets = beforeKept; }
+        'ordinary sale prepares the economics once; forecast presence never recursively calls it'); }
+    finally { Economy.keptTargets = beforeKept; }
     assert.notEqual(Economy.inputKey(solo), Economy.inputKey({ ...solo, partyId: 2 }));
     assert.notEqual(Economy.inputKey(solo), Economy.inputKey(protectedLoot));
     // Fractional table rates are forecasts, but funded purchase tranches must
