@@ -139,6 +139,36 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
         Shared.fetchCharacters = fetchCharacters;
     }
 
+    // EnterWorld logs its own failure and keeps the player connected (author's rule).
+    {
+        const ShotStock = invoke('GameServer/Inventory/ShotStock');
+        const HennaService = invoke('GameServer/Henna/HennaService');
+        const Database = invoke('Database');
+        const saved = [ShotStock.ensureActorStock, HennaService.restore, Database.fetchMacros, Database.fetchShortcuts];
+        ShotStock.ensureActorStock = () => Promise.resolve();
+        HennaService.restore = () => Promise.resolve();
+        Database.fetchMacros = () => Promise.resolve([]);
+        Database.fetchShortcuts = () => Promise.resolve([]);
+        try {
+            const enterWorld = invoke('GameServer/Network/Request/EnterWorld');
+            const socket = fakeSocket();
+            const session = {
+                actor: { backpack: { fetchItems: () => [] }, fetchId: () => 1, fetchName: () => 'p',
+                    enterWorld: () => Promise.reject(new Error('injected world entry failure')) },
+                dataSendToMe() {},
+                dataReceive(packet) { return enterWorld(this, packet); },
+                error() {}
+            };
+            Server.prototype.onSocket.call({ name: 'Test', callback: () => session }, socket);
+            socket.emit('data', frame([0x03]));
+            await new Promise((resolve) => setTimeout(resolve, 100));
+
+            assert.strictEqual(socket.destroyed, false, 'a failed world entry is logged and keeps the connection');
+        } finally {
+            [ShotStock.ensureActorStock, HennaService.restore, Database.fetchMacros, Database.fetchShortcuts] = saved;
+        }
+    }
+
     await settle();
     assert.deepStrictEqual(unhandled, [], 'no rejection escapes the connection boundary');
     console.log('packet dispatch failure handling ok');
