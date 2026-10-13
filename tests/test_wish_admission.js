@@ -23,6 +23,7 @@ const adapters = {
     'GameServer/DataCache': data,
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
+    'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
     'GameServer/Bot/AI/GearAcquisitionPlanner': { roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: item => gearIds.has(item.selfId), considerable: () => true, itemScore: () => 1, withReadiness: fn => fn(),
         equippedSlotsFor: row => row?.equippedSlots?.length ? row.equippedSlots : row?.equipped ? [row.slot] : [],
