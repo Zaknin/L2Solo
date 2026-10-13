@@ -58,7 +58,11 @@ function npcTalkResponse(session, data) {
 
     try {
         const handler = invoke(`GameServer/World/Generics/NpcBypasses/${handlerName}`);
-        handler(session, parts);
+        const result = handler(session, parts);
+        // Async bypasses (BotFriends) fail the same way as sync ones, not as an unhandled rejection.
+        if (result && typeof result.catch === 'function') {
+            result.catch((err) => utils.infoWarn('GameServer', 'Unhandled bypass command: %s, error: %s', parts[0], err?.message));
+        }
     } catch (err) {
         utils.infoWarn('GameServer', 'Unhandled bypass command: %s, error: %s', parts[0], err.message);
     }
