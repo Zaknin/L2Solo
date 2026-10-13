@@ -92,6 +92,69 @@ function allItems() {
     return gearCatalog;
 }
 
+// Fresh projections deliberately re-read rows: these callers historically
+// observed same-array and nested item edits without a catalogue revision.
+function currentRankRows(items, rank) {
+    return (items || []).filter(item => String(item.etc?.rank || 'none').toLowerCase() === rank);
+}
+function currentSlotRows(items, wanted, paired = false) {
+    return (items || []).filter(item => {
+        const slot = Number(item.etc?.slot || 0);
+        if (wanted === 'weapon' || BotEquipmentCompatibility.isWeaponSlot(Number(wanted)))
+            return BotEquipmentCompatibility.isWeaponSlot(slot);
+        if (paired && [1, 2].includes(Number(wanted))) return [1, 2].includes(slot);
+        if (paired && [4, 5].includes(Number(wanted))) return [4, 5].includes(slot);
+        return slot === wanted;
+    });
+}
+function currentWearableRows(items) {
+    return (items || []).filter(item => Number(item.etc?.slot) > 0);
+}
+let npcItemIds = null;
+function currentNpcRows(items, shops) {
+    if (!npcItemIds?.size) {
+        const ids = new Set((shops.allEntries?.() || []).map(row => Number(row.selfId)).filter(Boolean));
+        if (!ids.size) return [];
+        npcItemIds = ids;
+    }
+    return (items || []).filter(item => npcItemIds.has(Number(item.selfId)));
+}
+
+// This is the wish provider's original identity+source-revision observation.
+// Its sorted/scored columns are shared class/role game data, never actor state.
+let wishSource = null, wishRevision = -1;
+const wishKits = new Map();
+function wishKitsFor(items, revision, classId, role, Planner, Sources) {
+    if (wishSource !== items || wishRevision !== revision) {
+        wishSource = items; wishRevision = revision; wishKits.clear();
+    }
+    const key = `${classId}:${role}`;
+    if (!wishKits.has(key)) {
+        const slots = new Map(), empty = { classId, stats: { classId }, inventory: {} };
+        for (const item of items || []) {
+            if (!Sources.hasSource(item.selfId) || !Planner.suitable(item, empty, role, String(item.etc?.rank || 'none'))) continue;
+            const slot = Number(item.etc?.slot);
+            if (!slots.has(slot)) slots.set(slot, []);
+            slots.get(slot).push(item);
+        }
+        for (const [slot, list] of slots) {
+            const scored = list.map(item => ({ item, score: Planner.itemScore(item, role, classId) }));
+            scored.sort((a, b) => b.score - a.score
+                || Number(a.item.template.price) - Number(b.item.template.price)
+                || Number(a.item.selfId) - Number(b.item.selfId));
+            const items = scored.map(row => row.item), scores = Float64Array.from(scored, row => row.score);
+            const ranks = Int8Array.from(scored, row => RANK_ORDER.indexOf(String(row.item.etc?.rank || 'none')));
+            // Derived ordering/scores/ranks belong to this owner. Borrow raw
+            // item rows, without publishing its mutable arrays or typed columns.
+            slots.set(slot, Object.freeze({ length: items.length,
+                itemAt: at => items[at], scoreAt: at => scores[at], rankAt: at => ranks[at] }));
+        }
+        wishKits.set(key, Object.freeze({ get: slot => slots.get(slot),
+            [Symbol.iterator]: () => slots[Symbol.iterator]() }));
+    }
+    return wishKits.get(key);
+}
+
 function validRank(item, rank) {
     return RANK_ORDER.indexOf(item.rank) >= 0 && item.rank === rank;
 }
@@ -344,7 +407,7 @@ function buildPlan(classId, level) {
 }
 
 const BotGear = {
-    planFor
+    planFor, currentRankRows, currentSlotRows, currentWearableRows, currentNpcRows, wishKitsFor
 };
 
 module.exports = BotGear;

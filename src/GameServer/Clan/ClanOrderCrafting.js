@@ -14,8 +14,7 @@ const idOf = member => Number(member.characterId ?? member.id);
 const itemName = id => ItemIndex.find(DataCache.items, id)?.template?.name || `Item ${id}`;
 
 function recipesForItem(itemId) {
-    return Object.values(Recipes.loadRecipeItems()).filter(recipe => recipe.type === 'dwarven'
-        && Number(recipe.productId) === Number(itemId))
+    return require('../Knowledge/RecipeCatalog').currentDwarvenScrollRows(Recipes, itemId)
         .sort((a, b) => b.successRate - a.successRate || a.recipeId - b.recipeId);
 }
 

@@ -275,6 +275,12 @@ function isStationService(state = {}) {
     return Boolean(state.stats?.craftStationId) || serviceStationSlot(state) !== null;
 }
 
+// The caller may add its learned clan recipes. Keys use the current raw rows,
+// numeric LAST and Map insertion order, just as the former consumer copy did.
+function publishedRecipeIndex() {
+    return new Map(publishedStationRecipes().recipes.map(recipe => [Number(recipe.recipeId), recipe]));
+}
+
 function profileFor(state = {}) {
     const current = state.stats?.craftShop || {};
     const station = stationFor(state);
@@ -321,6 +327,7 @@ module.exports = {
     availableRecipes,
     stationRecipes,
     publishedStationRecipes,
+    publishedRecipeIndex,
     profileFor,
     ensureRecipes
 };

@@ -119,7 +119,7 @@ function economicRequest(requirement) {
 // result never grants ownership/readiness and is never assigned or persisted.
 function discoveryOptions(options) {
     const recipes = options.economicCraftAllowed === false ? options.craftRecipes || []
-        : Object.values(Recipes.loadRecipeItems()).filter(recipe => recipe.type === 'dwarven');
+        : require('../Knowledge/RecipeCatalog').currentDwarvenScrollRows(Recipes);
     return { ...options, craftRecipes: recipes, allowedRecipeIds: recipes.map(recipe => recipe.recipeId),
         craftProviders: options.craftProviders, spoilCapable: true, ignoreExistingPlan: true };
 }

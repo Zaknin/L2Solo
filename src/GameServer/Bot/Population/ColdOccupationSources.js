@@ -25,13 +25,8 @@ function initialise() {
     // Retain the original startup-time stock/rates, borrowing the shared shop
     // owner's snapshot instead of constructing a private item/town index.
     npcOfferView = require('../../Knowledge/GameDataCatalogue').native().npcTownOffers();
-    for (const item of Data.items || []) {
-        invoke('GameServer/Bot/Economy/MarketCounters').counterOf(item.selfId);
-        const crystals = Number(item.etc?.cristals), rank = String(item.etc?.rank || '');
-        if (!(crystals > 0) || !/^(Weapon|Armor)\./.test(String(item.template?.kind || ''))) continue;
-        if (!gearByRank.has(rank)) gearByRank.set(rank, []);
-        gearByRank.get(rank).push(Object.freeze({ selfId: Number(item.selfId), crystals, rank }));
-    }
+    require('../../Knowledge/CrystalCatalog').coldGearByRank(Data.items || [],
+        item => invoke('GameServer/Bot/Economy/MarketCounters').counterOf(item.selfId), gearByRank);
     for (const [buyerName, store] of Object.entries(invoke('GameServer/Bot/MerchantStoreConfigs'))) {
         if (Number(store.storeType) !== 3 || !store.town) continue;
         for (const line of store.items || []) {
@@ -44,12 +39,7 @@ function initialise() {
     }
     // Exact native seated recovery is static in class/level on this branch.
     const Rest = invoke('GameServer/Bot/Population/ColdRest');
-    for (const row of Data.classTemplates || []) {
-        const rates = new Float64Array(81);
-        for (let level = 1; level <= 80; level++) rates[level] = Rest.coldRestRegenPerTick({ level,
-            stats: { classId: Number(row.classId) } }).mp * 1200;
-        mpRates.set(Number(row.classId), rates);
-    }
+    require('../../Knowledge/RecoveryCatalog').seatedMpRates(Data.classTemplates, Rest, mpRates);
 }
 
 function* reservations(state) {

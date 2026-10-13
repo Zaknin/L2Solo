@@ -234,7 +234,7 @@ async function context() {
     const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
-    const items = (cache.items || []).filter((item) => Number(item.etc?.slot) > 0);
+    const items = invoke('GameServer/Bot/AI/BotGear').currentWearableRows(cache.items);
     const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
     if (!staticMarkets.has(rate)) {
         if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {

@@ -54,7 +54,6 @@ const DIRECT_ROUTE_COOLDOWN_MS = 60 * 60 * 1000;
 const PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT = 2;
 const PAIRED_SLOTS = Object.freeze({ 1: 2, 2: 1, 4: 5, 5: 4 });
 const NPC_GEAR_MAX_RANK = 'd';
-let staticNpcItemIdsCache = null;
 
 function rateProfileSignature() {
     const rates = ProgressionRates.profile();
@@ -526,8 +525,7 @@ function equipInventoryUpgrades(state = {}, inventory = {}) {
                 ? [{ entry, item }] : [];
         });
         if (worn.length > 1) {
-            const starters = new Set((DataCache.newbieItems?.find(row => row.classId === classId)?.items || [])
-                .filter(item => item.equipped === true).map(item => Number(item.selfId)));
+            const starters = require('../../Knowledge/StarterItemCatalog').ids(DataCache.newbieItems, 'strict', classId);
             worn.sort((left, right) => Number(starters.has(Number(right.entry.selfId)))
                 - Number(starters.has(Number(left.entry.selfId)))
                 || itemScore(right.item, role, classId) - itemScore(left.item, role, classId)
@@ -667,7 +665,7 @@ function preferredTarget(state = {}, options = {}) {
     const acquisitionRank = Progression.acquisitionRankFor(acquisitionState, acquisitionState === state ? progression : undefined);
     const closesC = progression.required && rankIndex(gradeForLevel(state.level)) > rankIndex('c');
     const targetSlotFor = item => Number(options.wishSlot || missingPairedCSlot(state, item, progression) || item.etc?.slot || 0);
-    const allCandidates = (options.wishTargetId ? [catalogItem(options.wishTargetId)].filter(Boolean) : DataCache.items || [])
+    const allCandidates = (options.wishTargetId ? [catalogItem(options.wishTargetId)].filter(Boolean) : BotGear.currentRankRows(DataCache.items, recipeRank || acquisitionRank))
         .filter(item => Sources.hasSource(item.selfId))
         .filter((item) => rankIndex(item.etc?.rank) <= rankIndex(acquisitionRank))
         .filter((item) => options.wishTargetId ? considerable(item, acquisitionState, role, acquisitionRank)
@@ -752,7 +750,7 @@ function preferredDropTarget(state = {}, options = {}) {
     const classId = classIdFor(state);
     const owned = inventoryMap(state.inventory);
     const excluded = excludedTargetIds(options);
-    const candidates = (DataCache.items || [])
+    const candidates = BotGear.currentRankRows(DataCache.items, 'none')
         .filter((item) => Sources.hasSource(item.selfId) && suitable(item, state, role, 'none'))
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => Number(owned.get(Number(item.selfId)) || 0) < 1)
@@ -885,12 +883,7 @@ function npcOfferForTarget(target, state = {}, options = {}) {
 
 function staticNpcItems(options = {}) {
     if (typeof options.findMarketOffer === 'function') return DataCache.items || [];
-    if (!staticNpcItemIdsCache?.size) {
-        const itemIds = new Set((NpcShopBuyLists.allEntries?.() || []).map((entry) => Number(entry.selfId)).filter(Boolean));
-        if (!itemIds.size) return [];
-        staticNpcItemIdsCache = itemIds;
-    }
-    return (DataCache.items || []).filter((item) => staticNpcItemIdsCache.has(Number(item.selfId)));
+    return BotGear.currentNpcRows(DataCache.items, NpcShopBuyLists);
 }
 
 function npcAdequacyLevel(state = {}) {
@@ -906,15 +899,6 @@ function desiredNpcSlots(state = {}, plan = BotGear.planFor({ classId: classIdFo
         // actually transitions back to a one-handed weapon.
         .filter((slot) => slot !== 8 || !hasEquippedTwoHandedWeapon(state))
         .sort((left, right) => order.indexOf(left) - order.indexOf(right));
-}
-
-function itemMatchesDesiredSlot(item, desiredSlot) {
-    const slot = Number(item?.etc?.slot || 0);
-    const wanted = Number(desiredSlot || 0);
-    if (BotEquipmentCompatibility.isWeaponSlot(slot) && BotEquipmentCompatibility.isWeaponSlot(wanted)) return true;
-    if ([1, 2].includes(slot) && [1, 2].includes(wanted)) return true;
-    if ([4, 5].includes(slot) && [4, 5].includes(wanted)) return true;
-    return slot === wanted;
 }
 
 function equippedItemAtSlot(state = {}, slot) {
@@ -939,8 +923,8 @@ function npcCandidatesForSlot(state = {}, desiredSlot, maxRank, options = {}) {
     const currentRank = rankIndex(current?.etc?.rank);
     const currentScore = current ? itemScore(current, role, classId) : 0;
     const excluded = excludedTargetIds(options);
-    return staticNpcItems(options).filter((item) => !excluded.has(Number(item.selfId)))
-        .filter((item) => itemMatchesDesiredSlot(item, desiredSlot))
+    return BotGear.currentSlotRows(staticNpcItems(options), Number(desiredSlot || 0), true)
+        .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => Number(state.inventory?.[String(item.selfId)]?.amount || 0) < 1)
         .filter((item) => rankIndex(item.etc?.rank) <= rankIndex(maxRank))
         .filter((item) => suitable(item, state, role, item.etc?.rank))
@@ -1183,13 +1167,9 @@ function marketRecoveryPlanForTarget(state = {}, targetId, options = {}) {
         : Number(failedTarget.etc?.slot || 0);
     const excluded = excludedTargetIds(options);
     const cap = progressionPriceCap(gradeForLevel(state.level), state.level);
-    const alternatives = (DataCache.items || [])
+    const alternatives = BotGear.currentSlotRows(DataCache.items, failedSlot)
         .filter((item) => Number(item.selfId) !== Number(targetId))
         .filter((item) => !excluded.has(Number(item.selfId)))
-        .filter((item) => {
-            const slot = BotEquipmentCompatibility.isWeaponSlot(Number(item.etc?.slot || 0)) ? 'weapon' : Number(item.etc?.slot || 0);
-            return slot === failedSlot;
-        })
         .filter((item) => considerable(item, state, role))
         .filter((item) => isSlotUpgrade(item, ownedItems, role, classId))
         .filter((item) => Number(item.template?.price || 0) <= cap)

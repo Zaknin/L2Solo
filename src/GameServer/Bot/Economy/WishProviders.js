@@ -16,9 +16,6 @@ function need(path) {
     if (!module) needed.set(path, module = require(path));
     return module;
 }
-let catalogSource = null;
-let sourceRevision = -1;
-const kits = new Map();
 
 // Compatibility is game data shared by class/role, not an actor's prescribed
 // purchase. Keep every item (including SA and set parts) in this immutable view.
@@ -40,47 +37,22 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
     const Data = invoke('GameServer/DataCache');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const revision = Sources.revision();
-    if (catalogSource !== Data.items || sourceRevision !== revision) {
-        catalogSource = Data.items; sourceRevision = revision; kits.clear();
-    }
     const role = Planner.roleFor(state);
     const classId = Number(state.stats?.classId || state.classId || 0);
-    const key = `${classId}:${role}`;
-    if (!kits.has(key)) {
-        const slots = new Map(), empty = { classId, stats: { classId }, inventory: {} };
-        for (const item of Data.items || []) {
-            if (!Sources.hasSource(item.selfId) || !Planner.suitable(item, empty, role, String(item.etc?.rank || 'none'))) continue;
-            const slot = Number(item.etc?.slot);
-            if (!slots.has(slot)) slots.set(slot, []);
-            slots.get(slot).push(item);
-        }
-        // Scores and grade membership are game data for this class/role,
-        // not another owner cache. Parallel columns add nine bytes per entry.
-        for (const [slot, list] of slots) {
-            const scored = list.map(item => ({ item, score: Planner.itemScore(item, role, classId) }));
-            scored.sort((a, b) => b.score - a.score
-                || Number(a.item.template.price) - Number(b.item.template.price)
-                || Number(a.item.selfId) - Number(b.item.selfId));
-            slots.set(slot, { items: scored.map(row => row.item),
-                scores: Float64Array.from(scored, row => row.score),
-                // Unknown ranks formerly had index -1 and remain eligible.
-                ranks: Int8Array.from(scored, row => GEAR_RANKS.indexOf(String(row.item.etc?.rank || 'none'))) });
-        }
-        kits.set(key, slots);
-    }
+    const kits = invoke('GameServer/Bot/AI/BotGear').wishKitsFor(Data.items, revision, classId, role, Planner, Sources);
     const maxRank = GEAR_RANKS.indexOf(Progression.acquisitionRankFor(state, progression || undefined));
     const result = new Map();
     const budget = Math.max(0, Number(state.adena || 0) - Number(ctx?.survivalReserve || 0));
     const target = Number(state.stats?.equipmentPlan?.target?.selfId || 0);
     const held = String(state.stats?.wishFocus?.[0] || '').match(/^power:(\d+):/);
-    const slotKits = new Map(kits.get(key));
+    const slotKits = new Map(kits);
     for (const [first, second] of [[1, 2], [4, 5]]) if (slotKits.has(first) && !slotKits.has(second)) slotKits.set(second, slotKits.get(first));
     for (const [slot, kit] of slotKits) {
         const allowed = [];
-        for (let at = 0; at < kit.items.length; at++) if (kit.ranks[at] <= maxRank) allowed.push(at);
+        for (let at = 0; at < kit.length; at++) if (kit.rankAt(at) <= maxRank) allowed.push(at);
         // The exported game-data view is also used to construct fixed kits;
         // it has no actor choice or expensive build evaluation.
-        if (!ctx) { result.set(slot, allowed.map(at => kit.items[at])); continue; }
+        if (!ctx) { result.set(slot, allowed.map(at => kit.itemAt(at))); continue; }
         const current = replacementWorn(wornFor, slot);
         const owned = current && Data.items && need('../../Item/ItemTemplateIndex').find(Data.items, current.selfId);
         const before = owned ? Planner.itemScore(owned, role, classId) : 0;
@@ -89,13 +61,13 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
         const cheaper = (a, b) => !b || a.price < b.price || a.price === b.price && a.item.selfId < b.item.selfId;
         const better = (a, b) => !b || a.ratio > b.ratio || a.ratio === b.ratio && cheaper(a, b);
         for (const at of allowed) {
-            const item = kit.items[at];
+            const item = kit.itemAt(at);
             if (progression?.required && !Progression.priority(item, slot, progression)) continue;
             if (acquisitionAllowed && !acquisitionAllowed(item.selfId)) continue;
             const price = Number(ctx.price(item.selfId));
             if (!(price > 0) || Number(current?.selfId) === Number(item.selfId)) continue;
             ctx.walletBoundary?.(price + Number(ctx.survivalReserve || 0));
-            const score = kit.scores[at];
+            const score = kit.scoreAt(at);
             const row = { item, price, score, ratio: Math.max(0, score - before) / price };
             if (Number(item.selfId) === target || Number(item.selfId) === Number(held?.[1])) retained = row;
             // A proxy can nominate a same-score SA/set alternative, but cannot

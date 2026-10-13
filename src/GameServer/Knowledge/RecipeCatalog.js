@@ -59,9 +59,17 @@ function warmup() { catalogFor(NativeRecipes.nativeSource()); }
 
 // Production retains the old scroll-selected ordering and admission policy.
 // An injected synthetic owner has no declared native revision: do not cache it.
-function recipeItemRows(owner = NativeRecipes) {
+function recipeItemRows(owner = NativeRecipes, current = false) {
+    if (current) return Object.values(owner.loadRecipeItems());
     return typeof owner.nativeSource === 'function' ? catalogFor(owner.nativeSource()).recipeItemRows
         : Object.values(owner.loadRecipeItems() || {});
+}
+
+// These planning readers formerly scanned current scroll-selected rows. Keep
+// raw type/product edits visible and caller-owned arrays (including duplicates).
+function currentDwarvenScrollRows(owner = NativeRecipes, productId) {
+    return recipeItemRows(owner, true).filter(recipe => recipe.type === 'dwarven'
+        && (arguments.length < 2 || Number(recipe.productId) === Number(productId)));
 }
 
 // Station stock selects recipe-scroll rows, admits only present products,
@@ -102,4 +110,4 @@ function inputsFor(recipe) {
     return prepared;
 }
 
-module.exports = { rows, recipesUsing, recipesForProduct, ingredientsForRecipe, revision, recipeItemRows, dwarvenRecipesForItems, warmup, preparedInputsFor, inputsFor };
+module.exports = { rows, recipesUsing, recipesForProduct, ingredientsForRecipe, revision, recipeItemRows, currentDwarvenScrollRows, dwarvenRecipesForItems, warmup, preparedInputsFor, inputsFor };

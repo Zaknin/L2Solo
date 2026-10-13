@@ -105,16 +105,8 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
-let starterItemsSource = null;
-let starterItemIds = new Set();
-
 function isStarterEquipment(item, template = templateFor(item?.selfId)) {
-    const source = DataCache.newbieItems;
-    if (starterItemsSource !== source) {
-        starterItemsSource = source;
-        starterItemIds = new Set((source || []).flatMap(row => row.items || [])
-            .map(grant => Number(grant.selfId)));
-    }
+    const starterItemIds = require('../../Knowledge/StarterItemCatalog').snapshotIds(DataCache.newbieItems, isStarterEquipment);
     return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
 }
 
