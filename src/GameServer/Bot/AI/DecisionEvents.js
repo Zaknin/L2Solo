@@ -43,8 +43,8 @@ function marksFor(session, actor) {
     // Progress is one scalar native read. Reuse the accepted horizon/error;
     // no actor capture, bag scan or new estimate is needed on an AI action.
     const progress = { characterId: actor.fetchId?.(), level, stats: { exp }, persona: session.coldLifeState?.persona };
-    const horizon = !!baseline && Number.isFinite(Number(exp)) && Sections.horizonChanged(progress,
-        baseline, baseline.expHour, invoke('GameServer/Bot/AI/BotPersona').of(progress));
+    const horizon = !!baseline && Number.isFinite(Number(exp)) && Sections.horizonEvent(progress,
+        baseline, baseline.expHour, invoke('GameServer/Bot/AI/BotPersona').of(progress), timestamp);
     const build = Sections.hash([actor.fetchClassId?.(), actor.fetchClanId?.(), actor.hennaStats,
         session.decisionEquipmentMark, session.decisionSkillsMark,
         Number(stats.wishSections?.night) >= 0 ? Number(invoke('GameServer/World/GameTime').isNight(timestamp)) : -1,
