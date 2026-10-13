@@ -983,6 +983,7 @@ const tests = [
     'tests/test_n53_accepted_metrics.js',
     'tests/test_cold_safety_transport.js',
     'tests/test_cold_projection_retention.js',
+    'tests/test_cold_projection_retention_memory.js',
     'tests/test_n53_worker_presence.js',
     'tests/test_hot_board_safety.js',
     'tests/test_lifecycle_safety_sweep.js',
