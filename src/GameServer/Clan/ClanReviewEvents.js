@@ -145,8 +145,11 @@ function watchRecruitment(clanId, demand = {}) {
     unwatchRecruitment(id);
     if (!classIds.length || ['completed', 'fulfilled', 'cancelled'].includes(demand.status)
         || recruitment.size >= MAX_RECRUITMENT_CLANS) return false;
+    const economicRequirements = Array.isArray(demand.requirements) ? demand.requirements : [];
     const request = { classIds, minLevel: Math.max(1, Number(demand.minLevel) || 1),
         maxLevel: Math.min(100, Number(demand.maxLevel) || 100), generation: demand.generation,
+        recipeIds: new Set([...(demand.source?.recipes || []), ...economicRequirements.filter(row => row.kind === 'craft').map(row => row.recipeId)]),
+        sourceIds: new Set(economicRequirements.filter(row => row.kind === 'spoil').map(row => String(row.spotId))),
         skillIds: demand.skillIds ? new Set(demand.skillIds.map(Number)) : null };
     recruitment.set(id, request);
     for (const classId of classIds) {
@@ -200,6 +203,15 @@ function candidateInput(classId, level, available, clanId, skillId = null) {
     }
 }
 
+function recipeInput(classId, level, available, clanId, recipeId) {
+    if (!watchedCandidate(classId, level, available, clanId)) return;
+    for (const id of recruitmentClasses.get(Number(classId)) || []) {
+        const request = recruitment.get(id);
+        if ((Number(clanId) === 0 || Number(clanId) === id) && Number(level) >= request.minLevel && Number(level) <= request.maxLevel
+            && request.recipeIds.has(Number(recipeId))) { committedCandidates ||= new Set(); committedCandidates.add(id); }
+    }
+}
+
 function savedCapabilitiesChanged(classId, level, available, clanId, before, after) {
     if (!watchedCandidate(classId, level, available, clanId) || before === after) return;
     const learned = raw => {
@@ -218,6 +230,9 @@ function savedCapabilitiesChanged(classId, level, available, clanId, before, aft
 }
 
 function attach(connection) {
+    connection.function('clan_candidate_recipe', (classId, level, available, clanId, recipeId) => {
+        recipeInput(classId, level, available, clanId, recipeId); return null;
+    });
     connection.function('clan_candidate_input', (classId, level, available, clanId, skillId) => {
         candidateInput(classId, level, available, clanId, skillId); return null;
     });
@@ -228,6 +243,8 @@ function attach(connection) {
     const call = prefix => `SELECT clan_candidate_input(${prefix}.classId,${prefix}.level,${prefix}.joinAvailability,${prefix}.clanId,NULL);`;
     const byId = (id, skillId = 'NULL') => `SELECT clan_candidate_input(classId,level,joinAvailability,clanId,${skillId})
         FROM bot_party_candidate_projection WHERE characterId = ${id};`;
+    const recipeById = prefix => `SELECT clan_candidate_recipe(classId,level,joinAvailability,clanId,${prefix}.recipeId)
+        FROM bot_party_candidate_projection WHERE characterId=${prefix}.characterId;`;
     connection.exec(`
         CREATE TEMP TRIGGER clan_candidate_added AFTER INSERT ON main.bot_party_candidate_projection BEGIN ${call('NEW')} END;
         CREATE TEMP TRIGGER clan_candidate_removed AFTER DELETE ON main.bot_party_candidate_projection BEGIN ${call('OLD')} END;
@@ -238,6 +255,10 @@ function attach(connection) {
         CREATE TEMP TRIGGER clan_candidate_skills_removed AFTER DELETE ON main.skills BEGIN ${byId('OLD.characterId', 'OLD.selfId')} END;
         CREATE TEMP TRIGGER clan_candidate_skills_updated AFTER UPDATE OF level ON main.skills
         WHEN OLD.level IS NOT NEW.level BEGIN ${byId('NEW.characterId', 'NEW.selfId')} END;
+        CREATE TEMP TRIGGER clan_candidate_recipe_added AFTER INSERT ON main.character_recipes BEGIN ${recipeById('NEW')} END;
+        CREATE TEMP TRIGGER clan_candidate_recipe_removed AFTER DELETE ON main.character_recipes BEGIN ${recipeById('OLD')} END;
+        CREATE TEMP TRIGGER clan_candidate_recipe_updated AFTER UPDATE OF recipeId,characterId ON main.character_recipes
+        WHEN OLD.recipeId IS NOT NEW.recipeId OR OLD.characterId IS NOT NEW.characterId BEGIN ${recipeById('OLD')} ${recipeById('NEW')} END;
         CREATE TEMP TRIGGER clan_candidate_gear_added AFTER INSERT ON main.items WHEN NEW.equipped <> 0 BEGIN ${byId('NEW.characterId')} END;
         CREATE TEMP TRIGGER clan_candidate_gear_removed AFTER DELETE ON main.items WHEN OLD.equipped <> 0 BEGIN ${byId('OLD.characterId')} END;
         CREATE TEMP TRIGGER clan_candidate_gear_updated AFTER UPDATE OF equipped,enchant,selfId,characterId ON main.items
@@ -271,6 +292,11 @@ function attach(connection) {
 function committedMember(previous = {}, state = {}) {
     const clanId = Number(state.stats?.clanId || 0);
     if (!(clanId > 0)) return;
+    const request = recruitment.get(clanId);
+    if (request?.sourceIds.size) {
+        const relevant = value => (value.stats?.clanHuntBackoffs || []).filter(row => request.sourceIds.has(String(row.spotId)));
+        if (JSON.stringify(relevant(previous)) !== JSON.stringify(relevant(state))) changed(clanId, 'recruitment_input');
+    }
     leaderSpChanged(state.characterId, previous.sp, state.sp);
     if (Number(state.level) > Number(previous.level)) changed(clanId, 'member_level');
     for (const itemId of trackedItems(clanId)) {

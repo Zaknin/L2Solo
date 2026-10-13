@@ -205,8 +205,9 @@ function equipmentRoster(clan, beneficiary, previousGoal = null, plan = null) {
     const retained = (previousGoal?.assignedMemberIds || []).map(number)
         .filter((id) => memberIds.has(id));
     const requiresSpoiler = String(plan?.next?.kind || '') === 'spoil';
+    const spoilerFor = member => ClanPolicy.rosterRole(member) === 'spoiler' || RosterDemand.ownedSpoilCapability(clan, member, plan);
     const retainedHasSpoiler = retained.some((id) => (
-        ClanPolicy.rosterRole((clan?.members || []).find((member) => memberId(member) === id)) === 'spoiler'
+        spoilerFor((clan?.members || []).find((member) => memberId(member) === id))
     ));
     if (beneficiaryId && beneficiaryId === previousBeneficiaryId
         && retained.length >= Math.max(2, number(Config.operationMinMembers, 5))
@@ -218,10 +219,10 @@ function equipmentRoster(clan, beneficiary, previousGoal = null, plan = null) {
         selected.unshift(beneficiaryId);
     }
     if (requiresSpoiler && !selected.some((id) => (
-        ClanPolicy.rosterRole((clan?.members || []).find((member) => memberId(member) === id)) === 'spoiler'
+        spoilerFor((clan?.members || []).find((member) => memberId(member) === id))
     ))) {
         const spoiler = eligible.find((member) => (
-            member?.phase === 'cold' && !member?.partyId && ClanPolicy.rosterRole(member) === 'spoiler'
+            member?.phase === 'cold' && !member?.partyId && spoilerFor(member)
         ));
         const spoilerId = memberId(spoiler);
         if (spoilerId) {
@@ -617,6 +618,7 @@ async function craftingOptions(clan) {
     const published = new Map(CraftShops.publishedStationRecipes().recipes.map(recipe => [Number(recipe.recipeId), recipe]));
     const providers = {};
     const crafters = (clan.members || []).filter(member => member.phase === 'cold'
+        && !member.recruitmentReserved && !member.stats?.tradeMeeting && !member.stats?.playerPartyTakeover
         && (!member.partyId || Number(member.stats?.clanPartyObjective?.clanId) === Number(clan.id))
         && !['dead', 'respawning'].includes(member.activity)
         && CraftShops.isServiceCrafter(member));
@@ -638,13 +640,7 @@ async function craftingOptions(clan) {
         if (!known && published.has(Number(recipe.recipeId))) continue;
         providers[recipe.recipeId] = { characterId: memberId(crafter), known,
             recipeItemId: Number(recipe.recipeItemId), loc: crafter.loc || { locX: 83400, locY: 148600, locZ: -3400 } };
-        const materials = recipe.materials.map(row => ({ ...row }));
-        if (!known) {
-            const scroll = materials.find(row => Number(row.selfId) === Number(recipe.recipeItemId));
-            if (scroll) scroll.amount += 1;
-            else materials.push({ selfId: Number(recipe.recipeItemId), amount: 1 });
-        }
-        published.set(Number(recipe.recipeId), { ...recipe, materials });
+        published.set(Number(recipe.recipeId), recipe);
     }
     return { craftRecipes: [...published.values()], allowedRecipeIds: [...published.keys()], craftProviders: providers };
 }
@@ -678,7 +674,9 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
     }
     let remaining = 64 - retainedIds.length;
     const prepare = pool => options.jobKey ? PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline, context: options.workerContext,
-        clan, spots: profiles, prospects: pool, previousGoal }) : Promise.resolve(RosterDemand.prepare(clan, profiles, pool, previousGoal));
+        clan, spots: profiles, prospects: pool, previousGoal, economicRequirements: scan.requirements }) : Promise.resolve({
+            ...RosterDemand.prepare(clan, profiles, pool, previousGoal),
+            economicProspects: RosterDemand.retainedEconomicProspects(pool, scan.requirements) });
     let prepared = await prepare(prospects);
     while (!prepared.raids.length && remaining > 0 && !scan.done && prepared.requests.length) {
         const request = prepared.requests.find(row => !(scan.exhausted || []).includes(row.kind));
@@ -698,7 +696,7 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
         prepared = await prepare(prospects);
         if (!page.length && (scan.exhausted || []).length >= prepared.requests.length) scan.done = true;
     }
-    scan.prospects = prepared.retainedProspects;
+    scan.prospects = [...new Set([...prepared.retainedProspects, ...(prepared.economicProspects || [])])].slice(0, 9);
     scan.ownerSection = section;
     scan.ownFingerprint = RosterDemand.ownFingerprint(clan);
     scan.goalKey = previousGoal?.goalKey || null;
@@ -707,7 +705,49 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
     scan.classIds = require('./ClanCandidateCapabilities').classIdsForRequirements([...new Set(watchRequests.flatMap(row => row.kinds))]);
     scan.minLevel = watchRequests.length ? Math.min(...watchRequests.map(row => row.minLevel)) : 1;
     scan.maxLevel = watchRequests.length ? Math.max(...watchRequests.map(row => row.maxLevel)) : 100;
-    return { ...prepared, scan, ownerSection: section, continuation: !prepared.raids.length && !scan.done && prepared.requests.length > 0 };
+    return { ...prepared, scan, ownerSection: section, prospects, remaining, clan, profiles, previousGoal,
+        continuation: !prepared.raids.length && !scan.done && prepared.requests.length > 0 };
+}
+
+async function prepareEconomic(recruitment, requirements, options) {
+    const { scan } = recruitment;
+    const requests = requirements.map(RosterDemand.economicRequest);
+    const key = RosterDemand.hash(requirements);
+    if (scan.economic?.key !== key) scan.economic = { key, exhausted: [] };
+    const economic = scan.economic;
+    // One logical native chain, one finite cursor; unrelated money/SP does not
+    // restart it. The allowance is the remainder of this same admitted raid job.
+    for (const request of requests) {
+        if (economic.exhausted.includes(request.key)) continue;
+        if (!(recruitment.remaining > 0)) break;
+        if (economic.kind !== request.key) { economic.kind = request.key; economic.cursor = null; }
+        if (Date.now() >= options.planningDeadline) throw planningDeferred('clan planning deadline');
+        const limit = recruitment.remaining;
+        const page = await LifeState.clanOperationCandidates({ targetClanId: recruitment.clan.id, unclanned: true,
+            excludeTradeMeetings: true, classIds: request.classIds, minLevel: request.minLevel, maxLevel: request.maxLevel,
+            cursor: economic.cursor, limit });
+        recruitment.remaining -= page.length;
+        recruitment.prospects = [...new Map([...recruitment.prospects,
+            ...page.filter(member => !(scan.refused || []).includes(memberId(member)))].map(member => [memberId(member), member])).values()];
+        economic.cursor = page.at(-1)?.candidateCursor || economic.cursor;
+        if (page.length < limit) economic.exhausted.push(request.key);
+    }
+    const recipeIds = requirements.filter(row => row.kind === 'craft').map(row => row.recipeId);
+    const ids = recruitment.prospects.map(memberId);
+    const knowledge = ids.length && recipeIds.length ? await Database.execute([`SELECT characterId,recipeId FROM character_recipes
+        WHERE characterId IN (${ids.map(() => '?').join(',')}) AND recipeId IN (${recipeIds.map(() => '?').join(',')})`, [...ids, ...recipeIds]]) : [];
+    const partial = options.jobKey ? await PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline,
+        clan: recruitment.clan, spots: recruitment.profiles, prospects: recruitment.prospects, previousGoal: recruitment.previousGoal,
+        economicRequirements: requirements }) : { economicProspects: RosterDemand.retainedEconomicProspects(recruitment.prospects, requirements, scan.prospects) };
+    scan.prospects = [...new Set([...scan.prospects, ...(partial.economicProspects || [])])].slice(0, 9);
+    // Scalar watches only. Recipe knowledge changes use the same after-COMMIT
+    // addressed review input as ability/class/availability changes.
+    scan.classIds = [...new Set([...scan.classIds, ...requests.flatMap(row => row.classIds)])];
+    scan.minLevel = Math.min(scan.minLevel, ...requests.map(row => row.minLevel));
+    scan.maxLevel = Math.max(scan.maxLevel, ...requests.map(row => row.maxLevel));
+    scan.requirements = requirements;
+    recruitment.continuation ||= requests.some(row => !economic.exhausted.includes(row.key));
+    return knowledge.map(row => [Number(row.characterId), Number(row.recipeId)]);
 }
 
 async function planningForClan(clan, previousGoal = null, options = {}) {
@@ -773,7 +813,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         )
         : false;
     const warehouseRows = await Database.fetchClanWarehouseItems(clan.id);
-    const craftOptions = await craftingOptions(clan);
+    const craftOptions = await craftingOptions(recruitment?.clan || clan);
     const previousMemberId = number(previousGoal?.target?.memberId);
     const reservationOptions = reservationOptionsForClan(clan);
     // The clan pays what a member lacks for its goal from its free money (above
@@ -784,7 +824,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         member?.phase === 'cold'
         && (!member?.partyId || previousAssigned.has(memberId(member)))
         && String(member?.simulationOwner || 'legacy_main') === 'legacy_main'
-        && ClanPolicy.rosterRole(member) === 'spoiler'
+        && (ClanPolicy.rosterRole(member) === 'spoiler' || RosterDemand.ownedSpoilCapability(clan, member))
     ));
     const members = planningMemberOrder(
         clan.members || [],
@@ -801,6 +841,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         ? Object.fromEntries(members.map((member) => [memberId(member), beneficiaryFingerprint(member)]))
         : null;
     let workerContext;
+    let economicAttempted = false;
     const planningDeadline = number(options.planningDeadline)
         || Date.now() + Math.min(45000, Math.max(1000, Config.actionLeaseMs - 5000));
     if (workerFingerprint && members.length) {
@@ -817,6 +858,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
                 new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean))));
         const memberOptions = {
             ...craftOptions,
+            economicCraftAllowed: require('../Bot/Economy/ProductionPolicy').buyersDisabled() === false,
             ignoreExistingPlan: previousFulfilled && id === previousMemberId,
             occupancy,
             capacityUnits,
@@ -827,11 +869,18 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             ...reservationOptions,
             excludedTargetIds: options.excludedTargetIds || []
         };
+        const nativePlan = async extra => {
+            const requestOptions = { ...memberOptions, ...extra };
+            if (workerFingerprint) return PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: requestOptions,
+                context: workerContext, deadlineAt: planningDeadline, jobKey: options.jobKey });
+            return requestOptions.economicMode ? RosterDemand.economicPlan(planForMember, {
+                clan: recruitment.clan, prospects: recruitment.prospects, prepared: recruitment }, member, memberSpots, warehouseRows, requestOptions)
+                : planForMember(member, memberSpots, warehouseRows, requestOptions);
+        };
         let plan;
         if (workerFingerprint) {
             try {
-                plan = await PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: memberOptions, context: workerContext,
-                    deadlineAt: planningDeadline, jobKey: options.jobKey });
+                plan = await nativePlan();
                 if (Date.now() >= planningDeadline) throw planningDeferred('clan planning deadline');
             } catch (error) {
                 recordReason('clan_planning_worker_unavailable');
@@ -840,7 +889,22 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         } else {
             // Synchronous harnesses use the identical pure planner. Runtime enables
             // the worker at startup and never falls back here after a worker failure.
-            plan = planForMember(member, memberSpots, warehouseRows, memberOptions);
+            plan = await nativePlan();
+        }
+        const economicEnabled = recruitment && !economicAttempted
+            && require('./ClanRules').memberLimit(clan.level) > Number(clan.physicalMemberCount ?? clan.members.length);
+        if (economicEnabled) {
+            const discovered = await nativePlan({ economicMode: 'discovery' });
+            const requirements = discovered.economicRequirements;
+            if (requirements?.length) {
+                economicAttempted = true;
+                const recipeKnowledge = await prepareEconomic(recruitment, requirements, options);
+                plan = await nativePlan({ economicMode: 'conditional', economicRequirements: requirements, recipeKnowledge });
+                if (plan.economicTeam) {
+                    recruitment.scan.prospects = [...new Set([...plan.economicTeam.retainedProspects, ...recruitment.scan.prospects])].slice(0, 9);
+                    recruitment.continuation = false;
+                }
+            }
         }
         plans.set(id, plan);
         // Equipment planning is CPU-only and may inspect several nearby item
@@ -1036,7 +1100,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         }
     }
 
-    const team = planning.recruitment?.teams?.[selection.plan?.next?.spotId];
+    const team = selection.plan?.economicTeam || planning.recruitment?.teams?.[selection.plan?.next?.spotId];
     const section = RosterDemand.ownerSection(clan, options.ownerSection);
     const scan = planning.recruitment?.scan || null;
     if (team && !team.actualReady) {
@@ -1044,6 +1108,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         goal.assignedMemberIds = [];
         goal.status = 'preparing';
         goal.reasonCodes = ['clan_recruitment_wait'];
+        if (team.economic) goal.plan.economicRequirements = team.requirements;
         if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
         const demand = RosterDemand.buildDemand(clan, goal, team, section);
         const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
@@ -1102,6 +1167,9 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         assignedMemberIds,
         roleFor: ClanPolicy.rosterRole
     });
+    if (selection.plan.economicOwnedRequirements) goal.plan.economicRequirements = selection.plan.economicOwnedRequirements;
+    else if (previousGoal?.plan?.economicRequirements && goal.goalKey === previousGoal.goalKey)
+        goal.plan.economicRequirements = previousGoal.plan.economicRequirements;
     if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
     let persistedGoal = false;
     if (team?.actualReady) {

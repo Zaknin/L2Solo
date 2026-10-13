@@ -85,6 +85,7 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
         spots,
         clanCrafting: true,
         craftRecipes: options.craftRecipes,
+        craftProviders: options.craftProviders,
         ...(options.recipeId ? { recipeId: options.recipeId } : {}),
         allowedRecipeIds: options.allowedRecipeIds ? new Set(options.allowedRecipeIds) : undefined,
         maxExpectedKills: number(options.maxExpectedKills, Config.equipmentMaxExpectedKills),

@@ -54,11 +54,7 @@ function componentFor(state, selfId) {
 function recipeForState(state, recipe) {
     const provider = state?.stats?.equipmentPlan?.craftProviders?.[recipe?.recipeId];
     if (!recipe || !provider || provider.known || provider.workshop) return recipe;
-    const materials = recipe.materials.map(row => ({ ...row }));
-    const scroll = materials.find(row => Number(row.selfId) === Number(recipe.recipeItemId));
-    if (scroll) scroll.amount += 1;
-    else materials.push({ selfId: Number(recipe.recipeItemId), amount: 1 });
-    return { ...recipe, materials };
+    return ClanCrafting.recipeForProvider(recipe, provider);
 }
 
 function hasMaterials(state, recipe) {

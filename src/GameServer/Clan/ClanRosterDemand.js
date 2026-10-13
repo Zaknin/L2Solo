@@ -3,6 +3,10 @@ const { createHash } = require('node:crypto');
 const Raid = require('./ClanRaidPolicy');
 const Capabilities = require('./ClanCandidateCapabilities');
 const Rules = require('./ClanRules');
+const Recipes = invoke('GameServer/Items/C4RecipeItems');
+const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const Data = invoke('GameServer/DataCache');
+const RecipeItems = require('../Item/ItemTemplateIndex');
 const id = member => Number(member?.characterId ?? member?.id);
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
 
@@ -24,6 +28,17 @@ function ownFingerprint(clan) {
     return hash([clan.id, clan.level, clan.state?.mode, clan.physicalMemberCount ?? clan.members.length,
         clan.members.map(member => [id(member), memberFingerprint(member)]).sort((a, b) => a[0] - b[0])]);
 }
+function ownJoinFingerprint(clan) {
+    // Waiting cleanup legitimately releases the owner's unstarted group and
+    // removes its objective. It cannot change membership or learned equipment
+    // capability between the selected CAS and the native join.
+    return hash([clan.id, clan.level, clan.physicalMemberCount ?? clan.members.length,
+        clan.members.map(member => [id(member), memberFingerprint({ ...member,
+            partyId: Number(member.stats?.clanPartyObjective?.clanId) === Number(clan.id) ? null : member.partyId,
+            party: Number(member.stats?.clanPartyObjective?.clanId) === Number(clan.id) ? null : member.party,
+            activity: ['dead', 'respawning'].includes(member.activity) ? member.activity : null,
+            stats: { ...member.stats, clanPartyObjective: null } })]).sort((a, b) => a[0] - b[0])]);
+}
 function ownerSection(clan, requested) {
     if (requested === 'productionGoal') return requested;
     const goal = clan.state?.goal;
@@ -35,7 +50,7 @@ function sourceFingerprint(spot) {
 }
 function goalFingerprint(goal) {
     return hash(goal ? [goal.goalKey, goal.type, goal.status, goal.controlledBy || null, goal.target,
-        goal.plan?.kind, goal.plan?.sourceId, goal.assignedMemberIds || []] : null);
+        goal.plan?.kind, goal.plan?.sourceId, goal.plan?.economicRequirements || null, goal.assignedMemberIds || []] : null);
 }
 function scanKey(clan, spots, previousGoal, section) {
     return scanKeyForSources(clan, hash(spots.map(sourceFingerprint)), previousGoal, section);
@@ -55,6 +70,168 @@ function neededKinds(assessment) {
 function proofRow(member) {
     return [id(member), Number(member.simulationRevision ?? member.simulation?.revision ?? 0),
         Number(member.classId ?? member.stats?.classId ?? 0), Number(member.level), memberFingerprint(member)];
+}
+function recipeIds(plan, member, warehouseRows = []) {
+    if (!plan?.recipeId) return [];
+    const Crafting = require('./ClanCraftingPolicy');
+    const used = new Set();
+    Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), Crafting.stockInventory(member?.inventory, warehouseRows),
+        null, 1, plan.craftProviders, plan.componentRecipes, used);
+    return [...used];
+}
+function economicRequirements(plan, options = {}, member, warehouseRows = []) {
+    const requirements = [];
+    if (plan?.strategy === 'craft') for (const recipeId of recipeIds(plan, member, warehouseRows)) {
+        if (Recipes.resolveByRecipeId(recipeId)?.type === 'dwarven' && !(options.allowedRecipeIds || []).includes(recipeId)) requirements.push({ kind: 'craft', recipeId });
+    }
+    if (plan?.next?.kind === 'spoil' && !options.spoilCapable) requirements.push({ kind: 'spoil',
+        itemId: Number(plan.next.itemId), npcId: Number(plan.next.npcId), spotId: String(plan.next.spotId), spotLevel: Number(plan.next.spotLevel) });
+    return requirements;
+}
+function capabilityContext(requirement) {
+    return requirement.kind === 'craft' ? { learned: true, recipe: Recipes.resolveByRecipeId(requirement.recipeId) }
+        : { itemId: requirement.itemId, reward: RecipeItems.findStrict(Data.npcRewards, requirement.npcId) };
+}
+function economicCapable(member, requirement) {
+    if (requirement.kind === 'spoil' && !require('../Bot/Population/ClanEquipmentPartyPolicy').allowed(member,
+        { ...requirement, clanOperation: 'equipment', clanId: 1 })) return false;
+    return Capabilities.contextualCapability(member, requirement, capabilityContext(requirement));
+}
+function economicRequest(requirement) {
+    let classIds = Capabilities.classIdsForRequirements([requirement]);
+    let minLevel = 1, maxLevel = 100;
+    if (requirement.kind === 'craft') {
+        const recipe = Recipes.resolveByRecipeId(requirement.recipeId);
+        const Craft = invoke('GameServer/Bot/Economy/CraftEligibility');
+        classIds = classIds.filter(classId => Craft.canCraft({ classId, level: 80 }, recipe));
+        const starts = classIds.map(classId => {
+            for (let level = 1; level <= 80; level++) if (Craft.canCraft({ classId, level }, recipe)) return level;
+            return 100;
+        });
+        minLevel = Math.min(100, ...starts);
+    } else {
+        const npc = RecipeItems.findStrict(Data.npcs, requirement.npcId);
+        minLevel = Math.max(1, Number(npc?.template?.level || 1) - require('./ClanSimulationConfig').operationMaxTargetLevelGap);
+    }
+    return { ...requirement, classIds, minLevel, maxLevel, key: hash(requirement) };
+}
+// Discovery exposes native routes only to find concrete requirements. Its
+// result never grants ownership/readiness and is never assigned or persisted.
+function discoveryOptions(options) {
+    const recipes = options.economicCraftAllowed === false ? options.craftRecipes || []
+        : Object.values(Recipes.loadRecipeItems()).filter(recipe => recipe.type === 'dwarven');
+    return { ...options, craftRecipes: recipes, allowedRecipeIds: recipes.map(recipe => recipe.recipeId),
+        craftProviders: options.craftProviders, spoilCapable: true, ignoreExistingPlan: true };
+}
+function ownedSpoilCapability(clan, member, plan = null) {
+    if (!member || member.phase !== 'cold' || member.recruitmentReserved || member.stats?.tradeMeeting || member.stats?.playerPartyTakeover) return false;
+    const demand = clan.state?.recruitmentDemand;
+    const owner = demand?.ownerSection ? clan.state?.[demand.ownerSection] : null;
+    const active = goal => goal?.type === 'equipment' && goal.status !== 'completed' && goal.controlledBy !== 'player';
+    const requirements = plan?.economicOwnedRequirements || (demand?.source?.kind === 'economic' && active(owner) && owner?.goalKey === demand.goalKey
+        ? demand.requirements : [clan.state?.productionGoal, clan.state?.goal].find(active)?.plan?.economicRequirements);
+    return (requirements || []).some(row => row.kind === 'spoil' && (!plan || Number(plan.next?.npcId) === row.npcId
+        && Number(plan.next?.itemId) === row.itemId && String(plan.next?.spotId) === row.spotId) && economicCapable(member, row));
+}
+function conditionalOptions(options, requirements, prospects, knowledge = []) {
+    const providers = { ...options.craftProviders }, recipes = new Map((options.craftRecipes || []).map(recipe => [recipe.recipeId, recipe]));
+    const known = new Set(knowledge.map(row => `${row[0]}:${row[1]}`));
+    for (const requirement of requirements.filter(row => row.kind === 'craft')) {
+        const recipe = Recipes.resolveByRecipeId(requirement.recipeId);
+        const eligible = prospects.filter(member => economicCapable(member, requirement));
+        const crafter = eligible.find(member => known.has(`${id(member)}:${recipe.recipeId}`)) || eligible[0];
+        if (!crafter) continue;
+        const learned = known.has(`${id(crafter)}:${recipe.recipeId}`);
+        providers[recipe.recipeId] = { characterId: id(crafter), known: learned, recipeItemId: recipe.recipeItemId, loc: crafter.loc };
+        recipes.set(recipe.recipeId, recipe);
+    }
+    return { ...options, craftRecipes: [...recipes.values()], allowedRecipeIds: [...recipes.keys()], craftProviders: providers,
+        spoilCapable: options.spoilCapable || requirements.some(row => row.kind === 'spoil' && prospects.some(member => economicCapable(member, row))) };
+}
+function economicSource(plan, requirements, knowledge, member, warehouseRows) {
+    const recipes = recipeIds(plan, member, warehouseRows);
+    const selected = requirements.filter(row => row.kind === 'craft' ? recipes.includes(row.recipeId)
+        : plan.next?.kind === 'spoil' && plan.next.itemId === row.itemId && plan.next.npcId === row.npcId && plan.next.spotId === row.spotId);
+    const recipeProviders = recipes.flatMap(recipe => plan.craftProviders?.[recipe]?.characterId
+        ? [[Number(plan.craftProviders[recipe].characterId), recipe]] : []);
+    return { kind: 'economic', id: plan.next?.spotId || `recipe:${plan.recipeId}`, npcId: Number(plan.next?.npcId || 0),
+        requirements: selected, recipes, recipeProviders,
+        knowledge: hash(recipeProviders.map(([provider, recipe]) => [provider, recipe,
+            plan.craftProviders[recipe].known === true])),
+        fingerprint: economicFingerprint(selected, recipes) };
+}
+function economicFingerprint(requirements, recipes) {
+    return hash([recipes.map(recipe => Recipes.resolveByRecipeId(recipe)), requirements.filter(row => row.kind === 'spoil').map(row => {
+        const reward = RecipeItems.findStrict(Data.npcRewards, row.npcId);
+        const npc = RecipeItems.findStrict(Data.npcs, row.npcId);
+        return [row.spotId, row.spotLevel, row.npcId, npc?.template?.level, row.itemId, reward?.spoils || null];
+    })]);
+}
+function economicSourceCurrent(source) {
+    return source.fingerprint === economicFingerprint(source.requirements, source.recipes)
+        && source.requirements.every(row => row.kind === 'craft' ? !!Recipes.resolveByRecipeId(row.recipeId)
+            : (!Number.isFinite(row.spotLevel) || Number(invoke('GameServer/Bot/Population/SpotProfiles').findById(row.spotId)?.avgLevel) === row.spotLevel)
+                && require('../Knowledge/SourceCatalog').rewardSelectedAtSpot(invoke('GameServer/Bot/Population/SpotProfiles').findById(row.spotId),
+                    RecipeItems.findStrict(Data.npcRewards, row.npcId))
+                && Gear.itemDropYield(RecipeItems.findStrict(Data.npcRewards, row.npcId), row.itemId, 'spoil').chance > 0);
+}
+function economicTeam(clan, plan, requirements, prospects, knowledge, raidTeam = null, member, warehouseRows = []) {
+    const own = new Set(clan.members.map(id)), source = economicSource(plan, requirements, knowledge, member, warehouseRows);
+    if (raidTeam) source.raid = raidTeam.source;
+    const prospectiveIds = source.recipeProviders.map(row => row[0]).filter(value => !own.has(value));
+    const spoil = source.requirements.find(row => row.kind === 'spoil');
+    if (spoil && !ownAvailable(clan).some(member => economicCapable(member, spoil))) {
+        const candidate = prospects.find(member => economicCapable(member, spoil));
+        if (!candidate) return null;
+        prospectiveIds.push(id(candidate));
+    }
+    const needed = [...new Set([...(raidTeam?.prospectiveIds || []), ...prospectiveIds])];
+    if (!needed.length || needed.length > 9 || needed.length > Rules.memberLimit(clan.level) - Number(clan.physicalMemberCount ?? clan.members.length)) return null;
+    const rows = [...(raidTeam?.rows || []).filter(row => !own.has(row[0])), ...prospects.filter(member => needed.includes(id(member))).map(proofRow)];
+    return { ...raidTeam, source, economic: true, memberIds: raidTeam?.memberIds || [], prospectiveIds: needed,
+        retainedProspects: [...new Set([...needed, ...prospects.filter(value => source.requirements.some(row => economicCapable(value, row))).map(id)])].slice(0, 9),
+        rows: [...new Map(rows.map(row => [row[0], row])).values()], ownFingerprint: ownFingerprint(clan), actualReady: false,
+        ownJoinFingerprint: ownJoinFingerprint(clan),
+        requirements: source.requirements, deficits: { economic: needed.length },
+        neededKinds: [...new Set([...(raidTeam?.neededKinds || []), ...source.requirements.map(row => row.kind)])], reason: 'economic_capability_missing' };
+}
+function ownAvailable(clan) {
+    return clan.members.filter(value => value.phase === 'cold' && !value.recruitmentReserved
+        && !value.stats?.tradeMeeting && !value.stats?.playerPartyTakeover && (!value.partyId || Number(value.stats?.clanPartyObjective?.clanId) === Number(clan.id)));
+}
+function retainedEconomicProspects(prospects, requirements = [], raidIds = []) {
+    const retained = new Set(raidIds);
+    // Keep coverage before alternatives: one capable actor can satisfy several
+    // recipes. Rehydrate these IDs next pass; never persist candidate frames.
+    for (const requirement of Array.isArray(requirements) ? requirements : []) {
+        if ([...retained].some(value => prospects.some(member => id(member) === value && economicCapable(member, requirement)))) continue;
+        const candidate = prospects.find(member => economicCapable(member, requirement));
+        if (candidate && retained.size < 9) retained.add(id(candidate));
+    }
+    return [...retained].slice(0, 9);
+}
+
+// Both discovery and the strict comparison run in the admitted native worker.
+// Only the strict result with a physically possible real team can be selected.
+function economicPlan(planner, job, member, spots, warehouseRows, options) {
+    const base = { ...options }; delete base.economicMode; delete base.economicRequirements; delete base.recipeKnowledge;
+    if (options.economicMode === 'discovery') {
+        const plan = planner(member, spots, warehouseRows, discoveryOptions(base));
+        return { ...plan, economicRequirements: economicRequirements(plan, base, member, warehouseRows) };
+    }
+    const requirements = options.economicRequirements || [];
+    const conditional = conditionalOptions(base, requirements, job.prospects, options.recipeKnowledge);
+    const owned = ownAvailable(job.clan);
+    conditional.spoilCapable ||= requirements.some(row => row.kind === 'spoil' && owned.some(value => economicCapable(value, row)));
+    const plan = planner(member, spots, warehouseRows, conditional);
+    const relevant = economicRequirements(plan, base, member, warehouseRows);
+    if (!relevant.length) return plan;
+    if (relevant.every(row => row.kind === 'spoil' && owned.some(value => economicCapable(value, row))))
+        return { ...plan, economicOwnedRequirements: relevant };
+    const team = economicTeam(job.clan, plan, relevant, job.prospects, options.recipeKnowledge,
+        job.prepared?.teams?.[plan.next?.spotId], member, warehouseRows);
+    return team ? { ...plan, economicTeam: team }
+        : planner(member, spots, warehouseRows, base);
 }
 
 // Called in the existing planning worker. RaidPolicy owns every composition,
@@ -111,6 +288,12 @@ function prepare(clan, spots, prospects = [], previousGoal = null, readinessCach
 }
 
 function buildDemand(clan, goal, team, section) {
+    if (team.economic) return { clanId: clan.id, ownerSection: section, goalKey: goal.goalKey,
+        generation: hash([clan.id, section, goal.goalKey, team.source, team.rows.map(row => [row[0], row[2], row[3], row[4]])]), source: team.source,
+        minLevel: Math.min(...team.rows.map(row => row[3]), ...team.requirements.map(row => economicRequest(row).minLevel)), maxLevel: 100,
+        neededKinds: team.neededKinds, classIds: [...new Set([...team.rows.map(row => row[2]),
+            ...team.requirements.flatMap(row => economicRequest(row).classIds)])], requirements: team.requirements,
+        newMemberIds: team.prospectiveIds, proof: { ownFingerprint: team.ownFingerprint, ownJoinFingerprint: team.ownJoinFingerprint, rows: team.rows }, reason: team.reason, status: 'waiting' };
     const kinds = [...new Set([...team.neededKinds, ...team.rows.filter(row => team.prospectiveIds.includes(row[0]))
         .map(row => Raid.raidRole({ classId: row[2], level: row[3] }) === 'buffer' ? 'mainBuffer' : Raid.raidRole({ classId: row[2], level: row[3] }))])];
     const generation = hash([clan.id, section, goal.goalKey, team.source.fingerprint,
@@ -136,10 +319,13 @@ function intakeContext(candidate, clan) {
     const remaining = demand.newMemberIds.filter(value => !ownIds.has(value));
     const allowed = goal?.goalKey === demand.goalKey && goal.status !== 'completed' && goal.controlledBy !== 'player'
         && remaining.includes(id(candidate)) && candidate.level >= demand.minLevel && candidate.level <= demand.maxLevel
-        && demand.neededKinds.some(kind => Capabilities.contextualCapability(candidate, kind));
+        && (demand.source?.kind === 'economic' ? demand.requirements.some(requirement => economicCapable(candidate, requirement))
+            || demand.neededKinds.some(kind => Capabilities.contextualCapability(candidate, kind))
+            : demand.neededKinds.some(kind => Capabilities.contextualCapability(candidate, kind)));
     return { contextualAllowed: allowed, roleNeed: allowed, growthNeed: allowed && remaining.length > 0,
         targetMemberCount: Math.min(Rules.memberLimit(clan.level), clan.members.length + remaining.length) };
 }
 
-module.exports = { memberFingerprint, ownFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanKeyForSources, hash, neededKinds, proofRow,
-    prepare, buildDemand, fullRoster, intakeContext };
+module.exports = { memberFingerprint, ownFingerprint, ownJoinFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanKeyForSources, hash, neededKinds, proofRow,
+    prepare, buildDemand, fullRoster, intakeContext, recipeIds, economicRequirements, economicRequest, discoveryOptions,
+    conditionalOptions, economicTeam, economicCapable, economicSourceCurrent, economicPlan, ownedSpoilCapability, retainedEconomicProspects };

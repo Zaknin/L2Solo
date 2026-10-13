@@ -65,6 +65,21 @@ function rawSourcesForItem(itemId, kind) {
     }
     return atlas.rawByKind[kind]?.get(Number(itemId)) || EMPTY;
 }
+function rewardAllowedAtSpot(spot, reward, protectedRaid) {
+    return protectedRaid ? spot?.raidBoss === true && Number(spot.raidBossTemplateId || 0) === Number(reward.selfId)
+        : !!spot && spot.raidBoss !== true;
+}
+
+// Addressed source proof: the same native ID/name and raid permission relation
+// as the selected index, without replacing its one retained planner view.
+function rewardSelectedAtSpot(spot, reward) {
+    if (!spot || !reward) return false;
+    const npc = ItemTemplateIndex.find(DataCache.npcs, reward.selfId);
+    if (!rewardAllowedAtSpot(spot, reward, BotRaidSafety.isProtectedRaidEntity(npc))) return false;
+    const name = String(reward.template?.name || '').trim().toLowerCase();
+    return (spot.npcEntries || []).some(entry => entry.selfId && Number(entry.selfId) === Number(reward.selfId)
+        || name && entry.name && String(entry.name).trim().toLowerCase() === name);
+}
 function sourcesByItem(spots = []) {
     if (!spots?.length) return NO_SOURCES;
     const rewards = DataCache.npcRewards || [];
@@ -130,10 +145,7 @@ function sourcesByItem(spots = []) {
         // Only the explicit raid-source atlas may opt a protected NPC into
         // equipment planning. Mentioning that NPC in an ordinary spot never
         // bypasses the global bot raid guard.
-        const eligibleSpots = protectedRaid
-            ? spotsForNpc.filter((spot) => spot?.raidBoss === true
-                && Number(spot.raidBossTemplateId || 0) === Number(reward.selfId))
-            : spotsForNpc.filter((spot) => spot?.raidBoss !== true);
+        const eligibleSpots = spotsForNpc.filter(spot => rewardAllowedAtSpot(spot, reward, protectedRaid));
         if (!eligibleSpots.length) return;
         const itemKinds = [
             ['drop', reward.rewards || []],
@@ -214,4 +226,4 @@ function potentialSpawnData() {
     return require('./SpawnCatalog').potentialSpawnData();
 }
 
-module.exports = { sourcesByItem, rawSourcesForItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData };
+module.exports = { sourcesByItem, rawSourcesForItem, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData, rewardSelectedAtSpot };

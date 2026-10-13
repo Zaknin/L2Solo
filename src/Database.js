@@ -3923,6 +3923,15 @@ function recruitmentRows(where, params) {
             simulationOwner: row.simulationOwner || 'legacy_main', stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
 }
 function recruitmentSourceCurrent(source) {
+    if (source?.kind === 'economic') {
+        const Demand = require('./GameServer/Clan/ClanRosterDemand');
+        if (!Demand.economicSourceCurrent(source) || source.raid && !recruitmentSourceCurrent(source.raid)) return false;
+        const pairs = source.recipeProviders || [];
+        if (new Set(pairs.map(row => row[0])).size > 9) return false;
+        const known = pairs.map(([characterId, recipeId]) => [characterId, recipeId,
+            !!one('SELECT 1 FROM character_recipes WHERE characterId=? AND recipeId=?', [characterId, recipeId])]);
+        return Demand.hash(known) === source.knowledge;
+    }
     const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
     const spot = Catalog.findById(source.id);
     if (!spot) return false;
@@ -9382,6 +9391,14 @@ const Database = {
                 if (!member || !recruitmentAvailable(member) || require('./GameServer/Clan/ClanRosterDemand').memberFingerprint(member) !== candidateFingerprint) {
                     return { ok: false, code: 'recruitment_candidate_changed' };
                 }
+                if (demand.source.kind === 'economic') {
+                    const Demand = require('./GameServer/Clan/ClanRosterDemand');
+                    const ownRows = recruitmentRows('c.clanId=?', [targetClanId]);
+                    const clanLevel = one('SELECT level FROM clans WHERE id=?', [targetClanId]).level;
+                    const own = ownRows.filter(row => !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(row));
+                    if (ownRows.length > 40 || Demand.ownJoinFingerprint({ id: targetClanId, level: clanLevel, state,
+                        physicalMemberCount: ownRows.length, members: own }) !== demand.proof.ownJoinFingerprint) return { ok: false, code: 'recruitment_snapshot_changed' };
+                }
             }
 
             const memberCount = Number(one('SELECT COUNT(*) AS count FROM characters WHERE clanId = ?', [targetClanId]).count || 0);
@@ -9494,7 +9511,8 @@ const Database = {
                 if (state.recruitmentDemand?.ownerSection === ownerSection) state.recruitmentDemand = null;
                 if (state.recruitmentScan?.ownerSection === ownerSection && (goal || recruitmentScan === undefined)) state.recruitmentScan = null;
             }
-            if (Buffer.byteLength(JSON.stringify({ recruitmentDemand: state.recruitmentDemand, recruitmentScan: state.recruitmentScan })) > 2048)
+            if (Buffer.byteLength(JSON.stringify({ recruitmentDemand: state.recruitmentDemand, recruitmentScan: state.recruitmentScan,
+                economicRequirements: [state.goal?.plan?.economicRequirements, state.productionGoal?.plan?.economicRequirements] })) > 2048)
                 return { ok: false, code: 'recruitment_metadata_bound' };
             state.updatedAt = timestamp;
             const updated = write(`UPDATE clan_simulation_clans

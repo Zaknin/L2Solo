@@ -107,8 +107,12 @@ parentPort.on('message', (message) => {
             }
             if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw Error('clan planning deadline');
             if (raidJob?.key !== payload.jobKey) raidJob = { key: payload.jobKey, readiness: new Map() };
-            parentPort.postMessage({ id: message.id, result: require('./ClanRosterDemand').prepare(payload.clan,
-                payload.spots, payload.prospects, payload.previousGoal, raidJob.readiness) });
+            raidJob.clan = payload.clan; raidJob.prospects = payload.prospects;
+            raidJob.prepared = require('./ClanRosterDemand').prepare(payload.clan,
+                payload.spots, payload.prospects, payload.previousGoal, raidJob.readiness);
+            raidJob.prepared.economicProspects = require('./ClanRosterDemand').retainedEconomicProspects(payload.prospects,
+                payload.economicRequirements, raidJob.prepared.retainedProspects);
+            parentPort.postMessage({ id: message.id, result: raidJob.prepared });
             return;
         } else if (message.type === 'plan') {
             const payload = spotCatalog.restore(message.payload);
@@ -128,7 +132,10 @@ parentPort.on('message', (message) => {
             if (forbidden) throw new Error('clan planning worker loaded a live runtime dependency');
             const startedAt = workerData?.developerDiagnostics ? performance.now() : 0;
             const { member, spots, warehouseRows, options } = payload;
-            const plan = planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
+            if (options.economicMode && raidJob?.key !== payload.jobKey) throw Error('economic planning job missing');
+            const plan = options.economicMode ? require('./ClanRosterDemand').economicPlan(planner.planForMember, raidJob,
+                member, spots, warehouseRows, { ...options, throwOnError: true })
+                : planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
             parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt } : {}) } });
             return;
         } else {

@@ -659,11 +659,15 @@ function preferredTarget(state = {}, options = {}) {
     const craftRecipes = options.craftRecipes
         ? options.craftRecipes.filter((recipe) => recipe.type === 'dwarven' && Sources.allowsRecipe(recipe))
         : CraftShopService.publishedStationRecipes().recipes;
-    const recipes = [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()];
+    // Origin admission sees the canonical recipe. A real clan provider's
+    // learning scroll is the existing material cost, added only afterwards.
+    const canonicalRecipes = [...craftRecipes, ...C4DualSwordCombinations.loadRecipes()].filter(recipe => Sources.allowsRecipe(recipe));
+    const learningRecipe = recipe => require('../../Clan/ClanCraftingPolicy').recipeForProvider(recipe, options.craftProviders?.[recipe.recipeId]);
+    const recipes = canonicalRecipes.map(learningRecipe);
     const recipeRank = options.recipeId
         ? String((DataCache.items || []).find((item) => Number(item.selfId) === Number(recipes.find((recipe) => Number(recipe.recipeId) === Number(options.recipeId))?.productId))?.etc?.rank || '')
         : null;
-    const recipesByProduct = new Map(recipes.filter(recipe => Sources.allowsRecipe(recipe)).map((recipe) => [Number(recipe.productId), recipe]));
+    const recipesByProduct = new Map(recipes.map((recipe) => [Number(recipe.productId), recipe]));
     const excluded = excludedTargetIds(options);
     const excludedMaterials = new Set((options.excludedMaterialIds || []).map(Number));
     const acquisitionState = options.wishTargetId ? Progression.preparation(state, progression) || state : state;
@@ -2486,7 +2490,8 @@ function rawPlanFor(state = {}, options = {}) {
     const planningOptions = {
         ...options,
         allowedRecipeIds: options.allowedRecipeIds || stationRecipeIds(),
-        recipeCatalog: options.craftRecipes ? new Map(options.craftRecipes.map(recipe => [Number(recipe.productId), recipe])) : null,
+        recipeCatalog: options.craftRecipes ? new Map(options.craftRecipes.filter(recipe => Sources.allowsRecipe(recipe)).map(recipe =>
+            [Number(recipe.productId), require('../../Clan/ClanCraftingPolicy').recipeForProvider(recipe, options.craftProviders?.[recipe.recipeId])])) : null,
         sourceCache: options.sourceCache || new Map()
     };
     const preparedTarget = !options.recipeId && (options.wishTargetId || rankIndex(gradeForLevel(state.level)) > rankIndex('d'))

@@ -39,7 +39,11 @@ function contextualCapability(member = {}, requirement = {}, context = {}) {
         && learnedSkills(member).some(healingSkill);
     if (kind === 'mainBuffer') return role === 'buffer'
         && learnedSkills(member).some(skill => mainBuffSkill(skill, context.beneficiaries || []));
-    if (kind === 'craft') return !!context.recipe && Craft.canCraft(member, context.recipe);
+    if (kind === 'craft') {
+        const input = context.learned ? { ...member, craftLevel: Math.max(0,
+            ...learnedSkills(member).filter(skill => Number(skill.selfId) === 172).map(skill => Number(skill.level) || 0)) } : member;
+        return !!context.recipe && Craft.canCraft(input, context.recipe);
+    }
     if (kind === 'spoil') {
         const skills = learnedSkills(member);
         if (![254, 42].every(id => skills.some(skill => Number(skill.selfId) === id && Number(skill.level) > 0))) return false;
