@@ -32,18 +32,16 @@ function consume(session, data) {
         }
     }
 
-    return Database.deleteShortcut(characterId, data.slot).then(() => {
-
-        return Database.setShortcut(characterId, data).then(() => {
-            if (session.actor !== actor) return;
-            session.dataSendToMe(
-                ServerResponse.addShortcut({
-                    ...data,
-                    level: data.kind === 2 ? actor.skillset.fetchSkill(data.id)?.fetchLevel() ?? 1 : undefined
-                })
-            );
-            if (data.kind === 2) session.dataSendToMe(ServerResponse.skillCoolTime(actor));
-        });
+    // setShortcut is an UPSERT on (characterId, slot), the table's primary key: it replaces the slot itself.
+    return Database.setShortcut(characterId, data).then(() => {
+        if (session.actor !== actor) return;
+        session.dataSendToMe(
+            ServerResponse.addShortcut({
+                ...data,
+                level: data.kind === 2 ? actor.skillset.fetchSkill(data.id)?.fetchLevel() ?? 1 : undefined
+            })
+        );
+        if (data.kind === 2) session.dataSendToMe(ServerResponse.skillCoolTime(actor));
     });
 }
 
