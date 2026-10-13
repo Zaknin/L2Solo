@@ -1,16 +1,8 @@
 const ServerResponse = invoke('GameServer/Network/Response');
 const Warehouse = invoke('GameServer/Warehouse/PersonalWarehouse');
 const ClanWarehouse = invoke('GameServer/Warehouse/ClanWarehouse');
-
-function lines(buffer) {
-    if (buffer.length < 5) return null;
-    const count = buffer.readInt32LE(1);
-    if (!Number.isSafeInteger(count) || count < 0 || count > 100 || buffer.length !== 5 + (count * 8)) return null;
-    return Array.from({ length: count }, (_, index) => ({
-        objectId: buffer.readInt32LE(5 + (index * 8)),
-        amount: buffer.readInt32LE(9 + (index * 8))
-    }));
-}
+// Same packet lines as a deposit: count, then objectId and amount per line.
+const { lines } = invoke('GameServer/Network/Request/WarehouseDeposit');
 
 module.exports = async function warehouseWithdraw(session, buffer) {
     try {

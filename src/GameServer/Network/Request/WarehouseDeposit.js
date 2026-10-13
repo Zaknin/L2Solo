@@ -25,3 +25,4 @@ module.exports = async function warehouseDeposit(session, buffer) {
         session.dataSendToMe(ServerResponse.actionFailed());
     }
 };
+module.exports.lines = lines;
