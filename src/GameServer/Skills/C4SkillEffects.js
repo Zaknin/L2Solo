@@ -1351,15 +1351,6 @@ function refreshUserInfo(session, target) {
     }
 }
 
-function refreshEtcStatus(session, actor) {
-    const packet = ServerResponse.etcStatusUpdate(actor);
-    if (actor?.session?.dataSendToMe) {
-        actor.session.dataSendToMe(packet);
-    } else if (actor === session?.actor && session?.dataSendToMe) {
-        session.dataSendToMe(packet);
-    }
-}
-
 function refreshEffects(session, target) {
     // NPC cast sessions forward to a nearby player; their actor is not the receiver.
     // Personal effect packets must never describe an NPC, including summons.

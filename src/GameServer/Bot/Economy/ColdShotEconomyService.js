@@ -7,7 +7,7 @@ const Recipes = invoke('GameServer/Items/C4RecipeItems');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const StaticMerchantPricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
-const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
+invoke('GameServer/World/Generics/NpcShopBuyLists');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Profit = require('./CraftProfitPolicy');
 const Workshops = require('./CraftWorkshopService');
@@ -26,7 +26,6 @@ const { SHOT_RECIPE_IDS, SHOT_PRODUCT_IDS, SHOT_RECIPE_ITEM_IDS, CRYSTAL_BY_RANK
     availableMaterial, fundedDemand, recipeTarget, scrapCraftRoutes, craftCandidate } = Policy;
 const CRYSTAL_SKILL_LEVEL = { d: 1, c: 2, b: 3, a: 4, s: 5 };
 const active = new Set();
-let catalogCache = null;
 
 // Recheck only the published physical quantity, exit and crystal source. The
 // shared immutable NPC adjacency is initialised once; dynamic reads touch at
@@ -157,21 +156,6 @@ function recheck(state, selected) {
     const candidate = require('./WealthCraftPolicy').drain(Policy.recipeShotSearch(state, recipe, context, options));
     if (!candidate || Number(candidate.gear?.selfId || 0) !== gearId && gearId > 0) return null;
     return candidate;
-}
-
-function catalog() {
-    const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
-    if (catalogCache?.source === DataCache.items && catalogCache.rate === rate) return catalogCache;
-    const itemTemplates = new Map((DataCache.items || []).map((item) => [Number(item.selfId), item]));
-    const npcPrice = new Map();
-    for (const line of NpcShopBuyLists.allOffers()) {
-        const price = Number(line.price ?? itemTemplates.get(Number(line.selfId))?.template?.price);
-        if (!Number.isFinite(price) || price <= 0) continue;
-        const id = Number(line.selfId);
-        npcPrice.set(id, Math.min(npcPrice.get(id) || Infinity, price));
-    }
-    catalogCache = { source: DataCache.items, rate, itemTemplates, npcPrice };
-    return catalogCache;
 }
 
 function marketSnapshot(now = Date.now(), ownState = null) {
@@ -496,5 +480,5 @@ async function execute(state, step, now = Date.now()) {
 
 module.exports = { review, reviewDemand, marketSnapshot, craftCandidate, recipeTarget,
     fundedDemand, scrapCraftRoutes, hasShotSurplus, SHOT_RECIPE_IDS, craft, obtainRecipe, execute, recheck,
-    _resetForTests() { catalogCache = null; active.clear(); }
+    _resetForTests() { active.clear(); }
 };

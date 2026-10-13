@@ -25,10 +25,6 @@ let active = null;
 let monitor = null;
 let selectionInFlight = false;
 
-function actorOf(session) {
-    return session?.actor || null;
-}
-
 function className(classId) {
     return (DataCache.classTemplates == null ? undefined : ClassProgression.firstClassRow(DataCache.classTemplates, classId))?.template?.class
         || `Class ${classId}`;

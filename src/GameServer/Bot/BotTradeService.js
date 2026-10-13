@@ -1,6 +1,6 @@
 const BeginnerShots = require('../Items/C4BeginnerShots');
-const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
-const DataCache = invoke('GameServer/DataCache');
+require('../Item/ItemTemplateIndex');
+invoke('GameServer/DataCache');
 const Database = invoke('Database');
 const ServerResponse = invoke('GameServer/Network/Response');
 const SpeckMath = invoke('GameServer/SpeckMath');
@@ -18,10 +18,6 @@ let tradeSequence = 0;
 
 function now() {
     return Date.now();
-}
-
-function itemTemplate(selfId) {
-    return ItemTemplateIndex.find(DataCache.items, selfId);
 }
 
 function isBotSession(session) {
@@ -306,10 +302,6 @@ function startBotTradeWithOffer(botSession, playerSession, objectId, amount, met
 
 function startNegotiatedTrade(botSession, playerSession, negotiation) {
     return openBotTrade(botSession, playerSession, negotiation);
-}
-
-function lineMapFor(trade, session) {
-    return session === trade.botSession ? trade.botItems : trade.playerItems;
 }
 
 function addPlayerItem(playerSession, objectId, amount) {

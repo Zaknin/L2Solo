@@ -273,10 +273,6 @@ function liveCurrentNpcTarget(session, bot, radius = 2500) {
     return targetDistance(bot, target) <= radius ? target : null;
 }
 
-function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-}
-
 function encounterReadiness(bot, target) {
     return EncounterReadiness.evaluate({
         hp: bot.fetchHp(), maxHp: bot.fetchMaxHp(), mp: bot.fetchMp(), maxMp: bot.fetchMaxMp(),
