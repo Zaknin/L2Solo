@@ -46,6 +46,7 @@ const original = { published: Shops.publishedStationRecipes, share: Config.maxBo
     reload: invoke('GameServer/Clan/ClanService').reload, buyers: Population.staticBuyersDisabled,
     plan: Runtime.plan, query: Life.clanOperationCandidates };
 const calls = [], pages = [], rpc = [], endedJobs = [];
+const originalExternalRange = [base + 100, base + 200];
 const nativeSend = Runtime.ClanPlanningCoordinator.prototype.send;
 const proofCalls = () => Object.fromEntries(['plan', 'prepare_raids', 'end_planning_job']
     .map(type => [type, rpc.filter(value => value === type).length]));
@@ -117,27 +118,30 @@ function learningReaderCases() {
 }
 
 async function criticCases() {
+    // Separate physical actors/clan/stock from the default native consumer cases.
+    const base = 848000, owns = [member(base, 4, [], stock), member(base + 1, 15), member(base + 2, 17)];
+    calls.length = pages.length = rpc.length = endedJobs.length = 0;
     const frame = 1891, mold = 1877, component = Recipes.resolveByProductId(frame);
     const partialCrafter = base + 462, badSpoiler = base + 500, goodSpoiler = base + 501;
     // This selector's old external fixture rows are unavailable, not deleted.
-    await q("UPDATE bot_life_state SET phase='hot' WHERE characterId BETWEEN ? AND ?", [base + 100, base + 200]);
+    await q("UPDATE bot_life_state SET phase='hot' WHERE characterId BETWEEN ? AND ?", originalExternalRange);
     const partialStock = { ...stock }; delete partialStock[frame];
     const frameAmount = recipe.materials.find(row => row.selfId === frame).amount;
     for (const row of component.materials) if (row.selfId !== mold) partialStock[row.selfId] = {
         selfId: row.selfId, amount: row.amount * frameAmount
     };
-    await q('UPDATE bot_life_state SET inventorySummary=? WHERE characterId=?', [JSON.stringify(partialStock), base]);
-    for (const candidate of [...Array.from({ length: 63 }, (_, i) => member(base + 400 + i, 57,
+    for (const candidate of [...owns, ...Array.from({ length: 63 }, (_, i) => member(base + 400 + i, 57,
         i === 62 ? [{ selfId: 172, level: 6 }] : [])), member(badSpoiler, 54, [{ selfId: 254, level: 1 }]),
         member(goodSpoiler, 55, [{ selfId: 254, level: 1 }, { selfId: 42, level: 1 }])]) {
         await q(`INSERT INTO characters(id,username,name,classId,race,level,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
             VALUES(?,'bot_pop_economic',?,?,0,50,1000,1000,0,0,0,0,83400,148600,-3400)`, [candidate.characterId, `Partial${candidate.characterId}`, candidate.classId]);
-        await q(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,phase,activity,spotId,hp,maxHp,mp,maxMp,inventorySummary,statsJson,updatedAt)
-            VALUES(?,'bot_pop_economic',?,50,'cold','hunting','ordinary:partial',1000,1000,1000,1000,'{}',?,1)`,
-        [candidate.characterId, `Partial${candidate.characterId}`, JSON.stringify(candidate.stats)]);
+        await q(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,phase,activity,spotId,locX,locY,locZ,hp,maxHp,mp,maxMp,inventorySummary,statsJson,updatedAt)
+            VALUES(?,'bot_pop_economic',?,50,'cold','hunting','ordinary:partial',83400,148600,-3400,1000,1000,1000,1000,?,?,1)`,
+        [candidate.characterId, `Partial${candidate.characterId}`, JSON.stringify(candidate.inventory), JSON.stringify(candidate.stats)]);
         await q("INSERT INTO bot_personas(characterId,seed,primaryDrive,archetype,traitsJson) VALUES(?,'fixture','power','fighter',?)",
             [candidate.characterId, JSON.stringify({ commitment: 1 })]);
     }
+    await q('UPDATE bot_life_state SET inventorySummary=? WHERE characterId=?', [JSON.stringify(partialStock), base]);
     await DB.setCharacterRecipe(partialCrafter, recipe.recipeId, 'dwarven');
     const reward = Data.npcRewards.find(row => Gear.isBotEligibleSourceNpcId(row.selfId)
         && Gear.itemDropYield(row, mold, 'spoil').chance > 0
@@ -146,7 +150,7 @@ async function criticCases() {
     const npc = Data.npcs.find(row => row.selfId === reward.selfId);
     const spot = { id: `ordinary:partial:${reward.selfId}`, avgLevel: npc.template.level, capacity: 10, density: 10,
         npcEntries: [{ selfId: reward.selfId, count: 10 }], center: owns[0].loc };
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles'), oldProfiles = Profiles.ensure();
+    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles'), oldProfiles = Profiles.ensure(), oldPublished = Shops.publishedStationRecipes;
     Profiles.cache = [...oldProfiles, spot];
     Shops.publishedStationRecipes = () => ({ recipes: [component], ids: new Set([component.recipeId]), stationByRecipeId: new Map() });
     try {
@@ -200,7 +204,7 @@ async function criticCases() {
         assert.deepEqual(endedJobs, [0, 0], 'both native end acknowledgements leave no pending RPC');
         console.log('Economic critic fixes passed: partial63+1 continuation, unavailable owned helper, non-evicting native source CAS/join, shared cold learning');
         console.log('Native RPC by admitted pass:', JSON.stringify([firstCalls, secondCalls]), 'candidate page counts:', pages.map(row => row.count).join(','));
-    } finally { Profiles.cache = oldProfiles; }
+    } finally { Profiles.cache = oldProfiles; Shops.publishedStationRecipes = oldPublished; }
 }
 
 async function recipeEvents(clan, demand) {
@@ -419,8 +423,9 @@ async function main() {
         await sourceCases(await projection());
         await selectedSpoil();
         Events.stop(); assert.equal(Events.recruitmentCount(), 0);
-        console.log('Clan economic intake checks passed: native discovery/conditional RPC, shared64 continuation, selected CAS/join/own craft, canonical recipe/source and committed watches');
         console.log('Native planning calls:', JSON.stringify(calls), 'candidate page counts:', pages.map(row => row.count).join(','));
+        await criticCases();
+        console.log('Clan economic intake checks passed: native discovery/conditional RPC, shared64 continuation, selected CAS/join/own craft, canonical recipe/source and committed watches; all four critic regressions');
     } finally {
         Runtime.plan = original.plan; Life.clanOperationCandidates = original.query; Shops.publishedStationRecipes = original.published;
         Config.maxBotMemberShare = original.share; Population.staticBuyersDisabled = original.buyers;
