@@ -6,16 +6,31 @@ const tables = new WeakMap();
 const EMPTY = Object.freeze([]);
 const weights = new WeakMap();
 
-function tableFor(spots) {
+function indexFor(spots) {
     let built = tables.get(spots);
     // A list filled in place (the cold worker's) gets a new table. The list's
     // length is compared, not the table's size: a repeated id must not make
     // every lookup rebuild the table.
     if (!built || built.length !== spots.length) {
-        built = { length: spots.length, table: new Map(spots.map((spot) => [String(spot.id), spot])) };
+        built = { length: spots.length };
         tables.set(spots, built);
     }
+    return built;
+}
+
+function tableFor(spots) {
+    const built = indexFor(spots);
+    if (!built.table) built.table = new Map(spots.map((spot) => [String(spot.id), spot]));
     return built.table;
+}
+
+// Occupancy's native Map contract: LAST row, SameValueZero keys, no string
+// coercion. Share the source lifetime without changing the public string view.
+function strictTableFor(spots) {
+    if (!Array.isArray(spots)) return new Map();
+    const built = indexFor(spots);
+    if (!built.strictTable) built.strictTable = new Map(spots.map(spot => [spot.id, spot]));
+    return built.strictTable;
 }
 
 function spotById(spots, spotId) {
@@ -65,4 +80,4 @@ function npcWeights(spot, npcId) {
     return { count: built.byNpc.get(Number(npcId)) || 0, totalCount: built.totalCount };
 }
 
-module.exports = { tableFor, spotById, spotsForNpc, npcWeights };
+module.exports = { tableFor, strictTableFor, spotById, spotsForNpc, npcWeights };

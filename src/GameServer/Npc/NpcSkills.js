@@ -220,6 +220,23 @@ function maxHpMultiplierFor(npc) {
     }, 1);
 }
 
+// Cold combat has datapack templates rather than live NPCs. Preserve its
+// first permanent-skill projection per numeric NPC ID for this process;
+// live pets/servitors still resolve their current skills through forNpc.
+const templateMaxHpMultipliers = new Map();
+function templateMaxHpMultiplierFor(npc) {
+    const npcId = Number(npc?.selfId || 0);
+    if (!npcId) return 1;
+    if (!templateMaxHpMultipliers.has(npcId)) {
+        const reference = {
+            fetchSelfId: () => npcId,
+            fetchSummonSkillId: () => Number(npc?.summonSkillId || 0)
+        };
+        templateMaxHpMultipliers.set(npcId, maxHpMultiplierFor(reference));
+    }
+    return templateMaxHpMultipliers.get(npcId);
+}
+
 module.exports = {
     prepareThreats,
     threatFor,
@@ -227,5 +244,6 @@ module.exports = {
     forNpc,
     combatSkillsFor,
     passiveSkillsFor,
-    maxHpMultiplierFor
+    maxHpMultiplierFor,
+    templateMaxHpMultiplierFor
 };

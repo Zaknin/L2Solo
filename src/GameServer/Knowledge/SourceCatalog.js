@@ -18,12 +18,15 @@ function rewardForNpc(npcId) {
 // cache holds one list, and the next wish review would rebuild it in full.
 const NO_SOURCES = new Map();
 let sourceIndexCache = { spots: null, rewards: null, npcs: null, byItemId: NO_SOURCES };
-// Static NPC metadata is shared across selections. Replacing either catalog
-// releases the previous atlas; it never retains actors, clans or selected spots.
-let sourceRewardAtlas = { rewards: null, npcs: null, byNpc: new Map(), byName: new Map() };
-function sourceRewardAtlasFor(rewards, npcs) {
-    if (sourceRewardAtlas.rewards === rewards && sourceRewardAtlas.npcs === npcs
-        && sourceRewardAtlas.rewardsLength === rewards.length && sourceRewardAtlas.npcsLength === npcs?.length) return sourceRewardAtlas;
+// Reward relations belong to their source array, including cold-combat name
+// lookups. NPC metadata is prepared only for readers that need it. Weak keys
+// release replaced sources; no atlas retains actors or selected spots.
+let sourceRewardAtlas = null;
+const rewardAtlases = new WeakMap();
+function rewardAtlasFor(rewards) {
+    if (!Array.isArray(rewards)) return null;
+    const cached = rewardAtlases.get(rewards);
+    if (cached && cached.rewardsLength === rewards.length) return cached;
     const byNpc = new Map();
     const byName = new Map();
     const append = (index, key, row) => {
@@ -32,14 +35,39 @@ function sourceRewardAtlasFor(rewards, npcs) {
         index.set(key, rows);
     };
     rewards.forEach((reward, ordinal) => {
-        const npc = ItemTemplateIndex.find(npcs, reward.selfId);
-        const row = { reward, ordinal, npcLevel: Number(npc?.template?.level || 0),
-            protectedRaid: BotRaidSafety.isProtectedRaidEntity(npc) };
+        if (!reward) return;
+        const row = { reward, ordinal };
         append(byNpc, Number(reward.selfId), row);
-        append(byName, String(reward.template?.name || '').trim().toLowerCase(), row);
+        if ((reward.rewards || []).length > 0 || (reward.spoils || []).length > 0) {
+            append(byName, String(reward.template?.name || '').trim().toLowerCase(), row);
+        }
     });
-    sourceRewardAtlas = { rewards, npcs, rewardsLength: rewards.length, npcsLength: npcs?.length, byNpc, byName };
+    for (const rows of byName.values()) Object.freeze(rows);
+    const atlas = { rewards, rewardsLength: rewards.length, byNpc, byName };
+    rewardAtlases.set(rewards, atlas);
+    return atlas;
+}
+
+function sourceRewardAtlasFor(rewards, npcs) {
+    const atlas = rewardAtlasFor(rewards);
+    if (!atlas.metadataPrepared || atlas.npcs !== npcs || atlas.npcsLength !== npcs?.length) {
+        for (const rows of atlas.byNpc.values()) for (const row of rows) {
+            const npc = ItemTemplateIndex.find(npcs, row.reward.selfId);
+            row.npcLevel = Number(npc?.template?.level || 0);
+            row.protectedRaid = BotRaidSafety.isProtectedRaidEntity(npc);
+        }
+        atlas.metadataPrepared = true;
+        atlas.npcs = npcs;
+        atlas.npcsLength = npcs?.length;
+    }
+    sourceRewardAtlas = atlas;
     return sourceRewardAtlas;
+}
+
+// ALL nonempty loot/spoil rows, with original ordinals and normalized names.
+// Callers keep their own candidate arrays, weights and random selection.
+function rewardRowsForName(name, rewards = DataCache.npcRewards) {
+    return rewardAtlasFor(rewards)?.byName.get(String(name || '').trim().toLowerCase()) || EMPTY;
 }
 
 // All declared reward sources, independent of planner spots and raid access.
@@ -232,4 +260,4 @@ function potentialSpawnData() {
     return require('./SpawnCatalog').potentialSpawnData();
 }
 
-module.exports = { sourcesByItem, rawSourcesForItem, rewardForNpc, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData, rewardSelectedAtSpot };
+module.exports = { sourcesByItem, rawSourcesForItem, rewardForNpc, rewardRowsForName, selectedNpcSpots, selectedSpotNpcs, potentialSpawnData, rewardSelectedAtSpot };

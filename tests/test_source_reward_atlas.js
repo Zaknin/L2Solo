@@ -11,6 +11,7 @@ const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const SourceCatalog = require('../src/GameServer/Knowledge/SourceCatalog');
+const SpawnCatalog = require('../src/GameServer/Knowledge/SpawnCatalog');
 const GameCatalogue = require('../src/GameServer/Knowledge/GameDataCatalogue').native();
 const ItemTemplateIndex = require('../src/GameServer/Item/ItemTemplateIndex');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
@@ -167,8 +168,20 @@ try {
     assert.equal(potential.population, 'definition_only');
     assert.equal(potential.totalSemantics, 'per_explicit_coordinate_or_random_total_in_bounds');
     assert.equal(potential.groups[0].spawns[0].total, 2, 'total stays per coordinate, not inferred population');
+    const bounded = SpawnCatalog.boundedSpawnZones();
+    assert.deepEqual(bounded, [{ group: definitions[0], centerX: 1, centerY: 2 }]);
+    assert.equal(SpawnCatalog.boundedSpawnZones(), bounded, 'the source owns its prepared bound-centre relation');
+    assert.deepEqual(SpawnCatalog.npcIdsForSpawnZone(definitions[0]), [normal.selfId]);
+    definitions[0].spawns.push({ selfId: String(normal.selfId) }, { selfId: 0 }, { selfId: undefined });
+    assert.deepEqual(SpawnCatalog.npcIdsForSpawnZone(definitions[0]), [normal.selfId, String(normal.selfId), 0, undefined],
+        'zone NPC IDs retain strict Set keys and first spawn order, including raw missing/zero IDs');
+    definitions.push({ bounds: [{ locX: '1', locY: 2 }, { locX: 3, locY: 4 }], spawns: [] },
+        { bounds: [], spawns: [{ selfId: 99999 }] });
+    assert.deepEqual(SpawnCatalog.boundedSpawnZones().map(row => [row.centerX, row.centerY]), [[1, 2], [6.5, 3]],
+        'grown sources keep raw zone order, skip unbounded zones and preserve native string-coordinate arithmetic');
     DataCache.npcSpawns = definitions.slice();
     assert.notEqual(GameCatalogue.potentialSpawnData().revision, potential.revision);
+    assert.notEqual(SpawnCatalog.boundedSpawnZones(), bounded, 'a replaced source gets its own prepared centres');
     DataCache.npcSpawns = originalSpawns;
 
     // Same reward reached through both aliases produces one row per kind;
@@ -176,6 +189,17 @@ try {
     const loot = (selfId, name) => ({ selfId, template: { name }, rewards: [
         { items: [{ selfId: 1869 }, { selfId: 1869 }, { selfId: 1870 }] }],
         spoils: [{ items: [{ selfId: 1869 }] }] });
+    const repeated = loot(16, ' Shared ');
+    const namedRewards = [repeated, null, { selfId: 20, template: { name: 'shared' }, rewards: [], spoils: [] },
+        { selfId: 17, template: { name: 'SHARED' }, spoils: [{}] }, repeated];
+    const namedRows = SourceCatalog.rewardRowsForName(' SHARED ', namedRewards);
+    assert.deepEqual(namedRows.map(row => [row.reward, row.ordinal]), [[repeated, 0], [namedRewards[3], 3], [repeated, 4]],
+        'the shared name atlas retains every nonempty loot/spoil duplicate in source order');
+    assert.equal(SourceCatalog.rewardRowsForName('shared', namedRewards), namedRows);
+    assert.deepEqual(SourceCatalog.rewardRowsForName('shared', null), []);
+    namedRewards.push(loot(18, 'Shared'));
+    assert.deepEqual(SourceCatalog.rewardRowsForName('shared', namedRewards).map(row => row.ordinal), [0, 3, 4, 5]);
+    assert.notEqual(SourceCatalog.rewardRowsForName('shared', namedRewards.slice()), namedRows);
     DataCache.npcRewards = [loot(16, 'Shared'), loot(17, 'Shared'), loot(16, 'Other')];
     const aliases = [{ id: 'first', npcEntries: [
         { selfId: 17, name: ' shared ', count: 4 }, { selfId: 16, name: 'Other', count: 2 },
@@ -242,7 +266,8 @@ try {
     const npc = originalFind(originalNpcs, normal.selfId);
     DataCache.npcs = originalNpcs.map(row => row === npc ? { ...row, template: { ...row.template, level: 99 } } : row);
     const changedNpcs = Planner.sourceIndexFor(spots);
-    assert.equal(traversals, 2);
+    assert.equal(traversals, 1, 'NPC replacement refreshes metadata without rebuilding reward-name rows');
+    assert.equal(npcLookups, originalRewards.length * 2, 'every reward gets its replacement NPC metadata once');
     assert.equal([...changedNpcs.values()].flat().find(row => row.reward === normal).npcLevel, 99);
     DataCache.npcs = originalNpcs.map(row => row === npc ? { ...row, template: { ...row.template, raidBoss: true } } : row);
     assert(![...Planner.sourceIndexFor(spots).values()].flat().some(row => row.reward === normal),

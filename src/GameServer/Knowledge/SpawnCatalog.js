@@ -5,6 +5,7 @@ const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { revisionOf } = require('./CatalogueRevision');
 const EMPTY = Object.freeze([]);
 let current = null;
+const zoneNpcIds = new WeakMap();
 
 function sourceFor() {
     const groups = DataCache.npcSpawns;
@@ -32,6 +33,43 @@ function spawnsForNpc(npcId) {
         source.byNpc = byNpc;
     }
     return source.byNpc.get(Number(npcId)) || EMPTY;
+}
+
+// Raw-zone order and native centroid arithmetic, including uncoerced source
+// coordinates. Merchant locations and distances are evaluated by the caller.
+function boundedSpawnZones() {
+    const source = sourceFor();
+    if (!source) return null;
+    if (!source.boundedZones) {
+        const rows = [];
+        source.groups.forEach(group => {
+            if (!group.bounds || group.bounds.length === 0) return;
+            let sumX = 0, sumY = 0;
+            group.bounds.forEach(point => {
+                sumX += point.locX;
+                sumY += point.locY;
+            });
+            rows.push(Object.freeze({ group, centerX: sumX / group.bounds.length,
+                centerY: sumY / group.bounds.length }));
+        });
+        source.boundedZones = Object.freeze(rows);
+    }
+    return source.boundedZones;
+}
+
+// Strict Set semantics retain number/string distinctions and first spawn
+// order. The borrowed relation follows replacement/growth of a zone's rows.
+function npcIdsForSpawnZone(zone) {
+    const spawns = zone.spawns;
+    if (!spawns) return EMPTY;
+    let prepared = zoneNpcIds.get(zone);
+    if (!prepared || prepared.spawns !== spawns || prepared.length !== spawns.length) {
+        const ids = new Set();
+        spawns.forEach(spawn => ids.add(spawn.selfId));
+        prepared = { spawns, length: spawns.length, ids: Object.freeze([...ids]) };
+        zoneNpcIds.set(zone, prepared);
+    }
+    return prepared.ids;
 }
 
 // Observer contract: last raid-marked template, first spawn per numeric ID,
@@ -70,4 +108,4 @@ function potentialSpawnData() {
         periodSemantics: 'day_or_night_otherwise_always', population: 'definition_only' };
 }
 
-module.exports = { spawnsForNpc, spawn, potentialSpawnData, raidBossDefinitions };
+module.exports = { spawnsForNpc, spawn, potentialSpawnData, raidBossDefinitions, boundedSpawnZones, npcIdsForSpawnZone };
