@@ -54,12 +54,15 @@ module.exports = function(session, parts) {
             if (rows && rows[0]) {
                 const charId = rows[0].id;
                 const charRealName = rows[0].name;
+                const confirmOfflineGrant = () => {
+                    if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
+                };
                 return Database.fetchItems(charId, 'admin_give_adena').then((items) => {
                     const adenaItem = items.find(ob => ob.selfId === 57);
                     if (adenaItem) {
                         const total = adenaItem.amount + amount;
                         return Database.updateItemAmount(charId, adenaItem.id, total).then(() => {
-                            if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
+                            confirmOfflineGrant();
                         });
                     } else {
                         return Database.setItem(charId, {
@@ -69,7 +72,7 @@ module.exports = function(session, parts) {
                             equipped: false,
                             slot: 0
                         }).then(() => {
-                            if (session.actor === actor) session.dataSendToMe(ServerResponse.speak(actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
+                            confirmOfflineGrant();
                         });
                     }
                 });

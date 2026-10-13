@@ -75,17 +75,20 @@ async function sellJunk(session) {
 
     backpack.items = backpack.items.filter((item) => !soldItemIds.has(Number(item.fetchId())));
 
+    const announceSale = () => {
+        session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
+        session.dataSendToMe(ServerResponse.userInfo(session.actor));
+        session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
+        session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+    };
+
     // An existing Adena stack is updated; only a missing one gets a new stack
     // (a failed update must not fall through to a second, new stack).
     writes.push(backpack.stackableExists(57).then((adenaItem) => {
         const total = adenaItem.fetchAmount() + totalAdenaPayout;
         return Database.updateItemAmount(session.actor.fetchId(), adenaItem.fetchId(), total).then(() => {
             adenaItem.setAmount(total);
-            session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-            session.dataSendToMe(ServerResponse.userInfo(session.actor));
-            
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+            announceSale();
         });
     }, () => {
         return Database.setItem(session.actor.fetchId(), {
@@ -96,11 +99,7 @@ async function sellJunk(session) {
             slot: 0
         }).then((packet) => {
             backpack.insertItem(Number(packet.insertId), 57, { amount: totalAdenaPayout });
-            session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-            session.dataSendToMe(ServerResponse.userInfo(session.actor));
-            
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+            announceSale();
         });
     }));
 
