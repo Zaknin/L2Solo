@@ -11,6 +11,7 @@ const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const BotEquipmentCompatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
 const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility');
+const { gradeForLevel } = invoke('GameServer/Bot/AI/GearGradeRule');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const CraftSupplementMaterials = invoke('GameServer/Bot/Economy/CraftSupplementMaterials');
 // Common materials have hundreds of sources. Retain only their sorted index
@@ -105,16 +106,6 @@ function isRealCatalogItem(item = {}) {
         && name.length > 0
         && name !== '0'
         && !/^_+$/.test(name);
-}
-
-function gradeForLevel(level) {
-    const value = Number(level || 1);
-    if (value >= 76) return 's';
-    if (value >= 61) return 'a';
-    if (value >= 52) return 'b';
-    if (value >= 40) return 'c';
-    if (value >= 20) return 'd';
-    return 'none';
 }
 
 function roleFor(state = {}) {

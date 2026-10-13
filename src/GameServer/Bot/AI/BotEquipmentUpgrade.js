@@ -4,6 +4,7 @@ const BotEquipmentCompatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatib
 const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const ArmorPolicy = invoke('GameServer/Bot/AI/BotArmorPolicy');
+const { gradeForLevel } = invoke('GameServer/Bot/AI/GearGradeRule');
 
 const ARMOR_SLOTS = {
     earringRight: 1,
@@ -30,16 +31,6 @@ function isBotSession(session) {
         session.constructor.name === 'BotSession' ||
         String(session.accountId || '').startsWith('bot_')
     );
-}
-
-function gradeForLevel(level) {
-    const value = Number(level || 1);
-    if (value >= 76) return 's';
-    if (value >= 61) return 'a';
-    if (value >= 52) return 'b';
-    if (value >= 40) return 'c';
-    if (value >= 20) return 'd';
-    return 'none';
 }
 
 function rankAllowed(item, actor) {
