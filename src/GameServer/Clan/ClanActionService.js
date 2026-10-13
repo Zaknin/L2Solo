@@ -585,6 +585,7 @@ async function resolveAction(action, options = {}) {
             // The action itself is already settled; only its follow-up
             // scheduling failed, so report the stored status, not a failure.
             record(metrics.reasonCounts, 'clan_follow_up_exception');
+            utils.infoWarn('ClanAction', 'follow-up of %s action %d failed: %s', String(action.actionType), Number(action.id), reasonCode);
             return { ...settledOutcome(action, settled, startedAt), followUpError: reasonCode };
         }
         const settleStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
