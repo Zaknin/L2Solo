@@ -241,7 +241,17 @@ async function main() {
         });
         assert.strictEqual(compatibilityRelease.ok, true);
 
-        await ClanActionService.bootstrap();
+        // A failed first bootstrap must leave recovery to the next pass, not
+        // mark it done for the rest of the process.
+        const originalEnsurePlayerManaged = Database.ensurePlayerManagedClans;
+        Database.ensurePlayerManagedClans = async () => { throw new Error('injected bootstrap failure'); };
+        try {
+            await assert.rejects(ClanActionService.bootstrap(), /injected bootstrap failure/);
+        } finally {
+            Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
+        }
+        const retriedBootstrap = await ClanActionService.bootstrap();
+        assert(Object.hasOwn(retriedBootstrap, 'playerManaged'), 'the next pass must rerun the failed bootstrap');
         const originalClaimClanAction = Database.claimClanAction;
         Database.claimClanAction = async (options) => {
             const claim = await originalClaimClanAction.call(Database, options);

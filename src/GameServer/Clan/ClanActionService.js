@@ -242,6 +242,12 @@ async function scheduleReviews() {
 async function bootstrap() {
     if (bootstrapped) return { attempted: 0, created: 0 };
     bootstrapped = true;
+    // The flag only keeps one bootstrap in flight: a failed one is rerun by the
+    // next resolve pass (every recovery key is idempotent).
+    try { return await bootstrapOnce(); } catch (error) { bootstrapped = false; throw error; }
+}
+
+async function bootstrapOnce() {
     const playerManaged = await Database.ensurePlayerManagedClans();
     const clans = await Database.fetchClansNeedingAction(Config.resolveBatchSize * 4);
     let created = 0;
