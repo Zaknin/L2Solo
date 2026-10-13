@@ -68,7 +68,12 @@ const STATION_LAYOUT = [
     ['c', 'weapons', 'C Weapons: Late', [220, 222, 223, 228, 230, 234, 237, 238, 240], 'c_weapons_late'],
     // B needs both entry weapons and physical/caster blunts. Selecting one
     // recipe per weapon kind hid axes behind the most expensive staff.
-    ['b', 'weapons', 'B Weapons: Entry', [437, 441, 443, 445, 447, 449, 451, 453, 455, 457], 'b_weapons_entry']
+    ['b', 'weapons', 'B Weapons: Entry', [437, 441, 443, 445, 447, 449, 451, 453, 455, 457], 'b_weapons_entry'],
+    // Preserve every existing account slot. These native 100% recipes fill
+    // the entry B sets; Avadon robes, circlet, gloves and boots already have services.
+    ['b', 'armor', 'B Armor: Zubei Sets', [342, 344, 434, 424, 430, 432, 362, 364, 368, 370], 'b_armor_zubei'],
+    ['b', 'armor', 'B Armor: Avadon Heavy & Light', [358, 360, 366, 479], 'b_armor_avadon'],
+    ['b', 'jewelry', 'B Jewelry: Adamantite', [329, 331, 333], 'b_jewelry_entry']
 ];
 
 // Position groups independently from generated account slots.  Existing craft
@@ -77,12 +82,12 @@ const STATION_LAYOUT = [
 const STATION_LOCATION_ORDER = Object.freeze([
     'd_heavy', 'd_robe', 'd_light', 'd_weapons', 'd_jewelry',
     'c_heavy', 'c_robe', 'c_light', 'c_weapons_entry', 'c_weapons_mid', 'c_weapons_late', 'c_weapons_top', 'c_jewelry',
-    'b_heavy', 'b_robe', 'b_light', 'b_weapons_entry', 'b_weapons', 'b_jewelry',
+    'b_armor_zubei', 'b_armor_avadon', 'b_heavy', 'b_robe', 'b_light', 'b_weapons_entry', 'b_weapons', 'b_jewelry_entry', 'b_jewelry',
     'a_heavy', 'a_robe', 'a_light', 'a_weapons', 'a_jewelry', 'a_heavy_elite',
     's_heavy', 's_robe', 's_light', 's_weapons', 's_jewelry',
     'resource_core', 'resource_master'
 ]);
-// 32 offers fit on the outer frame at a regular 231-unit interval. If the
+// 35 offers fit on the outer frame at a regular 211-unit interval. If the
 // catalogue grows beyond this compact ring, add a second full perimeter around
 // the central column rather than filling its interior in partial rows.
 const GiranCraftStalls = perimeterStalls(GIRAN_CRAFT_OUTER, STATION_LOCATION_ORDER.length);

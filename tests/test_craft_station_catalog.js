@@ -63,6 +63,20 @@ assert.strictEqual(entry.stationId, 'b_weapons_entry');
 assert(entry.entries.some(row => row.recipeId === 457), 'the new station publishes Great Axe');
 assert(entry.entries.some(row => row.recipeId === 441), 'the new station publishes Heavy War Axe');
 assert(entry.entries.length <= CraftShopService.MAX_PUBLIC_RECIPES, 'the native public recipe limit is respected');
+const entryBProducts = [856, 887, 918,
+    357, 383, 503, 554, 612, 633, 2384, 2388, 2397, 2402,
+    2376, 2379, 2390, 673, 600, 2406, 2415, 2464];
+for (const productId of entryBProducts) {
+    const recipe = C4RecipeItems.resolveVariantsByProductId(productId).find(row => row.successRate === 100);
+    assert(recipe && published.ids.has(recipe.recipeId), `${template(productId).template.name} has its native 100% service`);
+    const station = published.stationByRecipeId.get(recipe.recipeId);
+    const slot = CraftShopService.CraftStations.indexOf(station);
+    const profile = CraftShopService.profileFor({ level: 70, accountName: `bot_craft_${slot + 1}`, stats: { classId: 57 } });
+    assert(profile.entries.some(row => row.recipeId === recipe.recipeId), 'published entry recipes reach the physical service portfolio');
+    assert(profile.entries.length <= CraftShopService.MAX_PUBLIC_RECIPES);
+}
+assert.deepStrictEqual(CraftShopService.CraftStations.slice(32).map(row => row.id),
+    ['b_armor_zubei', 'b_armor_avadon', 'b_jewelry_entry'], 'new B services append after every persisted crafter account');
 const originalItems = DataCache.items;
 DataCache.items = originalItems.filter((item) => Number(item.selfId) !== Number(published.recipes[0].productId));
 try {

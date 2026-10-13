@@ -168,7 +168,7 @@ const CRYSTALS = new Set(Object.values(CRYSTAL_IDS));
 // Not spare: Adena, crystals (the shot crafters' input), clan items, any
 // recipe material (a crafter's input, e.g. Rope of Magic), and an item the NPC
 // pays nothing for (soul crystals, Ancient Adena): those are not bot junk.
-const CONSUMABLE_KINDS = new Set(['Other', 'Other.None', 'Other.Arrow', 'Other.Potion', 'Other.Scroll']);
+const CONSUMABLE_KINDS = new Set(['Other', 'Other.None', 'Other.Arrow', 'Other.Potion', 'Other.Scroll', 'Other.Tattoo']);
 let recipeMaterialSource = null;
 let recipeMaterialIds = new Set();
 
@@ -199,7 +199,8 @@ function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null)
     if (invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId))) return false;
     if (isMarketRecipeItem(item)) return false;
     const kind = kindFor(item, template);
-    return NPC_ONLY_KINDS.some((prefix) => kind.startsWith(prefix))
+    return kind === 'Other.Tattoo'
+        || NPC_ONLY_KINDS.some((prefix) => kind.startsWith(prefix))
         || isSpareConsumable(item, template)
         || isRecipeItem(item, template)
         // Some later C4 skill books lost their canonical Other.Spellbook
@@ -423,6 +424,8 @@ function reservedEquipmentAmounts(state, options = {}) {
     const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
     const combination = reservedCombinationAmounts(state, exchange);
     const upgrades = reservedUpgradeAmounts(state);
+    for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const [id, amount] of Object.entries(retainedEquipmentAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
@@ -443,6 +446,21 @@ function reservedEquipmentAmounts(state, options = {}) {
     }, {});
 }
 
+// Only the selected, still drawable symbol owns dye inputs. Keeping every
+// usable dye would fill the bag again even though the bot can wear three symbols.
+function reservedHennaAmounts(state = {}) {
+    const key = state.stats?.wishFocus?.[0];
+    const match = typeof key === 'string' && /^henna:(\d+)$/.exec(key);
+    if (!match) return {};
+    const Henna = invoke('GameServer/Henna/HennaRules');
+    const classId = state.stats?.classId || state.classId;
+    const slots = state.stats?.hennas || [];
+    const symbol = Henna.symbol(Number(match[1]));
+    if (!symbol || slots.includes(symbol.id) || slots.filter(Boolean).length >= Henna.slotsForClass(classId)
+        || !Henna.availableForClass(classId).some(row => row.id === symbol.id)) return {};
+    return { [symbol.dyeSelfId]: Number(symbol.dyeAmount) };
+}
+
 // Only fields read by the reservation owners above. Plan descriptions,
 // observed prices, travel, progress and timestamps cannot change this input.
 function reservationInputKey(state = {}) {
@@ -461,7 +479,7 @@ function reservationInputKey(state = {}) {
         ? quantities(plan.combine.requirements) : null;
     return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
         plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
-        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state)]);
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state), reservedHennaAmounts(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -521,6 +539,8 @@ function saleCandidates(state, options = {}) {
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
     const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)) };
     const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
+        reserved[id] = Math.max(Number(reserved[id] || 0), amount + Number(clan[id] || 0));
     for (const [id, amount] of Object.entries(options.reserved || {}))
         reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
     // Potions, crafter ammunition and travel scrolls use restock reserves.
