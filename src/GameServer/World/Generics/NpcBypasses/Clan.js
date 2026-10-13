@@ -198,8 +198,12 @@ function levelUp(session) {
         }).finally(() => { session.clanLevelUpPending = false; });
     }
 
-    // The level write is returned so that its failure reaches the catch below.
-    return spendLevelCost(session, requirement).then((spent) => {
+    // One request at a time, as on the 3->4 path above: a repeated click while
+    // the first one still pays must not buy the same level twice. The level
+    // write is returned so that its failure reaches the catch below.
+    if (session.clanLevelUpPending) return;
+    session.clanLevelUpPending = true;
+    return new Promise((resolve) => resolve(spendLevelCost(session, requirement))).then((spent) => {
         if (!spent.ok) {
             sendHtml(session, page(errorText(spent.code, spent) + returnLink()));
             return;
@@ -217,7 +221,7 @@ function levelUp(session) {
     }).catch((err) => {
         utils.infoWarn('Clan', 'level up failed: %s', err.message);
         sendHtml(session, page('Failed to increase clan level.' + returnLink()));
-    });
+    }).finally(() => { session.clanLevelUpPending = false; });
 }
 
 function members(session) {

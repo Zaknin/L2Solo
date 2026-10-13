@@ -105,6 +105,24 @@ async function main() {
         assert.strictEqual(ok.actor.fetchSp(), 70000);
         assert.strictEqual(ok.actor.backpack.fetchItemFromSelfId(57).fetchAmount(), 1350000);
         assert(ok.said.includes('Clan level increased to 1.'), 'the leader sees the success message');
+
+        // A second request while the first is still paying is ignored, as on
+        // the 3->4 path: one charge and one level write for one level.
+        const repeat = await fixture({ holdSp: true });
+        const first = Clan(repeat.session, ['clan', 'level-up']);
+        const second = Clan(repeat.session, ['clan', 'level-up']);
+        repeat.releaseSp.forEach((resolve) => resolve());
+        await Promise.all([first, second]);
+        await ticks();
+        assert.strictEqual(repeat.spWrites.length, 1, 'a repeated request must not pay the level twice');
+        assert.deepStrictEqual(repeat.levelWrites, [1]);
+        assert.strictEqual(repeat.actor.fetchSp(), 70000);
+        assert.strictEqual(repeat.actor.backpack.fetchItemFromSelfId(57).fetchAmount(), 1350000);
+        assert.strictEqual(repeat.clan.level, 1);
+        assert.notStrictEqual(repeat.session.clanLevelUpPending, true, 'the guard is released after the request ends');
+
+        // After a failed request the guard is released and the next one runs.
+        assert.notStrictEqual(failed.session.clanLevelUpPending, true, 'a failed request releases the guard');
         console.log('clan level-up bypass checks passed');
     } finally {
         Object.assign(Database, {
