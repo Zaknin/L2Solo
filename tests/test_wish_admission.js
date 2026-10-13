@@ -38,6 +38,7 @@ const adapters = {
     'GameServer/Items/C4RecipeItems': { resolveByProductId: id => recipes.get(Number(id)) || null,
         resolveByRecipeId: id => [...recipes.values()].find(row => row.recipeId === Number(id)) || null },
     'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => true, isServiceCrafter: () => false },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
     'GameServer/Bot/Economy/MarketCounters': { moveOf: () => 0, counterOf: () => 'armor c' },
