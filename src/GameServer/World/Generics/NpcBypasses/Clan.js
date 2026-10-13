@@ -114,14 +114,16 @@ function createClan(session, name) {
     });
 }
 
+function levelCostLine(requirement) {
+    const amount = (value) => value.toLocaleString('en-US');
+    const second = requirement.adena ? `${amount(requirement.adena)} adena` : requirement.itemName;
+    return `<font color="LEVEL">Clan Level ${requirement.nextLevel}:</font> ${amount(requirement.sp)} SP plus ${second}<br>`;
+}
+
 function levelInfo(session) {
     sendHtml(session, page(
         'You may raise the level of the clan. You will need the following:<br>' +
-        '<font color="LEVEL">Clan Level 1:</font> 30,000 SP plus 650,000 adena<br>' +
-        '<font color="LEVEL">Clan Level 2:</font> 150,000 SP plus 2,500,000 adena<br>' +
-        '<font color="LEVEL">Clan Level 3:</font> 500,000 SP plus Proof of Blood<br>' +
-        '<font color="LEVEL">Clan Level 4:</font> 1,400,000 SP plus Proof of Alliance<br>' +
-        '<font color="LEVEL">Clan Level 5:</font> 3,500,000 SP plus Proof of Aspiration<br><br>' +
+        Object.values(ClanRules.LEVEL_REQUIREMENTS).map(levelCostLine).join('') + '<br>' +
         '<button value="Level Up" action="bypass -h clan level-up" width=60 height=15 back="sek.cbui94" fore="sek.cbui92">' +
         returnLink()
     ));
