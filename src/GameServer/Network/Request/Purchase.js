@@ -1,30 +1,12 @@
 const World         = invoke('GameServer/World/World');
 const ReceivePacket = invoke('Packet/Receive');
 const ServerResponse = invoke('GameServer/Network/Response');
-const DataCache      = invoke('GameServer/DataCache');
-const Item           = invoke('GameServer/Item/Item');
 const TradeService   = invoke('GameServer/Bot/TradeService');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const BotManager     = invoke('GameServer/Bot/BotManager');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const WireD = invoke('Packet/WireD');
-
-function merchantPurchaseItems(store, actor) {
-    const items = [];
-
-    TradeService.refreshStorePrices(store, actor);
-    TradeService.nativeStoreItems(store).forEach((storeItem) => {
-        DataCache.fetchItemFromSelfId(storeItem.selfId, (item) => {
-            items.push(new Item(storeItem.objectId, {
-                ...utils.crushOb(item),
-                amount: storeItem.count,
-                price: storeItem.price
-            }));
-        });
-    });
-
-    return items;
-}
+const merchantPurchaseItems = invoke('GameServer/Network/MerchantPurchaseItems');
 
 function purchase(session, buffer) {
     const packet = new ReceivePacket(buffer);
@@ -112,7 +94,7 @@ async function consume(session, data) {
                 return;
             }
             session.dataSendToMe(ServerResponse.purchaseList(
-                merchantPurchaseItems(store, session.actor),
+                merchantPurchaseItems(store, { refresh: true, actor: session.actor }),
                 session.actor.backpack.fetchTotalAdena()
             ));
             trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));

@@ -4,22 +4,7 @@ const DataCache      = invoke('GameServer/DataCache');
 const Item           = invoke('GameServer/Item/Item');
 const SummonControl  = invoke('GameServer/Npc/SummonControl');
 const TradeService   = invoke('GameServer/Bot/TradeService');
-
-function merchantPurchaseItems(store) {
-    const items = [];
-
-    TradeService.nativeStoreItems(store).forEach((storeItem) => {
-        DataCache.fetchItemFromSelfId(storeItem.selfId, (item) => {
-            items.push(new Item(storeItem.objectId, {
-                ...utils.crushOb(item),
-                amount: storeItem.count,
-                price: storeItem.price
-            }));
-        });
-    });
-
-    return items;
-}
+const merchantPurchaseItems = invoke('GameServer/Network/MerchantPurchaseItems');
 
 function merchantDemandRows(actor, store) {
     const rows = [];
