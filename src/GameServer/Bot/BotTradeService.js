@@ -120,7 +120,9 @@ function sendToPlayer(trade, packet) {
 }
 
 function cancelTrade(trade, reason = 'cancelled', notify = true) {
-    if (!trade || ['cancelled', 'committed'].includes(trade.state)) return false;
+    // A committing trade is already being written to the database and that
+    // write cannot be undone: the commit wins over a late cancellation.
+    if (!trade || ['cancelled', 'committing', 'committed'].includes(trade.state)) return false;
     trade.state = 'cancelled';
     trade.cancelReason = reason;
     if (trade.botSession?.pendingResourceDelivery?.tradeId === trade.id) {
@@ -156,6 +158,11 @@ function tradeIsOpen(trade) {
         return false;
     }
     return true;
+}
+
+function committingTrade(session) {
+    const trade = session?.activeTrade;
+    return trade?.state === 'committing' ? trade : null;
 }
 
 function activeTradeFor(session) {
@@ -207,6 +214,7 @@ function canStart(playerSession, botSession, { allowMerchant = false } = {}) {
     if (!isRealPlayerSession(playerSession) || !isBotSession(botSession) || !botSession.actor) return 'invalid_target';
     if (botSession.plan === 'merchant' && !allowMerchant) return 'merchant_store';
     if (actorDistance(playerSession.actor, botSession.actor) > TRADE_RANGE) return 'too_far';
+    if (committingTrade(playerSession) || committingTrade(botSession)) return 'trade_committing';
     return null;
 }
 
@@ -506,6 +514,13 @@ function publicMoved(entries) {
 }
 
 async function commit(playerSession) {
+    // One commit owner per trade: a confirmation that arrives while the
+    // transfer is in the database joins it instead of starting another one.
+    const inFlight = committingTrade(playerSession);
+    if (inFlight?.playerSession === playerSession && inFlight.commitPromise) {
+        return inFlight.commitPromise.then((result) => (result.ok ? { ...result, idempotent: true } : result));
+    }
+
     const replay = playerSession?.lastBotTradeCompletion;
     if (!playerSession?.activeTrade && replay && now() - Number(replay.completedAt || 0) <= COMPLETION_REPLAY_TTL_MS) {
         return { ...replay.result, idempotent: true };
@@ -513,6 +528,17 @@ async function commit(playerSession) {
 
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
+    const prepared = prepareCommit(trade);
+    if (!prepared.ok) return prepared;
+
+    // Mark the owner before the first await, so a second confirmation or a
+    // cancellation sees the commit that is already running.
+    trade.state = 'committing';
+    trade.commitPromise = finishCommit(trade, playerSession, prepared.entries, prepared.databaseTransfers);
+    return trade.commitPromise;
+}
+
+function prepareCommit(trade) {
     if (trade.playerItems.size === 0 && trade.botItems.size === 0) {
         const result = { ok: false, reason: 'empty_or_invalid_trade' };
         recordSupplyTrade(trade, 'failed', result.reason, false);
@@ -559,18 +585,28 @@ async function commit(playerSession) {
         slot: entry.line.slot,
         petData: entry.line.petData
     }));
+    return { ok: true, entries, databaseTransfers };
+}
 
+async function finishCommit(trade, playerSession, entries, databaseTransfers) {
     let moved;
     try {
         moved = await Database.transferInventoryBetweenCharacters(databaseTransfers);
     } catch (error) {
+        // The transaction wrote nothing: the trade is open again and can be
+        // confirmed or cancelled as before.
+        trade.state = 'open';
+        trade.commitPromise = null;
         const result = { ok: false, reason: 'database_failed', error };
         recordSupplyTrade(trade, 'failed', result.reason, false);
         return result;
     }
 
-    applyLocalTransfers(moved, entries);
+    // The database holds the transfer now; the trade is committed even if the
+    // memory update below throws, so it never stays in 'committing'.
     trade.state = 'committed';
+    trade.commitPromise = null;
+    applyLocalTransfers(moved, entries);
     trade.playerConfirmed = true;
     trade.botConfirmed = true;
     trade.completedAt = now();
@@ -604,6 +640,8 @@ async function commit(playerSession) {
 }
 
 function confirmPlayerTrade(playerSession) {
+    const inFlight = committingTrade(playerSession);
+    if (inFlight?.playerSession === playerSession) return { ok: true, trade: inFlight };
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
 
