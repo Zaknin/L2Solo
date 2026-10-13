@@ -178,6 +178,7 @@ class ColdSimulationCoordinator {
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = 0;
+        this.lastWatchdogAt = 0;
         this.lastWorkerSnapshot = {};
         this.partyReviews = { committed: 0, departed: 0, dissolved: 0, reasons: {}, recent: [] };
         this.workerMaxInFlight = null;
@@ -2362,7 +2363,13 @@ class ColdSimulationCoordinator {
     watchdog() {
         if (!this.worker || this.stopping) return;
         this.syncWorkerPressure();
-        const age = Date.now() - this.lastHeartbeatAt;
+        const now = Date.now();
+        // While the main thread itself stood still (the Mac slept, a long pause)
+        // it could receive no heartbeat, so that time is no evidence against the worker.
+        const stalled = this.lastWatchdogAt ? now - this.lastWatchdogAt - 1000 : 0;
+        this.lastWatchdogAt = now;
+        if (stalled > 1000) this.lastHeartbeatAt = Math.min(now, this.lastHeartbeatAt + stalled);
+        const age = now - this.lastHeartbeatAt;
         if (age <= Math.max(5000, Number(Config.coldWorkerUnhealthyMs) || 5000)) {
             this.setPauseReason('heartbeat_stale', false);
             return;
