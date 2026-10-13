@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+async function nativeFixture() {
 const isolated = require('./helpers/isolatedSocialDatabase')('clan-goal-recruitment');
 require('../src/Global');
 isolated.assertConfigured(options.default);
@@ -118,7 +119,10 @@ async function pureAndWorker(clan, prospects) {
     try {
         await worker.withJob(Date.now() + 30000, Data, async jobKey => {
             const actual = await worker.prepareRaids({ jobKey, deadlineAt: Date.now() + 30000, clan, spots: [spot], prospects }, Data, [spot]);
-            assert.deepEqual(actual, prepared, 'new actual RPC uses identical learned capabilities, native estimate and proof');
+            assert.deepEqual(actual, { ...prepared,
+                economicProspects: Demand.retainedEconomicProspects(prospects, [], prepared.retainedProspects) },
+            'new actual RPC uses identical learned capabilities, native estimate and full shared proof');
+            if (process.argv.includes('--lifecycle-failure')) assert.fail('intentional caught fixture lifecycle failure');
         });
         assert.equal(worker.activeJob, null);
     } finally { await worker.shutdown(); }
@@ -462,4 +466,26 @@ async function main() {
         Events.stop(); await Runtime.shutdown(); await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true });
     }
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+await main();
+}
+
+async function completeFixture(work) {
+    let completed = false;
+    // A pending Promise and an idle unref'ed worker do not keep Node alive.
+    // Hold only this fixture until native work AND its cleanup have settled.
+    const held = setInterval(() => {}, 1000);
+    process.once('exit', () => {
+        if (!completed) {
+            console.error('Clan goal recruitment fixture did not complete successfully');
+            process.exitCode = 1;
+        }
+    });
+    try {
+        await work();
+        completed = true;
+    } catch (error) {
+        console.error(error);
+        process.exitCode = 1;
+    } finally { clearInterval(held); }
+}
+completeFixture(nativeFixture);
