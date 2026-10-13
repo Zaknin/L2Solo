@@ -63,6 +63,7 @@ const metrics = {
 };
 
 let bootstrapped = false;
+let bootstrapRetryAt = 0;
 
 function number(value, fallback = 0) {
     const parsed = Number(value);
@@ -240,11 +241,16 @@ async function scheduleReviews() {
 }
 
 async function bootstrap() {
-    if (bootstrapped) return { attempted: 0, created: 0 };
+    if (bootstrapped || Date.now() < bootstrapRetryAt) return { attempted: 0, created: 0 };
     bootstrapped = true;
     // The flag only keeps one bootstrap in flight: a failed one is rerun by the
-    // next resolve pass (every recovery key is idempotent).
-    try { return await bootstrapOnce(); } catch (error) { bootstrapped = false; throw error; }
+    // first resolve pass after one normal clan interval, not by every
+    // continuation pass (a lasting fault would rerun all its reads each second).
+    try { return await bootstrapOnce(); } catch (error) {
+        bootstrapped = false;
+        bootstrapRetryAt = Date.now() + Config.resolveIntervalMs;
+        throw error;
+    }
 }
 
 async function bootstrapOnce() {
@@ -758,6 +764,7 @@ const ClanActionService = {
 
     resetMetrics() {
         bootstrapped = false;
+        bootstrapRetryAt = 0;
         Object.keys(metrics).forEach((key) => {
             if (metrics[key] instanceof Map) metrics[key].clear();
             else metrics[key] = 0;

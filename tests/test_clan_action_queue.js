@@ -241,29 +241,38 @@ async function main() {
         });
         assert.strictEqual(compatibilityRelease.ok, true);
 
-        // A failed first bootstrap must leave recovery to the next pass, not
-        // mark it done for the rest of the process.
+        // A failed first bootstrap must leave recovery to a later pass, not
+        // mark it done for the rest of the process, nor stop the queued actions.
         const originalEnsurePlayerManaged = Database.ensurePlayerManagedClans;
-        Database.ensurePlayerManagedClans = async () => { throw new Error('injected bootstrap failure'); };
+        const originalClaim = Database.claimClanAction;
+        const nativeNow = Date.now;
+        let bootstrapReads = 0;
+        let claimsDuringFailedBootstrap = 0;
+        Database.ensurePlayerManagedClans = async () => { bootstrapReads += 1; throw new Error('injected bootstrap failure'); };
+        Database.claimClanAction = async () => { claimsDuringFailedBootstrap += 1; return { action: null }; };
         try {
-            await assert.rejects(ClanActionService.bootstrap(), /injected bootstrap failure/);
-            // Nor may it stop the queued actions of that pass.
-            const originalClaim = Database.claimClanAction;
-            let claimsDuringFailedBootstrap = 0;
-            Database.claimClanAction = async () => { claimsDuringFailedBootstrap += 1; return { action: null }; };
-            let failedBootstrapBatch;
-            try {
-                failedBootstrapBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
-            } finally {
-                Database.claimClanAction = originalClaim;
-            }
+            const failedBootstrapBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
             assert.strictEqual(failedBootstrapBatch.bootstrap.error, 'injected bootstrap failure');
             assert.strictEqual(claimsDuringFailedBootstrap, 1, 'a failed bootstrap must not stop the action queue');
-        } finally {
+            // A lasting fault is retried once per normal clan interval, not on
+            // every continuation pass.
+            const heldBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
+            assert.strictEqual(bootstrapReads, 1, 'a pass right after the failure must not rerun the bootstrap');
+            assert.strictEqual(heldBatch.bootstrap.error, undefined);
+            assert.strictEqual(claimsDuringFailedBootstrap, 2);
+            const failedAt = nativeNow();
+            Date.now = () => failedAt + ClanActionService.config.resolveIntervalMs;
+            await assert.rejects(ClanActionService.bootstrap(), /injected bootstrap failure/);
+            assert.strictEqual(bootstrapReads, 2, 'a pass after the retry time must rerun the bootstrap');
+            Date.now = () => failedAt + 2 * ClanActionService.config.resolveIntervalMs + 1;
             Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
+            const retriedBootstrap = await ClanActionService.bootstrap();
+            assert(Object.hasOwn(retriedBootstrap, 'playerManaged'), 'the retried bootstrap must run in full');
+        } finally {
+            Date.now = nativeNow;
+            Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
+            Database.claimClanAction = originalClaim;
         }
-        const retriedBootstrap = await ClanActionService.bootstrap();
-        assert(Object.hasOwn(retriedBootstrap, 'playerManaged'), 'the next pass must rerun the failed bootstrap');
         const originalClaimClanAction = Database.claimClanAction;
         Database.claimClanAction = async (options) => {
             const claim = await originalClaimClanAction.call(Database, options);
