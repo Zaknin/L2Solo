@@ -294,6 +294,37 @@ async function arenaLifecycleChecks() {
         assert.strictEqual(deleteBroadcasts, 1, 'clone deletion must be broadcast to every nearby real player');
         assert.strictEqual(EffectStore.list(player.actor).length, 0, 'arena-only buffs disappear on release');
 
+        // E295: a drain toggle active before the duel is restored after it and
+        // must keep draining MP (the restore re-applies the effect, not the ticker).
+        // The release above returned the player outside the arena, so a new
+        // duel has to enter from the manager again.
+        player.actor.setLocXYZH({ ...Arena.NPC, head: 0 });
+        EffectStore.apply(player.actor, {
+            key: 'silent_move', id: 221, level: 1, name: 'Silent Move', type: 'buff', toggle: true,
+            stats: { silentMoving: true }, durationMs: 0,
+            manaDot: { toggle: true, damage: 7, intervalMs: 40 }
+        });
+        player.actor.silentMoving = true;
+        assert.strictEqual(await ArenaDuelService.select(player, sourceSession.actor.fetchId()), true);
+        player.actor.setLocXYZH({ locX: 73350, locY: 142760, locZ: -3778, head: 0 });
+        await wait(350);
+        assert.strictEqual(ArenaDuelService.active?.enteredArena, true, 'second duel should be entered');
+        assert.strictEqual(EffectStore.list(player.actor).some((effect) => effect.key === 'silent_move'), false,
+            'the toggle is cleared for the duel');
+        ArenaDuelService.release(player, 'test_release_toggle');
+        const restoredToggle = EffectStore.list(player.actor).find((effect) => effect.key === 'silent_move');
+        assert(restoredToggle, 'the toggle is restored after the duel');
+        assert.strictEqual(player.actor.silentMoving, true, 'restored Silent Move sets the flag again');
+        assert(player.actor.effectTimers?.silent_move,
+            'restored drain toggle must restart its MP drain ticker');
+        player.actor.setMp(player.actor.fetchMaxMp());
+        const mpAfterRestore = player.actor.fetchMp();
+        await wait(150);
+        assert(player.actor.fetchMp() < mpAfterRestore, 'restored drain toggle must cost MP over time');
+        EffectStore.remove(player.actor, 'silent_move');
+        invoke('GameServer/Effects/EffectTicker').clearAll(player.actor);
+        player.actor.silentMoving = false;
+
         BotManager.sessions = [];
         const coldCharacterId = 9902001;
         const weaponDefinition = DataCache.items.find((entry) => (
