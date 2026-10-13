@@ -317,12 +317,6 @@ function removeRadar(session, locX, locY, locZ) {
   return true;
 }
 
-function clearRadars(session) {
-  const waypoints = [...(session?.questWaypoints?.values() || [])];
-  waypoints.forEach((coords) => removeRadar(session, ...coords));
-  return waypoints.length;
-}
-
 // Mirrors the source QuestState.addSpawn default: spawn at the player's
 // location, with no automatic despawn unless a quest explicitly requests it.
 function spawnQuestNpc(state, selfId, options = {}) {
@@ -467,7 +461,6 @@ module.exports = {
   onSkillSee,
   addRadar,
   removeRadar,
-  clearRadars,
   spawnQuestNpc,
   awardFirstProfession,
   questRates,

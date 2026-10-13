@@ -319,7 +319,6 @@ const BotManager = {
 
     init() {
         if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotManager :: Initializing automated bots...");
-        BotSocialMemory.init();
         BotFriendship.init();
         PopulationService.init();
         GoalService.init();

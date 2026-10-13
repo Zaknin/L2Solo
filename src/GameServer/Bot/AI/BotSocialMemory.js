@@ -28,7 +28,6 @@ function snapshot(player, bot) {
         gratitude: relation?.gratitude || 0, irritation: relation?.irritation || 0 };
 }
 const BotSocialMemory = {
-    init() {},
     getSnapshot(player, bot) {
         if (!Identity.isStaticService(bot) && actorId(bot) && !Memory.views.has(actorId(bot))) void this.load(player, bot);
         return snapshot(player, bot);
