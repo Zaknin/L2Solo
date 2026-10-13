@@ -1147,16 +1147,20 @@ function view(state, plan, deps, built = {}) {
 // The plan's own potion and shot targets, published with its money packet
 // (L72): the sale list keeps what the plan decided under spot occupancy
 // instead of a second earning-spot search. A changed potion or shot item
-// (level, weapon) has no published target yet and reads the foundation.
+// (level, weapon) has no published target yet and reads the foundation; so
+// do shots risen since the build: without restock their target is capped by
+// the stock owned then (the sale list keeps at most what is owned, so a
+// fall needs no fresh read).
 function stockTargets(base) {
     const potions = base.stock('potions'), shots = base.stock('shots');
-    return [potions.itemId, potions.target, shots.itemId, shots.target];
+    return [potions.itemId, potions.target, shots.itemId, shots.target, shots.current];
 }
 function keptTargets(state = {}, deps = {}) {
     const row = state.stats?.stockTargets, ShotStock = invoke('GameServer/Inventory/ShotStock'), plan = ShotStock.planForState(state);
-    if (Array.isArray(row) && row[0] === invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId
-        && row[2] === plan.selfId)
-        return { potions: row[1], shots: { itemId: row[2], target: row[3], beginnerCurrent: ShotStock.beginnerAmount(state, plan) } };
+    const beginnerCurrent = ShotStock.beginnerAmount(state, plan);
+    if (Array.isArray(row) && row.length === 5 && row[0] === invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId
+        && row[2] === plan.selfId && positive(state.inventory?.[plan.selfId]?.amount) + beginnerCurrent <= row[4])
+        return { potions: row[1], shots: { itemId: row[2], target: row[3], beginnerCurrent } };
     const base = basics(state, deps);
     return { potions: base.stock('potions').target, shots: base.stock('shots') };
 }
