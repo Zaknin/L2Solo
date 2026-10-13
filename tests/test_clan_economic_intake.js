@@ -42,7 +42,7 @@ seed.prepare("INSERT INTO character_recipes(characterId,recipeId,type) VALUES(?,
 seed.prepare("INSERT INTO character_recipes(characterId,recipeId,type) VALUES(?,?,'dwarven')").run(secondCrafter, recipe.recipeId);
 seed.close();
 const q = (sql, args = []) => DB.execute([sql, args]);
-const original = { published: Shops.publishedStationRecipes, share: Config.maxBotMemberShare,
+const original = { published: Shops.publishedStationRecipes, publishedIndex: Shops.publishedRecipeIndex, share: Config.maxBotMemberShare,
     reload: invoke('GameServer/Clan/ClanService').reload, buyers: Population.staticBuyersDisabled,
     plan: Runtime.plan, query: Life.clanOperationCandidates };
 const calls = [], pages = [], rpc = [], endedJobs = [];
@@ -331,6 +331,9 @@ async function selectedSpoil() {
 async function main() {
     DB.init(); await Life.init(); await invoke('GameServer/Bot/Population/BackgroundPartyState').init();
     Shops.publishedStationRecipes = () => ({ recipes: [], ids: new Set(), stationByRecipeId: new Map() });
+    // Main-thread options and the worker context must see the same fixture
+    // public services, including the component service used by criticCases.
+    Shops.publishedRecipeIndex = () => new Map(Shops.publishedStationRecipes().recipes.map(row => [Number(row.recipeId), row]));
     Config.maxBotMemberShare = 1; Population.staticBuyersDisabled = false;
     invoke('GameServer/Clan/ClanService').reload = async () => {};
     Runtime.start();
@@ -351,7 +354,8 @@ async function main() {
         assert(created.ok); clanId = created.clanId;
         let clan = await projection();
         const first = await Equipment.planningForClan(clan, null, runOptions());
-        assert.equal(pages.length, 1); assert.equal(pages[0].count, 64);
+        assert.equal(pages.length, 1, JSON.stringify({ calls, scan: first.recruitment.scan,
+            plans: [...first.plans].map(([id, plan]) => [id, plan]) })); assert.equal(pages[0].count, 64);
         assert(pages[0].classIds.includes(57) && pages[0].classIds.every(classId =>
             invoke('GameServer/Bot/Economy/CraftEligibility').canCraft({ classId, level: 80 }, recipe)), 'query uses native capable craft families before LIMIT');
         assert(first.recruitment.continuation && !first.selection?.plan?.economicTeam, 'first64 wrong learned skills create no demand or phantom readiness');
@@ -428,6 +432,7 @@ async function main() {
         console.log('Clan economic intake checks passed: native discovery/conditional RPC, shared64 continuation, selected CAS/join/own craft, canonical recipe/source and committed watches; all four critic regressions');
     } finally {
         Runtime.plan = original.plan; Life.clanOperationCandidates = original.query; Shops.publishedStationRecipes = original.published;
+        Shops.publishedRecipeIndex = original.publishedIndex;
         Config.maxBotMemberShare = original.share; Population.staticBuyersDisabled = original.buyers;
         invoke('GameServer/Clan/ClanService').reload = original.reload;
         Events.stop(); await Runtime.shutdown(); await DB.close();
