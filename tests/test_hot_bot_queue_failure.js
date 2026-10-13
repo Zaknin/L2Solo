@@ -171,6 +171,22 @@ async function main() {
         assert.strictEqual(botSession.brainInFlight, false);
         assert.deepStrictEqual(fallbackReplies, ['Give me a moment. I have a lot to sort through right now.'],
             'a queued admission refused after the wait must deliver the budget fallback');
+
+        // A reset (BotAI.stop) resolves the same waiter: no promise of an answer from a leaving bot.
+        fallbackReplies.length = 0;
+        try {
+            BotInferenceBudget.reserve = () => ({
+                ok: true, bypassed: true, queued: true, reservation: null,
+                ready: Promise.resolve({ ok: false, reason: 'inference_budget_reset', retryAfterMs: 0, status: null })
+            });
+            assert.strictEqual(BotBrain.maybeThink(botSession, 'player_chat', status, 'reset', requestContext('reset')), true);
+            for (let attempt = 0; attempt < 100 && botSession.brainInFlight; attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+        } finally { BotInferenceBudget.reserve = originalReserve; }
+        assert.strictEqual(requests.length, requestsBeforeRefusal, 'a reset admission never reaches the provider');
+        assert.strictEqual(botSession.brainInFlight, false);
+        assert.deepStrictEqual(fallbackReplies, [], 'a reset admission sends no fallback');
     } finally {
         releaseFirst?.();
         options.default.OpenRouter = originalConfig;
