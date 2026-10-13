@@ -131,6 +131,48 @@ try {
         assert.notStrictEqual(Economy.forState(state, at(T + 11 * MINUTE)).plan, economy.plan, 'after 10 min the plan is rebuilt');
         assert(builds > before);
     }
+    // (f) soft market never excuses the held leaf's own offer (critic 1).
+    {
+        board.remove(9300501); // the line of (c): the own offer below is the only one
+        const tripCost = Object.assign(() => 0, { details: () => ({ known: true, hours: .1, fees: 0 }) });
+        const tdeps = timestamp => ({ ...deps, tripCost, timestamp });
+        let state = subject(93009, 1e6);
+        const economy = Economy.forState(state, tdeps(T));
+        state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+        const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
+        assert(wished, 'fixture: a wished item the review read');
+        board.put({ id: 9300901, kind: 'shop', storeType: SELL, ownerId: 7, town: 'Giran',
+            lines: [{ lineId: 1, selfId: wished, count: 5, price: 10 }] });
+        // fixture: the held decision's own next step buys that line
+        economy.plan.network.activity = { activity: 'shopping', kind: 'buy', itemId: wished, amount: 1, unitPrice: 10,
+            sourceType: 'afk', town: 'Giran' };
+        assert(Economy.acceptedActivityHolds(state, economy.plan.network.activity, tdeps(T + MINUTE)),
+            'fixture: the own offer, funding and route hold');
+        let before = builds;
+        assert.strictEqual(Economy.forState(state, tdeps(T + MINUTE)).plan, economy.plan,
+            'a moved read token waits while the own offer holds');
+        assert.equal(builds, before);
+        board.put({ id: 9300901, kind: 'shop', storeType: SELL, ownerId: 7, town: 'Giran',
+            lines: [{ lineId: 1, selfId: wished, count: 5, price: 20 }] });
+        before = builds;
+        assert.notStrictEqual(Economy.forState(state, tdeps(T + 2 * MINUTE)).plan, economy.plan,
+            'the own line moved: rebuild inside the market delay');
+        assert(builds > before);
+    }
+    // (g) a resting crafter's MP is a resource: the card is refused (critic 2a).
+    {
+        let state = { ...subject(93010), craftLevel: 1 };
+        const economy = Economy.forState(state, deps);
+        state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+        const accepted = Decisions.advisory(economy, state);
+        assert(accepted && accepted.mp === state.vitals.mp);
+        const resting = { ...ownResult(state), vitals: { ...state.vitals } };
+        Economy.forgetContext(state.characterId);
+        assert(Decisions.refreshAdvisory(resting, accepted, at(T + 1000), { afterResult: true }),
+            'fixture: the same MP keeps the crafter card');
+        assert.equal(Decisions.refreshAdvisory({ ...resting, vitals: { ...state.vitals, mp: state.vitals.mp + 50 } }, accepted,
+            at(T + 1000), { afterResult: true }), null, 'a crafter MP rise refuses the card');
+    }
     // (d) a reconcile event of this step is never overwritten by a reused packet.
     {
         const { state, economy, accepted } = decided(93006);

@@ -120,13 +120,16 @@ Economy.forActor = (bot, current) => {
     const context = priorEconomyForActor(bot, current);
     if (current === progressSession) {
         const progress = { level: bot.fetchLevel(), adena: wallet, stats: { exp: bot.fetchExp(), money: context.statsPacket.money } };
-        context.statsPacket.wishSections = { wallet, cashBounds: [-1, null], moneyError: -1,
+        context.statsPacket.wishSections = { at: Date.now(), wallet, cashBounds: [-1, null], moneyError: -1,
             funding: Sections.fundingMark(progress), expHour: 1000,
             horizon: Valuation.stageHours(progress, 1000, persona), incomeError: Sections.incomeError(progress, persona) };
     }
     return context;
 };
 const progressTick = () => Hunting.tick(progressSession, actor, {}, { say() {} });
+// L70: the horizon is a soft change; the last actual decision is aged past
+// its 5 min delay instead of waiting in real time.
+const ageDecision = () => { progressSession.coldLifeState.stats.wishSections.at -= Sections.SOFT_DELAY.horizon; };
 progressTick();
 const progressBuilds = builds, progressSeq = progressSession.coldLifeState.stats.decisionSeq;
 assert(.2 > progressSession.coldLifeState.stats.wishSections.incomeError);
@@ -135,12 +138,16 @@ progressTick();
 assert.equal(builds, progressBuilds, 'small native XP reuses the accepted horizon');
 experience += stageRemaining * .18;
 progressTick();
+assert.equal(builds, progressBuilds, 'a horizon change inside 5 min of the decision raises no benefits event');
+ageDecision();
+progressTick();
 assert.equal(level, 39);
 assert.equal(builds, progressBuilds + 1, '20% less remaining stage at the same level refreshes the hot decision');
 assert.equal(progressSession.coldLifeState.stats.decisionSeq, progressSeq + 1);
 progressTick();
 assert.equal(builds, progressBuilds + 1, 'the accepted new horizon is the next anchor, with no repeated roll');
 experience += stageRemaining * .2;
+ageDecision();
 progressTick();
 assert.equal(builds, progressBuilds + 2, 'later meaningful XP is compared with the last accepted horizon');
 Economy.forActor = priorEconomyForActor;
