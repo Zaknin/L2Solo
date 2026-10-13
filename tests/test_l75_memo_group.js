@@ -121,17 +121,23 @@ const Data = invoke('GameServer/DataCache'); Data.init();
     console.log('PASS profile scope: one build per state and timestamp, fresh values, private copies');
 }
 
-// 4. EconomyContext.forState opens the scope for its own build.
+// 4. EconomyContext.forState opens the scope for its own build: its readers
+// share one profile (fewer coldCombat reads) and the result is the same.
 {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const original = Profile.withProfileScope;
-    const scoped = [];
-    Profile.withProfileScope = (state, work) => { scoped.push(state); return original(state, work); };
-    try {
-        const state = structuredClone(require('./fixtures/wish_spot_native_state.json'));
-        try { Economy.forState(state, { timestamp: 1791335800000, rememberContext: false }); } catch (_) { /* the scope is what is checked */ }
-        assert.equal(scoped[0], state, 'forState builds inside the profile scope of its state');
-    } finally { Profile.withProfileScope = original; }
-    console.log('PASS economy build: forState opens the profile scope');
+    const build = bypass => {
+        const state = structuredClone(require('./fixtures/wish_spot_native_state.json')), stats = state.stats;
+        let reads = 0;
+        state.stats = new Proxy(stats, { get(target, key) { if (key === 'coldCombat') reads++; return target[key]; } });
+        if (bypass) Profile.withProfileScope = (_state, work) => work();
+        try { return { economy: Economy.forState(state, { timestamp: 1791335800000, rememberContext: false }), reads }; }
+        finally { Profile.withProfileScope = original; }
+    };
+    build(false); // warm the shared module caches so both builds below start equal
+    const plain = build(true), scoped = build(false);
+    assert.deepEqual(scoped.economy.statsPacket, plain.economy.statsPacket, 'the scope does not change the build');
+    assert(scoped.reads < plain.reads, `the build's readers share one profile (${scoped.reads} < ${plain.reads} reads)`);
+    console.log(`PASS economy build: forState shares one profile (${scoped.reads} vs ${plain.reads} coldCombat reads)`);
 }

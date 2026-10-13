@@ -51,7 +51,7 @@ function useSpots(source) {
 }
 
 // rates: the profile the caller has just read (one rate read per call, L75).
-function refreshCatalog(rates = ProgressionRates.profile()) {
+function refreshCatalog(rates) {
     const spots = spotSource() || EMPTY_SPOTS;
     const revision = Rewards.revision(rates);
     if (spots !== rewardSpots || spots.length !== rewardSpotCount || revision !== rewardRevision) {

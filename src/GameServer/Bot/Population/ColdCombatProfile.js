@@ -526,14 +526,16 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
 }
 
 // One economy build (EconomyContext.forState) is synchronous and reads the
-// bot's own profile at one timestamp up to three times: the income route's
-// target matchup, the gear source facts and the bag safety (L75). Nothing in
-// the build writes the profile's inputs (inventory rows, coldCombat, level,
-// class, hennas); the planners work on copies. The scope holds that one
-// profile until the build returns; another state, timestamp or any option
-// (a night probe) builds as before. Equipment preparation only shares item
-// rows and never changes a profile's values. Each caller gets its own
-// top-level copy, as from a fresh build.
+// bot's own profile at one timestamp several times: the income route's
+// target matchup, the gear source facts and skill gains (with their own
+// build's night flag) and a repeated bag safety (L75). Nothing in the build
+// writes the profile's inputs (inventory rows, coldCombat, level, class,
+// hennas); the planners work on copies. The scope holds that one profile
+// until the build returns. Options only feed the night of statSources, so a
+// night flag equal to the timestamp's own night is the same profile; another
+// state, timestamp, night or option (a night probe) builds as before.
+// Equipment preparation only shares item rows and never changes a profile's
+// values. Each caller gets its own top-level copy, as from a fresh build.
 let profileScope = null;
 function withProfileScope(state, work) {
     const outer = profileScope;
@@ -541,13 +543,13 @@ function withProfileScope(state, work) {
     try { return work(); }
     finally { profileScope = outer; }
 }
-function noOptions(options) {
-    for (const _ in options) return false;
+function sharedOptions(options, timestamp) {
+    for (const key in options) if (key !== 'night' || options.night !== GameTime.isNight(timestamp)) return false;
     return true;
 }
 
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
-    const scope = profileScope !== null && profileScope.state === state && noOptions(options) ? profileScope : null;
+    const scope = profileScope !== null && profileScope.state === state && sharedOptions(options, timestamp) ? profileScope : null;
     if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
     const profile = buildProfile(state, timestamp, options);
     if (scope === null) return profile;
