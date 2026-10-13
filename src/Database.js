@@ -7326,7 +7326,7 @@ const Database = {
     },
     exchangeDimensionalDiamond(characterId, itemId) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const recipe = require('../data/Items/dimensional_diamond_exchanges.json').recipes.find(row => row.itemId === itemId);
+            const recipe = require('./GameServer/Items/DimensionalDiamondCatalog').recipe(itemId);
             if (!recipe) throw new Error('Invalid dimensional diamond exchange');
             const diamonds = all('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 7562 AND equipped = 0 ORDER BY id', [characterId]);
             if (diamonds.reduce((sum, item) => sum + item.amount, 0) < recipe.cost) throw new Error('Not enough dimensional diamonds');
@@ -7350,7 +7350,7 @@ const Database = {
     },
     completeSecondProfession(characterId, expectedClassId, targetClassId) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const route = require('../data/Templates/second_profession_trials.json').find(row => row.classId === targetClassId);
+            const route = require('./GameServer/SecondProfessionCatalog').routeForClass(targetClassId);
             const character = one('SELECT classId, level, race FROM characters WHERE id = ?', [characterId]);
             if (!route || character?.classId !== expectedClassId || character.level < 40 || character.race !== route.race
                 || !require('./GameServer/ClassProgression').secondProfMap[expectedClassId]?.includes(targetClassId)) {
@@ -8179,7 +8179,7 @@ const Database = {
             } else if (proposal.kind === 'henna') {
                 const Henna = invoke('GameServer/Henna/HennaRules');
                 const character = one('SELECT classId FROM characters WHERE id = ?', [characterId]);
-                const symbol = Henna.availableForClass(character?.classId).find(row => row.id === proposal.symbolId);
+                const symbol = Henna.symbolForClass(character?.classId, proposal.symbolId);
                 const rows = all('SELECT slot, symbolId FROM character_hennas WHERE characterId = ?', [characterId]);
                 const slot = [1,2,3].find(value => !rows.some(row => row.slot === value));
                 if (!symbol || !slot || rows.length >= Henna.slotsForClass(character.classId)) throw Error('invalid_bot_henna');

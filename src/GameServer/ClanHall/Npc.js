@@ -36,7 +36,7 @@ function doorLinks(actor, hall) {
         ? '<br>' + link('doors open', 'Open doors') + link('doors close', 'Close doors') : '';
 }
 function hallForNpc(id) {
-    return Policy.catalog.halls.find((h) => h.managerIds.includes(Number(id)) || h.doormanIds?.includes(Number(id)));
+    return Policy.hallForNpc(id, Policy.catalog.halls);
 }
 function handles(id) {
     return Policy.catalog.auctioneerIds.includes(Number(id)) || !!hallForNpc(id);

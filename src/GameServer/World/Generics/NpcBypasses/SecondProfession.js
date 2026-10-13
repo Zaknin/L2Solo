@@ -1,6 +1,7 @@
 const Service = invoke('GameServer/SecondProfession');
 const QuestService = invoke('GameServer/Quest/QuestService');
 const Response = invoke('GameServer/Network/Response');
+const Catalog = require('../../../SecondProfessionCatalog');
 
 module.exports = function secondProfession(session, parts) {
     return QuestService.mutate(session, async () => {
@@ -9,7 +10,7 @@ module.exports = function secondProfession(session, parts) {
         const target = Number(parts[1]);
         if (!Number.isInteger(target)) return;
         const result = await Service.transfer(session, target);
-        const route = Service.routes.find(route => route.classId === target);
+        const route = Catalog.routeForClass(target, Service.routes);
         if (result.ok) {
             const message = `Congratulations! You are now a ${route.name}.`
                 + (result.refreshPending ? '<br>Speak with this master again to refresh your skills.' : '');

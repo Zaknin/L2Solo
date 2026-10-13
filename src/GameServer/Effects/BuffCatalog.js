@@ -28,9 +28,18 @@ const ALL_BUFFS = {
         stats: { pAtkMul: 1.12 }
     }
 };
+const keyIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['key'], buffs => {
+    const byKey = new Map();
+    for (const buff of buffs) if (!byKey.has(buff.key)) byKey.set(buff.key, buff);
+    return byKey;
+});
 
 function byTypeOrKey(typeOrKey) {
-    return ALL_BUFFS[typeOrKey] || Object.values(ALL_BUFFS).find((buff) => buff.key === typeOrKey);
+    const direct = ALL_BUFFS[typeOrKey];
+    if (direct) return direct;
+    const buffs = Object.values(ALL_BUFFS), index = keyIndex(buffs);
+    return index ? Number.isNaN(typeOrKey) ? undefined : index.get(typeOrKey)
+        : buffs.find(buff => buff.key === typeOrKey);
 }
 
 function isActive(actor, typeOrKey, at = Date.now()) {

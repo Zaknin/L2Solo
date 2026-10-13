@@ -4,11 +4,9 @@ const SystemMessage = invoke('GameServer/Network/Response/SystemMessage');
 const DataCache = invoke('GameServer/DataCache');
 const World = invoke('GameServer/World/World');
 
-const hennaData = require('../../../data/Henna/c4-henna.json');
-const hennaTreeData = require('../../../data/Henna/c4-henna-trees.json');
-
-const SYMBOLS = new Map(hennaData.symbols.map((symbol) => [symbol.id, symbol]));
-const TREES = new Map(Object.entries(hennaTreeData.trees).map(([classId, ids]) => [Number(classId), ids]));
+const HennaRules = require('./HennaRules');
+const Symbols = HennaRules.serviceView();
+const { availableForClass, slotsForClass, totals } = HennaRules;
 const STAT_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN'];
 const SLOT_COUNT = 3;
 
@@ -23,14 +21,12 @@ function fetchSlots(session) {
 
 function symbolOf(session, slot) {
     const symbolId = fetchSlots(session)[slot - 1];
-    return symbolId ? SYMBOLS.get(symbolId) : null;
+    return symbolId ? Symbols.symbolStrict(symbolId) : null;
 }
 
 function availableFor(session) {
     return availableForClass(session.actor.fetchClassId?.());
 }
-
-const { availableForClass, slotsForClass, totals } = require('./HennaRules');
 
 function fetchDye(session, dyeSelfId) {
     return session.actor.backpack.fetchItemFromSelfId(dyeSelfId) || null;
@@ -55,7 +51,7 @@ function restore(session) {
         const slots = [null, null, null];
         rows.forEach((row) => {
             const slot = Number(row.slot);
-            const symbol = SYMBOLS.get(Number(row.symbolId));
+            const symbol = Symbols.symbolStrict(Number(row.symbolId));
             if (symbol && slot >= 1 && slot <= SLOT_COUNT) slots[slot - 1] = symbol.id;
         });
         session.hennas = slots;
@@ -78,14 +74,14 @@ function sendHennaList(session) {
 }
 
 function sendHennaItemInfo(session, symbolId) {
-    const symbol = SYMBOLS.get(Number(symbolId));
+    const symbol = Symbols.symbolStrict(Number(symbolId));
     if (!symbol) return;
     session.dataSendToMe(ServerResponse.hennaItemInfo(session.actor, symbol, session.actor.backpack.fetchTotalAdena()));
 }
 
 function canDraw(session, symbol) {
     if (!symbol) return 'forbidden';
-    if (!(TREES.get(Number(session.actor.fetchClassId?.())) || []).includes(symbol.id)) return 'forbidden';
+    if (!Symbols.hasSymbolForClass(session.actor.fetchClassId?.(), symbol.id)) return 'forbidden';
     const dye = fetchDye(session, symbol.dyeSelfId);
     if (!dye || dye.fetchAmount() < symbol.dyeAmount) return 'missing-dye';
     if (session.actor.backpack.fetchTotalAdena() < symbol.price) return 'missing-adena';
@@ -94,7 +90,7 @@ function canDraw(session, symbol) {
 }
 
 function drawSymbol(session, symbolId) {
-    const symbol = SYMBOLS.get(Number(symbolId));
+    const symbol = Symbols.symbolStrict(Number(symbolId));
     const reason = canDraw(session, symbol);
     if (reason) {
         session.dataSendToMe(SystemMessage(SYSTEM_CANT_DRAW_SYMBOL));
@@ -154,8 +150,8 @@ function removeSymbol(session, slot) {
 const HennaService = {
     SLOT_COUNT,
     STAT_KEYS,
-    symbol(id) { return SYMBOLS.get(Number(id)) || null; },
-    isTattooDye(selfId) { return hennaData.symbols.some((symbol) => symbol.dyeSelfId === Number(selfId)); },
+    symbol: Symbols.symbol,
+    isTattooDye: Symbols.isTattooDye,
     restore,
     sendHennaList,
     sendHennaItemInfo,

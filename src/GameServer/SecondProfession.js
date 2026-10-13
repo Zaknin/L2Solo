@@ -1,6 +1,7 @@
 // C4 village_master requirements, Lisvus fdc7e33a. Level-only transfer stays
 // available through the existing temple-priest menus while trials are added.
-const routes = require('../../data/Templates/second_profession_trials.json');
+const Catalog = require('./SecondProfessionCatalog');
+const routes = Catalog.routes;
 const ClassTransfer = require('./ClassTransfer');
 const Response = invoke('GameServer/Network/Response');
 const Database = invoke('Database');
@@ -8,7 +9,7 @@ const World = invoke('GameServer/World/World');
 const NpcIndex = invoke('GameServer/World/NpcObjectIndex');
 const H = require('./Quest/SecondProfessionQuest');
 
-const handles = id => routes.some(route => route.npcs.includes(Number(id)));
+const handles = Catalog.handles;
 
 function nearbyNpc(session) {
     const actor = session?.actor, talk = session?.activeNpcTalk;
@@ -21,7 +22,7 @@ function nearbyNpc(session) {
 function render(session, message = '') {
     const actor = session.actor, id = session.activeNpcTalk?.selfId;
     if (!handles(id)) return false;
-    const choices = routes.filter(route => route.npcs.includes(id) && route.race === actor.fetchRace()
+    const choices = Catalog.routesForNpc(id).filter(route => route.race === actor.fetchRace()
         && (ClassTransfer.eligibility(actor, route.classId).ok || actor.fetchClassId() === route.classId));
     const body = choices.map(route => {
         if (actor.fetchClassId() === route.classId) return `<a action="bypass -h second-profession ${route.classId}">Refresh my ${route.name} skills</a><br>`;
@@ -40,7 +41,7 @@ function render(session, message = '') {
 
 async function transfer(session, targetClassId) {
     if (!nearbyNpc(session)) return { ok: false, reason: 'npc' };
-    const route = routes.find(route => route.classId === targetClassId);
+    const route = Catalog.routeForClass(targetClassId);
     if (!route?.npcs.includes(session.activeNpcTalk.selfId) || route.race !== session.actor.fetchRace()) {
         return { ok: false, reason: 'wrong_profession' };
     }
