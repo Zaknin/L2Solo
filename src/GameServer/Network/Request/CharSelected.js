@@ -8,16 +8,16 @@ function charSelected(session, buffer) {
     packet
         .readD(); // Character Slot
 
-    consume(session, {
+    return consume(session, {
         characterSlot: packet.data[0]
     });
 }
 
 function consume(session, data) {
-    Shared.fetchCharacters(session.accountId).then((characters) => {
+    return Shared.fetchCharacters(session.accountId).then((characters) => {
         const character = characters[data.characterSlot];
 
-        Shared.fetchClassInformation(character.classId).then((classInfo) => {
+        return Shared.fetchClassInformation(character.classId).then((classInfo) => {
             // Create a new actor instance with info
             session.setActor({
                 ...character, ...utils.crushOb(classInfo)

@@ -4,6 +4,8 @@ const EventEmitter = require('events');
 require('../src/Global');
 
 const Server = require('../src/Server');
+const Session = invoke('GameServer/Session');
+const Shared = invoke('GameServer/Network/Shared');
 
 // Nothing may reach the process-wide rejection path: on Node 22 it ends the
 // whole server. Record instead of exiting so each case can be asserted.
@@ -22,8 +24,30 @@ function fakeSocket() {
     socket.remoteAddress = '127.0.0.1';
     socket.remotePort = 1;
     socket.destroyed = false;
+    socket.written = [];
+    socket.write = (data) => socket.written.push(data);
     socket.destroy = () => { socket.destroyed = true; };
     return socket;
+}
+
+// A real game session behind the real connection wiring: the packet goes
+// through Session.dataReceive and the opcode table to the real handler.
+function connectGame(accountId) {
+    const socket = fakeSocket();
+    let session;
+    Server.prototype.onSocket.call({ name: 'Test', callback: (value) => {
+        session = new Session(value);
+        session.accountId = accountId;
+        return session;
+    } }, socket);
+    return { socket, session };
+}
+
+function slotPacket(opcode, slot) {
+    const payload = Buffer.alloc(5);
+    payload[0] = opcode;
+    payload.writeInt32LE(slot, 1);
+    return frame(payload);
 }
 
 // The real connection wiring, without opening a listening port.
@@ -61,6 +85,58 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 
         assert.deepStrictEqual(session.received, [0x01, 0x02], 'healthy packets of one chunk are all dispatched');
         assert.strictEqual(socket.destroyed, false);
+    }
+
+    {
+        // L85: a handler that fails through its returned Promise costs the
+        // connection, like a synchronous throw, instead of the process.
+        const { socket } = connect(() => Promise.reject(new Error('late failure')));
+
+        socket.emit('data', frame([0x01]));
+        await settle();
+
+        assert.strictEqual(socket.destroyed, true, 'a rejected handler drops its connection');
+        assert.deepStrictEqual(unhandled, [], 'the rejection is observed at the boundary');
+    }
+
+    {
+        // Normal path: a handler that resolves later keeps its connection.
+        const { socket } = connect(() => Promise.resolve('done'));
+
+        socket.emit('data', frame([0x01]));
+        await settle();
+
+        assert.strictEqual(socket.destroyed, false, 'a resolved handler keeps its connection');
+    }
+
+    const fetchCharacters = Shared.fetchCharacters;
+    try {
+        // A character slot the account does not have: the real handlers read
+        // a missing character inside their nested chain.
+        Shared.fetchCharacters = () => Promise.resolve([{ id: 1, name: 'Only', classId: 0 }]);
+        for (const [name, opcode] of [['CharSelected', 0x0d], ['CharDelete', 0x0c]]) {
+            const { socket } = connectGame('fixture');
+            socket.emit('data', slotPacket(opcode, 9));
+            await settle();
+            await settle();
+
+            assert.strictEqual(socket.destroyed, true, `${name} with a bad slot drops the connection`);
+            assert.deepStrictEqual(unhandled, [], `${name} returns its nested chain to the boundary`);
+        }
+
+        // A character list read that fails after the return to selection.
+        Shared.fetchCharacters = () => Promise.reject(new Error('injected list failure'));
+        {
+            const { socket } = connectGame('fixture');
+            socket.emit('data', frame([0x46]));
+            await settle();
+            await settle();
+
+            assert.strictEqual(socket.destroyed, true, 'Restart with a failed list read drops the connection');
+            assert.deepStrictEqual(unhandled, [], 'Restart returns its list chain to the boundary');
+        }
+    } finally {
+        Shared.fetchCharacters = fetchCharacters;
     }
 
     await settle();

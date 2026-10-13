@@ -26,7 +26,7 @@ class Session {
         // Weird, sometimes the packet is sent twofold/duplicated. I had to limit it based on the header size...
         const packet = data.slice(2, data.readInt16LE());
         const decipheredPacket = require('blowfish-ecb').decipher(this.blowfish, packet);
-        Opcodes.table[decipheredPacket[0]](this, decipheredPacket);
+        return Opcodes.table[decipheredPacket[0]](this, decipheredPacket);
     }
 
     dataSend(data, encipher = true) {
