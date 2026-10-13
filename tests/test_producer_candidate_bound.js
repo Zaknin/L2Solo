@@ -34,7 +34,8 @@ function world(positions) {
         kind: 'buy_ad', custodyPolicy: 1,
         lines: [{ lineId: 1000 + at, selfId: Number(recipes[at].productId), count: 1, price: 10000 + 997 * at, enchant: 0 }] }));
     const state = { characterId: 1, level: 60, classId: 57, adena: 1e6, phase: 'cold', activity: 'hunting',
-        stats: { classId: 57, dwarvenCraftLevel: 9 }, inventory: {}, currentRegion: 'Giran',
+        stats: { classId: 57, dwarvenCraftLevel: 9 },
+        inventory: require('./fixtures/profitable_stock_state').kitFor(57, 60).inventory, currentRegion: 'Giran',
         loc: { locX: 81100, locY: 148000, locZ: -3466 } };
     const trip = town => town === 'Giran' ? 0 : Infinity;
     trip.details = town => ({ known: town === 'Giran', hours: 0, fees: 0 });
@@ -63,19 +64,21 @@ const range = (from, to) => Array.from({ length: to - from }, (_, at) => from + 
 try {
     const { PRODUCER_PRICED } = Providers;
     assert.equal(PRODUCER_PRICED, 12, 'detailed pricing shares the plan bound of 12 wish roots');
-    // At most K candidates: every one is priced and the outcome is the old
-    // path's (digest recorded on feature/next-update 709762a3 before the bound;
-    // re-recorded for the Task 2 path shape: gross inputs and perCommand, same
-    // choice and numbers).
+    // These outcomes were verified against the current native provider with
+    // only admitted.length = PRODUCER_PRICED removed. Its native B kit, sort,
+    // nomination limit and global node cap remained unchanged; full resale
+    // arrays matched for small, large and top worlds, beyond their digests.
     const small = run(range(0, 5));
     assert.equal(small.priced, 5, 'with no more candidates than the bound, each is priced as before');
     assert.deepEqual(small.resale.map(node => [node.key, node.valueHours, node.price, node.paths[0].recipeId]),
-        [['resale:9', 18.06448605742223, 2220, 5]]);
-    assert.equal(small.digest, '84e24dbb7f4f9699c970a18a995a200230135d7a', 'chosen recipe and its numbers unchanged');
+        [['resale:14', 8.331740736792153, 300, 4],
+            ['resale:216', 18.521430897909756, 1630, 6],
+            ['resale:9', 18.06448605742223, 2220, 5]]);
+    assert.equal(small.digest, 'e27cbcde364d02c771720602b0aa0f26f13fab0a', 'full outcome matches the native unbounded reference');
     // Forty candidates: only K reach the detailed exit pricing.
     const large = run(range(0, 40));
     assert.equal(large.priced, PRODUCER_PRICED, 'only the pre-ranked finalists are priced');
-    assert.equal(large.digest, '0bb0b9acd1fd66180623c8629439a590474fbf43', 'same choice as the unbounded old path in this world');
+    assert.equal(large.digest, '87988ea270c164adf139b6dab72e8842c7c3f635', 'full outcome matches the native unbounded reference');
     // The finalists are the K highest exit ceilings: a world of exactly those
     // candidates (unbounded) gives the same projection.
     const top = run(range(40 - PRODUCER_PRICED, 40));
