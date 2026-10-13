@@ -1030,8 +1030,17 @@ function startKernel(config = {}) {
                 : previousPlan;
             // Failure counters and recovery deadlines are live native facts,
             // even when the expensive wish calculation still holds.
+            const deferredHolds = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+                && !previousPlan.levelingRecovery
+                && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
             const planHolds = !previousPlan
                 || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
+                // Native wish_focus retains inactive target/history fields,
+                // not a current route/quote. Their old level/rate stamps do
+                // not grant authority: the current advisory fence below does.
+                // A wake/expiry still goes through the native planner.
+                || deferredHolds
                 || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
                     && JSON.stringify(retainedPlan) === JSON.stringify(previousPlan);
             // A proved ordinary solo round keeps its accepted native plan.
@@ -1051,9 +1060,15 @@ function startKernel(config = {}) {
                     partyRequest: null, reusablePartyRequest: false, replanFailure: null,
                     targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState };
             }
-            const preparedEconomy = Economy.forState(state, deps);
+            // Build the renewed proof against the native live history, so a
+            // consumed wake/expiry does not invalidate it again on publication.
+            const preparationState = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+                ? { ...state, stats: { ...state.stats,
+                    equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
+            const preparedEconomy = Economy.forState(preparationState, deps);
             const selectedAcquisition = GearPlanSelection
-                .selectAcquisitionPlan(state, previousPlan, {
+                .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
                     planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
                 });

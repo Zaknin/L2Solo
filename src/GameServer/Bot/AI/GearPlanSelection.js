@@ -9,6 +9,15 @@ const OfferOrder = invoke('GameServer/Bot/Economy/OfferOrder');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
+function deferredWishPlan(previousPlan, replanContext) {
+    const plan = { ...previousPlan, status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus' };
+    // Consume the native recovery wake/expiry once, retaining the inactive
+    // target and its historical stamps for a later acquisition decision.
+    if (previousPlan?.recoveryTargets || replanContext.recoveryTargets?.length) plan.recoveryTargets = replanContext.recoveryTargets;
+    if (previousPlan?.levelingRecovery && !replanContext.levelingRecovery) delete plan.levelingRecovery;
+    return plan;
+}
+
 function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
     if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
     const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
@@ -27,8 +36,9 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     if (!activeGear && !GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) {
         // Acquisition metadata remains resumable, but cannot override the
         // common engine's book, social, sale or production activity.
-        return { acquisitionPlan: { ...previousPlan, status: 'deferred', strategy: 'none', next: null,
-            reason: 'wish_focus' }, replanContext: {},
+        const replanContext = preparedReplanContext || GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
+        const acquisitionPlan = deferredWishPlan(previousPlan, replanContext);
+        return { acquisitionPlan, replanContext,
             reusablePartyRequest: false, excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
     }
     // The selected item's native funding gate reads the packet made by this
@@ -140,4 +150,4 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     return { ...result, economy };
 }
 
-module.exports = { selectAcquisitionPlan };
+module.exports = { selectAcquisitionPlan, deferredWishPlan };

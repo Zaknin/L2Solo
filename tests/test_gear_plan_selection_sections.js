@@ -66,3 +66,24 @@ try {
     assert.deepEqual(woke.acquisitionPlan.recoveryTargets, []);
     console.log('PASS native acquisition failure overrides warm reuse; ordinary progress retains the goal');
 } finally { Object.assign(Planner, original); }
+
+const deferred = { ...plan, status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus',
+    plannedForLevel: 20, rateProfileSignature: 'x10:10:10:10',
+    recoveryTargets: [{ targetId: target.selfId, reason: 'drop_exhausted', until: timestamp - 1 }],
+    levelingRecovery: { until: timestamp - 1, resumeLevel: state.level, resumeExp: 0 } };
+const nativeContext = Planner.replanContextFor(state, deferred, timestamp);
+const result = Selection.selectAcquisitionPlan(state, deferred, { spots, timestamp,
+    preparedEconomy: { statsPacket: {}, network: { queue: [], activity: { activity: 'hunting' } } },
+    preparedReplanContext: nativeContext });
+assert.deepEqual(result.acquisitionPlan.recoveryTargets, [], 'wish deferral consumes the native expired recovery list');
+assert.equal(result.acquisitionPlan.levelingRecovery, undefined);
+assert.deepEqual(result.acquisitionPlan.target, deferred.target);
+assert.equal(result.acquisitionPlan.startedAt, deferred.startedAt);
+assert.equal(result.acquisitionPlan.plannedForLevel, 20);
+assert.equal(result.acquisitionPlan.rateProfileSignature, 'x10:10:10:10');
+assert.equal(invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(result.acquisitionPlan), false,
+    'deferred target/history remain structural dependencies');
+assert.deepEqual(Selection.deferredWishPlan(result.acquisitionPlan,
+    Planner.replanContextFor(state, result.acquisitionPlan, timestamp)), result.acquisitionPlan,
+    'native cleanup stabilizes after the one meaningful expiry');
+console.log('PASS native deferred wish history cleanup preserves resumable target and historical stamps');

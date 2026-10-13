@@ -847,6 +847,7 @@ function releaseBuild(key) {
 }
 function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
     const saved = state.stats?.coldCombat || {};
+    const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'
         ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
             row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
@@ -854,7 +855,9 @@ function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
         : 'no-inventory';
     const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
         .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
-    return [saved.classId, state.stats?.classId, state.classId, state.level, worn, (state.stats?.hennas || []).join(','),
+    // Main publishes the current class in stats; worker hydration may also
+    // carry its alias at the root. Both forms have the same native build.
+    return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
         JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects].join('|');
 }

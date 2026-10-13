@@ -208,6 +208,21 @@ try {
     assert.equal(levelled.stats.activityLeaf, 0);
     const paired = { ...state, inventory: { ...state.inventory, 1: { ...state.inventory[1], amount: 2 } } };
     assert.notEqual(Sections.capability(paired, deps.timestamp), Sections.capability(state, deps.timestamp));
+    const classAlias = { ...state, classId: state.stats.classId };
+    assert.deepEqual(Profile.powerFor(classAlias, deps.timestamp), Profile.powerFor(state, deps.timestamp));
+    assert.equal(Profile.buildInputKey(classAlias, deps.timestamp), Profile.buildInputKey(state, deps.timestamp),
+        'a duplicate current profession is the same build');
+    const rootClass = { ...classAlias, stats: { ...state.stats } };
+    delete rootClass.stats.classId;
+    assert.equal(Profile.buildInputKey(rootClass, deps.timestamp), Profile.buildInputKey(state, deps.timestamp),
+        'the native root-class fallback describes the same profession');
+    const changedClass = { ...classAlias, stats: { ...state.stats, classId: 2 } };
+    assert.notEqual(Sections.capability(changedClass, deps.timestamp), Sections.capability(state, deps.timestamp),
+        'an actual current profession change still invalidates the build');
+    const changedSnapshotClass = { ...state, stats: { ...state.stats,
+        coldCombat: { ...state.stats.coldCombat, classId: 2 } } };
+    assert.notEqual(Sections.capability(changedSnapshotClass, deps.timestamp), Sections.capability(state, deps.timestamp),
+        'a different authoritative combat profession remains an input');
     const skillAuthority = { ...state, stats: { ...state.stats,
         coldCombat: { ...state.stats.coldCombat, skillSource: 'tree' } } };
     assert.notEqual(Sections.capability(skillAuthority, deps.timestamp), Sections.capability(state, deps.timestamp));
