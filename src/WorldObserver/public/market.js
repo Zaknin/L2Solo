@@ -66,12 +66,7 @@ const marketEls = {
 };
 
 function escapeMarketHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+    return WorldObserverFormat.escapeHtml(value);
 }
 
 function marketNumber(value, fallback = '—') {
@@ -80,9 +75,7 @@ function marketNumber(value, fallback = '—') {
 }
 
 function compactMarketNumber(value) {
-    const amount = Math.max(0, Number(value || 0));
-    if (amount < 1000) return amount.toLocaleString();
-    return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: amount < 10000 ? 1 : 0 }).format(amount);
+    return WorldObserverFormat.compactAmount(value);
 }
 
 function relativeMarketTime(timestamp) {

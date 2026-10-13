@@ -373,6 +373,7 @@ async function clanOrderUiChecks() {
         uiIcon: (name) => `<svg data-icon="${name}"></svg>`, roleLabel: (role) => role, uiLabel: (kind, label) => label,
         activityLabel: value => value,
         readableToken: (value) => value || '', compactNumber: (value) => String(value),
+        WorldObserverFormat: require('../src/WorldObserver/public/format'),
         fetch: null
     });
     for (const name of ['escapeHtml', 'text', 'number', 'clanGoalSummary', 'clanAutomaticGoalMarkup', 'resetClanOrderDraft', 'clanOrderDraft',

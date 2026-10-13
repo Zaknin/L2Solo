@@ -401,12 +401,7 @@ function svgEl(name, attrs = {}) {
 }
 
 function escapeHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+    return WorldObserverFormat.escapeHtml(value);
 }
 
 function text(value, fallback = '—') {
@@ -435,9 +430,7 @@ function formatTime(timestamp) {
 }
 
 function compactNumber(value) {
-    const amount = Math.max(0, Number(value || 0));
-    if (amount < 1000) return amount.toLocaleString();
-    return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: amount < 10000 ? 1 : 0 }).format(amount);
+    return WorldObserverFormat.compactAmount(value);
 }
 
 function formatRelative(timestamp) {
