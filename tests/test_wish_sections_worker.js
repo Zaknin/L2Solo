@@ -406,6 +406,10 @@ module.exports.wishSectionsProbe = async id => {
                 wishAdvisory: advice }, timestamp: clock });
             assert(failureChecked, 'the native lifecycle bypasses thin reuse on a failed acquisition route');
         } finally { Selection.selectAcquisitionPlan = nativeSelection; }
+        // L70: own observed income is a soft change, re-examined at the
+        // bot's next decision point 5 min after the last actual decision.
+        state = { ...state, stats: { ...state.stats, wishSections: { ...state.stats.wishSections, at: clock - 5 * 60 * 1000 } } };
+        Economy.forgetContext(id); // the held plan of that older decision is evicted as in a cold population
         kernel.states.set(id, { ...kernel.states.get(id), state, context: { wishAdvisory: accepted } });
         const beforeLearning = builds;
         const learned = await kernel.projectResolve(state, {

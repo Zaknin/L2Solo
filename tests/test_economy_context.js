@@ -198,6 +198,7 @@ async function run() {
     // MVP-6 Bounds: a gear candidate's reads wait in its scope; only a kept
     // scope becomes an input, so a rejected candidate's market cannot rebuild.
     const ScopedProviders = invoke('GameServer/Bot/Economy/WishProviders');
+    const MARKET_DELAY = invoke('GameServer/Bot/Economy/DecisionSections').SOFT_DELAY.market;
     const build = ScopedProviders.build;
     try {
         ScopedProviders.build = (state, ctx, deps) => {
@@ -214,7 +215,11 @@ async function run() {
         revisions.set(990002, 1);
         assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a rejected candidate\'s market change keeps the context');
         revisions.set(990001, 1);
-        assert.notEqual(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'an admitted candidate\'s source becoming known rebuilds');
+        // L70: a read market token is soft; it is re-examined once the
+        // market delay since the last actual decision has passed.
+        assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a moved source waits for the market delay');
+        assert.notEqual(Economy.forState(scoped, { ...scopedDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, scopedContext.plan,
+            'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
     // An item the purchase reader finds no offer for is still an input: the
@@ -236,7 +241,8 @@ async function run() {
         assert.equal(Economy.forState(absent, absentDeps()).plan, absentContext.plan, 'no offer change keeps the context');
         absentBoard.put({ id: 1, ownerId: 77, storeType: 1, custodyPolicy: 1, revision: 1, town: 'Giran',
             lines: [{ lineId: 2, selfId: ABSENT, count: 1, price: 100 }] });
-        assert.notEqual(Economy.forState(absent, absentDeps()).plan, absentContext.plan, 'a first offer for an absent item rebuilds');
+        assert.notEqual(Economy.forState(absent, { ...absentDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, absentContext.plan,
+            'a first offer for an absent item rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS absent item is an input');
     const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
@@ -259,7 +265,8 @@ async function run() {
         assert.equal(Economy.forState(base, shopDeps()).plan, shopContext.plan,
             'a workshop owner save without an offer change keeps the customer cache hit');
         shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 2 } });
-        assert.notEqual(Economy.forState(base, shopDeps()).plan, shopContext.plan, 'halved capacity is an offer change');
+        assert.notEqual(Economy.forState(base, { ...shopDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, shopContext.plan,
+            'halved capacity is an offer change');
     } finally { Workshop.remove(shopOwner.characterId); }
     const physicalSpot = { id: 'gear-physical', npcEntries: [{ selfId: 130 }] };
     const mixedSpot = { id: 'gear-mixed', npcEntries: [{ selfId: 130 }, { selfId: 264 }] };

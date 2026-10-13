@@ -280,7 +280,12 @@ try {
             assert.equal(restored.statsPacket.decisionSeq, chosen.statsPacket.decisionSeq);
             if (event === 'quote') quoteMove++;
             else subject = { ...subject, inventory: { ...subject.inventory, 1869: { selfId: 1869, amount: 2 } } };
-            const changed = Economy.forState(subject, options);
+            // L70: a read quote is a soft market change, re-examined only
+            // after its 10 min delay since the last actual decision.
+            if (event === 'quote') assert.equal(Economy.forState(subject, options).network.focus[0], 'held',
+                'a moved quote waits for the market delay');
+            const changed = Economy.forState(subject, event === 'quote'
+                ? { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY.market } : options);
             assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
         }
     } finally { Providers.build = nativeProviders; Tendency.roll = heldRoll; }
