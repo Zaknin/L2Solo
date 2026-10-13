@@ -1104,6 +1104,21 @@ function personalCraftPlan(state, context) {
             plan: context.network.plans.get(leaf.rootKey) };
     const targetId = Number(wish?.object?.itemId || leaf.rootKey.split(':')[1]);
     if (!targetId || !leaf.rootKey.startsWith('power:')) return null;
+    // Ready blacksmith exchanges cost no money, so their root need not be in
+    // the spending queue. Route the native selected leaf to the equipment
+    // owner; it cannot be executed by the dwarf workshop/production owner.
+    const dual = leaf.kind === 'craft' && leaf.activity === 'crafting' && leaf.executable && !leaf.funding
+        ? invoke('GameServer/Items/C4DualSwordCombinations').resolveByRecipeId(leaf.recipeId) : null;
+    if (dual?.productId === targetId && dual.materials.every(row =>
+        Number(state.inventory?.[row.selfId]?.amount || 0) >= row.amount)) return {
+        strategy: 'craft', status: 'ready_to_craft', next: null,
+        target: { selfId: targetId, slot: 14 }, recipeId: dual.recipeId, outputAmount: 1,
+        materials: dual.materials.map(row => ({ ...row,
+            owned: Number(state.inventory[row.selfId].amount), missing: 0 })),
+        combine: { type: 'dual_sword', resultId: targetId, stationId: dual.station.id,
+            npcId: dual.station.npcId, requirements: dual.materials.map(row => ({ ...row })) },
+        source: 'wish_network'
+    };
     const providers = {}, components = {}, visited = new Set(), crystalInputs = new Map();
     let finalRecipe = null, exchange = leaf.kind === 'luxury_exchange' ? leaf.improvement : null;
     const visit = (plan, depth = 0) => {

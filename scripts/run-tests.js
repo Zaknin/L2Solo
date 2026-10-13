@@ -330,6 +330,7 @@ const tests = [
     'tests/test_bot_equipment_transition_recovery.js',
     'tests/test_bot_dual_sword_combine.js',
     'tests/test_bot_dual_sword_database.js',
+    'tests/test_dual_sword_wish_execution.js',
     'tests/test_bot_gear_skill_hints.js',
     'tests/test_bot_class_progression.js',
     'tests/test_generated_cold_skills.js',

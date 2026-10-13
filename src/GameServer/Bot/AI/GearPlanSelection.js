@@ -37,7 +37,7 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
     });
     const preparedAcquisition = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, economy);
-    if (preparedAcquisition?.strategy === 'luxury_exchange') return {
+    if (preparedAcquisition?.strategy === 'luxury_exchange' || preparedAcquisition?.combine?.type === 'dual_sword') return {
         acquisitionPlan: preparedAcquisition, replanContext: {}, reusablePartyRequest: false,
         excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
     const chosen = economy.network.queue.find(wish => wish.key === economy.network.activity?.rootKey)
