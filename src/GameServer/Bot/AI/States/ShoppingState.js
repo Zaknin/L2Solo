@@ -507,6 +507,18 @@ module.exports = {
                     }
                 }
 
+                if (session.companionShopping?.kind === 'player_resource_purchase') {
+                    // A supply run is hidden and parked cold: it ends through
+                    // its normal return, which reveals the bot beside the
+                    // leader and marks it hot. Stopping the AI keeps a second
+                    // tick from re-entering here before the return fires.
+                    TownNpcApproach.reset(session);
+                    CompanionNavigationRecovery.clear(session);
+                    BotAI.stop?.(session);
+                    this.scheduleResourceReturn(session, bot, BotAI, { deliveryReady: false });
+                    return;
+                }
+
                 const companionResume = session.resumeAfterShopping;
                 const returningToCompanion = session.partyCompanion === true && companionResume?.followPlayerSession?.actor?.fetchIsOnline?.();
                 deferEquipmentRetry(session);

@@ -269,7 +269,118 @@ async function main() {
     console.log('LLM supply errand checks passed');
 }
 
-main().catch((error) => {
+// E283: when the route to the supply seller is exhausted, the hidden errand
+// must end through the normal supply return (reveal beside the leader, hot
+// again, supply phase cleared), not stay invisible in the shopping phase.
+async function exhaustedSupplyRouteReturnsVisibly() {
+    const Recovery = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
+    const Approach = invoke('GameServer/Bot/AI/TownNpcApproach');
+    const Chatter = invoke('GameServer/Bot/AI/TownChatter');
+    const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
+    const HotBoard = invoke('GameServer/Bot/Economy/HotBoardReviewService');
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const Improvements = invoke('GameServer/Bot/Economy/BotImprovementService');
+    const WishProviders = require('../src/GameServer/Bot/Economy/WishProviders');
+    const Response = invoke('GameServer/Network/Response');
+    const originals = {
+        charInfo: Response.charInfo, relationChanged: Response.relationChanged,
+        move: Recovery.move, resolveTargetActor: Recovery.resolveTargetActor, refreshTarget: Recovery.refreshTarget,
+        approachPlan: Approach.plan, say: Chatter.say, markHot: PopulationService.markHot,
+        naturalBreak: HotBoard.naturalBreak, forActor: Economy.forActor, chosen: Improvements.chosen,
+        personalCraftPlan: WishProviders.personalCraftPlan, setTimeout: global.setTimeout
+    };
+    const timers = [];
+    const hot = [];
+    const said = [];
+    let stopped = 0;
+    let initialized = 0;
+    let routeAttempts = 0;
+    try {
+        Recovery.move = () => { routeAttempts += 1; return { status: 'exhausted', failures: 3 }; };
+        Recovery.resolveTargetActor = () => null;
+        Recovery.refreshTarget = (target) => target;
+        Approach.plan = () => null;
+        Chatter.say = (_session, _ai, key) => { said.push(key); };
+        PopulationService.markHot = async (_session, reason) => { hot.push(reason); };
+        HotBoard.naturalBreak = () => {};
+        Economy.forActor = () => ({ state: {} });
+        Improvements.chosen = () => null;
+        WishProviders.personalCraftPlan = () => null;
+        Response.charInfo = () => 'charInfo';
+        Response.relationChanged = () => 'relationChanged';
+        global.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+
+        let leaderX = 5000;
+        const leader = { actor: { fetchId: () => 100, fetchIsOnline: () => true,
+            fetchLocX: () => leaderX, fetchLocY: () => 0, fetchLocZ: () => 0 } };
+        const placed = [];
+        const sent = [];
+        const bot = {
+            fetchId: () => 2, fetchName: () => 'Runner', fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0,
+            setLocXYZ: (point) => { placed.push(point); }, unselect() {}, automation: { abortAll() {} },
+            backpack: { fetchItems: () => [] }, state: { fetchTowards: () => false, fetchCasts: () => false }
+        };
+        const session = {
+            accountId: 'bot_2', actor: bot, plan: 'shopping', partyCompanion: true, followPlayerSession: leader,
+            companionShopping: { kind: 'player_resource_purchase', workflowId: 'supply-e283', itemId: 1463, amount: 1,
+                target: { locX: 1000, locY: 0, locZ: 0, name: 'Grocer' } },
+            shoppingTarget: { locX: 1000, locY: 0, locZ: 0, name: 'Grocer' },
+            resumeAfterShopping: { followPlayerSession: leader },
+            shoppingWarehouseDone: true,
+            supplyErrandHidden: true,
+            supplyErrandPhase: 'shopping',
+            dataSendToOthers: (packet) => { sent.push(packet); }
+        };
+        const ai = {
+            getClosestTown: () => ({ name: 'Talking Island', x: 0, y: 0, z: 0 }),
+            stop: () => { stopped += 1; session.aiActive = false; },
+            init: () => { initialized += 1; session.aiActive = true; }
+        };
+        session.aiActive = true;
+
+        ShoppingState.tick(session, bot, null, ai);
+        // BotAI runs a state tick only while aiActive; stopping it keeps the
+        // next tick from re-entering the exhausted branch before the return.
+        assert.strictEqual(session.aiActive, false, 'the AI loop pauses until the supply return fires');
+        assert.strictEqual(timers.length, 1, 'an exhausted supply route schedules exactly one supply return');
+        assert.strictEqual(session.companionShopping?.kind, 'player_resource_purchase',
+            'the errand stays readable until the normal return consumes it');
+
+        leaderX = 6000;
+        timers[0].callback();
+        await new Promise((resolve) => originals.setTimeout(resolve, 0));
+
+        assert.strictEqual(session.supplyErrandHidden, false, 'the supply runner must become visible again');
+        assert.strictEqual(session.supplyErrandPhase, undefined, 'the supply phase must end');
+        assert.deepStrictEqual(hot, ['supply_errand_return'], 'the cold supply record must be marked hot once');
+        assert.strictEqual(session.plan, 'following');
+        assert.strictEqual(session.companionShopping, undefined);
+        assert.strictEqual(session.resumeAfterShopping, undefined);
+        assert.deepStrictEqual(placed, [{ locX: 6080, locY: 0, locZ: 0 }], 'the runner reappears beside the leader');
+        assert.deepStrictEqual(sent, ['charInfo', 'relationChanged'], 'nearby clients receive the runner again');
+        assert(said.includes('supply-return'), 'the runner reports its empty return');
+        assert.strictEqual(session.aiActive, true, 'the AI loop runs again after the return');
+        assert(stopped >= 1 && initialized >= 1);
+        assert.strictEqual(routeAttempts, 1, 'no new route is tried after the errand ended');
+    } finally {
+        Recovery.move = originals.move;
+        Recovery.resolveTargetActor = originals.resolveTargetActor;
+        Recovery.refreshTarget = originals.refreshTarget;
+        Approach.plan = originals.approachPlan;
+        Chatter.say = originals.say;
+        PopulationService.markHot = originals.markHot;
+        HotBoard.naturalBreak = originals.naturalBreak;
+        Economy.forActor = originals.forActor;
+        Improvements.chosen = originals.chosen;
+        WishProviders.personalCraftPlan = originals.personalCraftPlan;
+        Response.charInfo = originals.charInfo;
+        Response.relationChanged = originals.relationChanged;
+        global.setTimeout = originals.setTimeout;
+    }
+    console.log('Exhausted supply route return checks passed');
+}
+
+main().then(() => exhaustedSupplyRouteReturnsVisibly()).catch((error) => {
     console.error(error);
     process.exitCode = 1;
 });
