@@ -148,8 +148,8 @@ async function consumeMerchant(session, list, { native = false } = {}) {
         }
     } catch (err) {
         utils.infoWarn('Sell', 'merchant sell error: %s', err.message || err);
-        recordSold();
         session.dataSendToMe(ServerResponse.actionFailed());
+        recordSold();
     }
 }
 

@@ -118,12 +118,12 @@ async function consume(session, data) {
             trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
         } catch (err) {
             utils.infoWarn('Purchase', 'merchant purchase error: %s', err.message || err);
-            recordBought();
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1) || /changed/i.test(String(err.message || err))) {
                 session.activeMerchantTrade = null;
                 session.viewedPrivateStoreSeller = null;
             }
             session.dataSendToMe(ServerResponse.actionFailed());
+            recordBought();
         }
         return;
     }
