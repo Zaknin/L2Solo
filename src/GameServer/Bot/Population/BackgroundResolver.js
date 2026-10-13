@@ -24,13 +24,6 @@ function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-function midpointBand(levelBand) {
-    if (!levelBand) return 1;
-    const parts = String(levelBand).split('-').map((value) => Number(value));
-    if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return Number(parts[0]) || 1;
-    return Math.round((parts[0] + parts[1]) / 2);
-}
-
 function botCombatStats(state, timestamp = Date.now()) {
     return ColdCombatProfile.profileFor(state, timestamp);
 }

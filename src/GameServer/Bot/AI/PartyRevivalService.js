@@ -17,10 +17,6 @@ const PARTY_DEATH_WARNING_COUNT = 2;
 const RESURRECTION_SCROLL_SKILL_ID = 2014;
 const PLAYER_RESURRECTION_SCROLLS = new Set([737, 3936, 3959]);
 
-function world() {
-    return invoke('GameServer/World/World');
-}
-
 function isCompanionOf(session, leaderSession) {
     return !!(
         session?.actor &&
