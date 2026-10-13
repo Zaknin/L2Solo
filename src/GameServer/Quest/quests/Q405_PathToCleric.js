@@ -36,16 +36,7 @@ function count(state, selfId) {
   return state.session.actor.backpack.fetchItemFromSelfId(selfId)?.fetchAmount() || 0;
 }
 
-async function replace(state, remove, give, condition) {
-  const quest = service();
-  for (const item of remove) {
-    if (!(await quest.takeItem(state.session, item))) return false;
-  }
-  await quest.giveItem(state.session, give, 1);
-  await state.set("cond", condition);
-  state.playSound(MIDDLE);
-  return true;
-}
+const { exchange: replace } = require("../ProfessionQuestSteps");
 
 module.exports = {
   id: 405,
