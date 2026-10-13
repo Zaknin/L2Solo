@@ -13,6 +13,8 @@ const BotManager = invoke('GameServer/Bot/BotManager');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const MemoryPolicy = invoke('GameServer/Social/InteractionMemoryPolicy');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const World = invoke('GameServer/World/World');
 
 function actor(id, name, x = 0) {
     return {
@@ -103,6 +105,8 @@ async function main() {
 
         assert.deepStrictEqual(results.map((result) => result.reply), ['reply-1', 'reply-2']);
         assert.deepStrictEqual(results.map((result) => result.delivered), [true, true]);
+        assert.deepStrictEqual(results.map((result) => result.ok), [true, true],
+            'a delivered model reply must report success like the fallback does');
         assert.strictEqual(deliveredPackets.length, 2, 'cold replies should be delivered inside the traced stage');
         assert.strictEqual(requests.length, 2, 'every cold tell must reach the provider without a cooldown drop');
         const secondPayload = JSON.parse(requests[1].messages[1].content);
@@ -215,6 +219,27 @@ async function main() {
             assert.strictEqual(observations.filter((name) => name === stage).length, 6, `${stage} should be emitted for every admitted cold request`);
         }
         assert.strictEqual(observations.filter((name) => name === 'bot.tool.come_to_player').length, 1, 'come_to_player should have one tool observation');
+
+        // The real tell path sends ActionFailed when a delivered reply lacks ok.
+        const originalFindByName = LifeState.findByName;
+        const originalFindSession = BotManager.findSessionByName;
+        try {
+            BotManager.findSessionByName = () => null;
+            LifeState.findByName = async () => state;
+            OpenRouterGateway.setTransport(async (_url, init) => {
+                requests.push(JSON.parse(init.body));
+                return response({ choices: [{ message: { content: JSON.stringify({
+                    action: 'say', reply: 'world-reply', reason: 'test_reply', confidence: 0.95
+                }) } }] });
+            });
+            const packetsBefore = deliveredPackets.length;
+            const sent = await World.messageBotByName(playerSession, playerSession.actor, 'ColdChatBot', 'hi again');
+            assert.strictEqual(sent, true, 'a delivered model reply is a successful tell');
+            assert.strictEqual(deliveredPackets.length - packetsBefore, 1, 'the reply text is the only packet, no ActionFailed');
+        } finally {
+            LifeState.findByName = originalFindByName;
+            BotManager.findSessionByName = originalFindSession;
+        }
         console.log('Cold bot chat checks passed');
     } finally {
         options.default.OpenRouter = originalConfig;

@@ -241,6 +241,7 @@ function validateLlmReply(result) {
     if (!reply || Number(parsed.confidence || 0) < 0.35) return null;
 
     return {
+        ok: true,
         reply,
         action: parsed.action || 'say',
         reason: parsed.reason || 'llm',
