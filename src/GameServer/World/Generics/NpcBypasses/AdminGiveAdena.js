@@ -14,9 +14,12 @@ module.exports = function(session, parts) {
     const targetSession = World.user.sessions.find(ob => ob.actor && ob.actor.fetchName().toLowerCase() === targetName.toLowerCase());
     if (targetSession && targetSession.actor) {
         const backpack = targetSession.actor.backpack;
-        backpack.stackableExists(57).then((item) => {
+        // The writes are returned so that a failure reaches the NPC dialog's
+        // log; only a missing stack gets a new one (a failed update of an
+        // existing stack must not fall through to a second stack).
+        return backpack.stackableExists(57).then((item) => {
             const total = item.fetchAmount() + amount;
-            Database.updateItemAmount(targetSession.actor.fetchId(), item.fetchId(), total).then(() => {
+            return Database.updateItemAmount(targetSession.actor.fetchId(), item.fetchId(), total).then(() => {
                 backpack.updateAmount(item.fetchId(), total);
                 targetSession.dataSendToMe(ServerResponse.userInfo(targetSession.actor));
                 targetSession.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
@@ -26,8 +29,8 @@ module.exports = function(session, parts) {
                     session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to ${targetSession.actor.fetchName()}.` }));
                 }
             });
-        }).catch(() => {
-            Database.setItem(targetSession.actor.fetchId(), {
+        }, () => {
+            return Database.setItem(targetSession.actor.fetchId(), {
                 selfId: 57,
                 name: "Adena",
                 amount: amount,
@@ -45,19 +48,19 @@ module.exports = function(session, parts) {
             });
         });
     } else {
-        Database.fetchCharacterName(targetName).then((rows) => {
+        return Database.fetchCharacterName(targetName).then((rows) => {
             if (rows && rows[0]) {
                 const charId = rows[0].id;
                 const charRealName = rows[0].name;
-                Database.fetchItems(charId, 'admin_give_adena').then((items) => {
+                return Database.fetchItems(charId, 'admin_give_adena').then((items) => {
                     const adenaItem = items.find(ob => ob.selfId === 57);
                     if (adenaItem) {
                         const total = adenaItem.amount + amount;
-                        Database.updateItemAmount(charId, adenaItem.id, total).then(() => {
+                        return Database.updateItemAmount(charId, adenaItem.id, total).then(() => {
                             session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully gave ${amount} Adena to offline character ${charRealName}.` }));
                         });
                     } else {
-                        Database.setItem(charId, {
+                        return Database.setItem(charId, {
                             selfId: 57,
                             name: "Adena",
                             amount: amount,
