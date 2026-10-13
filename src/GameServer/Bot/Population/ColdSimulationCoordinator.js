@@ -1809,17 +1809,12 @@ class ColdSimulationCoordinator {
         // same legacy row that the worker snapshots. A rejected claim must
         // rebase from SQLite; returning the cached row simply emits the same
         // stale CAS again and turns one legitimate handoff into an IPC storm.
-        const authoritativeStates = rebaseIds.length
-            ? await LifeState.statesByIds(rebaseIds)
-            : [];
-        // statesByIds rows carry a flat simulationOwner for clan readers; the
-        // worker must receive the native shape or it cannot command the bot.
-        const authoritativeById = new Map(authoritativeStates.map(({ simulationOwner: _flatOwner, ...state }) => [
-            Number(state.characterId), state
-        ]));
+        // statesByIds caches the native SQLite state before it resolves. Its
+        // returned rows carry a flat simulationOwner for clan readers; the
+        // worker must receive the cached native shape or it cannot command the bot.
+        if (rebaseIds.length) await LifeState.statesByIds(rebaseIds);
         const rejected = [...missing, ...(claimed.rejected || [])].map((result) => {
-            const state = authoritativeById.get(Number(result.characterId))
-                || LifeState.cachedState(result.characterId);
+            const state = LifeState.cachedState(result.characterId);
             if (!state) return result;
             const needsRetryDelay = OWNERSHIP_REBASE_REASONS.has(String(result.reason || ''));
             return {
