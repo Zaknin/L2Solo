@@ -471,9 +471,22 @@ async function execute(action, options = {}) {
     return result || { ok: true };
 }
 
+function settledOutcome(action, { resolved, result, ok, reasonCode }, startedAt) {
+    if (ok) {
+        DiagnosticConfig.developerDiagnostics && (metrics.succeeded += 1);
+        recordAction(action, 'succeeded');
+    } else {
+        DiagnosticConfig.developerDiagnostics && (metrics.failed += 1);
+        recordAction(action, 'failed');
+        record(metrics.reasonCounts, reasonCode);
+    }
+    return { ...resolved, result, durationMs: Date.now() - startedAt };
+}
+
 async function resolveAction(action, options = {}) {
     const startedAt = Date.now();
     let resolutionRecorded = false;
+    let settled = null;
     DiagnosticConfig.developerDiagnostics && (metrics.running += 1);
     recordAction(action, 'running');
     try {
@@ -525,6 +538,7 @@ async function resolveAction(action, options = {}) {
         if (!resolved.idempotent) metrics.resolved += 1;
         resolutionRecorded = true;
         if (resolved.idempotent) return resolved;
+        settled = { resolved, result, ok, reasonCode };
 
         const followUpStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         try {
@@ -564,17 +578,15 @@ async function resolveAction(action, options = {}) {
         } finally {
             DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'follow_up', Date.now() - followUpStartedAt);
         }
-        if (ok) {
-            DiagnosticConfig.developerDiagnostics && (metrics.succeeded += 1);
-            recordAction(action, 'succeeded');
-        } else {
-            DiagnosticConfig.developerDiagnostics && (metrics.failed += 1);
-            recordAction(action, 'failed');
-            record(metrics.reasonCounts, reasonCode);
-        }
-        return { ...resolved, result, durationMs: Date.now() - startedAt };
+        return settledOutcome(action, settled, startedAt);
     } catch (error) {
         const reasonCode = error?.message || 'clan_action_exception';
+        if (settled) {
+            // The action itself is already settled; only its follow-up
+            // scheduling failed, so report the stored status, not a failure.
+            record(metrics.reasonCounts, 'clan_follow_up_exception');
+            return { ...settledOutcome(action, settled, startedAt), followUpError: reasonCode };
+        }
         const settleStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         const resolved = await Database.resolveClanAction({
             actionId: action.id,
