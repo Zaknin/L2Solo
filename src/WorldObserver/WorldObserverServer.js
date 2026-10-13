@@ -519,7 +519,10 @@ function compactClanGoal(raw) {
     const goal = raw && raw.goal ? raw.goal : raw;
     if (!goal || typeof goal !== 'object') return null;
     const targetItemId = clanNumber(goal.target?.itemId) || null;
-    const targetItemName = goal.target?.itemName || null;
+    const storedItemName = goal.target?.itemName || null;
+    const targetItemName = !storedItemName || storedItemName === `Item ${targetItemId}`
+        ? itemTemplate(targetItemId)?.template?.name || storedItemName
+        : storedItemName;
     const targetIcon = targetItemId ? itemIconFor(null, targetItemId, targetItemName, null) : null;
     const target = goal.target ? {
         itemId: targetItemId,

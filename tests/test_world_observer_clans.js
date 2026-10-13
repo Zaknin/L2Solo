@@ -48,6 +48,23 @@ const itemGoal = Observer.compactClanGoal({
 assert.strictEqual(itemGoal.target.iconUrl, '/observer/item-icons/armor_t59_ul_i00.png',
     'item goals must reuse the local Observer item-icon catalog');
 
+for (const itemName of [undefined, 'Item 192']) {
+    const savedGoal = { type: 'equipment', status: 'executing',
+        target: { itemId: 192, itemName, memberId: 42, memberName: 'Recipient' } };
+    const resolvedGoal = Observer.compactClanGoal(savedGoal);
+    assert.strictEqual(resolvedGoal.target.itemName, 'Crystal Staff',
+        'saved clan goals with missing or placeholder names must resolve their item from the catalog');
+    assert.strictEqual(resolvedGoal.target.iconUrl, '/observer/item-icons/weapon_crystal_staff_i00.png',
+        'the resolved item name must also restore the clan goal icon');
+    assert.strictEqual(resolvedGoal.target.memberName, 'Recipient');
+    assert.strictEqual(savedGoal.target.itemName, itemName,
+        'Observer inspection must not alter the persisted clan goal');
+}
+const unknownItemGoal = Observer.compactClanGoal({ type: 'equipment',
+    target: { itemId: 99999999, itemName: 'Item 99999999' } });
+assert.strictEqual(unknownItemGoal.target.itemName, 'Item 99999999');
+assert.strictEqual(unknownItemGoal.target.iconUrl, null);
+
 const craftRecipe = invoke('GameServer/Items/C4RecipeItems').resolveByProductId(1879);
 const automaticCraftGoal = { type: 'equipment', status: 'executing', goalKey: 'clan-equipment:7:43:1879',
     target: { itemId: 1879, memberId: 43 }, plan: { kind: 'craft' } };
