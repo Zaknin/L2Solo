@@ -172,7 +172,8 @@ function create({ service = () => require('./PlayerBoardService'),
         const page = service().entries(session, { ...query, kind: query.side === 'workshop' ? 'workshop' : undefined,
             limit: PAGE_SIZE });
         let body = header(session, query) + (message ? Html.font(text(message, '', 512), Html.COLOR.warn) + '<br>' : '');
-        if (session.tradeMeetingPresence) body += 'Waiting for the merchant. Stay here.<br>'
+        // Only the selected character's own meeting marker is shown.
+        if (session.tradeMeetingPresence?.actorId === Number(session.actor.fetchId())) body += 'Waiting for the merchant. Stay here.<br>'
             + Html.actionFooter([{ label: 'Cancel trade', command: 'board cancel' }]) + '<br>';
         if (session.playerBoardWaypoint) body += Html.font('Tracking: ' + session.playerBoardWaypoint.name) + '<br1>'
             + Html.actionFooter([{ label: 'Stop tracking', command: 'board untrack' }]) + '<br1>';

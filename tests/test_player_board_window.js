@@ -215,7 +215,10 @@ async function main() {
     await meetingWindow.handle(session, ['board', 'quantity', '7']);
     assert.equal(selectedAmount, 7); assert.match(htmlVisible(packets.at(-1)), /Item.*Coal.*Quantity.*7.*Total.*126 a/);
     await meetingWindow.handle(session, ['board', 'quantity', '0']); assert.equal(selectedAmount, 7);
-    session.tradeMeetingPresence = { id: 7 };
+    session.tradeMeetingPresence = { id: 7, actorId: Number(session.actor.fetchId()) + 1 };
+    assert.doesNotMatch(meetingWindow.show(session), /Waiting for the merchant|board cancel/,
+        'a meeting marker of the previous character on this connection is not shown (E270)');
+    session.tradeMeetingPresence = { id: 7, actorId: Number(session.actor.fetchId()) };
     assert.match(meetingWindow.show(session), /board cancel/);
     await meetingWindow.handle(session, ['board', 'cancel']); assert.equal(cancelled, 1);
     session.tradeMeetingPresence = undefined;

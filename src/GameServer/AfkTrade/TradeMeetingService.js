@@ -97,13 +97,18 @@ function acceptRows(result) {
 }
 async function syncActors(row) {
     for (const id of [row.actorA, row.actorB]) {
-        const session = sessionFor(id);
-        if (!session) continue;
+        const session = sessionFor(id), actor = session?.actor;
+        if (!session || Number(actor?.fetchId?.()) !== Number(id)) continue;
         const anchor = await db().fetchTradeMeetingForOwner?.(id) || (row.state === 'accepted' ? row : null);
-        session.tradeMeetingPresence = anchor ? { id: anchor.id,
-            locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null } : undefined;
-        if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
+        // The connection may hold another character after the wait: its marker,
+        // travel and window stay untouched; the inventory sync is bound to the ID.
+        if (session.actor === actor) {
+            session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
+                locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null } : undefined;
+            if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
+        }
         await afk().syncOnlineInventory(id, await db().fetchItems(id, 'trade_meeting_sync'));
+        if (session.actor !== actor) continue;
         if (!life().cachedState(id)) {
             try { require('./PlayerMeetingNotifications').notify(session, row); }
             catch (error) { utils.infoWarn('AfkTrade', 'meeting chat presentation: %s', error.message); }
@@ -352,7 +357,8 @@ async function trade(characterId, store, itemId, amount, options) {
 }
 function presenceChanged(session) {
     const marker = session.tradeMeetingPresence, actor = session.actor;
-    if (!marker || !actor) return;
+    // A marker made for the previous character on this connection is not this one's.
+    if (!marker || !actor || marker.actorId !== Number(actor.fetchId())) return;
     const present = !actor.isDead() && actor.fetchHp() > 0
         && Math.hypot(actor.fetchLocX() - marker.locX, actor.fetchLocY() - marker.locY, actor.fetchLocZ() - marker.locZ) <= 200;
     const atWaypoint = marker.waypoint ? Math.hypot(actor.fetchLocX() - marker.waypoint.locX,
