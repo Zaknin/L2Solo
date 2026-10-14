@@ -75,7 +75,7 @@ function recipeIds(plan, member, warehouseRows = []) {
     if (!plan?.recipeId) return [];
     const Crafting = require('./ClanCraftingPolicy');
     const used = new Set();
-    Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), Crafting.stockInventory(member?.inventory, warehouseRows),
+    Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), Crafting.craftStock(member?.inventory, warehouseRows),
         null, 1, plan.craftProviders, plan.componentRecipes, used);
     return [...used];
 }
