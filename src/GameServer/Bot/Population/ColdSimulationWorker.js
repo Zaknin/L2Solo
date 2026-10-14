@@ -1012,16 +1012,19 @@ function startKernel(config = {}) {
                 },
                 economyFor: (projected, deps) => {
                     observedDeps = deps;
-                    const why = [];
+                    const why = [], prepared = {};
                     refreshed = !projected.party?.partyId && !projected.partyId
-                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true, why }) : null;
+                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true, why, prepared }) : null;
                     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
                     // Both native stock gates read one prepared foundation;
                     // the same edges also drive the action after projection.
-                    const stock = refreshed?.economy || Economy.basics(projected, deps);
+                    // L116: a refusal's own basics when it built them, else
+                    // built at the first gate read (edges skips resting,
+                    // travelling and party bots, which read none).
+                    let stock = refreshed?.economy || prepared.basics || null;
                     economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
                         .edges(state, projected, owner?.context || {}, timestamp,
-                            { stockFor: (_state, kind) => stock.stock(kind) });
+                            { stockFor: (_state, kind) => (stock ||= Economy.basics(projected, deps)).stock(kind) });
                     if (economyEdges && refreshed) {
                         refreshed = null; why.push('economy_edges');
                         // L115: which native gate dropped a card that held its fence.
