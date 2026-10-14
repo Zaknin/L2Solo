@@ -664,6 +664,13 @@ async function acquireMaterials(state, requirements) {
         ready: requirements.every(row => held(current, row.selfId) >= Number(row.amount)) };
 }
 
+// An errand that ends closes its market_errand goal; a clan errand also returns
+// the clan's credit it did not spend, once its end is saved.
+async function endErrand(characterId, errand, spent, saved) {
+    await GoalState.clear(characterId, 'completed').catch(() => null);
+    return saved ? invoke('GameServer/Clan/ClanPurchaseCredit').returnUnspent(characterId, errand, spent) : null;
+}
+
 // On arrival: the errand of the town the bot stands in, bought there (the
 // plan made again for this town, as the board stands now); what it bought
 // stays as stats.lastErrand for the job that sent it (a clan's order).
@@ -676,7 +683,7 @@ async function buyErrand(state, options = {}) {
         // The buyer left the clan on its way: the treasury credit it carries is not spent;
         // the errand ends here like one with no plan left, and the credit goes back.
         const dropped = await LifeState.upsertState(CombinedErrands.complete(state, errand), 'market_errand_no_offer');
-        const refunded = dropped ? await invoke('GameServer/Clan/ClanPurchaseCredit').returnUnspent(state.characterId, errand, 0) : null;
+        const refunded = await endErrand(state.characterId, errand, 0, dropped);
         return { state: refunded?.state || dropped || state, purchased: false, units: 0, reason: 'market_errand_no_offer' };
     }
     const terms = { towns: [errand.town], purpose: errand.purpose, ...savedRoute(errand), ...fundingTerms(errand),
@@ -704,10 +711,7 @@ async function buyErrand(state, options = {}) {
     const cleared = { ...remaining, stats: { ...remaining.stats,
         lastErrand: { purpose: errand.purpose, selfId: errand.selfId, units: bought.units, tag: errand.tag || null, at: Date.now() } } };
     const saved = await LifeState.upsertState(cleared, bought.units > 0 ? 'market_errand_bought' : 'market_errand_no_offer');
-    if (rest === 0 || !plan) await GoalState.clear(state.characterId, 'completed').catch(() => null);
-    // A clan errand that ends here returns the clan's credit it did not spend.
-    const returned = saved && (rest === 0 || !plan)
-        ? await invoke('GameServer/Clan/ClanPurchaseCredit').returnUnspent(state.characterId, errand, bought.spent) : null;
+    const returned = rest === 0 || !plan ? await endErrand(state.characterId, errand, bought.spent, saved) : null;
     return { state: returned?.state || saved || cleared, purchased: bought.units > 0, units: bought.units,
         reason: bought.units > 0 ? 'market_errand_bought' : 'market_errand_no_offer' };
 }

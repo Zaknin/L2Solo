@@ -15,6 +15,7 @@ const Market = invoke('GameServer/Bot/Economy/ColdMarketService');
 const Offers = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Errands = require('../src/GameServer/Bot/Population/CombinedErrandPolicy');
+const GoalState = invoke('GameServer/Bot/Goals/GoalState');
 const GIRAN = { locX: 83396, locY: 147904, locZ: -3400 };
 const WALLET = 1000000, CLAN = 42, PACKET = [77000, 3e-5, 15000, 1200000];
 let nextId = 719300;
@@ -33,6 +34,8 @@ async function stateFor(clanId, errand, packet = PACKET) {
 const stock = async (id, itemId) => (await Database.fetchItems(id)).filter(row => Number(row.selfId) === Number(itemId))
     .reduce((sum, row) => sum + Number(row.amount), 0);
 const wallet = id => stock(id, 57);
+const errandGoal = async id => assert(await GoalState.set(id, { type: 'market_errand', status: 'active', priority: 80 }), 'goal set');
+const goalStatus = id => GoalState.snapshot(id)?.current?.status;
 
 (async () => {
     Data.init();
@@ -70,6 +73,7 @@ const wallet = id => stock(id, 57);
 
         // Ex-member (clanId 0): no purchase, errand gone, the clan credit refunded.
         const left = await stateFor(0, clanErrand());
+        await errandGoal(left.characterId);
         const dropped = await Market.tryPurchase(left, { type: 'market_errand' });
         assert.equal(dropped.purchased, false);
         assert.equal(Errands.pending(dropped.state).length, 0, 'the errand is gone');
@@ -77,6 +81,7 @@ const wallet = id => stock(id, 57);
         assert.equal(await wallet(left.characterId), WALLET);
         assert.deepEqual(payments.map(p => [p.clanId, p.characterId, p.amount]), [[CLAN, left.characterId, -npc.price]]);
         assert.equal(Errands.pending(Life.cachedState(left.characterId) || dropped.state).length, 0);
+        assert.equal(goalStatus(left.characterId), 'completed', 'the dropped errand ends its market_errand goal');
 
         // Member of another clan: also not the errand's clan.
         payments.length = 0;
