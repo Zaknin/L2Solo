@@ -581,6 +581,7 @@ const tests = [
     'tests/test_cold_startup_snapshot_paging.js',
     'tests/test_cold_context_spot_index.js',
     'tests/test_cold_worker_routing.js',
+    'tests/test_e324_route_ledger.js',
     'tests/test_worker_table_channel.js',
     'tests/test_cold_worker_craft_routes.js',
     'tests/test_bot_weapon_bridge_affordable.js',
