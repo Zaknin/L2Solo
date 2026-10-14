@@ -41,7 +41,7 @@ function run() {
         stats: { classId: 1, persona: { traits: { commitment: .5, caution: .5, resilience: .5, ambition: .5,
             empathy: .5, sociability: .5, assertiveness: .5 }, understanding: .8 } },
         timing: {}, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
-    const deps = { board, spots, occupancy, timestamp, rememberContext: false };
+    const deps = { board, spots, occupancy, timestamp, rememberContext: false, keepIncomeRoute: true };
     const basics = Economy.basics(state, deps);
     const record = basics.preparedIncomeRoute;
     assert.equal(calls, 1);
@@ -75,6 +75,13 @@ function run() {
         built(target, { ...extra, preparedIncomeRoute: record });
         assert.equal(calls, before + 1, `a different ${why} searches afresh`);
     }
+    const Gear = invoke('GameServer/Bot/AI/PersonalGearProgression'), assess = Gear.assess;
+    Gear.assess = target => ({ ...assess(target), required: !assess(target).required });
+    try {
+        const flipped = calls;
+        built(state, { preparedIncomeRoute: record });
+        assert.equal(calls, flipped + 1, 'a different required flag searches afresh');
+    } finally { Gear.assess = assess; }
     const before = calls;
     const moved = { ...record, reads: record.reads.map((value, i) => i === 1 ? value + 1 : value) };
     const repriced = built(state, { preparedIncomeRoute: moved });

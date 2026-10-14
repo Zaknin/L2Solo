@@ -17,6 +17,8 @@ const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
+const IncomeRoute = require('./EquipmentIncomeRoute');
+const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const FENCE_BYTES = 4096;
 const FENCE_RAW_BYTES = 65536, FENCE_SPOTS = 4096;
 const SOURCE_MEMO_LIMIT = 8;
@@ -692,15 +694,19 @@ function kitReader(data, price, scrollUseHours) {
 // forState() for the same projected state; the second build takes the
 // first one's route through deps.preparedIncomeRoute instead of searching
 // again. Key: the same state object, timestamp, spots and occupancy objects,
-// mode, maxChecks and required gear flag: every input of select but its
-// price reader. The record keeps each price(id) select made, in order, with
+// mode, maxChecks and required gear flag. Select also reads module state
+// (SpotRiskPolicy exclusions, SpotValueTable tables, SpotProfiles capacity,
+// LevelingRoutes, ColdCombatProfile scope), so the reuse is exact only because
+// nothing yields or writes between the basics and the build of one step: a
+// record must never cross an await or a write to occupancy or reservations.
+// The record keeps each price(id) select made, in order, with
 // its value: the build replays them through its own price first, so its
 // read fence, price and belief maps and board watch fill exactly as a fresh
 // search would, and a price that came out different searches afresh. The
 // record travels only by deps (the cold worker passes its basics' record);
 // select returns plain data (no closure over price).
 function incomeRouteFor(state, deps, timestamp, price, keep) {
-    const required = invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required;
+    const required = GearProgression.assess(state).required;
     const prepared = deps.preparedIncomeRoute;
     if (prepared && prepared.state === state && prepared.timestamp === timestamp && prepared.spots === deps.spots
         && prepared.occupancy === deps.occupancy && prepared.mode === deps.mode
@@ -712,7 +718,7 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
         if (same) { keep?.(prepared); return prepared.route; }
     }
     const reads = keep ? [] : null;
-    const route = require('./EquipmentIncomeRoute').select(state, { ...deps, timestamp, required,
+    const route = IncomeRoute.select(state, { ...deps, timestamp, required,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
     keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
         maxChecks: deps.maxChecks, required, reads, route });
@@ -807,7 +813,9 @@ function basics(state = {}, deps = {}) {
     const board = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
     const { price } = pricing(state, persona, board, timestamp, deps);
     let route = null;
-    const base = { persona, price, timestamp, ...foundation(state, deps, persona, timestamp, price, record => { route = record; }) };
+    // The main thread records only on request (deps.keepIncomeRoute): its builds never read a record.
+    const keep = !isMainThread || deps.keepIncomeRoute ? record => { route = record; } : null;
+    const base = { persona, price, timestamp, ...foundation(state, deps, persona, timestamp, price, keep) };
     // Not enumerable: a view spread over these basics does not carry it (L120).
     Object.defineProperty(base, 'preparedIncomeRoute', { value: route });
     return base;
