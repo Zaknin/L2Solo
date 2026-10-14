@@ -1161,6 +1161,7 @@ const tests = [
     'tests/test_economy_context.js',
     'tests/test_economy_context_publication.js',
     'tests/test_economy_context_shadow.js',
+    'tests/test_economy_income_route_reuse.js',
     'tests/test_packed_interaction_memory.js',
     'tests/test_wish_cost_caches.js',
     'tests/test_gear_threat.js',
