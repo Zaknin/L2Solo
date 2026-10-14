@@ -175,12 +175,33 @@ function townTable(index, selfId, options = {}) {
 
 // cheapestTown for `amount` from a townTable. The quote cap is counted per
 // call, as one cheapestTown call counts it.
+// ARCH-NOTE: PERF the town loop is memoized per table and amount: a craft search prices one input at the same
+// amounts again and again (offline, 100 crafters: 71% of cheapestIn calls repeat a (table, amount)), and the
+// loop is a pure function of the rows, the options and the amount. The one input that is read live is
+// options.accept (a party trade admission): a call compares accept over the table's lines (at most the quote
+// depth) with the outcomes the memo was filled under and drops the memo when one differs. The noteQuoteCut and
+// noteShort counts run on every call, in the same order. moneyForTown (read per town) is never memoized. Consumers
+// copy `best` and only read its lines, so the hits share one result object.
 function cheapestIn(table, amount) {
     const options = table.options;
     amount = Math.max(1, Math.floor(Number(amount) || 1));
     const cut = options.quoteDepth > 0 ? noteQuoteCut(table.listed, options.quoteDepth) : false;
-    let best = null;
-    for (const { town, trip, price, lines } of table.rows) best = betterOffer(best, options, amount, town, trip, price, lines);
+    let memo = null;
+    if (!options.moneyForTown) {
+        memo = table.byAmount ||= new Map();
+        if (options.accept) {
+            const lines = table.acceptLines ||= table.rows.flatMap(row => row.lines);
+            const admitted = lines.map(line => !!options.accept(line));
+            if (table.admitted && admitted.some((value, at) => value !== table.admitted[at])) memo.clear();
+            table.admitted = admitted;
+        }
+    }
+    let best = memo?.get(amount);
+    if (best === undefined) {
+        best = null;
+        for (const { town, trip, price, lines } of table.rows) best = betterOffer(best, options, amount, town, trip, price, lines);
+        memo?.set(amount, best);
+    }
     return noteShort(table.index, table.selfId, options, amount, cut, best);
 }
 
