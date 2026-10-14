@@ -70,7 +70,7 @@ function refreshCatalog(rates) {
         rewardSpots = spots; rewardSpotCount = spots.length;
         rewardRevision = revision;
         countReset(cachedRows());
-        valueMemo.clear(); bestRows.clear(); incomeRows.clear();
+        clearValueMemo(); bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
         spoilLevels.clear();
     }
@@ -88,11 +88,18 @@ function roleSpoilLevel(role, level) {
 // (ProgressionRates keeps one profile object while the rates are equal).
 const MAX_VALUE_MEMO = 32768;
 const valueMemo = new Map();
+// Insertion order of valueMemo's keys, oldest at valueMemoHead: the drop at the
+// cap reads the oldest key here. Asking the Map for its first key walks every
+// slot an earlier drop left empty (4.3 s per 131k drops at the cap); a row is
+// only ever added on a miss and removed as the oldest, so both orders agree.
+const valueMemoOrder = [];
+let valueMemoHead = 0;
+function clearValueMemo() { valueMemo.clear(); valueMemoOrder.length = 0; valueMemoHead = 0; }
 let valueMemoTable = null, valueMemoRates = null;
 function refreshValueMemo(t, rates) {
     if (t !== valueMemoTable || rates !== valueMemoRates) {
         countReset(valueMemo.size);
-        valueMemo.clear();
+        clearValueMemo();
         valueMemoTable = t;
         valueMemoRates = rates;
     }
@@ -234,9 +241,11 @@ function memoValue(t, rates, spotId, role, level, shots, skill) {
         DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
         row = computeValue(t, rates, spotId, role, level, shots, skill);
         if (valueMemo.size >= MAX_VALUE_MEMO) {
-            valueMemo.delete(valueMemo.keys().next().value);
+            valueMemo.delete(valueMemoOrder[valueMemoHead]);
+            valueMemoHead = (valueMemoHead + 1) % MAX_VALUE_MEMO;
             DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
         }
+        valueMemoOrder[(valueMemoHead + valueMemo.size) % MAX_VALUE_MEMO] = key;
         valueMemo.set(key, row);
     } else DiagnosticConfig.developerDiagnostics && (stats.memoHits += 1);
     return row;
@@ -334,7 +343,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
         countReset(cachedRows());
-        incomeRows.clear(); bestRows.clear(); valueMemo.clear();
+        incomeRows.clear(); bestRows.clear(); clearValueMemo();
         clearIncomeBases();
     }
     refreshValueMemo(t, rates);
@@ -407,7 +416,7 @@ function useFile(next = DEFAULT_FILE) {
     file = next;
     table = null;
     bestRows.clear();
-    valueMemo.clear();
+    clearValueMemo();
     clearIncomeBases();
 }
 
