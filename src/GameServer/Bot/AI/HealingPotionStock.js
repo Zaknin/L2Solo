@@ -23,7 +23,6 @@ const MELEE_USE_HP_RATIO = 0.35;
 const RANGED_USE_HP_RATIO = 0.25;
 const QUICK_USE_HP_RATIO = 0.12;
 const DESIRED_HP_RATIO = 0.65;
-const MAX_USES_PER_ENCOUNTER = 1;
 
 function templateFor(selfId) {
     return ItemTemplateIndex.find(DataCache.items, selfId) || null;
@@ -217,7 +216,8 @@ function selectPotion(inventory, hp, maxHp, roleOrActor, options = {}) {
     const safeMaxHp = Math.max(1, Number(maxHp || hp || 1));
     const safeHp = Math.max(0, Number(hp || 0));
     const hpRatio = safeHp / safeMaxHp;
-    if (hpRatio > (options.pvp ? 0.65 : useThreshold(roleOrActor))) return null;
+    // The danger moment (E70, DangerMoment) chooses when; the fixed ratio stays for cold and PvP.
+    if (!options.dangerMoment && hpRatio > (options.pvp ? 0.65 : useThreshold(roleOrActor))) return null;
     const available = availablePotions(inventory, hpRatio, options);
     if (!available.length) return null;
 
@@ -249,11 +249,9 @@ function tryUseInCombat(session, actor, target, options = {}) {
     if (actor.state?.fetchCasts?.() || (activeHot && !options.pvp)) return null;
 
     const targetId = Number(target.fetchId?.() ?? target.id ?? 0);
-    const encounter = session.healingPotionEncounter?.targetId === targetId
-        ? session.healingPotionEncounter
-        : { targetId, used: 0 };
-    session.healingPotionEncounter = encounter;
-    if (encounter.used >= Number(options.pvp ? Infinity : options.maxUses ?? MAX_USES_PER_ENCOUNTER)) return null;
+    // A bot that took the danger moment for this target drinks only by it (E70);
+    // the potion HoT and the item reuse limit the bottles, as on the cold side.
+    if (!options.dangerMoment && !options.pvp && session.dangerMoment?.targetId === targetId) return null;
 
     const inventory = actorInventory(actor);
     const potion = selectPotion(inventory, actor.fetchHp?.(), actor.fetchMaxHp?.(), actor, { ...options, activeHot });
@@ -266,10 +264,9 @@ function tryUseInCombat(session, actor, target, options = {}) {
     if (!skill || actor.canUseSkill?.(skill) === false) return null;
 
     actor.backpack.useItem(session, item.objectId);
-    encounter.used += 1;
     session.lastCombatDecision = {
         action: 'use_healing_potion',
-        reason: 'low_hp_active_combat',
+        reason: options.dangerMoment ? 'danger_moment' : 'low_hp_active_combat',
         role: roleFor(options.role || actor),
         itemId: potion.selfId,
         itemName: potion.name,
@@ -318,13 +315,13 @@ function coldPurchasePatch(state, options = {}) {
 module.exports = {
     DESIRED_HP_RATIO,
     HOT_EFFECT_KEYS,
-    MAX_USES_PER_ENCOUNTER,
     MELEE_USE_HP_RATIO,
     POTIONS,
     POTION_IDS,
     QUICK_USE_HP_RATIO,
     RANGED_USE_HP_RATIO,
     activePotionHot,
+    actorInventory,
     amountInInventory,
     coldEffectFor,
     coldPurchasePatch,

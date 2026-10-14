@@ -99,7 +99,7 @@ function clearTacticalState(session) {
     session.lastTargetEvaluation = undefined;
     session.lastCombatDecision = undefined;
     session.lastPvpDecision = undefined;
-    session.healingPotionEncounter = undefined;
+    session.dangerMoment = undefined;
     session.spoilAttemptedTargetId = undefined;
     session.sweepAttemptedTargetId = undefined;
 }

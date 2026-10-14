@@ -16,6 +16,8 @@ const EncounterReadiness = invoke('GameServer/Bot/AI/BotEncounterReadiness');
 const BotPvpRisk      = invoke('GameServer/Bot/AI/BotPvpRisk');
 const BotRoles        = invoke('GameServer/Bot/AI/BotRoles');
 const RestPolicy      = invoke('GameServer/Bot/AI/RestPolicy');
+const DangerMoment    = invoke('GameServer/Bot/AI/DangerMoment');
+const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const SummonerTactics = invoke('GameServer/Bot/AI/SummonerTactics');
 const BotTownTravel  = invoke('GameServer/Bot/AI/BotTownTravel');
 const BotSpotTravel  = invoke('GameServer/Bot/AI/BotSpotTravel');
@@ -504,6 +506,17 @@ function needsEmergencyRetreat(bot) {
         bot.fetchMp() / Math.max(1, bot.fetchMaxMp()));
 }
 
+// The danger moment of a fight (E70, §13.6), taken before the swing gate and
+// the emergency retreat: 'drank', 'flee', 'fight', or null when the bot has
+// no held economy or the matchup is unknown (the author's retreat rule then).
+// A potion it could not drink leaves the moment to the other options.
+function dangerMoment(session, bot, target, profiles) {
+    const moment = DangerMoment.forActor(session, bot, target, { profiles });
+    if (moment?.action !== 'drink') return moment?.action || null;
+    if (HealingPotionStock.tryUseInCombat(session, bot, target, { dangerMoment: true })) return 'drank';
+    return DangerMoment.forActor(session, bot, target, { profiles, potion: null })?.action || null;
+}
+
 function retreatFromThreat(session, bot, threat) {
     if (bot.state.fetchSeated()) {
         bot.state.setSeated(false);
@@ -724,14 +737,17 @@ module.exports = {
                 return;
             }
             const currentGround = currentHuntingGround(session, bot);
+            const matchupProfiles = TargetMatchup.actorProfiles([bot]);
             const groundSafety = currentGround
                 ? BotHuntingGroundPolicy.evaluate(currentGround, { level: bot.fetchLevel() }, {
                     mode: 'solo',
-                    matchupProfiles: TargetMatchup.actorProfiles([bot]),
+                    matchupProfiles,
                     equipment: equippedItems(bot)
                 })
                 : { allowed: true };
-            if (!groundSafety.allowed || needsEmergencyRetreat(bot)) {
+            const moment = groundSafety.allowed ? dangerMoment(session, bot, incomingMonster, matchupProfiles) : null;
+            if (moment === 'drank') return;
+            if (!groundSafety.allowed || (moment ? moment === 'flee' : needsEmergencyRetreat(bot))) {
                 if (groundSafety.allowed && isSoloHunter(session) &&
                     BotEmergencyFinisher.tryFinish(session, bot, incomingMonster, Generics, BotAI)) return;
                 retreatFromThreat(session, bot, incomingMonster);
@@ -765,7 +781,12 @@ module.exports = {
         // A live selected NPC still owns the encounter during that gap, so a
         // critically wounded bot must retreat instead of clearing the target
         // and sitting down in front of it.
-        if (liveEncounterTarget && !nativeCombatActionInFlight && needsEmergencyRetreat(bot)) {
+        // The danger moment runs mid-swing too: a potion does not wait for the
+        // swing flags, which a melee bot re-arms in the same callback.
+        const moment = liveEncounterTarget ? dangerMoment(session, bot, liveEncounterTarget) : null;
+        if (moment === 'drank') return;
+        if (liveEncounterTarget && (moment ? moment === 'flee'
+            : !nativeCombatActionInFlight && needsEmergencyRetreat(bot))) {
             if (session.spotRelocation) BotSpotTravel.cancel(session, bot, 'low_resources_in_combat');
             if (BotRaidSafety.retreat(session, bot, liveEncounterTarget, { distance: EMERGENCY_RETREAT_DISTANCE })) {
                 return;

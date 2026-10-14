@@ -92,7 +92,7 @@ function hold(session, actor, context) {
         ...(Number.isFinite(leaf.valueHours) ? { valueHours: leaf.valueHours } : {}),
         ...(leaf.items ? { items: leaf.items } : {}), ...(leaf.improvement ? { improvement: leaf.improvement } : {}) } : null;
     session.heldEconomy = { network: { activity }, statsPacket: context.statsPacket,
-        riskWeight: context.riskWeight, moneyPrice: context.moneyPrice,
+        riskWeight: context.riskWeight, moneyPrice: context.moneyPrice, deathHours: context.deathHours,
         ...(context.inputKey ? { inputKey: require('../Fnv1a').fnv1a32(context.inputKey).toString(16) } : {}) };
     session.decisionMarks = marksFor(session, actor);
     if (DiagnosticConfig.developerDiagnostics) {
