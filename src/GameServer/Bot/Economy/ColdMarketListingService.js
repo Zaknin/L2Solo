@@ -132,7 +132,10 @@ function open(state, options = {}) {
     const market = invoke('GameServer/Bot/Economy/BotAfkMarketService').saleDecision(state, options);
     const initialMarket = market;
     return BuyStoreService.sellToBestBuyer(state, town?.name, { answers: market.answers }).then((dynamicBuyerSale) => {
-    if (dynamicBuyerSale.pending) return { ...dynamicBuyerSale, listed: false };
+    // A deal through a trade meeting ends the sale like every other outcome:
+    // the retry keeps a later pass from answering the same ad again when the
+    // payer refuses it (E311).
+    if (dynamicBuyerSale.pending) return { ...dynamicBuyerSale, state: deferSellRetry(dynamicBuyerSale.state || state), listed: false };
     return StaticBuyerService.sell(dynamicBuyerSale.state || state, town?.name).then((buyerSale) => {
     const saleState = buyerSale.state || dynamicBuyerSale.state || state;
     return LifeState.applyNpcLiquidation(saleState, market.npc, {

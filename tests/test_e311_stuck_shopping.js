@@ -53,22 +53,35 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         const ad = Afk.ownerRecords(buyerId).find(row => row.kind === 'buy_ad');
         assert(ad, 'the buy ad is on the board');
 
-        // The payer's worker refuses the deal, as live (the ad's need changed).
+        // The payer's worker answers later; it refuses the deal, as live (the ad's need changed).
         const meetings = new Set();
-        Coordinator.requestMeetingPreparation = async (id, request) => {
+        let refuse = null;
+        Coordinator.requestMeetingPreparation = (id, request) => {
             meetings.add(request.token);
-            throw Error('trade_meeting_need_changed');
+            return new Promise((resolve, reject) => { refuse = () => reject(Error('trade_meeting_need_changed')); });
         };
 
         const first = await Population.resolveColdState(Life.cachedState(sellerId));
         assert(first.ok, 'the first visit pass runs');
         await settle();
         assert.equal(meetings.size, 1, 'the first pass answered the buy ad through a trade meeting');
-        assert.equal(Meetings.hasPreparation(sellerId), false, 'the refused preparation is discarded');
-        assert.equal(Life.cachedState(sellerId).activity, 'shopping', 'the visit waits for the pending deal');
+        assert.equal(Meetings.hasPreparation(sellerId), true, 'the deal is still being prepared');
+        assert.equal(Life.cachedState(sellerId).activity, 'shopping', 'a deal in preparation keeps the visit');
+        assert(Number(Life.cachedState(sellerId).stats.marketSellRetryAfter) > Date.now(), 'the sale retry is saved with the pending deal');
+        await Population.resolveColdState(Life.cachedState(sellerId));
+        await settle();
+        assert.equal(Life.cachedState(sellerId).activity, 'shopping', 'a pass during the preparation does not end the visit');
 
         // The refusal is known. The next pass must not wait on the same
         // refused deal again: it finishes the visit and leaves town.
+        refuse();
+        await settle();
+        assert.equal(Meetings.hasPreparation(sellerId), false, 'the refused preparation is discarded');
+        // The ended visit runs the town errands, whose NPC basket needs the
+        // money packet every live cold bot carries (left out above: with it
+        // this fixture's sale decision does not answer the ad).
+        const held = Life.cachedState(sellerId);
+        await Life.upsertState({ ...held, stats: { ...held.stats, money: [100, 0, 1000, 0] } }, 'e311_fixture');
         for (let pass = 0; pass < 2 && Life.cachedState(sellerId).activity === 'shopping'; pass++) {
             await Population.resolveColdState(Life.cachedState(sellerId));
             await settle();
@@ -77,6 +90,8 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         assert.notEqual(after.activity, 'shopping', `E311: the visit never ends after a refused deal: ${JSON.stringify({
             meetings: meetings.size, activity: after.activity, townVisit: after.stats.townVisit,
             marketSellRetryAfter: after.stats.marketSellRetryAfter, lastReason: after.stats.lastReason })}`);
+        assert.equal(meetings.size, 1, 'no later pass answers the refused ad again');
+        assert(Number(after.stats.marketSellRetryAfter) > Date.now(), 'the ended visit keeps its sale retry');
         console.log('E311 refused trade meeting does not hold the town visit: passed');
     } finally {
         Coordinator.requestMeetingPreparation = prepare;
