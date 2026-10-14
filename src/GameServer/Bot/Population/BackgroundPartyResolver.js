@@ -166,7 +166,7 @@ const BackgroundPartyResolver = {
             arrived: require('./PartyHuntingAssembly').ready(party, members, spot) }) : null;
         if (marked && (!admission.ok || !admission.held && party.stats?.raidEncounter?.status === 'defeated')) {
             const reason = admission.reason || 'raid_roster_not_opened';
-            const cancelled = ['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(reason);
+            const cancelled = Roster.CANCEL_REASONS.includes(reason);
             const nextResolveAt = cancelled ? null : timestamp + 30000;
             return { atomic: true, memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
                 materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt } })), events: [], nextResolveAt,

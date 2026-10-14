@@ -2172,12 +2172,12 @@ class ColdSimulationCoordinator {
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
         const cancelled = new Set();
         for (const result of results) {
-            if (!['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(result.detail)) continue;
+            if (!ClanRaidRoster.CANCEL_REASONS.includes(result.detail)) continue;
             const change = result.proposal?.atomicGroup?.partyChanges?.[0];
             if (!change || cancelled.has(change.partyId)) continue;
             cancelled.add(change.partyId);
             const party = BackgroundPartyState.find(change.partyId);
-            if (party?.updatedAt === change.expectedUpdatedAt) await require('../../Clan/ClanRaidRoster').cancelUnopened(party, result.detail);
+            if (party?.updatedAt === change.expectedUpdatedAt) await ClanRaidRoster.cancelUnopened(party, result.detail);
         }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
             this.tableChannel.flush();

@@ -10,7 +10,7 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
     const Authority = require('./ColdRaidAuthority');
     await Authority.init();
     spot = invoke('GameServer/RaidBoss/RaidEncounterScope').decorateSpot(spot);
-    const marker = require('../../Clan/ClanRaidRoster').markerFor(party);
+    const marker = ClanRaidRoster.markerFor(party);
     const raidOwner = marker ? invoke('Database').clanRaidOwner(marker) : null;
     const claims = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
     const grants = claims.grants || [];
@@ -78,8 +78,8 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
     } finally {
         Raid.abort(id);
         await Owner.releaseBatch(grants, { releaseInvalidated: true });
-        if (['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(rejectedRoster))
-            await require('../../Clan/ClanRaidRoster').cancelUnopened(party, rejectedRoster);
+        if (ClanRaidRoster.CANCEL_REASONS.includes(rejectedRoster))
+            await ClanRaidRoster.cancelUnopened(party, rejectedRoster);
     }
 }
 module.exports = { resolve };
