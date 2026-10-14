@@ -42,15 +42,38 @@ try {
         assert.equal(selects, before + 2, 'a fresh copy of a guarded state recomputes as before');
     }
 
-    // Bounded: past the limit, entries older than REVIEW_MS are dropped in one pass.
+    // Counters: hits are answers of the id hold, misses are guarded cold rows computed and stored.
+    const stat = Income.soloHoldStats();
+    assert(stat.hits >= 1 && stat.misses >= 6 && stat.size >= 1, 'the counters moved');
+    const beforeStat = Income.soloHoldStats();
+    route(row({ characterId: 991003 }), at + 20000);
+    route(row({ characterId: 991003 }), at + 21000);
+    const afterStat = Income.soloHoldStats();
+    assert.equal(afterStat.misses, beforeStat.misses + 1);
+    assert.equal(afterStat.hits, beforeStat.hits + 1);
+    assert.equal(afterStat.size, beforeStat.size + 1);
+
+    // Bounded: the Map order follows `at` and is evicted from the front past the limit.
     const old = at - Income.REVIEW_MS * 2;
-    for (let id = 1; id <= 4097; id++) route(row({ characterId: 2000000 + id }), old);
-    const count = selects;
-    route(row({ characterId: 2000001 }), old + 1000);
-    assert.equal(selects, count, 'held rows are reused while fresh');
+    route(row({ characterId: 2999999 }), old - 1);
+    for (let id = 1; id <= 4096; id++) route(row({ characterId: 2000000 + id }), old);
+    assert(Income.soloHoldStats().size <= 4096, 'the map stays within the limit');
+    let count = selects;
+    route(row({ characterId: 2999999 }), old + 1000);
+    assert.equal(selects, count + 1, 'the oldest entry was evicted from the front');
+    count = selects;
+    route(row({ characterId: 2004000 }), old + 1000);
+    assert.equal(selects, count, 'a later entry is still held');
+    // A re-set entry moves to the back: the next eviction takes the older ones first.
+    route(row({ characterId: 2000005, adena: 1 }), old + 2000);
+    count = selects;
+    route(row({ characterId: 2000005, adena: 1 }), old + 2500);
+    assert.equal(selects, count, 'the re-set entry is held');
+    // Expired entries leave from the front even under the limit.
     route(row({ characterId: 3000000 }), at);
-    route(row({ characterId: 2000002 }), old + 2000);
-    assert.equal(selects, count + 2, 'expired rows were dropped when the map passed its limit');
+    count = selects;
+    route(row({ characterId: 2004001 }), old + 3000);
+    assert.equal(selects, count + 1, 'an expired front entry is dropped by a later insert');
 } finally {
     Route.select = original;
 }

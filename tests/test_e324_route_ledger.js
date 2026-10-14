@@ -61,7 +61,13 @@ const rebuild = () => {
     SpotService.findCurrentSpot = () => current;
     SpotService.arrivalPointForState = (state, target) => ({ ...target.center, locX: target.center.locX + Number(state.characterId) });
 
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    let publish = null;
+    const subscribe = LifeState.subscribePublications;
+    LifeState.subscribePublications = (listener, options) => { publish = listener; return subscribe.call(LifeState, listener, options); };
     const coordinator = new ColdSimulationCoordinator();
+    LifeState.subscribePublications = subscribe;
+    assert.strictEqual(typeof publish, 'function');
     const bot = (characterId, extra = {}) => ({
         characterId, name: `Hunter${characterId}`, phase: 'cold', activity: 'hunting', level,
         spotId: current.id, currentRegion: current.name, loc: { ...current.center },
@@ -137,6 +143,81 @@ const rebuild = () => {
         assert.strictEqual(admitSoloRouteTravelState({ ...holder, activity: 'traveling',
             stats: { travel: { reason: 'level_replan', spotId: small.id, arrivalAt: clock + 25000 } } },
         holder, profiles, admissionOccupancy, clock).admitted, true);
+    }
+
+    // E324 review: ledger counters, ack with a state, renewals, publications, worker stop.
+    {
+        coordinator.pendingRoutes.clear();
+        const stats = () => ({ ...coordinator.pendingRouteStats });
+        const base = stats();
+        clock += 2000;
+        rebuild();
+        assert.strictEqual(routeOf(bot(21)), small.id);
+        assert.strictEqual(routeOf(bot(22)), small.id);
+        const first = { ...coordinator.pendingRoutes.get(21) };
+        assert.deepStrictEqual([...coordinator.pendingRoutes.keys()], [21, 22]);
+
+        // Same spot again: expiresAt moves, at and the Map position stay.
+        clock += 1000;
+        const renewing = bot(21, { timing: { lastResolvedAt: clock, nextResolveAt: clock + 60000 } });
+        assert.strictEqual(routeOf(renewing), small.id);
+        const renewed = coordinator.pendingRoutes.get(21);
+        assert.strictEqual(renewed.at, first.at, 'a same-spot renewal keeps its at');
+        assert(renewed.expiresAt > first.expiresAt, 'a same-spot renewal moves expiresAt');
+        assert.deepStrictEqual([...coordinator.pendingRoutes.keys()], [21, 22], 'a same-spot renewal keeps the Map position');
+        assert.strictEqual(stats().replaced, base.replaced);
+
+        // An ack with a state deletes the entry; the next context sets it again for the new route.
+        await coordinator.handleCommitResults([{ ok: true, characterId: 21, state: bot(21, { activity: 'traveling' }) }]);
+        assert(!coordinator.pendingRoutes.has(21));
+        assert.strictEqual(stats().deletedByAck, base.deletedByAck + 1);
+        assert.strictEqual(routeOf(bot(21)), small.id);
+        assert.deepStrictEqual([...coordinator.pendingRoutes.keys()], [22, 21], 'the new route is set at the end');
+        assert.strictEqual(coordinator.pendingRoutes.get(21).at, clock);
+        // An ack for a bot with no entry counts nothing.
+        await coordinator.handleCommitResults([{ ok: true, characterId: 999 }]);
+        assert.strictEqual(stats().deletedByAck, base.deletedByAck + 1);
+
+        // A changed spot replaces the entry (deleted and set at the end).
+        const moved = coordinator.pendingRoutes.get(22);
+        moved.spotId = next.id;
+        assert.strictEqual(routeOf(bot(22)), small.id);
+        assert.strictEqual(coordinator.pendingRoutes.get(22).spotId, small.id);
+        assert.deepStrictEqual([...coordinator.pendingRoutes.keys()], [21, 22]);
+        assert.strictEqual(stats().replaced, base.replaced + 1);
+
+        // A publication of a state that is not cold, or no state, deletes the entry; a cold one keeps it.
+        publish({ characterId: 21, state: bot(21), kind: 'put' });
+        assert(coordinator.pendingRoutes.has(21), 'a cold publication keeps the entry');
+        publish({ characterId: 21, state: bot(21, { phase: 'hot' }), kind: 'put' });
+        assert(!coordinator.pendingRoutes.has(21), 'a non-cold publication deletes the entry');
+        publish({ characterId: 22, state: null, kind: 'remove' });
+        assert(!coordinator.pendingRoutes.has(22), 'a remove deletes the entry');
+
+        // Expiry before an ack is counted.
+        clock += 2000;
+        rebuild();
+        assert.strictEqual(routeOf(bot(23)), small.id);
+        const expiring = coordinator.pendingRoutes.get(23).expiresAt;
+        clock = expiring;
+        rebuild();
+        coordinator.contextIndex();
+        assert(!coordinator.pendingRoutes.has(23));
+        assert.strictEqual(stats().expiredBeforeAck, base.expiredBeforeAck + 1);
+        assert.strictEqual(coordinator.snapshot().pendingRoutes.expiredBeforeAck, stats().expiredBeforeAck);
+
+        // A worker exit and a stop clear the ledger.
+        rebuild();
+        assert.strictEqual(routeOf(bot(24)), small.id);
+        assert(coordinator.pendingRoutes.size > 0);
+        coordinator.onWorkerExit(0);
+        assert.strictEqual(coordinator.pendingRoutes.size, 0, 'a worker exit clears the ledger');
+        assert.strictEqual(coordinator.pendingRoutesOccupancy, null);
+        assert.strictEqual(routeOf(bot(25)), small.id);
+        assert(coordinator.pendingRoutes.size > 0);
+        await coordinator.stopCurrent(null, coordinator.workerEpoch);
+        assert.strictEqual(coordinator.pendingRoutes.size, 0, 'a stop clears the ledger');
+        assert.strictEqual(coordinator.pendingRoutesOccupancy, null);
     }
 })().then(() => {
     console.log('E324 route ledger checks passed');

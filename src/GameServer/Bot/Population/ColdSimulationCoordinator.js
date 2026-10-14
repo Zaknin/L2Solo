@@ -165,6 +165,7 @@ class ColdSimulationCoordinator {
         // contexts and not yet committed (occupancyWithPendingRoutes).
         this.pendingRoutes = new Map();
         this.pendingRoutesOccupancy = null;
+        this.pendingRouteStats = { deletedByAck: 0, expiredBeforeAck: 0, replaced: 0 };
         this.projectionRetention = new ColdProjectionRetention({
             stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
             dependencies: (state, context) => {
@@ -221,6 +222,8 @@ class ColdSimulationCoordinator {
             }
         });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
+            // A bot that is no longer cold has no commit to wait for: its pending route goes.
+            if (packet.kind === 'remove' || !packet.state || packet.state.phase !== 'cold') this.pendingRoutes.delete(Number(packet.characterId));
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
             this.economyRoutes.forget(packet.characterId);
@@ -1045,9 +1048,12 @@ class ColdSimulationCoordinator {
     // bot's commit lands, as a gear plan's plan.next.spotId does through the
     // farm intent. routeFor reserves it in the current occupancy, which lives
     // one second; each rebuilt occupancy counts the routes still pending, in
-    // the order they were handed out and only while they fit, so a bot whose
+    // the order of their entries in the Map and only while they fit, so a bot whose
     // place was taken meanwhile meets the admission as before. A bot the
-    // snapshot already counts at that spot is not counted twice.
+    // snapshot already counts at that spot is not counted twice. The Map keeps
+    // an entry where it was first set: a renewal for the same spot updates
+    // expiresAt in place, a changed spot or a new context without a route
+    // deletes the entry, and a new route is set at the end.
     occupancyWithPendingRoutes(profiles, spots = SpotIndex.tableFor(profiles), timestamp = Date.now()) {
         const occupancy = SpotProfiles.currentOccupancy(profiles) || {};
         if (occupancy === this.pendingRoutesOccupancy) return occupancy;
@@ -1055,6 +1061,7 @@ class ColdSimulationCoordinator {
         for (const [characterId, route] of this.pendingRoutes) {
             if (route.expiresAt <= timestamp) {
                 this.pendingRoutes.delete(characterId);
+                this.pendingRouteStats.expiredBeforeAck += 1;
                 continue;
             }
             const spot = spots.get(route.spotId);
@@ -1068,11 +1075,19 @@ class ColdSimulationCoordinator {
     notePendingRoute(state, route, timestamp = Date.now()) {
         const id = Number(state?.characterId);
         if (!id) return;
-        this.pendingRoutes.delete(id);
-        if (!route?.needed || route.mode !== 'solo' || !route.spotId) return;
+        const held = this.pendingRoutes.get(id);
+        const wanted = route?.needed && route.mode === 'solo' && route.spotId ? String(route.spotId) : null;
         const due = Math.max(timestamp, Number(state.timing?.nextResolveAt || 0));
-        this.pendingRoutes.set(id, { spotId: String(route.spotId), at: timestamp,
-            expiresAt: Math.min(timestamp + PENDING_ROUTE_MAX_MS, due + 2 * snapshotRefreshMs()) });
+        const expiresAt = Math.min(timestamp + PENDING_ROUTE_MAX_MS, due + 2 * snapshotRefreshMs());
+        if (held && wanted && held.spotId === wanted) {
+            held.expiresAt = expiresAt;
+            return;
+        }
+        if (held) {
+            this.pendingRoutes.delete(id);
+            this.pendingRouteStats.replaced += 1;
+        }
+        if (wanted) this.pendingRoutes.set(id, { spotId: wanted, at: timestamp, expiresAt });
     }
 
     routeFor(state, currentSpot, party, partyMembers, index) {
@@ -2217,7 +2232,9 @@ class ColdSimulationCoordinator {
         }
         // A landed commit ends the bot's pending route: a started trip is
         // counted by the occupancy from now on, any other state frees it.
-        results.forEach(result => this.pendingRoutes.delete(Number(result.characterId)));
+        results.forEach(result => {
+            if (this.pendingRoutes.delete(Number(result.characterId))) this.pendingRouteStats.deletedByAck += 1;
+        });
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
         const cancelled = new Set();
@@ -2602,6 +2619,8 @@ class ColdSimulationCoordinator {
         this.cancelSafety();
         Metrics.clearColdSafetyEpoch(epoch);
         this.projectionRetention.reset();
+        this.pendingRoutes.clear();
+        this.pendingRoutesOccupancy = null;
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
@@ -2649,6 +2668,8 @@ class ColdSimulationCoordinator {
         for (const held of this.commitAcknowledgements.values()) held.resolve(false);
         this.commitAcknowledgements.clear();
         this.projectionRetention.reset();
+        this.pendingRoutes.clear();
+        this.pendingRoutesOccupancy = null;
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         if (!this.started) return { stopped: true };
@@ -2705,6 +2726,8 @@ class ColdSimulationCoordinator {
             epoch: this.workerEpoch,
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
+            pendingRoutes: { size: this.pendingRoutes.size, ...this.pendingRouteStats },
+            soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
             economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,
             partyReviews: Config.developerDiagnostics ? this.partyReviews : null,
