@@ -8,6 +8,8 @@ const RESOURCE_IDS = new Set([
     5220, 5549, 5550, 5551, 5552
 ]);
 const isResource = (id) => RESOURCE_IDS.has(Number(id));
+// Blades a dual-sword exchange consumes; warehouseMaterials hands them over.
+const DUAL_COMPONENT_IDS = new Set(DualSwords.COMBINATIONS.flatMap(([, leftId, rightId]) => [leftId, rightId]));
 const isSupplement = require('../Bot/Economy/CraftSupplementMaterials').isSupplementalMaterial;
 const clanIdFor = (state) => Number(state?.clanId ?? state?.stats?.clanId ?? 0);
 const resolveRecipe = (id) => Recipes.resolveByRecipeId(id) || DualSwords.resolveByRecipeId(id);
@@ -19,7 +21,8 @@ const isPersonalCraft = (state, plan = state?.stats?.equipmentPlan) => clanIdFor
 function stockInventory(inventory = {}, rows = []) {
     const result = { ...inventory };
     for (const row of rows) {
-        if (!String(row.kind || '').startsWith('Other.Material') && !Recipes.resolve(row.selfId)) continue;
+        if (!String(row.kind || '').startsWith('Other.Material') && !Recipes.resolve(row.selfId)
+            && !DUAL_COMPONENT_IDS.has(Number(row.selfId))) continue;
         const amount = Math.max(0, Number(row.amount || 0) - Number(row.reservedAmount || 0));
         const id = Number(row.selfId);
         result[id] = { ...(result[id] || {}), selfId: id, name: row.name,
