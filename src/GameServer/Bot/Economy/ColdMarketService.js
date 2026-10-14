@@ -124,7 +124,8 @@ function buyOffer(state, offer, options = {}) {
                 coldState: state, autoEquip: options.autoEquip, economyCommand: options.economyCommand,
                 funding: PurchaseFunding.nativeTerms(options, offer.selfId) }
         ).then((trade) => {
-            if (trade.pending) return { state: LifeState.cachedState(state.characterId) || state, pending: true, meetingId: trade.meetingId, purchased: false, units: 0, spent: 0 };
+            if (trade.pending) return { state: LifeState.cachedState(state.characterId) || state, pending: true, meetingId: trade.meetingId,
+                preparation: trade.preparationId || trade.token || null, purchased: false, units: 0, spent: 0 };
             const done = AfkTrade.committedTrade(trade, state.characterId);
             if (!done.committed) throw new Error('cold_state_sync_failed');
             // Native commit includes the buyer's experience exactly once.
@@ -433,7 +434,7 @@ async function buyHere(state, plan, options = {}) {
         if (!(count > 0)) continue;
         const bought = await buyOffer(current, offer, { qty: count, autoEquip: false, ...purchaseTerms(current, plan, spent) });
         current = bought.state || current;
-        if (bought.pending) return { state: current, units, spent, pending: true, meetingId: bought.meetingId };
+        if (bought.pending) return { state: current, units, spent, pending: true, meetingId: bought.meetingId, preparation: bought.preparation || null };
         if (!bought.purchased) continue;
         units += Number(bought.units || 0);
         spent += Number(bought.spent || 0);
@@ -846,10 +847,10 @@ const ColdMarketService = {
         });
     },
     // options.saleVisit (PopulationService saleVisit): the visit came to sell.
-    // options.meetingPending: a trade meeting of this bot is still being prepared.
+    // options.shotDealLive: the shot meeting this visit staged (townVisit.shotDeal) is still being prepared.
     async finishTownErrands(state, options = {}) {
         if (!state || state.activity !== 'shopping' || state.phase === 'hot') return state;
-        let current = state, shotDeal = !!options.meetingPending;
+        let current = state, shotDeal = options.shotDealLive ? state.stats?.townVisit?.shotDeal || null : null;
         // A finite snapshot; every purchase replans against current quotes and current wallet.
         for (const errand of CombinedErrands.pending(state, Date.now(), state.currentRegion)) {
             if (LifeState.hotRow(current.characterId)) return LifeState.hotRow(current.characterId);
@@ -876,7 +877,9 @@ const ColdMarketService = {
                     // E314: on a sale visit a pending deal (a trade meeting) ends the
                     // visit below like any other outcome: no retry on this visit.
                     if (bought.hot || bought.pending && !options.saleVisit) return current;
-                    if (bought.pending) shotDeal = true;
+                    // Only a meeting this bot staged delivers later; a busy refusal
+                    // (no preparation) leaves the shortfall to the NPC basket below.
+                    if (bought.preparation) shotDeal = bought.preparation;
                 }
             }
         }
@@ -898,10 +901,13 @@ const ColdMarketService = {
             ...(shotDeal ? { shots: false } : {}) });
         current = bought.state;
         if (LifeState.hotRow(current.characterId)) return current;
+        const ended = current.stats?.townVisit?.completed === true;
         return { ...current, stats: { ...current.stats,
             // ARCH-NOTE: the completed cold visit uses the same clock as the hot town event.
-            visitEvery: require('./TownVisitInterval').arrived(current.stats),
-            townVisit: current.stats?.townVisit ? { ...current.stats.townVisit, completed: true } : null } };
+            // A visit held in town after it ended (E314) counts its arrival once.
+            visitEvery: ended ? current.stats.visitEvery : require('./TownVisitInterval').arrived(current.stats),
+            townVisit: current.stats?.townVisit ? { ...current.stats.townVisit, completed: true,
+                ...(shotDeal ? { shotDeal } : {}) } : null } };
     },
     buyOffer,
     tripFrom,

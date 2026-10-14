@@ -654,6 +654,19 @@ function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation =
     };
 }
 
+// E314: a sale visit ended on a shot meeting it staged stays in town, without
+// new market travel, while that same preparation is still open.
+function shotDealLive(state) {
+    const deal = state?.stats?.townVisit?.completed === true && state.stats.townVisit.shotDeal;
+    return !!deal && TradeMeetingService.preparationOf(state.characterId) === deal;
+}
+
+// An ended visit is saved in town only while a meeting preparation holds the
+// bot (E314); it starts no market travel until that preparation ends.
+function heldVisit(state) {
+    return state?.stats?.townVisit?.completed === true && TradeMeetingService.hasPreparation(state.characterId);
+}
+
 // The departure marker, not the goal re-reviewed on arrival, says the trip came to sell.
 function saleVisit(state) {
     const visit = state?.stats?.townVisit;
@@ -3872,7 +3885,9 @@ const PopulationService = {
             .then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
                 spot: SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId) || spot
             })
-                .then((goalSnapshot) => ColdMarketService.tryPurchase(marketLifecycle.state, goalSnapshot?.current)
+                .then((goalSnapshot) => (heldVisit(marketLifecycle.state)
+                    ? Promise.resolve({ state: marketLifecycle.state, purchased: false, reason: 'other_town_deferred' })
+                    : ColdMarketService.tryPurchase(marketLifecycle.state, goalSnapshot?.current))
                     .then((marketResult) => ({ marketLifecycle, marketResult, goal: goalSnapshot?.current || null }))))
             .then(({ marketLifecycle, marketResult, goal }) => this.finishColdMarketStep(updatedState, workerPlan, spot, tripEdge, marketLifecycle, marketResult, goal))
             .then((finalState) => {
@@ -3938,7 +3953,7 @@ const PopulationService = {
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
             const sale = saleVisit(listingState);
             return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale,
-                meetingPending: TradeMeetingService.hasPreparation(listingState.characterId) }).then((restockedState) => {
+                shotDealLive: shotDealLive(listingState) }).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
                 // A deal in preparation keeps the bot in town; a sale visit it
                 // ended on this pass is saved with its sale retry, not lost in

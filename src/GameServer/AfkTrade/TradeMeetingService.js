@@ -152,6 +152,10 @@ function stage(request) {
 function hasPreparation(characterId) {
     return preparedActors.has(Number(characterId));
 }
+// The preparation token this actor is in, or null.
+function preparationOf(characterId) {
+    return preparedActors.get(Number(characterId)) || null;
+}
 function canJoinParty(characterId, state = life().cachedState(characterId), session = sessionFor(characterId)) {
     const current = life()?.cachedState?.(characterId) || state;
     return partyTradeAllowed('party', current, session, hasPreparation(characterId), !!enrolled.get(Number(characterId))?.size);
@@ -530,7 +534,7 @@ async function init() {
         await new Promise(resolve => setImmediate(resolve));
     }
 }
-module.exports = { stage, discard, hasPreparation, canJoinParty, accept, cancel, receipt, prepareTrade, trade, wake, init, reset, presenceChanged,
+module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, prepareTrade, trade, wake, init, reset, presenceChanged,
     isPlayerWaiting: id => !!playerWaiters.get(Number(id))?.size,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };
