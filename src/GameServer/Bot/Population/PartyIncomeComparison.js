@@ -116,7 +116,10 @@ function rowInput(state) {
     if (state.phase !== 'cold' || !(Number(state.simulation?.revision) > 0) || !(Number(state.characterId) > 0)) return null;
     try { return createHash('sha1').update(JSON.stringify(state)).digest('base64'); } catch { return null; }
 }
+let soloHoldSpots = null;
 function holdById(characterId, entry, timestamp) {
+    // A rebuilt spot table (SpotProfiles.reset) voids every hold; keep no old table reachable from here.
+    if (entry.spots !== soloHoldSpots) { soloHolds.clear(); soloHoldSpots = entry.spots; }
     soloHolds.set(characterId, entry);
     if (soloHolds.size <= SOLO_HOLD_LIMIT) return;
     for (const [id, held] of soloHolds) if (timestamp - held.at >= REVIEW_MS) soloHolds.delete(id);
