@@ -765,6 +765,7 @@ const tests = [
     'tests/test_npc_decay.js',
     'tests/test_npc_respawn.js',
     'tests/test_party_companion_rest_follow.js',
+    'tests/test_following_tick_pins.js',
     'tests/test_party_capacity.js',
     'tests/test_party_rewards.js',
     'tests/test_party_buff_targets.js',
