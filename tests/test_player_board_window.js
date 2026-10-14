@@ -252,19 +252,42 @@ async function main() {
     assert.equal(disconnected.playerBoardAgreePending, undefined, 'failed progress delivery must release the pending request');
     assert.equal(agreementCalls, 1, 'a disconnected player does not start a new merchant approval');
 
-    const defaultShow = Window.show;
+    board.clear();
+    board.put(record(500, 1864, { kind: 'sell_ad', custodyPolicy: 1, town: 'Valley of Saints', ownerId: 45 }));
+    board.put(record(501, 1835, { kind: 'shop', town: 'Dion', ownerId: 45 }));
+    const filteredSession = { actor, accountId: session.accountId, dataSendToMe: session.dataSendToMe };
+    window.show(filteredSession, { side: SELL, town: null });
+    await window.handle(filteredSession, ['board', 'type', 'meeting']);
+    assert.equal(filteredSession.playerBoardView.tradeType, 'meeting');
+    assert.match(packets.at(-1), /board answer sell_ad 500 /);assert.doesNotMatch(packets.at(-1), /board answer shop 501 /);
+    assert(filteredSession.nativeBoardModel.towns.includes('Valley of Saints'), 'a named meeting zone is a selectable market place');
+    assert(!filteredSession.nativeBoardModel.towns.includes('Dion'), 'places without the selected offer type are omitted');
+    await window.handle(filteredSession, ['board', 'search', 'Coal']);
+    assert.match(packets.at(-1), /board list sell - 1864 - meeting/);
+    await window.handle(filteredSession, ['board', 'town', 'Valley', 'of', 'Saints']);
+    assert.equal(filteredSession.nativeBoardModel.screen, 'search');
+    assert.equal(filteredSession.playerBoardView.tradeType, 'meeting');
+    assert.equal(filteredSession.playerBoardView.town, 'Valley of Saints');
+    window.open(filteredSession);assert.equal(filteredSession.playerBoardView.tradeType, 'meeting', 'reopening retains the selected filters');
+    await window.handle(filteredSession, ['board', 'type', 'Private', 'shops']);
+    assert.equal(filteredSession.playerBoardView.tradeType, 'shop');
+    assert.equal(filteredSession.playerBoardNavigation.at, 0, 'changing the offer type starts a new cursor history');
+    const filterPackets = packets.length;
+    await window.handle(filteredSession, ['board', 'type', 'invalid']);assert.equal(packets.length, filterPackets);
+
+    const defaultOpen = Window.open;
     const ActorGenerics = invoke(path.actor), originalAdmin = ActorGenerics.adminPanel;
     const Config = invoke('GameServer/Bot/Population/PopulationConfig'), oldChatLog = Config.devLogPlayerChat;
     let boardOpened = 0, adminOpened = 0;
     try {
-        Window.show = (target, query) => { assert.equal(target, session); assert.deepEqual(query, {}); boardOpened++; };
+        Window.open = target => { assert.equal(target, session); boardOpened++; };
         ActorGenerics.adminPanel = target => { assert.equal(target, session); adminOpened++; };
         Config.devLogPlayerChat = false;
         invoke('GameServer/Network/Opcodes').table[0x57](session);
         assert.equal(boardOpened, 1); assert.equal(adminOpened, 0);
         invoke('GameServer/Network/Request/Speak').consume(session, { kind: 0, text: '.admin' });
         assert.equal(adminOpened, 1);
-    } finally { Window.show = defaultShow; ActorGenerics.adminPanel = originalAdmin; Config.devLogPlayerChat = oldChatLog; }
+    } finally { Window.open = defaultOpen; ActorGenerics.adminPanel = originalAdmin; Config.devLogPlayerChat = oldChatLog; }
     console.log('PASS Alt+B market, admin command, 10000-line cursors, HTML bounds and workshop confirmation');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

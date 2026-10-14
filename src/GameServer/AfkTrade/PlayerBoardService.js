@@ -5,6 +5,9 @@
 const { SELL, BUY } = require('./BoardIndex');
 const SHOP_RANGE = 200;
 const WORKSHOP_RANGE = 1200;
+const TRADE_TYPES = Object.freeze(['all', 'meeting', 'shop']);
+const matchesType = (line, type = 'all') => type === 'all' || (type === 'meeting' ? line.custodyPolicy === 1
+    : type === 'shop' && line.kind === 'shop' && line.custodyPolicy !== 1);
 
 function location(actor) {
     return { locX: Number(actor.fetchLocX()), locY: Number(actor.fetchLocY()), locZ: Number(actor.fetchLocZ()) };
@@ -62,7 +65,11 @@ function create({ afk = () => invoke('GameServer/AfkTrade/AfkTradeService'),
     function itemIds(session, options = {}) {
         if (!human(session)) return [];
         if (options.kind === 'workshop') return [...new Set([...workshopOffers(session, options)].map(row => row.entry.selfId))];
-        return afk().isBoardReady() ? [...afk().boardIndex().itemIds(options.side, options.town)] : [];
+        if (!afk().isBoardReady()) return [];
+        const board = afk().boardIndex();
+        const ids = [...board.itemIds(options.side, options.town)];
+        return !options.tradeType || options.tradeType === 'all' ? ids
+            : ids.filter(id => { for (const line of board.lines(id, options.side, options.town)) if (matchesType(line, options.tradeType)) return true; return false; });
     }
     function entries(session, options = {}) {
         if (!human(session)) return { available: false, entries: [], next: null };
@@ -88,7 +95,7 @@ function create({ afk = () => invoke('GameServer/AfkTrade/AfkTradeService'),
                 const cursor = !options.cursor?.side || side === Number(options.cursor.side) ? options.cursor : null;
                 for (const row of board.page(side, { town: options.town || null, selfId: Number(options.selfId) || 0, cursor })) {
                     const line = row.line;
-                    if (line.ownerId === playerId) continue;
+                    if (line.ownerId === playerId || !matchesType(line, options.tradeType)) continue;
                     const offer = service.offerOf(line);
                     if (!offer) continue;
                     if (!push({ id: line.recordId, kind: line.kind, side: line.storeType, ownerId: line.ownerId,
@@ -248,4 +255,4 @@ function create({ afk = () => invoke('GameServer/AfkTrade/AfkTradeService'),
 }
 
 const service = create();
-module.exports = { ...service, create };
+module.exports = { ...service, create, TRADE_TYPES, matchesType };

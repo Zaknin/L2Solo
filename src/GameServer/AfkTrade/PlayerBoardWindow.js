@@ -2,6 +2,8 @@
 const Html = require('../World/Generics/HtmlKit');
 const { SELL, BUY } = require('./BoardIndex');
 const { isKind } = require('./BoardRules');
+const Native = require('./NativeBoard');
+const { TRADE_TYPES, matchesType } = require('./PlayerBoardService');
 // C4 puts adjacent links on separate lines outside table cells. Keep pages
 // short and use the native table/edit/combobox subset rather than inline layout.
 const PAGE_SIZE = 6;
@@ -39,19 +41,22 @@ function create({ service = () => require('./PlayerBoardService'),
     workshops = () => invoke('GameServer/Bot/Economy/CraftWorkshopService'),
     response = () => invoke('GameServer/Network/Response'),
     townOf = actor => invoke('GameServer/Bot/BotAI').getClosestTownName(actor.fetchLocX(), actor.fetchLocY(), actor.fetchLocZ()),
-    waypoints = () => invoke('GameServer/World/Generics/NativeItemLocations') } = {}) {
+    waypoints = () => invoke('GameServer/World/Generics/NativeItemLocations'),
+    meeting = session => require('./PlayerBoardMeeting').status(session) } = {}) {
     const itemName = id => text(afk().itemName(id), 'Unknown item');
     function normalize(session, query = {}) {
         return { side: sideOf(query.side), town: Object.hasOwn(query, 'town') ? query.town || null : townOf(session.actor),
-            selfId: integer(query.selfId) || 0, cursor: query.cursor || null };
+            selfId: integer(query.selfId) || 0, cursor: query.cursor || null,
+            tradeType: sideOf(query.side) === 'workshop' ? 'all' : TRADE_TYPES.includes(query.tradeType) ? query.tradeType : 'all' };
     }
     function command(query, cursor = null) {
-        return `board list ${word(query.side)} ${query.town ? encodeURIComponent(query.town) : '-'} ${query.selfId} ${encodeCursor(cursor, query.side === 'workshop')}`;
+        return `board list ${word(query.side)} ${query.town ? encodeURIComponent(query.town) : '-'} ${query.selfId} ${encodeCursor(cursor, query.side === 'workshop')}`
+            + (query.tradeType && query.tradeType !== 'all' ? ' ' + query.tradeType : '');
     }
     function previous(session, query) {
         // Only bounded cursor references, never offers or rendered pages. This
         // returns to the actual page after hidden rows or HTML-size clipping.
-        const key = JSON.stringify([query.side, query.town, query.selfId]);
+        const key = JSON.stringify([query.side, query.town, query.selfId, query.tradeType]);
         let navigation = session.playerBoardNavigation;
         if (!navigation || navigation.key !== key || !query.cursor) {
             navigation = session.playerBoardNavigation = { key, cursors: [query.cursor], at: 0 };
@@ -78,7 +83,7 @@ function create({ service = () => require('./PlayerBoardService'),
     function page(body, footer = '') {
         // This client keeps the window title "Chat"; <title> inside the NPC
         // body adds a duplicate plain heading instead of renaming the frame.
-        return Html.page(Html.table([Html.row([Html.cell(body, { width: Html.WIDTH, align: 'left' })])]), { footer });
+        return Html.page('<!--L2SOLO_BOARD-->' + Html.table([Html.row([Html.cell(body, { width: Html.WIDTH, align: 'left' })])]), { footer });
     }
     function tradeDetails(rows) {
         return Html.table(rows.map(([label, value]) => Html.row([
@@ -87,8 +92,17 @@ function create({ service = () => require('./PlayerBoardService'),
         ])));
     }
     function towns(session, query) {
-        const listed = query.side === 'workshop' ? workshops().boardRecords().map(shop => shop.town)
+        let listed = query.side === 'workshop' ? workshops().boardRecords().map(shop => shop.town)
             : [...(afk().boardIndex().townItems.get(query.side)?.keys() || [])];
+        if (query.side !== 'workshop' && query.tradeType && query.tradeType !== 'all') {
+            const index = afk().boardIndex();
+            listed = listed.filter(town => {
+                for (const id of index.itemIds(query.side, town)) {
+                    for (const line of index.lines(id, query.side, town)) if (matchesType(line, query.tradeType)) return true;
+                }
+                return false;
+            });
+        }
         return [...new Set([query.town, townOf(session.actor), ...listed])]
             .filter(town => typeof town === 'string' && town && town !== '*' && town.length <= 64 && !/[;\x00-\x1f]/.test(town)).sort();
     }
@@ -102,6 +116,14 @@ function create({ service = () => require('./PlayerBoardService'),
             Html.cell('<combobox var="board_town" width=174 height=17 list="' + Html.esc(choices.join(';')) + '">', { width: 184 }),
             Html.cell(Html.button('Set town', 'board town $board_town', { width: 76 }), { width: 86 })
         ]) + '<br1>';
+        if (query.side !== 'workshop') {
+            const label = { all: 'All offers', meeting: 'Meetings', shop: 'Private shops' };
+            body += Html.columns([
+                Html.cell('<combobox var="board_type" width=174 height=17 list="' +
+                    [query.tradeType, ...TRADE_TYPES.filter(type => type !== query.tradeType)].map(type => label[type]).join(';') + '">', { width: 184 }),
+                Html.cell(Html.button('Set type', 'board type $board_type', { width: 76 }), { width: 86 })
+            ]) + '<br1>';
+        }
         body += Html.columns([
             Html.cell('<edit var="board_query" width=174 height=15 length=48>', { width: 184 }),
             Html.cell(Html.button('Search', 'board search $board_query', { width: 76 }), { width: 86 })
@@ -116,6 +138,25 @@ function create({ service = () => require('./PlayerBoardService'),
     function requestOf(entry) {
         return entry.kind === 'workshop' ? `workshop ${entry.ownerId} ${entry.recipeId} ${entry.price} ${entry.revision ?? '-'}`
             : `${entry.kind} ${entry.id} ${entry.lineId} ${entry.selfId} ${entry.price} ${entry.revision ?? '-'}`;
+    }
+    const action = (label, command, role) => ({ label, command, role });
+    function navigation(session, query) {
+        return [action('Buy items', command({ ...query, side: SELL }), 'sell'),
+            action('Sell items', command({ ...query, side: BUY }), 'buy'),
+            action('Craft', command({ ...query, side: 'workshop' }), 'workshop'),
+            ...(query.selfId ? [action('All items', command({ ...query, selfId: 0 }), 'all')] : []),
+            ...(session.tradeMeetingPresence?.actorId === Number(session.actor.fetchId()) ? [action('Cancel trade', 'board cancel', 'cancel')] : []),
+            ...(session.playerBoardWaypoint ? [action('Stop tracking', 'board untrack', 'untrack')] : [])];
+    }
+    function model(session, fields = {}) {
+        const query = session.playerBoardView || normalize(session);
+        return { title: 'Market Board', screen: 'list', itemId: query.selfId, itemName: query.selfId ? itemName(query.selfId) : '',
+            towns: ['All towns', ...towns(session, query).slice(0, 25)], meeting: meeting(session), ...fields };
+    }
+    function detail(session, title, request, result, message, details, actions, rows = []) {
+        const id = result.productId || result.selfId || request.selfId || 0;
+        return model(session, { screen: 'detail', title, itemId: id, itemName: id ? itemName(id) : '',
+            message, details, actions, rows });
     }
     function entryHtml(entry, query) {
         const workshop = entry.kind === 'workshop';
@@ -137,7 +178,7 @@ function create({ service = () => require('./PlayerBoardService'),
         const query = session.playerBoardView || normalize(session);
         const q = String(session.playerBoardSearch || '').toLowerCase();
         if (!q) return show(session, query, 'Enter part of an item name to search.');
-        const ids = service().itemIds(session, { side: query.side, town: query.town, kind: query.side === 'workshop' ? 'workshop' : undefined });
+        const ids = service().itemIds(session, { side: query.side, town: query.town, tradeType: query.tradeType, kind: query.side === 'workshop' ? 'workshop' : undefined });
         const matches = ids.map(selfId => ({ selfId, name: itemName(selfId) })).filter(row => row.name.toLowerCase().includes(q))
             .sort((a, b) => a.name.localeCompare(b.name) || a.selfId - b.selfId);
         const start = Math.min(offset, Math.max(0, Math.ceil(matches.length / SEARCH_PAGE_SIZE) - 1) * SEARCH_PAGE_SIZE);
@@ -150,12 +191,16 @@ function create({ service = () => require('./PlayerBoardService'),
         const actions = [{ label: 'Back', command: command(query, query.cursor) }];
         if (start) actions.unshift({ label: 'Previous', command: `board searchpage ${start - SEARCH_PAGE_SIZE}` });
         if (start + SEARCH_PAGE_SIZE < matches.length) actions.push({ label: 'Next', command: `board searchpage ${start + SEARCH_PAGE_SIZE}` });
-        return send(session, page(body, Html.actionFooter(actions)));
+        session.nativeBoardSearchOffset = start;
+        return send(session, page(body, Html.actionFooter(actions)), model(session, { screen: 'search', title: 'Find market offers', itemId: 0, itemName: '',
+            message: matches.length ? `${matches.length} matching items` : 'No matching items in this market.', page: Math.floor(start / SEARCH_PAGE_SIZE) + 1,
+            rows: matches.slice(start, start + SEARCH_PAGE_SIZE).map(row => ({ itemId: row.selfId, name: row.name,
+                select: action('Compare offers', command({ ...query, selfId: row.selfId })) })),
+            actions: [...navigation(session, query), ...actions.map(a => ({ ...a, role: a.label.toLowerCase() === 'previous' ? 'prev' : a.label.toLowerCase() }))] }));
     }
-    function send(session, html) {
+    function send(session, html, snapshot = model(session, { screen: 'detail', title: 'Checking the trade', message: 'Checking goods and payment. Waiting for the merchant response.' })) {
         if (html.length > MAX_HTML) throw Error('board HTML exceeds packet guard');
-        session.dataSendToMe(response().npcHtml(session.actor.fetchId(), html));
-        return html;
+        return Native.present(session, html, snapshot, response());
     }
     function track(session, result) {
         const loc = result.loc, coords = [loc?.locX, loc?.locY, loc?.locZ].map(Number);
@@ -178,6 +223,7 @@ function create({ service = () => require('./PlayerBoardService'),
         if (session.playerBoardWaypoint) body += Html.font('Tracking: ' + session.playerBoardWaypoint.name) + '<br1>'
             + Html.actionFooter([{ label: 'Stop tracking', command: 'board untrack' }]) + '<br1>';
         let next = page.next;
+        const visible = [];
         const back = previous(session, query);
         if (!page.available) body += 'The market board is not ready.<br>';
         else if (!page.entries.length) body += 'No matching offers.<br>';
@@ -185,15 +231,55 @@ function create({ service = () => require('./PlayerBoardService'),
             const row = entryHtml(entry, query);
             if (frame(body + row, query, next || entry.cursor, back).length + 32 > MAX_HTML) { next = entry.cursor; break; }
             body += row;
+            const workshop = entry.kind === 'workshop';
+            visible.push({ itemId: entry.selfId, name: (entry.enchant ? '+' + amount(entry.enchant) + ' ' : '') + (workshop ? itemName(entry.selfId) : text(entry.itemName, 'Unknown item')),
+                owner: text(entry.ownerName, 'Merchant', 64), town: text(entry.town, query.town || 'the local town', 64),
+                price: amount(entry.price) + (workshop ? ' a fee' : ' a each'), quantity: workshop ? '' : amount(entry.count) + (query.side === BUY ? ' wanted' : ' available'),
+                mode: workshop ? 'Crafting fee' : entry.conditional ? 'Meeting offer' : entry.kind === 'shop' ? 'Private shop' : 'Advertisement',
+                select: action('Compare', command({ ...query, selfId: entry.selfId })),
+                primary: action(workshop ? 'Craft' : query.side === BUY ? 'Sell' : 'Buy', 'board answer ' + requestOf(entry)),
+                locate: action('Location', 'board locate ' + requestOf(entry)) });
         }
-        return send(session, frame(body, query, next, back));
+        const actions = navigation(session, query);
+        if (back !== undefined) actions.push(action('Previous', command(query, back), 'prev'));
+        if (query.cursor) actions.push(action('First', command(query), 'first'));
+        if (next) actions.push(action('Next', command(query, next), 'next'));
+        return send(session, frame(body, query, next, back), model(session, { rows: visible, actions,
+            page: (session.playerBoardNavigation?.at || 0) + 1, message: message || (!page.available ? 'The market board is not ready.' : !page.entries.length ? 'No matching offers.' : ''),
+            details: session.playerBoardWaypoint ? [['Tracking', session.playerBoardWaypoint.name]] : [] }));
+    }
+    function open(session) {
+        if (!session?.actor) return;
+        Native.begin(session);
+        return show(session, session.playerBoardView || {});
+    }
+    function applyFilter(session, query) {
+        if (session.nativeBoardModel?.screen !== 'search') return show(session, query);
+        session.playerBoardView = normalize(session, query);
+        return search(session);
+    }
+    function refresh(session) {
+        if (session.nativeBoardModel?.screen === 'search') return search(session, session.nativeBoardSearchOffset || 0);
+        if (session.nativeBoardModel?.screen === 'detail') {
+            const current = { ...session.nativeBoardModel, meeting: meeting(session) };
+            return send(session, '', current);
+        }
+        return show(session, session.playerBoardView || {});
     }
     async function answer(session, request) {
         const actor = session.actor;
+        const epoch = session.nativeBoardEpoch;
         const result = await service().answer(session, request);
         if (session.actor !== actor) return result;
+        if (session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return result;
         const query = session.playerBoardView || normalize(session);
-        if (result.action === 'store_opened') return result;
+        if (result.action === 'store_opened') {
+            if (session.nativeBoardVersion >= 1 && session.nativeBoardOpen) {
+                send(session, '', { screen: 'store', title: 'Private shop' });
+                session.nativeBoardOpen = false;
+            }
+            return result;
+        }
         if (result.ok && result.action === 'locate') {
             if (!track(session, result)) return show(session, query, 'The merchant location is unavailable.');
             show(session, query, result.conditional ? 'Meeting point marked on your radar. The merchant comes after you agree.'
@@ -216,7 +302,12 @@ function create({ service = () => require('./PlayerBoardService'),
             send(session, page(body, Html.actionFooter([
                 ...(result.action === 'meet' ? [{ label: 'Try again', command: 'board answer ' + requestOf(request) }] : []),
                 { label: 'Back', command: command(query, query.cursor) }
-            ])));
+            ])), detail(session, workshop ? 'Meet the crafter' : 'Meet the merchant', request, result,
+                result.action === 'contact' ? 'Contact the merchant to arrange the trade.' : result.conditional ? 'Go to the marked meeting point, then try again. The merchant comes after you agree.'
+                    : workshop ? 'Go to the crafter to review materials and confirm crafting.' : 'Go to the private shop to open its trade window.',
+                [['Price', amount(request.price) + ' a' + (workshop ? ' fee' : ' each')], ['Merchant', result.ownerName], ['Town', result.town],
+                    ['Radar', marked ? 'Location marked' : 'Location unavailable']],
+                [...(result.action === 'meet' ? [action('Try again', 'board answer ' + requestOf(request), 'primary')] : []), action('Back to market', command(query, query.cursor), 'back')]));
         } else if (result.ok && result.action === 'confirm_trade') {
             const owner = text(result.ownerName, 'Merchant', 100);
             const verb = result.side === BUY ? 'Sell' : 'Buy';
@@ -231,7 +322,10 @@ function create({ service = () => require('./PlayerBoardService'),
                     Html.cell(Html.button('Set', 'board quantity $board_quantity', { width: 100 }), { width: 110 })]) + '<br1>' + Html.spacer(6)
                 + Html.font('Change the quantity above,') + '<br1>' + Html.font('or agree to the amount shown.');
             send(session, page(body, Html.actionFooter([
-                { label: 'Agree and wait', command: 'board agree' }, { label: 'Back', command: command(query, query.cursor) }])));
+                { label: 'Agree and wait', command: 'board agree' }, { label: 'Back', command: command(query, query.cursor) }])),
+                detail(session, verb + ' items', request, result, 'Agree to reserve the goods and payment. Stay at the meeting point until the merchant arrives.',
+                    [['Quantity', amount(result.amount)], ['Price each', amount(result.price) + ' a'], ['Total', amount(result.total) + ' a'], ['Merchant', owner], ['Town', result.town]],
+                    [action('Agree and wait', 'board agree', 'primary'), action('Set quantity', 'board quantity', 'quantity'), action('Back to market', command(query, query.cursor), 'back')]));
         } else if (result.ok && result.action === 'agreed') {
             send(session, page(Html.font('Trade agreed', Html.COLOR.title) + '<br>'
                 + 'Goods and payment are reserved.<br1>'
@@ -239,7 +333,12 @@ function create({ service = () => require('./PlayerBoardService'),
                 + 'Leaving the meeting point cancels the trade.<br>'
                 + Html.font('You will be notified when the trade completes.'), Html.actionFooter([
                 { label: 'Cancel trade', command: 'board cancel' },
-                { label: 'Market Board', command: command(query, query.cursor) }])));
+                { label: 'Market Board', command: command(query, query.cursor) }])), detail(session, 'Trade agreed', request, result,
+                    'Goods and payment are reserved. Stay here; leaving the meeting point cancels the trade.',
+                    [['Quantity', amount(request.amount || 1)], ['Price each', amount(request.price) + ' a'],
+                        ['Total', amount(request.price * (request.amount || 1)) + ' a'], ['Merchant', text(result.ownerName, 'Merchant', 64)],
+                        ['Town', text(result.town, 'the local town', 64)]],
+                    [action('Cancel trade', 'board cancel', 'cancel'), action('Market Board', command(query, query.cursor), 'back')]));
         } else if (result.ok && result.action === 'confirm') {
             const name = itemName(result.productId), owner = text(result.ownerName, 'Merchant', 100);
             let body = Html.font('Confirm craft', Html.COLOR.title) + '<br>' + Html.keyValueRows([
@@ -250,7 +349,11 @@ function create({ service = () => require('./PlayerBoardService'),
             if (result.successRate != null && result.successRate < 100) body += Html.font('Materials and the fee are spent even if crafting fails.', Html.COLOR.warn) + '<br>';
             send(session, page(body, Html.actionFooter([
                 { label: 'Craft', command: `board craft ${result.ownerId} ${result.recipeId} ${result.price} ${result.revision}` },
-                { label: 'Back', command: command(query, query.cursor) }])));
+                { label: 'Back', command: command(query, query.cursor) }])), detail(session, 'Confirm craft', request, result,
+                    result.successRate != null && result.successRate < 100 ? 'Materials and the fee are spent even if crafting fails.' : 'You supply the materials and the crafting fee.',
+                    [['Quantity', amount(result.productCount || 1)], ['Fee', amount(result.price) + ' a'], ['Crafter', owner], ...(result.successRate == null ? [] : [['Success', amount(result.successRate) + '%']])],
+                    [action('Craft', `board craft ${result.ownerId} ${result.recipeId} ${result.price} ${result.revision}`, 'primary'), action('Back to market', command(query, query.cursor), 'back')],
+                    (result.materials || []).map(row => ({ itemId: row.selfId, name: itemName(row.selfId), quantity: amount(row.amount), mode: 'Required material' }))));
         } else {
             const owner = text(result.ownerName, 'Merchant', 100), town = text(result.town, 'the local town', 64);
             const message = !result.ok ? result.reason === 'record_changed' ? 'This offer has changed.'
@@ -284,13 +387,21 @@ function create({ service = () => require('./PlayerBoardService'),
     }
     async function handle(session, parts) {
         const actor = session?.actor;
+        const epoch = session?.nativeBoardEpoch;
         try {
             if (!session?.actor) return;
             if (session.playerBoardAgreePending || session.playerBoardCraftPending) return;
+            if (parts[1] === 'type') {
+                const value = parts.slice(2).join(' ');
+                const type = ({ 'All offers': 'all', Meetings: 'meeting', 'Private shops': 'shop' })[value] || value;
+                const query = session.playerBoardView || normalize(session);
+                if (!TRADE_TYPES.includes(type) || query.side === 'workshop') return;
+                return applyFilter(session, { ...query, tradeType: type, cursor: null });
+            }
             if (parts[1] === 'town') {
                 const query = session.playerBoardView || normalize(session), town = parts.slice(2).join(' ').trim();
                 if (town !== 'All towns' && !towns(session, query).includes(town)) return;
-                return show(session, { ...query, town: town === 'All towns' ? null : town, cursor: null });
+                return applyFilter(session, { ...query, town: town === 'All towns' ? null : town, cursor: null });
             }
             if (parts[1] === 'search') {
                 const searchText = parts.slice(2).join(' ').trim();
@@ -306,11 +417,12 @@ function create({ service = () => require('./PlayerBoardService'),
                 }
                 return show(session, session.playerBoardView || {});
             }
-            if (parts[1] === 'list' && parts.length === 6) {
+            if (parts[1] === 'list' && (parts.length === 6 || parts.length === 7)) {
                 if (!['sell', 'buy', 'workshop'].includes(parts[2]) || integer(parts[4]) === null) return;
+                if (parts.length === 7 && !TRADE_TYPES.includes(parts[6])) return;
                 const side = sideOf(parts[2]), town = parts[3] === '-' ? null : decodeURIComponent(parts[3]);
                 if (town && town.length > 64) return;
-                return show(session, { side, town, selfId: Number(parts[4]), cursor: decodeCursor(parts[5], side) });
+                return show(session, { side, town, selfId: Number(parts[4]), cursor: decodeCursor(parts[5], side), tradeType: parts[6] || 'all' });
             }
             if (parts[1] === 'quantity' && parts.length === 3) {
                 const prepared = session.playerBoardPreparation, count = integer(parts[2]);
@@ -319,7 +431,7 @@ function create({ service = () => require('./PlayerBoardService'),
             }
             if (parts[1] === 'cancel' && parts.length === 2) {
                 const actor = session.actor, cancelled = await service().cancel(session);
-                if (actor !== session.actor) return;
+                if (actor !== session.actor || session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return;
                 if (cancelled?.ok === false) return show(session, session.playerBoardView || {}, 'The trade could not be cancelled. Try again.');
                 return show(session, session.playerBoardView || {}, 'Trade cancelled. Unused goods and payment are returned.');
             }
@@ -352,6 +464,7 @@ function create({ service = () => require('./PlayerBoardService'),
         } catch (error) {
             utils.infoWarn('Board', 'player board request failed: %s', error.message);
             if (session?.actor !== actor) return;
+            if (session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return;
             if (parts[1] === 'agree') session.dataSendToMe(response().systemMessage.text('The trade could not be agreed. Please try again.'));
             if (parts[1] === 'craft') session.dataSendToMe(response().systemMessage.text('The craft could not be completed. Please try again.'));
             return show(session, session.playerBoardView || {}, 'This offer is unavailable.');
@@ -360,11 +473,12 @@ function create({ service = () => require('./PlayerBoardService'),
     function meetingResult(session, meeting) {
         if (meeting.state === 'accepted' || session.playerBoardMeetingResult === meeting.id) return;
         session.playerBoardMeetingResult = meeting.id;
+        if (session.nativeBoardVersion >= 1 && !session.nativeBoardOpen) return;
         return show(session, session.playerBoardView || {}, meeting.state === 'completed'
             ? 'Trade completed. Goods and payment are delivered.'
             : 'Trade cancelled. Unused goods and payment are returned.');
     }
-    return { show, answer, handle, meetingResult };
+    return { open, show, refresh, answer, handle, meetingResult };
 }
 const window = create();
 module.exports = { ...window, create, PAGE_SIZE, MAX_HTML, encodeCursor, decodeCursor };
