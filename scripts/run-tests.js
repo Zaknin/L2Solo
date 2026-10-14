@@ -666,6 +666,7 @@ const tests = [
     'tests/test_clan_goal_fulfilled_closed.js',
     'tests/test_clan_raid_failure_owner.js',
     'tests/test_clan_production_goal_promotion.js',
+    'tests/test_clan_beneficiary_rotation_order.js',
     'tests/test_clan_simulation_slice5.js',
     'tests/test_clan_blood_mark_support.js',
     'tests/test_clan_simulation_slice6.js',

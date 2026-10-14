@@ -1194,7 +1194,10 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         if (!saved.ok) return saved;
         persistedGoal = true;
     }
-    const rotation = await releasePreviousBeneficiary(clan, previousGoal, goal);
+    // The previous beneficiary is released only for a goal that is saved: a
+    // full roster saved it above; otherwise the caller saves it after a
+    // successful assignment, and a failed one keeps the previous goal.
+    let rotation = persistedGoal ? await releasePreviousBeneficiary(clan, previousGoal, goal) : null;
     const expectedObjective = clanPartyObjective(selection.plan, goal, 'required', clan.id);
     const craftReady = ['ready_to_craft', 'component_ready'].includes(selection.plan?.status);
     const craftMembers = craftReady ? Object.values(selection.plan.craftProviders || {}).map(provider => number(provider.characterId)) : [];
@@ -1205,6 +1208,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         recordReason(assignment.code);
         return { ...assignment, goal, plans, selection };
     }
+    if (!persistedGoal) rotation = await releasePreviousBeneficiary(clan, previousGoal, goal);
     const roster = new Set(assignedMemberIds);
     const partyAssignments = await (clan.members || [])
         .filter((member) => member?.phase === 'cold')
