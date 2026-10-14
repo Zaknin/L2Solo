@@ -222,7 +222,9 @@ async function resolveProduction(clan, options = {}) {
 }
 
 async function scheduleReviews() {
-    for (const event of await ReviewEvents.drain(Database)) {
+    const events = await ReviewEvents.drain(Database);
+    for (let index = 0; index < events.length; index++) {
+        const event = events[index];
         try {
             for (const actionType of [ACTION_TYPES.PLAN, ACTION_TYPES.SUPPLIES]) {
                 const [active] = await Database.execute([`SELECT id,status FROM clan_actions WHERE clanId=?
@@ -236,7 +238,13 @@ async function scheduleReviews() {
                 await Database.enqueueClanAction({ clanId: event.clanId, actionType, priority: actionType === ACTION_TYPES.PLAN ? 75 : 40,
                     actionKey: `clan:${event.clanId}:event:${randomUUID()}:${actionType}`, payload: { reasons: event.causes } });
             }
-        } catch (error) { ReviewEvents.changed(event.clanId, 'review_retry'); throw error; }
+        } catch (error) {
+            // drain() already removed every event of this batch: put the failing
+            // one and all later ones back with their own causes.
+            ReviewEvents.changed(event.clanId, 'review_retry');
+            for (const rest of events.slice(index)) for (const cause of rest.causes) ReviewEvents.changed(rest.clanId, cause);
+            throw error;
+        }
     }
 }
 
