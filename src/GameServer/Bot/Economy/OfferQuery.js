@@ -178,10 +178,11 @@ function townTable(index, selfId, options = {}) {
 // ARCH-NOTE: PERF the town loop is memoized per table and amount: a craft search prices one input at the same
 // amounts again and again (offline, 100 crafters: 71% of cheapestIn calls repeat a (table, amount)), and the
 // loop is a pure function of the rows, the options and the amount. The one input that is read live is
-// options.accept (a party trade admission): a call compares accept over the table's lines (at most the quote
-// depth) with the outcomes the memo was filled under and drops the memo when one differs. The noteQuoteCut and
-// noteShort counts run on every call, in the same order. moneyForTown (read per town) is never memoized. Consumers
-// copy `best` and only read its lines, so the hits share one result object.
+// options.accept (a party trade admission): a call compares accept over the table's lines with the outcomes the
+// memo was filled under and drops the memo when one differs (the lines are at most the quote depth only because
+// the one caller, ColdOccupationSources, passes quoteDepth > 0). The noteQuoteCut and noteShort counts run on every
+// call, in the same order. moneyForTown (read per town) is never memoized. Consumers copy `best` and only read its
+// lines, so the hits share one result object.
 function cheapestIn(table, amount) {
     const options = table.options;
     amount = Math.max(1, Math.floor(Number(amount) || 1));
