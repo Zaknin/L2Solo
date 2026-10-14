@@ -3,6 +3,7 @@
 const SkillRankIndex = require('./SkillRankIndex');
 const data = require('../../../data/Skills/c4-skill-books.json');
 const ClassProgression = require('../ClassProgression');
+const ClanReviewEvents = require('../Clan/ClanReviewEvents');
 const books = new Map(data.skills);
 const bookIds = new Set(books.values());
 let treeSource = null;
@@ -63,12 +64,18 @@ function missingBooks(state = {}) {
     return requiredBooks(state).filter((book) => Number(state.inventory?.[book.selfId]?.amount || 0) <= 0);
 }
 
+// K46: a bot clan leader's reserved SP (ClanReviewEvents) is not spendable;
+// the gates see what learnBotSkill sees. Empty in the cold worker, which only
+// projects training; main recomputes the gate before every paid pass.
+function reservedSp(state) { return ClanReviewEvents.spReserve(state.characterId); }
+
 function needsTraining(state = {}) {
     const known = learned(state);
     const classId = Number(state.stats?.classId ?? state.classId);
+    const spendable = Number(state.sp || 0) - reservedSp(state);
     return entries(classId).some((entry) => {
         const training = nextTraining(classId, state.level, entry.selfId, known.get(Number(entry.selfId)) || 0);
-        return training && Number(state.sp || 0) >= training.sp
+        return training && spendable >= training.sp
             && (invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)
                 || !training.bookId || Number(state.inventory?.[training.bookId]?.amount || 0) > 0);
     });
@@ -83,7 +90,7 @@ function nextTrainingSp(state = {}) {
             next = Math.min(next, training.sp);
         }
     }
-    return next;
+    return next + reservedSp(state);
 }
 
 // Native training pays from the committed balance. Apply its exact delta to

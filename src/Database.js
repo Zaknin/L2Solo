@@ -6860,6 +6860,8 @@ const Database = {
             const infrastructure = String(character.username).startsWith('bot_craft_');
             const spentSp = infrastructure ? 0 : training.sp;
             if (Number(character.sp) < spentSp) return { learned: false, reason: 'insufficient_sp' };
+            // K46: a bot leader keeps the funded clan level's SP for its level-up.
+            if (spentSp && Number(character.sp) - ClanReviewInputs.spReserve(id) < spentSp) return { learned: false, reason: 'clan_sp_reserve' };
             const requiresBook = !infrastructure && Number(character.clanId) > 0 && training.bookId;
             const book = requiresBook
                 ? one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id LIMIT 1', [id, training.bookId]) : null;
@@ -10643,7 +10645,12 @@ const Database = {
                 warehouseRevision: Number(state.warehouseRevision || 0)
             };
         }, 'clan-simulation:level-up')).then(result => {
-            if (result.ok) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'level');
+            if (result.ok) {
+                // The level and its SP are paid: release the leader's reserve now,
+                // not at the next clan projection.
+                ClanReviewInputs.untrackLeader(clan);
+                ClanReviewInputs.changed(clan, 'level');
+            }
             return result;
         });
     },
