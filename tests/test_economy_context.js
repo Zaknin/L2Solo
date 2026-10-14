@@ -227,6 +227,45 @@ async function run() {
             'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
+    // The build's memos (inventory row keys, the profile scope's build key,
+    // the bag tokens) end with it: a row changed after the build reads fresh.
+    // A nested build of another bot leaves the outer build's keys exact.
+    {
+        const T = Date.now(), deps = { timestamp: T }, Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const fixture = equippedFixture(1310, 1, 30, 20000);
+        const worn = Object.keys(fixture.inventory).find(id => fixture.inventory[id].equipped);
+        const state = { ...fixture, inventory: { ...fixture.inventory, [worn]: { ...fixture.inventory[worn] } } };
+        const keyBefore = Economy.inputKey(state, deps), buildBefore = Profile.buildInputKey(state, T);
+        const capabilityBefore = Sections.capability(state, T);
+        const bagRead = ctx => { const local = ctx.nodeInputs.begin(); ctx.nodeInputs.bag(worn); ctx.nodeInputs.end();
+            return local.bag.get(Number(worn)); };
+        let outer = null, nested = null, bagDuring = null;
+        try {
+            ScopedProviders.build = (subject, ctx, buildDeps) => {
+                if (subject === state && outer === null) {
+                    outer = ctx; bagDuring = bagRead(ctx);
+                    Economy.forState(equippedFixture(1311, 1, 32, 30000), deps);
+                    nested = [Economy.inputKey(state, deps), Profile.buildInputKey(state, T), Sections.capability(state, T), bagRead(ctx)];
+                }
+                return build(subject, ctx, buildDeps);
+            };
+            Economy.forState(state, deps);
+        } finally { ScopedProviders.build = build; }
+        assert(outer, 'the build reached its providers');
+        assert.deepEqual(nested, [keyBefore, buildBefore, capabilityBefore, bagDuring],
+            'a nested build of another bot leaves the outer build\'s keys');
+        state.inventory[worn].enchant = 3;
+        const fresh = structuredClone(state);
+        assert.notEqual(Economy.inputKey(state, deps), keyBefore);
+        assert.equal(Economy.inputKey(state, deps), Economy.inputKey(fresh, deps), 'the row key reads the changed row');
+        assert.notEqual(Profile.buildInputKey(state, T), buildBefore);
+        assert.equal(Sections.capability(state, T), Sections.capability(fresh, T), 'the capability reads the changed row');
+        assert.notEqual(Sections.capability(state, T), capabilityBefore);
+        assert.equal(bagRead(outer), JSON.stringify([state.inventory[worn], 0]), 'a late bag read reads the changed row');
+        assert.notEqual(bagRead(outer), bagDuring);
+        Economy.forget(state.characterId);
+    }
+    console.log('PASS build memos end with the build / nested build');
     // An item the purchase reader finds no offer for is still an input: the
     // reader reads the context's watched board, so the first offer for that
     // item rebuilds the held context.

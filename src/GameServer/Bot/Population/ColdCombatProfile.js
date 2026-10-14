@@ -538,10 +538,13 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
 // state, timestamp, night or option (a night probe) builds as before.
 // Equipment preparation only shares item rows and never changes a profile's
 // values. Each caller gets its own top-level copy, as from a fresh build.
+// The scope also holds the state's build input key at one exact timestamp
+// (buildInputKey), read by the build's section keys, capability and wish
+// section snapshot; a string, shared as is.
 let profileScope = null;
 function withProfileScope(state, work) {
     const outer = profileScope;
-    profileScope = { state, timestamp: NaN, profile: null };
+    profileScope = { state, timestamp: NaN, profile: null, keyAt: NaN, key: null };
     try { return work(); }
     finally { profileScope = outer; }
 }
@@ -921,10 +924,14 @@ function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
 }
 function buildInputKey(state = {}, timestamp = Date.now()) {
+    const scope = profileScope !== null && profileScope.state === state ? profileScope : null;
+    if (scope !== null && scope.keyAt === timestamp) return scope.key;
     // Lifecycle may publish the implicit worn slot explicitly. That is the
     // same build, although the internal raw cache key can be reconstructed.
     const text = powerKey(state, timestamp, true), entry = buildGainsFor(state, timestamp);
-    return entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
+    const key = entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
+    if (scope !== null) { scope.keyAt = timestamp; scope.key = key; }
+    return key;
 }
 function powerFor(state = {}, timestamp = Date.now(), options = {}) {
     const profile = profileFor(state, timestamp, options);

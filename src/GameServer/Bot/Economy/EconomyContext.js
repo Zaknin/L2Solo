@@ -7,6 +7,8 @@ const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Providers = require('./WishProviders');
 const Sections = require('./DecisionSections');
+// Read through the module object at call time (tests replace withProfileScope).
+const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
@@ -115,12 +117,26 @@ function routeState(state, session) {
     routeAnchors.set(session, anchor);
     return { ...state, loc: anchor.loc };
 }
+const rowKey = row => [row.selfId, row.amount, row.equippedCount || row.equipped,
+    row.slot, row.enchant, row.stackable, row.starterMobLootAmount, row.kind, row.rank,
+    row.reservedAmount, row.protectedAmount, row.protected, row.acceptedCustomer, row.assignedClan, row.available,
+    (row.instances || []).map(item=>[item.id,item.enchant,item.slot,item.equipped,item.amount].join('/')).join(';')].join(':');
+// ARCH-NOTE: PERF: a bag row is not mutated while one forState build runs.
+// Once the build's own key missed the held one (rowKeys set: a miss or the
+// own-result check), a row's key part is made once and shared by the state's
+// later keys and its section copies, whose unbanded rows are the same
+// objects. The same-inputs hit makes one key and sets nothing. A nested build
+// starts without it; it dies when forState returns.
+let rowKeys = null;
+const heldRowKey = row => {
+    if (row === null || typeof row !== 'object') return rowKey(row);
+    let key = rowKeys.get(row);
+    if (key === undefined) rowKeys.set(row, key = rowKey(row));
+    return key;
+};
 function inputKey(state, deps = {}) {
     const stats = state.stats || {};
-    const items = Object.values(state.inventory || {}).map(row => [row.selfId, row.amount, row.equippedCount || row.equipped,
-        row.slot, row.enchant, row.stackable, row.starterMobLootAmount, row.kind, row.rank,
-        row.reservedAmount, row.protectedAmount, row.protected, row.acceptedCustomer, row.assignedClan, row.available,
-        (row.instances || []).map(item=>[item.id,item.enchant,item.slot,item.equipped,item.amount].join('/')).join(';')].join(':')).sort().join(',');
+    const items = Object.values(state.inventory || {}).map(rowKeys === null ? rowKey : heldRowKey).sort().join(',');
     // A native bag change, own sample or relation revision is an input event.
     // No timing poll, no world-wide counter: the board and the market are
     // inputs only through the items the bot read (see `market` in forState).
@@ -765,10 +781,11 @@ function basics(state = {}, deps = {}) {
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
 // The build reads the bot's own combat profile several times at one
 // timestamp; one build of it serves them (ColdCombatProfile.withProfileScope).
-let CombatProfile = null;
 function forState(state = {}, deps = {}) {
-    return (CombatProfile ||= invoke('GameServer/Bot/Population/ColdCombatProfile'))
-        .withProfileScope(state, () => buildForState(state, deps));
+    const outer = rowKeys;
+    rowKeys = null;
+    try { return CombatProfile.withProfileScope(state, () => buildForState(state, deps)); }
+    finally { rowKeys = outer; }
 }
 // The shadow plan comparison, also by the card refusal that sent this build
 // (deps.advisoryRefusal, set by the cold worker while diagnostics run), so a
@@ -801,6 +818,7 @@ function buildForState(state, deps) {
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
     const key = inputKey(state, { ...deps, timestamp });
+    if (held?.key !== key) rowKeys = new Map();
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
     // Market items read and the spot crowd are soft (L70): a moved token
@@ -864,20 +882,41 @@ function buildForState(state, deps) {
     const nodeScopes = [];
     const spotReads = new Map();
     const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
+    const bagIds = () => Object.keys(state.inventory || {}).filter(id => Number(id) !== 57);
     // ARCH-NOTE: PERF: the build is one synchronous call (its generators are
     // drained inside it; board, counter and workshop deltas and occupancy
     // reservations apply between calls), so an item's market token and a
     // spot's occupancy token are constant while it runs: each is built once
-    // per build. A late read through the view (after either return below)
-    // builds it fresh, as its inputs may have moved since. Dies at return.
-    let tokensLive = true;
-    const marketTokens = new Map(), spotTokens = new Map();
+    // per build. The bag (state.inventory rows, state.acceptedIncoming) is
+    // not mutated during the build either: an item's bag token and the bag's
+    // id list are built once too. A late read through the view (after either
+    // return below) builds it fresh, as its inputs may have moved since.
+    // Dies at return.
+    let tokensLive = true, liveBagIds = null, liveBagKeys = null;
+    const marketTokens = new Map(), spotTokens = new Map(), bagTokens = new Map();
+    const endTokens = () => { tokensLive = false; marketTokens.clear(); spotTokens.clear(); bagTokens.clear(); liveBagIds = liveBagKeys = null; };
     const tokenOf = id => {
         if (!tokensLive) return marketToken(sourceBoard, id, deps);
         let token = marketTokens.get(id);
         if (token === undefined) marketTokens.set(id, token = marketToken(sourceBoard, id, deps));
         return token;
     };
+    const spotTokenOf = id => {
+        if (!tokensLive) return occupancyToken(deps, id);
+        let token = spotTokens.get(id);
+        if (token === undefined) spotTokens.set(id, token = occupancyToken(deps, id));
+        return token;
+    };
+    const bagTokenOf = id => {
+        if (!tokensLive) return bagToken(id);
+        const at = String(id); // the property key bagToken reads
+        let token = bagTokens.get(at);
+        if (token === undefined) bagTokens.set(at, token = bagToken(id));
+        return token;
+    };
+    const wholeBagIds = () => tokensLive ? liveBagIds ??= bagIds() : bagIds();
+    const wholeBagKeys = () => tokensLive ? liveBagKeys ??= JSON.stringify(wholeBagIds().slice().sort())
+        : JSON.stringify(bagIds().sort());
     const read = id => { id = Number(id);
         for (const local of nodeScopes) local.items.set(id, tokenOf(id));
         if (reads.has(id)) return;
@@ -906,21 +945,22 @@ function buildForState(state, deps) {
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
         // Every evaluated source participates in admission/ranking, including a losing candidate.
-        sourceSpot: id => { let token = tokensLive ? spotTokens.get(id) : undefined;
-            if (token === undefined) { token = occupancyToken(deps, id); if (tokensLive) spotTokens.set(id, token); }
+        sourceSpot: id => { const token = spotTokenOf(id);
             spotReads.set(id, token);
             for (const local of nodeScopes) local.spots.set(id, token); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
-            bag: id => { if (!(Number(id) > 0)) return;
-                for (const local of nodeScopes) local.bag.set(Number(id), bagToken(id)); },
-            wholeBag: () => { for (const id of Object.keys(state.inventory || {})) if (Number(id) !== 57) context.nodeInputs.bag(id);
-                for (const local of nodeScopes) local.bag.set(-1, JSON.stringify(Object.keys(state.inventory || {}).filter(id => Number(id) !== 57).sort())); },
+            bag: id => { if (!(Number(id) > 0) || !nodeScopes.length) return;
+                const token = bagTokenOf(id);
+                for (const local of nodeScopes) local.bag.set(Number(id), token); },
+            wholeBag: () => { if (!nodeScopes.length) return;
+                for (const id of wholeBagIds()) context.nodeInputs.bag(id);
+                const token = wholeBagKeys();
+                for (const local of nodeScopes) local.bag.set(-1, token); },
             holds: input => (!deps.workshops || !!deps.workshopRevision || !!deps.inputKey)
-                && marketHolds(sourceBoard, new Map(input.items), deps)
-                && input.spots.every(([id, token]) => occupancyToken(deps, id) === token)
-                && (input.bag || []).every(([id, token]) => id === -1
-                    ? JSON.stringify(Object.keys(state.inventory || {}).filter(key => Number(key) !== 57).sort()) === token : bagToken(id) === token),
+                && marketHolds(sourceBoard, input.items || [], deps)
+                && input.spots.every(([id, token]) => spotTokenOf(id) === token)
+                && (input.bag || []).every(([id, token]) => (id === -1 ? wholeBagKeys() : bagTokenOf(id)) === token),
             keep: input => { for (const [id] of input.items) read(id);
                 for (const [id] of input.spots) context.sourceSpot(id);
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
@@ -956,7 +996,7 @@ function buildForState(state, deps) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
             if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
         }
-        tokensLive = false; marketTokens.clear(); spotTokens.clear();
+        endTokens();
         return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
     }
     // One stock reader for the provider's gear witnesses and the network
@@ -1023,7 +1063,7 @@ function buildForState(state, deps) {
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode);
-    building = false; tokensLive = false; marketTokens.clear(); spotTokens.clear();
+    building = false; endTokens();
 
     if (diagnostic) {
         Diagnostics.count('context', 'build', diagnosticReason);

@@ -4,13 +4,15 @@
 // things. Only these compact boundaries belong to the saved decision; graphs
 // stay in EconomyContext's existing bounded working cache.
 const { fnv1a32 } = require('../Fnv1a');
+// Read through the module object at call time (tests replace buildInputKey).
+const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
 let PurchaseFunding = null, EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
 function capability(state, timestamp = Date.now()) {
     const stats = state.stats || {};
-    return hash([invoke('GameServer/Bot/Population/ColdCombatProfile').buildInputKey(state, timestamp),
+    return hash([CombatProfile.buildInputKey(state, timestamp),
         state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
 }
 function fundingMark(state) {
@@ -92,7 +94,7 @@ function bounds(wallet) {
 function snapshot(state, context, cashBounds, moneyError = -1, mode) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
-    const profileKey = invoke('GameServer/Bot/Population/ColdCombatProfile').buildInputKey(state, context.timestamp);
+    const profileKey = CombatProfile.buildInputKey(state, context.timestamp);
     const night = profileKey.endsWith('|n') ? 1 : profileKey.endsWith('|d') ? 0 : -1;
     return { at: Number(context.timestamp), wallet: positive(state.adena), cashBounds, funding: fundingMark(actual), moneyError, night,
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
