@@ -429,6 +429,7 @@ const tests = [
     'tests/test_bot_inventory_capacity_cleanup.js',
     'tests/test_bot_goal_copies.js',
     'tests/test_cold_cleanup_keeps_resolve.js',
+    'tests/test_resolve_cold_state_pins.js',
     'tests/test_forced_cleanup_existing_shop.js',
     'tests/test_cold_safe_enchant.js',
     'tests/test_bot_static_buyer_sale.js',
