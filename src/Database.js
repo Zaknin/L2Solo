@@ -9540,7 +9540,8 @@ const Database = {
         ownerSection = 'goal',
         recruitmentDemand,
         recruitmentScan,
-        rosterProof = null
+        rosterProof = null,
+        supersededProductionGoalKey = null
     } = {}) {
         const clan = Number(clanId);
         if (!clan) return Promise.resolve({ ok: false, code: 'target_not_autonomous' });
@@ -9564,6 +9565,15 @@ const Database = {
                 || goal.controlledBy === 'player' || goal.goalKey !== state.recruitmentDemand.goalKey
                 || Number(goal.plan?.sourceId) !== Number(state.recruitmentDemand.source?.npcId))) state.recruitmentDemand = null;
             if (recruitmentScan !== undefined) state.recruitmentScan = recruitmentScan;
+            // From level 3 the main planner adopts the production goal as its
+            // previous goal; its saved result replaces that copy, which would
+            // otherwise keep its key, assignments and demand active.
+            if (ownerSection === 'goal' && supersededProductionGoalKey
+                && String(state.productionGoal?.goalKey || '') === String(supersededProductionGoalKey)) {
+                state.productionGoal = null;
+                if (state.recruitmentDemand?.ownerSection === 'productionGoal') state.recruitmentDemand = null;
+                if (state.recruitmentScan?.ownerSection === 'productionGoal') state.recruitmentScan = null;
+            }
             if (!goal || goal.status === 'completed' || goal.controlledBy === 'player') {
                 if (state.recruitmentDemand?.ownerSection === ownerSection) state.recruitmentDemand = null;
                 if (state.recruitmentScan?.ownerSection === ownerSection && (goal || recruitmentScan === undefined)) state.recruitmentScan = null;

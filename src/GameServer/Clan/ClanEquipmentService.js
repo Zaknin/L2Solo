@@ -1110,6 +1110,10 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
 
     const team = selection.plan?.economicTeam || planning.recruitment?.teams?.[selection.plan?.next?.spotId];
     const section = RosterDemand.ownerSection(clan, options.ownerSection);
+    // A main-section save of a goal adopted from the production section
+    // replaces that copy (ClanGoalService passes the production goal itself).
+    const supersededProductionGoalKey = section === 'goal' && previousGoal && previousGoal === clan.state?.productionGoal
+        ? previousGoal.goalKey : null;
     const scan = planning.recruitment?.scan || null;
     if (team && !team.actualReady) {
         const goal = Policy.buildGoal(clan, selection, previousGoal, Date.now(), { assignedMemberIds: [], roleFor: ClanPolicy.rosterRole });
@@ -1120,7 +1124,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
         const demand = RosterDemand.buildDemand(clan, goal, team, section);
         const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
-            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: demand, recruitmentScan: scan,
+            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: demand, recruitmentScan: scan, supersededProductionGoalKey,
             rosterProof: { ...demand.proof, source: team.source, ownerSection: section,
                 ownerGoal: RosterDemand.goalFingerprint(clan.state?.[section]) }, eventType: 'equipment_recruitment_wait', reasonCode: 'clan_recruitment_wait' });
         if (!saved.ok) return saved;
@@ -1183,7 +1187,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
     if (team?.actualReady) {
         goal.fullRoster = RosterDemand.fullRoster(clan, goal, team, section);
         const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
-            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: null, recruitmentScan: null,
+            expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: null, recruitmentScan: null, supersededProductionGoalKey,
             rosterProof: { ownFingerprint: team.ownFingerprint, rows: team.rows, source: team.source,
                 ownerSection: section, ownerGoal: RosterDemand.goalFingerprint(clan.state?.[section]) },
             eventType: 'equipment_full_roster_ready', reasonCode: 'clan_full_roster_ready' });

@@ -415,6 +415,7 @@ async function resolveClanInternal(clan, options = {}) {
                 ownerSection: equipment.ownerSection || 'goal',
                 recruitmentDemand: equipment.recruitmentDemand,
                 recruitmentScan: equipment.recruitmentScan,
+                supersededProductionGoalKey: previous && previous === clan.state?.productionGoal ? previous.goalKey : null,
                 expectedUpdatedAt: number(equipment.expectedUpdatedAt ?? clan.state?.updatedAt) || null,
                 eventType,
                 reasonCode: goal.plan?.reasonCode || ''
