@@ -10,7 +10,7 @@ module.exports = {
   name: "Cure for Fever Disease",
   npcs: [E, Y],
   startNpcs: [E],
-  killNpcs: [106],
+  killNpcs: [103, 106, 108],
   eventNpc: (e) => (e === "start" ? E : null),
   async onEvent(s, e) {
     if (e !== "start" || s.isStarted() || s.session.actor.fetchLevel() < 15)
