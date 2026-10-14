@@ -74,6 +74,8 @@ const ColdTrip = require('./ColdTrip');
 const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
 const activationFailureLogAt = new Map();
+// Returned by a resolveColdState branch method that did not take its branch.
+const COLD_RESOLVE_NEXT = Symbol('cold_resolve_next');
 
 function logPartyActivationFailure(state, result, timestamp = Date.now()) {
     const partyId = state?.party?.partyId;
@@ -3436,21 +3438,8 @@ const PopulationService = {
         }
         if (workerRequest?.precomputedPlan?.statsPacket) options = { ...options, statsPacket: workerRequest.precomputedPlan.statsPacket };
         const startedAt = Date.now();
-        const hallVisit = invoke('GameServer/ClanHall/ColdVisit');
-        if (!joinedBackgroundParty(state) && (hallVisit.needed(state, startedAt) || state.stats?.clanHallVisit)) {
-            // ARCH-NOTE: Hall dispatch bypasses the ordinary resolve branch; keep Main's captured admission through its inner writer.
-            return hallVisit.resolve(state, startedAt, options);
-        }
-        if (PartyMarketBreak.ready(state)) return resumePartyMarketBreak(state, startedAt);
-        const karmaPolicy = invoke('GameServer/Bot/Population/ColdKarmaPolicy');
-        const karmaPlan = karmaPolicy.active(state) ? karmaPolicy.plan(state, SpotProfiles.ensure(), startedAt) : null;
-        if (karmaPlan && !joinedBackgroundParty(state)) {
-            const result = BackgroundResolver.resolveSolo({ state: karmaPlan.plannedState,
-                spot: karmaPlan.spot, targetNpcId: karmaPlan.targetNpcId, timestamp: startedAt,
-                elapsedMs: Math.max(1000, startedAt - Number(state.timing?.lastResolvedAt || startedAt - 60000)) });
-            return LifeState.applyResolve(karmaPlan.plannedState, result, options)
-                .then(saved => ({ ok: !!saved, state: saved || state, debug: result.debug }));
-        }
+        const entryResult = this.resolveColdEntryBranch(state, options, startedAt);
+        if (entryResult !== COLD_RESOLVE_NEXT) return entryResult;
         const precomputedResult = workerRequest?.precomputedResult || null;
         if (joinedBackgroundParty(state)) {
             Config.developerDiagnostics && Metrics.recordSkippedResolve('joined_party_before_resolve');
@@ -3461,103 +3450,16 @@ const PopulationService = {
         const cleanupAfterFight = !!precomputedResult && state.activity !== 'shopping'
             && !!inventoryCleanupGoal(state, startedAt);
         const cleanupState = precomputedResult ? null : inventoryCleanupTravelState(state, startedAt);
-        if (cleanupState) {
-            const { cleanup, ...travelState } = cleanupState;
-            return LifeState.upsertState(travelState, 'inventory_cleanup_market_travel')
-                    .then((saved) => (saved ? {
-                        ok: true,
-                        state: saved,
-                        debug: {
-                            activity: 'inventory_cleanup_travel',
-                            slots: cleanup.itemCount,
-                            npcOnlySlots: cleanup.npcOnlySlots,
-                            reason: cleanup.cleanupReason
-                        }
-                    } : {
-                        ok: false,
-                        reason: 'state_write_rejected',
-                        state
-                    }))
-                    .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
-        }
+        if (cleanupState) return this.resolveColdCleanupTravel(state, cleanupState, startedAt);
         const elapsedMs = state.timing?.lastResolvedAt ? Math.max(1000, startedAt - state.timing.lastResolvedAt) : 60000;
         // These transitions have no planning, market search, or inventory work
         // between their persisted deadline and the next state change.
         if (cleanupAfterFight || state.activity === 'traveling'
             || (state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) {
-            const requestLifecycleState = expirePartyRequestForState(state, startedAt);
-            const result = precomputedResult || BackgroundResolver.resolveSolo({
-                state: requestLifecycleState,
-                spot: null,
-                pressure: Director.pressureForState(state),
-                elapsedMs,
-                timestamp: startedAt
-            });
-            if (joinedBackgroundParty(state)) {
-                Config.developerDiagnostics && Metrics.recordSkippedResolve('joined_party_during_transition');
-                return Promise.resolve({ ok: false, reason: 'joined_party', state });
-            }
-            return LifeState.applyResolve(requestLifecycleState, result, options).then((updatedState) => {
-                if (!updatedState) {
-                    Config.developerDiagnostics && Metrics.recordSkippedResolve('transition_apply_failed');
-                    return { ok: false, reason: 'apply_failed', state };
-                }
-                if (workerRequest?.precomputedPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions
-                    .hold(updatedState.characterId, workerRequest.precomputedPlan.economyDecision);
-                Config.developerDiagnostics && Metrics.recordBackgroundResolve();
-                Config.developerDiagnostics && Metrics.recordCombat(result.debug);
-                const recoveredForMarket = state.activity === 'resting'
-                    && (canResumeAffordableMarketPlan(updatedState)
-                        || canResumeWarehouseMarketSale(updatedState));
-                const cleanupTrip = cleanupAfterFight
-                    ? inventoryCleanupTravelState(withoutStartedTrip(state, updatedState), startedAt)
-                    : null;
-                if (cleanupTrip) delete cleanupTrip.cleanup;
-                const marketHandoff = cleanupTrip
-                    ? LifeState.upsertState(cleanupTrip, 'inventory_cleanup_market_travel').then((saved) => saved || updatedState)
-                    : recoveredForMarket
-                    ? GoalService.review(updatedState).then(async (goalSnapshot) => {
-                        const travelState = await marketTravelWithRefund(updatedState, goalSnapshot?.current, Date.now(), goalSnapshot?.economy);
-                        return travelState
-                            ? LifeState.upsertState(travelState, 'goal_market_travel_after_recovery').then((saved) => saved || travelState)
-                            : LifeState.cachedState(updatedState.characterId) || updatedState;
-                    }).catch((err) => {
-                        utils.infoWarn('BotGoals', 'post-recovery market handoff failed for %s: %s', state.name, err.message);
-                        return updatedState;
-                    })
-                    : Promise.resolve(updatedState);
-                return marketHandoff.then((finalState) => LifeEvents.recordMany(state.characterId, result.events).then(() => ({
-                    ok: true,
-                    state: finalState,
-                    debug: result.debug
-                })));
-            }).finally(() => {
-                if (workerRequest?.precomputedPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.release(state.characterId);
-                Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt);
-            });
+            return this.resolveColdTransition(state, workerRequest, options, precomputedResult, cleanupAfterFight, elapsedMs, startedAt);
         }
-        const MammonUnseal = invoke('GameServer/Bot/AI/BotMammonUnseal');
-        if (state.activity === 'crafting' && state.stats?.mammonReturn) {
-            return MammonUnseal.finish(state,startedAt)
-                .then(next => LifeState.upsertState(next,'mammon_unseal_complete'))
-                .then(saved => ({ok:!!saved,state:saved || state}));
-        }
-        const mammonTravel = MammonUnseal.beginTravel(state,startedAt);
-        if (mammonTravel) {
-            return LifeState.upsertState(mammonTravel,'mammon_unseal_travel')
-                .then(saved => ({ok:!!saved,state:saved || state}));
-        }
-        if (GearAcquisitionPlanner.isCraftService(state)) {
-            const { equipmentPlan, ...serviceStats } = state.stats || {};
-            const serviceState = {
-                ...state,
-                timing: { ...(state.timing || {}), nextResolveAt: null },
-                stats: serviceStats
-            };
-            return LifeState.upsertState(serviceState, 'craft_service_idle')
-                .then((saved) => ({ ok: true, state: saved || serviceState, debug: { activity: 'craft_service_idle' } }))
-                .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
-        }
+        const serviceResult = this.resolveColdServiceBranch(state, startedAt);
+        if (serviceResult !== COLD_RESOLVE_NEXT) return serviceResult;
         const staleShopping = BackgroundResolver.staleShopping(state);
         const passiveActivity = ['traveling', 'shopping', 'merchant', 'crafting', 'dead'].includes(state?.activity) && !staleShopping;
         const workerPlan = workerRequest?.precomputedPlan || null;
@@ -3574,29 +3476,7 @@ const PopulationService = {
             && ['direct_drop', 'craft'].includes(acquisitionPlan.strategy)
             && !!acquisitionPlan.next?.spotId;
         if (workerPlanHasSource) {
-            const availableSource = GearAcquisitionPlanner.bestSourceForPlan(
-                state,
-                acquisitionPlan,
-                spots,
-                { occupancy }
-            );
-            if (availableSource) {
-                acquisitionPlan = GearAcquisitionPlanner.retargetPlanSource(state, acquisitionPlan, availableSource);
-            } else if (!GearAcquisitionPlanner.clanGoalPlanLocked(state, acquisitionPlan)) {
-                const replacement = GearAcquisitionPlanner.replacementPlanFor(
-                    state,
-                    acquisitionPlan,
-                    spots,
-                    { occupancy, ...replanContext }
-                );
-                acquisitionPlan = GearAcquisitionPlanner.finalizePlan(
-                    state,
-                    previousPlan,
-                    replacement,
-                    replanContext,
-                    startedAt
-                );
-            }
+            acquisitionPlan = this.retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, occupancy, replanContext, startedAt);
         }
         if (!acquisitionPlan) {
             acquisitionPlan = previousPlan;
@@ -3615,61 +3495,7 @@ const PopulationService = {
         if (replanContext.failure) {
             planEvents.push(acquisitionFallbackEvent(state, previousPlan, replanContext.failure, acquisitionPlan));
         }
-        if (plannedState.activity === 'crafting') {
-            return ColdCraftingService.craft(plannedState).then((craft) => {
-                const completed = craft.reason === 'crafted'
-                    || craft.reason === 'component_crafted'
-                    || craft.reason === 'dual_sword_combined';
-                const reason = craft.reason === 'component_crafted'
-                    ? 'cold_component_craft_complete'
-                    : craft.reason === 'dual_sword_combined'
-                        ? 'cold_dual_sword_combine_complete'
-                        : craft.reason === 'crafted' ? 'cold_craft_complete' : 'cold_craft_wait';
-                // A persisted plan can say ready_to_craft even when an earlier
-                // component craft consumed the raw inputs for the next batch,
-                // or a station may be temporarily unavailable. Do not pin the
-                // bot at a station: re-enter hunting so the acquisition planner
-                // can select the missing material again.
-                const recoveredState = !completed && craft.state?.activity !== 'traveling'
-                    ? {
-                        ...(craft.state || plannedState),
-                        activity: 'hunting',
-                        stats: {
-                            ...((craft.state || plannedState).stats || {}),
-                            travel: null
-                        },
-                        timing: {
-                            ...((craft.state || plannedState).timing || {}),
-                            nextResolveAt: Date.now() + 30000
-                        }
-                    }
-                    : craft.state || plannedState;
-                return LifeState.upsertState(recoveredState, reason).then((saved) => {
-                    const supplemented = craft.supplementedMaterials || [];
-                    const supplyEvent = supplemented.length
-                        ? LifeEvents.record(state.characterId, 'craft_supplemented', `${state.name} received ${supplemented.map((item) => `${item.amount} ${item.name}`).join(', ')} for crafting`, {
-                            recipeId: craft.recipeId,
-                            materials: supplemented
-                        }, 2)
-                        : Promise.resolve(null);
-                    if (!completed) return supplyEvent.then(() => ({ ok: true, state: saved || craft.state || plannedState, debug: craft }));
-                    const eventType = craft.reason === 'component_crafted'
-                        ? 'component_craft'
-                        : craft.reason === 'dual_sword_combined' ? 'dual_sword_combine' : 'equipment_craft';
-                    const quantity = Math.max(1, Number(craft.batchCount || 1));
-                    const verb = craft.reason === 'dual_sword_combined' ? 'combined' : 'crafted';
-                    const summary = `${state.name} ${verb} ${quantity > 1 ? `${quantity}x ` : ''}${craft.productName} at ${craft.stationId}`;
-                    return supplyEvent.then(() => LifeEvents.record(state.characterId, eventType, summary, {
-                        recipeId: craft.recipeId,
-                        productId: craft.productId,
-                        stationId: craft.stationId
-                    }, ['crafted', 'dual_sword_combined'].includes(craft.reason) ? 3 : 2)).then(() => (
-                        { ok: true, state: saved || craft.state || plannedState, debug: craft }
-                    ));
-                });
-            })
-                .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
-        }
+        if (plannedState.activity === 'crafting') return this.resolveColdCraft(state, plannedState, startedAt);
         // A deferred request still owns the safe fallback route until the
         // planner either reopens it or replaces the unavailable target. Do
         // not let the cooldown hand control back to SpotProfiles while the
@@ -3695,13 +3521,7 @@ const PopulationService = {
         // example, a clan warehouse handoff). Persist this transition directly;
         // applying the earlier combat/travel result would overwrite the trip.
         if (travellingState !== routedState) {
-            const craftTravel = { ...travellingState, timing: { ...travellingState.timing,
-                activityStartedAt: startedAt, nextResolveAt: travel.arrivalAt } };
-            return LifeState.upsertState(craftTravel, 'cold_craft_travel').then(async saved => {
-                if (!saved) return { ok: false, reason: 'state_write_rejected', state };
-                await LifeEvents.recordMany(state.characterId, [...planEvents, ...travelEvents]);
-                return { ok: true, state: saved, debug: { activity: 'craft_travel', fights: 0, wins: 0 } };
-            }).finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
+            return this.resolveColdCraftTravel(state, travellingState, travel, planEvents, travelEvents, startedAt);
         }
         const selectedSpot = passiveActivity
             ? null
@@ -3720,18 +3540,7 @@ const PopulationService = {
         const effectiveState = huntingTravelState || travellingState;
         const spot = effectiveState.activity === 'traveling' ? null : selectedSpot;
         if (!spot && !passiveActivity && effectiveState.activity !== 'traveling') {
-            Config.developerDiagnostics && Metrics.recordSkippedResolve('missing_spot');
-            Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt);
-            const retryAt = startedAt + 30000;
-            const waiting = { ...plannedState, activity: 'resting',
-                timing: { ...plannedState.timing, nextResolveAt: retryAt },
-                stats: { ...plannedState.stats, restUntil: retryAt,
-                    routeRecovery: { reason: 'missing_spot', at: startedAt,
-                        attempts: Number(state.stats?.routeRecovery?.attempts || 0) + 1 } } };
-            return LifeState.upsertState(waiting, 'missing_spot_recovery').then(saved => ({
-                ok: !!saved, reason: saved ? 'missing_spot_recovery' : 'state_write_rejected',
-                state: saved || state, debug: { fights: 0, wins: 0, reason: 'missing_spot' }
-            }));
+            return this.resolveColdMissingSpot(state, plannedState, startedAt);
         }
 
         const result = precomputedResult || BackgroundResolver.resolveSolo({
@@ -3750,163 +3559,398 @@ const PopulationService = {
         }
 
         return LifeState.applyResolve(effectiveState, result, { ...options, ...(workerPlan?.statsPacket ? { statsPacket: workerPlan.statsPacket } : {}) })
-            .then(async (updatedState) => {
+            .then((updatedState) => this.applyColdResolve(state, updatedState, workerPlan, result, spot, acquisitionPlan, planEvents, travelEvents))
+            .then((outcome) => this.reviewColdOutcomeAfterCommit(state, outcome, options))
+            .finally(() => {
+                if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.release(state.characterId);
+                Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt);
+            });
+    },
+
+    resolveColdEntryBranch(state, options, startedAt) {
+        const hallVisit = invoke('GameServer/ClanHall/ColdVisit');
+        if (!joinedBackgroundParty(state) && (hallVisit.needed(state, startedAt) || state.stats?.clanHallVisit)) {
+            // ARCH-NOTE: Hall dispatch bypasses the ordinary resolve branch; keep Main's captured admission through its inner writer.
+            return hallVisit.resolve(state, startedAt, options);
+        }
+        if (PartyMarketBreak.ready(state)) return resumePartyMarketBreak(state, startedAt);
+        const karmaPolicy = invoke('GameServer/Bot/Population/ColdKarmaPolicy');
+        const karmaPlan = karmaPolicy.active(state) ? karmaPolicy.plan(state, SpotProfiles.ensure(), startedAt) : null;
+        if (karmaPlan && !joinedBackgroundParty(state)) {
+            const result = BackgroundResolver.resolveSolo({ state: karmaPlan.plannedState,
+                spot: karmaPlan.spot, targetNpcId: karmaPlan.targetNpcId, timestamp: startedAt,
+                elapsedMs: Math.max(1000, startedAt - Number(state.timing?.lastResolvedAt || startedAt - 60000)) });
+            return LifeState.applyResolve(karmaPlan.plannedState, result, options)
+                .then(saved => ({ ok: !!saved, state: saved || state, debug: result.debug }));
+        }
+        return COLD_RESOLVE_NEXT;
+    },
+
+    resolveColdCleanupTravel(state, cleanupState, startedAt) {
+        const { cleanup, ...travelState } = cleanupState;
+        return LifeState.upsertState(travelState, 'inventory_cleanup_market_travel')
+                .then((saved) => (saved ? {
+                    ok: true,
+                    state: saved,
+                    debug: {
+                        activity: 'inventory_cleanup_travel',
+                        slots: cleanup.itemCount,
+                        npcOnlySlots: cleanup.npcOnlySlots,
+                        reason: cleanup.cleanupReason
+                    }
+                } : {
+                    ok: false,
+                    reason: 'state_write_rejected',
+                    state
+                }))
+                .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
+    },
+
+    resolveColdTransition(state, workerRequest, options, precomputedResult, cleanupAfterFight, elapsedMs, startedAt) {
+        const requestLifecycleState = expirePartyRequestForState(state, startedAt);
+        const result = precomputedResult || BackgroundResolver.resolveSolo({
+            state: requestLifecycleState,
+            spot: null,
+            pressure: Director.pressureForState(state),
+            elapsedMs,
+            timestamp: startedAt
+        });
+        if (joinedBackgroundParty(state)) {
+            Config.developerDiagnostics && Metrics.recordSkippedResolve('joined_party_during_transition');
+            return Promise.resolve({ ok: false, reason: 'joined_party', state });
+        }
+        return LifeState.applyResolve(requestLifecycleState, result, options).then((updatedState) => {
             if (!updatedState) {
-                Config.developerDiagnostics && Metrics.recordSkippedResolve('cold_apply_failed');
+                Config.developerDiagnostics && Metrics.recordSkippedResolve('transition_apply_failed');
                 return { ok: false, reason: 'apply_failed', state };
             }
-            if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.hold(updatedState.characterId, workerPlan.economyDecision);
-
-            // Every ordinary town visit publishes its worker-selected stock
-            // before native errands can finish the visit and leave town.
-            let correctedBids = false;
-            const checked = await BotAfkMarketService.reviewPurchaseLimits(updatedState);
-            updatedState = checked.state || updatedState;
-            correctedBids = checked.changed;
-            // A correction changed the owner's board revision. Its earlier
-            // optional plan waits for fresh preparation, rather than replaying it.
-            if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids) {
-                const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
-                const beforeWrite = () => {
-                    if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
-                        || ColdSimulationCoordinator.workerEpoch !== sourceEpoch)
-                        throw new WorkerCommandAdmissionRefusal('stale_worker_source');
-                    if (ColdSimulationCoordinator.fencedBots?.has(updatedState.characterId)
-                        || LifeState.cachedState(updatedState.characterId)?.phase !== 'cold')
-                        throw new WorkerCommandAdmissionRefusal('hot_handoff_fenced');
-                };
-                const board = await BotAfkMarketService.executePlan(updatedState, workerPlan.economyPlan,
-                    { reviewGoal: false, beforeWrite });
-                updatedState = board.state || updatedState;
-            }
-
-            const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');
-            const acquisitionLeaf = ColdSimulationCoordinator.economyDecisions.activity(updatedState);
-            if (acquisitionLeaf?.activity === 'improving'
-                && ['crystallize', 'luxury_exchange'].includes(acquisitionLeaf.improvement?.kind)
-                && updatedState.currentRegion === 'Giran' && improvementService.inTown(updatedState)) {
-                const improved = await improvementService.reviewCold(updatedState);
-                if (improved.changed) {
-                    // Consumed inputs retire this card. Replan in town before
-                    // another purchase or the return to a hunting spot.
-                    ColdSimulationCoordinator.economyDecisions.release(updatedState.characterId);
-                    return { ok: true, state: improved.state, debug: result.debug };
-                }
-            }
-
+            if (workerRequest?.precomputedPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions
+                .hold(updatedState.characterId, workerRequest.precomputedPlan.economyDecision);
             Config.developerDiagnostics && Metrics.recordBackgroundResolve();
             Config.developerDiagnostics && Metrics.recordCombat(result.debug);
-            if (updatedState.activity === 'crafting') {
-                return { ok: true, state: updatedState, debug: result.debug };
-            }
-            const tripEdge = CombinedErrands.edge(state, updatedState, result);
-            return invoke('GameServer/Bot/Economy/CraftWorkshopService').review(updatedState)
-                .then(workshopState => ColdShotEconomyService.review(workshopState, Date.now(), { edge: tripEdge }))
-                .then((shotEconomy) => ColdWealthCraftService.tryCraft(shotEconomy.state || updatedState))
-                .then(async (wealthCraft) => {
-                    const current = wealthCraft.state || updatedState;
-                    const released = invoke('GameServer/Bot/Economy/BotImprovementService').inTown(current)
-                        ? await BotWarehouse.releaseCold(current, { inTown: true }) : { state: current };
-                    return ColdMarketListingService.resolve(LifeState.cachedState(current.characterId) || released.state || current);
+            const recoveredForMarket = state.activity === 'resting'
+                && (canResumeAffordableMarketPlan(updatedState)
+                    || canResumeWarehouseMarketSale(updatedState));
+            const cleanupTrip = cleanupAfterFight
+                ? inventoryCleanupTravelState(withoutStartedTrip(state, updatedState), startedAt)
+                : null;
+            if (cleanupTrip) delete cleanupTrip.cleanup;
+            const marketHandoff = cleanupTrip
+                ? LifeState.upsertState(cleanupTrip, 'inventory_cleanup_market_travel').then((saved) => saved || updatedState)
+                : recoveredForMarket
+                ? GoalService.review(updatedState).then(async (goalSnapshot) => {
+                    const travelState = await marketTravelWithRefund(updatedState, goalSnapshot?.current, Date.now(), goalSnapshot?.economy);
+                    return travelState
+                        ? LifeState.upsertState(travelState, 'goal_market_travel_after_recovery').then((saved) => saved || travelState)
+                        : LifeState.cachedState(updatedState.characterId) || updatedState;
+                }).catch((err) => {
+                    utils.infoWarn('BotGoals', 'post-recovery market handoff failed for %s: %s', state.name, err.message);
+                    return updatedState;
                 })
-                .then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
-                    spot: SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId) || spot
-                })
-                    .then((goalSnapshot) => ColdMarketService.tryPurchase(marketLifecycle.state, goalSnapshot?.current)
-                        .then((marketResult) => ({ marketLifecycle, marketResult, goal: goalSnapshot?.current || null }))))
-                .then(({ marketLifecycle, marketResult, goal }) => {
-                    const purchasedState = marketResult.state || marketLifecycle.state || updatedState;
-                    if (marketResult.pending) return purchasedState;
-                    // The bot was activated while the market step ran (the activation fence waits
-                    // 500 ms at most): its row is the actor's now; nothing cold is written over it.
-                    const hotRow = LifeState.hotRow(purchasedState.characterId);
-                    if (hotRow) return hotRow;
-                    if (marketResult.purchased) {
-                        const batchState = {
-                            ...purchasedState,
-                            activity: 'shopping',
-                            timing: {
-                                ...(purchasedState.timing || {}),
-                                activityStartedAt: Number(purchasedState.timing?.activityStartedAt || Date.now()),
-                                nextResolveAt: Date.now() + 1000
-                            }
-                        };
-                        // Keep the bot in town for one prompt follow-up pass.
-                        // The next scheduler tick replans from the purchased
-                        // inventory and can buy another item in this same town
-                        // without returning to the hunting ground in between.
-                        return LifeState.upsertState(batchState, 'market_batch_continue')
-                            .then((saved) => saved || batchState);
-                    }
-                    const listingIntent = marketListingIntent(purchasedState, goal);
-                    const listingPromise = !marketLifecycle.closed && listingIntent.shouldOpen
-                        && (!workerPlan?.economyPlan || listingIntent.cleanup)
-                        ? openMarketListing(listingIntent, goal)
-                        : Promise.resolve({ state: purchasedState, listed: false });
-                    const marketStatePromise = listingPromise.then((listingResult) => {
-                        const listingState = listingResult.state || purchasedState;
-                        if (listingResult.pending) return listingState;
-                        if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
-                        return ColdMarketService.finishTownErrands(listingState).then((restockedState) => {
-                            if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
-                            if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(restockedState.characterId)) return restockedState;
-                            const returnState = GoalExecutor.finishMarketVisit(restockedState);
-                            return returnState
-                                ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)
-                                : restockedState;
-                        });
-                    });
-                    return marketStatePromise.then((persistedState) => persistedState || purchasedState)
-                        .then((marketState) => {
-                        if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(marketState.characterId)) return marketState;
-                        return GoalService.review(marketState, { spot }).catch((err) => {
-                        utils.infoWarn('BotGoals', 'goal review failed for %s: %s', marketState.name, err.message);
-                        return null;
-                    }).then(async (goalSnapshot) => {
-                        const remote = await BotAfkMarketService.reconcile(marketState, goalSnapshot?.current, goalSnapshot?.candidates);
-                        const current = remote.state || marketState;
-                        const travelState = tripEdge || SurvivalFloor.forState(current)?.action === 'unload'
-                            ? GoalExecutor.beginMarketTravel(current, goalSnapshot?.current, Date.now(),
-                                { economy: current === marketState ? goalSnapshot?.economy : null }) : null;
-                        return travelState ? LifeState.upsertState(travelState, 'goal_market_travel') : current;
-                    });
-                    });
-                }).then((finalState) => {
-                    const craftEvents = CraftTelemetry.progressEvents(state, acquisitionPlan, updatedState);
-                    return LifeEvents.recordMany(state.characterId, [...planEvents, ...travelEvents, ...result.events, ...craftEvents])
-                        .then(() => finalState);
-                })
-                .then((finalState) => {
-                    // A bot that went hot meanwhile speaks through its own AI.
-                    if (finalState.phase !== 'hot') GlobalChat.maybeAnnounce(finalState, result.events);
-                    return {
-                        ok: true,
-                        state: finalState,
-                        debug: result.debug
-                    };
-                });
-        }).then(async outcome => {
-            if (outcome?.ok && !options.workerAdmission
-                && !invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) {
-                const current = LifeState.cachedState(state.characterId) || outcome.state;
-                if (current) {
-                    const trained = await LifeState.reviewTrainingAfterCommit(current);
-                    const improved = await invoke('GameServer/Bot/Economy/BotImprovementService').reviewCold(trained);
-                    outcome.state = improved.state || trained;
-                }
-            }
-            // Native errands can start a new trip after publishing the bids.
-            // Finish this owner's resolve against that final route and money
-            // packet, including recovery and preparation-pending branches.
-            if (outcome?.ok && outcome.state) {
-                const checked = await BotAfkMarketService.reviewPurchaseLimits(outcome.state);
-                outcome.state = checked.state || outcome.state;
-            }
-            return outcome;
+                : Promise.resolve(updatedState);
+            return marketHandoff.then((finalState) => LifeEvents.recordMany(state.characterId, result.events).then(() => ({
+                ok: true,
+                state: finalState,
+                debug: result.debug
+            })));
         }).finally(() => {
-            if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.release(state.characterId);
+            if (workerRequest?.precomputedPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.release(state.characterId);
             Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt);
         });
+    },
+
+    resolveColdServiceBranch(state, startedAt) {
+        const MammonUnseal = invoke('GameServer/Bot/AI/BotMammonUnseal');
+        if (state.activity === 'crafting' && state.stats?.mammonReturn) {
+            return MammonUnseal.finish(state,startedAt)
+                .then(next => LifeState.upsertState(next,'mammon_unseal_complete'))
+                .then(saved => ({ok:!!saved,state:saved || state}));
+        }
+        const mammonTravel = MammonUnseal.beginTravel(state,startedAt);
+        if (mammonTravel) {
+            return LifeState.upsertState(mammonTravel,'mammon_unseal_travel')
+                .then(saved => ({ok:!!saved,state:saved || state}));
+        }
+        if (GearAcquisitionPlanner.isCraftService(state)) {
+            const { equipmentPlan, ...serviceStats } = state.stats || {};
+            const serviceState = {
+                ...state,
+                timing: { ...(state.timing || {}), nextResolveAt: null },
+                stats: serviceStats
+            };
+            return LifeState.upsertState(serviceState, 'craft_service_idle')
+                .then((saved) => ({ ok: true, state: saved || serviceState, debug: { activity: 'craft_service_idle' } }))
+                .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
+        }
+        return COLD_RESOLVE_NEXT;
+    },
+
+    retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, occupancy, replanContext, startedAt) {
+        const availableSource = GearAcquisitionPlanner.bestSourceForPlan(
+            state,
+            acquisitionPlan,
+            spots,
+            { occupancy }
+        );
+        if (availableSource) {
+            acquisitionPlan = GearAcquisitionPlanner.retargetPlanSource(state, acquisitionPlan, availableSource);
+        } else if (!GearAcquisitionPlanner.clanGoalPlanLocked(state, acquisitionPlan)) {
+            const replacement = GearAcquisitionPlanner.replacementPlanFor(
+                state,
+                acquisitionPlan,
+                spots,
+                { occupancy, ...replanContext }
+            );
+            acquisitionPlan = GearAcquisitionPlanner.finalizePlan(
+                state,
+                previousPlan,
+                replacement,
+                replanContext,
+                startedAt
+            );
+        }
+        return acquisitionPlan;
+    },
+
+    resolveColdCraft(state, plannedState, startedAt) {
+        return ColdCraftingService.craft(plannedState).then((craft) => {
+            const completed = craft.reason === 'crafted'
+                || craft.reason === 'component_crafted'
+                || craft.reason === 'dual_sword_combined';
+            const reason = craft.reason === 'component_crafted'
+                ? 'cold_component_craft_complete'
+                : craft.reason === 'dual_sword_combined'
+                    ? 'cold_dual_sword_combine_complete'
+                    : craft.reason === 'crafted' ? 'cold_craft_complete' : 'cold_craft_wait';
+            // A persisted plan can say ready_to_craft even when an earlier
+            // component craft consumed the raw inputs for the next batch,
+            // or a station may be temporarily unavailable. Do not pin the
+            // bot at a station: re-enter hunting so the acquisition planner
+            // can select the missing material again.
+            const recoveredState = !completed && craft.state?.activity !== 'traveling'
+                ? {
+                    ...(craft.state || plannedState),
+                    activity: 'hunting',
+                    stats: {
+                        ...((craft.state || plannedState).stats || {}),
+                        travel: null
+                    },
+                    timing: {
+                        ...((craft.state || plannedState).timing || {}),
+                        nextResolveAt: Date.now() + 30000
+                    }
+                }
+                : craft.state || plannedState;
+            return LifeState.upsertState(recoveredState, reason).then((saved) => {
+                const supplemented = craft.supplementedMaterials || [];
+                const supplyEvent = supplemented.length
+                    ? LifeEvents.record(state.characterId, 'craft_supplemented', `${state.name} received ${supplemented.map((item) => `${item.amount} ${item.name}`).join(', ')} for crafting`, {
+                        recipeId: craft.recipeId,
+                        materials: supplemented
+                    }, 2)
+                    : Promise.resolve(null);
+                if (!completed) return supplyEvent.then(() => ({ ok: true, state: saved || craft.state || plannedState, debug: craft }));
+                const eventType = craft.reason === 'component_crafted'
+                    ? 'component_craft'
+                    : craft.reason === 'dual_sword_combined' ? 'dual_sword_combine' : 'equipment_craft';
+                const quantity = Math.max(1, Number(craft.batchCount || 1));
+                const verb = craft.reason === 'dual_sword_combined' ? 'combined' : 'crafted';
+                const summary = `${state.name} ${verb} ${quantity > 1 ? `${quantity}x ` : ''}${craft.productName} at ${craft.stationId}`;
+                return supplyEvent.then(() => LifeEvents.record(state.characterId, eventType, summary, {
+                    recipeId: craft.recipeId,
+                    productId: craft.productId,
+                    stationId: craft.stationId
+                }, ['crafted', 'dual_sword_combined'].includes(craft.reason) ? 3 : 2)).then(() => (
+                    { ok: true, state: saved || craft.state || plannedState, debug: craft }
+                ));
+            });
+        })
+            .finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
+    },
+
+    resolveColdCraftTravel(state, travellingState, travel, planEvents, travelEvents, startedAt) {
+        const craftTravel = { ...travellingState, timing: { ...travellingState.timing,
+            activityStartedAt: startedAt, nextResolveAt: travel.arrivalAt } };
+        return LifeState.upsertState(craftTravel, 'cold_craft_travel').then(async saved => {
+            if (!saved) return { ok: false, reason: 'state_write_rejected', state };
+            await LifeEvents.recordMany(state.characterId, [...planEvents, ...travelEvents]);
+            return { ok: true, state: saved, debug: { activity: 'craft_travel', fights: 0, wins: 0 } };
+        }).finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
+    },
+
+    resolveColdMissingSpot(state, plannedState, startedAt) {
+        Config.developerDiagnostics && Metrics.recordSkippedResolve('missing_spot');
+        Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt);
+        const retryAt = startedAt + 30000;
+        const waiting = { ...plannedState, activity: 'resting',
+            timing: { ...plannedState.timing, nextResolveAt: retryAt },
+            stats: { ...plannedState.stats, restUntil: retryAt,
+                routeRecovery: { reason: 'missing_spot', at: startedAt,
+                    attempts: Number(state.stats?.routeRecovery?.attempts || 0) + 1 } } };
+        return LifeState.upsertState(waiting, 'missing_spot_recovery').then(saved => ({
+            ok: !!saved, reason: saved ? 'missing_spot_recovery' : 'state_write_rejected',
+            state: saved || state, debug: { fights: 0, wins: 0, reason: 'missing_spot' }
+        }));
+    },
+
+    async applyColdResolve(state, updatedState, workerPlan, result, spot, acquisitionPlan, planEvents, travelEvents) {
+        if (!updatedState) {
+            Config.developerDiagnostics && Metrics.recordSkippedResolve('cold_apply_failed');
+            return { ok: false, reason: 'apply_failed', state };
+        }
+        if (workerPlan?.economyDecision) ColdSimulationCoordinator.economyDecisions.hold(updatedState.characterId, workerPlan.economyDecision);
+
+        // Every ordinary town visit publishes its worker-selected stock
+        // before native errands can finish the visit and leave town.
+        let correctedBids = false;
+        const checked = await BotAfkMarketService.reviewPurchaseLimits(updatedState);
+        updatedState = checked.state || updatedState;
+        correctedBids = checked.changed;
+        // A correction changed the owner's board revision. Its earlier
+        // optional plan waits for fresh preparation, rather than replaying it.
+        if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids) {
+            const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
+            const beforeWrite = () => {
+                if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
+                    || ColdSimulationCoordinator.workerEpoch !== sourceEpoch)
+                    throw new WorkerCommandAdmissionRefusal('stale_worker_source');
+                if (ColdSimulationCoordinator.fencedBots?.has(updatedState.characterId)
+                    || LifeState.cachedState(updatedState.characterId)?.phase !== 'cold')
+                    throw new WorkerCommandAdmissionRefusal('hot_handoff_fenced');
+            };
+            const board = await BotAfkMarketService.executePlan(updatedState, workerPlan.economyPlan,
+                { reviewGoal: false, beforeWrite });
+            updatedState = board.state || updatedState;
+        }
+
+        const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');
+        const acquisitionLeaf = ColdSimulationCoordinator.economyDecisions.activity(updatedState);
+        if (acquisitionLeaf?.activity === 'improving'
+            && ['crystallize', 'luxury_exchange'].includes(acquisitionLeaf.improvement?.kind)
+            && updatedState.currentRegion === 'Giran' && improvementService.inTown(updatedState)) {
+            const improved = await improvementService.reviewCold(updatedState);
+            if (improved.changed) {
+                // Consumed inputs retire this card. Replan in town before
+                // another purchase or the return to a hunting spot.
+                ColdSimulationCoordinator.economyDecisions.release(updatedState.characterId);
+                return { ok: true, state: improved.state, debug: result.debug };
+            }
+        }
+
+        Config.developerDiagnostics && Metrics.recordBackgroundResolve();
+        Config.developerDiagnostics && Metrics.recordCombat(result.debug);
+        if (updatedState.activity === 'crafting') {
+            return { ok: true, state: updatedState, debug: result.debug };
+        }
+        const tripEdge = CombinedErrands.edge(state, updatedState, result);
+        return invoke('GameServer/Bot/Economy/CraftWorkshopService').review(updatedState)
+            .then(workshopState => ColdShotEconomyService.review(workshopState, Date.now(), { edge: tripEdge }))
+            .then((shotEconomy) => ColdWealthCraftService.tryCraft(shotEconomy.state || updatedState))
+            .then(async (wealthCraft) => {
+                const current = wealthCraft.state || updatedState;
+                const released = invoke('GameServer/Bot/Economy/BotImprovementService').inTown(current)
+                    ? await BotWarehouse.releaseCold(current, { inTown: true }) : { state: current };
+                return ColdMarketListingService.resolve(LifeState.cachedState(current.characterId) || released.state || current);
+            })
+            .then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
+                spot: SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId) || spot
+            })
+                .then((goalSnapshot) => ColdMarketService.tryPurchase(marketLifecycle.state, goalSnapshot?.current)
+                    .then((marketResult) => ({ marketLifecycle, marketResult, goal: goalSnapshot?.current || null }))))
+            .then(({ marketLifecycle, marketResult, goal }) => this.finishColdMarketStep(updatedState, workerPlan, spot, tripEdge, marketLifecycle, marketResult, goal))
+            .then((finalState) => {
+                const craftEvents = CraftTelemetry.progressEvents(state, acquisitionPlan, updatedState);
+                return LifeEvents.recordMany(state.characterId, [...planEvents, ...travelEvents, ...result.events, ...craftEvents])
+                    .then(() => finalState);
+            })
+            .then((finalState) => {
+                // A bot that went hot meanwhile speaks through its own AI.
+                if (finalState.phase !== 'hot') GlobalChat.maybeAnnounce(finalState, result.events);
+                return {
+                    ok: true,
+                    state: finalState,
+                    debug: result.debug
+                };
+            });
+    },
+
+    finishColdMarketStep(updatedState, workerPlan, spot, tripEdge, marketLifecycle, marketResult, goal) {
+        const purchasedState = marketResult.state || marketLifecycle.state || updatedState;
+        if (marketResult.pending) return purchasedState;
+        // The bot was activated while the market step ran (the activation fence waits
+        // 500 ms at most): its row is the actor's now; nothing cold is written over it.
+        const hotRow = LifeState.hotRow(purchasedState.characterId);
+        if (hotRow) return hotRow;
+        if (marketResult.purchased) {
+            const batchState = {
+                ...purchasedState,
+                activity: 'shopping',
+                timing: {
+                    ...(purchasedState.timing || {}),
+                    activityStartedAt: Number(purchasedState.timing?.activityStartedAt || Date.now()),
+                    nextResolveAt: Date.now() + 1000
+                }
+            };
+            // Keep the bot in town for one prompt follow-up pass.
+            // The next scheduler tick replans from the purchased
+            // inventory and can buy another item in this same town
+            // without returning to the hunting ground in between.
+            return LifeState.upsertState(batchState, 'market_batch_continue')
+                .then((saved) => saved || batchState);
+        }
+        const listingIntent = marketListingIntent(purchasedState, goal);
+        const listingPromise = !marketLifecycle.closed && listingIntent.shouldOpen
+            && (!workerPlan?.economyPlan || listingIntent.cleanup)
+            ? openMarketListing(listingIntent, goal)
+            : Promise.resolve({ state: purchasedState, listed: false });
+        const marketStatePromise = listingPromise.then((listingResult) => {
+            const listingState = listingResult.state || purchasedState;
+            if (listingResult.pending) return listingState;
+            if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
+            return ColdMarketService.finishTownErrands(listingState).then((restockedState) => {
+                if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
+                if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(restockedState.characterId)) return restockedState;
+                const returnState = GoalExecutor.finishMarketVisit(restockedState);
+                return returnState
+                    ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)
+                    : restockedState;
+            });
+        });
+        return marketStatePromise.then((persistedState) => persistedState || purchasedState)
+            .then((marketState) => {
+            if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(marketState.characterId)) return marketState;
+            return GoalService.review(marketState, { spot }).catch((err) => {
+            utils.infoWarn('BotGoals', 'goal review failed for %s: %s', marketState.name, err.message);
+            return null;
+        }).then(async (goalSnapshot) => {
+            const remote = await BotAfkMarketService.reconcile(marketState, goalSnapshot?.current, goalSnapshot?.candidates);
+            const current = remote.state || marketState;
+            const travelState = tripEdge || SurvivalFloor.forState(current)?.action === 'unload'
+                ? GoalExecutor.beginMarketTravel(current, goalSnapshot?.current, Date.now(),
+                    { economy: current === marketState ? goalSnapshot?.economy : null }) : null;
+            return travelState ? LifeState.upsertState(travelState, 'goal_market_travel') : current;
+        });
+        });
+    },
+
+    async reviewColdOutcomeAfterCommit(state, outcome, options) {
+        if (outcome?.ok && !options.workerAdmission
+            && !invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) {
+            const current = LifeState.cachedState(state.characterId) || outcome.state;
+            if (current) {
+                const trained = await LifeState.reviewTrainingAfterCommit(current);
+                const improved = await invoke('GameServer/Bot/Economy/BotImprovementService').reviewCold(trained);
+                outcome.state = improved.state || trained;
+            }
+        }
+        // Native errands can start a new trip after publishing the bids.
+        // Finish this owner's resolve against that final route and money
+        // packet, including recovery and preparation-pending branches.
+        if (outcome?.ok && outcome.state) {
+            const checked = await BotAfkMarketService.reviewPurchaseLimits(outcome.state);
+            outcome.state = checked.state || outcome.state;
+        }
+        return outcome;
     },
 
     async executeWorkerLifecycleCommand(state, request = {}, options = {}) {
