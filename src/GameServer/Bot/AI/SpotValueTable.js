@@ -41,8 +41,8 @@ const incomeBases = new Map();
 const MAX_INCOME_BASE_CELLS = 262144;
 let incomeBaseCells = 0;
 // Cache use for the cold worker heartbeat (L104); counted only with developer diagnostics.
-// memoClears counts the oldest-row drops at MAX_VALUE_MEMO; resets the catalog or rate changes in refreshCatalog.
-const stats = { memoHits: 0, memoMisses: 0, memoClears: 0, resets: 0, baseClears: 0 };
+// memoEvictions counts the oldest-row drops at MAX_VALUE_MEMO; resets the catalog or rate changes in refreshCatalog.
+const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, resets: 0, baseClears: 0 };
 function cacheStats() {
     return { memo: valueMemo.size, best: bestRows.size, income: incomeRows.size, bases: incomeBases.size,
         cells: incomeBaseCells, ...stats };
@@ -212,7 +212,7 @@ function memoValue(t, rates, spotId, role, level, shots, skill) {
         row = computeValue(t, rates, spotId, role, level, shots, skill);
         if (valueMemo.size >= MAX_VALUE_MEMO) {
             valueMemo.delete(valueMemo.keys().next().value);
-            DiagnosticConfig.developerDiagnostics && (stats.memoClears += 1);
+            DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
         }
         valueMemo.set(key, row);
     } else DiagnosticConfig.developerDiagnostics && (stats.memoHits += 1);

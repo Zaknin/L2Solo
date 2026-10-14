@@ -320,12 +320,14 @@ const uniqueVerdicts = new Map();
 let verdictSource, verdictCount = 0;
 
 // Cache use for the cold worker heartbeat (L104); counted only with developer
-// diagnostics. verdictEntries is kept incrementally: the verdict entries of
-// every fingerprint in sharedVerdicts, with the count of each fingerprint in
-// entryCounts (keyed by its verdict map) so an eviction subtracts it; a dropped
-// map may still be held by profile arrays, so it stops counting (live false).
-const stats = { verdictEntries: 0, fingerprintHits: 0, fingerprintMisses: 0, verdictHits: 0, verdictMisses: 0,
-    spotHits: 0, spotMisses: 0, evictions: 0, clears: 0 };
+// diagnostics. fingerprintHits/Misses: a new profile array found or not in
+// sharedVerdicts. verdictEntries and spotEntries are kept incrementally: the
+// verdict and spot result entries of every fingerprint in sharedVerdicts, with
+// the counts of each fingerprint in entryCounts (keyed by its verdict map) so an
+// eviction subtracts them; a dropped map may still be held by profile arrays,
+// so it stops counting (live false).
+const stats = { verdictEntries: 0, spotEntries: 0, fingerprintHits: 0, fingerprintMisses: 0, verdictHits: 0,
+    verdictMisses: 0, spotHits: 0, spotMisses: 0, evictions: 0, clears: 0 };
 const entryCounts = new WeakMap();
 function cacheStats() {
     return { fingerprints: sharedVerdicts.size, uniqueVerdicts: uniqueVerdicts.size,
@@ -368,17 +370,14 @@ function profileFingerprint(profile) {
 // Verdicts of one profile array: safety options key -> species id -> verdict.
 function verdictsFor(profiles) {
     let verdicts = npcVerdicts.get(profiles);
-    if (verdicts) {
-        DiagnosticConfig.developerDiagnostics && (stats.fingerprintHits += 1);
-        return verdicts;
-    }
+    if (verdicts) return verdicts;
     const source = dataCache().npcs || [];
     if (verdictSource !== source || verdictCount !== source.length) {
         verdictSource = source;
         verdictCount = source.length;
         if (DiagnosticConfig.developerDiagnostics) {
             for (const entry of sharedVerdicts.values()) { const held = entryCounts.get(entry.verdicts); if (held) held.live = false; }
-            stats.clears += 2; stats.verdictEntries = 0;
+            stats.clears += 2; stats.verdictEntries = 0; stats.spotEntries = 0;
         }
         sharedVerdicts.clear();
         uniqueVerdicts.clear();
@@ -398,14 +397,14 @@ function verdictsFor(profiles) {
         DiagnosticConfig.developerDiagnostics && (stats.fingerprintMisses += 1);
         if (fingerprint !== null) {
             sharedVerdicts.set(fingerprint, { verdicts, usedAt: now });
-            if (DiagnosticConfig.developerDiagnostics) entryCounts.set(verdicts, { entries: 0, live: true });
+            if (DiagnosticConfig.developerDiagnostics) entryCounts.set(verdicts, { entries: 0, spots: 0, live: true });
             for (const [key, entry] of sharedVerdicts) {
                 if (sharedVerdicts.size <= VERDICT_PROFILE_LIMIT && now - entry.usedAt < VERDICT_PROFILE_IDLE_MS) break;
                 sharedVerdicts.delete(key);
                 if (DiagnosticConfig.developerDiagnostics) {
                     stats.evictions += 1;
                     const held = entryCounts.get(entry.verdicts);
-                    if (held) { held.live = false; stats.verdictEntries -= held.entries; }
+                    if (held) { held.live = false; stats.verdictEntries -= held.entries; stats.spotEntries -= held.spots; }
                 }
             }
         }
@@ -481,11 +480,12 @@ function spotMatchup(spot, profiles, options = {}) {
         eligible ||= canHunt;
         if (canHunt) safe += weight;
     }
-    if (DiagnosticConfig.developerDiagnostics) {
-        // Verdicts stored by this spot; unshared (unfingerprinted) arrays have no count.
-        const held = entryCounts.get(byOptions);
+    // Verdicts and the spot result stored by this call; unshared (unfingerprinted) arrays have no count.
+    const held = DiagnosticConfig.developerDiagnostics ? entryCounts.get(byOptions) : null;
+    if (held?.live) {
         const added = verdicts.size - entriesBefore;
-        if (held?.live && added) { held.entries += added; stats.verdictEntries += added; }
+        held.entries += added; held.spots += 1;
+        stats.verdictEntries += added; stats.spotEntries += 1;
     }
     const efficiency = total ? effective / total : 1;
     const safeFraction = total ? safe / total : 1;
