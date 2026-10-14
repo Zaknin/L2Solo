@@ -8,10 +8,13 @@ const Population = invoke('GameServer/Bot/Population/PopulationService');
 const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const id = 730183;
 const sellerId = 730184;
+const doneSellerId = 730185;
+const cleanerId = 730186;
 const STATIC_BOUGHT = [1864, 1865, 1866, 1867, 1868, 1869, 1870, 1871];
 
 (async () => {
-    const world = await createWorld([{ id, classId: 0, level: 20 }, { id: sellerId, classId: 0, level: 20 }], 'native-afk-visit');
+    const world = await createWorld([{ id, classId: 0, level: 20 }, { id: sellerId, classId: 0, level: 20 },
+        { id: doneSellerId, classId: 0, level: 20 }, { id: cleanerId, classId: 0, level: 20 }], 'native-afk-visit');
     try {
         await Life.init();
         await Database.createAccount('bot_native_afk_visit', 'fixture');
@@ -172,5 +175,49 @@ const STATIC_BOUGHT = [1864, 1865, 1866, 1867, 1868, 1869, 1870, 1871];
         const unbacked = offered.filter(line => sold.has(Number(line.selfId)));
         assert.deepEqual(unbacked.map(line => line.selfId), [], 'nothing sold on this visit is still offered on the board');
         console.log('PASS native sale town visit: worker showcase skipped, static buyers paid, sale retry written, open listed the rest');
+
+        assert.equal(Population.marketListingIntent({ ...saleState, stats: { ...saleState.stats,
+            townVisit: { ...saleState.stats.townVisit, town: 'Gludin Village' } } }, { type: 'restock' }).saleVisit, false,
+        'a sale marker for another town does not make this visit a sale trip');
+        // Controls on the same bag: the worker showcase still runs on a finished
+        // sale visit and on a forced cleanup (the author's path, E306).
+        const showcaseRunsFor = async (characterId, label, stats) => {
+            const account = `bot_native_${label}`;
+            await Database.createAccount(account, 'fixture');
+            await Database.execute(['UPDATE characters SET username=? WHERE id=?', [account, characterId]]);
+            await Database.setItem(characterId, { selfId: 57, amount: 1000000, slot: 0 });
+            await Database.setItem(characterId, { selfId: 1, amount: 1, equipped: 1, slot: 7 });
+            for (const selfId of [1786, 1792, 1793, 1800, 1803, 2143, 2151, 2173, 2174, 2175, 1867, 1869, 1870, 1871, 1872, 1873, 1880, 1897])
+                await Database.setItem(characterId, { selfId, amount: 1000, slot: 0 });
+            const visitState = await Life.upsertState({ characterId, accountName: account,
+                name: `Native${label}`, level: 20, exp: Number(DataCache.experience[19]),
+                phase: 'cold', activity: 'shopping', currentRegion: 'Elven Village', spotId: String(spot.id),
+                adena: 1000000, loc: place, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 },
+                inventory: Life.inventorySummaryFromItems(await Database.fetchItems(characterId)),
+                stats: { classId: 0, generatedCold: true, classProgressionClassId: 0, classProgressionLevel: 20,
+                    marketReturn: { spotId: String(spot.id), regionName: spot.name, loc: spot.center }, ...stats },
+                timing: { activityStartedAt: Date.now(), lastResolvedAt: Date.now() - 1000, nextResolveAt: Date.now() }
+            }, `${label}_fixture`);
+            const decided = await nativeDecision(visitState, { townVisit: true });
+            assert(decided.plan.economyPlan, `${label}: the worker plan carries a showcase`);
+            let runs = 0;
+            try {
+                Market.executePlan = (...args) => { runs++; return executePlan.apply(Market, args); };
+                const result = await Population.resolveColdState(visitState, { precomputedPlan: decided.plan,
+                    precomputedResult: { patch: {}, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
+                        nextResolveAt: Date.now() + 30000, debug: {} } });
+                assert(result.ok);
+            } finally { Market.executePlan = executePlan; }
+            return { visitState, runs };
+        };
+        const done = await showcaseRunsFor(doneSellerId, 'done_sale_visit',
+            { townVisit: { town: 'Elven Village', startedAt, reason: 'sell_inventory', completed: true } });
+        assert.equal(Population.marketListingIntent(done.visitState, { type: 'restock' }).saleVisit, false);
+        assert.equal(done.runs, 1, 'a finished sale visit reaches the worker showcase, so the sale case skip is the predicate');
+        const cleanup = await showcaseRunsFor(cleanerId, 'cleanup_visit', {
+            townVisit: { town: 'Elven Village', startedAt, reason: 'sell_inventory' },
+            forcedMarketCleanup: { cleanupReason: 'inventory_capacity', itemCount: 18, npcOnlySlots: 0, startedAt } });
+        assert.equal(cleanup.runs, 1, 'a forced cleanup keeps the worker showcase (the author path)');
+        console.log('PASS sale visit controls: finished and other-town sale markers, forced cleanup keeps the showcase');
     } finally { await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

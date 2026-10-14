@@ -3818,9 +3818,10 @@ const PopulationService = {
         // A correction changed the owner's board revision. Its earlier
         // optional plan waits for fresh preparation, rather than replaying it.
         // A sale trip's own sale (open) decides the bag: the worker showcase
-        // first would make two pricers fight over it (E306).
+        // first would make two pricers fight over it. A forced cleanup keeps
+        // the author's path (E306).
         if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids
-            && !saleVisit(updatedState)) {
+            && (!saleVisit(updatedState) || updatedState.stats?.forcedMarketCleanup)) {
             const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
             const beforeWrite = () => {
                 if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
