@@ -173,6 +173,8 @@ class ClanPlanningCoordinator {
         const result = await this.send('plan', { payload: writer.pack(payload) });
         DiagnosticConfig.developerDiagnostics && (this.stats.completed++);
         DiagnosticConfig.developerDiagnostics && (this.stats.maxRunMs = Math.max(this.stats.maxRunMs, result.durationMs));
+        // The worker's ColdCombatProfile gain store after this run (L110).
+        DiagnosticConfig.developerDiagnostics && result.gainStore && (this.stats.gainStore = result.gainStore);
         return result.plan;
     }
 

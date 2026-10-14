@@ -110,6 +110,7 @@ const { MarketBuyerWaiters } = require('../Economy/MarketBuyerWaiters');
 const SpotIndex = require('../AI/SpotIndex');
 const BotTargetMatchup = require('../AI/BotTargetMatchup');
 const SpotValueTable = require('../AI/SpotValueTable');
+const ColdCombatProfile = require('./ColdCombatProfile');
 const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
     /[\\/]src[\\/]Database\.js$/i.test(filename)
     || /[\\/]GameServer[\\/]World[\\/]World\.js$/i.test(filename)
@@ -1311,7 +1312,8 @@ function startKernel(config = {}) {
             tables: tables.summary(),
             developerDiagnostics: economyDiagnostics.metrics(),
             ...heapTelemetry.snapshot(),
-            caches: { matchup: BotTargetMatchup.cacheStats(), spotValue: SpotValueTable.cacheStats() },
+            caches: { matchup: BotTargetMatchup.cacheStats(), spotValue: SpotValueTable.cacheStats(),
+                gainStore: ColdCombatProfile.cacheStats() },
             heapUsed: process.memoryUsage().heapUsed,
             rss: process.memoryUsage().rss,
             eventLoopUtilization: elu.utilization,

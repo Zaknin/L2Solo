@@ -50,8 +50,12 @@ async function measured(head) {
     try {
         assert.equal(Database.isReady(), false);
         await check('actual status preserves Worker metadata and ordinary pressure fields', () => {
-            sample = { states: 13, queueHead: { kind: 'normal', dueAt: 123, overdue: true, ageMs: 5000, current: true } };
+            sample = { states: 13, queueHead: { kind: 'normal', dueAt: 123, overdue: true, ageMs: 5000, current: true },
+                caches: { gainStore: { buildGains: 1, ownerBuilds: 2, ownerPreparations: 3, candidateIndex: 4, gainHits: 5, gainMisses: 6,
+                    limitMisses: 7, switches: 8, preparationSwitches: 9, clanSwitches: 10, filledDrops: 11, evictions: 12 } } };
             const result = Status.summary();
+            assert.match(result.line, /,gs:1\/2\/3\/4:5\/6\/7:8\/9\/10\/11\/12 /);
+            assert.match(result.line, / mainGains=\d+\/\d+\/\d+\/\d+:\d+\/\d+\/\d+:\d+\/\d+\/\d+\/\d+\/\d+ clanGains=\d+\/\d+\/\d+\/\d+:\d+\/\d+\/\d+:\d+\/\d+\/\d+\/\d+\/\d+ /);
             assert.equal(result.coldWorker.worker, sample); assert.match(result.line, /snapshot=7/);
             assert.match(result.line, /workerQueueHead=normal\/current\/overdue\/5s/);
             assert.doesNotMatch(result.line, /workerDue=/);

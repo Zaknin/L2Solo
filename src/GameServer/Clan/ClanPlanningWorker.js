@@ -136,7 +136,9 @@ parentPort.on('message', (message) => {
             const plan = options.economicMode ? require('./ClanRosterDemand').economicPlan(planner.planForMember, raidJob,
                 member, spots, warehouseRows, { ...options, throwOnError: true })
                 : planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
-            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt } : {}) } });
+            // lazy: worker the profile resolves its links through the stub invoke installed above.
+            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt,
+                gainStore: invoke('GameServer/Bot/Population/ColdCombatProfile').cacheStats() } : {}) } });
             return;
         } else {
             throw new Error('unknown clan worker message');
