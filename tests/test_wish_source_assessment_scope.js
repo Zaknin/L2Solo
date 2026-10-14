@@ -20,6 +20,14 @@ function plannerModule(old) {
         const begin = source.indexOf('function partyNeedAssessmentForSource(');
         const end = source.indexOf('\nfunction sourceTargetLevel(', begin);
         source = source.slice(0, begin) + require('./helpers/sourceAssessmentReference') + source.slice(end);
+        // The source fact walk classifies records through the per-level
+        // helper; the reference computes and counts each of those reads too.
+        const helper = source.indexOf('function sourceAssessmentReasonAt(');
+        const helperEnd = source.indexOf('\n}\n', helper);
+        assert(begin >= 0 && end > begin && helper >= 0 && helperEnd > helper, 'reference splice points exist');
+        source = source.slice(0, helper) + 'function sourceAssessmentReasonAt(record, readiness, targetLevel) {\n'
+            + '    assessmentComputations++;\n    return sourceAssessmentReason(readiness, targetLevel);'
+            + source.slice(helperEnd);
     } else {
         source = source.replace('function sourceAssessmentReason(readiness, targetLevel) {',
             'function sourceAssessmentReason(readiness, targetLevel) { assessmentComputations++;');

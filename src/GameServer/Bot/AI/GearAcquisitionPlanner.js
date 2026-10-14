@@ -1651,16 +1651,7 @@ function partyNeedAssessmentForSource(state = {}, source = {}) {
     }
     const record = readinessRecord(state);
     const readiness = record ? record.readiness : computeCombatReadiness(state);
-    const targetLevel = sourceTargetLevel(source);
-    if (record?.assessments?.has(targetLevel)) return SOURCE_ASSESSMENTS[record.assessments.get(targetLevel)];
-    const reason = sourceAssessmentReason(readiness, targetLevel);
-    if (record) {
-        // Many items share the same target level. Keep only primitive answers
-        // in this decision's existing scope; overflow computes normally.
-        record.assessments ||= new Map();
-        if (record.assessments.size < MAX_SOURCE_ASSESSMENTS) record.assessments.set(targetLevel, reason);
-    }
-    return SOURCE_ASSESSMENTS[reason];
+    return SOURCE_ASSESSMENTS[sourceAssessmentReasonAt(record, readiness, sourceTargetLevel(source))];
 }
 
 function sourceTargetLevel(source) {
@@ -1678,15 +1669,23 @@ function sourceRecordTargetLevel(entry) {
 }
 
 // The bot's verdict on one non-raid record, as soloSafeForSource gives it
-// for the record's target: solo_ready only. readiness is the decision's one
-// combat readiness (sourceReadinessFor).
-function soloSafeAtLevel(readiness, targetLevel) {
-    return SOURCE_ASSESSMENTS[sourceAssessmentReason(readiness, targetLevel)].need === 'solo_ok';
+// for the record's target: solo_ready only. record and readiness are the
+// decision's one readiness record (null outside a scope) and its readiness.
+function soloSafeAtLevel(record, readiness, targetLevel) {
+    return SOURCE_ASSESSMENTS[sourceAssessmentReasonAt(record, readiness, targetLevel)].need === 'solo_ok';
 }
 
-function sourceReadinessFor(state) {
-    const record = readinessRecord(state);
-    return record ? record.readiness : computeCombatReadiness(state);
+// One decision's answer per target level, shared by partyNeedAssessmentForSource
+// and the source fact walk. Many items share the same target level. Keep only
+// primitive answers in this decision's existing scope; overflow computes normally.
+function sourceAssessmentReasonAt(record, readiness, targetLevel) {
+    if (record?.assessments?.has(targetLevel)) return record.assessments.get(targetLevel);
+    const reason = sourceAssessmentReason(readiness, targetLevel);
+    if (record) {
+        record.assessments ||= new Map();
+        if (record.assessments.size < MAX_SOURCE_ASSESSMENTS) record.assessments.set(targetLevel, reason);
+    }
+    return reason;
 }
 
 function sourceAssessmentReason(readiness, targetLevel) {
@@ -2113,7 +2112,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     // Most records the bot reaches are refused as party_needed. The verdict
     // reads one readiness per call and the record's level; the counts take
     // their tally once at the end (the key keeps its first-seen place).
-    let readiness = null, partyNeeded = 0;
+    let readinessScoped = null, readiness = null, partyNeeded = 0;
     const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
     // The full view still reads all rows. Ready readers walk only eligible
     // ordinals; diagnostics merge the few static buckets at their first row.
@@ -2155,8 +2154,11 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
             // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
             // still needs its roster, as soloSafeForSource says.
             // Same raid check as partyNeedAssessmentForSource (kept there too).
-            readiness ??= sourceReadinessFor(state);
-            if (kind === 'raid' || !soloSafeAtLevel(readiness, sourceRecordTargetLevel(entry))) {
+            if (readiness === null) {
+                readinessScoped = readinessRecord(state);
+                readiness = readinessScoped ? readinessScoped.readiness : computeCombatReadiness(state);
+            }
+            if (kind === 'raid' || !soloSafeAtLevel(readinessScoped, readiness, sourceRecordTargetLevel(entry))) {
                 if (counts && !partyNeeded++ && !counts.has('party_needed')) counts.set('party_needed', 0);
                 if (readyOnly) continue;
                 reason = 'party_needed';
