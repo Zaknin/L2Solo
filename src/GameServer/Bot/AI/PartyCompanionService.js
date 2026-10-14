@@ -728,8 +728,12 @@ function beginRegroup(leaderSession, options = {}) {
 function holdParty(leaderSession) {
     const leader = leaderSession?.actor;
     if (!leader) return { ok: false, reason: 'missing_party_leader' };
+    // A companion on a hidden supply errand is left alone: its return places it
+    // beside the leader and would never clear a Hold anchor stored in town.
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
     const members = membersForLeader(leaderSession)
-        .filter((member) => !['shopping', 'getting_buffed', 'merchant'].includes(member.plan));
+        .filter((member) => !['shopping', 'getting_buffed', 'merchant'].includes(member.plan))
+        .filter((member) => !SupplyErrand.ownsCompanion(member));
     if (!members.length) return { ok: false, reason: 'no_party_companions' };
 
     // A hold order is a per-member position anchor. It intentionally does not

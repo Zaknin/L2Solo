@@ -7,6 +7,10 @@ require('../src/Global');
 // shopping) alone. The errand's return places it beside the leader. Other
 // companions are still summoned, and an errand companion is neither moved,
 // told "Summoned to your side!", nor counted for a regroup slot.
+// E301: the panel Hold (single stay and hold-all) and the stay_party tool
+// (PartyCompanionService.holdParty) skip it too: no botStay, no stayLocation
+// (the hidden town position), no "Holding this position." reply; an ordinary
+// companion still holds.
 
 const BotSupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
 const BotTownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
@@ -21,6 +25,7 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const BotAI = invoke('GameServer/Bot/BotAI');
 const PetTravel = invoke('GameServer/Pets/PetTravel');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
+const HotBackgroundParty = invoke('GameServer/Bot/AI/HotBackgroundParty');
 const CompanionControl = invoke('GameServer/World/Generics/NpcBypasses/CompanionControl');
 
 function item(id, selfId, amount) {
@@ -110,7 +115,8 @@ async function runCase(phaseWanted, failures) {
         shoppingTarget: errand.shoppingTarget,
         resumeAfterShopping: errand.resumeAfterShopping,
         plan: errand.plan,
-        stayLocation: errand.stayLocation
+        stayLocation: errand.stayLocation,
+        botStay: errand.botStay
     };
 
     PartyCompanionService.membersForLeader = () => [errand, a, b];
@@ -127,6 +133,7 @@ async function runCase(phaseWanted, failures) {
         check(errand.resumeAfterShopping === before.resumeAfterShopping, `${command}: resumeAfterShopping was changed`);
         check(errand.plan === before.plan, `${command}: plan is '${errand.plan}' (expected '${before.plan}')`);
         check(errand.stayLocation === before.stayLocation, `${command}: the Hold anchor of the errand companion was moved`);
+        check(errand.botStay === before.botStay, `${command}: botStay of the errand companion is ${errand.botStay} (expected ${before.botStay})`);
         check(!log.includes('teleport:Caelan') && !log.includes('clear:Caelan'), `${command}: the errand companion was teleported`);
         check(counters.sent.length === 0, `${command}: packets were sent for the hidden companion`);
     };
@@ -153,6 +160,57 @@ async function runCase(phaseWanted, failures) {
         stateKept('regroup');
         check(log.includes('teleport:Ardis') && log.includes('teleport:Brun'), `regroup: the ordinary companions were not both summoned (${log})`);
         check(a.stayLocation.locX === 1060 && a.stayLocation.locY === 2060, `regroup: first ordinary slot is ${JSON.stringify(a.stayLocation)} (expected 1060,2060)`);
+
+        // Hold. A Hold set before the errand stays as it is (clearing it is out
+        // of scope); these cases start from a companion without one.
+        const freeHold = () => {
+            errand.botStay = false;
+            errand.stayLocation = null;
+            before.botStay = false;
+            before.stayLocation = null;
+            for (const member of [a, b]) { member.botStay = false; member.stayLocation = null; }
+            counters.said.length = 0;
+            log.length = 0;
+        };
+        const holds = (member, command) => {
+            check(member.botStay === true, `${command}: ${member.accountId} botStay is ${member.botStay} (expected true)`);
+            check(member.stayLocation && member.stayLocation.locX === 0 && member.stayLocation.locY === 0,
+                `${command}: ${member.accountId} Hold anchor is ${JSON.stringify(member.stayLocation)}`);
+        };
+
+        freeHold();
+        CompanionControl(leader, ['companion-control', 'stay', 'Caelan']);
+        stateKept('stay errand');
+        check(counters.said.length === 0, `stay errand: reply '${counters.said}' for a companion that was not held`);
+
+        CompanionControl(leader, ['companion-control', 'stay', 'Ardis']);
+        holds(a, 'stay ordinary');
+        check(counters.said.includes('bot_2:Holding this position.'), `stay ordinary: reply is '${counters.said}'`);
+
+        freeHold();
+        CompanionControl(leader, ['companion-control', 'movement', 'hold']);
+        stateKept('hold-all');
+        holds(a, 'hold-all');
+        holds(b, 'hold-all');
+
+        freeHold();
+        const realRoster = HotBackgroundParty.roster;
+        leader.hotBackgroundPartyId = 'party';
+        HotBackgroundParty.roster = () => [leader, errand, a, b];
+        try {
+            const held = PartyCompanionService.holdParty(leader);
+            check(held.ok === true && held.affected === 2, `holdParty: result is ${JSON.stringify(held)} (expected 2 affected)`);
+            stateKept('holdParty');
+            holds(a, 'holdParty');
+            holds(b, 'holdParty');
+            HotBackgroundParty.roster = () => [leader, errand];
+            const none = PartyCompanionService.holdParty(leader);
+            check(none.ok === false && none.reason === 'no_party_companions', `holdParty only errand: result is ${JSON.stringify(none)}`);
+            stateKept('holdParty only errand');
+        } finally {
+            HotBackgroundParty.roster = realRoster;
+            delete leader.hotBackgroundPartyId;
+        }
     } finally {
         global.setTimeout = realSetTimeout;
         PetTravel.begin = realBegin;
