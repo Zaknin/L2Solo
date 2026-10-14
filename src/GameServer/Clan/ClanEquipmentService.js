@@ -1110,10 +1110,10 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
 
     const team = selection.plan?.economicTeam || planning.recruitment?.teams?.[selection.plan?.next?.spotId];
     const section = RosterDemand.ownerSection(clan, options.ownerSection);
-    // A main-section save of a goal adopted from the production section
-    // replaces that copy (ClanGoalService passes the production goal itself).
-    const supersededProductionGoalKey = section === 'goal' && previousGoal && previousGoal === clan.state?.productionGoal
-        ? previousGoal.goalKey : null;
+    // A main-section save of a goal adopted from the production section (or
+    // of the same goal still copied there) replaces that copy.
+    const supersededProductionGoalKey = section === 'goal' && previousGoal && (previousGoal === clan.state?.productionGoal
+        || (previousGoal.goalKey && previousGoal.goalKey === clan.state?.productionGoal?.goalKey)) ? previousGoal.goalKey : null;
     const scan = planning.recruitment?.scan || null;
     if (team && !team.actualReady) {
         const goal = Policy.buildGoal(clan, selection, previousGoal, Date.now(), { assignedMemberIds: [], roleFor: ClanPolicy.rosterRole });

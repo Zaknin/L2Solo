@@ -415,7 +415,10 @@ async function resolveClanInternal(clan, options = {}) {
                 ownerSection: equipment.ownerSection || 'goal',
                 recruitmentDemand: equipment.recruitmentDemand,
                 recruitmentScan: equipment.recruitmentScan,
-                supersededProductionGoalKey: previous && previous === clan.state?.productionGoal ? previous.goalKey : null,
+                // The adopted production goal, or a copy of the same goal a
+                // promotion before this fix left in the production section.
+                supersededProductionGoalKey: previous && (previous === clan.state?.productionGoal
+                    || (previous.goalKey && previous.goalKey === clan.state?.productionGoal?.goalKey)) ? previous.goalKey : null,
                 expectedUpdatedAt: number(equipment.expectedUpdatedAt ?? clan.state?.updatedAt) || null,
                 eventType,
                 reasonCode: goal.plan?.reasonCode || ''

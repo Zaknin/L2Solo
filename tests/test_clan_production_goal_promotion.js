@@ -35,7 +35,11 @@ function seed() {
             productionGoal: equipmentGoal('old-equipment', LEADER, 80),
             recruitmentScan: { ownerSection: 'productionGoal', goalKey: 'old-equipment' } },
         2: { mode: 'player_managed', level: 3, leaderId: LEADER, memberIds: [LEADER], updatedAt: 100,
-            goal: equipmentGoal('main-equipment', LEADER, 81), productionGoal: equipmentGoal('other-equipment', LEADER, 82) }
+            goal: equipmentGoal('main-equipment', LEADER, 81), productionGoal: equipmentGoal('other-equipment', LEADER, 82) },
+        // An earlier promotion already left the same goal in both sections.
+        3: { mode: 'player_managed', level: 3, leaderId: LEADER, memberIds: [LEADER], updatedAt: 100,
+            goal: equipmentGoal('same-equipment', LEADER, 83), productionGoal: equipmentGoal('same-equipment', LEADER, 83),
+            recruitmentDemand: { ownerSection: 'productionGoal', goalKey: 'same-equipment' } }
     };
     for (const [id, state] of Object.entries(states)) {
         db.prepare("INSERT INTO clans(id,name,level,leaderId) VALUES(?,?,3,?)").run(Number(id), `Promotion${id}`, LEADER);
@@ -75,6 +79,14 @@ async function main() {
         assert.equal(kept.goal.status, 'completed');
         assert.equal(kept.productionGoal?.goalKey, 'other-equipment', 'a production goal the planner did not adopt is kept');
         assert.equal(kept.productionGoal.status, 'executing');
+
+        const leftover = await Goals.resolveClan({ id: 3, level: 3, leaderId: LEADER, members: [], state: states[3] });
+        assert.equal(leftover.ok, true, JSON.stringify(leftover));
+        const cleaned = await stored(3);
+        assert.equal(cleaned.goal?.status, 'completed');
+        assert.equal(cleaned.productionGoal, null, 'a leftover copy of the main goal is cleared');
+        assert.equal(cleaned.recruitmentDemand, null, 'its recruitment demand goes with it');
+        assert.equal(Membership.activeGoalKeys(cleaned).size, 0);
         console.log('Clan production goal promotion checks passed');
     } finally {
         await Database.close();
