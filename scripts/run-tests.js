@@ -1652,6 +1652,31 @@ const defaultConfigTests = new Set([
     'tests/test_wish_network_diagnostics.js',
     'tests/test_wish_quantity_allocation.js'
 ]);
+// Gate: a test file nobody lists is a test CI never runs (E297). Checked before
+// anything runs, also for --list, so the mistake shows up on the developer's machine.
+{
+    const listed = new Set(tests);
+    const onDisk = fs.readdirSync(path.resolve(__dirname, '../tests')).filter((name) => /^test_.*\.js$/.test(name)).map((name) => `tests/${name}`);
+    const problems = [];
+    const unlisted = onDisk.filter((testFile) => !listed.has(testFile) && !notRunTests.has(testFile));
+    if (unlisted.length) {
+        problems.push(`Test files that are neither in tests nor in notRunTests:\n${unlisted.map((f) => `  ${f}`).join('\n')}\n` +
+            'Add each to tests in scripts/run-tests.js, or to notRunTests with a reason.');
+    }
+    const both = [...notRunTests.keys()].filter((testFile) => listed.has(testFile));
+    if (both.length) {
+        problems.push(`Test files in both tests and notRunTests:\n${both.map((f) => `  ${f}`).join('\n')}\nKeep each in one place only.`);
+    }
+    const missing = [...listed, ...notRunTests.keys(), ...geodataTests, ...optionalGeodataTests, ...defaultConfigTests]
+        .filter((testFile) => !fs.existsSync(path.resolve(__dirname, '..', testFile)));
+    if (missing.length) {
+        problems.push(`Listed test files that do not exist:\n${[...new Set(missing)].map((f) => `  ${f}`).join('\n')}\nRemove them from scripts/run-tests.js.`);
+    }
+    if (problems.length) {
+        console.error(`scripts/run-tests.js: the test list is out of date.\n${problems.join('\n\n')}`);
+        process.exit(1);
+    }
+}
 const selectedTests = tests.filter((testFile) => geodataOnly
     ? geodataTests.has(testFile) || optionalGeodataTests.has(testFile)
     : !geodataTests.has(testFile));
