@@ -453,6 +453,7 @@ const tests = [
     'tests/test_resolve_cold_state_pins.js',
     'tests/test_forced_cleanup_existing_shop.js',
     'tests/test_shop_town_unreached_retry.js',
+    'tests/test_e311_stuck_shopping.js',
     'tests/test_cold_safe_enchant.js',
     'tests/test_bot_static_buyer_sale.js',
     'tests/test_bot_market_town_routing.js',
