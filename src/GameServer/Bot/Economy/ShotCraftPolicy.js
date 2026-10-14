@@ -395,10 +395,28 @@ function* recipeShotSearch(state, recipe, context, options = {}) {
         // Same order as the uncached walk: the strict score test keeps the first
         // best, and a row's trip is first read where that walk first read it.
         const gearSource = row => ({ ...row, cash: Number(row.price), ownedValue: 0 });
-        for (const entry of yield* perRank('gear', gearRows)) {
+        const rows = yield* perRank('gear', gearRows);
+        let scoredNow = false;
+        for (const entry of rows) {
             if (Number(entry.row.crystals) < missing) continue;
-            if (entry.scored === undefined) entry.scored = yield* scoreGear(gearSource(entry.row));
+            if (entry.scored === undefined) { entry.scored = yield* scoreGear(gearSource(entry.row)); scoredNow = true; }
             if (entry.scored && (!best || entry.scored.score < best.score)) take(gearSource(entry.row), entry.scored);
+        }
+        // A scored row can never be taken when it failed scoring, or when an
+        // earlier scored row has at least its crystals and at most its score:
+        // whenever it passes, that row passed first. Unscored rows stay.
+        if (memo && scoredNow) {
+            const kept = [], frontier = [];
+            for (const entry of rows) {
+                if (entry.scored === null) continue;
+                if (entry.scored) {
+                    const crystals = Number(entry.row.crystals), score = entry.scored.score;
+                    if (frontier.some(other => Number(other.row.crystals) >= crystals && other.scored.score <= score)) continue;
+                    frontier.push(entry);
+                }
+                kept.push(entry);
+            }
+            memo.set(`gear:${rank}`, kept);
         }
         for (const [selfId, held, crystals] of yield* perRank('owned', ownedRows)) {
             if (!(availableOwn(selfId)?.count > 0) || !(crystals >= missing)) continue;
