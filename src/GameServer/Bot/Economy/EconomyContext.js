@@ -208,7 +208,7 @@ const STRUCTURAL_SEGMENTS = [
     'frustration', 'other', 'other', 'other', 'other', 'other', 'other', 'other',
     'time', 'time', 'clan_loot', 'clan_loot', 'clan_loot', 'trip_loc', 'gear_threat', 'other', 'memory',
     'other', 'other', 'other', 'other', 'trip_loc', 'trip_loc', 'other', 'other', 'other', 'progress', 'other',
-    'workshop', 'other', 'progress', 'build'];
+    'workshop', 'progress', 'progress', 'build'];
 function structuralSegment(index) {
     return index < STRUCTURAL_SEGMENTS.length ? STRUCTURAL_SEGMENTS[index] : 'plan_tail';
 }
@@ -1382,6 +1382,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

@@ -408,6 +408,18 @@ async function run() {
     assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, sp: mage.sp + 1 }));
     assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, stats: { ...mage.stats,
         coldCombat: { ...mage.stats.coldCombat, skills: [{ selfId: valuable.skillId, level: 1 }] } } }));
+    // L115: the segment names of the structural key follow inputKey's order;
+    // a new field shifts them, so the fixed count and positions are pinned.
+    const segments = state => Economy.sectionKeys(state, {}, []).structural.split('|');
+    const firstMoved = changed => { const before = segments(mage), after = segments(changed);
+        let at = 0; while (at < before.length && before[at] === after[at]) at++; return at; };
+    assert.equal(segments(mage).length, 51, 'structural key: 49 inputKey fields, capability, tail');
+    assert.equal(Economy.structuralSegment(3), 'loot');
+    assert.equal(Economy.structuralSegment(18), 'frustration');
+    assert.equal(Economy.structuralSegment(34), 'memory');
+    assert.equal(Economy.structuralSegment(50), 'plan_tail');
+    assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, frustration: 0.7 } })), 'frustration');
+    assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, memoryRevision: 99 } })), 'memory');
     const artisan = Economy.forState({ ...base, characterId: 904, level: 70, adena: 1e6,
         stats: { ...base.stats, classId: 57, exp: Data.experience[69] } });
     console.log('CONTEXT artisan', JSON.stringify({ hour: artisan.hourAdena, hunt: artisan.hunt,
