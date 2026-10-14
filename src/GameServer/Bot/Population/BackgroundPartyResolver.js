@@ -396,6 +396,9 @@ const BackgroundPartyResolver = {
             ...state,
             vitals: pending ? { ...state.vitals } : BackgroundResolver.applyStandingRegen(state, state.vitals, elapsedMs, timestamp)
         }));
+        // Raid preparation casts its own buffs; an ordinary hunt casts them between fights (F23).
+        const huntBuffs = raid || pending ? null : BackgroundResolver.castHuntPartyBuffs(combatMembers, timestamp);
+        if (huntBuffs) combatMembers = huntBuffs.members;
         for (let i = 0; i < fightBudget; i++) {
             const encounter = BackgroundResolver.resolvePartyFight({
                 members: combatMembers,
@@ -738,6 +741,7 @@ const BackgroundPartyResolver = {
                 skillUses,
                 heals,
                 musicUses,
+                partyBuffCasts: huntBuffs?.buffCasts || 0,
                 summonUses,
                 summonActions,
                 potionsUsed,

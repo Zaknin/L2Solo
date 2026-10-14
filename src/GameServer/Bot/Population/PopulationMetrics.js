@@ -14,6 +14,7 @@ function emptyCounters() {
         combatActions: 0,
         skillUses: 0,
         heals: 0,
+        partyBuffCasts: 0,
         skippedResolves: 0,
         activations: 0,
         cooldowns: 0,
@@ -251,6 +252,7 @@ const PopulationMetrics = {
         this.counters.combatActions += Math.max(0, Number(debug.combatActions) || 0);
         this.counters.skillUses += Math.max(0, Number(debug.skillUses) || 0);
         this.counters.heals += Math.max(0, Number(debug.heals) || 0);
+        this.counters.partyBuffCasts += Math.max(0, Number(debug.partyBuffCasts) || 0);
     },
 
     recordSkippedResolve(reason = 'unknown') {

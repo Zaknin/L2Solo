@@ -36,6 +36,9 @@ function combatRoleForState(state) {
         : persistedRole || BotRoles.combatRoleFor(state);
 }
 
+// A party buff is cast again once it has this share of its duration left, at most this many ms.
+const BUFF_RECAST_SHARE = 0.25;
+const BUFF_RECAST_MAX_MS = 120000;
 const ELEMENTAL_DAMAGE_TRAITS = new Set(['fire', 'water', 'wind', 'earth', 'holy', 'dark']);
 const PHYSICAL_RACE_STATS = Object.freeze({
     animal: 'pAtk-animals',
@@ -640,7 +643,7 @@ function coldBuffPlan(fighters, timestamp) {
         const family = PartyBuffLoadout.family(key);
         const level = Number(action.skill.fetchLevel() || 1);
         const durationMs = Math.max(60000, Number(semantic.durationMs ?? action.skill.fetchBuffTime()) || 1200000);
-        const threshold = Math.min(120000, Math.floor(durationMs * 0.25));
+        const threshold = Math.min(BUFF_RECAST_MAX_MS, Math.floor(durationMs * BUFF_RECAST_SHARE));
         return action.beneficiaries.some((actor) => !(actor.fighter.profile.effects || []).some((effect) => (
             (Number(effect?.id || 0) === Number(action.skill.fetchSelfId())
                 || PartyBuffLoadout.family(effect?.key) === family)
@@ -650,14 +653,11 @@ function coldBuffPlan(fighters, timestamp) {
     });
 }
 
-function prepareRaidParty(members, timestamp = Date.now()) {
-    const fighters = raidPreparationFighters(members, timestamp);
+// One cast pass of the planned party buffs: the raid preparation and an
+// ordinary cold party hunt both call it. Returns the casts and their duration.
+function castPartyBuffs(fighters, timestamp) {
     let buffCasts = 0;
-    let musicCasts = 0;
-    let summonCasts = 0;
-    let chargeCasts = 0;
     let durationMs = 0;
-
     for (const action of coldBuffPlan(fighters, timestamp)) {
         const provider = action.provider.fighter;
         const cost = Math.max(0, Number(action.skill.fetchConsumedMp() || 0));
@@ -673,6 +673,37 @@ function prepareRaidParty(members, timestamp = Date.now()) {
         durationMs += actionDelayMs(provider.profile, action.skill.coldRecord);
         buffCasts += 1;
     }
+    return { buffCasts, durationMs };
+}
+
+// An ordinary cold party hunt (F23): the party casts its buffs between fights
+// when the earliest one is about to expire. Cast time is not charged to the
+// hunt, it fits inside the gap between two party resolves.
+function castHuntPartyBuffs(members, timestamp) {
+    const fighters = raidPreparationFighters(members, timestamp);
+    const { buffCasts } = castPartyBuffs(fighters, timestamp);
+    if (buffCasts === 0) return { buffCasts, members };
+    return {
+        buffCasts,
+        members: fighters.map((fighter) => ({
+            ...fighter.state,
+            vitals: { ...fighter.vitals },
+            stats: {
+                ...(fighter.state.stats || {}),
+                coldCombat: { ...(fighter.state.stats?.coldCombat || {}), cooldowns: fighter.cooldowns }
+            }
+        }))
+    };
+}
+
+function prepareRaidParty(members, timestamp = Date.now()) {
+    const fighters = raidPreparationFighters(members, timestamp);
+    const buffPass = castPartyBuffs(fighters, timestamp);
+    const buffCasts = buffPass.buffCasts;
+    let musicCasts = 0;
+    let summonCasts = 0;
+    let chargeCasts = 0;
+    let durationMs = buffPass.durationMs;
 
     for (const fighter of fighters) {
         let action = chooseMusicAction(fighter, fighters, timestamp + durationMs);
@@ -1586,6 +1617,7 @@ const BackgroundResolver = {
     estimateRestMs,
     applyStandingRegen,
     prepareRaidParty,
+    castHuntPartyBuffs,
     effectiveSkillPower,
     resolveSolo({ state, spot, pressure = {}, targetNpcId = 0, elapsedMs = 60000, rng = Math.random, timestamp = Date.now() }) {
         if (!state) {
