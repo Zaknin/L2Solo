@@ -31,6 +31,15 @@ function syncPartyCompanions(leaderSession, destination, Generics, companions = 
             return;
         }
 
+        // A hidden supply errand owns the bot while it is cold (escape cast)
+        // or shopping in the supply town (the same rule as the errand's own
+        // return). Leave it on the errand: its return places it beside the
+        // leader's position at that time, wherever the leader now is.
+        if (companionSession.supplyErrandHidden === true
+            && (companionSession.supplyErrandPhase === 'cold' || companionSession.supplyErrandPhase === 'shopping')) {
+            return;
+        }
+
         const companion = companionSession.actor;
         if (PartyCompanionService.staysOutOfTown(companion, destination)) {
             return;

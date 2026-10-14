@@ -2,11 +2,12 @@ const assert = require('assert');
 
 require('../src/Global');
 
-// E292: a party companion on a hidden supply errand (player_resource_purchase)
-// is moved by the leader's teleport. Every other exit of the errand reveals the
-// bot, clears its errand phase and hands the life-state row back to hot
-// (BotTownTravel.restoreSupplyHot, ShoppingState.scheduleResourceReturn). This
-// test checks that the leader-teleport exit leaves the same end state.
+// E292 (option 2): a party companion on a hidden supply errand
+// (player_resource_purchase) in the phases the errand owns (cold: the escape
+// cast, shopping: hot AI in the supply town) is not moved by the leader's
+// teleport. The errand keeps its state and its normal return
+// (ShoppingState.scheduleResourceReturn) places the bot beside the leader's
+// position at return time, so the bot comes back where the leader now is.
 
 const BotSupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
 const BotTownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
@@ -17,6 +18,8 @@ const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const ServerResponse = invoke('GameServer/Network/Response');
 const BotAI = invoke('GameServer/Bot/BotAI');
 const TeleportTo = invoke('GameServer/Actor/Generics/TeleportTo');
+const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
+const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 
 function item(id, selfId, amount) {
     let count = amount;
@@ -29,15 +32,16 @@ function item(id, selfId, amount) {
 }
 
 function makeWorld(counters) {
+    const leaderLoc = { locX: 0, locY: 0, locZ: 0 };
     const player = {
         accountId: 'player',
         actor: {
             fetchId: () => 100,
             fetchName: () => 'Slava',
             fetchIsOnline: () => true,
-            fetchLocX: () => 0,
-            fetchLocY: () => 0,
-            fetchLocZ: () => 0
+            fetchLocX: () => leaderLoc.locX,
+            fetchLocY: () => leaderLoc.locY,
+            fetchLocZ: () => leaderLoc.locZ
         }
     };
     const adena = item(10, 57, 100000);
@@ -52,7 +56,7 @@ function makeWorld(counters) {
         fetchLocZ: () => 0,
         isDead: () => false,
         unselect() {},
-        setLocXYZ() {},
+        setLocXYZ(point) { counters.placed.push(point); },
         moveTo() {},
         backpack: { fetchItemFromSelfId: (selfId) => (Number(selfId) === 57 ? adena : null) },
         automation: { abortAll() {} },
@@ -65,7 +69,15 @@ function makeWorld(counters) {
         followPlayerSession: player,
         dataSendToOthers: (packet) => { counters.sent.push(packet); }
     };
-    return { player, bot, session };
+    const other = {
+        accountId: 'bot_2',
+        partyCompanion: true,
+        followPlayerSession: player,
+        companionShopping: undefined,
+        plan: 'following',
+        actor: { fetchId: () => 2, isDead: () => false, unselect() {}, fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0 }
+    };
+    return { player, bot, session, other, leaderLoc };
 }
 
 async function flush() {
@@ -73,7 +85,7 @@ async function flush() {
 }
 
 async function runCase(phaseWanted, failures) {
-    const counters = { sent: [], markHot: 0, stop: 0, init: 0 };
+    const counters = { sent: [], placed: [], markHot: 0, stop: 0, init: 0 };
     let arrival = null;
     BotTownTravel.request = (_session, _bot, _ai, _reason, options) => {
         arrival = options.onArrival;
@@ -84,7 +96,7 @@ async function runCase(phaseWanted, failures) {
     BotAI.wakeup = () => {};
     PopulationService.markHot = async () => { counters.markHot += 1; return { phase: 'hot' }; };
 
-    const { player, session } = makeWorld(counters);
+    const { player, bot, session, other, leaderLoc } = makeWorld(counters);
     const requested = BotSupplyErrand.request(session, player, 1463, 1);
     assert.strictEqual(requested.ok, true, `${phaseWanted}: supply errand starts (${requested.reason})`);
     await flush();
@@ -95,24 +107,61 @@ async function runCase(phaseWanted, failures) {
         assert.strictEqual(session.supplyErrandPhase, 'shopping');
     }
     counters.sent.length = 0;
+    const before = {
+        companionShopping: session.companionShopping,
+        shoppingTarget: session.shoppingTarget,
+        resumeAfterShopping: session.resumeAfterShopping,
+        plan: session.plan
+    };
 
-    // The leader (a real player) teleports; the companion is synced beside it.
-    let teleported = 0;
-    const Generics = { teleportTo: () => { teleported += 1; return true; }, revive() {} };
-    const moved = TeleportTo.syncPartyCompanions(player, { locX: 5000, locY: 5000, locZ: 0 }, Generics, [session]);
+    // The leader (a real player) teleports; an ordinary companion is synced
+    // beside it, the companion on the supply errand stays on its errand.
+    leaderLoc.locX = 5000;
+    leaderLoc.locY = 5000;
+    const teleported = [];
+    const Generics = { teleportTo: (target) => { teleported.push(target.accountId); return true; }, revive() {} };
+    const moved = TeleportTo.syncPartyCompanions(player, { locX: 5000, locY: 5000, locZ: 0 }, Generics, [session, other]);
     await flush();
 
-    assert.strictEqual(moved, 1, `${phaseWanted}: the companion is moved with the leader`);
-    assert.strictEqual(teleported, 1);
     const check = (ok, message) => { if (!ok) failures.push(`${phaseWanted}: ${message}`); };
-    check(session.supplyErrandHidden !== true,
-        `supplyErrandHidden stays ${session.supplyErrandHidden} after the leader teleport (expected revealed)`);
-    check(session.supplyErrandPhase === undefined,
-        `supplyErrandPhase stays '${session.supplyErrandPhase}' after the leader teleport (expected cleared)`);
-    check(counters.markHot === 1,
-        `PopulationService.markHot called ${counters.markHot} times (expected 1: the life-state row stays cold)`);
-    check(session.resumeAfterShopping === undefined,
-        'resumeAfterShopping stays set after the leader teleport (expected cleared)');
+    check(moved === 1, `syncPartyCompanions moved ${moved} companions (expected 1: only the companion not on the errand)`);
+    check(!teleported.includes('bot_1'), 'the companion on the supply errand was teleported with the leader');
+    check(teleported.includes('bot_2'), 'the ordinary companion was not teleported with the leader');
+    check(other.plan === 'following', 'the ordinary companion is not set to follow');
+    check(session.supplyErrandHidden === true,
+        `supplyErrandHidden is ${session.supplyErrandHidden} after the leader teleport (expected the errand to stay hidden)`);
+    check(session.supplyErrandPhase === phaseWanted,
+        `supplyErrandPhase is '${session.supplyErrandPhase}' after the leader teleport (expected '${phaseWanted}')`);
+    check(session.companionShopping === before.companionShopping, 'companionShopping was changed by the leader teleport');
+    check(session.shoppingTarget === before.shoppingTarget, 'shoppingTarget was changed by the leader teleport');
+    check(session.resumeAfterShopping === before.resumeAfterShopping, 'resumeAfterShopping was changed by the leader teleport');
+    check(session.plan === before.plan, `plan is '${session.plan}' after the leader teleport (expected '${before.plan}')`);
+    check(counters.markHot === 0, `PopulationService.markHot called ${counters.markHot} times by the leader teleport (expected 0)`);
+    check(counters.sent.length === 0, 'packets were sent to others for the hidden companion by the leader teleport');
+    if (failures.length) return;
+
+    // The errand ends through its normal return: the bot reappears beside the
+    // leader's new position, visible and hot again.
+    const timers = [];
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+    try {
+        ShoppingState.scheduleResourceReturn(session, bot, BotAI, { deliveryReady: true });
+    } finally {
+        global.setTimeout = realSetTimeout;
+    }
+    assert.strictEqual(timers.length, 1, `${phaseWanted}: one supply return is scheduled`);
+    timers[0].callback();
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+
+    check(JSON.stringify(counters.placed) === JSON.stringify([{ locX: 5080, locY: 5000, locZ: 0 }]),
+        `the returning companion was placed at ${JSON.stringify(counters.placed)} (expected beside the leader's new position 5080,5000)`);
+    check(session.supplyErrandHidden === false, 'the returning companion stays hidden');
+    check(session.supplyErrandPhase === undefined, `supplyErrandPhase is '${session.supplyErrandPhase}' after the return`);
+    check(counters.markHot === 1, `PopulationService.markHot called ${counters.markHot} times by the return (expected 1)`);
+    check(session.plan === 'following', `plan is '${session.plan}' after the return (expected following)`);
+    check(session.resumeAfterShopping === undefined && session.companionShopping === undefined,
+        'the errand state is not consumed by the return');
 }
 
 async function main() {
@@ -126,7 +175,8 @@ async function main() {
         wakeup: BotAI.wakeup,
         charInfo: ServerResponse.charInfo,
         relationChanged: ServerResponse.relationChanged,
-        items: DataCache.items
+        items: DataCache.items,
+        say: TownChatter.say
     };
     const failures = [];
     try {
@@ -139,6 +189,7 @@ async function main() {
         LifeState.markCold = async () => ({ phase: 'cold', activity: 'shopping' });
         ServerResponse.charInfo = () => 'charInfo';
         ServerResponse.relationChanged = () => 'relationChanged';
+        TownChatter.say = () => {};
 
         await runCase('cold', failures);
         await runCase('shopping', failures);
@@ -153,8 +204,9 @@ async function main() {
         ServerResponse.charInfo = originals.charInfo;
         ServerResponse.relationChanged = originals.relationChanged;
         DataCache.items = originals.items;
+        TownChatter.say = originals.say;
     }
-    assert.deepStrictEqual(failures, [], `leader teleport leaves the supply errand open:\n  ${failures.join('\n  ')}`);
+    assert.deepStrictEqual(failures, [], `leader teleport and the supply errand:\n  ${failures.join('\n  ')}`);
     console.log('supply errand leader teleport tests passed');
 }
 
