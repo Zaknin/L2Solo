@@ -43,7 +43,8 @@ let incomeBaseCells = 0;
 // Cache use for the cold worker heartbeat (L104); counted only with developer diagnostics.
 // memoEvictions, incomeEvictions, baseEvictions count the oldest-row drops at their caps; resets the
 // wholesale clears that dropped rows (catalog, table or rate change).
-const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, incomeEvictions: 0, baseEvictions: 0, resets: 0 };
+const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, incomeEvictions: 0, baseEvictions: 0, resets: 0,
+    bestHits: 0, bestMisses: 0, incomeHits: 0, incomeMisses: 0 };
 function countReset(rows) { DiagnosticConfig.developerDiagnostics && rows && (stats.resets += 1); }
 function cachedRows() { return valueMemo.size + bestRows.size + incomeRows.size + incomeBases.size; }
 function cacheStats() {
@@ -293,7 +294,8 @@ function best(role, level, shots = true, metric = 'exp') {
         clearIncomeBases();
     }
     const key = `${role}:${level}:${Boolean(shots)}:${metric}`;
-    if (bestRows.has(key)) return bestRows.get(key);
+    if (bestRows.has(key)) { DiagnosticConfig.developerDiagnostics && (stats.bestHits += 1); return bestRows.get(key); }
+    DiagnosticConfig.developerDiagnostics && (stats.bestMisses += 1);
     let bestRow = null;
     // A whole-table scan reads each spot once: it bypasses the per-bot memo.
     for (const spot of t.spots) {
@@ -318,10 +320,12 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
     const key = `${role}:${level}:${costs.shots}:${costs.potions}:${minGap}:${Number(shots)}:${skill}`;
     if (incomeRows.has(key)) {
+        DiagnosticConfig.developerDiagnostics && (stats.incomeHits += 1);
         const held = incomeRows.get(key);
         incomeRows.delete(key); incomeRows.set(key, held);
         return held;
     }
+    DiagnosticConfig.developerDiagnostics && (stats.incomeMisses += 1);
     const basisKey = `${role}:${level}:${minGap}:${Number(shots)}:${skill}`;
     let basis = incomeBases.get(basisKey);
     if (basis) {

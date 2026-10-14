@@ -2,6 +2,7 @@ const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const { isNativeSource } = require('./TradeIntent');
+const Diagnostics = require('./EconomyDiagnostics');
 const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
 function templateFor(selfId) {
@@ -99,6 +100,14 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     if (!nativeGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
+    // E303: the buy ads cap of 3 is cut here; the later slices (ColdEconomyPlan.buyBatch, BotAfkMarketService) see at most 3.
+    if (Diagnostics.active()) {
+        Diagnostics.count('cap', 'buy_ads', 'check');
+        if (goals.length > 3) {
+            Diagnostics.count('cap', 'buy_ads', 'cut');
+            Diagnostics.count('cap', 'buy_ads', 'dropped', goals.length - 3);
+        }
+    }
     const candidates = goals.slice(0, 3);
     const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
     let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));

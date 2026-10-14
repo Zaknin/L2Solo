@@ -1259,7 +1259,7 @@ function forGroup(group, members, deps = {}) {
         - positive(byKey.get(a).valueHours) / Math.max(1, positive(byKey.get(a).price)));
     // MVP-6: the same admission as one member's projection; a root whose
     // union does not fit is pending and the smaller ones still proceed.
-    const { roots: admitted, kept } = admitRoots(roots, byKey);
+    const { roots: admitted, kept } = admitRoots(roots, byKey, { label: 'group' });
     const network = engine.build({ actorKey, inputKey: key, remembered: false, nodes: nodes.filter(node => kept.has(node.key)), roots: admitted,
         wallet, playedHours: positive(group.playedHours), persona: group.persona || first.persona,
         previous: { focus: group.wishFocus, dormant: group.dormantWishes },

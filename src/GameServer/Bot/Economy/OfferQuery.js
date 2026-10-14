@@ -6,6 +6,7 @@
 // over the index they build from the board table. Static code only.
 const { SELL, offerFields } = require('../../AfkTrade/BoardIndex');
 const OfferOrder = require('./OfferOrder');
+const Diagnostics = require('./EconomyDiagnostics');
 
 // options: towns (a list; null: every town), excludeOwner (the buyer's own
 // records), budget, cost (OfferOrder.tripCost), accept(offer) (the caller's
@@ -67,6 +68,17 @@ function fill(lines, amount, { npcPrice = 0, money = Infinity, maxPrice = Infini
     return { lines: taken, npc, units, cost };
 }
 
+// E303: the quote depth cap of 5 (cheapestTown quoteDepth). Counts the check, and the cut with the lines it
+// dropped; returns whether it cut. cap:quotes:short (cheapestTown) is a cut call whose result is not whole.
+function noteQuoteCut(list, depth) {
+    if (!Diagnostics.active()) return false;
+    Diagnostics.count('cap', 'quotes', 'check');
+    if (list.length <= depth) return false;
+    Diagnostics.count('cap', 'quotes', 'cut');
+    Diagnostics.count('cap', 'quotes', 'dropped', list.length - depth);
+    return true;
+}
+
 // The town where a buyer gets `amount` units of an item for the least, its
 // trip there included (б5, D1; user Q1 A for shots): in each town the board's
 // lines there and the NPC shop there as one more offer (fill), plus the
@@ -86,7 +98,9 @@ function cheapestTown(index, selfId, options = {}) {
         if (offer.town && price > 0 && (!npcPrice.has(offer.town) || price < npcPrice.get(offer.town))) npcPrice.set(offer.town, price);
     }
     const inspected = options.quoteDepth > 0 ? new Map() : null;
-    if (inspected) for (const line of (index ? index.list(selfId, SELL) : []).slice(0, options.quoteDepth)) {
+    const board = inspected ? index ? index.list(selfId, SELL) : [] : null;
+    const cut = inspected ? noteQuoteCut(board, options.quoteDepth) : false;
+    if (inspected) for (const line of board.slice(0, options.quoteDepth)) {
         if (!inspected.has(line.town)) inspected.set(line.town, []);
         inspected.get(line.town).push(line);
     }
@@ -112,6 +126,7 @@ function cheapestTown(index, selfId, options = {}) {
                 && String(town).localeCompare(best.town) < 0));
         if (better) best = { town, ...filled, npcPrice: price, trip, landed, whole, spendBudget: money };
     }
+    if (cut && !best?.whole) Diagnostics.count('cap', 'quotes', 'short');
     return best;
 }
 

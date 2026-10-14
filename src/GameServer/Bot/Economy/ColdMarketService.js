@@ -302,6 +302,12 @@ function planPurchase(state, selfId, amount, options = {}) {
     if (options.sourcePlan) {
         const source = options.sourcePlan;
         if (!source.town || towns && !towns.includes(source.town) || Number(source.selfId) !== Number(selfId)) return null;
+        // E303: the producer cuts the quote lines to 5 (OfferQuery.cheapestTown); this slice should never drop anything,
+        // so cap:quote_use:cut is an invariant check and is expected to stay 0.
+        if (Diagnostics.active() && (source.lines || []).length > 5) {
+            Diagnostics.count('cap', 'quote_use', 'cut');
+            Diagnostics.count('cap', 'quote_use', 'dropped', source.lines.length - 5);
+        }
         const quotes = (source.lines || []).slice(0, 5).map(entry => entry.line);
         let npcPrice = 0;
         if (npc && Number.isSafeInteger(Number(source.npc)) && Number(source.npc) > 0) {
