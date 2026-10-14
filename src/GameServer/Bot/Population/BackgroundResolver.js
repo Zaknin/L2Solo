@@ -680,7 +680,13 @@ function castPartyBuffs(fighters, timestamp) {
 // An ordinary cold party hunt (F23): the party casts its buffs between fights
 // when the earliest one is about to expire. Cast time is not charged to the
 // hunt, it fits inside the gap between two party resolves.
+// The plan's skills are the profile's, ColdCombatProfile.skillsFor without the
+// build: a party where no member has a cold party buff casts nothing, and the
+// fighters are built only when one has.
 function castHuntPartyBuffs(members, timestamp) {
+    const buffer = members.some((state) => ColdCombatProfile.skillsFor(state)
+        .some((skill) => skill && skill.passive !== true && coldBuffSkill(skill)));
+    if (!buffer) return { buffCasts: 0, members };
     const fighters = raidPreparationFighters(members, timestamp);
     const { buffCasts } = castPartyBuffs(fighters, timestamp);
     if (buffCasts === 0) return { buffCasts, members };

@@ -52,6 +52,25 @@ assert.strictEqual(soon.debug.partyBuffCasts || 0, 0, 'fresh buffs are not recas
 const late = hunt(members.map((_, index) => stateOf(first, index, members)), timestamp + BUFF_MS - 60000);
 assert(late.debug.partyBuffCasts > 0, 'buffs about to expire are cast again');
 
+// A party where no member has a cold party buff skips the fighter build: it
+// would cast nothing, so it returns its members as they are.
+const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
+const fighters = [member(4, 0, 'dps'), member(5, 0, 'dps'), member(6, 0, 'tank')];
+const profileFor = ColdCombatProfile.profileFor;
+let builds = 0;
+ColdCombatProfile.profileFor = (...args) => { builds += 1; return profileFor(...args); };
+try {
+    const plain = BackgroundResolver.castHuntPartyBuffs(fighters, timestamp);
+    assert.strictEqual(plain.buffCasts, 0);
+    assert.strictEqual(plain.members, fighters, 'a party without a buffer keeps its members');
+    assert.strictEqual(builds, 0, 'a party without a buffer builds no fighter');
+    const buffed = BackgroundResolver.castHuntPartyBuffs(members, timestamp);
+    assert(buffed.buffCasts > 0, 'a party with a buffer still casts');
+    assert(builds >= 2 * members.length, 'a party with a buffer builds its fighters');
+} finally {
+    ColdCombatProfile.profileFor = profileFor;
+}
+
 const originalCounters = PopulationMetrics.counters;
 const originalSummary = PopulationMetrics.lastSummaryCounters;
 PopulationMetrics.counters = Object.fromEntries(Object.keys(PopulationMetrics.counters).map((key) => [key, 0]));
