@@ -2149,6 +2149,16 @@ class ColdSimulationCoordinator {
 
     async handleCommitResults(results = []) {
         const worker = this.worker, epoch = this.workerEpoch;
+        // A committed dissolve of a marked unopened party (the resolver's cancel)
+        // wakes its clan once; the atomic group commits all members or none.
+        const dissolved = new Set();
+        for (const result of results) {
+            const change = result.ok ? result.proposal?.atomicGroup?.partyChanges?.[0] : null;
+            if (change?.status !== 'dissolved' || dissolved.has(change.partyId)) continue;
+            dissolved.add(change.partyId);
+            try { require('../../Clan/ClanRaidRoster').wakeCancelled({ stats: JSON.parse(change.statsJson || '{}') }); }
+            catch (error) { this.recordError(error); }
+        }
         results = results.filter(result => {
             const source = result.proposal?.[PROPOSAL_SOURCE];
             return !source || (source.worker === worker && source.epoch === epoch);

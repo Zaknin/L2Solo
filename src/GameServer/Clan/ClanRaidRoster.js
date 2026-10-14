@@ -122,8 +122,15 @@ async function cancelUnopened(party, reason) {
         stats: { ...current.stats, partyBreakReason: reason, dissolvedAt: Date.now() } });
     if (!saved) return false;
     await invoke('GameServer/Bot/Population/BotLifeState').releaseDissolvedPartyMembers(party.partyId, reason);
-    // The clan goal stays executing after the party is gone: wake its review for a new attempt.
-    require('./ClanReviewEvents').changed(markerFor(current).clanId, 'raid_cancelled');
+    wakeCancelled(current, reason);
     return true;
 }
-module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened };
+// A marked party dissolved for one of these reasons leaves its clan goal executing:
+// wake its review for a new attempt. Callers wake only after the dissolve is saved.
+const CANCEL_REASONS = Object.freeze(['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened']);
+function wakeCancelled(party, reason = party?.stats?.partyBreakReason) {
+    const marker = markerFor(party);
+    if (!marker || !CANCEL_REASONS.includes(reason)) return false;
+    return require('./ClanReviewEvents').changed(marker.clanId, 'raid_cancelled');
+}
+module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened, CANCEL_REASONS, wakeCancelled };

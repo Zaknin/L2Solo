@@ -70,6 +70,8 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
         const Metrics = require('./PopulationMetrics');
         Metrics.recordPartyResolve(); Metrics.recordCombat(result.debug);
         if (nextParty.status === 'dissolved') Metrics.recordPartyDissolution();
+        // The resolver's cancel of a marked unopened party is committed here.
+        if (nextParty.status === 'dissolved') require('../../Clan/ClanRaidRoster').wakeCancelled(nextParty);
         return { ok: true, party: committedParty, debug: result.debug };
     } finally {
         Raid.abort(id);
