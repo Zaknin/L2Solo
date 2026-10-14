@@ -62,6 +62,8 @@ const stubs = new Map([
     // Immutable map boundaries only; no live World, geodata or database access.
     ['GameServer/World/WorldAreaCatalog', { resolve: originalInvoke('GameServer/World/WorldAreaCatalog').resolve }],
     ['GameServer/World/TownRespawn', originalInvoke('GameServer/World/TownRespawn')],
+    // Cold bots have no live summon (PartyBuffLoadout.build asks for one); SummonControl loads Network and World.
+    ['GameServer/Npc/SummonControl', { activeSummon: () => null }],
     // The game clock is a pure function of the timestamp (cold night bonuses).
     ['GameServer/World/GameTime', originalInvoke('GameServer/World/GameTime')],
     ['GameServer/World/WorldConstants', originalInvoke('GameServer/World/WorldConstants')],
