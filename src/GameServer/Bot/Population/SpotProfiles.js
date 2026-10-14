@@ -396,6 +396,11 @@ function currentOccupancy(profiles, maxAgeMs = 1000) {
     return occupancyCache;
 }
 
+// The bots on a spot for its kill share (E69), main thread.
+function spotHunters(spot) {
+    return spot?.id ? Math.max(1, LevelingRoutes.occupancyForSpot(currentOccupancy(SpotProfiles.ensure()), spot.id)) : 1;
+}
+
 function shouldLeaveOverCapacity(state, spot, occupancy) {
     const entry = occupancy?.[spot?.id];
     const reservationKey = clanEquipmentReservationKey(state, spot?.id);
@@ -614,6 +619,7 @@ const SpotProfiles = {
 
 SpotProfiles.occupancySnapshot = occupancySnapshot;
 SpotProfiles.currentOccupancy = currentOccupancy;
+SpotProfiles.spotHunters = spotHunters;
 SpotProfiles.indexedOccupancy = indexedOccupancy;
 SpotProfiles.shouldLeaveOverCapacity = shouldLeaveOverCapacity;
 SpotProfiles.farmIntentSpotId = farmIntentSpotId;

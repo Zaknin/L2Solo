@@ -1290,6 +1290,14 @@ class ColdSimulationKernel {
             && Protocol.sameCommandCheckpoint(current.state, attempt.checkpoint);
     }
 
+    // The bots on a spot for its kill share (E69), from the occupancy index.
+    spotHunters(spot) {
+        if (!spot?.id) return 1;
+        let count = 0;
+        for (const member of this.occupancy.members(spot.id, 'physical')) if (member) count++;
+        return Math.max(1, count);
+    }
+
     async resolveCommand(characterId, attempt) {
         const id = Number(characterId);
         const current = this.states.get(id);
@@ -1314,6 +1322,7 @@ class ColdSimulationKernel {
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 state: resolveState,
                 spot: current.context.spot || null,
+                spotHunters: this.spotHunters(current.context.spot),
                 pressure: current.context.pressure || {},
                 targetNpcId: Number(current.context.targetNpcId || lifecyclePlan?.targetNpcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
@@ -1979,10 +1988,12 @@ class ColdSimulationKernel {
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const resolveState = lifecyclePlan?.plannedState || active.state;
+            const spot = resolveState.activity === 'traveling' ? null : lifecyclePlan?.spot || active.context.spot || null;
             const result = await this.resolveSolo({
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 state: resolveState,
-                spot: resolveState.activity === 'traveling' ? null : lifecyclePlan?.spot || active.context.spot || null,
+                spot,
+                spotHunters: this.spotHunters(spot),
                 pressure: active.context.pressure || {},
                 targetNpcId: Number(lifecyclePlan?.targetNpcId || lifecyclePlan?.acquisitionPlan?.next?.npcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) ||

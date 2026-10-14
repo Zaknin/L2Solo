@@ -131,6 +131,14 @@ function levelFit(spot, targetLevel, options = {}) {
     };
 }
 
+// Mobs per hour one spawn gives back (E69): 3600 / its respawn seconds. The
+// respawn spread is symmetric (SpawnNpcs.respawnDelayMs), so its mean is
+// `respawn`; a leader's minions come back with their leader.
+function respawnsPerHour(npc) {
+    const respawn = Number((npc?.spawnDefinition || npc?.minionLeader?.spawnDefinition)?.spawn?.respawn) || 0;
+    return respawn > 0 ? 3600 / respawn : 0;
+}
+
 function isSuitable(spot, targetLevel, options = {}) {
     if (!spot) return false;
     const fit = levelFit(spot, targetLevel, options);
@@ -141,6 +149,7 @@ function isSuitable(spot, targetLevel, options = {}) {
 
 const SpotService = {
     MAX_WALK_SPOT_DISTANCE,
+    respawnsPerHour,
     spots: null,
 
     reset() {
@@ -201,8 +210,9 @@ const SpotService = {
             const selfId = Number(npc.fetchSelfId?.() || 0);
             if (selfId) sector.selfIds[selfId] = (sector.selfIds[selfId] || 0) + 1;
             const npcKey = selfId ? `id:${selfId}` : `name:${name}`;
-            sector.npcs[npcKey] = sector.npcs[npcKey] || { selfId, name, level, count: 0 };
+            sector.npcs[npcKey] = sector.npcs[npcKey] || { selfId, name, level, count: 0, production: 0 };
             sector.npcs[npcKey].count++;
+            sector.npcs[npcKey].production += respawnsPerHour(npc);
             sector.arrivalPoints.push({
                 locX: npc.fetchLocX(),
                 locY: npc.fetchLocY(),
@@ -237,9 +247,10 @@ const SpotService = {
                 density: sector.count,
                 npcNames: nameEntries.slice(0, 3).map((item) => item.name),
                 npcSelfIds: selfIdEntries.slice(0, 8).map((item) => item.selfId),
+                // `production`: the group's mobs per hour from its respawns (E69).
                 npcEntries: Object.values(sector.npcs)
                     .sort((a, b) => b.count - a.count)
-                    .map((entry) => ({ ...entry })),
+                    .map((entry) => ({ ...entry, production: Math.round(entry.production * 100) / 100 })),
                 arrivalPoints: sector.arrivalPoints.map((point) => ({ ...point })),
                 levelCounts: { ...sector.levels },
                 dominantLevels: levelEntries.slice(0, 3),

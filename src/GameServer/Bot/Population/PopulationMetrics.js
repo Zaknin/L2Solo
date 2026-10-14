@@ -20,6 +20,9 @@ function emptyCounters() {
         coldPullMobs: 0,
         // Cold solo area-skill hits that struck every mob of a pull (F20).
         coldAreaPullHits: 0,
+        // E69: solo rounds the spot share cut short, and the fights it did not start.
+        coldShareBoundResolves: 0,
+        coldShareCutFights: 0,
         skippedResolves: 0,
         activations: 0,
         cooldowns: 0,
@@ -261,6 +264,9 @@ const PopulationMetrics = {
         this.counters.coldPulls += Math.max(0, Number(debug.pulls) || 0);
         this.counters.coldPullMobs += Math.max(0, Number(debug.pullMobs) || 0);
         this.counters.coldAreaPullHits += Math.max(0, Number(debug.areaPullHits) || 0);
+        const shareCut = Math.max(0, Number(debug.shareCut) || 0);
+        if (shareCut > 0) this.counters.coldShareBoundResolves += 1;
+        this.counters.coldShareCutFights += shareCut;
     },
 
     recordSkippedResolve(reason = 'unknown') {

@@ -1613,6 +1613,17 @@ function soloFightCount(spot, elapsedMs) {
     return Math.min(maxFights, Math.max(1, Math.ceil((spot.density || 1) / 3)));
 }
 
+// E69: a cold solo bot kills at most its share of what the spot's spawns give
+// back during the round: the spot's mobs per hour (SpotService, from the
+// respawns) times the round's hours, split among the bots on the spot. Null
+// when the spot has no production table (raids, rooms, older profiles).
+function soloShareMobs(spot, elapsedMs, hunters) {
+    const entries = (spot?.npcEntries || []).filter(entry => Number.isFinite(entry.production));
+    if (!entries.length || spot.raidBoss === true) return null;
+    const production = entries.reduce((sum, entry) => sum + entry.production, 0);
+    return production * elapsedMs / 3600000 / Math.max(1, Number(hunters) || 1);
+}
+
 // The wait before the next solo hunt cycle, from a roll in [0, 1).
 function huntCycleDelayMs(roll) {
     return 30000 + Math.round(roll * 90000);
@@ -1620,6 +1631,7 @@ function huntCycleDelayMs(roll) {
 
 const BackgroundResolver = {
     soloFightCount,
+    soloShareMobs,
     travelRecord,
     huntCycleDelayMs,
     combat: { chooseSkill, chooseChargeSkill, coldChargeState, expireCharges, addCharges, consumeCharges,
@@ -1636,7 +1648,8 @@ const BackgroundResolver = {
     prepareRaidParty,
     castHuntPartyBuffs,
     effectiveSkillPower,
-    resolveSolo({ state, spot, pressure = {}, targetNpcId = 0, elapsedMs = 60000, rng = Math.random, timestamp = Date.now() }) {
+    // spotHunters: the bots on the spot, from the caller's occupancy (E69).
+    resolveSolo({ state, spot, pressure = {}, targetNpcId = 0, elapsedMs = 60000, spotHunters = 1, rng = Math.random, timestamp = Date.now() }) {
         if (!state) {
             return {
                 patch: {},
@@ -1815,6 +1828,12 @@ const BackgroundResolver = {
         }
 
         const fights = soloFightCount(spot, elapsedMs);
+        // The share's fraction left from the last round on this spot carries
+        // over; a pull above it is owed (a negative carry).
+        const share = soloShareMobs(spot, elapsedMs, spotHunters);
+        const shareCarry = share !== null && String(state.stats?.coldShare?.spotId) === String(spot.id)
+            ? Number(state.stats.coldShare.carry) || 0 : 0;
+        const shareMobs = share === null ? Infinity : share + shareCarry;
         // Spend the cycle's available combat time on the current monster before
         // starting another. Slow kills must not repeatedly reset at 12 seconds.
         // Retain the old action budget and cap simulated combat at one minute.
@@ -1851,9 +1870,16 @@ const BackgroundResolver = {
         let pulls = 0;
         let pullMobs = 0;
         let areaPullHits = 0;
+        let mobsKilled = 0;
+        let shareCut = 0;
 
         for (let i = 0; i < fights; i++) {
             if (combatMs >= combatBudgetMs || combatActions >= actionBudget) break;
+            // A mob already engaged is finished; a new one needs a whole mob of the share.
+            if (mobsKilled + 1 > shareMobs && !(i === 0 && continuing)) {
+                shareCut = fights - i;
+                break;
+            }
             const fightState = {
                 ...state,
                 vitals: patch.vitals,
@@ -1919,6 +1945,7 @@ const BackgroundResolver = {
 
             if (result.won) {
                 wins += 1;
+                mobsKilled += Math.max(1, Number(result.debug?.pullMobs) || 1);
                 if (Number(result.debug?.mobSelfId) > 0) foughtNpcIds.push(Number(result.debug.mobSelfId));
             }
             if (result.died) {
@@ -1960,6 +1987,12 @@ const BackgroundResolver = {
                 }
                 break;
             }
+        }
+
+        if (share !== null) {
+            const left = shareMobs - mobsKilled;
+            // Whole mobs left unused stay for the other hunters.
+            patch.stats.coldShare = { spotId: spot.id, carry: Math.round((left < 0 ? left : left % 1) * 1000) / 1000 };
         }
 
         // The round's sample is recorded once its lifecycle is applied
@@ -2005,6 +2038,7 @@ const BackgroundResolver = {
                 pulls,
                 pullMobs,
                 areaPullHits,
+                shareCut,
                 targetNpcId: Number(targetNpcId) || null,
                 targetOnSpot: ColdCombatProfile.spotSpawns(spot, targetNpcId) ? 1 : 0,
                 foughtNpcIds

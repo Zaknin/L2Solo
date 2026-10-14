@@ -2854,6 +2854,7 @@ const PopulationService = {
                 const result = BackgroundResolver.resolveSolo({
                     state: lifecycleState,
                     spot,
+                    spotHunters: SpotProfiles.spotHunters(spot),
                     pressure: Director.pressureForState(lifecycleState),
                     targetNpcId: directDropTargetNpcId(lifecycleState.stats?.equipmentPlan),
                     elapsedMs,
@@ -3556,6 +3557,7 @@ const PopulationService = {
         const result = precomputedResult || BackgroundResolver.resolveSolo({
             state: effectiveState,
             spot,
+            spotHunters: SpotProfiles.spotHunters(spot),
             pressure: Director.pressureForState(state),
             targetNpcId: partyRouteWaiting
                 ? Number(partyFallback?.npcId || 0)
@@ -3588,7 +3590,8 @@ const PopulationService = {
         const karmaPlan = karmaPolicy.active(state) ? karmaPolicy.plan(state, SpotProfiles.ensure(), startedAt) : null;
         if (karmaPlan && !joinedBackgroundParty(state)) {
             const result = BackgroundResolver.resolveSolo({ state: karmaPlan.plannedState,
-                spot: karmaPlan.spot, targetNpcId: karmaPlan.targetNpcId, timestamp: startedAt,
+                spot: karmaPlan.spot, spotHunters: SpotProfiles.spotHunters(karmaPlan.spot),
+                targetNpcId: karmaPlan.targetNpcId, timestamp: startedAt,
                 elapsedMs: Math.max(1000, startedAt - Number(state.timing?.lastResolvedAt || startedAt - 60000)) });
             return LifeState.applyResolve(karmaPlan.plannedState, result, options)
                 .then(saved => ({ ok: !!saved, state: saved || state, debug: result.debug }));
