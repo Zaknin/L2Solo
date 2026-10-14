@@ -17,6 +17,8 @@ function npcId(party, leader) {
 // A cheap representative of ordinary hunting, weighted by the actual spawn
 // population. Stable per hunting unit so teammates never invent separate goals.
 // This is competition context only; it does not replace the PvE gear target.
+// Lazy: loaded on first use (load order), then kept; a require per call was ~1% of the cold worker (perf-map 2026-10-14).
+let scorer = null;
 function competitionNpcId(party, leader, spot) {
     const planned = npcId(party, leader);
     if (planned) return planned;
@@ -24,7 +26,7 @@ function competitionNpcId(party, leader, spot) {
     if (!spot) spot = invoke('GameServer/Bot/Population/SpotProfiles').findById(party?.spotId || leader.spotId);
     if (!spot) return 0;
     const level = Number(leader.level || 1);
-    const { MIN_LEVEL_GAP, MAX_LEVEL_ADVANTAGE } = require('../AI/BotTargetScorer');
+    const { MIN_LEVEL_GAP, MAX_LEVEL_ADVANTAGE } = scorer ||= require('../AI/BotTargetScorer');
     const entries = (spot.npcEntries || []).filter(e => Number(e.selfId) > 0
         && Number(e.level ?? spot.avgLevel ?? level) >= level + MIN_LEVEL_GAP
         && Number(e.level ?? spot.avgLevel ?? level) <= level + MAX_LEVEL_ADVANTAGE)
