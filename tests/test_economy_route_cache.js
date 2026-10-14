@@ -26,6 +26,33 @@ assert.equal(cache.accept({ ...sent.at(-1), rows }), false, 'worker exit/removal
 const failed = new EconomyRouteCache({ send: () => false }); failed.read(1, 'offline', frame);
 assert.equal(failed.cards.size, 0, 'unavailable worker retains no pending card');
 
+const delivered = [], shopping = new EconomyRouteCache({ limit: 2,
+    send: payload => { delivered.push(payload); return true; } });
+const progressed = new Set();
+for (let round = 0; round < 6; round++) {
+    for (let id = 1; id <= 6; id++) {
+        if (progressed.has(id)) continue;
+        if (shopping.read(id, `visit:${id}`, frame)) progressed.add(id);
+        while (delivered.length) shopping.accept({ ...delivered.shift(), rows });
+        assert(shopping.cards.size <= 2, 'awaiting first consumption cannot grow the route cache');
+    }
+}
+assert.equal(progressed.size, 6,
+    'completed routes must survive until their first shopping read when more visible bots than cache slots request routes');
+
+const retired = new Set(), orphanRequests = [];
+const orphaned = new EconomyRouteCache({ limit: 1, evictable: id => retired.has(id),
+    send: payload => { orphanRequests.push(payload); return true; } });
+orphaned.read(1, 'old-visit', frame);
+orphaned.accept({ ...orphanRequests[0], rows });
+orphaned.read(2, 'new-visit', frame);
+assert.equal(orphanRequests.length, 1, 'an active owner retains its unread completed route');
+retired.add(1);
+orphaned.read(2, 'new-visit', frame);
+assert.equal(orphanRequests.length, 2, 'a retired owner cannot pin an unread route slot');
+assert.equal(orphaned.cards.has(1), false);
+orphaned.forget(2);
+
 require('./helpers/databaseIsolation');
 require('../src/Global');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
