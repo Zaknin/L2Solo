@@ -269,10 +269,12 @@ function buildProjection(state, ctx, deps) {
     const Recipes = invoke('GameServer/Items/C4RecipeItems'), Profit = need('./CraftProfitPolicy');
     // `nodes` is the current target: the real projection, or one gear
     // candidate's scratch arena while it is evaluated (MVP-6).
-    let nodes = [], scratch = false;
+    // `nodeKeys` holds the keys of `nodes` (the same target), so a membership
+    // test is one lookup instead of a scan; `add` is the only writer of both.
+    let nodes = [], nodeKeys = new Set(), scratch = false;
     const roots = [], values = new Map();
-    const add = node => { if (nodes.length >= 64 || nodes.some(row => row.key === node.key)) return false;
-        nodes.push(node); return true; };
+    const add = node => { if (nodes.length >= 64 || nodeKeys.has(node.key)) return false;
+        nodes.push(node); nodeKeys.add(node.key); return true; };
     // One descriptor per item key in this build, shared by the scratch
     // arenas and the real graph, so a witness and its expanded root read
     // identical nodes. ARCH-NOTE: dies at return; at most the 64-node cap
@@ -289,7 +291,7 @@ function buildProjection(state, ctx, deps) {
     const builtBy = new Map();
     let readScope = null;
     const include = key => {
-        if (nodes.some(node => node.key === key)) return;
+        if (nodeKeys.has(key)) return;
         const node = descriptors.get(key);
         if (!node) return;
         for (const path of node.paths || []) {
@@ -438,7 +440,7 @@ function buildProjection(state, ctx, deps) {
     const itemNode = (id, depth = 0) => {
         if (!Sources.hasSource(id)) return null;
         const key = `item:${id}`;
-        if (nodes.some(node => node.key === key)) return key;
+        if (nodeKeys.has(key)) return key;
         if (depth >= 3 || nodes.length >= 36 || preparingItems.has(key)) return null;
         // A memoized subgraph enters the real graph under the same 36-node
         // cap as a fresh build: its whole missing closure is counted first.
@@ -451,7 +453,7 @@ function buildProjection(state, ctx, deps) {
             }
             const missing = new Set();
             const collect = at => {
-                if (missing.has(at) || nodes.some(node => node.key === at) || !descriptors.has(at)) return;
+                if (missing.has(at) || nodeKeys.has(at) || !descriptors.has(at)) return;
                 missing.add(at);
                 for (const path of descriptors.get(at).paths || []) {
                     for (const row of path.requirements || []) collect(row.key);
@@ -670,7 +672,7 @@ function buildProjection(state, ctx, deps) {
             const demand = [];
             for (const id of ctx.board.itemIds(3)) {
                 if (!sourceIndex.get(Number(id))?.some(entry => entry.kind === 'spoil')) continue;
-                if (positive(state.inventory?.[id]?.amount) || nodes.some(node => node.key === `resale:${id}`)) continue;
+                if (positive(state.inventory?.[id]?.amount) || nodeKeys.has(`resale:${id}`)) continue;
                 const offer = ctx.board.first(id, 3, { excludeOwner: state.characterId, enchant: 0 });
                 if (!offer || !(offer.price > ctx.buyback(id))) continue;
                 const units = Math.max(1, Math.min(50, Math.floor(offer.count)));
@@ -758,12 +760,12 @@ function buildProjection(state, ctx, deps) {
     // A rare piece's status value is part of its gear root from the start,
     // so admission scores the value the network later reads.
     const rare = candidates.find(row => row.item && (ctx.board?.list(row.item.selfId, SELL)?.length || 0) <= 1);
-    const real = nodes, gear = [];
+    const real = nodes, realKeys = nodeKeys, gear = [];
     for (const candidate of candidates) {
-        nodes = []; scratch = true; readScope = ctx.readScope?.open() || null;
+        nodes = []; nodeKeys = new Set(); scratch = true; readScope = ctx.readScope?.open() || null;
         const key = itemNode(candidate.item.selfId);
         const keys = nodes.map(node => node.key);
-        nodes = real; scratch = false; readScope = null; ctx.readScope?.close();
+        nodes = real; nodeKeys = realKeys; scratch = false; readScope = null; ctx.readScope?.close();
         if (!key) continue;
         const benefitPerHour = (candidate.gain.attack + candidate.gain.defence * ctx.deathHours) * powerWeight;
         gear.push({ candidate, keys, family: Equipment.isWeaponSlot(candidate.slot) ? 'weapon' : candidate.slot,
@@ -1033,7 +1035,7 @@ function buildProjection(state, ctx, deps) {
     // their 36-node build cap is not spent on gear; the final rank cut
     // below compares every root.
     for (const row of admittedGear) {
-        if (nodes.length + row.keys.filter(key => !nodes.some(node => node.key === key)).length + 1 > 64) {
+        if (nodes.length + row.keys.filter(key => !nodeKeys.has(key)).length + 1 > 64) {
             admission.pending.push({ key: row.node.key, reason: 'node_limit' });
             continue;
         }

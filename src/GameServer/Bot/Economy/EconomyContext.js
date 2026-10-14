@@ -805,11 +805,25 @@ function buildForState(state, deps) {
     const nodeScopes = [];
     const spotReads = new Map();
     const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
+    // ARCH-NOTE: PERF: the build is one synchronous call (its generators are
+    // drained inside it; board, counter and workshop deltas and occupancy
+    // reservations apply between calls), so an item's market token and a
+    // spot's occupancy token are constant while it runs: each is built once
+    // per build. A late read through the view (after either return below)
+    // builds it fresh, as its inputs may have moved since. Dies at return.
+    let tokensLive = true;
+    const marketTokens = new Map(), spotTokens = new Map();
+    const tokenOf = id => {
+        if (!tokensLive) return marketToken(sourceBoard, id, deps);
+        let token = marketTokens.get(id);
+        if (token === undefined) marketTokens.set(id, token = marketToken(sourceBoard, id, deps));
+        return token;
+    };
     const read = id => { id = Number(id);
-        for (const local of nodeScopes) local.items.set(id, marketToken(sourceBoard, id, deps));
+        for (const local of nodeScopes) local.items.set(id, tokenOf(id));
         if (reads.has(id)) return;
-        if (scope) { if (!scope.has(id)) scope.set(id, marketToken(sourceBoard, id, deps)); return; }
-        reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id);
+        if (scope) { if (!scope.has(id)) scope.set(id, tokenOf(id)); return; }
+        reads.set(id, tokenOf(id)); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -833,7 +847,9 @@ function buildForState(state, deps) {
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
         // Every evaluated source participates in admission/ranking, including a losing candidate.
-        sourceSpot: id => { const token = occupancyToken(deps, id); spotReads.set(id, token);
+        sourceSpot: id => { let token = tokensLive ? spotTokens.get(id) : undefined;
+            if (token === undefined) { token = occupancyToken(deps, id); if (tokensLive) spotTokens.set(id, token); }
+            spotReads.set(id, token);
             for (const local of nodeScopes) local.spots.set(id, token); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
@@ -881,6 +897,7 @@ function buildForState(state, deps) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
             if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
         }
+        tokensLive = false; marketTokens.clear(); spotTokens.clear();
         return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
     }
     // One stock reader for the provider's gear witnesses and the network
@@ -947,7 +964,7 @@ function buildForState(state, deps) {
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode);
-    building = false;
+    building = false; tokensLive = false; marketTokens.clear(); spotTokens.clear();
 
     if (diagnostic) {
         Diagnostics.count('context', 'build', diagnosticReason);
