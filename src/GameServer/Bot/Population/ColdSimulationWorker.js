@@ -734,16 +734,31 @@ function advisoryRefusal(deps, site, reason) {
     if (name === 'party' || name === 'no_card') return deps;
     return { ...deps, advisoryRefusal: name.startsWith('fence:structural:') ? 'fence:structural' : name };
 }
+// ColdEconomyPlan.edges bits, named for the L115 counters.
+const EDGE_NAMES = [[1, 'new_item'], [2, 'stock_keep'], [4, 'money_reached'], [8, 'review'], [16, 'level'], [32, 'death']];
+// L115: a card lost on remember is counted by its first failing check, so the
+// next call's no_card refusal has a cause.
 function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
-    if (!owner?.context || !Object.isExtensible(owner.context)) return;
+    const diagnostic = economyDiagnostics.active();
+    if (!owner?.context || !Object.isExtensible(owner.context)) {
+        if (diagnostic && advisory) economyDiagnostics.count('card', 'drop', 'remember_no_context');
+        return;
+    }
     const current = kernel.states.get(Number(owner.state.characterId));
-    if (current?.state !== owner.state || current.context !== owner.context) return;
+    if (current?.state !== owner.state || current.context !== owner.context) {
+        if (diagnostic && advisory) economyDiagnostics.count('card', 'drop', owner.context.wishAdvisory ? 'remember_stale_kept' : 'remember_stale');
+        return;
+    }
     // The fence must describe this exact state; the build activity and a
     // trip to the held leaf's own spot compare as in the card (L70). A read
     // market token already deferred by the reused plan stays soft (L70).
+    const why = diagnostic ? [] : undefined;
     if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
         .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections, activity: advisory.activity,
-            leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()) }))) advisory = null;
+            leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()), why }))) {
+        if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
+        advisory = null;
+    }
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
     });
@@ -1007,7 +1022,17 @@ function startKernel(config = {}) {
                     economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
                         .edges(state, projected, owner?.context || {}, timestamp,
                             { stockFor: (_state, kind) => stock.stock(kind) });
-                    if (economyEdges && refreshed) { refreshed = null; why.push('economy_edges'); }
+                    if (economyEdges && refreshed) {
+                        refreshed = null; why.push('economy_edges');
+                        // L115: which native gate dropped a card that held its fence.
+                        // Bit 8 has three triggers in edges(); named apart here.
+                        if (economyDiagnostics.active()) for (const [bit, name] of EDGE_NAMES) {
+                            if (!(economyEdges & bit)) continue;
+                            economyDiagnostics.count('advisory', 'edge', bit !== 8 ? name
+                                : projected.activity === 'shopping' && state.activity === 'traveling' ? 'review_arrival'
+                                    : projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal');
+                        }
+                    }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
                     return Economy.forState(projected, advisoryRefusal(deps, 'result', why[0] || 'party'));
                 },
