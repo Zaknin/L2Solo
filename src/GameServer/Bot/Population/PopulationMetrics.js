@@ -125,6 +125,8 @@ const PopulationMetrics = {
         samples: 0,
         slowSamples: 0
     },
+    // Last schedulerLagWindow readings, kept outside eventLoop: snapshot() spreads eventLoop into the status API.
+    lagHistory: [],
     schedulerState: {
         budgetMs: 0,
         mode: 'unknown',
@@ -217,6 +219,7 @@ const PopulationMetrics = {
             const lag = Math.max(0, measuredAt - expectedAt);
 
             this.eventLoop.lagMs = lag;
+            this.recordLagReading(lag);
             if (Config.developerDiagnostics) {
             this.eventLoop.maxLagMs = Math.max(this.eventLoop.maxLagMs, lag);
             this.eventLoop.samples += 1;
@@ -617,6 +620,20 @@ const PopulationMetrics = {
 
     currentEventLoopLag() {
         return Number(this.eventLoop.lagMs || 0);
+    },
+
+    recordLagReading(lag) {
+        const window = Math.max(1, Math.floor(Number(Config.schedulerLagWindow) || 3));
+        this.lagHistory.push(Math.max(0, Number(lag) || 0));
+        if (this.lagHistory.length > window) this.lagHistory.splice(0, this.lagHistory.length - window);
+    },
+
+    // Lag that most of the recent readings reach (the median of an odd window; the lower of two with two readings):
+    // one late reading, a GC pause or a burst of queued callbacks, does not read as a loaded loop.
+    sustainedEventLoopLag() {
+        if (!this.lagHistory.length) return 0;
+        const sorted = [...this.lagHistory].sort((a, b) => a - b);
+        return sorted[Math.floor((sorted.length - 1) / 2)];
     },
 
     snapshot() {

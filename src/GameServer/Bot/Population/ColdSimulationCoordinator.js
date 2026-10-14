@@ -2475,10 +2475,14 @@ class ColdSimulationCoordinator {
         const throttleMs = Math.max(0, Number(Config.schedulerLagThrottleMs) || 0);
         const abortMs = Math.max(0, Number(Config.schedulerLagAbortMs) || 0);
         let maxInFlight = player ? playerLimit : idleLimit;
+        // The worker limit follows sustained lag only. The raw max above (the latest 1 s reading, or the same reading
+        // held 5 s in schedulerState) dropped the limit 32 -> 2 on one GC or burst task: 14% of summaries at 2 on
+        // 2026-10-14 (L118). Early-flush admission and the governor still read the raw lagMs returned below.
+        const limitLagMs = Number(Metrics.sustainedEventLoopLag?.() || 0);
 
-        if (abortMs > 0 && lagMs >= abortMs) {
+        if (abortMs > 0 && limitLagMs >= abortMs) {
             maxInFlight = lagLimit;
-        } else if (throttleMs > 0 && lagMs > throttleMs) {
+        } else if (throttleMs > 0 && limitLagMs > throttleMs) {
             maxInFlight = Math.max(lagLimit, Math.floor(maxInFlight / 2));
         }
 
