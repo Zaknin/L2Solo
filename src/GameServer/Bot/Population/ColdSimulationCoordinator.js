@@ -38,6 +38,7 @@ const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 
 const ColdTrip = require('./ColdTrip');
+const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
 // Private main-thread provenance survives the queue's shallow clone but is
 // excluded from JSON/wire sizing and cannot be supplied by a Worker message.
 const PROPOSAL_SOURCE = Symbol('cold-proposal-source');
@@ -2156,7 +2157,7 @@ class ColdSimulationCoordinator {
             const change = result.ok ? result.proposal?.atomicGroup?.partyChanges?.[0] : null;
             if (change?.status !== 'dissolved' || dissolved.has(change.partyId)) continue;
             dissolved.add(change.partyId);
-            try { require('../../Clan/ClanRaidRoster').wakeCancelled({ stats: JSON.parse(change.statsJson || '{}') }); }
+            try { ClanRaidRoster.wakeCancelled({ stats: JSON.parse(change.statsJson || '{}') }); }
             catch (error) { this.recordError(error); }
         }
         results = results.filter(result => {

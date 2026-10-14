@@ -1,3 +1,5 @@
+const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
+
 // The main-thread fallback uses exactly the same lease-fenced transaction as
 // worker raids; it must not apply nine independent inventory updates.
 async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs }) {
@@ -71,7 +73,7 @@ async function resolve({ party, members, spot, pressure, targetNpcId, elapsedMs 
         Metrics.recordPartyResolve(); Metrics.recordCombat(result.debug);
         if (nextParty.status === 'dissolved') Metrics.recordPartyDissolution();
         // The resolver's cancel of a marked unopened party is committed here.
-        if (nextParty.status === 'dissolved') require('../../Clan/ClanRaidRoster').wakeCancelled(nextParty);
+        if (nextParty.status === 'dissolved') ClanRaidRoster.wakeCancelled(nextParty);
         return { ok: true, party: committedParty, debug: result.debug };
     } finally {
         Raid.abort(id);

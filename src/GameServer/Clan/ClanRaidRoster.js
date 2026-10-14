@@ -1,6 +1,7 @@
 // A marked equipment roster is a committed owner identity, not a head count.
 // Combat math and composition remain owned by ClanRaidPolicy.
 const Demand = require('./ClanRosterDemand');
+const ReviewEvents = require('./ClanReviewEvents');
 // Invocation authority, never persisted or cached per actor/party.
 const nativeImpact = Symbol('native-raid-offensive-impact');
 const isNativeImpact = value => value === nativeImpact;
@@ -131,6 +132,6 @@ const CANCEL_REASONS = Object.freeze(['raid_roster_owner_changed', 'raid_roster_
 function wakeCancelled(party, reason = party?.stats?.partyBreakReason) {
     const marker = markerFor(party);
     if (!marker || !CANCEL_REASONS.includes(reason)) return false;
-    return require('./ClanReviewEvents').changed(marker.clanId, 'raid_cancelled');
+    return ReviewEvents.changed(marker.clanId, 'raid_cancelled');
 }
 module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened, CANCEL_REASONS, wakeCancelled };
