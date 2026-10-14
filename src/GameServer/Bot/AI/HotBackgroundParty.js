@@ -13,6 +13,7 @@ const TownTransit = invoke('GameServer/Bot/AI/TownTransitPolicy');
 const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const DangerMoment = invoke('GameServer/Bot/AI/DangerMoment');
+const Awareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const BotRetreatPlanner = invoke('GameServer/Bot/AI/BotRetreatPlanner');
 // The cold party resolver's target rule: one answer for hot and cold parties.
 const PartyTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
@@ -147,7 +148,7 @@ function returnToSpot(session, bot, spot, party, now, destination = null) {
 // or run; a run hands the bot to FleeingState until it ends. true = acted.
 function dangerMoment(session, bot, target, near, scan, now) {
     if (!DangerMoment.applies(session, bot)) return false;
-    const attackers = invoke('GameServer/Bot/AI/PartyAwareness').npcsAttackingActor(bot, DangerMoment.ATTACKER_RADIUS, scan.near);
+    const attackers = Awareness.npcsAttackingActor(bot, DangerMoment.ATTACKER_RADIUS, scan.near);
     if (!attackers.length) {
         session.dangerMoment = undefined;
         return false;
@@ -333,7 +334,6 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     if (bot.state.fetchCasts?.()) return true;
     const radius = 1800;
     const near = members.filter(s => Threats.distance(s.actor, owner.actor) <= radius);
-    const Awareness = invoke('GameServer/Bot/AI/PartyAwareness');
     // A member restarted in town goes back on its own threat only: the party's
     // fight at the spot is no target for a bot in town.
     const ownScan = {};
