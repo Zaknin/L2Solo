@@ -653,18 +653,27 @@ function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation =
     };
 }
 
+// The departure marker, not the goal re-reviewed on arrival, says the trip came to sell.
+function saleVisit(state) {
+    const visit = state?.stats?.townVisit;
+    return visit?.reason === 'sell_inventory' && visit.completed !== true
+        && (!visit.town || visit.town === state.currentRegion);
+}
+
 function marketListingIntent(state, goal = null) {
     const forcedCleanup = state?.stats?.forcedMarketCleanup || null;
     const ordinaryVisit = state?.phase === 'cold' && state.activity === 'shopping'
         && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state);
-    if (!forcedCleanup && goal?.type !== 'sell_inventory' && !ordinaryVisit) {
+    const selling = saleVisit(state);
+    if (!forcedCleanup && goal?.type !== 'sell_inventory' && !ordinaryVisit && !selling) {
         return { shouldOpen: false, state };
     }
-    if (!forcedCleanup) return { shouldOpen: true, state };
+    if (!forcedCleanup) return { shouldOpen: true, saleVisit: selling, state };
 
     return {
         shouldOpen: true,
         cleanup: forcedCleanup,
+        saleVisit: selling,
         state: {
             ...state,
             stats: {
@@ -677,8 +686,8 @@ function marketListingIntent(state, goal = null) {
 
 function openMarketListing(intent, goal) {
     // An existing shop can sell remotely, but cannot unload the bag that
-    // brought its owner to town or defer the next cleanup trip.
-    if (!intent.cleanup && BotAfkMarketService.canTradeRemotely(intent.state, goal)) {
+    // brought its owner to town (a cleanup or a sale trip) or defer the next one.
+    if (!intent.cleanup && !intent.saleVisit && BotAfkMarketService.canTradeRemotely(intent.state, goal)) {
         return BotAfkMarketService.reconcile(intent.state, goal)
             .then((remote) => ({ state: remote.state, listed: false, remote: remote.changed }));
     }
@@ -3808,7 +3817,10 @@ const PopulationService = {
         correctedBids = checked.changed;
         // A correction changed the owner's board revision. Its earlier
         // optional plan waits for fresh preparation, rather than replaying it.
-        if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids) {
+        // A sale trip's own sale (open) decides the bag: the worker showcase
+        // first would make two pricers fight over it (E306).
+        if (updatedState.activity === 'shopping' && workerPlan?.economyPlan && !correctedBids
+            && !saleVisit(updatedState)) {
             const sourceWorker = ColdSimulationCoordinator.worker, sourceEpoch = ColdSimulationCoordinator.workerEpoch;
             const beforeWrite = () => {
                 if (ColdSimulationCoordinator.stopping || ColdSimulationCoordinator.worker !== sourceWorker
@@ -3899,8 +3911,9 @@ const PopulationService = {
                 .then((saved) => saved || batchState);
         }
         const listingIntent = marketListingIntent(purchasedState, goal);
+        // A sale trip must reach the buyers and its 30-min retry, which only open does.
         const listingPromise = !marketLifecycle.closed && listingIntent.shouldOpen
-            && (!workerPlan?.economyPlan || listingIntent.cleanup)
+            && (!workerPlan?.economyPlan || listingIntent.cleanup || listingIntent.saleVisit)
             ? openMarketListing(listingIntent, goal)
             : Promise.resolve({ state: purchasedState, listed: false });
         const marketStatePromise = listingPromise.then((listingResult) => {
