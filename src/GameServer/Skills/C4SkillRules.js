@@ -1313,6 +1313,13 @@ function shotBoostsHeal(skillType) {
     return SHOT_BOOSTED_HEALS.has(skillType);
 }
 
+// Area, frontal-area and aura skills strike every enemy around their centre.
+// C4 skill data has no target limit for them.
+const AREA_SOURCE_TARGETS = new Set(['area', 'front_area', 'aura']);
+function hitsArea(semantic = {}) {
+    return AREA_SOURCE_TARGETS.has(semantic.sourceTarget);
+}
+
 function resolveCached(skill = {}) {
     const key = `${skill.selfId}|${skill.level}|${skill.name}|${skill.power}|${skill.buff}|${skill.spell === true}|${skill.distance}`;
     let semantic = resolved.get(key);
@@ -1565,6 +1572,7 @@ module.exports = {
     SIEGE_FLAG,
     resolve,
     resolveCached,
+    hitsArea,
     shotBoostsHeal,
     normalizeKey,
     sourcedMaxLevel,

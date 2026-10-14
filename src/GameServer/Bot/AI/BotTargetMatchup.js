@@ -150,14 +150,16 @@ function channels(profile, target) {
             || (kind === 'Weapon.Bow' && number(semantic.castRange ?? skill.distance, 0) < 400)) continue;
         const power = Math.max(0, number(skill.power ?? semantic.power, 0));
         if (!power) continue;
-        const weight = magic
+        // An area skill hits every mob of a pull (F20; BotPullEstimate.pullView).
+        const struck = Rules.hitsArea(semantic) ? Math.max(1, number(target.pull)) : 1;
+        const weight = struck * (magic
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
                 / Math.max(0.5, number(skill.hitTime, 3000) / 1000 * 333 / positive(profile.castSpd || 333))
             : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef)
-                / Math.max(1, number(skill.hitTime, 1500) / 1000);
-        const hitDamage = magic
+                / Math.max(1, number(skill.hitTime, 1500) / 1000));
+        const hitDamage = struck * (magic
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
-            : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef);
+            : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef));
         result.push({ weight, modifier: modifier(target, semantic, magic, kind), magic,
             soloScore: profile.soloAttackScores?.[skill.selfId],
             survivalWeight: Math.min(weight, hitDamage / Math.max(0.25, number(skill.reuse, 0) / 1000)),

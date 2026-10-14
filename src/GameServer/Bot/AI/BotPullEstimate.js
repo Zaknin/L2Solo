@@ -89,9 +89,10 @@ function entryPull(spot, selfId) {
 
 // A pull of k as one mob: k times the HP, and the attack of the mobs still
 // standing on average while they fall one by one, (k + 1) / 2 of one mob.
+// The view keeps k for the area skills that hit every mob of it.
 function pullView(target, k) {
     if (!(k > 1)) return target;
-    return { ...target, maxHp: target.maxHp * k, pAtk: target.pAtk * (k + 1) / 2 };
+    return { ...target, maxHp: target.maxHp * k, pAtk: target.pAtk * (k + 1) / 2, pull: k };
 }
 
 // A whole number of mobs for one new fight, from the spot's mean.

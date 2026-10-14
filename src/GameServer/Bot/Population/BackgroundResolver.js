@@ -1176,6 +1176,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     // A pull is counted once, when its fight starts; a continued fight keeps its saved view.
     const mob = pending ? picked : BotPullEstimate.pullView(picked, picked.pull);
     const pullMobs = pending ? 0 : Number(picked.pull || 1);
+    let areaPullHits = 0;
     let mobHp = pending?.hp ?? mob.maxHp;
     let actions = 0;
     let overhitContext = null;
@@ -1215,7 +1216,12 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             const hit = coldBotTurn(soloFighter, { allies, mob, mobHp, at: timestamp + time, time, rng });
             if (!hit) continue;
             const targetHpBeforeHit = mobHp;
-            mobHp -= Math.max(0, hit.damage);
+            // An area skill hits every mob of the pull, each for the full hit (F20):
+            // exact while all k stand, a little generous once some have fallen.
+            const struck = hit.skill && Number(mob.pull) > 1 && C4SkillRules.hitsArea(C4SkillRules.resolveCached(hit.skill))
+                ? Number(mob.pull) : 1;
+            if (struck > 1) areaPullHits += 1;
+            mobHp -= Math.max(0, hit.damage) * struck;
             if (mobHp <= 0) {
                 overhitContext = invoke('GameServer/Progression/OverhitReward').contextForHit({
                     attacker: { characterId: state.characterId },
@@ -1270,7 +1276,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
                 musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
                 potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
-                mobSelfId: mob.selfId || null, timedOut: !died, pullMobs }
+                mobSelfId: mob.selfId || null, timedOut: !died, pullMobs, areaPullHits }
         };
     }
 
@@ -1317,7 +1323,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
             musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
             potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
-            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit, pullMobs }
+            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit, pullMobs, areaPullHits }
     };
 }
 
@@ -1844,6 +1850,7 @@ const BackgroundResolver = {
         let completedFights = 0;
         let pulls = 0;
         let pullMobs = 0;
+        let areaPullHits = 0;
 
         for (let i = 0; i < fights; i++) {
             if (combatMs >= combatBudgetMs || combatActions >= actionBudget) break;
@@ -1905,6 +1912,7 @@ const BackgroundResolver = {
                 pulls += 1;
                 pullMobs += result.debug.pullMobs;
             }
+            areaPullHits += Number(result.debug?.areaPullHits || 0);
             for (const [selfId, count] of Object.entries(result.debug?.drunkPotions || {})) {
                 drunkPotions[selfId] = Number(drunkPotions[selfId] || 0) + Number(count);
             }
@@ -1996,6 +2004,7 @@ const BackgroundResolver = {
                 drunkPotions,
                 pulls,
                 pullMobs,
+                areaPullHits,
                 targetNpcId: Number(targetNpcId) || null,
                 targetOnSpot: ColdCombatProfile.spotSpawns(spot, targetNpcId) ? 1 : 0,
                 foughtNpcIds

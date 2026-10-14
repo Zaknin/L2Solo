@@ -18,6 +18,8 @@ function emptyCounters() {
         // Cold solo fights started and the mobs they pulled (F20): mobs per pull.
         coldPulls: 0,
         coldPullMobs: 0,
+        // Cold solo area-skill hits that struck every mob of a pull (F20).
+        coldAreaPullHits: 0,
         skippedResolves: 0,
         activations: 0,
         cooldowns: 0,
@@ -258,6 +260,7 @@ const PopulationMetrics = {
         this.counters.partyBuffCasts += Math.max(0, Number(debug.partyBuffCasts) || 0);
         this.counters.coldPulls += Math.max(0, Number(debug.pulls) || 0);
         this.counters.coldPullMobs += Math.max(0, Number(debug.pullMobs) || 0);
+        this.counters.coldAreaPullHits += Math.max(0, Number(debug.areaPullHits) || 0);
     },
 
     recordSkippedResolve(reason = 'unknown') {
