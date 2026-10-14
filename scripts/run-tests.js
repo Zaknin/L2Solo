@@ -849,6 +849,8 @@ const tests = [
     'tests/test_quest_cure_fever_items.js',
     'tests/test_quest_item_templates.js',
     'tests/test_quest_abort.js',
+    'tests/test_quest_handin_requires_item.js',
+    'tests/test_quest_npc_names.js',
     'tests/test_second_profession_trials.js',
     'tests/test_second_profession_session_race.js',
     'tests/test_second_profession_content_audit.js',
