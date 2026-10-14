@@ -989,6 +989,7 @@ const tests = [
     'tests/test_board_trade_meeting.js',
     'tests/test_trade_meeting_service.js',
     'tests/test_same_point_trade_meetings.js',
+    'tests/test_reserved_board_stock.js',
     'tests/test_delete_character_trade_meetings.js',
     'tests/test_same_point_meeting_service.js',
     'tests/test_trade_meeting_worker_prepare.js',

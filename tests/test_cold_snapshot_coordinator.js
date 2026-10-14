@@ -274,7 +274,40 @@ function setup() {
         governor.complete = originalComplete;
         clearTimeout(sliced.coordinator.snapshotContinuationTimer);
     }
-    console.log('Cold coordinator incremental refresh, cooperative full bootstrap, and P0 bypass checks passed');
+    const nativeTravel = setup();
+    const previousCachedState = LifeState.cachedState;
+    const waitingMeeting = { characterId: 930021, phase: 'cold', activity: 'hunting', updatedAt: 1000,
+        stats: { tradeMeeting: [7, 1] }, timing: { nextResolveAt: 2000 },
+        simulation: { revision: 40, ownerId: 'legacy_main', leaseId: null } };
+    const paidLeg = { ...waitingMeeting, activity: 'traveling', updatedAt: 1001,
+        stats: { ...waitingMeeting.stats, travel: { reason: 'trade_meeting', arrivalAt: 3000 } },
+        timing: { nextResolveAt: 3000 }, simulation: { ...waitingMeeting.simulation, revision: 41 } };
+    let authoritative = waitingMeeting;
+    try {
+        LifeState.cachedState = id => id === waitingMeeting.characterId ? authoritative : previousCachedState.call(LifeState, id);
+        // The previous page is still hydrating while the native leg commits.
+        // A deferred incoming/memory notification carries its pre-trip object.
+        nativeTravel.coordinator.criticalSnapshotInFlight = Promise.resolve();
+        nativeTravel.coordinator.notifyState(waitingMeeting);
+        authoritative = paidLeg;
+        nativeTravel.coordinator.notifyState(paidLeg);
+        nativeTravel.coordinator.markDirty(waitingMeeting, { critical: true, reason: 'trade_incoming' });
+        nativeTravel.coordinator.criticalSnapshotInFlight = null;
+        await nativeTravel.coordinator.flushCriticalSnapshots();
+        const published = nativeTravel.messages.at(-1).payload.rows[0].state;
+        assert.strictEqual(published.simulation.revision, 41,
+            'a delayed pre-trip notification must not replace a newer native paid leg');
+        assert.strictEqual(published.activity, 'traveling');
+        const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+        const kernel = new ColdSimulationKernel({ now: () => 4000, resolveSolo: () => null });
+        kernel.upsertMany(nativeTravel.messages.flatMap(message => message.payload.rows));
+        assert.strictEqual(kernel.dueCandidates(4000, 1)[0]?.characterId, waitingMeeting.characterId,
+            'the actual published leg must retain resolver coverage for arrival');
+    } finally {
+        LifeState.cachedState = previousCachedState;
+        clearTimeout(nativeTravel.coordinator.snapshotContinuationTimer);
+    }
+    console.log('Cold coordinator incremental refresh, cooperative full bootstrap, P0 bypass and native trip publication checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

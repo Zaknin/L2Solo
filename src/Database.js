@@ -3199,11 +3199,21 @@ function afkTradeShopUnsafe(shopId) {
         JOIN characters ON characters.id = shops.ownerId
         WHERE shops.id = ?`, [shopId]);
     if (!shop) return null;
+    const meetings = shop.custodyPolicy === 1 ? TradeMeetings.active(shop.ownerId) : [];
+    const held = meetings.length ? all(`SELECT selfId,enchant,SUM(heldCount) amount FROM board_trade_meeting_lines
+        WHERE meetingId IN (${meetings.map(() => '?').join(',')}) AND sourceAdId=? AND custodyType='trade'
+        GROUP BY selfId,enchant`, [...meetings.map(row => row.id), shop.id]) : [];
+    const heldByItem = new Map(held.map(row => [`${row.selfId}:${row.enchant}`, Number(row.amount)]));
     return {
         ...shop,
         appearance: jsonObject(shop.appearanceJson),
         lines: all('SELECT * FROM afk_trade_lines WHERE shopId = ? ORDER BY id', [shopId])
-            .map(line => ({ ...line, ...(linePricing(line) ? { pricing: linePricing(line) } : {}) }))
+            .map(line => ({ ...line,
+                // Keep count as the native receipt's backing. Only uncommitted
+                // units are offered to the next buyer/seller on the public board.
+                ...(shop.custodyPolicy === 1 ? { availableCount: Math.max(0,
+                    Number(line.count) - (heldByItem.get(`${line.selfId}:${line.enchant}`) || 0)) } : {}),
+                ...(linePricing(line) ? { pricing: linePricing(line) } : {}) }))
     };
 }
 
@@ -5150,13 +5160,23 @@ const Database = {
                 WHERE ${condition} ORDER BY shops.id`, params, 'afk-trade:list'),
             run(`SELECT lines.* FROM afk_trade_lines lines
                 JOIN afk_trade_shops shops ON shops.id = lines.shopId
-                WHERE ${condition} ORDER BY lines.shopId, lines.id`, params, 'afk-trade:lines')
-        ]).then(([shops, lines]) => {
+                WHERE ${condition} ORDER BY lines.shopId, lines.id`, params, 'afk-trade:lines'),
+            run(`SELECT lines.sourceAdId shopId,lines.selfId,lines.enchant,SUM(lines.heldCount) amount
+                FROM board_trade_meeting_lines lines JOIN board_trade_meetings meetings ON meetings.id=lines.meetingId
+                JOIN afk_trade_shops shops ON shops.id=lines.sourceAdId
+                WHERE ${condition} AND shops.custodyPolicy=1 AND meetings.state='accepted' AND lines.custodyType='trade'
+                GROUP BY lines.sourceAdId,lines.selfId,lines.enchant`, params, 'afk-trade:held-lines')
+        ]).then(([shops, lines, held]) => {
             const byShop = new Map();
+            const conditional = new Set(shops.filter(shop => shop.custodyPolicy === 1).map(shop => Number(shop.id)));
+            const reserved = new Map(held.map(row => [`${row.shopId}:${row.selfId}:${row.enchant}`, Number(row.amount)]));
             lines.forEach((line) => {
                 const shopLines = byShop.get(Number(line.shopId)) || [];
                 const pricing = linePricing(line);
-                shopLines.push({ ...line, ...(pricing ? { pricing } : {}) });
+                shopLines.push({ ...line,
+                    ...(conditional.has(Number(line.shopId)) ? { availableCount: Math.max(0,
+                        Number(line.count) - (reserved.get(`${line.shopId}:${line.selfId}:${line.enchant}`) || 0)) } : {}),
+                    ...(pricing ? { pricing } : {}) });
                 byShop.set(Number(line.shopId), shopLines);
             });
             return shops.map((shop) => ({

@@ -1365,6 +1365,13 @@ class ColdSimulationCoordinator {
     }
 
     markDirty(state, options = {}) {
+        // Deferred inventory/memory notifications can still carry the object
+        // from before a native paid leg. Coalescing that object over the new
+        // leg leaves the worker waiting at the old meeting state indefinitely.
+        const current = LifeState.cachedState(Number(state?.characterId));
+        if (current && (Number(current.simulation?.revision || 0) > Number(state?.simulation?.revision || 0)
+            || Number(current.simulation?.revision || 0) === Number(state?.simulation?.revision || 0)
+                && Number(current.updatedAt || 0) > Number(state?.updatedAt || 0))) state = current;
         this.projectionRetention.invalidate(state);
         if (!state?.characterId || !this.worker || !this.ready) {
             return { ok: false, reason: 'worker_not_ready' };

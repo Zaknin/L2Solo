@@ -80,9 +80,19 @@ const ids = [730221, 730222, 730223], point = { locX: 83396, locY: 147904, locZ:
             return request;
         };
         const quoted = (await accept(await advertised())).meeting.id;
+        const reservedAd = await Database.fetchAfkTradeShop(ad.id);
+        assert.equal(reservedAd.lines[0].count, 2, 'native advertised count still backs the accepted receipt');
+        assert.equal(reservedAd.lines[0].availableCount, 0, 'accepted stock is unavailable to another public buyer');
+        const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
+        Afk.refreshRecord(reservedAd);
+        assert.equal(Afk.boardIndex().ownerLines(ids[1]).length, 0, 'fully held stock leaves the public offer index');
         await assert.rejects(accept(await advertised()), /quote_changed/, 'one advertisement cannot promise its remaining units twice');
         await Database.cancelTradeMeeting(quoted, 'fixture');
         for (const actor of [ids[0], ids[1]]) { await Database.settleBoardOwner(actor); await Database.acknowledgeTradeMeeting(quoted, actor); }
+        const releasedAd = await Database.fetchAfkTradeShop(ad.id);
+        assert.equal(releasedAd.lines[0].availableCount, 2, 'cancellation restores the same original advertised units');
+        Afk.refreshRecord(releasedAd);
+        assert.equal(Afk.boardIndex().ownerLines(ids[1])[0].count, 2, 'released stock becomes publicly available again');
         // A meeting that takes the whole advertised count closes the record
         // like every other fill: nothing stays on the board at count 0.
         const filled = (await accept(await advertised())).meeting.id;
