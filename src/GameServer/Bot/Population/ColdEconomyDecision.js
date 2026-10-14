@@ -374,7 +374,15 @@ function economyFor(state, deps = {}) {
 function advisory(economy, state, activity = state.activity) {
     const card = capture(economy, state);
     const fence = economy?.calculationFence;
-    if (!(fence instanceof Uint8Array)) return null;
+    const diagnostic = Diagnostics.active();
+    if (!(fence instanceof Uint8Array)) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_fence'); return null; }
+    if (diagnostic) {
+        // L115: the real size of every card (fence + card), dropped or kept.
+        const total = fence.byteLength + card.data.byteLength;
+        Diagnostics.count('card', 'size', total <= 2048 ? 'le2k' : total <= 4096 ? '2-4k' : total <= 8192 ? '4-8k' : '8k+');
+        if (card.data.byteLength > MAX_BYTES) Diagnostics.count('card', 'drop', 'oversize_card');
+        else if (total > MAX_ADVISORY_BYTES) Diagnostics.count('card', 'drop', 'oversize_total');
+    }
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
         activityLeaf: Number(state.stats?.activityLeaf || 0), activity, mp: Number(state.vitals?.mp) };

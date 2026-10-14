@@ -195,6 +195,23 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
         Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0])}`;
     return { build, sources: sourceKey };
 }
+// Diagnostics only (L115): the group name of each '|' segment of the
+// structural key above, in its order: the inputKey fields, then the
+// capability, then the JSON tail (equipment plan, persona, spot deaths,
+// market trades, relations, production, role, account). A bounded set of
+// 12 names keeps the worker's counter keys few. The positions hold while no
+// field before the differing one contains '|' (all are numbers, ids, or
+// JSON of numbers and town names).
+const STRUCTURAL_SEGMENTS = [
+    'progress', 'progress', 'progress', 'loot', 'other', 'other', 'other', 'other', 'other',
+    'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'time', 'other', 'other',
+    'frustration', 'other', 'other', 'other', 'other', 'other', 'other', 'other',
+    'time', 'time', 'clan_loot', 'clan_loot', 'clan_loot', 'trip_loc', 'gear_threat', 'other', 'memory',
+    'other', 'other', 'other', 'other', 'trip_loc', 'trip_loc', 'other', 'other', 'other', 'progress', 'other',
+    'workshop', 'other', 'progress', 'build'];
+function structuralSegment(index) {
+    return index < STRUCTURAL_SEGMENTS.length ? STRUCTURAL_SEGMENTS[index] : 'plan_tail';
+}
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised; location, region and the travel target stay
 // exact inside Trip.key, so 'to town' never matches 'to a spot'. One trip
@@ -341,10 +358,16 @@ function calculationFence(state, sections, reads, spots, deps, bands = [], safet
 // successive differences; dungeon/noncanonical ids keep their original keys.
 // Only the worker compresses large proofs, and only the existing owner keeps
 // their <=4KB result. No hash, global dictionary or saved dependency list.
+// A size refusal is counted as fence:drop:<reason> while diagnostics run (L115).
+function fenceDrop(reason) {
+    if (Diagnostics.active()) Diagnostics.count('fence', 'drop', reason);
+    return null;
+}
 function encodeCalculationFence(fields, compact = true) {
     const plain = fenceEncoder.encode(JSON.stringify(fields));
-    if (!compact || plain.byteLength <= 2048) return plain.byteLength <= FENCE_BYTES ? plain : null;
-    if (plain.byteLength > FENCE_RAW_BYTES || fields[2].length > FENCE_SPOTS) return null;
+    if (!compact || plain.byteLength <= 2048) return plain.byteLength <= FENCE_BYTES ? plain : fenceDrop('plain_over_4k');
+    if (plain.byteLength > FENCE_RAW_BYTES) return fenceDrop('raw_over_64k');
+    if (fields[2].length > FENCE_SPOTS) return fenceDrop('spots_over_4096');
     const tokens = [], indexes = new Map(), grid = [], other = [];
     for (const [id, token] of fields[2]) {
         if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
@@ -360,9 +383,9 @@ function encodeCalculationFence(fields, compact = true) {
         coordinates.push(row[0] - x, row[1] - y, row[2]); x = row[0]; y = row[1];
     }
     const packed = fenceEncoder.encode(JSON.stringify([fields[0], fields[1], [tokens, coordinates, other], fields[3], fields[4]]));
-    if (packed.byteLength > FENCE_RAW_BYTES) return null;
+    if (packed.byteLength > FENCE_RAW_BYTES) return fenceDrop('raw_over_64k');
     const compressed = deflateRawSync(packed, { level: 6 });
-    if (compressed.byteLength + 1 > FENCE_BYTES) return null;
+    if (compressed.byteLength + 1 > FENCE_BYTES) return fenceDrop('compressed_over_4k');
     const result = new Uint8Array(compressed.byteLength + 1); result[0] = 1; result.set(compressed, 1);
     return result;
 }
@@ -435,7 +458,7 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
     // options.activity is the fence's own build activity, so one key compares;
     // options.leaf is its held leaf (a trip to the leaf's own spot).
     const structural = sectionKeys(fieldActivity(state, options.activity, options.leaf), deps, bands).structural;
-    if (key !== structural) return miss(why, why && Diagnostics.active() ? `structural:${firstSegment(key, structural)}` : 'structural');
+    if (key !== structural) return miss(why, why && Diagnostics.active() ? `structural:${structuralSegment(firstSegment(key, structural))}` : 'structural');
     const reads = new Map();
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;
