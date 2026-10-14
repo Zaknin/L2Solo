@@ -87,6 +87,12 @@ try {
             'before an action a shopper still rebuilds');
         assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'traveling' }, accepted, at(T + 1000)), null,
             'a traveller without a trip record (resolved as a fight) still rebuilds');
+        const why = [];
+        Decisions.refreshAdvisory({ ...next, activity: 'shopping' }, accepted, at(T + 1000), { why });
+        assert.deepEqual(why, ['not_field:shopping'], 'a refused card names its check');
+        assert.equal(Decisions.refusal({ ...next, activity: 'traveling' }, accepted, at(T + 1000)), 'travel_record');
+        assert.equal(Decisions.refusal({ ...next, incomingPending: true }, accepted, at(T + 1000)), 'incoming');
+        assert.equal(Decisions.refusal(next, accepted, at(T + 1000)), '', 'a reusable card has no refusal');
         assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'shopping' }, accepted, at(T + 1000), { afterResult: true }), null,
             'only hunting, resting and travelling are equalised');
         assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
