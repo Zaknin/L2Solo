@@ -124,5 +124,14 @@ try {
     tick(follower, 27000);
     assert.notStrictEqual(follower.lastDecision.action, 'party_regroup', 'a leader on its way back from town is not followed');
     leader.spotRelocation = undefined;
+    // The leader away (in town): the owner is the first member AT the spot, not the first one merely not away
+    // (the healer, past the cell edge but not in town, comes first in the roster).
+    leader.actor.x = 50000; leader.actor.town = true;
+    healer.actor.x = 4500; healer.actor.town = false;
+    follower.actor.x = 100; follower.actor.town = false;
+    healer.actor.moved = false;
+    tick(healer, 28000);
+    assert.strictEqual(healer.lastDecision.action, 'party_regroup');
+    assert.strictEqual(healer.actor.move.to.locX, 100, 'the member past the edge regroups to the one at the spot');
     console.log('Hot background party anchor: roster wait, regroup point and return from town passed');
 } finally { saved.reverse().forEach(restore => restore()); }

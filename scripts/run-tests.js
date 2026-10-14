@@ -166,7 +166,6 @@ const tests = [
     'tests/test_hot_background_party_revival.js',
     'tests/test_hot_background_party_buffs.js',
     'tests/test_hot_background_party_anchor.js',
-    'tests/test_hot_background_party_danger_moment.js',
     'tests/test_cold_party_hunt_buffs.js',
     'tests/test_bot_danger_moment.js',
     'tests/test_bot_resting_danger_moment.js',

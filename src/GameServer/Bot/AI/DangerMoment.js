@@ -5,6 +5,7 @@ const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const ColdRest = invoke('GameServer/Bot/Population/ColdRest');
 const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 
 // E70, §13.6 "it got dangerous": drink a potion, run to heal, sit or keep
 // fighting, each priced in the bot's hours. First choices, calibrated later
@@ -100,6 +101,7 @@ function forActor(session, actor, target, options = {}) {
     const packetPrice = Number(economy.statsPacket?.money?.[1] || 0);
     const moneyPrice = economy.moneyPrice > 0 ? economy.moneyPrice : packetPrice > 0 ? packetPrice : null;
     const targetId = Number(target.fetchId?.() ?? 0);
+    if (moneyPrice === null) Diagnostics.count('danger_moment', 'no_price', 'all');
     const restHours = ColdRest.estimateRestMs({ level: actor.fetchLevel?.(), stats: { classId: actor.fetchClassId?.() } },
         { hp, maxHp, mp, maxMp }) / 3600000;
     const moment = decide({ hp, maxHp, survivalRatio: survival.survivalRatio, attacked: options.attacked !== false,
@@ -119,8 +121,15 @@ function applies(session, actor) {
     return false;
 }
 
+// One counter per outcome taken (drank is counted as drink): the live check reads what the moment decides.
+function counted(action) {
+    if (!action) return null;
+    Diagnostics.count('danger_moment', action === 'drank' ? 'drink' : action, 'all');
+    return action;
+}
+
 // The moment a fight in progress takes, hunting (E70) or resting and attacked
-// (E71), or a hot party member (E70): 'drank', 'flee', 'fight', or null when
+// (E71): 'drank', 'flee', 'fight', or null when
 // the bot has no held economy or the matchup is unknown (the author's retreat
 // rule then). A potion it could not drink leaves the moment to the other
 // options. A bot at full HP has nothing to drink and takes the author's rule
@@ -139,9 +148,9 @@ function take(session, actor, target, options = {}) {
     let inventory = null;
     const bag = () => inventory || (inventory = HealingPotionStock.actorInventory(actor));
     const moment = forActor(session, actor, target, { profiles, attackers, attacked: options.attacked, bag });
-    if (moment?.action !== 'drink') return moment?.action || null;
-    if (HealingPotionStock.tryUseInCombat(session, actor, target, { dangerMoment: true, inventory: bag() })) return 'drank';
-    return forActor(session, actor, target, { profiles, attackers, attacked: options.attacked, potion: null })?.action || null;
+    if (moment?.action !== 'drink') return counted(moment?.action);
+    if (HealingPotionStock.tryUseInCombat(session, actor, target, { dangerMoment: true, inventory: bag() })) return counted('drank');
+    return counted(forActor(session, actor, target, { profiles, attackers, attacked: options.attacked, potion: null })?.action);
 }
 
 module.exports = { LOSE_SLOPE, FLEE_EXPOSURE, ROLL_SPREAD, ATTACKER_RADIUS, loseChance, decide, forActor, applies, take };
