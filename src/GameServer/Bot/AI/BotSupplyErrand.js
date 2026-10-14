@@ -35,6 +35,16 @@ function townDestination(offer, bot, BotAI) {
     return null;
 }
 
+// The errand owns the companion while it is hidden and cold (escape cast) or
+// shopping in the supply town: the same phases its return treats as the
+// errand (ShoppingState.scheduleResourceReturn). A leader's teleport leaves
+// such a companion alone; the return places it beside the leader's position
+// at that time.
+function ownsCompanion(session) {
+    return session?.supplyErrandHidden === true
+        && (session.supplyErrandPhase === 'cold' || session.supplyErrandPhase === 'shopping');
+}
+
 function hideForSupply(session, bot) {
     if (session.supplyErrandHidden === true) return;
     session.supplyErrandHidden = true;
@@ -313,6 +323,7 @@ module.exports = {
     MAX_REQUEST_AMOUNT,
     actorAdena,
     itemTemplate,
+    ownsCompanion,
     purchaseAtDestination,
     request
 };

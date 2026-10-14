@@ -18,6 +18,7 @@ const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const ServerResponse = invoke('GameServer/Network/Response');
 const BotAI = invoke('GameServer/Bot/BotAI');
 const TeleportTo = invoke('GameServer/Actor/Generics/TeleportTo');
+const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 
@@ -164,6 +165,48 @@ async function runCase(phaseWanted, failures) {
         'the errand state is not consumed by the return');
 }
 
+// The leader's teleport also ends a party raid (BotRaidSafety.endPlayerPartyRaid,
+// called by TeleportTo for a player): its companion sweep must leave the
+// errand companion alone as well.
+async function raidEndCase(failures) {
+    const counters = { sent: [], placed: [], markHot: 0, stop: 0, init: 0 };
+    BotTownTravel.request = () => 'escape';
+    BotAI.stop = () => {};
+    BotAI.init = () => {};
+    BotAI.wakeup = () => {};
+    const cancelled = [];
+    BotAI.cancelScheduledTick = (target) => { cancelled.push(target.accountId); };
+    PopulationService.markHot = async () => { counters.markHot += 1; return { phase: 'hot' }; };
+    const { player, session, other } = makeWorld(counters);
+    const requested = BotSupplyErrand.request(session, player, 1463, 1);
+    assert.strictEqual(requested.ok, true, `raid: supply errand starts (${requested.reason})`);
+    await flush();
+    session.supplyErrandPhase = 'shopping';
+    session.plan = 'shopping';
+    other.plan = 'raid';
+    player.partyRaidEngagement = { bossId: 1 };
+    const Party = invoke('GameServer/Bot/AI/PartyCompanionService');
+    const Tactics = invoke('GameServer/Bot/AI/BotPvpTactics');
+    const saved = { members: Party.membersForLeader, stop: Tactics.stop, followSummon: Tactics.followSummon };
+    const tactics = [];
+    Party.membersForLeader = () => [session, other];
+    Tactics.stop = (target) => { tactics.push(target.accountId); };
+    Tactics.followSummon = () => {};
+    try {
+        assert.strictEqual(BotRaidSafety.endPlayerPartyRaid(player), true, 'raid: the raid ends');
+    } finally {
+        Party.membersForLeader = saved.members;
+        Tactics.stop = saved.stop;
+        Tactics.followSummon = saved.followSummon;
+    }
+    const check = (ok, message) => { if (!ok) failures.push(`raid: ${message}`); };
+    check(session.plan === 'shopping', `the errand companion's plan is '${session.plan}' after the raid end (expected shopping)`);
+    check(!cancelled.includes('bot_1'), 'the errand companion\'s AI tick was cancelled by the raid end');
+    check(!tactics.includes('bot_1'), 'the errand companion\'s tactics were stopped by the raid end');
+    check(other.plan === 'following', `the ordinary companion's plan is '${other.plan}' after the raid end (expected following)`);
+    check(cancelled.includes('bot_2'), 'the ordinary companion\'s AI tick was not cancelled');
+}
+
 async function main() {
     const originals = {
         bestSupplyOffer: MarketOpportunity.bestSupplyOffer,
@@ -173,6 +216,7 @@ async function main() {
         stop: BotAI.stop,
         init: BotAI.init,
         wakeup: BotAI.wakeup,
+        cancelScheduledTick: BotAI.cancelScheduledTick,
         charInfo: ServerResponse.charInfo,
         relationChanged: ServerResponse.relationChanged,
         items: DataCache.items,
@@ -193,6 +237,7 @@ async function main() {
 
         await runCase('cold', failures);
         await runCase('shopping', failures);
+        await raidEndCase(failures);
     } finally {
         MarketOpportunity.bestSupplyOffer = originals.bestSupplyOffer;
         BotTownTravel.request = originals.request;
@@ -201,6 +246,7 @@ async function main() {
         BotAI.stop = originals.stop;
         BotAI.init = originals.init;
         BotAI.wakeup = originals.wakeup;
+        BotAI.cancelScheduledTick = originals.cancelScheduledTick;
         ServerResponse.charInfo = originals.charInfo;
         ServerResponse.relationChanged = originals.relationChanged;
         DataCache.items = originals.items;

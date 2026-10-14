@@ -23,6 +23,7 @@ function syncPartyCompanions(leaderSession, destination, Generics, companions = 
     }
 
     const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
     const activeCompanions = companions || PartyCompanionService.membersForLeader(leaderSession);
     let moved = 0;
 
@@ -31,12 +32,9 @@ function syncPartyCompanions(leaderSession, destination, Generics, companions = 
             return;
         }
 
-        // A hidden supply errand owns the bot while it is cold (escape cast)
-        // or shopping in the supply town (the same rule as the errand's own
-        // return). Leave it on the errand: its return places it beside the
-        // leader's position at that time, wherever the leader now is.
-        if (companionSession.supplyErrandHidden === true
-            && (companionSession.supplyErrandPhase === 'cold' || companionSession.supplyErrandPhase === 'shopping')) {
+        // A hidden supply errand keeps its companion; the errand's return
+        // places it beside the leader wherever the leader is by then.
+        if (SupplyErrand.ownsCompanion(companionSession)) {
             return;
         }
 

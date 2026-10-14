@@ -249,7 +249,11 @@ function endPlayerPartyRaid(leaderSession) {
     Tactics.stop(leaderSession, leaderSession.actor);
     leaderSession.currentTargetId = undefined;
     leaderSession.actor.unselect?.();
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
     for (const member of companions) {
+        // The raid ends on the leader's teleport; a companion on a hidden
+        // supply errand stays with its errand (TeleportTo skips it too).
+        if (SupplyErrand.ownsCompanion(member)) continue;
         AI.cancelScheduledTick(member);
         Tactics.stop(member, member.actor);
         Tactics.followSummon(member, member.actor);
