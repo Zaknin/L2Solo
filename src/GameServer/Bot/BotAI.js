@@ -618,7 +618,8 @@ const BotAI = {
                     };
                 } else {
                     session.plan = 'hunting'; // Reset plan
-                    session.currentSpot = null;
+                    // A hot party member keeps the spot it hunts on: the party tick brings it back from town.
+                    if (!session.hotBackgroundPartyId) session.currentSpot = null;
                     session.noTargetTicks = 0;
                     spawnTarget = recoveryHall?.spawn || this.getDeathRespawnTarget(session, bot, false);
                 }
