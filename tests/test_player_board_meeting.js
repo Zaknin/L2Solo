@@ -90,7 +90,11 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
                 nextResolveAt: dueAt, roleCoverage: { dps: 2 }, stats: {} });
         };
         const html = () => session.packets.filter(packet => packet[0] === 0x0f).at(-1)?.subarray(5).toString('utf16le') || '';
-        const tells = () => session.packets.filter(packet => packet[0] === 0x4a).map(packet => ({
+        // Private messages to this player (kind 2). A bot's public chat is not
+        // one: on a slow run the seller's ambient global shout (kind 1,
+        // BotGlobalChat, a random roll on its resolves) came during the
+        // delivery and counted as a second tell.
+        const tells = () => session.packets.filter(packet => packet[0] === 0x4a && packet.readInt32LE(5) === 2).map(packet => ({
             sender: packet.readInt32LE(1), kind: packet.readInt32LE(5),
             name: packet.subarray(9).toString('utf16le').split('\0')[0],
             text: packet.subarray(9).toString('utf16le').split('\0')[1]
