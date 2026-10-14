@@ -208,10 +208,17 @@ function travelToShopTown(state, board, timestamp) {
     const stats = { ...(state.stats || {}), shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
     const goal = { type: 'sell_inventory', status: 'active',
         plan: { expectedBenefit: 'market_sale_inventory', marketTown: board.shopTown } };
-    const travel = GoalExecutor.beginMarketTravel({ ...state, activity: 'hunting', stats }, goal, timestamp);
+    // A sale trip that cannot pay the gatekeeper falls back to the town the
+    // Scroll of Escape reaches (GoalExecutor.beginMarketTravel), from a town
+    // this same town: only a trip to the shop town counts. Otherwise the lines
+    // wait in the bag behind the sale retry, as every other ended sale visit,
+    // instead of a new sale trip each resolve (E304 (a)).
+    const trip = GoalExecutor.beginMarketTravel({ ...state, activity: 'hunting', stats }, goal, timestamp);
+    const travel = trip?.stats?.travel?.townName === board.shopTown ? trip : null;
     if (travel) travel.stats.marketReturn = state.stats?.marketReturn || travel.stats.marketReturn;
-    const next = travel || GoalExecutor.finishMarketVisit({ ...state, stats }, timestamp, { recoverMissingReturn: true })
-        || { ...state, stats };
+    const waiting = travel ? null : { ...state, stats: { ...stats, marketSellRetryAfter: timestamp + SELL_RETRY_DELAY_MS } };
+    const next = travel || GoalExecutor.finishMarketVisit(waiting, timestamp, { recoverMissingReturn: true })
+        || waiting;
     return LifeState.upsertState(next, travel ? 'cold_market_shop_town_trip' : 'cold_market_shop_town_unreached')
         .then((saved) => ({ state: saved || next, listed: board.listed > 0, itemCount: board.listed,
             reason: travel ? 'shop_town_trip' : 'shop_town_unreached', shopTown: board.shopTown }));
@@ -251,5 +258,6 @@ module.exports = {
     targetMarketTownName,
     townCenter,
     open,
-    resolve
+    resolve,
+    travelToShopTown
 };
