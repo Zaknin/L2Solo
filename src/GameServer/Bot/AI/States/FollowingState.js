@@ -1077,7 +1077,7 @@ const FollowingState = {
 
     // Stuck sampling, standing up, rooted hold, karma town wait, gatekeeper transit, catch-up teleport.
     tickTravel(ctx) {
-        const { session, bot, Generics, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId, impairments } = ctx;
+        const { session, bot, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId, impairments } = ctx;
         const currentLoc = { x: bot.fetchLocX(), y: bot.fetchLocY() };
         if (!session.lastTickLoc) {
             session.lastTickLoc = currentLoc;
