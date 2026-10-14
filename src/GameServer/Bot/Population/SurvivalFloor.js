@@ -61,7 +61,7 @@ function stateCastCosts(state, profile, timestamp) {
 // full bag stay the floor.
 function saleRetryWaits(floor, state, timestamp) {
     return floor?.reason === 'overweight' && floor.weightPenalty === 1
-        && Number(state.stats?.marketSellRetryAfter || 0) > timestamp ? null : floor;
+        && Number(state?.stats?.marketSellRetryAfter || 0) > timestamp ? null : floor;
 }
 
 function forState(state, timestamp = Date.now(), inputs = null) {
@@ -99,7 +99,9 @@ function bagMarks(actor) {
         full: Number(bag.slots >= InventoryLimits.forActor(actor)) };
 }
 
-function forActor(actor) {
+// A hot solo hunter carries its life state in the session (`coldLifeState`),
+// where the hot sale visit writes the same retry (HuntingState pauseSelling).
+function forActor(actor, state = null, timestamp = Date.now()) {
     if (!actor) return null;
     const Attack = invoke('GameServer/Actor/Attack');
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
@@ -113,9 +115,10 @@ function forActor(actor) {
             && Number(skill.fetchConsumedHp?.() || 0) < Number(actor.fetchHp?.());
     })
         .map(skill => Attack.prototype.skillMpCost(actor, skill));
-    return evaluate({ dead: actor.isDead?.() === true, hp: actor.fetchHp?.(), mp: actor.fetchMp?.(),
+    return saleRetryWaits(evaluate({ dead: actor.isDead?.() === true, hp: actor.fetchHp?.(), mp: actor.fetchMp?.(),
         manaRequired: Roles.shouldRestForMana(actor), castCosts: costs,
-        ...actorInventory(actor), slotLimit: InventoryLimits.forActor(actor), maxLoad: actor.fetchMaxLoad?.() || 0 });
+        ...actorInventory(actor), slotLimit: InventoryLimits.forActor(actor), maxLoad: actor.fetchMaxLoad?.() || 0 }),
+    state, timestamp);
 }
 
 module.exports = { evaluate, forState, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };
