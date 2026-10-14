@@ -270,6 +270,7 @@ const tests = [
     'tests/test_llm_party_regroup.js',
     'tests/test_llm_supply_errand.js',
     'tests/test_supply_errand_leader_teleport.js',
+    'tests/test_supply_errand_summon.js',
     'tests/test_llm_configured_supply_store.js',
     'tests/test_afk_trade_database.js',
     'tests/test_saved_market_counts.js',
