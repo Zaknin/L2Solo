@@ -679,6 +679,7 @@ const tests = [
       'tests/test_clan_crafting_dual_stock.js',
       'tests/test_clan_raid_cancel_wake.js',
       'tests/test_clan_raid_roster_departure.js',
+      'tests/test_clan_errand_left_clan.js',
       'tests/test_clan_scheduler_admission.js',
       'tests/test_clan_crest_assets.js',
     'tests/test_clan_system.js',
