@@ -95,14 +95,25 @@ function noteQuoteCut(length, depth) {
 // lines, npc, npcPrice, units, cost, trip, landed } or null. O(T log n + k)
 // over the towns with offers.
 function cheapestTown(index, selfId, options = {}) {
-    return cheapestIn(townTable(index, selfId, options), options.amount);
+    const amount = Math.max(1, Math.floor(Number(options.amount) || 1));
+    const view = boardView(index, selfId, options);
+    const cut = view.inspected ? noteQuoteCut(view.board.length, options.quoteDepth) : false;
+    // One pass over the towns, no table: most callers price one amount.
+    let best = null;
+    for (const town of new Set(options.towns || [...view.listed, ...view.npcPrice.keys()])) {
+        if (!town) continue;
+        const trip = options.cost ? Number(options.cost(town)) : 0;
+        if (!Number.isFinite(trip)) continue;
+        best = betterOffer(best, options, amount, town, trip, view.npcPrice.get(town) || 0,
+            view.inspected ? view.inspected.get(town) || [] : index ? index.list(selfId, SELL, town) : []);
+    }
+    return noteShort(index, selfId, options, amount, cut, best);
 }
 
-// The amount-free part of cheapestTown: each town's trip, NPC price and
-// lines, in the query's town order. A buyer that prices one item for several
-// amounts within one plan (craft batches 1..64 over one board snapshot) reads
-// the board and the trips once and fills each amount from this table.
-function townTable(index, selfId, options = {}) {
+// The board part of a query: the cheapest NPC price per town and, under a
+// quote cap, the inspected lines by town. The cap is counted by the pricing
+// call (cheapestTown, cheapestIn), once per amount, never by a table build.
+function boardView(index, selfId, options) {
     const npcPrice = new Map();
     for (const offer of options.npcOffers || []) {
         const price = Number(offer.price);
@@ -114,16 +125,52 @@ function townTable(index, selfId, options = {}) {
         if (!inspected.has(line.town)) inspected.set(line.town, []);
         inspected.get(line.town).push(line);
     }
-    const listed = inspected ? inspected.keys() : index ? index.towns(selfId, SELL) : [];
+    return { npcPrice, inspected, board, listed: inspected ? inspected.keys() : index ? index.towns(selfId, SELL) : [] };
+}
+
+// One town's fill for `amount` against the best so far: a whole fill first,
+// then the least landed price a unit, then the town name.
+function betterOffer(best, options, amount, town, trip, price, lines) {
+    const money = options.moneyForTown ? options.moneyForTown(town, price, lines) : options.money ?? Infinity;
+    const filled = fill(lines, amount, {
+        npcPrice: price, money, maxPrice: options.maxPrice ?? Infinity,
+        excludeOwner: options.excludeOwner, accept: options.accept
+    });
+    if (!filled.units) return best;
+    const landed = filled.cost + trip;
+    const whole = filled.units >= amount;
+    const better = !best || (whole !== best.whole ? whole
+        : landed / filled.units < best.landed / best.units || (landed / filled.units === best.landed / best.units
+            && String(town).localeCompare(best.town) < 0));
+    return better ? { town, ...filled, npcPrice: price, trip, landed, whole, spendBudget: money } : best;
+}
+
+function noteShort(index, selfId, options, amount, cut, best) {
+    if (cut && !best?.whole) {
+        Diagnostics.count('cap', 'quotes', 'short');
+        if (options.sampleWhole && Diagnostics.active() && (++shortCalls & 63) === 0) {
+            Diagnostics.count('cap', 'quotes', 'sampled');
+            if (cheapestTown(index, selfId, { ...options, amount, quoteDepth: 0, sampleWhole: false })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
+        }
+    }
+    return best;
+}
+
+// The amount-free part of cheapestTown: each town's trip, NPC price and
+// lines, in the query's town order. A buyer that prices one item for several
+// amounts within one plan (craft batches 1..64 over one board snapshot) reads
+// the board and the trips once and fills each amount from this table.
+function townTable(index, selfId, options = {}) {
+    const view = boardView(index, selfId, options);
     const rows = [];
-    for (const town of new Set(options.towns || [...listed, ...npcPrice.keys()])) {
+    for (const town of new Set(options.towns || [...view.listed, ...view.npcPrice.keys()])) {
         if (!town) continue;
         const trip = options.cost ? Number(options.cost(town)) : 0;
         if (!Number.isFinite(trip)) continue;
-        rows.push({ town, trip, price: npcPrice.get(town) || 0,
-            lines: inspected ? inspected.get(town) || [] : index ? index.list(selfId, SELL, town) : [] });
+        rows.push({ town, trip, price: view.npcPrice.get(town) || 0,
+            lines: view.inspected ? view.inspected.get(town) || [] : index ? index.list(selfId, SELL, town) : [] });
     }
-    return { index, selfId, options, listed: board ? board.length : 0, rows };
+    return { index, selfId, options, listed: view.board ? view.board.length : 0, rows };
 }
 
 // cheapestTown for `amount` from a townTable. The quote cap is counted per
@@ -133,28 +180,8 @@ function cheapestIn(table, amount) {
     amount = Math.max(1, Math.floor(Number(amount) || 1));
     const cut = options.quoteDepth > 0 ? noteQuoteCut(table.listed, options.quoteDepth) : false;
     let best = null;
-    for (const { town, trip, price, lines } of table.rows) {
-        const money = options.moneyForTown ? options.moneyForTown(town, price, lines) : options.money ?? Infinity;
-        const filled = fill(lines, amount, {
-            npcPrice: price, money, maxPrice: options.maxPrice ?? Infinity,
-            excludeOwner: options.excludeOwner, accept: options.accept
-        });
-        if (!filled.units) continue;
-        const landed = filled.cost + trip;
-        const whole = filled.units >= amount;
-        const better = !best || (whole !== best.whole ? whole
-            : landed / filled.units < best.landed / best.units || (landed / filled.units === best.landed / best.units
-                && String(town).localeCompare(best.town) < 0));
-        if (better) best = { town, ...filled, npcPrice: price, trip, landed, whole, spendBudget: money };
-    }
-    if (cut && !best?.whole) {
-        Diagnostics.count('cap', 'quotes', 'short');
-        if (options.sampleWhole && Diagnostics.active() && (++shortCalls & 63) === 0) {
-            Diagnostics.count('cap', 'quotes', 'sampled');
-            if (cheapestTown(table.index, table.selfId, { ...options, amount, quoteDepth: 0, sampleWhole: false })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
-        }
-    }
-    return best;
+    for (const { town, trip, price, lines } of table.rows) best = betterOffer(best, options, amount, town, trip, price, lines);
+    return noteShort(table.index, table.selfId, options, amount, cut, best);
 }
 
 // The other sources a buyer sees in `towns` (null: every town): the

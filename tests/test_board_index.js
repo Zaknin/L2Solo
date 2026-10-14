@@ -202,6 +202,13 @@ try {
     assert.equal(delta('cap:quotes:short'), 128);
     assert.equal(delta('cap:quotes:sampled'), 1, 'one opted-in short call in 64 is sampled');
     assert.equal(delta('cap:quotes:lost'), 1, 'the whole list fills the sampled call');
+    // A craft purchase table (one board read for many amounts) counts the cap per priced amount, not per build.
+    const checks = () => (counts()['cap:quotes:check'] || 0);
+    const checksBefore = checks();
+    const table = Query.townTable(deep, 77, { quoteDepth: 5 });
+    assert.equal(checks() - checksBefore, 0, 'building a table counts no check');
+    for (const amount of [1, 5, 6]) Query.cheapestIn(table, amount);
+    assert.equal(checks() - checksBefore, 3, 'one check per priced amount');
     assert.equal(Query.cheapestTown(deep, 77, { amount: 6 }).whole, true);
     // With diagnostics off an opted-in call never pays for the whole-list rerun.
     Config.developerDiagnostics = false;
