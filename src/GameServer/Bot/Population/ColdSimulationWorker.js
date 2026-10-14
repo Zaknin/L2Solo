@@ -189,6 +189,7 @@ function changeWorkshop(key, row) {
         workshopRevisions.set(productId, (workshopRevisions.get(productId) || 0) + 1); occupationPlanner.sourceChanged(productId); }
 }
 const EDGE_STEPS = 64;
+const WORK_STAGES = Object.freeze(['stock', 'recipe', 'ingredient', 'owned', 'quote', 'trip', 'exit', 'without', 'success', 'utility', 'candidate', 'funding', 'edge']);
 const occupationPlanner = new ColdOccupationPlanner({
     onPublishError: (error, characterId, input) => send('fault', {
         reason: 'occupation_publication_failed', characterId, mode: input.mode,
@@ -418,7 +419,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         let next = work.iterator.next(); work.units++;
         for (let edges = 1; next.value === 'edge' && edges < EDGE_STEPS; edges++) { next = work.iterator.next(); work.units++; }
         work.stage = typeof next.value === 'number' ? next.value
-            : ['stock', 'recipe', 'ingredient', 'owned', 'quote', 'trip', 'exit', 'without', 'success', 'utility', 'candidate', 'funding', 'edge'].indexOf(next.value) + 1;
+            : WORK_STAGES.indexOf(next.value) + 1;
         if (next.done) { work.done = true; work.value = next.value; work.iterator = null; }
         return work.done;
     },
