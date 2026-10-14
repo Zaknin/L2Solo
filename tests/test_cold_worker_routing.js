@@ -301,12 +301,23 @@ try {
     assert.strictEqual(rejectedRoute.state.stats.travel, undefined);
     assert.strictEqual(rejectedRoute.state.stats.equipmentPlan, baseRouteState.stats.equipmentPlan,
         'rejecting stale travel must preserve the newly selected equipment alternative');
-    assert.strictEqual(rejectedRoute.state.timing.nextResolveAt, 3000,
-        'a rejected route should retry promptly instead of entering an unbounded wait');
     const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+    assert.strictEqual(rejectedRoute.state.timing.nextResolveAt, 2000 + Risk.ROUTE_CAPACITY_RETRY_MS,
+        'a rejected route retries after one ordinary hold, not at once and not in an unbounded wait');
+    assert(Risk.ROUTE_CAPACITY_RETRY_MS >= 10000,
+        'a refused bot must not stay due at once in the cold queue');
+    let chained = rejectedRoute.state;
+    for (let index = 1; index < Risk.MAX_BACKOFFS; index += 1) {
+        chained = Risk.withCapacityBackoff(chained, `chain_${index}`, 2000 + index * Risk.ROUTE_CAPACITY_RETRY_MS);
+    }
+    const chainEnd = 2000 + (Risk.MAX_BACKOFFS - 1) * Risk.ROUTE_CAPACITY_RETRY_MS;
+    assert.strictEqual(Risk.excludedSpotIdsForStates([chained], chainEnd).size, Risk.MAX_BACKOFFS,
+        'every spot refused along a retry chain stays excluded, so the bot can reach a free spot');
+    assert.strictEqual(Risk.excludedSpotIdsForStates([chained], chainEnd + Risk.CAPACITY_BACKOFF_MS).size, 0,
+        'the whole chain expires one backoff after the last refusal');
     assert.strictEqual(rejectedRoute.state.stats.lastReason, 'route_capacity_full');
-    assert(Risk.excludedSpotIdsForStates([rejectedRoute.state], 3000).has(targetSpot.id),
-        'a rejected capacity claim must not select the same destination on its immediate retry');
+    assert(Risk.excludedSpotIdsForStates([rejectedRoute.state], 2000 + Risk.ROUTE_CAPACITY_RETRY_MS).has(targetSpot.id),
+        'a rejected capacity claim must not select the same destination on its retry');
     assert(!Risk.excludedSpotIdsForStates([rejectedRoute.state], 2000 + Risk.CAPACITY_BACKOFF_MS).has(targetSpot.id),
         'temporary congestion must expire after one minute, without death-backoff escalation');
     assert.strictEqual(rejectedRoute.state.stats.spotBackoffs, undefined);

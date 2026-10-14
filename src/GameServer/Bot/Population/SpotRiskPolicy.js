@@ -7,6 +7,10 @@ const BACKOFF_MS = 60 * 60 * 1000;
 const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
 const MAX_BACKOFFS = 8;
 const CAPACITY_BACKOFF_MS = 60000;
+// A bot refused by a full spot keeps its current activity for one ordinary
+// hold before it plans again. A 1 s retry kept such bots due at once and let
+// them walk the full spots one per second in the cold queue.
+const ROUTE_CAPACITY_RETRY_MS = 30000;
 const MAX_FAILED_HUNTS = 3;
 const FAILED_HUNT_RECOVERY_WINS = 3;
 
@@ -187,11 +191,16 @@ function excludedSpotIdsForStates(states = [], timestamp = Date.now()) {
 }
 
 function withCapacityBackoff(state, spotId, timestamp = Date.now()) {
+    // Each refusal renews the spots refused earlier in the same chain: with
+    // one hold between retries a bot can still pass up to MAX_BACKOFFS full
+    // spots, and congestion expires one backoff after the last refusal.
+    const renewed = timestamp + CAPACITY_BACKOFF_MS;
     const retained = (state.stats?.capacityBackoffs || [])
-        .filter(entry => entry.until > timestamp && String(entry.spotId) !== String(spotId));
+        .filter(entry => entry.until > timestamp && String(entry.spotId) !== String(spotId))
+        .map(entry => ({ ...entry, until: Math.max(Number(entry.until), renewed) }));
     return { ...state, stats: { ...state.stats,
         lastReason: 'route_capacity_full',
-        capacityBackoffs: [...retained, { spotId: String(spotId), until: timestamp + CAPACITY_BACKOFF_MS }]
+        capacityBackoffs: [...retained, { spotId: String(spotId), until: renewed }]
             .slice(-MAX_BACKOFFS)
     } };
 }
@@ -245,6 +254,7 @@ module.exports = {
     BACKOFF_MS,
     MAX_BACKOFF_MS,
     MAX_BACKOFFS,
+    ROUTE_CAPACITY_RETRY_MS,
     CAPACITY_BACKOFF_MS,
     MAX_FAILED_HUNTS,
     FAILED_HUNT_RECOVERY_WINS,

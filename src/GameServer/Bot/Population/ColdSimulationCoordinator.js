@@ -107,7 +107,7 @@ function admitSoloRouteTravelState(nextState, baseState, profiles, occupancy, ti
             timing: {
                 ...(nextState.timing || {}),
                 activityStartedAt: baseState?.timing?.activityStartedAt || timestamp,
-                nextResolveAt: timestamp + 1000
+                nextResolveAt: timestamp + SpotRiskPolicy.ROUTE_CAPACITY_RETRY_MS
             },
             stats
         }, travel.spotId, timestamp),
