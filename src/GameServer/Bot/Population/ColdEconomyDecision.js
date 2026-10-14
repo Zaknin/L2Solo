@@ -403,12 +403,12 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
     if (!options.afterResult && state.activity === 'traveling'
-        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record';
+        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record'; // lazy: as canReuse before L114 (load order unchecked)
     const Sections = DecisionSections ||= require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
     if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
-    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = [];
+    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
     if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
         return `events:${why[0]}`;
     if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true, why }))

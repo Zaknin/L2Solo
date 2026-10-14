@@ -721,10 +721,16 @@ const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
 // Why the held card did not serve this step, counted and carried into the
 // build for its shadow plan join while diagnostics run (L114); the build's
 // inputs are the same either way.
+// Few counter names (the worker keeps 256): a non-field activity is not a
+// lever and the structural segment is named once, not in every join. A bot
+// in a party or without a card never had a card to reuse: counted, not joined.
 function advisoryRefusal(deps, site, reason) {
     if (!economyDiagnostics.active()) return deps;
-    economyDiagnostics.count('advisory', 'refuse', `${site}:${reason}`);
-    return { ...deps, advisoryRefusal: `${site}:${reason}` };
+    const name = reason.startsWith('not_field:') ? 'not_field' : reason;
+    economyDiagnostics.count('advisory', 'refuse', name);
+    economyDiagnostics.count('advisory', 'refuse_site', site);
+    if (name === 'party' || name === 'no_card') return deps;
+    return { ...deps, advisoryRefusal: name.startsWith('fence:structural:') ? 'fence:structural' : name };
 }
 function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
     if (!owner?.context || !Object.isExtensible(owner.context)) return;
