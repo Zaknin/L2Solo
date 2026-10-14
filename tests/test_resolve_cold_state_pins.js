@@ -169,7 +169,7 @@ function defaults() {
         canTradeRemotely: false,
         listingOpen: (state) => Promise.resolve({ state: retag(state, 'listingOpen'), listed: true }),
         finishVisit: () => null,
-        goalReview: (state) => Promise.resolve({ current: { type: 'hunt' }, candidates: [{ type: 'hunt' }], economy: { e: 1 } }),
+        goalReview: () => Promise.resolve({ current: { type: 'hunt' }, candidates: [{ type: 'hunt' }], economy: { e: 1 } }),
         survival: null
     };
 }
