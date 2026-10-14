@@ -3,6 +3,7 @@ const path = require('path');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const Rewards = require('../Economy/SpotRewardExpectation');
 const SpotIndex = require('./SpotIndex');
+const DiagnosticConfig = require('../Population/PopulationConfig');
 
 // The world spot table (market-sim step 3.3(c), N44): what an hour of solo
 // hunting on a spot gives a bot of a role and level, with shots or without.
@@ -39,6 +40,13 @@ const incomeBases = new Map();
 // Three doubles and one index per cell: at most 7 MiB per thread.
 const MAX_INCOME_BASE_CELLS = 262144;
 let incomeBaseCells = 0;
+// Cache use for the cold worker heartbeat (L104); counted only with developer diagnostics.
+// memoClears counts the oldest-row drops at MAX_VALUE_MEMO; resets the catalog or rate changes in refreshCatalog.
+const stats = { memoHits: 0, memoMisses: 0, memoClears: 0, resets: 0, baseClears: 0 };
+function cacheStats() {
+    return { memo: valueMemo.size, best: bestRows.size, income: incomeRows.size, bases: incomeBases.size,
+        cells: incomeBaseCells, ...stats };
+}
 let incomeTable, incomeRates;
 const EMPTY_SPOTS = [];
 let spotSource = () => EMPTY_SPOTS;
@@ -60,6 +68,7 @@ function refreshCatalog(rates) {
         valueMemo.clear(); bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
         spoilLevels.clear();
+        DiagnosticConfig.developerDiagnostics && (stats.resets += 1);
     }
 }
 
@@ -83,7 +92,10 @@ function refreshValueMemo(t, rates) {
         valueMemoRates = rates;
     }
 }
-function clearIncomeBases() { incomeBases.clear(); incomeBaseCells = 0; }
+function clearIncomeBases() {
+    incomeBases.clear(); incomeBaseCells = 0;
+    DiagnosticConfig.developerDiagnostics && (stats.baseClears += 1);
+}
 
 // A curve with no value at a gap (no curve spot hunts there) takes the
 // nearest higher gap's value, else the nearest lower one.
@@ -196,10 +208,14 @@ function memoValue(t, rates, spotId, role, level, shots, skill) {
     const key = `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
     let row = valueMemo.get(key);
     if (row === undefined) {
+        DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
         row = computeValue(t, rates, spotId, role, level, shots, skill);
-        if (valueMemo.size >= MAX_VALUE_MEMO) valueMemo.delete(valueMemo.keys().next().value);
+        if (valueMemo.size >= MAX_VALUE_MEMO) {
+            valueMemo.delete(valueMemo.keys().next().value);
+            DiagnosticConfig.developerDiagnostics && (stats.memoClears += 1);
+        }
         valueMemo.set(key, row);
-    }
+    } else DiagnosticConfig.developerDiagnostics && (stats.memoHits += 1);
     return row;
 }
 
@@ -363,4 +379,4 @@ function useFile(next = DEFAULT_FILE) {
     clearIncomeBases();
 }
 
-module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, useFile, useSpots, expGapFactor, DEFAULT_FILE };
+module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, useFile, useSpots, expGapFactor, cacheStats, DEFAULT_FILE };

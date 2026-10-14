@@ -1,4 +1,5 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const DiagnosticConfig = require('../Population/PopulationConfig');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const WeaponMask = invoke('GameServer/Skills/WeaponMask');
@@ -318,6 +319,19 @@ const sharedVerdicts = new Map();
 const uniqueVerdicts = new Map();
 let verdictSource, verdictCount = 0;
 
+// Cache use for the cold worker heartbeat (L104); counted only with developer
+// diagnostics. verdictEntries is kept incrementally: the verdict entries of
+// every fingerprint in sharedVerdicts, with the count of each fingerprint in
+// entryCounts (keyed by its verdict map) so an eviction subtracts it; a dropped
+// map may still be held by profile arrays, so it stops counting (live false).
+const stats = { verdictEntries: 0, fingerprintHits: 0, fingerprintMisses: 0, verdictHits: 0, verdictMisses: 0,
+    spotHits: 0, spotMisses: 0, evictions: 0, clears: 0 };
+const entryCounts = new WeakMap();
+function cacheStats() {
+    return { fingerprints: sharedVerdicts.size, uniqueVerdicts: uniqueVerdicts.size,
+        uniqueSpotResults: uniqueSpotResults.size, ...stats };
+}
+
 // Raw values with their type: channels() and soloSurvival() coerce with
 // number(), compare and test truthiness, so only identical inputs share.
 function fingerprintValue(value) {
@@ -354,11 +368,18 @@ function profileFingerprint(profile) {
 // Verdicts of one profile array: safety options key -> species id -> verdict.
 function verdictsFor(profiles) {
     let verdicts = npcVerdicts.get(profiles);
-    if (verdicts) return verdicts;
+    if (verdicts) {
+        DiagnosticConfig.developerDiagnostics && (stats.fingerprintHits += 1);
+        return verdicts;
+    }
     const source = dataCache().npcs || [];
     if (verdictSource !== source || verdictCount !== source.length) {
         verdictSource = source;
         verdictCount = source.length;
+        if (DiagnosticConfig.developerDiagnostics) {
+            for (const entry of sharedVerdicts.values()) { const held = entryCounts.get(entry.verdicts); if (held) held.live = false; }
+            stats.clears += 2; stats.verdictEntries = 0;
+        }
         sharedVerdicts.clear();
         uniqueVerdicts.clear();
     }
@@ -371,13 +392,21 @@ function verdictsFor(profiles) {
         shared.usedAt = now;
         sharedVerdicts.set(fingerprint, shared);
         verdicts = shared.verdicts;
+        DiagnosticConfig.developerDiagnostics && (stats.fingerprintHits += 1);
     } else {
         verdicts = new Map();
+        DiagnosticConfig.developerDiagnostics && (stats.fingerprintMisses += 1);
         if (fingerprint !== null) {
             sharedVerdicts.set(fingerprint, { verdicts, usedAt: now });
+            if (DiagnosticConfig.developerDiagnostics) entryCounts.set(verdicts, { entries: 0, live: true });
             for (const [key, entry] of sharedVerdicts) {
                 if (sharedVerdicts.size <= VERDICT_PROFILE_LIMIT && now - entry.usedAt < VERDICT_PROFILE_IDLE_MS) break;
                 sharedVerdicts.delete(key);
+                if (DiagnosticConfig.developerDiagnostics) {
+                    stats.evictions += 1;
+                    const held = entryCounts.get(entry.verdicts);
+                    if (held) { held.live = false; stats.verdictEntries -= held.entries; }
+                }
             }
         }
     }
@@ -386,7 +415,11 @@ function verdictsFor(profiles) {
 }
 
 function npcVerdict(verdicts, selfId, options) {
-    if (verdicts.has(selfId)) return verdicts.get(selfId);
+    if (verdicts.has(selfId)) {
+        DiagnosticConfig.developerDiagnostics && (stats.verdictHits += 1);
+        return verdicts.get(selfId);
+    }
+    DiagnosticConfig.developerDiagnostics && (stats.verdictMisses += 1);
     const npc = npcTemplate(selfId);
     let verdict = null;
     if (npc && huntingTargetPolicy().canHunt(npc)) {
@@ -402,7 +435,10 @@ function npcVerdict(verdicts, selfId, options) {
         const key = `${canHunt ? 1 : 0}:${fingerprintValue(match.efficiency)}`;
         verdict = uniqueVerdicts.get(key);
         if (!verdict) {
-            if (uniqueVerdicts.size >= VERDICT_PROFILE_LIMIT * 4) uniqueVerdicts.clear();
+            if (uniqueVerdicts.size >= VERDICT_PROFILE_LIMIT * 4) {
+                uniqueVerdicts.clear();
+                DiagnosticConfig.developerDiagnostics && (stats.clears += 1);
+            }
             uniqueVerdicts.set(key, verdict = Object.freeze({ efficiency: match.efficiency, canHunt }));
         }
     }
@@ -425,10 +461,15 @@ function spotMatchup(spot, profiles, options = {}) {
     const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
     let verdicts = byOptions.get(optionsKey);
     if (!verdicts) byOptions.set(optionsKey, verdicts = new Map());
+    const entriesBefore = DiagnosticConfig.developerDiagnostics ? verdicts.size : 0;
     let bySpot = spotMatchups.get(verdicts);
     if (!bySpot) spotMatchups.set(verdicts, bySpot = new WeakMap());
     const known = bySpot.get(spot);
-    if (known) return known;
+    if (known) {
+        DiagnosticConfig.developerDiagnostics && (stats.spotHits += 1);
+        return known;
+    }
+    DiagnosticConfig.developerDiagnostics && (stats.spotMisses += 1);
     const verdictOptions = { profiles, soloSafety: options.soloSafety, maxTargetLevel: options.maxTargetLevel };
     for (const entry of spot.npcEntries || []) {
         const verdict = npcVerdict(verdicts, Number(entry.selfId), verdictOptions);
@@ -440,6 +481,12 @@ function spotMatchup(spot, profiles, options = {}) {
         eligible ||= canHunt;
         if (canHunt) safe += weight;
     }
+    if (DiagnosticConfig.developerDiagnostics) {
+        // Verdicts stored by this spot; unshared (unfingerprinted) arrays have no count.
+        const held = entryCounts.get(byOptions);
+        const added = verdicts.size - entriesBefore;
+        if (held?.live && added) { held.entries += added; stats.verdictEntries += added; }
+    }
     const efficiency = total ? effective / total : 1;
     const safeFraction = total ? safe / total : 1;
     const spotEligible = !total || (eligible && (!options.soloSafety || safeFraction >= 0.6));
@@ -447,7 +494,10 @@ function spotMatchup(spot, profiles, options = {}) {
     const key = `${efficiency}:${safeFraction}:${spotEligible ? 1 : 0}:${penalty}`;
     let result = uniqueSpotResults.get(key);
     if (!result) {
-        if (uniqueSpotResults.size >= VERDICT_PROFILE_LIMIT * 4) uniqueSpotResults.clear();
+        if (uniqueSpotResults.size >= VERDICT_PROFILE_LIMIT * 4) {
+            uniqueSpotResults.clear();
+            DiagnosticConfig.developerDiagnostics && (stats.clears += 1);
+        }
         uniqueSpotResults.set(key, result = Object.freeze({ efficiency, safeFraction, eligible: spotEligible, penalty }));
     }
     bySpot.set(spot, result);
@@ -463,4 +513,4 @@ function damageRate(profiles, target = {}) {
 
 module.exports = { MIN_EFFICIENCY, VERDICT_PROFILE_LIMIT, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
     profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup,
-    sharedVerdictProfiles: () => sharedVerdicts.size, uniqueVerdictCount: () => uniqueVerdicts.size };
+    cacheStats, sharedVerdictProfiles: () => sharedVerdicts.size, uniqueVerdictCount: () => uniqueVerdicts.size };
