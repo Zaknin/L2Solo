@@ -132,7 +132,7 @@ function cheapestTown(index, selfId, options = {}) {
     }
     if (cut && !best?.whole) {
         Diagnostics.count('cap', 'quotes', 'short');
-        if (options.sampleWhole && (++shortCalls & 63) === 0) {
+        if (options.sampleWhole && Diagnostics.active() && (++shortCalls & 63) === 0) {
             Diagnostics.count('cap', 'quotes', 'sampled');
             if (cheapestTown(index, selfId, { ...options, quoteDepth: 0, sampleWhole: false })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
         }

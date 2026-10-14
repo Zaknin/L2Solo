@@ -203,5 +203,10 @@ try {
     assert.equal(delta('cap:quotes:sampled'), 1, 'one opted-in short call in 64 is sampled');
     assert.equal(delta('cap:quotes:lost'), 1, 'the whole list fills the sampled call');
     assert.equal(Query.cheapestTown(deep, 77, { amount: 6 }).whole, true);
+    // With diagnostics off an opted-in call never pays for the whole-list rerun.
+    Config.developerDiagnostics = false;
+    let accepted = 0;
+    for (let call = 0; call < 128; call++) Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5, sampleWhole: true, accept: () => ++accepted > 0 });
+    assert.equal(accepted, 128 * 5, 'no rerun over the whole list while diagnostics are off');
 } finally { Config.developerDiagnostics = diagnostics; }
 console.log('PASS test_board_index');

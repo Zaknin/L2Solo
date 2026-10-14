@@ -263,8 +263,10 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
         const towns = new Set(npcOffers.map(offer => offer.town));
         for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
         for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
+        // sampleWhole (E303, diagnostics only): the whole-list rerun prices only towns whose trip is warmed above, so
+        // in the worker `cap:quotes:lost` is a lower bound of the plans the cap drops.
         const best = OfferQuery.cheapestTown(board, id, { amount, quoteDepth: QUOTE_DEPTH, excludeOwner: owner.characterId,
-            accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip });
+            accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip, sampleWhole: true });
         yield 'candidate';
         return best ? { ...best, tripDetails: trip.details(best.town), repeatable: best.npc === amount, routeKey: best.town } : null;
     };
