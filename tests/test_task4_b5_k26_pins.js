@@ -42,7 +42,7 @@ function stub(object, key, value) { const prior = object[key]; restore.push(() =
         const errand = (selfId, amount) => ({ selfId, amount, town: 'Giran', purpose: 'clan', at: Date.now(), money: 2000, maxPrice: 1000,
             tag: { clanId: CLAN, clanPart: 2000 } });
         const withErrand = async e => { const s = Life.cachedState(member);
-            return Life.upsertState({ ...s, activity: 'shopping', stats: { ...s.stats, marketErrands: [e], marketErrand: e } }, 'fixture_errand'); };
+            return Life.upsertState({ ...s, activity: 'shopping', stats: { ...s.stats, clanId: CLAN, marketErrands: [e], marketErrand: e } }, 'fixture_errand'); };
         const arrive = () => Cold.tryPurchase(Life.cachedState(member), { type: 'market_errand', status: 'active' });
 
         // A clan errand whose only seller is a conditional ad: the purchase becomes a board meeting.
