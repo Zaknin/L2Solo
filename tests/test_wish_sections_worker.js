@@ -269,6 +269,8 @@ module.exports.wishSectionsProbe = async id => {
             }
             assert.equal(ColdEconomyDecision.refreshAdvisory(moneyChanged, fresh, prepared.deps), null,
                 'native affordability loss or funding completion reaches reconsideration');
+            assert.notEqual(ColdEconomyDecision.refusal(moneyChanged, fresh, prepared.deps), '', 'a refused card names its check');
+            assert.equal(ColdEconomyDecision.refusal({ ...candidate, incomingPending: true }, accepted, prepared.deps), 'incoming');
             const removed = activity === 'shopping' ? 166 : leaf.items[0];
             const noItem = { ...candidate, inventory: { ...candidate.inventory } }; delete noItem.inventory[removed];
             assert.equal(ColdEconomyDecision.refreshAdvisory(noItem, fresh, prepared.deps), null,

@@ -781,6 +781,7 @@ function buildForState(state, deps) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
+            if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_hit', deps.advisoryRefusal);
             for (const kind of deferred) Diagnostics.count('context', 'soft_deferred', kind);
             // The gap is measured from the last use, as the cache keeps by last use.
             const last = lastKeyHashes.get(actorKey);
