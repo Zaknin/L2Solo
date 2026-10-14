@@ -393,7 +393,7 @@ try {
 
     const holyArmor = makeSkill(197, 2);
     const darkSpell = new Skill({ selfId: 9996, level: 1, name: 'Dark damage', spell: true, power: 100 });
-    darkSpell.semantic.trait = 'dark';
+    darkSpell.semantic = { ...darkSpell.semantic, trait: 'dark' };
     const darkHit = () => enemy.attack.prepareSkillDamage(enemy, b, darkSpell, true, () => 0.99);
     const baseDark = darkHit();
     use(b, holyArmor);

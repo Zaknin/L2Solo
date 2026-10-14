@@ -1,7 +1,9 @@
 class SkillModel {
     constructor(data) {
         this.model = data;
-        this.semantic = invoke('GameServer/Skills/C4SkillRules').resolve(data);
+        // Every NPC instance builds its own skills: equal skills share one
+        // read-only semantic from the resolve memo; the model stays per instance.
+        this.semantic = invoke('GameServer/Skills/C4SkillRules').resolveCached(data);
     }
 
     // Set
