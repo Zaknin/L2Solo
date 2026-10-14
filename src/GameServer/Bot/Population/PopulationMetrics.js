@@ -115,6 +115,9 @@ function revisionGapBucket(result = {}) {
     return '+17';
 }
 
+// The cold worker limit reads the median of the last three 1 s readings (L118): two of three late, not one.
+const LAG_WINDOW = 3;
+
 const PopulationMetrics = {
     startedAt: null,
     counters: emptyCounters(),
@@ -125,7 +128,7 @@ const PopulationMetrics = {
         samples: 0,
         slowSamples: 0
     },
-    // Last schedulerLagWindow readings, kept outside eventLoop: snapshot() spreads eventLoop into the status API.
+    // Last LAG_WINDOW readings, kept outside eventLoop: snapshot() spreads eventLoop into the status API.
     lagHistory: [],
     schedulerState: {
         budgetMs: 0,
@@ -206,6 +209,7 @@ const PopulationMetrics = {
 
     startEventLoopMonitor() {
         if (this.timer || Config.enabled === false) return;
+        this.lagHistory.length = 0;
 
         if (Config.developerDiagnostics) {
             this.delayHistogram = monitorEventLoopDelay({ resolution: 20 });
@@ -623,12 +627,11 @@ const PopulationMetrics = {
     },
 
     recordLagReading(lag) {
-        const window = Math.max(1, Math.floor(Number(Config.schedulerLagWindow) || 3));
         this.lagHistory.push(Math.max(0, Number(lag) || 0));
-        if (this.lagHistory.length > window) this.lagHistory.splice(0, this.lagHistory.length - window);
+        if (this.lagHistory.length > LAG_WINDOW) this.lagHistory.splice(0, this.lagHistory.length - LAG_WINDOW);
     },
 
-    // Lag that most of the recent readings reach (the median of an odd window; the lower of two with two readings):
+    // Lag that most of the recent readings reach (the median of three; the lower of two with two readings):
     // one late reading, a GC pause or a burst of queued callbacks, does not read as a loaded loop.
     sustainedEventLoopLag() {
         if (!this.lagHistory.length) return 0;

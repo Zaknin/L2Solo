@@ -70,8 +70,6 @@ const DEFAULTS = {
     // gradual throttle avoids turning one noisy sample into a long backlog.
     schedulerLagThrottleMs: 40,
     schedulerLagAbortMs: 120,
-    // The cold worker limit reads the median of this many 1 s event-loop readings, so one late reading does not cut it.
-    schedulerLagWindow: 3,
     backgroundGovernorEnabled: true,
     backgroundJobTickMs: 250,
     backgroundGovernorWindowMs: 1000,
@@ -293,7 +291,6 @@ const ENV_KEYS = {
     playerProtectionGraceMs: 'BOT_POPULATION_PLAYER_PROTECTION_GRACE_MS',
     schedulerLagThrottleMs: 'BOT_POPULATION_SCHEDULER_LAG_THROTTLE_MS',
     schedulerLagAbortMs: 'BOT_POPULATION_SCHEDULER_LAG_ABORT_MS',
-    schedulerLagWindow: 'BOT_POPULATION_SCHEDULER_LAG_WINDOW',
     backgroundGovernorEnabled: 'BOT_BACKGROUND_GOVERNOR_ENABLED',
     backgroundJobTickMs: 'BOT_BACKGROUND_JOB_TICK_MS',
     backgroundGovernorWindowMs: 'BOT_BACKGROUND_GOVERNOR_WINDOW_MS',

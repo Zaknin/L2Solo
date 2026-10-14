@@ -13,8 +13,7 @@ const originalConfig = {
     coldWorkerPlayerMaxInFlight: Config.coldWorkerPlayerMaxInFlight,
     coldWorkerLagMaxInFlight: Config.coldWorkerLagMaxInFlight,
     schedulerLagThrottleMs: Config.schedulerLagThrottleMs,
-    schedulerLagAbortMs: Config.schedulerLagAbortMs,
-    schedulerLagWindow: Config.schedulerLagWindow
+    schedulerLagAbortMs: Config.schedulerLagAbortMs
 };
 const originalSchedulerState = Metrics.schedulerState;
 const originalEventLoop = { ...Metrics.eventLoop };
@@ -31,7 +30,6 @@ try {
     Config.coldWorkerLagMaxInFlight = 2;
     Config.schedulerLagThrottleMs = 40;
     Config.schedulerLagAbortMs = 120;
-    Config.schedulerLagWindow = 3;
     Metrics.schedulerState = { realPlayers: 1, mode: 'player', lagMs: 0 };
     readings(0, 0, 0);
 
@@ -64,7 +62,7 @@ try {
 
     Metrics.schedulerState = { realPlayers: 0, mode: 'idle', lagMs: 0 };
     readings(130, 130, 0, 0, 0);
-    assert.deepStrictEqual(Metrics.lagHistory, [0, 0, 0], 'only the last schedulerLagWindow readings are kept');
+    assert.deepStrictEqual(Metrics.lagHistory, [0, 0, 0], 'only the last three readings are kept');
     assert.strictEqual(coordinator.desiredWorkerPressure().maxInFlight, 32,
         'idle main must restore the full cold-worker concurrency budget once the lag is over');
 
@@ -97,4 +95,20 @@ try {
     Metrics.lagHistory = originalLagHistory;
 }
 
-console.log('Cold worker pressure checks passed');
+(async () => {
+    const sampleMs = Config.eventLoopSampleMs;
+    try {
+        Config.eventLoopSampleMs = 20;
+        Metrics.lagHistory.push(130, 130);
+        Metrics.startEventLoopMonitor();
+        assert.deepStrictEqual(Metrics.lagHistory, [], 'a started monitor must not decide the limit from an earlier run');
+        await new Promise((resolve) => setTimeout(resolve, 90));
+        assert.ok(Metrics.lagHistory.length >= 1 && Metrics.lagHistory.length <= 3,
+            'the event-loop timer must record its readings for the worker limit, at most three');
+    } finally {
+        Metrics.stopEventLoopMonitor();
+        Config.eventLoopSampleMs = sampleMs;
+        Metrics.lagHistory = originalLagHistory;
+    }
+    console.log('Cold worker pressure checks passed');
+})().catch((error) => { console.error(error); process.exit(1); });
