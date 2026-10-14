@@ -4,6 +4,9 @@
 // copies already materialized. A purchase/drop can grow the count before a new
 // physical row exists. Never copy the old item's enchant onto that new copy.
 function completeInstances(item = {}) {
+    // A physical stack owns its whole quantity. Per-unit identities belong
+    // only to non-stackable gear, never to Adena, shots or materials.
+    if (item.stackable === true) return item;
     if (!Array.isArray(item.instances)) return item;
     const amount = Math.max(0, Math.floor(Number(item.amount) || 0));
     const slots = Array.isArray(item.equippedSlots)

@@ -174,7 +174,8 @@ function itemStackable(selfId, item = {}) {
 }
 
 function normalizeInventoryStackability(inventory = {}) {
-    return Object.fromEntries(Object.entries(InventorySummary.canonicalize(inventory)).map(([key, item]) => {
+    const normalizedInventory = Object.fromEntries(Object.entries(inventory || {}).map(([key, item]) => {
+        if (!item) return [key, item];
         const selfId = Number(item?.selfId || key);
         const normalized = { ...(item || {}), stackable: itemStackable(selfId, item) };
         // A formerly non-stackable type (dyes, recipes) now has one physical
@@ -182,6 +183,8 @@ function normalizeInventoryStackability(inventory = {}) {
         if (normalized.stackable) delete normalized.instances;
         return [key, normalized];
     }));
+    // Repair legacy flags before completion can expand a count into copies.
+    return InventorySummary.canonicalize(normalizedInventory);
 }
 
 function inventorySummaryFromItems(items = []) {

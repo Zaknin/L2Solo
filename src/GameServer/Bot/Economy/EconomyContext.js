@@ -81,13 +81,14 @@ function stateForActor(actor, session = actor?.session) {
         if (!id) continue;
         const amount = positive(item.fetchAmount?.());
         const equipped = !!item.fetchEquipped?.();
+        const stackable = item.fetchStackable?.();
         const previous = inventory[id];
         inventory[id] = { selfId: id, amount: amount + positive(previous?.amount),
             equipped: equipped || previous?.equipped, equippedCount: Number(equipped) + positive(previous?.equippedCount),
             slot: equipped ? Number(item.fetchSlot?.()) : previous?.slot || 0,
-            enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0, stackable: item.fetchStackable?.(),
-            instances: [...(previous?.instances || []), { id: item.fetchId?.(), selfId: id, amount, equipped,
-                slot: Number(item.fetchSlot?.() || 0), enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0 }] };
+            enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0, stackable,
+            ...(stackable === true ? {} : { instances: [...(previous?.instances || []), { id: item.fetchId?.(), selfId: id, amount, equipped,
+                slot: Number(item.fetchSlot?.() || 0), enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0 }] }) };
     }
     const hotKit = invoke('GameServer/Bot/Population/ColdCombatProfile').capture(actor);
     const state = { ...stored, characterId: actor.fetchId?.(), level: actor.fetchLevel?.(), inventory, physicalInventory,
