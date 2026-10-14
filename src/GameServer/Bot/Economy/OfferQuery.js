@@ -68,10 +68,12 @@ function fill(lines, amount, { npcPrice = 0, money = Infinity, maxPrice = Infini
     return { lines: taken, npc, units, cost };
 }
 
+let shortCalls = 0;
 // E303: the quote depth cap of 5 (cheapestTown quoteDepth). Counts the check, and the cut with the lines it
 // dropped; returns whether it cut. cap:quotes:short (cheapestTown) is a cut call whose result is not whole;
-// one short call in 16 (`sampled`) is priced again over the whole list, `lost` counts those it fills.
-let shortCalls = 0;
+// of the short calls of callers with pure callbacks (options.sampleWhole: the sample runs accept, cost and
+// moneyForTown over every town), one in 64 (`sampled`) is priced again over the whole list, `lost` counts
+// those it fills. Developer diagnostics only; its route reads warm the caller's trip cache.
 function noteQuoteCut(list, depth) {
     if (!Diagnostics.active()) return false;
     Diagnostics.count('cap', 'quotes', 'check');
@@ -130,9 +132,9 @@ function cheapestTown(index, selfId, options = {}) {
     }
     if (cut && !best?.whole) {
         Diagnostics.count('cap', 'quotes', 'short');
-        if ((++shortCalls & 15) === 0) {
+        if (options.sampleWhole && (++shortCalls & 63) === 0) {
             Diagnostics.count('cap', 'quotes', 'sampled');
-            if (cheapestTown(index, selfId, { ...options, quoteDepth: 0 })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
+            if (cheapestTown(index, selfId, { ...options, quoteDepth: 0, sampleWhole: false })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
         }
     }
     return best;

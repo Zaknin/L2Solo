@@ -180,8 +180,8 @@ assert.equal(admittedFill.lines[0].line.ownerId, 2, 'fill streams caller admissi
 const admittedTown = Query.cheapestTown(leftContent, 1867, { amount: 1, accept: line => line.recordId !== 81 });
 assert.equal(admittedTown.lines[0].line.recordId, 82, 'town selection passes caller admission into the same fill');
 
-// E303: a cut call left short is sampled one in 16 and priced again over the whole list; `lost` counts those it
-// fills (developer diagnostics only, the result itself unchanged).
+// E303: a cut call left short is sampled one in 64 when its caller opts in and priced again over the whole list;
+// `lost` counts those it fills (developer diagnostics only, the result itself unchanged).
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
 const deep = new BoardIndex();
@@ -191,14 +191,16 @@ Config.developerDiagnostics = true;
 try {
     const counts = () => Diagnostics.metrics().counts;
     const before = { ...counts() };
-    for (let call = 0; call < 16; call++) {
-        const capped = Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5 });
+    for (let call = 0; call < 64; call++) assert.equal(Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5 }).whole, false);
+    assert.equal(counts()['cap:quotes:sampled'] || 0, before['cap:quotes:sampled'] || 0, 'no sample without the opt-in');
+    for (let call = 0; call < 64; call++) {
+        const capped = Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5, sampleWhole: true });
         assert.equal(capped.units, 5, 'the cap still prices only the first five asks');
         assert.equal(capped.whole, false);
     }
     const delta = key => (counts()[key] || 0) - (before[key] || 0);
-    assert.equal(delta('cap:quotes:short'), 16);
-    assert.equal(delta('cap:quotes:sampled'), 1, 'one short call in 16 is sampled');
+    assert.equal(delta('cap:quotes:short'), 128);
+    assert.equal(delta('cap:quotes:sampled'), 1, 'one opted-in short call in 64 is sampled');
     assert.equal(delta('cap:quotes:lost'), 1, 'the whole list fills the sampled call');
     assert.equal(Query.cheapestTown(deep, 77, { amount: 6 }).whole, true);
 } finally { Config.developerDiagnostics = diagnostics; }

@@ -115,7 +115,7 @@ function recheck(state, step = {}, knownRecipes = Workshops.cachedRecipes(state.
                 lines: [{ line: scrollQuote, count: 1, price: Number(scrollQuote.price) }], npc: 0 };
         }
         const best = OfferQuery.cheapestTown(board, id, { amount, cost: trip, excludeOwner: state.characterId,
-            quoteDepth: Price.QUOTE_DEPTH, accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, state),
+            quoteDepth: Price.QUOTE_DEPTH, sampleWhole: true, accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, state),
             npcOffers: require('./ProductionPolicy').allowsNpcShot(id) ? Sources().npcOffersFor(id) : [] });
         return best?.whole ? { ...best, tripDetails: trip.details?.(best.town), quoteDepth: Price.QUOTE_DEPTH } : null;
     };

@@ -115,7 +115,7 @@ function recheck(state, selected) {
         const onlyTown = id === gearId && sourceCode === -3 ? hintedTown : null;
         const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? Source.npcOffersFor(id) : [];
         const best = OfferQuery.cheapestTown(board, id, { amount, cost: trip, excludeOwner: state.characterId,
-            quoteDepth: Price.QUOTE_DEPTH, towns: onlyTown ? [onlyTown] : null, npcOffers,
+            quoteDepth: Price.QUOTE_DEPTH, sampleWhole: true, towns: onlyTown ? [onlyTown] : null, npcOffers,
             accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, state) });
         return best?.whole ? { ...best, tripDetails: trip.details?.(best.town), selfId: Number(id) } : null;
     };
