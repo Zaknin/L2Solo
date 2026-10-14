@@ -147,7 +147,7 @@ function buyOffer(state, offer, options = {}) {
         }).catch((error) => {
             // Either side already has a meeting in preparation: the offer did
             // not change. Like a pending meeting, no cooldown is set and the
-            // goal stays; the next review asks again.
+            // goal stays; the next review asks again. E314: a sale visit's shot restock ends the visit instead (finishTownErrands).
             if (error?.message === 'trade_meeting_preparation_busy') return { state: LifeState.cachedState(state.characterId) || state,
                 pending: true, purchased: false, units: 0, spent: 0, reason: 'trade_meeting_preparation_busy' };
             utils.infoWarn('BotMarket', 'AFK market purchase failed for %s: %s', state.name, error.message);
@@ -845,9 +845,11 @@ const ColdMarketService = {
             });
         });
     },
-    async finishTownErrands(state) {
+    // options.saleVisit (PopulationService saleVisit): the visit came to sell.
+    // options.meetingPending: a trade meeting of this bot is still being prepared.
+    async finishTownErrands(state, options = {}) {
         if (!state || state.activity !== 'shopping' || state.phase === 'hot') return state;
-        let current = state;
+        let current = state, shotDeal = !!options.meetingPending;
         // A finite snapshot; every purchase replans against current quotes and current wallet.
         for (const errand of CombinedErrands.pending(state, Date.now(), state.currentRegion)) {
             if (LifeState.hotRow(current.characterId)) return LifeState.hotRow(current.characterId);
@@ -858,18 +860,24 @@ const ColdMarketService = {
             current = next?.state || current;
             if (next?.pending || next?.reason === 'bot_went_hot') return current;
         }
-        const plan = ShotStock.planForState(current);
-        const localPrices = staticOffers(plan.selfId).filter(offer => offer.town === current.currentRegion);
-        const unitPrice = localPrices.length ? Math.min(...localPrices.map(offer => Number(offer.price))) : 0;
-        const restock = ShotStock.restockPlan(current, { plan, unitPrice });
-        if (restock.needed && restock.amount > 0) {
-            const purchase = planPurchase(current, plan.selfId, restock.targetAmount - restock.currentAmount, {
-                towns: [current.currentRegion], money: restock.cost, purpose: 'shots'
-            });
-            if (purchase) {
-                const bought = await buyHere(current, purchase, { deferRealNpc: true });
-                current = bought.state;
-                if (bought.pending || bought.hot) return current;
+        // E314: a visit already ended plans no shot purchase again (the NPC basket below still runs).
+        if (current.stats?.townVisit?.completed !== true) {
+            const plan = ShotStock.planForState(current);
+            const localPrices = staticOffers(plan.selfId).filter(offer => offer.town === current.currentRegion);
+            const unitPrice = localPrices.length ? Math.min(...localPrices.map(offer => Number(offer.price))) : 0;
+            const restock = ShotStock.restockPlan(current, { plan, unitPrice });
+            if (restock.needed && restock.amount > 0) {
+                const purchase = planPurchase(current, plan.selfId, restock.targetAmount - restock.currentAmount, {
+                    towns: [current.currentRegion], money: restock.cost, purpose: 'shots'
+                });
+                if (purchase) {
+                    const bought = await buyHere(current, purchase, { deferRealNpc: true });
+                    current = bought.state;
+                    // E314: on a sale visit a pending deal (a trade meeting) ends the
+                    // visit below like any other outcome: no retry on this visit.
+                    if (bought.hot || bought.pending && !options.saleVisit) return current;
+                    if (bought.pending) shotDeal = true;
+                }
             }
         }
         // Board deals remain at their own owner. Their current NPC remainders,
@@ -884,7 +892,10 @@ const ColdMarketService = {
                 goal: goalForErrand(current, errand), money: errand.money,
                 funding: purchaseTerms(current, { ...errand, npcPrice: offer.price }) });
         }
-        const bought = await require('./NpcRestockPlan').purchase(current, { town: current.currentRegion, extras });
+        // E314: while a shot deal waits for its meeting the NPC basket buys no
+        // shots: an accepted meeting would deliver the same shortfall again.
+        const bought = await require('./NpcRestockPlan').purchase(current, { town: current.currentRegion, extras,
+            ...(shotDeal ? { shots: false } : {}) });
         current = bought.state;
         if (LifeState.hotRow(current.characterId)) return current;
         return { ...current, stats: { ...current.stats,

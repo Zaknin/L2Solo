@@ -3936,9 +3936,21 @@ const PopulationService = {
                 if (TradeMeetingService.hasPreparation(id) || listingState.stats?.tradeMeeting) return listingState;
             }
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
-            return ColdMarketService.finishTownErrands(listingState).then((restockedState) => {
+            const sale = saleVisit(listingState);
+            return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale,
+                meetingPending: TradeMeetingService.hasPreparation(listingState.characterId) }).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
-                if (TradeMeetingService.hasPreparation(restockedState.characterId)) return restockedState;
+                // A deal in preparation keeps the bot in town; a sale visit it
+                // ended on this pass is saved with its sale retry, not lost in
+                // memory (E314), on the fresh row as the pending sale above (a
+                // meeting marker). Other visit reasons keep the author's path.
+                if (TradeMeetingService.hasPreparation(restockedState.characterId)) {
+                    if (!sale || restockedState.stats?.townVisit?.completed !== true) return restockedState;
+                    const live = LifeState.cachedState(restockedState.characterId) || restockedState, { stats } = restockedState;
+                    const ended = { ...live, stats: { ...live.stats, marketSellRetryAfter: stats.marketSellRetryAfter,
+                        visitEvery: stats.visitEvery, townVisit: stats.townVisit } };
+                    return LifeState.upsertState(ended, 'market_visit_held').then((saved) => saved || ended);
+                }
                 const returnState = GoalExecutor.finishMarketVisit(restockedState);
                 return returnState
                     ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)
