@@ -15,6 +15,9 @@ function emptyCounters() {
         skillUses: 0,
         heals: 0,
         partyBuffCasts: 0,
+        // Cold solo fights started and the mobs they pulled (F20): mobs per pull.
+        coldPulls: 0,
+        coldPullMobs: 0,
         skippedResolves: 0,
         activations: 0,
         cooldowns: 0,
@@ -253,6 +256,8 @@ const PopulationMetrics = {
         this.counters.skillUses += Math.max(0, Number(debug.skillUses) || 0);
         this.counters.heals += Math.max(0, Number(debug.heals) || 0);
         this.counters.partyBuffCasts += Math.max(0, Number(debug.partyBuffCasts) || 0);
+        this.counters.coldPulls += Math.max(0, Number(debug.pulls) || 0);
+        this.counters.coldPullMobs += Math.max(0, Number(debug.pullMobs) || 0);
     },
 
     recordSkippedResolve(reason = 'unknown') {

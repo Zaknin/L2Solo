@@ -10,6 +10,8 @@ const Spots = invoke('GameServer/Bot/AI/SpotService');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotTravel = invoke('GameServer/Bot/AI/BotSpotTravel');
 const TownTransit = invoke('GameServer/Bot/AI/TownTransitPolicy');
+const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 // The cold party resolver's target rule: one answer for hot and cold parties.
 const PartyTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
 
@@ -391,11 +393,18 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
         if (now >= Number(owner.nextBackgroundTargetScanAt || 0)) {
             owner.nextBackgroundTargetScanAt = now + 2000;
             const npcId = PartyTarget.npcId(party, owner.coldLifeState);
-            const npcs = World.fetchNpcsInRadius(owner.actor.fetchLocX(), owner.actor.fetchLocY(), radius)
-                .filter(allowedHunt).filter(n => Math.abs(n.fetchLocZ() - owner.actor.fetchLocZ()) < 500);
-            npcs.sort((a, b) => Number(b.fetchSelfId() === npcId) - Number(a.fetchSelfId() === npcId)
-                || Threats.distance(owner.actor, a) - Threats.distance(owner.actor, b));
-            const scan = HuntingVisibility.select(owner, 'party', owner.actor, npcs);
+            // The near members take only a pull they survive (E72): the target
+            // with its helpers, aggressive neighbours and minions; smaller first.
+            const profiles = TargetMatchup.actorProfiles(near.map(s => s.actor));
+            const pulls = World.fetchNpcsInRadius(owner.actor.fetchLocX(), owner.actor.fetchLocY(), radius)
+                .filter(allowedHunt).filter(n => Math.abs(n.fetchLocZ() - owner.actor.fetchLocZ()) < 500)
+                .map(npc => ({ npc, size: Spots.pullSizeFor(npc) }))
+                .filter(({ npc, size }) => TargetMatchup.soloSurvival(profiles,
+                    BotPullEstimate.pullView(TargetMatchup.targetView(npc), size)).eligible);
+            pulls.sort((a, b) => Number(b.npc.fetchSelfId() === npcId) - Number(a.npc.fetchSelfId() === npcId)
+                || Math.round(a.size) - Math.round(b.size)
+                || Threats.distance(owner.actor, a.npc) - Threats.distance(owner.actor, b.npc));
+            const scan = HuntingVisibility.select(owner, 'party', owner.actor, pulls.map(pull => pull.npc));
             target = scan.candidate;
             owner.backgroundTargetScanPending = scan.pending;
         }

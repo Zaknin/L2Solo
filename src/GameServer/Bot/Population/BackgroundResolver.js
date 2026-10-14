@@ -14,6 +14,7 @@ const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const EncounterReadiness = invoke('GameServer/Bot/AI/BotEncounterReadiness');
 const PartyBuffLoadout = invoke('GameServer/Bot/AI/PartyBuffLoadout');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
@@ -1109,8 +1110,8 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     const encounterKey = PveEncounter.key([state], spot, targetNpcId);
     const pending = PveEncounter.read(state.stats?.pveEncounter, encounterKey, timestamp);
     const matchupProfiles = pending ? null : TargetMatchup.coldProfiles(bot, fightState, timestamp);
-    const mob = pending?.mob || ColdCombatProfile.npcForSpot(spot, rng, { preferredNpcId: targetNpcId,
-        soloSafety: true,
+    const picked = pending?.mob || ColdCombatProfile.npcForSpot(spot, rng, { preferredNpcId: targetNpcId,
+        soloSafety: true, pull: true,
         maxTargetLevel: invoke('GameServer/Bot/Population/SpotRiskPolicy').recoveryFor(state)?.levelPenalty > 0
             ? invoke('GameServer/Bot/AI/LevelingRoutes').targetLevelForState(state) : null,
         matchupProfiles }) || {
@@ -1118,13 +1119,15 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         pAtk: Math.max(1, Number(spot.mob?.damage || 1)), pAtkRnd: 0, pDef: 1, mDef: 1,
         accur: 1, evasion: 0, critical: 0, atkSpd: 253, mAtk: 1, castSpd: 333
     };
-    if (mob.avoided) return { avoided: true, reason: mob.reason };
-    if (!pending && !mob.aggressiveInterruption) {
+    if (picked.avoided) return { avoided: true, reason: picked.reason };
+    // Readiness keeps the margin the route verdict gave one mob; the helpers,
+    // aggressive neighbours and minions come regardless (design 13.5).
+    if (!pending && !picked.aggressiveInterruption) {
         const readiness = EncounterReadiness.evaluate({
             hp: state.vitals?.hp ?? bot.maxHp, maxHp: bot.maxHp,
             mp: state.vitals?.mp ?? bot.maxMp, maxMp: bot.maxMp, level: bot.level,
             manaDependent: BotRoles.shouldRestForMana(state)
-        }, mob);
+        }, picked);
         // A full-health route verdict cannot admit the next mob after a win
         // depleted the owner. Keep the same damage margin with the HP/MP that
         // remain now; pending fights and aggressive interruptions still run.
@@ -1133,7 +1136,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             maxHp: Math.min(profile.maxHp, state.vitals?.hp ?? profile.maxHp),
             maxMp: Math.min(profile.maxMp, state.vitals?.mp ?? profile.maxMp)
         });
-        const canSurvive = TargetMatchup.soloSurvival(remaining, mob).eligible;
+        const canSurvive = TargetMatchup.soloSurvival(remaining, picked).eligible;
         if (!readiness.ready || !canSurvive) {
             return { avoided: true, needsRest: true, reason: 'solo_recovery_needed' };
         }
@@ -1170,6 +1173,9 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     const allies = [soloFighter];
     let mobReadyAt = Number(pending?.mobReadyAt || 0);
     let time = 0;
+    // A pull is counted once, when its fight starts; a continued fight keeps its saved view.
+    const mob = pending ? picked : BotPullEstimate.pullView(picked, picked.pull);
+    const pullMobs = pending ? 0 : Number(picked.pull || 1);
     let mobHp = pending?.hp ?? mob.maxHp;
     let actions = 0;
     let overhitContext = null;
@@ -1215,7 +1221,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
                     attacker: { characterId: state.characterId },
                     skill: hit.skill,
                     targetHpBeforeHit,
-                    targetMaxHp: mob.maxHp,
+                    targetMaxHp: mob.maxHp / Number(mob.pull || 1),
                     finalDamage: hit.damage,
                     encounterId: mob.selfId || targetNpcId,
                     timestamp: timestamp + time
@@ -1264,21 +1270,26 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
                 musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
                 potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
-                mobSelfId: mob.selfId || null, timedOut: !died }
+                mobSelfId: mob.selfId || null, timedOut: !died, pullMobs }
         };
     }
 
     ColdSoulCrystal.outcome(soloFighter, mob, rng, { at: timestamp + time });
+    // Every mob of the pull is a kill; the last hit decides the overhit.
+    const pulled = Number(mob.pull || 1);
     const rewards = ColdKillRewards.roll({
         spot,
-        kills: [{ npcSelfId: mob.selfId, overhitContext }],
+        kills: Array.from({ length: pulled }, (_, index) => ({ npcSelfId: mob.selfId,
+            overhitContext: index === pulled - 1 ? overhitContext : null })),
         killerLevel: Number(state.level || bot.level),
         rng,
         spoiler: BotRoles.isSpoiler(state) ? ColdKillRewards.spoilerFor(state, soloFighter.profile) : null
     });
-    const [kill] = rewards.progression;
-    const [{ drops, spoil }] = rewards.loot;
-    const gained = ColdKillRewards.scaledProgression(kill, {
+    const kill = rewards.progression.at(-1);
+    const gained = ColdKillRewards.scaledProgression(pulled === 1 ? kill : {
+        exp: rewards.progression.reduce((sum, item) => sum + item.exp, 0),
+        sp: rewards.progression.reduce((sum, item) => sum + item.sp, 0)
+    }, {
         expMultiplier: Number(pressure?.expMultiplier || 1),
         rates: ProgressionRates.profile(),
         profile: soloFighter.profile,
@@ -1295,7 +1306,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         exp: gained.exp,
         sp: gained.sp,
         adena: rewards.adena,
-        loot: [...drops, ...spoil],
+        loot: rewards.loot.flatMap(({ drops, spoil }) => [...drops, ...spoil]),
         cooldowns: soloFighter.cooldowns,
         charges: soloFighter.charges,
         chargeExpiresAt: soloFighter.chargeExpiresAt,
@@ -1306,7 +1317,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
             musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
             potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
-            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit }
+            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit, pullMobs }
     };
 }
 
@@ -1831,6 +1842,8 @@ const BackgroundResolver = {
         const soulCrystals = [];
         let attemptedFights = 0;
         let completedFights = 0;
+        let pulls = 0;
+        let pullMobs = 0;
 
         for (let i = 0; i < fights; i++) {
             if (combatMs >= combatBudgetMs || combatActions >= actionBudget) break;
@@ -1888,6 +1901,10 @@ const BackgroundResolver = {
             summonUses += Number(result.debug?.summonUses || 0);
             summonActions += Number(result.debug?.summonActions || 0);
             potionsUsed += Number(result.debug?.potionsUsed || 0);
+            if (result.debug?.pullMobs > 0) {
+                pulls += 1;
+                pullMobs += result.debug.pullMobs;
+            }
             for (const [selfId, count] of Object.entries(result.debug?.drunkPotions || {})) {
                 drunkPotions[selfId] = Number(drunkPotions[selfId] || 0) + Number(count);
             }
@@ -1977,6 +1994,8 @@ const BackgroundResolver = {
                 summonActions,
                 potionsUsed,
                 drunkPotions,
+                pulls,
+                pullMobs,
                 targetNpcId: Number(targetNpcId) || null,
                 targetOnSpot: ColdCombatProfile.spotSpawns(spot, targetNpcId) ? 1 : 0,
                 foughtNpcIds

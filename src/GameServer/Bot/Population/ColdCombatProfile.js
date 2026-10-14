@@ -14,6 +14,7 @@ const BuffCatalog = invoke('GameServer/Effects/BuffCatalog');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
@@ -839,6 +840,8 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
         selfId: number(npc.selfId),
         aggressiveInterruption: !!preferred && selected !== preferred,
         ...combat,
+        // A solo fight takes the whole pull of its spawn group (F20).
+        ...(options.pull && !explicitRaid ? { pull: BotPullEstimate.rollPull(selected.pull, rng) } : {}),
         ...(explicitRaid ? {
             // Cold mode represents the raid group as one bounded encounter.
             // Adds contribute part of their HP and incoming damage instead of

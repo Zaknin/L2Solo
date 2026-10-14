@@ -26,6 +26,7 @@ const BotRaidSafety   = invoke('GameServer/Bot/AI/BotRaidSafety');
 const HotActorLodPolicy = invoke('GameServer/Bot/AI/HotActorLodPolicy');
 const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPositioning');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const TownNpcApproach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const HotTownRebuff = invoke('GameServer/Bot/AI/HotTownRebuff');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
@@ -163,11 +164,6 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         .filter((npc) => npc.fetchAttackable() && !npc.isDead());
     const nearbyNpcs = limitTargetCandidates(session, bot, eligibleNearbyNpcs);
     const claimedIds = claimedTargetIds(session);
-    const clanCounts = nearbyNpcs.reduce((counts, npc) => {
-        const clan = npc.fetchClanName?.();
-        if (clan) counts.set(clan, (counts.get(clan) || 0) + 1);
-        return counts;
-    }, new Map());
     const spotIdAt = (actor) => `${Math.floor(actor.fetchLocX() / SPOT_CELL_SIZE)}_${Math.floor(actor.fetchLocY() / SPOT_CELL_SIZE)}`;
     const currentSpotId = String(session.currentSpot?.id || spotIdAt(bot)).split(':')[0];
     const partyActors = session.followPlayerSession || session.hotBackgroundPartyId
@@ -186,11 +182,12 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         .map((npc) => {
             const claimed = claimedIds.has(Number(npc.fetchId()));
             const npcSpotId = spotIdAt(npc);
-            const clan = npc.fetchClanName?.();
+            // The target's helpers, aggressive neighbours and minions come with it.
+            const pull = SpotService.pullSizeFor(npc);
             const matchupTarget = TargetMatchup.targetView(npc, matchupStats);
             const targetMatchup = TargetMatchup.evaluate(matchupProfiles, matchupTarget);
             if (isSoloHunter(session) && partyActors.length <= 1) {
-                const canHunt = TargetMatchup.soloCanHunt(matchupProfiles, matchupTarget);
+                const canHunt = TargetMatchup.soloCanHunt(matchupProfiles, BotPullEstimate.pullView(matchupTarget, pull));
                 Object.assign(targetMatchup, { eligible: canHunt.eligible, reason: canHunt.reason });
             }
             const scoreContext = {
@@ -206,7 +203,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
                 currentSpotId,
                 npcSpotId,
                 claimed,
-                socialAllies: clan ? Math.max(0, (clanCounts.get(clan) || 1) - 1) : 0,
+                socialAllies: pull - 1,
                 solo: isSoloHunter(session) && partyActors.length <= 1,
                 botRole: BotRoles.combatRoleFor(bot),
                 botOffenseRatio: matchupProfiles.length > 1 ? matchupProfiles.reduce((sum, profile) => sum

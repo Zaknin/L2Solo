@@ -9,6 +9,7 @@ const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 
 const anonymousStateIds = new WeakMap();
 let nextAnonymousStateId = 1;
@@ -180,6 +181,7 @@ const SpotService = {
                     selfIds: {},
                     npcs: {},
                     arrivalPoints: [],
+                    records: [],
                     partitionedAreaId: partition.area?.id || null
                 };
             }
@@ -206,6 +208,7 @@ const SpotService = {
                 locY: npc.fetchLocY(),
                 locZ: npc.fetchLocZ()
             });
+            sector.records.push(BotPullEstimate.record(npc));
         });
 
         this.spots = Object.values(sectors).map((sector) => {
@@ -240,14 +243,36 @@ const SpotService = {
                 arrivalPoints: sector.arrivalPoints.map((point) => ({ ...point })),
                 levelCounts: { ...sector.levels },
                 dominantLevels: levelEntries.slice(0, 3),
-                partitionedAreaId: sector.partitionedAreaId
+                partitionedAreaId: sector.partitionedAreaId,
+                records: sector.records
             };
 
             spot.name = spotName(spot);
             return WorldAreaCatalog.decorateSpot(spot);
         });
+        // lazy: worker SpotService also loads in the cold worker; these aggro owners import the live world.
+        const SocialAggro = invoke('GameServer/Npc/SocialAggro');
+        const NpcAggro = invoke('GameServer/Npc/NpcAggro');
+        const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
+        const pulls = BotPullEstimate.annotate(this.spots, {
+            assistZ: SocialAggro.MAX_ASSIST_Z_DIFFERENCE,
+            aggroRadius: NpcAggro.AGGRO_RADIUS,
+            aggroZ: NpcAggro.MAX_AGGRO_Z_DIFFERENCE
+        }, BotPullEstimate.minionJoiners(MinionManager.groupsByBoss));
+        // One number on each spot entry that pulls more than one mob, in this
+        // catalogue, its SpotProfiles copy and the cold worker's copy.
+        utils.infoSuccess('Spots', '%d spots, pull table %d of %d entries above one (~%d KB per copy)',
+            this.spots.length, pulls.pulls, pulls.entries, Math.ceil(pulls.pulls * 16 / 1024));
 
         return this.spots;
+    },
+
+    // Mobs that come with this one (BotPullEstimate), from the table built
+    // when the spots were indexed at start; 1 before that.
+    pullSizeFor(npc) {
+        if (!this.spots || !npc?.fetchLocX) return 1;
+        const spot = SpotIndex.spotById(this.spots, spotIdAt(locFromActor(npc)).id);
+        return BotPullEstimate.entryPull(spot, npc.fetchSelfId?.());
     },
 
     findById(id) {
