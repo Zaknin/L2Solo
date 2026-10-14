@@ -169,13 +169,15 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         const fees = tripValue(entries, 'fees');
         return tripValue(entries, 'hours') + (fees > 0 ? fees * adenaToHours : 0);
     };
-    const priceOf = path => {
+    // ownInput: the path's own-input value, or 0 where held units are priced
+    // by the allocation instead (no copy of the path per call).
+    const priceOf = (path, ownInput = path.ownInputOpportunityValue) => {
         if (!Number.isFinite(adenaToHours)) return nonnegative(path.price)
-            + nonnegative(path.ownInputOpportunityValue) + nonnegative(path.actualCashFees) > 0 ? Infinity
+            + nonnegative(ownInput) + nonnegative(path.actualCashFees) > 0 ? Infinity
             : nonnegative(path.costHours) + nonnegative(path.riskHours) * nonnegative(riskWeight);
         const value = Valuation.opportunity({ moneyPrice: adenaToHours, riskWeight }, [{ probability: 1,
             cashNow: nonnegative(path.price), foregoneBenefitHours: nonnegative(path.costHours),
-            ownInputOpportunityValue: nonnegative(path.ownInputOpportunityValue),
+            ownInputOpportunityValue: nonnegative(ownInput),
             actualCashFees: nonnegative(path.actualCashFees), riskHours: nonnegative(path.riskHours) }]);
         return value.known ? -value.valueHours : Infinity;
     };
@@ -251,11 +253,17 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
             const units = allocation && ['craft', 'crystallize'].includes(path.kind)
                 ? Math.ceil(amount / Number(path.productCount || 1)) : allocation ? amount : 1;
             if (!Number.isSafeInteger(units) || units <= 0) continue;
+            // Path-only facts, once per path (both evaluations read them).
+            const unitEffort = allocation ? priceOf(path, 0) : priceOf(path);
+            const inputs = allocation ? path.grossRequirements || path.requirements || [] : path.requirements || path.grossRequirements || [];
+            const leaf = Array.isArray(inputs) && inputs.length === 0;
             // Forecast the complete output first. A native batch limit only
             // bounds the next command, never the materials or price of the goal.
             const evaluate = (units, command = false) => {
-                const local = allocation ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
-                let price = nonnegative(path.price) * units, effort = (allocation ? priceOf({ ...path, ownInputOpportunityValue: 0 }) : priceOf(path)) * units,
+                // A path without inputs solves no child: it claims no stock, so the
+                // claims need no copy and no merge back.
+                const local = allocation && !leaf ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
+                let price = nonnegative(path.price) * units, effort = unitEffort * units,
                     available = true, height = 0, awaitingIncoming = !command && incomingHeld > 0;
                 if (allocation && !command && ownValue > 0) effort += ownValue * adenaToHours;
                 let executable = path.executable !== false;
@@ -276,7 +284,6 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                     hours = nonnegative(valuation.cycleHours);
                 }
                 const requirements = [];
-                const inputs = allocation ? path.grossRequirements || path.requirements || [] : path.requirements || path.grossRequirements || [];
                 // Exact once-per-path inputs (a recipe scroll) are paid once,
                 // never per attempt; consumed inputs of one attempt are the rest.
                 const untilSuccess = !planning && path.kind === 'craft' && successProbability > 0 && successProbability < 1
@@ -328,7 +335,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 if (ownCut && !command && diagnostic) Diagnostics.count('cap', 'branches', 'cut');
                 const basePrice = price, baseEffort = effort, baseHours = hours;
                 price += tripValue(tripEntries, 'fees'); effort += tripEffort(tripEntries); hours += tripValue(tripEntries, 'hours');
-                if (allocation && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
+                if (local && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
                 if (available) return { ...path, executable, supported, resolved, branches, quoted, tripEntries,
                     successProbability: probability, attemptProbability: successProbability, untilSuccess,
                     ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
