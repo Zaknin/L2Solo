@@ -1,9 +1,14 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
 const HOUR_MS = 3600000;
 const REVIEW_MS = 5 * 60000;
 const MAX_SOLO_CHECKS = 12;
 const soloChoices = new WeakMap();
+// Party formation hydrates fresh row copies every call, so the per-object hold
+// above never spans calls; this one holds the same choice for an unchanged row.
+const soloHolds = new Map();
+const SOLO_HOLD_LIMIT = 4096;
 const positive = value => Math.max(0, Number(value) || 0);
 const rosterKey = members => members.map(member => Number(member.characterId)).sort((a, b) => a - b).join(',');
 const personal = state => invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state);
@@ -64,8 +69,15 @@ function soloRoute(state, spots, timestamp, peers = []) {
     const standalone = soloState(state);
     let held = soloChoices.get(state);
     if (!held || held.spots !== spots || timestamp < held.at || timestamp - held.at >= REVIEW_MS) {
-        held = { spots, at: timestamp, choice: Route.select(standalone,
-            { spots, timestamp, required: true, mode: 'solo', maxChecks: MAX_SOLO_CHECKS }) };
+        const input = rowInput(state);
+        const byId = input && soloHolds.get(Number(state.characterId));
+        if (byId && byId.input === input && byId.spots === spots && timestamp >= byId.at && timestamp - byId.at < REVIEW_MS) {
+            held = { spots, at: byId.at, choice: byId.choice };
+        } else {
+            held = { spots, at: timestamp, choice: Route.select(standalone,
+                { spots, timestamp, required: true, mode: 'solo', maxChecks: MAX_SOLO_CHECKS }) };
+            if (input) holdById(Number(state.characterId), { input, spots, at: timestamp, choice: held.choice }, timestamp);
+        }
         soloChoices.set(state, held);
     }
     const choice = held.choice;
@@ -96,6 +108,18 @@ function soloRoute(state, spots, timestamp, peers = []) {
         break;
     }
     return best;
+}
+
+// Cold rows only. Their revision misses out-of-band writes (adena sync, PK drops,
+// warehouse liquidation keep it), so the key is the whole row content, not the revision.
+function rowInput(state) {
+    if (state.phase !== 'cold' || !(Number(state.simulation?.revision) > 0) || !(Number(state.characterId) > 0)) return null;
+    try { return createHash('sha1').update(JSON.stringify(state)).digest('base64'); } catch { return null; }
+}
+function holdById(characterId, entry, timestamp) {
+    soloHolds.set(characterId, entry);
+    if (soloHolds.size <= SOLO_HOLD_LIMIT) return;
+    for (const [id, held] of soloHolds) if (timestamp - held.at >= REVIEW_MS) soloHolds.delete(id);
 }
 
 function withEffects(state, effects) {

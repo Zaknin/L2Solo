@@ -101,6 +101,7 @@ const tests = [
     'tests/test_wish_crystallization_quantity.js',
     'tests/test_crystallization_market_sources.js',
     'tests/test_party_income_comparison.js',
+    'tests/test_party_solo_route_hold.js',
     'tests/test_spot_value_table.js',
     'tests/test_spot_income_band_cache.js',
     'tests/test_cold_startup_repair_checkpoint.js',
