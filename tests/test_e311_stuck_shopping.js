@@ -13,13 +13,14 @@ const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Meetings = invoke('GameServer/AfkTrade/TradeMeetingService');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
+const PriceDecision = invoke('GameServer/Bot/Economy/PriceDecision');
 const sellerId = 730311, buyerId = 730312, errandSellerId = 730313;
 const SKIN = 1867;
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
 (async () => {
     const world = await createWorld([{ id: sellerId, classId: 0, level: 20 }, { id: buyerId, classId: 0, level: 20 }, { id: errandSellerId, classId: 0, level: 20 }], 'e311-stuck-shopping');
-    const prepare = Coordinator.requestMeetingPreparation;
+    const prepare = Coordinator.requestMeetingPreparation, chooseByValue = PriceDecision.chooseByValue;
     try {
         await Database.createAccount('bot_e311_fixture', 'fixture');
         await Database.execute(['UPDATE characters SET username=? WHERE id IN (?,?,?)', ['bot_e311_fixture', sellerId, buyerId, errandSellerId]]);
@@ -94,6 +95,16 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
             assert.equal(held, before, `${label}: the saved sale retry changes the seller's own consent to the answer`);
         }
 
+        // The visit's sale decision rolls among its options keyed on the pass's
+        // millisecond (MarketListingPolicy.evaluate: rollKey 'dispose' at the
+        // decision point `now`; PriceDecision.chooseByValue keeps every other
+        // option a floor chance), so about 6% of passes list, keep or sell the
+        // skins to the NPC instead of answering the ad (CI: the errand seller
+        // listed them, no meeting). This test is about what follows an answer:
+        // each seller answers the ad whenever the decision offers it.
+        PriceDecision.chooseByValue = (options, rollKey) => options.find(option => option.action === 'ad' && Number.isFinite(option.value))
+            || chooseByValue(options, rollKey);
+
         // The payer's worker answers later; it refuses the deal, as live (the ad's need changed).
         const meetings = new Set();
         let refuse = null;
@@ -159,6 +170,7 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         console.log('E311 refused trade meeting does not hold the town visit: passed');
     } finally {
         Coordinator.requestMeetingPreparation = prepare;
+        PriceDecision.chooseByValue = chooseByValue;
         await world.close();
     }
 })().catch(error => { console.error(error); process.exitCode = 1; });
