@@ -859,10 +859,13 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
 // Native 1,000-owner strong dominators: max entry 3,560 B including buffers,
 // plus amortized build/owner tables, key boxes and night markers 148.32 B.
 // The resulting 3,708.32 B remains below the 4 KB per-owner budget.
+// A bot that plans gear ahead also holds the entry of its preparation build
+// (WishProviders): up to ~7.4 KB while it prepares, inside the 10 KB per-bot
+// rule; a change of its own build drops it.
 // Shared candidate names are interned once; a build keeps only numeric hashes,
 // power numbers and packed gains. Owners release both variants and night markers.
 const buildGains = new Map();
-const ownerBuilds = new Map();
+const ownerBuilds = new Map(), ownerPreparations = new Map();
 const candidateIndex = new Map();
 const POWER_FIELDS = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
 const CANDIDATE_LIMIT = 65536, ENTRY_LIMIT = 256, NONZERO_LIMIT = 128;
@@ -927,7 +930,7 @@ function newEntry(power, night, baseKey) {
     return resizeGains({ power: Float64Array.from(POWER_FIELDS.map(field => power[field])),
         size: 0, gainSize: 0, owners: 0, night, baseKey }, 32, 32);
 }
-function buildGainsFor(state = {}, timestamp = Date.now()) {
+function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false } = {}) {
     const text = powerKey(state, timestamp), baseKey = buildHash(text);
     const owner = Number(state.characterId) || 0;
     let key = baseKey, entry = buildGains.get(baseKey);
@@ -950,26 +953,37 @@ function buildGainsFor(state = {}, timestamp = Date.now()) {
         }
     }
     if (!owner) return entry;
-    const held = ownerBuilds.get(owner);
+    // The preparation build carries the bot's id but has its own slot: in
+    // one slot it released the bot's build entry, and both rebuilt every
+    // gain on each review.
+    const owners = preparation ? ownerPreparations : ownerBuilds;
+    const held = owners.get(owner);
     if (held !== key) {
         entry.owners++;
         if (entry.night === 1) buildGains.get(baseKey).owners++;
         if (held !== undefined) releaseBuild(held);
+        // No preparation outlives the build it was planned from; after a
+        // level-up its gains are computed once again.
+        if (!preparation && held !== undefined) forgetFrom(ownerPreparations, owner);
     }
-    ownerBuilds.delete(owner);
-    ownerBuilds.set(owner, key);
-    while (ownerBuilds.size > ownerLimit()) {
-        const [oldest, oldKey] = ownerBuilds.entries().next().value;
-        ownerBuilds.delete(oldest);
+    owners.delete(owner);
+    owners.set(owner, key);
+    while (owners.size > ownerLimit()) {
+        const [oldest, oldKey] = owners.entries().next().value;
+        owners.delete(oldest);
         releaseBuild(oldKey);
     }
     return entry;
 }
-function forgetBuild(characterId) {
-    const key = ownerBuilds.get(Number(characterId));
+function forgetFrom(owners, owner) {
+    const key = owners.get(owner);
     if (key === undefined) return;
-    ownerBuilds.delete(Number(characterId));
+    owners.delete(owner);
     releaseBuild(key);
+}
+function forgetBuild(characterId) {
+    forgetFrom(ownerPreparations, Number(characterId));
+    forgetFrom(ownerBuilds, Number(characterId));
 }
 function gainFor(entry, key, compute) {
     let id = candidateIndex.get(key);
@@ -999,7 +1013,7 @@ function gainFor(entry, key, compute) {
     entry.gains[slot * 2 + 1] = effect.defence;
     return { attack: entry.gains[slot * 2], defence: entry.gains[slot * 2 + 1] };
 }
-function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
+function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,

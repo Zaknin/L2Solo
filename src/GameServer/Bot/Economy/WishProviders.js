@@ -715,7 +715,7 @@ function buildProjection(state, ctx, deps) {
         if (Number(current?.selfId) === Number(item.selfId)) continue;
         const early = !!preparation && item.etc?.rank === 'c';
         const gain = early ? (futureGain ||= gearGainReader(preparation, timestamp,
-            Profile.buildGainsFor(preparation, timestamp), magic, ctx.gearThreatMask ?? 3))(item, slot) : gainFor(item, slot);
+            Profile.buildGainsFor(preparation, timestamp, { preparation: true }), magic, ctx.gearThreatMask ?? 3))(item, slot) : gainFor(item, slot);
         const benefitHorizon = early ? futureHorizon : horizon;
         const currentPrice = current ? price(current.selfId) : 0;
         const market = invoke('GameServer/Bot/Economy/MarketCounters');

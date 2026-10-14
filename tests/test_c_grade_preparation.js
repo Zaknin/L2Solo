@@ -31,8 +31,8 @@ function bot(classId = 54, level = 33) {
     state.stats.coldCombat = Profile.legacySnapshot(state, Profile.skillRecordsFromTree(classId, level), timestamp);
     return state;
 }
-function review(state, board = new BoardIndex(), extra = {}) {
-    Economy.reset(); Profile.forgetBuild(state.characterId);
+function review(state, board = new BoardIndex(), extra = {}, forget = true) {
+    Economy.reset(); if (forget) Profile.forgetBuild(state.characterId);
     return Economy.forState(state, { spots: [], board, timestamp, npcOffersFor: () => [],
         routeRows: Array.from({ length: require('../src/GameServer/Bot/Economy/EconomicTrip').towns.length },
             () => [true, 0, 0]), workshop: { known: true, recipeId: 0, incomePerHour: 0 }, ...extra });
@@ -174,6 +174,18 @@ const ctx = review(source, board);
 assert(ctx.projection.roots.some(key => /^power:/.test(key)
     && Data.items.find(item => item.selfId === Number(key.split(':')[1]))?.etc.rank === 'c'),
     'native wishes compare C sources before 40 after completing D');
+// The preparation build has its own slot: the next review keeps the bot's
+// build entry and its remembered gains; forget and a build change release it.
+const held = Profile.buildGainsFor(source, timestamp), preparing = Profile.size().ownerPreparations;
+assert(preparing > 0, 'a preparing bot holds its preparation build');
+review(structuredClone(source), board, {}, false);
+assert.equal(Profile.buildGainsFor(source, timestamp), held, 'a review with a preparation keeps the bot build entry');
+Profile.forgetBuild(source.characterId);
+assert.equal(Profile.size().ownerPreparations, preparing - 1, 'forget releases the preparation build too');
+review(structuredClone(source), board, {}, false);
+Profile.buildGainsFor({ ...source, level: source.level + 1 }, timestamp);
+assert.equal(Profile.size().ownerPreparations, preparing - 1, 'a build change drops the preparation');
+Profile.forgetBuild(source.characterId);
 const missing = structuredClone(source);
 delete missing.inventory[Object.values(missing.inventory).find(row => row.equippedSlots.includes(12)).selfId];
 assert(!review(missing, board).projection.roots.some(key => /^power:/.test(key)
