@@ -228,12 +228,17 @@ function bandsHold(state, bands = [], leaf = null) {
 // bound or on a moved funding mark; soft money, observation and horizon
 // changes wait for their kind's delay since the last actual decision.
 // held: { baseline, mp, expPerHour, persona } of the last actual decision.
-function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null) {
+// A failing check names itself in `why` (an array or null) and fails.
+const miss = (why, reason) => { why?.push(reason); return false; };
+// why: an array that receives the failing event's name (L114 diagnostics).
+function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why = null) {
     const stats = state.stats || {}, baseline = held.baseline;
-    if (stats.wishDirty || Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
-        && Number(state.vitals?.mp) !== Number(held.mp)) return false;
-    if (Sections.moneyEvent(state, baseline, timestamp) || Sections.observationEvent(state, baseline, timestamp, deps.mode)
-        || Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return false;
+    if (stats.wishDirty) return miss(why, 'wish_dirty');
+    if (Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
+        && Number(state.vitals?.mp) !== Number(held.mp)) return miss(why, 'crafter_mp');
+    if (Sections.moneyEvent(state, baseline, timestamp)) return miss(why, 'money');
+    if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return miss(why, 'observation');
+    if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return miss(why, 'horizon');
     if (deferred) {
         if (Sections.meaningfulMoney(state, baseline)) deferred.push('money');
         if (Sections.observationChanged(state, baseline, timestamp, deps.mode)) deferred.push('observation');
@@ -411,27 +416,38 @@ function decodeCalculationFence(fence) {
 // card's options (L70) the bot's own field activity is equalised and the
 // read market/spot crowd become soft: they fail only once the market delay
 // since the last actual decision (options.baseline.at) has passed.
+// options.why: an array that receives the failing part's name (L114
+// diagnostics); a structural miss names the first differing key segment
+// (inputKey order, then capability, then the tail) while diagnostics run.
 function calculationHolds(state, fence, deps = {}, options = {}) {
-    if (!(fence instanceof Uint8Array) || fence.byteLength > FENCE_BYTES || extensions.size || deps.nodes?.length) return false;
+    const why = options.why;
+    if (!(fence instanceof Uint8Array) || fence.byteLength > FENCE_BYTES || extensions.size || deps.nodes?.length) return miss(why, 'invalid');
     deps = resolved(state, deps);
-    if (deps.workshops && !deps.workshopRevision && !deps.inputKey) return false;
+    if (deps.workshops && !deps.workshopRevision && !deps.inputKey) return miss(why, 'workshop');
     const fields = decodeCalculationFence(fence);
-    if (!fields) return false;
+    if (!fields) return miss(why, 'invalid');
     const [key, [tokens, items], spots, bands, safety] = fields;
-    if (!bandsHold(state, bands, options.leaf)) return false;
+    if (!bandsHold(state, bands, options.leaf)) return miss(why, 'bands');
     if (safety) {
         const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
-        if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return false;
+        if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return miss(why, 'safety');
     }
     // options.activity is the fence's own build activity, so one key compares;
     // options.leaf is its held leaf (a trip to the leaf's own spot).
-    if (key !== sectionKeys(fieldActivity(state, options.activity, options.leaf), deps, bands).structural) return false;
+    const structural = sectionKeys(fieldActivity(state, options.activity, options.leaf), deps, bands).structural;
+    if (key !== structural) return miss(why, why && Diagnostics.active() ? `structural:${firstSegment(key, structural)}` : 'structural');
     const reads = new Map();
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;
-    if (!Object.hasOwn(options, 'baseline') || Sections.softDue(options.baseline, 'market', options.timestamp ?? Date.now())) return false;
+    if (!Object.hasOwn(options, 'baseline') || Sections.softDue(options.baseline, 'market', options.timestamp ?? Date.now())) return miss(why, 'market');
     if (options.countDeferral && Diagnostics.active()) Diagnostics.count('advisory', 'soft_deferred', 'market');
     return true;
+}
+function firstSegment(a, b) {
+    const left = a.split('|'), right = b.split('|');
+    let at = 0;
+    while (at < left.length && left[at] === right[at]) at++;
+    return at;
 }
 // A retained leaf is calculation data. Recheck its native source, physical
 // resources and funding now; execution still uses the existing command/CAS.
@@ -720,6 +736,14 @@ function forState(state = {}, deps = {}) {
     return (CombatProfile ||= invoke('GameServer/Bot/Population/ColdCombatProfile'))
         .withProfileScope(state, () => buildForState(state, deps));
 }
+// The shadow plan comparison, also by the card refusal that sent this build
+// (deps.advisoryRefusal, set by the cold worker while diagnostics run), so a
+// refusal that rebuilds the same plan shows itself (L114).
+function countShadowPlan(deps, sameKey, samePlan) {
+    const plan = samePlan ? 'same_plan' : 'new_plan';
+    Diagnostics.count('context', 'shadow_plan', `${sameKey ? 'same_key' : 'new_key'}:${plan}`);
+    if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_plan', `${deps.advisoryRefusal}:${plan}`);
+}
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('context', 'request');
@@ -895,7 +919,7 @@ function buildForState(state, deps) {
             money: state.stats?.money || [0, 0, base.survivalReserve, 0], stockTargets: state.stats?.stockTargets || stockTargets(base) };
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
-            if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan', `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
+            if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
         }
         tokensLive = false; marketTokens.clear(); spotTokens.clear();
         return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
@@ -971,8 +995,7 @@ function buildForState(state, deps) {
         Diagnostics.duration('context', performance.now() - started);
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
-        if (previousPlan !== null) Diagnostics.count('context', 'shadow_plan',
-            `${shadowSame ? 'same_key' : 'new_key'}:${plan === previousPlan ? 'same_plan' : 'new_plan'}`);
+        if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
     }
     if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,

@@ -386,32 +386,44 @@ function advisory(economy, state, activity = state.activity) {
 // step is resolveRest/resolveTravel of its own state (BackgroundResolver),
 // the same after a rebuild. A traveller without a trip record falls
 // through to a fight there, so it takes the rebuild.
-function canReuse(state, accepted, deps = {}, current = null, options = {}) {
-    if (!accepted || !accepted.card || !state.stats?.wishSections || state.stats.wishDirty
-        || Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq
-        || Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return false;
+// refusal: the first failing check's name, '' when the card holds (L114
+// diagnostics read it; canReuse is its boolean).
+function refusal(state, accepted, deps = {}, current = null, options = {}) {
+    if (!accepted || !accepted.card) return 'no_card';
+    if (!state.stats?.wishSections) return 'no_sections';
+    if (state.stats.wishDirty) return 'wish_dirty';
+    if (Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq) return 'decision_seq';
+    if (Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return 'activity_leaf';
     // The ordinary fight path resumes hunting even when its accepted next
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
-    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)
-        || state.incomingPending) return false;
+    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)) return 'leaf_kind';
+    if (state.incomingPending) return 'incoming';
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    if (!Economy.FIELD_ACTIVITIES.has(state.activity) || !options.afterResult && state.activity === 'traveling'
-        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return false;
+    if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
+    if (!options.afterResult && state.activity === 'traveling'
+        && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record';
     const Sections = DecisionSections ||= require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
     const baseline = state.stats.wishSections;
-    if (Sections.capability(state, timestamp) !== baseline.build) return false;
+    if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
-    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state);
-    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps)) return false;
-    return Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true })
-        && Economy.acceptedActivityHolds(state, leaf, deps, current);
+    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = [];
+    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
+        return `events:${why[0]}`;
+    if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true, why }))
+        return `fence:${why[0]}`;
+    return Economy.acceptedActivityHolds(state, leaf, deps, current) ? '' : 'accepted_leaf';
 }
+function canReuse(state, accepted, deps = {}, current = null, options = {}) {
+    return !refusal(state, accepted, deps, current, options);
+}
+// options.why: an array that receives the refusal's name.
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     let base;
     const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
-    if (!canReuse(state, accepted, deps, current, options)) return null;
+    const refused = refusal(state, accepted, deps, current, options);
+    if (refused) { options.why?.push(refused); return null; }
     // This new result is fenced to the actual publication, wallet and MP;
     // never relax ColdEconomyDecisions.matches or any native write guard.
     const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
@@ -544,5 +556,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, canReuse, refreshAdvisory, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, canReuse, refusal, refreshAdvisory, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };
