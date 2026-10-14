@@ -12,6 +12,18 @@ const rosterWrites = new Map();
 const staticMerchantNames = BotServiceIdentity.configuredMerchantNames();
 const staticMerchantPlaceholders = staticMerchantNames.map(() => '?').join(', ');
 
+// Roster changes of one player run one after another (const limit, removal).
+function serializeRosterWrite(playerId, change) {
+    const previous = rosterWrites.get(playerId) || Promise.resolve();
+    const next = previous.then(change, change);
+    // The caller gets the failure through `next`; the stored copy must not reject unhandled.
+    const tracked = next.catch(() => {}).finally(() => {
+        if (rosterWrites.get(playerId) === tracked) rosterWrites.delete(playerId);
+    });
+    rosterWrites.set(playerId, tracked);
+    return next;
+}
+
 function id(subject) { return Number(subject?.characterId || subject?.actor?.fetchId?.() || 0); }
 function page(value) { return Math.max(0, Number(value) || 0); }
 function falsyJsonMarker(alias, path) {
@@ -80,9 +92,11 @@ const BotFriendship = {
     remove(player, botId) {
         const playerId = id(player);
         if (!playerId || !botId) return Promise.resolve({ ok: false, reason: 'missing_bot' });
-        return Database.execute(['DELETE FROM bot_friend_roster WHERE playerId = ? AND botId = ?', [playerId, Number(botId)]])
+        // Queued with the const toggles: a toggle started before the removal
+        // cannot write its roster row after the friendship is gone.
+        return serializeRosterWrite(playerId, () => Database.execute(['DELETE FROM bot_friend_roster WHERE playerId = ? AND botId = ?', [playerId, Number(botId)]])
             .then(() => Database.execute(['DELETE FROM bot_friendships WHERE playerId = ? AND botId = ?', [playerId, Number(botId)]]))
-            .then(() => ({ ok: true }));
+            .then(() => ({ ok: true })));
     },
     request(player, state) {
         const playerId = id(player), botId = Number(state?.characterId || 0);
@@ -117,13 +131,7 @@ const BotFriendship = {
                 });
             });
         });
-        const previous = rosterWrites.get(playerId) || Promise.resolve();
-        const next = previous.then(change, change);
-        const tracked = next.finally(() => {
-            if (rosterWrites.get(playerId) === tracked) rosterWrites.delete(playerId);
-        });
-        rosterWrites.set(playerId, tracked);
-        return next;
+        return serializeRosterWrite(playerId, change);
     },
     selected(player) {
         const playerId = id(player);

@@ -65,10 +65,19 @@ async function consumeMerchant(session, list, { native = false } = {}) {
         return sellToNpcShop(session, list);
     }
 
+    const sold = [];
+    let socialRecorded = false;
+    // One social event for the lines that completed, whether the list ended
+    // whole or a later line failed (E253); never one event per line.
+    const recordSold = () => {
+        if (socialRecorded || sold.length === 0) return;
+        socialRecorded = true;
+        const detail = sold.map((item) => `${item.qty} ${item.name}`).join(', ');
+        BotSocialMemory.recordTradeCompleted(session, trade.merchant, `sold ${detail}`);
+    };
     try {
         TradeService.refreshStorePrices(store, session.actor);
         const nativeItems = TradeService.nativeStoreItems(store);
-        const sold = [];
         const objectIds = new Set();
         const requested = list.map((line) => {
             const item = line.objectId ? TradeService.sellableCopy(session.actor, line.selfId, line.objectId) : null;
@@ -113,10 +122,7 @@ async function consumeMerchant(session, list, { native = false } = {}) {
             });
         }
 
-        if (sold.length > 0) {
-            const detail = sold.map((item) => `${item.qty} ${item.name}`).join(', ');
-            BotSocialMemory.recordTradeCompleted(session, trade.merchant, `sold ${detail}`);
-        }
+        recordSold();
 
         session.dataSendToMe(ServerResponse.userInfo(session.actor));
         session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
@@ -143,6 +149,7 @@ async function consumeMerchant(session, list, { native = false } = {}) {
     } catch (err) {
         utils.infoWarn('Sell', 'merchant sell error: %s', err.message || err);
         session.dataSendToMe(ServerResponse.actionFailed());
+        recordSold();
     }
 }
 

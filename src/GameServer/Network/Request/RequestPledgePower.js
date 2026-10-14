@@ -1,11 +1,6 @@
 const ReceivePacket = invoke('Packet/Receive');
-const World = invoke('GameServer/World/World');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const ServerResponse = invoke('GameServer/Network/Response');
-
-function onlineSessionByActorId(id) {
-    return (World.user?.sessions || []).find((session) => Number(session.actor?.fetchId?.()) === Number(id));
-}
 
 function requestPledgePower(session, buffer) {
     const packet = new ReceivePacket(buffer);
@@ -37,7 +32,7 @@ function consume(session, data) {
         return;
     }
 
-    const targetSession = onlineSessionByActorId(data.memberId);
+    const targetSession = ClanService.onlineSessionByActorId(data.memberId);
     if (data.action === 2 && targetSession?.actor) {
         session.dataSendToMe(ServerResponse.managePledgePower(targetSession.actor.fetchClanPrivileges()));
         return;

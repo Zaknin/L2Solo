@@ -94,7 +94,10 @@ function handlePrivateTell(session, data) {
     // a valid private-tell target. Resolve that identity before rejecting the
     // tell so the message can enter the same cold LLM dialogue path.
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const actor = session.actor;
     return LifeState.findByName(target).then((state) => {
+        // A character selected during the lookup does not send this tell.
+        if (session.actor !== actor) return false;
         if (!state) {
             return World.messageBotByName(session, session.actor, target, text, 'client_tell');
         }
@@ -104,153 +107,153 @@ function handlePrivateTell(session, data) {
     });
 }
 
-function consume(session, data) {
-    logPlayerChat(session, data);
+// Clan chat (kind 4): delivered to online clan members and the clan
+// dialogue service only; its result is the result of consume.
+function routeClanSpeech(session, data) {
+    const clanId = Number(session.actor?.fetchClanId?.() || 0);
+    if (!clanId) return;
+    const packet = ServerResponse.speak(session.actor, data);
+    const ClanService = invoke('GameServer/Clan/ClanService');
+    ClanService.onlineSessions({ id: clanId }).forEach(member => {
+        if (member.actor?.fetchIsOnline?.() !== false) member.dataSendToMe(packet);
+    });
+    // Clan speech must not leak into local delivery or the nearby-bot
+    // dialogue router, which has no clan membership constraint.
+    return invoke('GameServer/Bot/AI/ClanDialogueService').handlePlayerSpeak(session, data);
+}
 
-    if (data.kind === 4) {
-        const clanId = Number(session.actor?.fetchClanId?.() || 0);
-        if (!clanId) return;
-        const packet = ServerResponse.speak(session.actor, data);
-        const ClanService = invoke('GameServer/Clan/ClanService');
-        ClanService.onlineSessions({ id: clanId }).forEach(member => {
-            if (member.actor?.fetchIsOnline?.() !== false) member.dataSendToMe(packet);
-        });
-        // Clan speech must not leak into local delivery or the nearby-bot
-        // dialogue router, which has no clan membership constraint.
-        return invoke('GameServer/Bot/AI/ClanDialogueService').handlePlayerSpeak(session, data);
+// Local chat commands (kind 0). Returns true when a command handled the
+// line, false when it is ordinary speech that goes on to the broadcast.
+function dispatchLocalCommand(session, data) {
+    if (String(data.text || '').trim().toLowerCase() === '.menu') {
+        invoke('GameServer/World/Generics/NpcBypasses/NativeMenu').open(session);
+        return true;
+    }
+    const ArenaDuelService = invoke('GameServer/World/ArenaDuelService');
+    if (String(data.text || '').trim().toLowerCase() === '.go') {
+        ArenaDuelService.handleGo(session, data.text);
+        return true;
+    }
+    const botCommandText = expandBotCommandAlias(data.text);
+
+    if (invoke('GameServer/Bot/Economy/BuffService').command(session, String(data.text || '').trim())) return true;
+
+    const itemsCommand = /^\.items(?:\s+(.*))?$/i.exec(String(data.text || '').trim());
+    if (itemsCommand) {
+        invoke('GameServer/World/Generics/NpcBypasses/NativeItems').open(session, itemsCommand[1] ?? null);
+        return true;
     }
 
-    if (data.kind === 2) {
-        handlePrivateTell(session, data);
-        return;
+    if (data.text === '.admin') {
+        invoke(path.actor).adminPanel(session, session.actor);
+        return true;
     }
-
-    if (data.kind === 0) { // TODO: Remove, temp solution
-        if (String(data.text || '').trim().toLowerCase() === '.menu') {
-            invoke('GameServer/World/Generics/NpcBypasses/NativeMenu').open(session);
-            return;
-        }
-        const ArenaDuelService = invoke('GameServer/World/ArenaDuelService');
-        if (String(data.text || '').trim().toLowerCase() === '.go') {
-            ArenaDuelService.handleGo(session, data.text);
-            return;
-        }
-        const botCommandText = expandBotCommandAlias(data.text);
-
-        if (invoke('GameServer/Bot/Economy/BuffService').command(session, String(data.text || '').trim())) return;
-
-        const itemsCommand = /^\.items(?:\s+(.*))?$/i.exec(String(data.text || '').trim());
-        if (itemsCommand) {
-            invoke('GameServer/World/Generics/NpcBypasses/NativeItems').open(session, itemsCommand[1] ?? null);
-            return;
-        }
-
-        if (data.text === '.admin') {
-            invoke(path.actor).adminPanel(session, session.actor);
-            return;
-        }
-        if (data.text === '.sell') {
-            invoke(path.world + 'NpcTalkResponse')(session, { link: 'sell-junk' });
-            return;
-        }
-        if (data.text === '.afksell' || data.text === '.afkbuy') {
-            const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
-            AfkTrade.begin(session, data.text === '.afksell' ? AfkTrade.SELL : AfkTrade.BUY)
-                .catch((error) => utils.infoWarn('AfkTrade', 'command failed: %s', error.message));
-            return;
-        }
-        if (data.text === '.afkstop') {
-            invoke('GameServer/AfkTrade/AfkTradeService').stop(session)
-                .catch((error) => utils.infoWarn('AfkTrade', 'stop command failed: %s', error.message));
-            return;
-        }
-        if (data.text === '.leave') {
-            const World = invoke('GameServer/World/World');
-            World.dismissParty(session, session.actor);
-            return;
-        }
-        if (data.text.startsWith('.kick ')) {
-            const name = data.text.substring(6).trim();
-            const World = invoke('GameServer/World/World');
-            World.oustPartyMember(session, session.actor, { name: name });
-            return;
-        }
-        if (botCommandText === '.bot' || data.text === '.companion') {
-            const CompanionControl = invoke('GameServer/World/Generics/NpcBypasses/CompanionControl');
-            CompanionControl.render(session, 0, { open: true });
-            return;
-        }
-        if (botCommandText === '.botparty') {
-            const BotParty = invoke('GameServer/World/Generics/NpcBypasses/BotParty');
-            BotParty.open(session);
-            return;
-        }
-        if (data.text.startsWith('/invite ') || data.text.startsWith('.invite ')) {
-            const name = data.text.replace(/^\/invite\s+|^\.invite\s+/, '').trim();
-            const World = invoke('GameServer/World/World');
-            World.inviteBotByName(session, session.actor, name, undefined, 'chat_invite');
-            return;
-        }
-        if (/^\.joinparty(?:\s+.*)?$/i.test(String(data.text || '').trim())) {
-            const name = String(data.text || '').trim().replace(/^\.joinparty\s*/i, '').trim();
-            const World = invoke('GameServer/World/World');
-            World.requestJoinBotPartyByName(session, session.actor, name, 'join_party_command');
-            return;
-        }
-        if (botCommandText === '.botfriends' || botCommandText.startsWith('.botfriends ')) {
-            const BotFriends = invoke('GameServer/World/Generics/NpcBypasses/BotFriends');
-            BotFriends.render(session, botCommandText.includes(' add') ? 'add' : 'friends', 0, null, { open: true });
-            return;
-        }
-        if (/^(\/tell|\.tell|\/w|\.w)\s+/i.test(data.text)) {
-            const body = data.text.replace(/^(\/tell|\.tell|\/w|\.w)\s+/i, '').trim();
-            const match = body.match(/^(\S+)\s+(.+)$/);
-            const World = invoke('GameServer/World/World');
-            World.messageBotByName(
-                session,
-                session.actor,
-                match ? match[1] : '',
-                match ? match[2] : '',
-                'chat_tell'
-            );
-            return;
-        }
-        if (data.text === '.uitest') {
-            const UiTest = invoke('GameServer/World/Generics/NpcBypasses/UiTest');
-            UiTest.render(session);
-            return;
-        }
-        if (botCommandText === '.botstatus' || botCommandText.startsWith('.botstatus ')) {
-            const BotStatus = invoke('GameServer/World/Generics/NpcBypasses/BotStatus');
-            const parts = botCommandText.split(/\s+/);
-            BotStatus(session, ['bot-status', parts[1]]);
-            return;
-        }
-        if (botCommandText === '.botpath' || botCommandText.startsWith('.botpath ')) {
-            const BotPath = invoke('GameServer/World/Generics/NpcBypasses/BotPath');
-            const parts = botCommandText.split(/\s+/);
-            BotPath(session, ['bot-path', parts[1]]);
-            return;
-        }
-        if (data.text === '/trade' || data.text === '.trade') {
-            const BotManager = invoke('GameServer/Bot/BotManager');
-            const BotTradeService = invoke('GameServer/Bot/BotTradeService');
-            const targetSession = BotManager.findSessionById(session.actor.fetchDestId());
-            const result = BotTradeService.startPlayerTrade(session, targetSession);
-
-            if (!result.ok) {
-                session.dataSendToMe(ServerResponse.actionFailed());
-                return;
-            }
-
-            session.dataSendToMe(ServerResponse.tradeStart(
-                targetSession.actor,
-                session.actor.backpack.fetchItems()
-            ));
-            return;
-        }
+    if (data.text === '.sell') {
+        invoke(path.world + 'NpcTalkResponse')(session, { link: 'sell-junk' });
+        return true;
     }
+    if (data.text === '.afksell' || data.text === '.afkbuy') {
+        const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+        AfkTrade.begin(session, data.text === '.afksell' ? AfkTrade.SELL : AfkTrade.BUY)
+            .catch((error) => utils.infoWarn('AfkTrade', 'command failed: %s', error.message));
+        return true;
+    }
+    if (data.text === '.afkstop') {
+        invoke('GameServer/AfkTrade/AfkTradeService').stop(session)
+            .catch((error) => utils.infoWarn('AfkTrade', 'stop command failed: %s', error.message));
+        return true;
+    }
+    if (data.text === '.leave') {
+        const World = invoke('GameServer/World/World');
+        World.dismissParty(session, session.actor);
+        return true;
+    }
+    if (data.text.startsWith('.kick ')) {
+        const name = data.text.substring(6).trim();
+        const World = invoke('GameServer/World/World');
+        World.oustPartyMember(session, session.actor, { name: name });
+        return true;
+    }
+    if (botCommandText === '.bot' || data.text === '.companion') {
+        const CompanionControl = invoke('GameServer/World/Generics/NpcBypasses/CompanionControl');
+        CompanionControl.render(session, 0, { open: true });
+        return true;
+    }
+    if (botCommandText === '.botparty') {
+        const BotParty = invoke('GameServer/World/Generics/NpcBypasses/BotParty');
+        BotParty.open(session);
+        return true;
+    }
+    if (data.text.startsWith('/invite ') || data.text.startsWith('.invite ')) {
+        const name = data.text.replace(/^\/invite\s+|^\.invite\s+/, '').trim();
+        const World = invoke('GameServer/World/World');
+        World.inviteBotByName(session, session.actor, name, undefined, 'chat_invite');
+        return true;
+    }
+    if (/^\.joinparty(?:\s+.*)?$/i.test(String(data.text || '').trim())) {
+        const name = String(data.text || '').trim().replace(/^\.joinparty\s*/i, '').trim();
+        const World = invoke('GameServer/World/World');
+        World.requestJoinBotPartyByName(session, session.actor, name, 'join_party_command');
+        return true;
+    }
+    if (botCommandText === '.botfriends' || botCommandText.startsWith('.botfriends ')) {
+        const BotFriends = invoke('GameServer/World/Generics/NpcBypasses/BotFriends');
+        BotFriends.render(session, botCommandText.includes(' add') ? 'add' : 'friends', 0, null, { open: true });
+        return true;
+    }
+    if (/^(\/tell|\.tell|\/w|\.w)\s+/i.test(data.text)) {
+        const body = data.text.replace(/^(\/tell|\.tell|\/w|\.w)\s+/i, '').trim();
+        const match = body.match(/^(\S+)\s+(.+)$/);
+        const World = invoke('GameServer/World/World');
+        World.messageBotByName(
+            session,
+            session.actor,
+            match ? match[1] : '',
+            match ? match[2] : '',
+            'chat_tell'
+        );
+        return true;
+    }
+    if (data.text === '.uitest') {
+        const UiTest = invoke('GameServer/World/Generics/NpcBypasses/UiTest');
+        UiTest.render(session);
+        return true;
+    }
+    if (botCommandText === '.botstatus' || botCommandText.startsWith('.botstatus ')) {
+        const BotStatus = invoke('GameServer/World/Generics/NpcBypasses/BotStatus');
+        const parts = botCommandText.split(/\s+/);
+        BotStatus(session, ['bot-status', parts[1]]);
+        return true;
+    }
+    if (botCommandText === '.botpath' || botCommandText.startsWith('.botpath ')) {
+        const BotPath = invoke('GameServer/World/Generics/NpcBypasses/BotPath');
+        const parts = botCommandText.split(/\s+/);
+        BotPath(session, ['bot-path', parts[1]]);
+        return true;
+    }
+    if (data.text === '/trade' || data.text === '.trade') {
+        const BotManager = invoke('GameServer/Bot/BotManager');
+        const BotTradeService = invoke('GameServer/Bot/BotTradeService');
+        const targetSession = BotManager.findSessionById(session.actor.fetchDestId());
+        const result = BotTradeService.startPlayerTrade(session, targetSession);
 
+        if (!result.ok) {
+            session.dataSendToMe(ServerResponse.actionFailed());
+            return true;
+        }
+
+        session.dataSendToMe(ServerResponse.tradeStart(
+            targetSession.actor,
+            session.actor.backpack.fetchItems()
+        ));
+        return true;
+    }
+    return false;
+}
+
+// Shout and trade go to every connected player; any other kind goes to
+// the speaker and the players around.
+function broadcastSpeech(session, data) {
     if (data.kind === 1 || data.kind === 8) { // Shout / Trade
         const packet = ServerResponse.speak(session.actor, data);
         const World = invoke('GameServer/World/World');
@@ -262,7 +265,10 @@ function consume(session, data) {
     } else {
         session.dataSendToMeAndOthers(ServerResponse.speak(session.actor, data), session.actor);
     }
+}
 
+// Nearby bots hear the line through the BotManager dialogue entry.
+function enterBotDialogue(session, data) {
     try {
         const BotManager = invoke('GameServer/Bot/BotManager');
         if (BotManager && typeof BotManager.handlePlayerSpeak === 'function') {
@@ -271,6 +277,22 @@ function consume(session, data) {
     } catch (err) {
         console.error("BotManager speak hook error:", err);
     }
+}
+
+function consume(session, data) {
+    logPlayerChat(session, data);
+
+    if (data.kind === 4) return routeClanSpeech(session, data);
+
+    if (data.kind === 2) {
+        handlePrivateTell(session, data);
+        return;
+    }
+
+    if (data.kind === 0 && dispatchLocalCommand(session, data)) return; // TODO: Remove, temp solution
+
+    broadcastSpeech(session, data);
+    enterBotDialogue(session, data);
 }
 
 module.exports = speak;

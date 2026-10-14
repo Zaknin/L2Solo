@@ -26,11 +26,14 @@ async function main() {
         actor: { fetchId: () => 42, skillset },
         dataSendToMe: packet => packets.push(packet)
     };
-    Database.deleteShortcut = async (_, slot) => {
-        const index = stored.findIndex(row => row.slot === slot);
-        if (index >= 0) stored.splice(index, 1);
+    let deletes = 0;
+    Database.deleteShortcut = async () => { deletes++; };
+    // Models the UPSERT on (characterId, slot): the slot is replaced in place.
+    const upsert = (row) => {
+        const index = stored.findIndex(entry => entry.slot === row.slot);
+        if (index >= 0) stored.splice(index, 1, { ...row }); else stored.push({ ...row });
     };
-    Database.setShortcut = async (_, row) => stored.push({ ...row });
+    Database.setShortcut = async (_, row) => upsert(row);
     Database.fetchShortcuts = async () => stored.map(row => ({ ...row }));
     const request = (kind, slot, id) => {
         const buffer = Buffer.alloc(17);
@@ -66,6 +69,24 @@ async function main() {
         assert.equal(init(stored, skillset).readInt32LE(17), 41, 'login resolves current level from legacy rows');
         await refreshSkills({ ...session, accountId: 'bot_42' }, session.actor);
         assert.equal(packets.length, count + 1);
+
+        // E256: the shortcut write is held while the connection selects another
+        // character. The slot stays the first character's; no shortcut packet reaches the other one.
+        const owners = [];
+        let releaseSet;
+        Database.setShortcut = (characterId, row) => new Promise((resolve) => {
+            releaseSet = () => { owners.push(characterId); upsert(row); resolve(); };
+        });
+        const firstActor = session.actor;
+        const held = request(2, 14, 92);
+        for (let i = 0; i < 3 && !releaseSet; i++) await new Promise((resolve) => setImmediate(resolve));
+        session.actor = { fetchId: () => 43, skillset: { fetchSkill: () => undefined } };
+        releaseSet();
+        await held;
+        assert.deepStrictEqual(owners, [42], 'the shortcut is stored for the character that made it');
+        assert.equal(packets.length, count + 1, 'no shortcut packet reaches the session of another character');
+        session.actor = firstActor;
+        assert.equal(deletes, 0, 'adding a shortcut relies on the UPSERT and issues no separate delete');
         console.log('Shortcut packet and skill refresh tests passed');
     } finally {
         Object.assign(Database, original);

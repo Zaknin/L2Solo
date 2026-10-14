@@ -23,11 +23,18 @@ function syncPartyCompanions(leaderSession, destination, Generics, companions = 
     }
 
     const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
     const activeCompanions = companions || PartyCompanionService.membersForLeader(leaderSession);
     let moved = 0;
 
     activeCompanions.forEach((companionSession) => {
         if (!companionSession?.actor) {
+            return;
+        }
+
+        // A hidden supply errand keeps its companion; the errand's return
+        // places it beside the leader wherever the leader is by then.
+        if (SupplyErrand.ownsCompanion(companionSession)) {
             return;
         }
 

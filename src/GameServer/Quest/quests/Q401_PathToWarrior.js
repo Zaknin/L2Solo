@@ -36,14 +36,7 @@ function equippedWeapon(state) {
   return Number(backpack.fetchPaperdollSelfId?.(7)) || 0;
 }
 
-async function collect(state, selfId, needed, chance = 1) {
-  const current = count(state, selfId);
-  if (current >= needed || Math.random() >= chance) return false;
-  const amount = service().questDropAmount(1, needed, current);
-  if (!amount) return false;
-  await service().giveItem(state.session, selfId, amount);
-  return current + amount >= needed;
-}
+const { collect } = require('../ProfessionQuestSteps');
 
 module.exports = {
   id: 401,

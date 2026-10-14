@@ -63,6 +63,7 @@ const metrics = {
 };
 
 let bootstrapped = false;
+let bootstrapRetryAt = 0;
 
 function number(value, fallback = 0) {
     const parsed = Number(value);
@@ -240,8 +241,19 @@ async function scheduleReviews() {
 }
 
 async function bootstrap() {
-    if (bootstrapped) return { attempted: 0, created: 0 };
+    if (bootstrapped || Date.now() < bootstrapRetryAt) return { attempted: 0, created: 0 };
     bootstrapped = true;
+    // The flag only keeps one bootstrap in flight: a failed one is rerun by the
+    // first resolve pass after one normal clan interval, not by every
+    // continuation pass (a lasting fault would rerun all its reads each second).
+    try { return await bootstrapOnce(); } catch (error) {
+        bootstrapped = false;
+        bootstrapRetryAt = Date.now() + Config.resolveIntervalMs;
+        throw error;
+    }
+}
+
+async function bootstrapOnce() {
     const playerManaged = await Database.ensurePlayerManagedClans();
     const clans = await Database.fetchClansNeedingAction(Config.resolveBatchSize * 4);
     let created = 0;
@@ -465,9 +477,22 @@ async function execute(action, options = {}) {
     return result || { ok: true };
 }
 
+function settledOutcome(action, { resolved, result, ok, reasonCode }, startedAt) {
+    if (ok) {
+        DiagnosticConfig.developerDiagnostics && (metrics.succeeded += 1);
+        recordAction(action, 'succeeded');
+    } else {
+        DiagnosticConfig.developerDiagnostics && (metrics.failed += 1);
+        recordAction(action, 'failed');
+        record(metrics.reasonCounts, reasonCode);
+    }
+    return { ...resolved, result, durationMs: Date.now() - startedAt };
+}
+
 async function resolveAction(action, options = {}) {
     const startedAt = Date.now();
     let resolutionRecorded = false;
+    let settled = null;
     DiagnosticConfig.developerDiagnostics && (metrics.running += 1);
     recordAction(action, 'running');
     try {
@@ -519,6 +544,7 @@ async function resolveAction(action, options = {}) {
         if (!resolved.idempotent) metrics.resolved += 1;
         resolutionRecorded = true;
         if (resolved.idempotent) return resolved;
+        settled = { resolved, result, ok, reasonCode };
 
         const followUpStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         try {
@@ -558,17 +584,16 @@ async function resolveAction(action, options = {}) {
         } finally {
             DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'follow_up', Date.now() - followUpStartedAt);
         }
-        if (ok) {
-            DiagnosticConfig.developerDiagnostics && (metrics.succeeded += 1);
-            recordAction(action, 'succeeded');
-        } else {
-            DiagnosticConfig.developerDiagnostics && (metrics.failed += 1);
-            recordAction(action, 'failed');
-            record(metrics.reasonCounts, reasonCode);
-        }
-        return { ...resolved, result, durationMs: Date.now() - startedAt };
+        return settledOutcome(action, settled, startedAt);
     } catch (error) {
         const reasonCode = error?.message || 'clan_action_exception';
+        if (settled) {
+            // The action itself is already settled; only its follow-up
+            // scheduling failed, so report the stored status, not a failure.
+            record(metrics.reasonCounts, 'clan_follow_up_exception');
+            utils.infoWarn('ClanAction', 'follow-up of %s action %d failed: %s', String(action.actionType), Number(action.id), reasonCode);
+            return { ...settledOutcome(action, settled, startedAt), followUpError: reasonCode };
+        }
         const settleStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         const resolved = await Database.resolveClanAction({
             actionId: action.id,
@@ -618,7 +643,11 @@ const ClanActionService = {
         const safeLimit = Math.max(1, Math.min(100, Math.floor(number(options.limit, Config.actionBatchSize))));
         const batchStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
         const bootstrapStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
-        return bootstrap().finally(() => {
+        return bootstrap().catch((error) => {
+            // Recovery is retried by the next pass; the queued actions still run.
+            utils.infoWarn('ClanAction', 'bootstrap failed: %s', error?.message || error);
+            return { attempted: 0, created: 0, error: error?.message || String(error) };
+        }).finally(() => {
             DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'bootstrap', Date.now() - bootstrapStartedAt);
         }).then(async (boot) => {
             const summary = {
@@ -735,6 +764,7 @@ const ClanActionService = {
 
     resetMetrics() {
         bootstrapped = false;
+        bootstrapRetryAt = 0;
         Object.keys(metrics).forEach((key) => {
             if (metrics[key] instanceof Map) metrics[key].clear();
             else metrics[key] = 0;

@@ -5,6 +5,7 @@ const calculateStats = invoke('GameServer/Actor/Generics/CalculateStats');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 
 function clearEffectsOnDeath(session, actor) {
+    const silentMoving = Object.values(actor.effects || {}).find((effect) => effect?.stats?.silentMoving);
     EffectTicker.clearAll(actor);
     // Death removes abnormal effects in C4. Clear both the authoritative store
     // and legacy/UI bookkeeping so a later support pass sees the revived member
@@ -13,6 +14,9 @@ function clearEffectsOnDeath(session, actor) {
     actor.activeBuffs = {};
     actor.supportReservations = {};
     EffectStore.prune(actor);
+    // actor.silentMoving is read first by NpcAggro; recompute it from the now
+    // empty store, as the manual removals do.
+    if (silentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(session, actor, silentMoving);
     calculateStats(session, actor);
     EffectTicker.refreshEffects(session, actor);
 }

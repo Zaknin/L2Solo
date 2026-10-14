@@ -1,8 +1,13 @@
 const HOLD_DISTANCE = 450;
 const DEFAULT_HOLD_MS = 60000;
 
-function online(session) {
-    return !!session?.actor?.fetchIsOnline?.();
+// The target is followed only while its connection still plays the same
+// character: another selected character or a return to character selection
+// (the world retires the actor while session.actor stays) ends the follow.
+function online(session, actor = session?.actor) {
+    if (!actor || session?.actor !== actor || !actor.fetchIsOnline?.()) return false;
+    const record = invoke('GameServer/World/World').registeredActorById?.(actor.fetchId?.());
+    return !record || (record.actor === actor && record.retired !== true);
 }
 
 function distance2d(first, second) {
@@ -16,6 +21,7 @@ function clear(session, reason = 'cleared') {
     if (!session) return false;
     session.chatArrivalActive = false;
     session.chatArrivalTargetSession = null;
+    session.chatArrivalTargetActor = null;
     session.chatArrivalUntil = 0;
     session.chatArrivalLastMoveAt = 0;
     session.chatArrivalReason = reason;
@@ -28,6 +34,7 @@ function start(session, targetSession, options = {}) {
     if (!session?.actor || !online(targetSession)) return false;
     session.chatArrivalActive = true;
     session.chatArrivalTargetSession = targetSession;
+    session.chatArrivalTargetActor = targetSession.actor;
     session.chatArrivalPersistent = options.persistent === true;
     session.chatArrivalStopOnArrival = options.stopOnArrival === true;
     session.chatArrivalUntil = session.chatArrivalPersistent
@@ -50,7 +57,7 @@ function tick(session, bot) {
     if (!session?.chatArrivalActive) return false;
     const targetSession = session.chatArrivalTargetSession;
     const player = targetSession?.actor;
-    if (!online(targetSession) || (!session.chatArrivalPersistent && Date.now() >= Number(session.chatArrivalUntil || 0))) {
+    if (!online(targetSession, session.chatArrivalTargetActor) || (!session.chatArrivalPersistent && Date.now() >= Number(session.chatArrivalUntil || 0))) {
         clear(session, 'expired');
         return false;
     }

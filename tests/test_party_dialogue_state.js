@@ -72,6 +72,21 @@ async function main() {
 
     PartyDialogueState.reset(player);
     assert.strictEqual(PartyDialogueState.snapshot(player), null);
+
+    // E266: selecting another character on the same connection starts a fresh dialogue.
+    const Session = invoke('GameServer/Session');
+    const connection = Object.create(Session.prototype);
+    connection.dataSendToMe = () => {};
+    const select = (id) => connection.setActor({ id, name: `Player${id}`, items: [], paperdoll: {}, locX: 0, locY: 0, locZ: 0 });
+    select(101);
+    PartyDialogueState.recordDeliveredReply(connection, nice, 'old character conversation', { turnId: 'old' });
+    connection.botDialogueResponderId = 1;
+    connection.botDialogueResponderAt = 3000;
+    assert.strictEqual(PartyDialogueState.snapshot(connection).recentTurns.length, 1);
+    select(102);
+    assert.strictEqual(PartyDialogueState.snapshot(connection), null, 'the new character has no previous turns or active bot');
+    assert.strictEqual(connection.botDialogueResponderId, undefined);
+    assert.strictEqual(connection.botDialogueResponderAt, undefined);
     console.log('Party dialogue state checks passed');
 }
 

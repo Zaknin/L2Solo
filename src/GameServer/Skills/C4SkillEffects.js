@@ -5,6 +5,7 @@ const BuffCatalog = invoke('GameServer/Effects/BuffCatalog');
 const EffectTicker = invoke('GameServer/Effects/EffectTicker');
 const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const EffectStats = invoke('GameServer/Effects/EffectStats');
+const ToggleSkills = invoke('GameServer/Skills/ToggleSkills');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const Formulas = invoke('GameServer/Formulas');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -950,6 +951,10 @@ function applyEffect(session, target, skill, semantic, source = session?.actor) 
         target.automation?.abortMovement?.(target, { notifyClient: false });
         EffectRestrictions.stopMovement(target?.session || session, target);
     }
+    // A displaced Silent Move source leaves actor.silentMoving stale (NpcAggro
+    // reads it first); recompute it from the store, then refresh as before.
+    const displacedSilentMoving = effect.removedEffects.find((removed) => removed.stats?.silentMoving);
+    if (displacedSilentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(target?.session || session, target, displacedSilentMoving);
     if (hasStats(effect) || effect.removedEffects.some(hasStats)) {
         refreshStats(target?.session || session, target);
     }
@@ -1006,12 +1011,19 @@ function applyCleanse(session, target, semantic) {
         removed.push(...EffectStore.removeByCategory(target, entry.category, entry.maxLevel ?? Infinity));
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) {
             refreshStats(target?.session || session, target);
         }
         refreshEffects(session, target);
     }
     return removed;
+}
+
+// Dispel paths remove toggles too: clear their actor flags (Silent Move,
+// Fake Death) the same way a manual toggle-off does.
+function cleanupRemovedState(session, target, removed) {
+    removed.forEach((effect) => ToggleSkills.cleanupState(target?.session || session, target, effect));
 }
 
 function applyCancel(session, target, semantic, rng) {
@@ -1027,6 +1039,7 @@ function applyCancel(session, target, semantic, rng) {
         }
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) {
             refreshStats(target?.session || session, target);
         }
@@ -1127,6 +1140,7 @@ function applyNegate(session, target, semantic) {
         if (EffectStore.remove(target, effect.key)) removed.push(effect);
     });
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) refreshStats(target?.session || session, target);
         refreshEffects(session, target);
     }
@@ -1144,6 +1158,7 @@ function applyBane(session, target, semantic, rng) {
     });
 
     if (removed.length) {
+        cleanupRemovedState(session, target, removed);
         if (removed.some(hasStats)) refreshStats(target?.session || session, target);
         refreshEffects(session, target);
     }
@@ -1352,35 +1367,8 @@ function refreshUserInfo(session, target) {
 }
 
 function refreshEffects(session, target) {
-    // NPC cast sessions forward to a nearby player; their actor is not the receiver.
-    // Personal effect packets must never describe an NPC, including summons.
-    const owner = !target?.fetchKind && (target?.session?.dataSendToMe
-        ? target.session : session?.actor === target ? session : null);
-    const packet = ServerResponse.abnormalStatusUpdate.fromActor(target);
-    if (owner?.dataSendToMe) {
-        owner.dataSendToMe(packet);
-        owner.dataSendToMe(ServerResponse.shortBuffStatusUpdate.fromActor(target));
-    }
-
-    if (target?.session?.dataSendToMe && target?.backpack?.fetchPaperdollSelfId) {
-        target.session.dataSendToMe(ServerResponse.userInfo(target));
-    }
-
-    // MagicEffectIcons has no object id and is only valid for the receiver's
-    // own effect bar. For NPCs, C4 renders persistent abnormal states from the
-    // abnormal-effect mask embedded in NpcInfo instead.
-    if (target?.fetchKind && session?.dataSendToMeAndOthers) {
-        session.dataSendToMeAndOthers(ServerResponse.npcInfo(target), target);
-    } else if (target?.session?.dataSendToOthers && target?.backpack?.fetchPaperdollSelfId) {
-        target.session.dataSendToOthers(ServerResponse.charInfo(target), target);
-    }
-
-    try {
-        const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
-        if (target?.session) PartyCompanionService.updateActorEffects(target.session);
-    } catch (err) {
-        utils.infoWarn('SkillEffects', 'party effect refresh failed: %s', err.message);
-    }
+    // One refresh for skills and expiry: EffectTicker also skips NpcInfo for dead/removed NPCs.
+    EffectTicker.refreshEffects(session, target);
 }
 
 function refreshStats(session, target) {

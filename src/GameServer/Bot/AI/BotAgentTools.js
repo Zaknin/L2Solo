@@ -1,5 +1,6 @@
 const ActorQueries = require('../../World/ActorSpatialQueries');
 const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
+const BotPkLock = require('./BotPkLock');
 const ServerResponse = invoke('GameServer/Network/Response');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const BotBuffs = invoke('GameServer/Bot/AI/BotBuffs');
@@ -234,7 +235,7 @@ function executeLegacy(session, decision, visiblePlayers) {
 
     // A chaotic character remains autonomous.  Chat may make it talk, but may
     // never turn it into a callable companion or redirect its hunting route.
-    if (session.plan === 'pk_hunting' && PK_LOCKED_ACTIONS.has(action)) {
+    if (BotPkLock.isPkLocked(session, action, PK_LOCKED_ACTIONS)) {
         return { applied: false, reason: 'pk_hunting_autonomous' };
     }
 
@@ -957,7 +958,7 @@ function registerTools() {
                 if (session.plan === 'getting_buffed') {
                     return ['none', 'say'].includes(name);
                 }
-                if (session.plan === 'pk_hunting' && PK_LOCKED_ACTIONS.has(name)) return false;
+                if (BotPkLock.isPkLocked(session, name, PK_LOCKED_ACTIONS)) return false;
                 if (name === 'shop' && session.partyCompanion === true && session.followPlayerSession) return false;
                 if (partyJoinActions.has(name) && !session.hotBackgroundPartyId) return false;
                 if (controlActions.has(name) && !(session.partyCompanion === true && session.followPlayerSession)) return false;
@@ -1092,6 +1093,7 @@ function rejectionReply(result = {}) {
         case 'incompatible_item':
         case 'not_an_upgrade':
         case 'no_safe_upgrade': return 'I could not find a safe equipment upgrade for this situation.';
+        case 'reserved_exchange_material': return 'I am keeping that item as material for an equipment exchange.';
         case 'unsafe_combat_state': return 'I am in combat. I will finish this fight before starting that request.';
         case 'skill_not_learned':
         case 'skill_not_combat_eligible':

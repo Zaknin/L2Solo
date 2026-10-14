@@ -1,4 +1,5 @@
 const BotToolAudit = invoke('GameServer/Bot/AI/BotToolAudit');
+const BotPkLock = require('./BotPkLock');
 const HotBotPolicyOverlay = invoke('GameServer/Bot/AI/HotBotPolicyOverlay');
 const LangfuseTracing = invoke('GameServer/Bot/AI/LangfuseTracing');
 
@@ -72,17 +73,18 @@ function worldRevision(session) {
     ].join(':');
 }
 
-function isPkLocked(session, action) {
-    return session?.plan === 'pk_hunting' && new Set([
-        'follow_player', 'regroup_party', 'stay_party', 'stay_here', 'hunt', 'rest', 'shop', 'move_to_spot',
-        'set_buff_policy',
-        'set_pull_policy', 'assign_puller', 'unassign_puller',
-        'set_skill_priority', 'clear_skill_priority', 'set_combat_stance',
-        'list_safe_loadouts', 'equip_candidate', 'optimize_equipment', 'list_party_candidates',
-        'propose_trade', 'give_resources', 'fetch_resources', 'offer_resources', 'update_trade_offer', 'cancel_trade',
-        'quote_item', 'counter_offer', 'accept_price', 'decline_price', 'open_negotiated_trade'
-    ]).has(action);
-}
+// Actions the registry refuses to a PK-hunting bot. BotAgentTools keeps its
+// own availability set; the two sets differ on purpose (U59), only the check
+// that applies a set is shared.
+const PK_LOCKED_REGISTRY_ACTIONS = new Set([
+    'follow_player', 'regroup_party', 'stay_party', 'stay_here', 'hunt', 'rest', 'shop', 'move_to_spot',
+    'set_buff_policy',
+    'set_pull_policy', 'assign_puller', 'unassign_puller',
+    'set_skill_priority', 'clear_skill_priority', 'set_combat_stance',
+    'list_safe_loadouts', 'equip_candidate', 'optimize_equipment', 'list_party_candidates',
+    'propose_trade', 'give_resources', 'fetch_resources', 'offer_resources', 'update_trade_offer', 'cancel_trade',
+    'quote_item', 'counter_offer', 'accept_price', 'decline_price', 'open_negotiated_trade'
+]);
 
 function requiresFreshWorld(action) {
     return !SOFT_FRESHNESS_ACTIONS.has(String(action || ''));
@@ -201,7 +203,7 @@ function execute(context = {}) {
         };
         return previous && typeof previous.then === 'function' ? previous.then(replay) : replay(previous);
     }
-    if (isPkLocked(session, action)) {
+    if (BotPkLock.isPkLocked(session, action, PK_LOCKED_REGISTRY_ACTIONS)) {
         const rejected = result(false, 'pk_hunting_autonomous');
         audit({ ...context, decision: { ...decision, action } }, 'rejected', rejected.reason);
         return rejected;

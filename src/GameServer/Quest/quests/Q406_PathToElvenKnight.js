@@ -28,14 +28,7 @@ function count(state, selfId) {
   return state.session.actor.backpack.fetchItemFromSelfId(selfId)?.fetchAmount() || 0;
 }
 
-async function collect(state, selfId, needed, chance) {
-  const current = count(state, selfId);
-  if (current >= needed || Math.random() >= chance) return false;
-  const amount = service().questDropAmount(1, needed, current);
-  if (!amount) return false;
-  await service().giveItem(state.session, selfId, amount);
-  return current + amount >= needed;
-}
+const { collect } = require("../ProfessionQuestSteps");
 
 module.exports = {
   id: 406,

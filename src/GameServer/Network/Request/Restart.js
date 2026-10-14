@@ -14,7 +14,7 @@ async function restart(session, buffer) {
         ServerResponse.restart()
     );
 
-    Shared.fetchCharacters(session.accountId).then((characters) => {
+    return Shared.fetchCharacters(session.accountId).then((characters) => {
         Shared.enterCharacterHall(session, characters);
     });
 }

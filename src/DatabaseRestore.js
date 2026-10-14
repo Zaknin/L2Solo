@@ -35,12 +35,20 @@ function removeDatabaseFiles(file) {
     for (const suffix of ['', '-wal', '-shm', '-journal']) fs.rmSync(file + suffix, { force: true });
 }
 
-function validateDatabase(file) {
+// One integrity rule for a stopped SQLite file (U54): read-only open,
+// quick_check must answer exactly "ok", the handle closes on every path.
+// Each caller passes its own failure (error text and type); a native SQLite
+// error while opening or reading passes through unchanged.
+function quickCheckDatabase(file, failure) {
     const db = new DatabaseSync(file, { readOnly: true });
     try {
         const rows = db.prepare('PRAGMA quick_check').all();
-        if (rows.length !== 1 || rows[0].quick_check !== 'ok') throw new Error('Restore database integrity check failed.');
+        if (rows.length !== 1 || rows[0].quick_check !== 'ok') failure();
     } finally { db.close(); }
+}
+
+function validateDatabase(file) {
+    quickCheckDatabase(file, () => { throw new Error('Restore database integrity check failed.'); });
 }
 
 function readMarker(worldPath, historyPath) {
@@ -164,4 +172,4 @@ function install(worldPath, historyPath, id, hasHistory) {
     }
 }
 
-module.exports = { files, flushDirectory, flushFile, install, markerPath, recover };
+module.exports = { files, flushDirectory, flushFile, install, markerPath, quickCheckDatabase, recover };

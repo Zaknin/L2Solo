@@ -182,6 +182,92 @@ function wait(ms) {
     assert.strictEqual(EffectStore.list(drainingOrc).length, 0, 'Soul Cry should auto-remove when periodic MP drain cannot be paid');
     assert.strictEqual(EffectStats.add(drainingOrc, 'pAtkAdd'), 0, 'Auto-removed Soul Cry should drop its P.Atk bonus');
 
+    // Cancel (applyCancel) and NPC Cancel 4094 (applyNegate) remove the
+    // Silent Move effect; actor.silentMoving, read first by NpcAggro, must follow.
+    const C4SkillEffects = invoke('GameServer/Skills/C4SkillEffects');
+    for (const cancelSkill of [
+        new SkillModel({ selfId: 1056, name: 'Cancel', level: 12, spell: true, power: 25, mp: 0, hp: 0, distance: 600 }),
+        new SkillModel({ selfId: 4094, name: 'NPC Cancel', level: 9, spell: true, power: 0, mp: 0, hp: 0, distance: 600 })
+    ]) {
+        const sneak = actor(100);
+        sneak.fetchCollectiveMDef = () => 10;
+        ToggleSkills.handleRequest(session(sneak), sneak, toggleSkill(221, 'Silent Move', 1));
+        assert.strictEqual(sneak.silentMoving, true, 'Silent Move should enable silent moving');
+        const caster = actor(100);
+        caster.fetchCollectiveMAtk = () => 1000;
+        const outcome = C4SkillEffects.execute(session(caster), caster, sneak, cancelSkill, {
+            magicSkill: true,
+            rng: () => 0,
+            attack: { clearLoadedShot() {} }
+        });
+        assert.strictEqual(outcome.cancelled.length, 1, `${cancelSkill.fetchName()} should remove Silent Move`);
+        assert.strictEqual(EffectStore.list(sneak).length, 0, `${cancelSkill.fetchName()} should leave no Silent Move effect`);
+        assert.strictEqual(sneak.silentMoving, false, `${cancelSkill.fetchName()} should clear the silent moving flag`);
+    }
+
+    // E287: Dance of Shadow (366, not a toggle) also carries silentMoving. Silent
+    // Move turned off while the dance runs leaves the flag true; the dance
+    // expiring must recompute it, or mobs ignore the actor for good.
+    const EffectTicker = invoke('GameServer/Effects/EffectTicker');
+    const dancer = actor(100);
+    const dancerSession = session(dancer);
+    const silentMove = toggleSkill(221, 'Silent Move', 1);
+    ToggleSkills.handleRequest(dancerSession, dancer, silentMove);
+    assert.strictEqual(dancer.silentMoving, true, 'Silent Move should enable silent moving');
+    const dance = EffectStore.apply(dancer, {
+        key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+        stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 40
+    });
+    EffectTicker.scheduleExpiry(dancerSession, dancer, dance);
+    ToggleSkills.handleRequest(dancerSession, dancer, silentMove);
+    assert.strictEqual(dancer.silentMoving, true, 'Dance of Shadow keeps silent moving after Silent Move is turned off');
+    await wait(120);
+    assert.strictEqual(EffectStore.list(dancer).length, 0, 'Dance of Shadow should have expired');
+    assert.strictEqual(dancer.silentMoving, false, 'Expired Dance of Shadow should clear the silent moving flag');
+
+    // A dance expiring while Silent Move is still on must not drop the flag.
+    const keeper = actor(100);
+    const keeperSession = session(keeper);
+    ToggleSkills.handleRequest(keeperSession, keeper, silentMove);
+    EffectStore.apply(keeper, {
+        key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+        stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 40
+    });
+    EffectTicker.scheduleExpiry(keeperSession, keeper, EffectStore.list(keeper).find((entry) => entry.key === 'dance_of_shadow'));
+    await wait(120);
+    assert.strictEqual(keeper.silentMoving, true, 'Expired dance must keep silent moving while Silent Move is on');
+
+    // E291: slot-limit eviction removes the oldest counted buff. When it is a
+    // silentMoving buff, C4SkillEffects must recompute the flag: with Silent
+    // Move still on it stays true, with no other source it clears.
+    const DataCache = invoke('GameServer/DataCache');
+    DataCache.init();
+    const wildMagicData = DataCache.skills.find((entry) => entry.selfId === 1303);
+    const wildMagic = new SkillModel({ ...utils.crushOb(wildMagicData), ...wildMagicData.levels.find((entry) => entry.level === 1) });
+    for (const withToggle of [true, false]) {
+        const evictee = actor(100);
+        const evicteeSession = session(evictee);
+        if (withToggle) ToggleSkills.handleRequest(evicteeSession, evictee, silentMove);
+        EffectStore.apply(evictee, {
+            key: 'dance_of_shadow', id: 366, level: 1, name: 'Dance of Shadow',
+            stats: { runSpdMul: 0.5, silentMoving: true }, durationMs: 60000
+        });
+        evictee.silentMoving = true;
+        for (let index = 0; index < 19; index += 1) {
+            EffectStore.apply(evictee, { key: `filler_${index}`, id: 5000 + index, level: 1, name: `Filler ${index}`, stats: { pDefMul: 1.01 }, durationMs: 60000 });
+        }
+        assert.strictEqual(EffectStore.list(evictee).some((entry) => entry.key === 'dance_of_shadow'), true, 'Dance of Shadow should still be stored before the eviction');
+        const caster2 = actor(100);
+        const cast = C4SkillEffects.execute(session(caster2), caster2, evictee, wildMagic, {
+            magicSkill: true, rng: () => 0, attack: { clearLoadedShot() {} }
+        });
+        assert(cast.effect, 'Wild Magic should land and push the oldest buff out');
+        assert.strictEqual(EffectStore.list(evictee).some((entry) => entry.key === 'dance_of_shadow'), false, 'Dance of Shadow should be evicted as the oldest counted buff');
+        assert.strictEqual(evictee.silentMoving, withToggle, withToggle
+            ? 'Eviction of a dance must keep silent moving while Silent Move is on'
+            : 'Eviction of the only silent moving source should clear the flag');
+    }
+
     console.log('Toggle skill checks passed');
 })().catch((err) => {
     console.error(err);

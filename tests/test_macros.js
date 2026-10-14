@@ -92,6 +92,35 @@ async function main() {
         assert.strictEqual(packets[1][6], 0, 'empty macro list reports zero macros');
         assert.strictEqual(packets[1][7], 0, 'empty macro list has no macro payload');
 
+        // E256: the macro write is held while the connection selects another
+        // character. The macro stays the first character's; no list reaches the other one.
+        const heldWrites = [];
+        Database.setMacro = (characterId, entry) => new Promise((resolve) => heldWrites.push(() => {
+            stored.push({ ...entry, owner: characterId });
+            resolve();
+        }));
+        const before = packets.length;
+        const firstActor = session.actor;
+        macro(session, makeMacroPacket({ ...data, name: 'Held' }));
+        for (let i = 0; i < 3 && !heldWrites.length; i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.strictEqual(heldWrites.length, 1, 'the macro write has started');
+        session.actor = { fetchId: () => 43 };
+        heldWrites[0]();
+        for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.strictEqual(stored.at(-1).owner, 42, 'the macro is stored for the character that made it');
+        assert.strictEqual(packets.length, before, 'no macro list reaches the session of another character');
+
+        let releaseDelete;
+        Database.deleteMacro = () => new Promise((resolve) => { releaseDelete = resolve; });
+        session.actor = firstActor;
+        macro(session, Buffer.concat([Buffer.from([0xc2]), writeD(stored.at(-1).id)]));
+        session.actor = { fetchId: () => 43 };
+        releaseDelete();
+        for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.strictEqual(packets.length, before, 'no macro list after a held delete reaches another character');
+        Database.deleteMacro = original.deleteMacro;
+        session.actor = firstActor;
+
         const sync = macroList([{
             id: 1001, name: 'Test', descr: '', acronym: 'T', icon: 1,
             commands: [{ type: 4, d1: 2, d2: 3, command: 'Shortcut' }]

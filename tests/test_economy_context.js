@@ -56,6 +56,11 @@ async function run() {
         assert.notEqual(Economy.inputKey(unlearned), Economy.inputKey(learned), 'learning invalidates the planning inputs');
         assert.notEqual(Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
             Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));
+        const plain = { level: 16, stats: { classId: 53 } };
+        assert.equal(Economy.inputKey({ ...plain, incomingPending: false }), Economy.inputKey(plain),
+            'an absent and a false delivery flag are one planning input');
+        assert.notEqual(Economy.inputKey({ ...plain, incomingPending: true }), Economy.inputKey(plain),
+            'a pending delivery invalidates the planning inputs');
     } finally { Profile.capture = capture; }
     const Board = invoke('GameServer/AfkTrade/BoardIndex').BoardIndex;
     const board = new Board();

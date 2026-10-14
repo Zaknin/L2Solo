@@ -28,7 +28,14 @@ const Observer = invoke('WorldObserver/WorldObserverServer');
             const html = await response.text();
             assert(html.includes(script));
             assert(html.includes('/observer/appShell.js'));
+            assert(html.includes('/observer/format.js'), `${route} must load the shared formatter`);
         }
+        const index = await (await fetch(origin + '/observer/overview')).text();
+        assert(index.includes('/observer/format.js'), 'the overview page must load the shared formatter');
+        const shared = await fetch(origin + '/observer/format.js');
+        assert.strictEqual(shared.status, 200);
+        assert(shared.headers.get('content-type').startsWith('application/javascript'));
+        assert((await shared.text()).includes('WorldObserverFormat'));
         assert.strictEqual((await fetch(origin + '/observer/unknown-section')).status, 404);
         console.log('Observer application HTTP routes: direct visits, shared appearance/navigation and local WebP assets passed');
     } finally { await new Promise(resolve => server.close(resolve)); }

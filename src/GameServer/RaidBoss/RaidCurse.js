@@ -92,6 +92,8 @@ function applyEffect(session, target, effect) {
 
     EffectTicker.scheduleExpiry(session, target, applied);
     EffectRestrictions.interruptOnApply(target?.session || session, target, applied, effect.source);
+    const displacedSilentMoving = applied.removedEffects.find((removed) => removed.stats?.silentMoving);
+    if (displacedSilentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(target?.session || session, target, displacedSilentMoving);
     if (Object.keys(applied.stats || {}).length > 0 || applied.removedEffects.some((removed) => Object.keys(removed.stats || {}).length > 0)) {
         try {
             invoke('GameServer/Actor/Generics/CalculateStats')(target?.session || session, target);

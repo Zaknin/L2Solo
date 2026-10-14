@@ -366,6 +366,11 @@ const World = {
         const runtime = currentUserLocationIndex(this.user) ?? createUserLocationIndex(this.user);
         const exists = this.user.sessions.find((ob) => session.fetchAccountId() === ob.fetchAccountId());
         if (exists && exists !== session) {
+            // Save the replaced character's status now, while it is still the
+            // account's session: its own close runs after the replacement and
+            // is refused then, so stale state cannot overwrite the new one.
+            try { exists.persistCharacterStatus?.({ currentOnly: true }); }
+            catch (error) { utils.infoWarn('World', 'replaced session status save failed: %s', error.message); }
             // Retire before destroying the socket: synchronous/late cleanup
             // from the previous session cannot alter its replacement.
             removeIndexedSession(runtime, exists);
@@ -715,6 +720,8 @@ const World = {
 
             BotSocialMemory.recordEvent(session, targetSession, 'party_formed', source);
             setTimeout(() => {
+                // The bot may be dismissed within this second.
+                if (!PartyCompanionService.isActiveCompanion(targetSession, session)) return;
                 BotManager.botTell(
                     targetSession,
                     session,

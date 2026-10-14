@@ -141,11 +141,11 @@ async function main() {
             Clan.canInvite = () => ({ ok: true, clan }); Clan.onlineSessions = () => [];
             Clan.refreshOnlineMembers = () => clan; Manager.botTell = () => {};
             Clan.addMember = async () => ({ ok: false, code: 'write_failed' });
-            bot.pendingClanInvite = { clanId: 11, requestorSession: World.user.sessions[0] };
+            bot.pendingClanInvite = { clanId: 11, requestorSession: World.user.sessions[0], invitedActor: bot.actor };
             assert(!(await Invite.accept(bot)).ok);
             assert.strictEqual(packets.length, 0, 'rejected joins produce no greeting');
             Clan.addMember = async () => ({ ok: true, clan, member: { id: 101 } });
-            bot.pendingClanInvite = { clanId: 11, requestorSession: World.user.sessions[0] };
+            bot.pendingClanInvite = { clanId: 11, requestorSession: World.user.sessions[0], invitedActor: bot.actor };
             assert((await Invite.accept(bot)).ok);
             assert.strictEqual(packets.length, 1, 'a committed invitation triggers the greeting');
             drain(); assert.strictEqual(packets.length, 3);

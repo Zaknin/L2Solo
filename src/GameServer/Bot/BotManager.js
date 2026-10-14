@@ -35,6 +35,10 @@ const BotClassProgression = invoke('GameServer/Bot/BotClassProgression');
 const BOTS_TO_SPAWN = BotPopulation.buildStarterBots();
 const DIRECT_SUPPORT_RANGE = 900;
 const INSULT_PATTERN = /\b(noob|idiot|stupid|trash|useless|suck|sucks)\b|(?:дурак|дура|тупой|тупая|лох|нуб|мусор|бесполезн)/i;
+// Whole-word greetings only ("this" is not "hi", "купи" is not "ку"),
+// with their chat forms ("hiii", "helloo", "приветик", "кукуку").
+// \b does not see Cyrillic letters, so word edges are Unicode letters/digits.
+const GREETING_PATTERN = /(^|[^\p{L}\p{N}])(hi+|hiya|hello+|привет\p{L}*|(?:ку)+)(?![\p{L}\p{N}])/iu;
 
 const MERCHANT_BOTS = Object.keys(MerchantConfigs).map(name => {
     const cfg = MerchantConfigs[name];
@@ -856,8 +860,6 @@ const BotManager = {
         const groupAddress = /\b(bot|bots|guys|party|team|help|everyone|everybody|companions|all)\b/.test(text) || /(бот|боты|ребят|народ|пати|команда|кто-нибудь)/.test(text);
         const partyChannel = Number(data.kind) === 3;
 
-        let llmResponder = null;
-        let deterministicRoute = null;
         const dialogueState = PartyDialogueState.snapshot(playerSession);
         const cheapRouterAvailable = llmEnabled && partyChannel && PartyLLMRouter.enabled() && !dialogueState?.routerInFlightAt;
         const routeMetadata = {
@@ -866,8 +868,39 @@ const BotManager = {
             playerId: player.fetchId?.() || null,
             sessionId: `party-chat:${player.fetchId?.() || 'unknown'}`
         };
+        const speech = {
+            playerSession,
+            data,
+            rawText,
+            text,
+            player,
+            SpeckMath,
+            playerPt,
+            PartyDialogueRouter,
+            PartyDialogueState,
+            PartyLLMRouter,
+            llmEnabled,
+            groupAddress,
+            partyChannel,
+            dialogueState,
+            cheapRouterAvailable,
+            routeMetadata,
+            // Written by routePlayerSpeech, read at call time by the parts below.
+            llmResponder: null,
+            deterministicRoute: null
+        };
+        const routerTurn = this.routePlayerSpeech(speech);
+        if (routerTurn) return routerTurn;
+        this.runPlayerSpeechPerBot(speech);
+    },
+
+    // Deterministic party/local route and, when it needs one, the cheap party
+    // LLM router. Returns the router promise when that path owns the turn,
+    // otherwise undefined after leaving the chosen responder on `speech`.
+    routePlayerSpeech(speech) {
+        const { playerSession, data, rawText, llmEnabled, partyChannel, dialogueState, cheapRouterAvailable, routeMetadata, PartyDialogueRouter, PartyDialogueState, PartyLLMRouter } = speech;
         if (llmEnabled) {
-            deterministicRoute = PartyDialogueRouter.select({
+            speech.deterministicRoute = PartyDialogueRouter.select({
                 text: rawText,
                 playerSession,
                 sessions: this.sessions,
@@ -877,177 +910,50 @@ const BotManager = {
                 activeResponderAt: playerSession.botDialogueResponderAt,
                 allowSpokespersonFallback: !cheapRouterAvailable
             });
-            llmResponder = deterministicRoute.candidate;
-            if (llmResponder) {
-                PartyDialogueState.beginRequest(playerSession, llmResponder.session, {
-                    reason: deterministicRoute.reason,
+            speech.llmResponder = speech.deterministicRoute.candidate;
+            if (speech.llmResponder) {
+                PartyDialogueState.beginRequest(playerSession, speech.llmResponder.session, {
+                    reason: speech.deterministicRoute.reason,
                     text: rawText,
                     channel: partyChannel ? 'party_chat' : 'local_chat',
-                    spokespersonId: deterministicRoute.reason === 'party_spokesperson' ? llmResponder.id : undefined
+                    spokespersonId: speech.deterministicRoute.reason === 'party_spokesperson' ? speech.llmResponder.id : undefined
                 });
             }
             if (partyChannel) {
                 const addressObservation = LangfuseTracing.startObservation(
                     'party.address.resolve',
                     { message: rawText },
-                    { ...routeMetadata, status: deterministicRoute.status, reason: deterministicRoute.reason },
+                    { ...routeMetadata, status: speech.deterministicRoute.status, reason: speech.deterministicRoute.reason },
                     'span'
                 );
                 addressObservation?.end({
-                    status: deterministicRoute.status,
-                    reason: deterministicRoute.reason,
-                    candidateId: deterministicRoute.candidate?.id || null,
-                    candidateCount: deterministicRoute.candidates?.length || 0
-                }, LangfuseTracing.observationStatus(deterministicRoute));
-                PartyDialogueRouter.recordMetric(deterministicRoute, {
+                    status: speech.deterministicRoute.status,
+                    reason: speech.deterministicRoute.reason,
+                    candidateId: speech.deterministicRoute.candidate?.id || null,
+                    candidateCount: speech.deterministicRoute.candidates?.length || 0
+                }, LangfuseTracing.observationStatus(speech.deterministicRoute));
+                PartyDialogueRouter.recordMetric(speech.deterministicRoute, {
                     source: 'deterministic',
-                    dispatchCount: llmResponder ? 1 : 0
+                    dispatchCount: speech.llmResponder ? 1 : 0
                 });
-                if (llmResponder) {
+                if (speech.llmResponder) {
                     const routeObservation = LangfuseTracing.startObservation(
                         'party.dialogue.route',
                         { message: rawText },
-                        { ...routeMetadata, source: 'deterministic', reason: deterministicRoute.reason },
+                        { ...routeMetadata, source: 'deterministic', reason: speech.deterministicRoute.reason },
                         'span'
                     );
                     routeObservation?.end({
                         route: 'bot',
-                        candidateId: llmResponder.id,
-                        reason: deterministicRoute.reason
-                    }, LangfuseTracing.observationStatus(deterministicRoute));
+                        candidateId: speech.llmResponder.id,
+                        reason: speech.deterministicRoute.reason
+                    }, LangfuseTracing.observationStatus(speech.deterministicRoute));
                 }
             }
         }
 
-        const dispatchLLM = (session, reason = deterministicRoute?.reason || 'deterministic_route') => {
-            if (!session?.actor) return Promise.resolve({ ok: false, reason: 'missing_bot' });
-            const currentState = PartyDialogueState.snapshot(playerSession);
-            if (String(currentState?.inFlightBotId || '') !== String(session.actor.fetchId())) {
-                PartyDialogueState.beginRequest(playerSession, session, {
-                    reason,
-                    text: rawText,
-                    channel: partyChannel ? 'party_chat' : 'local_chat',
-                    spokespersonId: reason === 'party_spokesperson' ? session.actor.fetchId() : undefined
-                });
-            }
-            const dispatchObservation = partyChannel
-                ? LangfuseTracing.startObservation(
-                    'party.dispatch',
-                    { botId: session.actor.fetchId?.(), message: rawText },
-                    { ...routeMetadata, botId: session.actor.fetchId?.() || null, reason },
-                    'span'
-                )
-                : null;
-            return BotDialogueArbiter.route({
-                playerSession,
-                botSession: session,
-                text: rawText,
-                channel: partyChannel ? 'party_chat' : 'local_chat',
-                source: partyChannel ? 'party_chat' : 'local_chat',
-                allowFallback: true
-            }).then((result) => {
-                dispatchObservation?.end(result, LangfuseTracing.observationStatus(result));
-                if (result?.started === true || result?.queued === true || result?.delivered === true) return result;
-                PartyDialogueState.clearInFlight(playerSession, session);
-                return result;
-            }).catch((error) => {
-                dispatchObservation?.end({ ok: false, reason: 'route_error', error: error.message }, {
-                    level: 'ERROR',
-                    statusMessage: error.message
-                });
-                PartyDialogueState.clearInFlight(playerSession, session);
-                utils.infoWarn('BotDialogue', 'local LLM chat route failed: %s', error.message);
-                return { ok: false, reason: 'route_error', error: error.message };
-            });
-        };
-
-        const deliverPartyClarification = async (candidate, matches = []) => {
-            if (!candidate?.session?.actor) return { ok: false, reason: 'missing_clarifier' };
-            const names = [...new Set((matches || [])
-                .map((match) => match?.name || match?.actor?.fetchName?.() || match?.session?.actor?.fetchName?.())
-                .filter(Boolean))];
-            const reply = names.length > 1
-                ? `Which one do you mean: ${names.join(' or ')}?`
-                : 'Which party member do you mean?';
-            const botSession = candidate.session;
-            const botId = botSession.actor.fetchId?.() || candidate.id || null;
-            const observation = LangfuseTracing.startObservation(
-                'party.dispatch',
-                { botId, message: rawText, action: 'clarify' },
-                { ...routeMetadata, botId, reason: 'router_clarify', deterministic: true },
-                'span'
-            );
-
-            PartyDialogueState.beginRequest(playerSession, botSession, {
-                reason: 'router_clarify',
-                text: rawText,
-                channel: 'party_chat',
-                spokespersonId: botId
-            });
-
-            let turn = null;
-            let persistenceError = null;
-            let persisted = false;
-            try {
-                const BotConversationService = invoke('GameServer/Bot/AI/BotConversationService');
-                turn = await BotConversationService.beginTurn({
-                    playerSession,
-                    botSession,
-                    text: rawText,
-                    channel: 'party_chat',
-                    source: 'party_router_clarification'
-                });
-            } catch (error) {
-                persistenceError = error;
-            }
-
-            try {
-                this.botTell(botSession, playerSession, reply);
-                PartyDialogueState.recordDeliveredReply(playerSession, botSession, reply, {
-                    turnId: turn?.turnId || `party-clarify:${botId}:${Date.now()}`,
-                    channel: 'party_chat'
-                });
-            } catch (error) {
-                PartyDialogueState.clearInFlight(playerSession, botSession);
-                observation?.end({ ok: false, delivered: false, clarification: true, error: error.message }, {
-                    level: 'ERROR',
-                    statusMessage: error.message
-                });
-                return { ok: false, started: false, delivered: false, clarification: true, reply, error: error.message };
-            }
-
-            if (turn) {
-                const BotConversationService = invoke('GameServer/Bot/AI/BotConversationService');
-                try {
-                    persisted = await BotConversationService.recordFallback({
-                        playerSession,
-                        botSession,
-                        turnId: turn.turnId,
-                        channel: 'party_chat',
-                        text: reply,
-                        reason: 'party_route_clarification'
-                    });
-                } catch (error) {
-                    persistenceError = persistenceError || error;
-                }
-            }
-
-            const result = {
-                ok: true,
-                started: false,
-                delivered: true,
-                clarification: true,
-                reply,
-                persisted: persisted === true
-            };
-            observation?.end(result, persistenceError
-                ? { level: 'WARNING', statusMessage: persistenceError.message }
-                : LangfuseTracing.observationStatus(result));
-            return result;
-        };
-
-        if (llmEnabled && partyChannel && cheapRouterAvailable && !llmResponder && deterministicRoute && (
-            deterministicRoute.status === 'needs_router' || deterministicRoute.status === 'ambiguous'
+        if (llmEnabled && partyChannel && cheapRouterAvailable && !speech.llmResponder && speech.deterministicRoute && (
+            speech.deterministicRoute.status === 'needs_router' || speech.deterministicRoute.status === 'ambiguous'
         )) {
             const fallbackRoute = PartyDialogueRouter.select({
                 text: rawText,
@@ -1063,8 +969,8 @@ const BotManager = {
                 return PartyLLMRouter.route({
                     text: rawText,
                     playerSession,
-                    candidates: deterministicRoute.candidates,
-                    selectedBotId: deterministicRoute.candidates.find((candidate) => candidate.selected)?.id || null,
+                    candidates: speech.deterministicRoute.candidates,
+                    selectedBotId: speech.deterministicRoute.candidates.find((candidate) => candidate.selected)?.id || null,
                     dialogueState: PartyDialogueState.snapshot(playerSession)
                 }).then((routerResult) => {
                     PartyDialogueState.clearRouter(playerSession);
@@ -1089,10 +995,10 @@ const BotManager = {
                     }, LangfuseTracing.observationStatus(routerResult));
                     if (routerResult?.route === 'clarify') {
                         return chosen
-                            ? deliverPartyClarification(chosen, deterministicRoute.matches)
+                            ? this.deliverPlayerSpeechClarification(speech, chosen, speech.deterministicRoute.matches)
                             : routerResult;
                     }
-                    return chosen ? dispatchLLM(chosen.session, reason) : routerResult;
+                    return chosen ? this.dispatchPlayerSpeech(speech, chosen.session, reason) : routerResult;
                 }).catch((error) => {
                     PartyDialogueState.clearRouter(playerSession);
                     PartyDialogueRouter.recordMetric({ route: 'none', reason: 'router_error' }, {
@@ -1100,22 +1006,154 @@ const BotManager = {
                         dispatchCount: fallbackRoute.candidate ? 1 : 0
                     });
                     return fallbackRoute.candidate
-                        ? dispatchLLM(fallbackRoute.candidate.session, 'router_error_fallback')
+                        ? this.dispatchPlayerSpeech(speech, fallbackRoute.candidate.session, 'router_error_fallback')
                         : { ok: false, reason: 'router_error', error: error.message };
                 });
             }
-            llmResponder = fallbackRoute.candidate;
-            deterministicRoute = fallbackRoute;
-            if (llmResponder) {
-                PartyDialogueState.beginRequest(playerSession, llmResponder.session, {
+            speech.llmResponder = fallbackRoute.candidate;
+            speech.deterministicRoute = fallbackRoute;
+            if (speech.llmResponder) {
+                PartyDialogueState.beginRequest(playerSession, speech.llmResponder.session, {
                     reason: fallbackRoute.reason,
                     text: rawText,
                     channel: 'party_chat',
-                    spokespersonId: fallbackRoute.reason === 'party_spokesperson' ? llmResponder.id : undefined
+                    spokespersonId: fallbackRoute.reason === 'party_spokesperson' ? speech.llmResponder.id : undefined
                 });
             }
         }
+    },
 
+    dispatchPlayerSpeech(speech, session, reason = speech.deterministicRoute?.reason || 'deterministic_route') {
+        const { playerSession, rawText, partyChannel, routeMetadata, PartyDialogueState } = speech;
+        if (!session?.actor) return Promise.resolve({ ok: false, reason: 'missing_bot' });
+        const currentState = PartyDialogueState.snapshot(playerSession);
+        if (String(currentState?.inFlightBotId || '') !== String(session.actor.fetchId())) {
+            PartyDialogueState.beginRequest(playerSession, session, {
+                reason,
+                text: rawText,
+                channel: partyChannel ? 'party_chat' : 'local_chat',
+                spokespersonId: reason === 'party_spokesperson' ? session.actor.fetchId() : undefined
+            });
+        }
+        const dispatchObservation = partyChannel
+            ? LangfuseTracing.startObservation(
+                'party.dispatch',
+                { botId: session.actor.fetchId?.(), message: rawText },
+                { ...routeMetadata, botId: session.actor.fetchId?.() || null, reason },
+                'span'
+            )
+            : null;
+        return BotDialogueArbiter.route({
+            playerSession,
+            botSession: session,
+            text: rawText,
+            channel: partyChannel ? 'party_chat' : 'local_chat',
+            source: partyChannel ? 'party_chat' : 'local_chat',
+            allowFallback: true
+        }).then((result) => {
+            dispatchObservation?.end(result, LangfuseTracing.observationStatus(result));
+            if (result?.started === true || result?.queued === true || result?.delivered === true) return result;
+            PartyDialogueState.clearInFlight(playerSession, session);
+            return result;
+        }).catch((error) => {
+            dispatchObservation?.end({ ok: false, reason: 'route_error', error: error.message }, {
+                level: 'ERROR',
+                statusMessage: error.message
+            });
+            PartyDialogueState.clearInFlight(playerSession, session);
+            utils.infoWarn('BotDialogue', 'local LLM chat route failed: %s', error.message);
+            return { ok: false, reason: 'route_error', error: error.message };
+        });
+    },
+
+    async deliverPlayerSpeechClarification(speech, candidate, matches = []) {
+        const { playerSession, rawText, routeMetadata, PartyDialogueState } = speech;
+        if (!candidate?.session?.actor) return { ok: false, reason: 'missing_clarifier' };
+        const names = [...new Set((matches || [])
+            .map((match) => match?.name || match?.actor?.fetchName?.() || match?.session?.actor?.fetchName?.())
+            .filter(Boolean))];
+        const reply = names.length > 1
+            ? `Which one do you mean: ${names.join(' or ')}?`
+            : 'Which party member do you mean?';
+        const botSession = candidate.session;
+        const botId = botSession.actor.fetchId?.() || candidate.id || null;
+        const observation = LangfuseTracing.startObservation(
+            'party.dispatch',
+            { botId, message: rawText, action: 'clarify' },
+            { ...routeMetadata, botId, reason: 'router_clarify', deterministic: true },
+            'span'
+        );
+
+        PartyDialogueState.beginRequest(playerSession, botSession, {
+            reason: 'router_clarify',
+            text: rawText,
+            channel: 'party_chat',
+            spokespersonId: botId
+        });
+
+        let turn = null;
+        let persistenceError = null;
+        let persisted = false;
+        try {
+            const BotConversationService = invoke('GameServer/Bot/AI/BotConversationService');
+            turn = await BotConversationService.beginTurn({
+                playerSession,
+                botSession,
+                text: rawText,
+                channel: 'party_chat',
+                source: 'party_router_clarification'
+            });
+        } catch (error) {
+            persistenceError = error;
+        }
+
+        try {
+            this.botTell(botSession, playerSession, reply);
+            PartyDialogueState.recordDeliveredReply(playerSession, botSession, reply, {
+                turnId: turn?.turnId || `party-clarify:${botId}:${Date.now()}`,
+                channel: 'party_chat'
+            });
+        } catch (error) {
+            PartyDialogueState.clearInFlight(playerSession, botSession);
+            observation?.end({ ok: false, delivered: false, clarification: true, error: error.message }, {
+                level: 'ERROR',
+                statusMessage: error.message
+            });
+            return { ok: false, started: false, delivered: false, clarification: true, reply, error: error.message };
+        }
+
+        if (turn) {
+            const BotConversationService = invoke('GameServer/Bot/AI/BotConversationService');
+            try {
+                persisted = await BotConversationService.recordFallback({
+                    playerSession,
+                    botSession,
+                    turnId: turn.turnId,
+                    channel: 'party_chat',
+                    text: reply,
+                    reason: 'party_route_clarification'
+                });
+            } catch (error) {
+                persistenceError = persistenceError || error;
+            }
+        }
+
+        const result = {
+            ok: true,
+            started: false,
+            delivered: true,
+            clarification: true,
+            reply,
+            persisted: persisted === true
+        };
+        observation?.end(result, persistenceError
+            ? { level: 'WARNING', statusMessage: persistenceError.message }
+            : LangfuseTracing.observationStatus(result));
+        return result;
+    },
+
+    runPlayerSpeechPerBot(speech) {
+        const { playerSession, rawText, text, player, SpeckMath, playerPt, llmEnabled, groupAddress, partyChannel } = speech;
         let brainGroupResponderPicked = false;
         this.sessions.forEach((session) => {
             const bot = session.actor;
@@ -1125,7 +1163,6 @@ const BotManager = {
             const partyCompanion = session.followPlayerSession === playerSession && session.partyCompanion === true;
             if (distance > 1500 && !(partyChannel && partyCompanion)) return; // Party chat is roster-scoped, not proximity-scoped
 
-            let handledByRule = false;
             const botName = bot.fetchName().toLowerCase();
             const shortBotName = botName.replace(/^bot_/, '');
             const addressedToBot = text.includes(botName) || text.includes(shortBotName);
@@ -1138,106 +1175,14 @@ const BotManager = {
             // regex replies intentionally remain only as the disabled-mode
             // fallback; otherwise they silently bypass OpenRouter and lose
             // the persona, memory, and Langfuse trace for the turn.
-            const llmAddressed = llmEnabled && llmResponder?.session === session;
+            const llmAddressed = llmEnabled && speech.llmResponder?.session === session;
             if (llmEnabled) {
                 if (!llmAddressed) return;
-                dispatchLLM(session, deterministicRoute?.reason);
+                this.dispatchPlayerSpeech(speech, session, speech.deterministicRoute?.reason);
                 return;
             }
 
-            if (directCommandTarget && INSULT_PATTERN.test(rawText)) {
-                handledByRule = true;
-                BotSocialMemory.recordEvent(playerSession, session, 'insulted', 'chat');
-                setTimeout(() => {
-                    this.botTell(session, playerSession, `That was uncalled for.`);
-                }, 500 + Math.random() * 500);
-            }
-
-            else if (text.includes("hi") || text.includes("hello") || text.includes("привет") || text.includes("ку")) {
-                handledByRule = true;
-                setTimeout(() => {
-                    const currentPlan = session.plan || 'hunting';
-                    const phrases = [
-                        `Hey ${player.fetchName()}! I'm currently ${currentPlan}.`,
-                        `Hello there! Ready to kill some keltirs?`,
-                        `Hi! Beautiful day to hunt, isn't it?`
-                    ];
-                    this.botSay(session, phrases[Math.floor(Math.random() * phrases.length)], playerSession);
-                }, 1000 + Math.random() * 1000);
-            }
-
-            else if (directCommandTarget && session.plan === 'pk_hunting' && (
-                text.includes('follow') || text.includes('come here') || text.includes('за мной') || text.includes('иди сюда') ||
-                text.includes('помоги') || text.includes('stop') || text.includes('стой') || text.includes('wait') ||
-                text.includes('hunt') || text.includes('иди качайся') || text.includes('кач') ||
-                text.includes('heal') || text.includes('хил') || text.includes('buff') || text.includes('бафф')
-            )) {
-                handledByRule = true;
-                setTimeout(() => {
-                    this.botSay(session, `I take no orders, ${player.fetchName()}.`, playerSession);
-                }, 500 + Math.random() * 500);
-            }
-
-            else if (directCommandTarget && (text.includes("follow") || text.includes("за мной") || text.includes("помоги"))) {
-                handledByRule = true;
-                setTimeout(() => {
-                    if (session.partyCompanion === true && session.followPlayerSession === playerSession) {
-                        this.botSay(session, `Sure! I will follow you and assist in combat.`, playerSession);
-                        session.plan = 'following';
-                    } else {
-                        this.botTell(session, playerSession, `I can come closer, but invite me if you want party follow.`);
-                        bot.moveTo({
-                            from: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
-                            to: {
-                                locX: player.fetchLocX() + utils.oneFromSpan(-80, 80),
-                                locY: player.fetchLocY() + utils.oneFromSpan(-80, 80),
-                                locZ: player.fetchLocZ()
-                            }
-                        });
-                    }
-                }, 800 + Math.random() * 800);
-            }
-
-            else if (directCommandTarget && (text.includes("stop") || text.includes("стой") || text.includes("wait"))) {
-                handledByRule = true;
-                setTimeout(() => {
-                    this.botSay(session, `Staying here! Let me know if you need help.`, playerSession);
-                    session.plan = 'resting';
-                    bot.moveTo({
-                        from: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
-                        to: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() }
-                    });
-                }, 800 + Math.random() * 800);
-            }
-
-            else if (directCommandTarget && (text.includes("hunt") || text.includes("иди качайся") || text.includes("кач"))) {
-                handledByRule = true;
-                setTimeout(() => {
-                    this.botSay(session, `Alright, returning to hunt keltirs!`, playerSession);
-                    if (session.followPlayerSession === playerSession && session.partyCompanion === true) {
-                        PartyCompanionService.detach(playerSession, session, {
-                            event: 'party_dismissed',
-                            source: 'chat_hunt',
-                            plan: 'hunting'
-                        });
-                    } else {
-                        session.plan = 'hunting';
-                        session.followPlayerSession = null;
-                        session.partyCompanion = false;
-                        refreshPartyMemberships([session], invoke);
-                    }
-                }, 800 + Math.random() * 800);
-            }
-
-            else if (directCommandTarget && (text.includes("heal") || text.includes("хил") || text.includes("buff") || text.includes("бафф"))) {
-                handledByRule = true;
-                setTimeout(() => {
-                    this.handleDirectSupportRequest(session, playerSession, distance, {
-                        heal: text.includes("heal") || text.includes("хил"),
-                        buff: text.includes("buff") || text.includes("бафф")
-                    });
-                }, 1000);
-            }
+            const handledByRule = this.applyPlayerSpeechRules(speech, session, distance, directCommandTarget);
 
             if (!handledByRule) {
                 if (addressedToBot || selectedBot || companionBot || (groupAddress && !brainGroupResponderPicked)) {
@@ -1257,6 +1202,108 @@ const BotManager = {
                 }
             }
         });
+    },
+
+    // Disabled-LLM regex replies and commands for one bot in range.
+    applyPlayerSpeechRules(speech, session, distance, directCommandTarget) {
+        const { playerSession, rawText, text, player } = speech;
+        const bot = session.actor;
+        let handledByRule = false;
+        if (directCommandTarget && INSULT_PATTERN.test(rawText)) {
+            handledByRule = true;
+            BotSocialMemory.recordEvent(playerSession, session, 'insulted', 'chat');
+            setTimeout(() => {
+                this.botTell(session, playerSession, `That was uncalled for.`);
+            }, 500 + Math.random() * 500);
+        }
+
+        else if (GREETING_PATTERN.test(text)) {
+            handledByRule = true;
+            setTimeout(() => {
+                const currentPlan = session.plan || 'hunting';
+                const phrases = [
+                    `Hey ${player.fetchName()}! I'm currently ${currentPlan}.`,
+                    `Hello there! Ready to kill some keltirs?`,
+                    `Hi! Beautiful day to hunt, isn't it?`
+                ];
+                this.botSay(session, phrases[Math.floor(Math.random() * phrases.length)], playerSession);
+            }, 1000 + Math.random() * 1000);
+        }
+
+        else if (directCommandTarget && session.plan === 'pk_hunting' && (
+            text.includes('follow') || text.includes('come here') || text.includes('за мной') || text.includes('иди сюда') ||
+            text.includes('помоги') || text.includes('stop') || text.includes('стой') || text.includes('wait') ||
+            text.includes('hunt') || text.includes('иди качайся') || text.includes('кач') ||
+            text.includes('heal') || text.includes('хил') || text.includes('buff') || text.includes('бафф')
+        )) {
+            handledByRule = true;
+            setTimeout(() => {
+                this.botSay(session, `I take no orders, ${player.fetchName()}.`, playerSession);
+            }, 500 + Math.random() * 500);
+        }
+
+        else if (directCommandTarget && (text.includes("follow") || text.includes("за мной") || text.includes("помоги"))) {
+            handledByRule = true;
+            setTimeout(() => {
+                if (session.partyCompanion === true && session.followPlayerSession === playerSession) {
+                    this.botSay(session, `Sure! I will follow you and assist in combat.`, playerSession);
+                    session.plan = 'following';
+                } else {
+                    this.botTell(session, playerSession, `I can come closer, but invite me if you want party follow.`);
+                    bot.moveTo({
+                        from: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
+                        to: {
+                            locX: player.fetchLocX() + utils.oneFromSpan(-80, 80),
+                            locY: player.fetchLocY() + utils.oneFromSpan(-80, 80),
+                            locZ: player.fetchLocZ()
+                        }
+                    });
+                }
+            }, 800 + Math.random() * 800);
+        }
+
+        else if (directCommandTarget && (text.includes("stop") || text.includes("стой") || text.includes("wait"))) {
+            handledByRule = true;
+            setTimeout(() => {
+                this.botSay(session, `Staying here! Let me know if you need help.`, playerSession);
+                session.plan = 'resting';
+                bot.moveTo({
+                    from: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
+                    to: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() }
+                });
+            }, 800 + Math.random() * 800);
+        }
+
+        else if (directCommandTarget && (text.includes("hunt") || text.includes("иди качайся") || text.includes("кач"))) {
+            handledByRule = true;
+            setTimeout(() => {
+                this.botSay(session, `Alright, returning to hunt keltirs!`, playerSession);
+                if (session.followPlayerSession === playerSession && session.partyCompanion === true) {
+                    PartyCompanionService.detach(playerSession, session, {
+                        event: 'party_dismissed',
+                        source: 'chat_hunt',
+                        plan: 'hunting'
+                    });
+                } else {
+                    session.plan = 'hunting';
+                    session.followPlayerSession = null;
+                    session.partyCompanion = false;
+                    refreshPartyMemberships([session], invoke);
+                }
+            }, 800 + Math.random() * 800);
+        }
+
+        else if (directCommandTarget && (text.includes("heal") || text.includes("хил") || text.includes("buff") || text.includes("бафф"))) {
+            handledByRule = true;
+            setTimeout(() => {
+                this.handleDirectSupportRequest(session, playerSession, distance, {
+                    heal: text.includes("heal") || text.includes("хил"),
+                    buff: text.includes("buff") || text.includes("бафф")
+                });
+            }, 1000);
+        }
+
+        return handledByRule;
     },
 
     handleDirectSupportRequest(botSession, playerSession, distance, request = {}) {

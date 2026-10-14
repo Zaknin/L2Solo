@@ -144,8 +144,12 @@ function transmitItemReceived(session, selfId, amount) {
 }
 
 async function onTalk(session, npc) {
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return false;
     await ensureLoaded(session);
+    if (session.actor !== actor) return false;
     const quest = questForNpc(npc, session);
     if (!quest) return false;
     const state = stateFor(session, quest);
@@ -168,8 +172,12 @@ async function onTalk(session, npc) {
 }
 
 async function onEvent(session, event) {
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return false;
     await ensureLoaded(session);
+    if (session.actor !== actor) return false;
     const quest = byId.get(Number(event.questId));
     const npc = session.activeNpcTalk;
     const eventName = String(event.name);
@@ -359,9 +367,14 @@ function rewardExpSp(session, exp, sp) {
 }
 
 async function onKill(session, npc, source = session?.actor) {
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return;
     await ensureLoaded(session);
+    if (session.actor !== actor) return;
     await invoke("GameServer/Clan/ClanAllianceService").onKill(session, npc);
+    if (session.actor !== actor) return;
     const ownerId = Number(npc.questSpawn?.ownerId) || 0;
     if (ownerId && ownerId !== Number(session.actor.fetchId())) return;
     const spawnedQuestId = Number(npc.questSpawn?.questId) || 0;
@@ -388,8 +401,12 @@ function onAttack(session, npc, source, damage) {
     if (!owner) return Promise.resolve();
     return onAttack(owner, npc, source, damage);
   }
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return;
     await ensureLoaded(session);
+    if (session.actor !== actor) return;
     for (const quest of handlers) {
       const state = states(session).get(quest.id);
       if (state?.isStarted()) await quest.onAttack(state, npc, source, damage);
@@ -400,8 +417,12 @@ function onAttack(session, npc, source, damage) {
 
 function onSummonDeath(session, pet) {
   if (!session?.actor) return Promise.resolve();
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return;
     await ensureLoaded(session);
+    if (session.actor !== actor) return;
     for (const quest of quests) {
       const state = states(session).get(quest.id);
       if (quest.onSummonDeath && state?.isStarted()) await quest.onSummonDeath(state, pet);
@@ -413,8 +434,12 @@ function onSummonDeath(session, pet) {
 function onSkillSee(session, npc, skill, source = session?.actor) {
   const handlers = skillQuests.get(npc.fetchSelfId?.());
   if (!handlers || !session?.actor || source !== session.actor || npc.isDead?.()) return Promise.resolve();
+  // Work queued for one character is dropped once the connection selected another.
+  const actor = session.actor;
   return mutate(session, async () => {
+    if (session.actor !== actor) return;
     await ensureLoaded(session);
+    if (session.actor !== actor) return;
     if (npc.questSpawn?.ownerId && npc.questSpawn.ownerId !== session.actor.fetchId()) return;
     for (const quest of handlers) {
       if (npc.questSpawn?.questId && npc.questSpawn.questId !== quest.id) continue;

@@ -405,7 +405,10 @@ const ClanSimulationService = {
                     });
                 } else summary.blocked += 1;
             }
-            founderScanOffset += processed;
+            // Joined and founding candidates leave the clanId=0 list; counting
+            // them would skip as many unseen candidates on the next page.
+            founderScanOffset += candidates.slice(0, processed)
+                .filter((candidate) => !reservedIds.has(candidate.characterId)).length;
             if (processed >= candidates.length && candidates.length < safeLimit) founderScanOffset = 0;
             DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'scan_loop', Date.now() - scanStartedAt);
             return summary;

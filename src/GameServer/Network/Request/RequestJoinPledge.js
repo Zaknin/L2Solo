@@ -1,12 +1,7 @@
 const ReceivePacket = invoke('Packet/Receive');
-const World = invoke('GameServer/World/World');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const ClanInviteService = invoke('GameServer/Clan/ClanInviteService');
 const ServerResponse = invoke('GameServer/Network/Response');
-
-function targetSessionById(id) {
-    return (World.user?.sessions || []).find((session) => Number(session.actor?.fetchId?.()) === Number(id));
-}
 
 function requestJoinPledge(session, buffer) {
     const packet = new ReceivePacket(buffer);
@@ -20,7 +15,7 @@ function requestJoinPledge(session, buffer) {
 }
 
 function consume(session, data) {
-    const targetSession = targetSessionById(data.targetId);
+    const targetSession = ClanService.onlineSessionByActorId(data.targetId);
     const target = targetSession?.actor;
     const allowed = ClanService.canInvite(session.actor, target);
 
@@ -29,8 +24,11 @@ function consume(session, data) {
         return;
     }
 
+    // The invite belongs to the invited character: after Restart the same
+    // connection may answer for another one.
     targetSession.pendingClanInvite = {
         requestorSession: session,
+        invitedActor: target,
         clanId: allowed.clan.id
     };
 

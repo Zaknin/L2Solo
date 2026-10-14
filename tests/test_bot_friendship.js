@@ -93,6 +93,29 @@ Promise.all([
     assert.strictEqual(await requestReason({ trust: 8, insults: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 - 1 }), 'accepted');
     const removed = await BotFriendship.remove({ characterId: 42 }, 100);
     assert.strictEqual(removed.ok, true, 'removing a friend should clear friendship and const membership');
+
+    // E251: a const toggle queued before a removal must not write its roster
+    // row after the removal deleted the friendship.
+    const order = [];
+    let releaseFriend;
+    Database.execute = ([sql]) => {
+        const text = String(sql).trim();
+        if (text.includes('FROM bot_friendships f')) return new Promise((resolve) => { releaseFriend = () => resolve([{}]); });
+        order.push(text.split(/\s+/).slice(0, 3).join(' '));
+        if (text.startsWith('SELECT 1 FROM bot_friend_roster')) return Promise.resolve([]);
+        if (text.includes('COUNT(*) AS count')) return Promise.resolve([{ count: 0 }]);
+        return Promise.resolve([]);
+    };
+    const toggle = BotFriendship.toggleConst({ characterId: 77 }, 200);
+    const removal = BotFriendship.remove({ characterId: 77 }, 200);
+    for (let i = 0; i < 5 && !releaseFriend; i++) await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    releaseFriend();
+    const [toggled, removedLater] = await Promise.all([toggle, removal]);
+    assert.strictEqual(toggled.selected, true);
+    assert.strictEqual(removedLater.ok, true);
+    assert.deepStrictEqual(order.slice(-3), ['INSERT INTO bot_friend_roster', 'DELETE FROM bot_friend_roster', 'DELETE FROM bot_friendships'],
+        'the removal runs after the queued toggle, so no roster row survives the friendship');
     console.log('Bot friendship roster checks passed');
 }).catch((error) => {
     console.error(error);

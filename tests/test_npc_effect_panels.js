@@ -86,6 +86,21 @@ try {
     assert.strictEqual(Rules.resolve({ selfId: 4019, level: 1 }).sourceTarget, 'area');
     assert.strictEqual(Rules.resolve({ selfId: 4205, level: 1 }).effect, 'paralyze');
     assert.strictEqual(Rules.resolve({ selfId: 4205, level: 1 }).durationMs, 120000);
+    // A skill-side effect refresh must not resend NpcInfo for a dead or
+    // removed NPC, like the expiry refresh in EffectTicker (U49).
+    const broadcasts = [];
+    const watcher = { actor: player, dataSendToMe() {}, dataSendToMeAndOthers: p => broadcasts.push(p) };
+    for (const [label, corpse] of [
+        ['dead', { effects: {}, fetchKind: () => 'Monster', fetchId: () => 1014814, fetchLevel: () => 20, state: { fetchDead: () => true } }],
+        ['removed', { effects: {}, fetchKind: () => 'Monster', fetchId: () => 1014815, fetchLevel: () => 20, corpseDecayState: 'removed' }]
+    ]) {
+        broadcasts.length = 0;
+        Effects.execute(watcher, npc, corpse, buff, { rng: () => 0 });
+        assert.strictEqual(broadcasts.filter(p => p[0] === 0x16).length, 0, `skill refresh must not resend NpcInfo for a ${label} NPC`);
+    }
+    broadcasts.length = 0;
+    Effects.execute(watcher, npc, npc, buff, { rng: () => 0 });
+    assert.strictEqual(broadcasts.filter(p => p[0] === 0x16).length, 1, 'skill refresh still sends NpcInfo for a live NPC');
     console.log('NPC effect panel and debuff lifecycle checks passed');
 } finally {
     Date.now = original.now;

@@ -61,6 +61,11 @@ async function main() {
         assert.deepEqual((await Life.clanOperationCandidates({ classIds: [15], minLevel: 45, maxLevel: 55, cursor })).map(member => member.characterId),
             next.map(member => member.characterId), 'unrelated timestamp changes never move continuation');
         assert.equal((await Life.statesByIds(Array.from({ length: 240 }, (_, i) => base + i))).length, 64);
+        const [hydrated] = await Life.statesByIds([base]);
+        assert.equal(hydrated.simulationOwner, hydrated.simulation.ownerId, 'clan readers see the flat owner on the returned row');
+        assert(!Object.hasOwn(Life.cachedState(base), 'simulationOwner'), 'E272: cached worker snapshot source has no flat owner');
+        assert(require('../src/GameServer/Bot/Population/ColdSimulationProtocol').commandCheckpoint(Life.cachedState(base)),
+            'E272: cached state stays commandable by the cold worker');
         const metadataTrigger = (await query("SELECT sql FROM sqlite_master WHERE name='bot_party_candidate_metadata'"))[0].sql;
         assert(!/json_extract|statsJson/i.test(metadataTrigger), 'new lease/phase/party metadata trigger reads only cheap scalars');
         const savedSkillsTrigger = (await query("SELECT sql FROM sqlite_temp_master WHERE name='clan_candidate_saved_skills'"))[0].sql;
@@ -186,6 +191,8 @@ async function main() {
         const [grant] = await Database.claimColdSimulationLeases([{ characterId: coldId, expectedRevision: current.simulationRevision,
             ownerId: Owner.OWNER_ID, leaseId: 'demand-fixture', timestamp, leaseUntil: timestamp + 60000 }]);
         assert(grant.ok); await events();
+        assert.equal((await Life.statesByIds([coldId]))[0].simulationOwner, Owner.OWNER_ID, 'leased member reads as worker-owned');
+        assert(Life.cachedState(coldId).simulation.ownerId === Owner.OWNER_ID && !Object.hasOwn(Life.cachedState(coldId), 'simulationOwner'));
         assert.deepEqual((await query('SELECT payloadJson,ordinaryEligible FROM bot_party_candidate_projection WHERE characterId=?', [coldId]))[0],
             unchangedProjection, 'native lease claim preserves payload and ordinary identity');
         const request = { characterId: coldId, expectedRevision: grant.revision, ownerId: Owner.OWNER_ID, leaseId: grant.leaseId,

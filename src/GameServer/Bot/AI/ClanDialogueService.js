@@ -189,6 +189,11 @@ async function reply(playerSession, clanId, text, state) {
             });
         } finally { Budget.settle(reservation, result?.usage || result?.telemetry?.usage); }
         if (!result?.ok) return { ok: false, reason: result?.reason || 'provider_error' };
+        // The sender or speaker may have left while the model was busy; check before any action runs.
+        if (!isPlayer(playerSession, clanId)) return { ok: false, reason: 'membership_changed' };
+        if (!candidatesFor(clanId, playerSession).some(entry => entry.id === candidate.id)) {
+            return { ok: false, reason: 'speaker_unavailable' };
+        }
         let action = result.data?.action;
         if (isPlayerJoinRequest(text)) action = 'request_player_join_party';
         if (action === 'request_player_join_party') {

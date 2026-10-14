@@ -1,30 +1,12 @@
 const World         = invoke('GameServer/World/World');
 const ReceivePacket = invoke('Packet/Receive');
 const ServerResponse = invoke('GameServer/Network/Response');
-const DataCache      = invoke('GameServer/DataCache');
-const Item           = invoke('GameServer/Item/Item');
 const TradeService   = invoke('GameServer/Bot/TradeService');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const BotManager     = invoke('GameServer/Bot/BotManager');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const WireD = invoke('Packet/WireD');
-
-function merchantPurchaseItems(store, actor) {
-    const items = [];
-
-    TradeService.refreshStorePrices(store, actor);
-    TradeService.nativeStoreItems(store).forEach((storeItem) => {
-        DataCache.fetchItemFromSelfId(storeItem.selfId, (item) => {
-            items.push(new Item(storeItem.objectId, {
-                ...utils.crushOb(item),
-                amount: storeItem.count,
-                price: storeItem.price
-            }));
-        });
-    });
-
-    return items;
-}
+const merchantPurchaseItems = invoke('GameServer/Network/MerchantPurchaseItems');
 
 function purchase(session, buffer) {
     const packet = new ReceivePacket(buffer);
@@ -43,7 +25,9 @@ function purchase(session, buffer) {
         list.push({ selfId: packet.data[2 + (i * 2)], amount: packet.data[3 + (i * 2)] });
     }
 
-    consume(session, {
+    // Server.js drops the connection when this Promise rejects; left
+    // unreturned, the rejection would end the process.
+    return consume(session, {
         listId: packet.data[0],
           list: list
     });
@@ -61,11 +45,20 @@ async function consume(session, data) {
         return;
     }
     if (store && store.storeType === 1) {
+        const bought = [];
+        let socialRecorded = false;
+        // One social event for the lines that completed, whether the list ended
+        // whole or a later line failed (E253); never one event per line.
+        const recordBought = () => {
+            if (socialRecorded || bought.length === 0) return;
+            socialRecorded = true;
+            const detail = bought.map((item) => `${item.qty} ${item.name}`).join(', ');
+            BotSocialMemory.recordTradeCompleted(session, trade.merchant, `bought ${detail}`);
+        };
         try {
             if (store.repricing === true || Number(trade.revision || 1) !== Number(store.revision || 1)) {
                 throw new Error("Store listing changed.");
             }
-            const bought = [];
             const sellerSession = BotManager.sessions.find((candidate) => candidate.actor === trade.merchant);
             for (const item of data.list) {
                 const quote = trade.prices?.[Number(item.selfId)];
@@ -90,10 +83,7 @@ async function consume(session, data) {
                 });
             }
 
-            if (bought.length > 0) {
-                const detail = bought.map((item) => `${item.qty} ${item.name}`).join(', ');
-                BotSocialMemory.recordTradeCompleted(session, trade.merchant, `bought ${detail}`);
-            }
+            recordBought();
 
             session.dataSendToMe(ServerResponse.userInfo(session.actor));
             session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
@@ -104,7 +94,7 @@ async function consume(session, data) {
                 return;
             }
             session.dataSendToMe(ServerResponse.purchaseList(
-                merchantPurchaseItems(store, session.actor),
+                merchantPurchaseItems(store, { refresh: true, actor: session.actor }),
                 session.actor.backpack.fetchTotalAdena()
             ));
             trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
@@ -115,7 +105,14 @@ async function consume(session, data) {
                 session.viewedPrivateStoreSeller = null;
             }
             session.dataSendToMe(ServerResponse.actionFailed());
+            recordBought();
         }
+        return;
+    }
+
+    // An NPC list line must ask for a whole number of items, at least one (E286).
+    if (!data.list.every((item) => Number.isSafeInteger(item.amount) && item.amount >= 1)) {
+        session.dataSendToMe(ServerResponse.actionFailed());
         return;
     }
 

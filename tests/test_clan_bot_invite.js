@@ -149,6 +149,61 @@ function fakeActor(id, name, options = {}) {
         BotManager.botTell = originalBotTell;
     }
 
+    // E255: the invite belongs to the invited character, not to the connection.
+    // After Restart and another character, an answer must not join that character.
+    {
+        const RequestAnswerJoinPledge = invoke('GameServer/Network/Request/RequestAnswerJoinPledge');
+        const invitedPlayer = fakeActor(2000003, 'Invited', { level: 22 });
+        const replacement = fakeActor(2000004, 'Replacement', { level: 22 });
+        const inviterSession = new PlayerSession(leader);
+        const invitedSession = new PlayerSession(invitedPlayer);
+        let added = 0;
+        try {
+            World.user = { sessions: [inviterSession, invitedSession] };
+            ClanService.findById = (id) => (Number(id) === Number(clan.id) ? clan : null);
+            ClanService.canInvite = (requestor, target) => (
+                requestor === leader && (target === invitedPlayer || target === replacement)
+                    ? { ok: true, clan }
+                    : { ok: false, code: 'unexpected_invite' }
+            );
+            ClanService.addMember = () => { added += 1; return Promise.resolve({ ok: true, clan, member: {} }); };
+            ClanService.onlineSessions = () => [];
+
+            RequestJoinPledge.consume(inviterSession, { targetId: invitedPlayer.fetchId() });
+            assert.ok(invitedSession.pendingClanInvite, 'player target should get a pending invite');
+            invitedSession.actor = replacement;
+            const answer = await RequestAnswerJoinPledge.consume(invitedSession, { answer: 1 });
+            assert.strictEqual(answer.code, 'missing_invite', 'an answer from another character is refused like an expired invite');
+            assert.strictEqual(added, 0, 'the replacement character must not join the clan');
+            assert.strictEqual(invitedSession.pendingClanInvite, null, 'the stale invite is consumed');
+
+            // E256: the join write is held; meanwhile the connection selects another
+            // character. The write stays the invited character's; the session gets no join UI.
+            invitedSession.actor = invitedPlayer;
+            let releaseJoin;
+            const joined = [];
+            ClanService.addMember = (_clan, actor) => new Promise((resolve) => {
+                joined.push(actor.fetchId());
+                releaseJoin = () => resolve({ ok: true, clan, member: { id: actor.fetchId() } });
+            });
+            RequestJoinPledge.consume(inviterSession, { targetId: invitedPlayer.fetchId() });
+            invitedSession.sent = [];
+            const pending = RequestAnswerJoinPledge.consume(invitedSession, { answer: 1 });
+            invitedSession.actor = replacement;
+            releaseJoin();
+            const heldAnswer = await pending;
+            assert.strictEqual(heldAnswer.ok, true, 'the invited character joined');
+            assert.deepStrictEqual(joined, [invitedPlayer.fetchId()], 'the write is for the invited character');
+            assert.deepStrictEqual(invitedSession.sent, [], 'no join UI reaches the session of another character');
+        } finally {
+            World.user = { sessions: originalWorldSessions || [] };
+            ClanService.findById = originalFindById;
+            ClanService.canInvite = originalCanInvite;
+            ClanService.addMember = originalAddMember;
+            ClanService.onlineSessions = originalOnlineSessions;
+        }
+    }
+
     const originalFetchClans = Database.fetchClans;
     const originalFetchClanCharacters = Database.fetchClanCharacters;
     const originalUpdateCharacterTitle = Database.updateCharacterTitle;
@@ -261,6 +316,58 @@ function fakeActor(id, name, options = {}) {
             assert.strictEqual(actor.fetchClanJoinExpiryTime(), 0, 'dissolve should not apply a join penalty');
             assert.strictEqual(actor.fetchClanCreateExpiryTime(), 0, 'dissolve should not apply a create penalty');
         });
+
+        // E265: the dissolve write is held while a member connection selects a
+        // character of another clan. Only the dissolved clan's characters are cleared.
+        Database.fetchClanCharacters = () => Promise.resolve(managedMembers);
+        await ClanService.reload();
+        const heldClan = ClanService.findById(managedClanRow.id);
+        const heldLeader = fakeActor(2000010, 'Warden', { clanId: heldClan.id, clanPrivileges: ClanRules.CP_ALL, title: 'Chief' });
+        const heldMember = fakeActor(2000011, 'ColdMina', { clanId: heldClan.id, title: 'Scout' });
+        const otherClanActor = fakeActor(2000012, 'Captain', { clanId: 6000008, clanPrivileges: 2047, title: 'Captain' });
+        const heldLeaderSession = new PlayerSession(heldLeader);
+        const heldMemberSession = new PlayerSession(heldMember);
+        World.user = { sessions: [heldLeaderSession, heldMemberSession] };
+        let releaseDissolve;
+        Database.dissolveClan = () => new Promise((resolve) => {
+            releaseDissolve = () => resolve({ ok: true, memberIds: [2000010, 2000011] });
+        });
+        const heldDissolve = ClanService.dissolve(heldLeader);
+        heldMemberSession.actor = otherClanActor;
+        releaseDissolve();
+        const heldResult = await heldDissolve;
+        assert.strictEqual(heldResult.ok, true);
+        assert.strictEqual(otherClanActor.fetchClanId(), 6000008, 'the other character keeps its clan');
+        assert.strictEqual(otherClanActor.fetchTitle(), 'Captain', 'the other character keeps its title');
+        assert.strictEqual(otherClanActor.fetchClanPrivileges(), 2047, 'the other character keeps its privileges');
+        assert.strictEqual(heldMember.fetchClanId(), 0, 'the dissolved clan member is cleared');
+        assert.strictEqual(heldLeader.fetchClanId(), 0, 'the leader is cleared');
+        assert.deepStrictEqual(heldResult.sessions, [heldLeaderSession], 'dissolve UI goes only to sessions still on a dissolved member');
+
+        // E265: the member connection switches to an alt of the SAME clan during
+        // the write; the alt is a member of the dissolved clan and is cleared too.
+        Database.fetchClanCharacters = () => Promise.resolve(managedMembers);
+        await ClanService.reload();
+        const altClan = ClanService.findById(managedClanRow.id);
+        const altLeader = fakeActor(2000010, 'Warden', { clanId: altClan.id, clanPrivileges: ClanRules.CP_ALL, title: 'Chief' });
+        const altFirst = fakeActor(2000011, 'ColdMina', { clanId: altClan.id, title: 'Scout' });
+        const altSecond = fakeActor(2000013, 'MinaAlt', { clanId: altClan.id, clanPrivileges: 8, title: 'Alt' });
+        const altLeaderSession = new PlayerSession(altLeader);
+        const altMemberSession = new PlayerSession(altFirst);
+        World.user = { sessions: [altLeaderSession, altMemberSession] };
+        let releaseAlt;
+        Database.dissolveClan = () => new Promise((resolve) => {
+            releaseAlt = () => resolve({ ok: true, memberIds: [2000010, 2000011, 2000013] });
+        });
+        const altDissolve = ClanService.dissolve(altLeader);
+        altMemberSession.actor = altSecond;
+        releaseAlt();
+        const altResult = await altDissolve;
+        assert.strictEqual(altSecond.fetchClanId(), 0, 'an alt of the dissolved clan selected during the write is cleared');
+        assert.strictEqual(altSecond.fetchTitle(), '', 'the alt loses the clan title');
+        assert.strictEqual(altSecond.fetchClanPrivileges(), 0, 'the alt loses the clan privileges');
+        assert.strictEqual(altFirst.fetchClanId(), 0, 'the remembered member is cleared');
+        assert.deepStrictEqual(altResult.sessions, [altLeaderSession, altMemberSession], 'the alt session gets the dissolve UI');
     } finally {
         Database.fetchClans = originalFetchClans;
         Database.fetchClanCharacters = originalFetchClanCharacters;

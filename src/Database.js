@@ -356,7 +356,9 @@ function historyOutboxUnsafe(kind, payload) {
 }
 
 // The history thread moved the outbox rows up to `upTo`; delete them from the
-// world through the write queue, one delete at a time.
+// world through the write queue, one delete at a time. A failed delete is not
+// repeated at once (a lasting fault would loop in microtasks): the next report
+// from the history thread retries it, up to the highest id reported.
 let outboxDeletedUpTo = 0;
 let outboxDeleteWanted = 0;
 let outboxDeleting = false;
@@ -366,12 +368,11 @@ function deleteMovedOutbox(upTo) {
     outboxDeleting = true;
     const target = outboxDeleteWanted;
     enqueue(() => write('DELETE FROM history_outbox WHERE id <= ?', [target]), { operation: 'history:outbox-delete' })
-        .then(() => { outboxDeletedUpTo = target; })
-        .catch(() => null)
-        .finally(() => {
+        .then(() => {
+            outboxDeletedUpTo = target;
             outboxDeleting = false;
             if (outboxDeleteWanted > outboxDeletedUpTo) deleteMovedOutbox(outboxDeleteWanted);
-        });
+        }, () => { outboxDeleting = false; });
 }
 
 // Waits until every write queued before the call is committed and moved into
@@ -8638,6 +8639,7 @@ const Database = {
             const amount = Number(command.amount);
             if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 2147483647) throw new Error('Invalid pet item amount');
             let playerItem = null;
+            let currentFeed;
             if (command.direction === 'deposit') {
                 const source = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [command.itemId, characterId]);
                 if (!source || source.id === controlId || source.equipped || source.amount < amount || source.petData || require('./GameServer/Pets/PetRules').TYPES[source.selfId]) throw new Error('Item cannot be given to a pet');
@@ -8669,13 +8671,21 @@ const Database = {
                         const id = target?.id || Number(write('INSERT INTO items(selfId, name, amount, enchant, characterId) VALUES (?, ?, ?, ?, ?)', [source.selfId, source.name, amount, source.enchant || 0, characterId]).insertId);
                         if (target) write('UPDATE items SET amount = ? WHERE id = ?', [target.amount + amount, id]);
                         playerItem = { ...source, id, amount: (target?.amount || 0) + amount, equipped: false };
-                    } else if (command.direction !== 'consume') throw new Error('Unknown pet inventory command');
+                    } else if (command.direction === 'consume') {
+                        // Eaten food and the feed it gives are one write, as in feedMountedPet (E232).
+                        const Rules = require('./GameServer/Pets/PetRules');
+                        const type = Rules.TYPES[collar.selfId];
+                        const feed = Number(command.feed);
+                        if (!Number.isFinite(feed) || feed <= 0 || !type.food.includes(source.selfId)) throw new Error('Pet food unavailable');
+                        currentFeed = Math.min(Rules.stats(type.npcId, state.level).maxFeed, (Number(state.currentFeed) || 0) + feed);
+                    } else throw new Error('Unknown pet inventory command');
                     source.amount -= amount;
                 }
             }
             state.inventory = inventory.filter(item => item.amount > 0);
+            if (currentFeed !== undefined) Object.assign(state, { currentFeed, starvingSince: 0 });
             write('UPDATE items SET petData = ? WHERE id = ? AND characterId = ?', [JSON.stringify(state), controlId, characterId]);
-            return { inventory: state.inventory, playerItem };
+            return { inventory: state.inventory, playerItem, currentFeed };
         }, 'pet:inventory'));
     },
 

@@ -102,6 +102,20 @@ const originalClaimBatch = Owner.claimBatch;
     assert.strictEqual(LifeState.cachedState(characterId).simulation.revision, 9,
         'authoritative rebase must refresh the coordinator cache');
 
+    // E272: a flat own simulationOwner makes the worker treat the state as flat
+    // wire input, refuse every command and never schedule the bot again.
+    const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+    const cached = LifeState.cachedState(characterId);
+    assert(!Object.hasOwn(cached, 'simulationOwner'), 'cached native state carries no flat owner');
+    assert(Protocol.commandCheckpoint(cached), 'cached state stays commandable by the worker');
+    assert(!Object.hasOwn(rejection.state, 'simulationOwner'), 'rebase state sent to the worker carries no flat owner');
+    assert(Protocol.commandCheckpoint(rejection.state), 'rebase state stays commandable by the worker');
+    const [hydrated] = await LifeState.statesByIds([characterId]);
+    assert.strictEqual(hydrated.simulationOwner, hydrated.simulation.ownerId, 'clan readers still see the flat owner');
+    assert.strictEqual(hydrated.simulationOwner, 'legacy_main');
+    assert.notStrictEqual(hydrated, LifeState.cachedState(characterId), 'the decorated row is a copy, not the cache entry');
+    assert(!Object.hasOwn(LifeState.cachedState(characterId), 'simulationOwner'));
+
     console.log('Cold claim authoritative rebase checks passed');
 })().catch((error) => {
     console.error(error);

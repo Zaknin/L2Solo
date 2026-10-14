@@ -120,7 +120,9 @@ function sendToPlayer(trade, packet) {
 }
 
 function cancelTrade(trade, reason = 'cancelled', notify = true) {
-    if (!trade || ['cancelled', 'committed'].includes(trade.state)) return false;
+    // A committing trade is already being written to the database and that
+    // write cannot be undone: the commit wins over a late cancellation.
+    if (!trade || ['cancelled', 'committing', 'committed'].includes(trade.state)) return false;
     trade.state = 'cancelled';
     trade.cancelReason = reason;
     if (trade.botSession?.pendingResourceDelivery?.tradeId === trade.id) {
@@ -147,6 +149,12 @@ function tradeIsOpen(trade) {
         cancelTrade(trade, 'missing_actor');
         return false;
     }
+    // The trade belongs to the characters that opened it; a session that now
+    // plays another character gets no packet about it.
+    if (trade.playerSession.actor !== trade.playerActor || trade.botSession.actor !== trade.botActor) {
+        cancelTrade(trade, 'actor_changed', trade.playerSession.actor === trade.playerActor);
+        return false;
+    }
     if (trade.playerSession.actor.fetchIsOnline?.() === false || trade.botSession.actor.fetchIsOnline?.() === false) {
         cancelTrade(trade, 'disconnected');
         return false;
@@ -156,6 +164,11 @@ function tradeIsOpen(trade) {
         return false;
     }
     return true;
+}
+
+function committingTrade(session) {
+    const trade = session?.activeTrade;
+    return trade?.state === 'committing' ? trade : null;
 }
 
 function activeTradeFor(session) {
@@ -189,6 +202,8 @@ function createTrade(playerSession, botSession, direction, metadata = {}) {
         direction,
         playerSession,
         botSession,
+        playerActor: playerSession.actor,
+        botActor: botSession.actor,
         playerItems: new Map(),
         botItems: new Map(),
         playerConfirmed: false,
@@ -207,6 +222,7 @@ function canStart(playerSession, botSession, { allowMerchant = false } = {}) {
     if (!isRealPlayerSession(playerSession) || !isBotSession(botSession) || !botSession.actor) return 'invalid_target';
     if (botSession.plan === 'merchant' && !allowMerchant) return 'merchant_store';
     if (actorDistance(playerSession.actor, botSession.actor) > TRADE_RANGE) return 'too_far';
+    if (committingTrade(playerSession) || committingTrade(botSession)) return 'trade_committing';
     return null;
 }
 
@@ -451,6 +467,8 @@ function transferEntries(trade) {
             direction: 'player_to_bot',
             fromSession: trade.playerSession,
             toSession: trade.botSession,
+            fromActor: trade.playerActor,
+            toActor: trade.botActor,
             line
         });
     }
@@ -459,25 +477,36 @@ function transferEntries(trade) {
             direction: 'bot_to_player',
             fromSession: trade.botSession,
             toSession: trade.playerSession,
+            fromActor: trade.botActor,
+            toActor: trade.playerActor,
             line
         });
     }
     return entries;
 }
 
+// The database moved the items between the characters remembered before the
+// wait. Memory is updated only for a side whose session still plays that
+// character: a replaced actor is never saved again (item writes are keyed by
+// the session's current actor and a reselected character loads from the
+// database), and a new actor must not receive another character's items.
 function applyLocalTransfers(moved, entries) {
-    const byKey = new Map(entries.map((entry) => [`${entry.fromSession.actor.fetchId()}:${entry.line.objectId}`, entry]));
+    const byKey = new Map(entries.map((entry) => [`${entry.fromActor.fetchId()}:${entry.line.objectId}`, entry]));
     moved.forEach((record) => {
         const entry = byKey.get(`${record.fromCharacterId}:${record.sourceItemId}`);
         if (!entry) return;
-        const sourceItems = entry.fromSession.actor.backpack.items || entry.fromSession.actor.backpack.fetchItems();
-        const sourceItem = sourceItems.find((item) => Number(item.fetchId()) === Number(record.sourceItemId));
-        if (sourceItem) {
-            if (Number(record.remaining) > 0) sourceItem.setAmount(Number(record.remaining));
-            else entry.fromSession.actor.backpack.items = sourceItems.filter((item) => Number(item.fetchId()) !== Number(record.sourceItemId));
+        if (entry.fromSession.actor === entry.fromActor) {
+            const sourceBackpack = entry.fromActor.backpack;
+            const sourceItems = sourceBackpack.items || sourceBackpack.fetchItems();
+            const sourceItem = sourceItems.find((item) => Number(item.fetchId()) === Number(record.sourceItemId));
+            if (sourceItem) {
+                if (Number(record.remaining) > 0) sourceItem.setAmount(Number(record.remaining));
+                else sourceBackpack.items = sourceItems.filter((item) => Number(item.fetchId()) !== Number(record.sourceItemId));
+            }
         }
 
-        const targetBackpack = entry.toSession.actor.backpack;
+        if (entry.toSession.actor !== entry.toActor) return;
+        const targetBackpack = entry.toActor.backpack;
         const existing = entry.line.stackable
             ? targetBackpack.fetchItemFromSelfId?.(entry.line.selfId)
             : null;
@@ -506,13 +535,38 @@ function publicMoved(entries) {
 }
 
 async function commit(playerSession) {
-    const replay = playerSession?.lastBotTradeCompletion;
-    if (!playerSession?.activeTrade && replay && now() - Number(replay.completedAt || 0) <= COMPLETION_REPLAY_TTL_MS) {
-        return { ...replay.result, idempotent: true };
+    // One commit owner per trade: a confirmation that arrives while the
+    // transfer is in the database joins it instead of starting another one.
+    const inFlight = committingTrade(playerSession);
+    if (inFlight?.playerSession === playerSession && inFlight.commitPromise) {
+        return inFlight.commitPromise.then((result) => (result.ok ? { ...result, idempotent: true } : result));
     }
+
+    const replay = completionReplay(playerSession);
+    if (replay) return { ...replay.result, idempotent: true };
 
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
+    const prepared = prepareCommit(trade);
+    if (!prepared.ok) return prepared;
+
+    // Mark the owner before the first await, so a second confirmation or a
+    // cancellation sees the commit that is already running.
+    trade.state = 'committing';
+    trade.commitPromise = finishCommit(trade, playerSession, prepared.entries, prepared.databaseTransfers);
+    return trade.commitPromise;
+}
+
+// The result of the trade this character completed a moment ago, for a
+// repeated confirmation packet of the same trade.
+function completionReplay(playerSession) {
+    const replay = playerSession?.lastBotTradeCompletion;
+    if (playerSession?.activeTrade || !replay || now() - Number(replay.completedAt || 0) > COMPLETION_REPLAY_TTL_MS) return null;
+    if (Number(replay.playerId) !== Number(playerSession.actor?.fetchId?.())) return null;
+    return replay;
+}
+
+function prepareCommit(trade) {
     if (trade.playerItems.size === 0 && trade.botItems.size === 0) {
         const result = { ok: false, reason: 'empty_or_invalid_trade' };
         recordSupplyTrade(trade, 'failed', result.reason, false);
@@ -549,8 +603,8 @@ async function commit(playerSession) {
     }
 
     const databaseTransfers = entries.map((entry) => ({
-        fromCharacterId: entry.fromSession.actor.fetchId(),
-        toCharacterId: entry.toSession.actor.fetchId(),
+        fromCharacterId: entry.fromActor.fetchId(),
+        toCharacterId: entry.toActor.fetchId(),
         sourceItemId: entry.line.objectId,
         selfId: entry.line.selfId,
         amount: entry.line.count,
@@ -559,43 +613,64 @@ async function commit(playerSession) {
         slot: entry.line.slot,
         petData: entry.line.petData
     }));
+    return { ok: true, entries, databaseTransfers };
+}
 
+async function finishCommit(trade, playerSession, entries, databaseTransfers) {
     let moved;
     try {
         moved = await Database.transferInventoryBetweenCharacters(databaseTransfers);
     } catch (error) {
+        // The transaction wrote nothing: the trade is open again and can be
+        // confirmed or cancelled as before.
+        trade.state = 'open';
+        trade.commitPromise = null;
         const result = { ok: false, reason: 'database_failed', error };
         recordSupplyTrade(trade, 'failed', result.reason, false);
         return result;
     }
 
-    applyLocalTransfers(moved, entries);
+    // The database holds the transfer now; the trade is committed even if the
+    // memory update below throws, so it never stays in 'committing'. A throw
+    // still reaches the caller, but the committed trade is always detached
+    // and its reservations released, or both sessions would stay busy.
     trade.state = 'committed';
-    trade.playerConfirmed = true;
-    trade.botConfirmed = true;
-    trade.completedAt = now();
-    const result = {
-        ok: true,
-        tradeId: trade.id,
-        direction: trade.direction,
-        negotiationId: trade.negotiationId || null,
-        partnerSession: trade.botSession,
-        moved: publicMoved(entries)
-    };
-    recordSupplyTrade(trade, 'completed', 'native_trade_commit', true, {
-        moved: result.moved
-    });
-    if (trade.botSession.pendingResourceDelivery?.tradeId === trade.id) {
-        trade.botSession.pendingResourceDelivery = undefined;
+    trade.commitPromise = null;
+    let result;
+    try {
+        applyLocalTransfers(moved, entries);
+        trade.playerConfirmed = true;
+        trade.botConfirmed = true;
+        trade.completedAt = now();
+        result = {
+            ok: true,
+            tradeId: trade.id,
+            direction: trade.direction,
+            negotiationId: trade.negotiationId || null,
+            partnerSession: trade.botSession,
+            // A side whose session plays another character now: the caller sends
+            // that session nothing about this trade.
+            playerActorChanged: trade.playerSession.actor !== trade.playerActor,
+            botActorChanged: trade.botSession.actor !== trade.botActor,
+            moved: publicMoved(entries)
+        };
+        recordSupplyTrade(trade, 'completed', 'native_trade_commit', true, {
+            moved: result.moved
+        });
+        if (trade.negotiationId) {
+            try { invoke('GameServer/Bot/Economy/BotNegotiationService').completeTrade(trade); } catch (_) { /* optional negotiation module */ }
+        }
+    } finally {
+        if (trade.botSession.pendingResourceDelivery?.tradeId === trade.id) {
+            trade.botSession.pendingResourceDelivery = undefined;
+        }
+        releaseReservations(trade);
+        clearAttachedTrade(trade);
     }
-    if (trade.negotiationId) {
-        try { invoke('GameServer/Bot/Economy/BotNegotiationService').completeTrade(trade); } catch (_) { /* optional negotiation module */ }
-    }
-    releaseReservations(trade);
-    clearAttachedTrade(trade);
     // Keep replay data serializable and detached from live session graphs.
     playerSession.lastBotTradeCompletion = {
         completedAt: trade.completedAt,
+        playerId: Number(trade.playerActor?.fetchId?.()),
         result: { ...result, partnerSession: null }
     };
     const detail = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? result.moved.map((item) => `${item.count} ${item.name}`).join(', ') : null;
@@ -604,6 +679,11 @@ async function commit(playerSession) {
 }
 
 function confirmPlayerTrade(playerSession) {
+    const inFlight = committingTrade(playerSession);
+    if (inFlight?.playerSession === playerSession) return { ok: true, trade: inFlight };
+    // A repeated confirmation of a trade that just completed reaches the
+    // commit, which answers with the completed result.
+    if (completionReplay(playerSession)) return { ok: true, trade: null, replay: true };
     const trade = activeTradeFor(playerSession);
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
 

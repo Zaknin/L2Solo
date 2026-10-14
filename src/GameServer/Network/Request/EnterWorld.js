@@ -59,8 +59,8 @@ function enterWorld(session, buffer) {
         if (session.enterWorldReady === tracked) session.enterWorldReady = null;
     });
     session.enterWorldReady = tracked;
-    tracked.catch(error => utils.infoWarn('Character', 'world entry failed: %s', error.message));
-    return tracked;
+    // Logged here and the player stays connected: the returned chain must not reach the drop boundary.
+    return tracked.catch(error => utils.infoWarn('Character', 'world entry failed: %s', error.message));
 }
 
 module.exports = enterWorld;

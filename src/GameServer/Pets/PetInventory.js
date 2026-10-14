@@ -50,6 +50,7 @@ async function apply(pet, command) {
     await runtime().persist(pet);
     const result = await Database.transferPetInventory(actor.fetchId(), pet.fetchPetControlItemObjectId(), command);
     pet.petData.inventory = result.inventory;
+    if (result.currentFeed !== undefined) pet.setCurrentFeed(result.currentFeed);
     const row = result.playerItem;
     if (row) {
         const existing = actor.backpack.fetchItemRaw(row.id);
@@ -88,9 +89,8 @@ function foodValue(itemId) {
 async function consumeFood(pet, item) {
     const feed = foodValue(item.fetchSelfId());
     if (feed <= 0) throw new Error('Unknown pet food');
-    await apply(pet, { direction: 'consume', itemId: item.fetchId(), amount: 1 });
-    pet.setCurrentFeed(pet.fetchCurrentFeed() + feed);
-    await runtime().persist(pet);
+    // The transfer writes the feed with the food; apply sets it in memory.
+    await apply(pet, { direction: 'consume', itemId: item.fetchId(), amount: 1, feed });
     pet.ownerSession.dataSendToMe?.(Response.consoleText(1527, [{ kind: 3, value: item.fetchSelfId() }]));
     runtime().publish(pet);
 }
