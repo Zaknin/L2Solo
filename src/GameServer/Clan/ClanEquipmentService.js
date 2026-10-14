@@ -962,8 +962,12 @@ async function recordRaidFailure(party, timestamp = Date.now()) {
 
     for (let attempt = 0; attempt < 2; attempt++) {
         const clan = await invoke('GameServer/Clan/ClanGoalService').clanProjectionById(clanId);
-        const current = clan?.state?.goal;
-        if (!current || String(current.goalKey || '') !== goalKey) {
+        // A raid may belong to the production goal a young clan runs beside
+        // its main goal; the failure is recorded on the goal that owns it.
+        const ownerSection = ['goal', 'productionGoal'].find(section => (
+            String(clan?.state?.[section]?.goalKey || '') === goalKey));
+        const current = ownerSection ? clan.state[ownerSection] : null;
+        if (!current) {
             return { ok: true, skipped: true, code: 'raid_goal_changed' };
         }
         if (String(current.controlledBy || '') === 'player') {
@@ -992,6 +996,7 @@ async function recordRaidFailure(party, timestamp = Date.now()) {
         const saved = await Database.updateAutonomousClanGoal({
             clanId,
             goal: next,
+            ownerSection,
             expectedUpdatedAt: number(clan.state?.updatedAt) || null,
             eventType: 'equipment_raid_failed',
             reasonCode: failure.reasonCode
@@ -1000,7 +1005,9 @@ async function recordRaidFailure(party, timestamp = Date.now()) {
             await Database.enqueueClanAction({
                 clanId,
                 actionKey: `clan:${clanId}:raid-failed:${failure.bossTemplateId}:${number(encounter.failedAt, timestamp)}`,
-                actionType: 'goal_plan',
+                // Below level 3 the production action plans the production
+                // goal; from level 3 the main planner adopts it as previous.
+                actionType: ownerSection === 'productionGoal' && number(clan.level) < 3 ? 'production' : 'goal_plan',
                 priority: 90,
                 availableAt: timestamp,
                 payload: {

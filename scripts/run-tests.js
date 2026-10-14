@@ -664,6 +664,7 @@ const tests = [
     'tests/test_clan_dues.js',
     'tests/test_clan_simulation_slice4.js',
     'tests/test_clan_goal_fulfilled_closed.js',
+    'tests/test_clan_raid_failure_owner.js',
     'tests/test_clan_simulation_slice5.js',
     'tests/test_clan_blood_mark_support.js',
     'tests/test_clan_simulation_slice6.js',
