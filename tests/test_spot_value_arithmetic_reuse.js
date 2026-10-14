@@ -53,6 +53,32 @@ try {
     assert.notEqual(a, b, 'each caller still owns a fresh row');
     const expected = structuredClone(b); a.kills = -1;
     assert.deepEqual(Table.value('-15_42', 'dps', 5), expected);
+    // One memo row per argument set as its string reads (the old string key):
+    // "5" and 5 share a row, "05" has its own, for a known spot (numeric key)
+    // and an unknown one (string key) alike.
+    const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+    const developer = Config.developerDiagnostics;
+    const renamed = JSON.parse(fs.readFileSync(fixtureFile, 'utf8'));
+    renamed.spots[0][0] = '5';
+    const renamedFile = path.join(require('node:os').tmpdir(), `spot_table_memo_${process.pid}.json`);
+    fs.writeFileSync(renamedFile, JSON.stringify(renamed));
+    try {
+        Config.developerDiagnostics = true;
+        Table.useFile(renamedFile);
+        const memo = (...args) => {
+            const before = Table.cacheStats(), row = Table.value(...args), after = Table.cacheStats();
+            return { row, hits: after.memoHits - before.memoHits, misses: after.memoMisses - before.memoMisses };
+        };
+        const first = memo('5', 'dps', 24);
+        assert(first.row && first.misses === 1 && first.hits === 0);
+        assert.deepEqual(memo(5, 'dps', 24), { row: first.row, hits: 1, misses: 0 });
+        assert.deepEqual(memo('5', 'dps', '24'), { row: first.row, hits: 1, misses: 0 });
+        assert.deepEqual(memo('05', 'dps', 24), { row: null, hits: 0, misses: 1 });
+        assert.deepEqual(memo('05', 'dps', 24), { row: null, hits: 1, misses: 0 });
+        assert.deepEqual(memo('5', 'dps', '024'), { row: first.row, hits: 0, misses: 1 });
+        assert.deepEqual(memo('7', 'dps', 24), { row: null, hits: 0, misses: 1 });
+        assert.deepEqual(memo(7, 'dps', 24), { row: null, hits: 1, misses: 0 });
+    } finally { Config.developerDiagnostics = developer; fs.rmSync(renamedFile, { force: true }); }
     console.log(`spot arithmetic exact parity PASS: ${comparisons} lookups; interpolation calls ${counts.reference}->${counts.current}`);
 } finally {
     delete global.__spotCurveCounts; Table.useFile(); delete process.env.L2NODE_PROGRESSION_RATE;

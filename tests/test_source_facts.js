@@ -196,6 +196,69 @@ try {
     assert(changed.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield
         > beforeReplacement.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield);
     checkMixed(warsmith, { spots: structuredClone(mixedSpots), occupancy: {} });
+
+    // The party verdict of a record is the old rule: soloSafeForSource on the
+    // target object the planner built per record (npcLevel from the record,
+    // else the spot's average level; SourceCatalog stores Number(level || 0)).
+    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    Data.npcRewards = [...saved.rewards, { selfId: 99001, template: { name: 'Facts Test Mob' },
+        rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
+        spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }];
+    const oldParty = (state, templateLevel, spot) => {
+        const npcLevel = Number(templateLevel || 0);
+        return !Planner.soloSafeForSource(state, { npcLevel: Number(npcLevel || spot.avgLevel || 1),
+            spotLevel: Number(spot.avgLevel || 1), sourceKind: 'drop', raidBoss: false });
+    };
+    const verdict = (state, templateLevel, avgLevel, expectParty, label) => {
+        const template = { name: 'Facts Test Mob', kind: 'Monster', ...(templateLevel === undefined ? {} : { level: templateLevel }) };
+        Data.npcs = [...saved.npcs, { selfId: 99001, template }];
+        const spot = { ...spots[0], avgLevel };
+        assert.equal(oldParty(state, templateLevel, spot), expectParty, `${label}: old rule`);
+        const row = byKind(facts(state, { spots: [spot] })).drop;
+        assert.equal(row.reason === 'party_needed', expectParty, `${label}: sourceFacts reason ${row.reason}`);
+    };
+    const healer = armed({ ...base, characterId: 990003, stats: { classId: 16 } });
+    const buffer = armed({ ...base, characterId: 990004, stats: { classId: 17 } });
+    assert.equal(Planner.roleFor(healer), 'healer');
+    assert.equal(Planner.roleFor(buffer), 'buffer');
+    // (a) a support with under two armour pieces needs a party at any margin;
+    // the warsmith at the same level is solo-ready.
+    verdict(healer, 38, 38, true, 'unprepared healer');
+    verdict(buffer, 38, 38, true, 'unprepared buffer');
+    verdict(warsmith, 38, 38, false, 'armed warsmith');
+    // (b) a margin in [-2, 0) is tight: preferred party, so not solo.
+    const effective = Planner.combatReadiness(warsmith).effectiveLevel;
+    const tight = Math.floor(effective) + 1;
+    assert(effective - tight >= -2 && effective - tight < 0);
+    verdict(warsmith, tight, tight, true, 'tight margin');
+    verdict(warsmith, tight + 2, tight + 2, true, 'underleveled');
+    verdict(warsmith, Math.floor(effective), Math.floor(effective), false, 'zero-or-better margin');
+    // (c) a record without its own level reads the spot's average level.
+    for (const level of [undefined, 0, 'abc']) {
+        verdict(warsmith, level, Math.floor(effective), false, `npc level ${level}, spot solo`);
+        verdict(warsmith, level, tight, true, `npc level ${level}, spot tight`);
+        verdict(warsmith, level, String(tight), true, `npc level ${level}, spot level string`);
+    }
+    verdict(warsmith, String(tight), Math.floor(effective), true, 'npc level string');
+    verdict(warsmith, String(Math.floor(effective)), tight, false, 'npc level string, spot tight');
+    // (d) party_needed first seen after ready and occupied keeps that key
+    // place, and its tally sums records on either side of other reasons.
+    const orderNpcs = [[99030, Math.floor(effective)], [99031, tight], [99032, Math.floor(effective)], [99033, tight]]
+        .map(([selfId, level]) => ({ selfId, template: { name: `Order ${selfId}`, level, kind: 'Monster' } }));
+    Data.npcs = [...saved.npcs, ...orderNpcs];
+    Data.npcRewards = orderNpcs.map(npc => ({ selfId: npc.selfId, template: npc.template,
+        rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
+        spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }));
+    const orderSpot = (npc, suffix) => ({ ...spots[0], id: `order-${npc.selfId}-${suffix}`, avgLevel: npc.template.level,
+        npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] });
+    const orderSpots = [orderSpot(orderNpcs[0], 'ready'), orderSpot(orderNpcs[0], 'full'), orderSpot(orderNpcs[1], 'a'),
+        orderSpot(orderNpcs[2], 'ready'), orderSpot(orderNpcs[3], 'b')];
+    const ordered = checkMixed(warsmith, { spots: orderSpots, occupancy: { 'order-99030-full': { count: 9, capacity: 9 } } });
+    const keys = [...ordered.counts.keys()];
+    assert(keys.indexOf('ready') >= 0 && keys.indexOf('occupied') >= 0 && keys.indexOf('party_needed') > keys.indexOf('ready')
+        && keys.indexOf('party_needed') > keys.indexOf('occupied'), `party_needed after ready and occupied: ${keys}`);
+    assert.equal(ordered.counts.get('party_needed'), ordered.all.filter(row => row.reason === 'party_needed').length);
+    assert(ordered.counts.get('party_needed') >= 4, 'party_needed records on both sides of a later ready spot');
     console.log('test_source_facts: ok');
 } finally {
     Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards;

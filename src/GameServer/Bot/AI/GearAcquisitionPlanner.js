@@ -224,6 +224,7 @@ function recoveryEntryLive(entry, state, timestamp, wake) {
 // call the planner changes equipment only on copied states/inventories.
 let readinessScope = null;
 const MAX_SOURCE_ASSESSMENTS = 128;
+const SUPPORT_ROLES = new Set(['healer', 'buffer']);
 const SOURCE_ASSESSMENTS = Object.freeze({
     missing_weapon: Object.freeze({ need: 'required', reason: 'missing_weapon' }),
     unprepared_support: Object.freeze({ need: 'required', reason: 'unprepared_support' }),
@@ -265,7 +266,7 @@ function computeCombatReadiness(state = {}) {
         : 0;
     const baseKit = (weapon ? 0.25 : 0) + Math.min(0.45, armor.length * 0.1);
     const roleAdjustment = role === 'tank' ? 0.45
-        : ['healer', 'buffer'].includes(role) ? -0.7
+        : SUPPORT_ROLES.has(role) ? -0.7
             : role === 'mage' ? -0.25 : 0;
 
     return {
@@ -1688,7 +1689,6 @@ function sourceReadinessFor(state) {
     return record ? record.readiness : computeCombatReadiness(state);
 }
 
-const SUPPORT_ROLES = new Set(['healer', 'buffer']);
 function sourceAssessmentReason(readiness, targetLevel) {
     const margin = readiness.effectiveLevel - targetLevel;
 
@@ -2154,6 +2154,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         if (!reason) {
             // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
             // still needs its roster, as soloSafeForSource says.
+            // Same raid check as partyNeedAssessmentForSource (kept there too).
             readiness ??= sourceReadinessFor(state);
             if (kind === 'raid' || !soloSafeAtLevel(readiness, sourceRecordTargetLevel(entry))) {
                 if (counts && !partyNeeded++ && !counts.has('party_needed')) counts.set('party_needed', 0);
