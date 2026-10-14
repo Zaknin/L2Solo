@@ -90,10 +90,14 @@ function admission(party, members, spot, options = {}) {
         || spot.raidWorldAvailable === false) return fail('raid_roster_source_changed');
     const owner = options.owner;
     if (!owner || owner.mode !== 'autonomous' || !same(owner.marker, marker)) return fail('raid_roster_owner_changed');
+    // A clan departure ends the roster (owner change cancels the party); the rest is transient.
     if (members.some(member => {
         const current = owner.members?.find(row => row[0] === id(member));
-        return !current || current[2] !== marker.clanId || current[1] !== Number(member.classId ?? member.stats?.classId ?? 0)
-            || Number(member.clanId ?? member.stats?.clanId) !== marker.clanId
+        return !current || current[2] !== marker.clanId || Number(member.clanId ?? member.stats?.clanId) !== marker.clanId;
+    })) return fail('raid_roster_owner_changed');
+    if (members.some(member => {
+        const current = owner.members.find(row => row[0] === id(member));
+        return current[1] !== Number(member.classId ?? member.stats?.classId ?? 0)
             || current[3] !== Number(member.level) || current[4]
             || String(member.partyId || member.party?.partyId || '') !== String(party.partyId)
             || member.phase !== (options.phase || 'cold')
