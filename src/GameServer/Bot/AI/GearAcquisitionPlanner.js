@@ -1663,9 +1663,32 @@ function partyNeedAssessmentForSource(state = {}, source = {}) {
 }
 
 function sourceTargetLevel(source) {
-    return Number(source?.npcLevel || source?.spotLevel || Infinity);
+    return targetLevelOf(source?.npcLevel, source?.spotLevel);
 }
 
+function targetLevelOf(npcLevel, spotLevel) {
+    return Number(npcLevel || spotLevel || Infinity);
+}
+
+// The level a source fact judges an index record by: sourceTargetLevel of
+// its sourceTargetOf view, without building that object per record.
+function sourceRecordTargetLevel(entry) {
+    return targetLevelOf(sourceRecordNpcLevel(entry), sourceRecordSpotLevel(entry.spot));
+}
+
+// The bot's verdict on one non-raid record, as soloSafeForSource gives it
+// for the record's target: solo_ready only. readiness is the decision's one
+// combat readiness (sourceReadinessFor).
+function soloSafeAtLevel(readiness, targetLevel) {
+    return SOURCE_ASSESSMENTS[sourceAssessmentReason(readiness, targetLevel)].need === 'solo_ok';
+}
+
+function sourceReadinessFor(state) {
+    const record = readinessRecord(state);
+    return record ? record.readiness : computeCombatReadiness(state);
+}
+
+const SUPPORT_ROLES = new Set(['healer', 'buffer']);
 function sourceAssessmentReason(readiness, targetLevel) {
     const margin = readiness.effectiveLevel - targetLevel;
 
@@ -1673,7 +1696,7 @@ function sourceAssessmentReason(readiness, targetLevel) {
     // even when the level arithmetic happens to look favourable.  This is a
     // hard party need, while a normally equipped bot near the target level can
     // still progress alone and merely advertise a preferred party.
-    const unpreparedSupport = ['healer', 'buffer'].includes(readiness.role)
+    const unpreparedSupport = SUPPORT_ROLES.has(readiness.role)
         && readiness.armorCount < 2;
     if (!readiness.hasWeapon) return 'missing_weapon';
     if (unpreparedSupport) return 'unprepared_support';
@@ -1909,10 +1932,16 @@ function sourceIndexFor(spots = []) {
 
 // The hunt-rule view of an index record: the fields the band, party and
 // capacity rules read. Materialized sources and source facts share it.
-function sourceTargetOf({ reward, spot, kind, npcLevel }) {
-    const raidBoss = spot?.raidBoss === true;
-    return { npcId: Number(reward.selfId), npcLevel: Number(npcLevel || spot?.avgLevel || 1), spotId: spot.id,
-        spotLevel: Number(spot.avgLevel || 1), sourceKind: raidBoss ? 'raid' : kind, raidBoss };
+function sourceTargetOf(entry) {
+    const { reward, spot, kind } = entry, raidBoss = spot?.raidBoss === true;
+    return { npcId: Number(reward.selfId), npcLevel: sourceRecordNpcLevel(entry), spotId: spot.id,
+        spotLevel: sourceRecordSpotLevel(spot), sourceKind: raidBoss ? 'raid' : kind, raidBoss };
+}
+function sourceRecordNpcLevel({ spot, npcLevel }) {
+    return Number(npcLevel || spot?.avgLevel || 1);
+}
+function sourceRecordSpotLevel(spot) {
+    return Number(spot.avgLevel || 1);
 }
 
 // One materialized source of an index record for a killer level.
@@ -2081,6 +2110,10 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly || bestForWish);
     let bestCost;
     let spoiler = options.spoiler;
+    // Most records the bot reaches are refused as party_needed. The verdict
+    // reads one readiness per call and the record's level; the counts take
+    // their tally once at the end (the key keeps its first-seen place).
+    let readiness = null, partyNeeded = 0;
     const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
     // The full view still reads all rows. Ready readers walk only eligible
     // ordinals; diagnostics merge the few static buckets at their first row.
@@ -2119,9 +2152,15 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         }
         if (!reason && rule) reason = FACT_RULE_REASONS[rule];
         if (!reason) {
-            const target = sourceTargetOf(entry);
-            if (!soloSafeForSource(state, target)) reason = 'party_needed';
-            else {
+            // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
+            // still needs its roster, as soloSafeForSource says.
+            readiness ??= sourceReadinessFor(state);
+            if (kind === 'raid' || !soloSafeAtLevel(readiness, sourceRecordTargetLevel(entry))) {
+                if (counts && !partyNeeded++ && !counts.has('party_needed')) counts.set('party_needed', 0);
+                if (readyOnly) continue;
+                reason = 'party_needed';
+            } else {
+                const target = sourceTargetOf(entry);
                 target.capacity = LevelingRoutes.capacityForSpot(spot);
                 if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
             }
@@ -2168,6 +2207,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         if (bestForWish) facts[0] = fact;
         else facts.push(fact);
     }
+    if (partyNeeded) counts.set('party_needed', counts.get('party_needed') + partyNeeded);
     return facts;
 }
 

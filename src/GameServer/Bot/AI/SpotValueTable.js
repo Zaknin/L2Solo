@@ -206,8 +206,29 @@ function value(spotId, role, level, shots = true, rewardOptions = {}) {
     return row && { ...row };
 }
 
+// The memo key: one small integer for a known spot, role, an integer level
+// and spoil skill (no string per call); any other argument set keeps the
+// five-part string. Each part is read as its string, as the string key reads
+// it ("5" and 5 share one row), so both forms name the same rows: one Map,
+// the same entries and the same oldest-first eviction.
+const MEMO_LEVELS = 256, MEMO_SKILLS = 64, MEMO_MAX_KEY = 2 ** 30;
+function memoPart(value, limit) {
+    if (typeof value === 'number') return Number.isInteger(value) && value >= 0 && value < limit ? value : -1;
+    const text = `${value}`, number = Number(text);
+    return Number.isInteger(number) && number >= 0 && number < limit && `${number}` === text ? number : -1;
+}
+function memoKey(t, spotId, role, level, shots, skill) {
+    const s = t.spotIndex.get(typeof spotId === 'string' ? spotId : `${spotId}`);
+    const r = t.roleIndex.get(typeof role === 'string' ? role : `${role}`);
+    const l = memoPart(level, MEMO_LEVELS), k = memoPart(skill, MEMO_SKILLS);
+    if (s !== undefined && r !== undefined && l >= 0 && k >= 0) {
+        const key = (((s * t.roleIndex.size + r) * 2 + (shots ? 1 : 0)) * MEMO_LEVELS + l) * MEMO_SKILLS + k;
+        if (key < MEMO_MAX_KEY) return key;
+    }
+    return `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
+}
 function memoValue(t, rates, spotId, role, level, shots, skill) {
-    const key = `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
+    const key = memoKey(t, spotId, role, level, shots, skill);
     let row = valueMemo.get(key);
     if (row === undefined) {
         DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
