@@ -13,16 +13,16 @@ const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Meetings = invoke('GameServer/AfkTrade/TradeMeetingService');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
-const sellerId = 730311, buyerId = 730312;
+const sellerId = 730311, buyerId = 730312, errandSellerId = 730313;
 const SKIN = 1867;
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
 (async () => {
-    const world = await createWorld([{ id: sellerId, classId: 0, level: 20 }, { id: buyerId, classId: 0, level: 20 }], 'e311-stuck-shopping');
+    const world = await createWorld([{ id: sellerId, classId: 0, level: 20 }, { id: buyerId, classId: 0, level: 20 }, { id: errandSellerId, classId: 0, level: 20 }], 'e311-stuck-shopping');
     const prepare = Coordinator.requestMeetingPreparation;
     try {
         await Database.createAccount('bot_e311_fixture', 'fixture');
-        await Database.execute(['UPDATE characters SET username=? WHERE id IN (?,?)', ['bot_e311_fixture', sellerId, buyerId]]);
+        await Database.execute(['UPDATE characters SET username=? WHERE id IN (?,?,?)', ['bot_e311_fixture', sellerId, buyerId, errandSellerId]]);
         await Life.init();
         const place = Town.marketTown('Giran').center;
         const spot = invoke('GameServer/Bot/Population/SpotProfiles').ensure().filter(row => row.center)
@@ -31,9 +31,15 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         await Database.setItem(buyerId, { selfId: 57, amount: 1000000, slot: 0 });
         await Database.setItem(sellerId, { selfId: 57, amount: 1000, slot: 0 });
         await Database.setItem(sellerId, { selfId: SKIN, amount: 20, slot: 0 });
+        await Database.setItem(errandSellerId, { selfId: 57, amount: 1000, slot: 0 });
+        await Database.setItem(errandSellerId, { selfId: SKIN, amount: 20, slot: 0 });
         for (const [id, name, activity, stats] of [
             [buyerId, 'E311Buyer', 'hunting', { classId: 0, generatedCold: true, money: [100, 0, 1000, 0] }],
             [sellerId, 'E311Seller', 'shopping', { classId: 0, generatedCold: true, marketSellRetryAfter: 1,
+                townVisit: { town: 'Giran', startedAt: Date.now() - 60000, reason: 'sell_inventory' },
+                marketReturn: { spotId: String(spot.id), regionName: spot.name, loc: spot.center } }],
+            // A second seller whose town errands are not done on the refused pass.
+            [errandSellerId, 'E311ErrandSeller', 'shopping', { classId: 0, generatedCold: true, marketSellRetryAfter: 1,
                 townVisit: { town: 'Giran', startedAt: Date.now() - 60000, reason: 'sell_inventory' },
                 marketReturn: { spotId: String(spot.id), regionName: spot.name, loc: spot.center } }]
         ]) {
@@ -53,6 +59,41 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         const ad = Afk.ownerRecords(buyerId).find(row => row.kind === 'buy_ad');
         assert(ad, 'the buy ad is on the board');
 
+        // The seller's own worker consents to the answer again (ColdSimulationWorker
+        // 'meeting' mode). The sale retry saved with the pending deal is in that
+        // snapshot: it must not take the answer away (it turns off
+        // ItemDisposition.soloSaleSlotLimit inside EconomyContext). Same economy
+        // build and the same MarketListingPolicy.evaluate as the worker consent.
+        const consentAnswer = (state, retryAfter, now) => {
+            const probe = { ...state, stats: { ...state.stats, marketSellRetryAfter: retryAfter } };
+            const trip = invoke('GameServer/Bot/Economy/EconomicTrip').prepare(probe);
+            let step; do step = trip.next(); while (!step.done);
+            const board = Afk.boardIndex();
+            const npcOffersFor = invoke('GameServer/Bot/Population/ColdOccupationSources').npcOffersFor;
+            const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(probe, { board, routeRows: step.value,
+                timestamp: now, npcOffersFor, workshop: { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 },
+                caller: 'meeting_prepare', trigger: 'e311-probe' });
+            const decision = invoke('GameServer/Bot/Economy/MarketListingPolicy').evaluate(probe, { economy, board, npcOffersFor,
+                findSpot: id => invoke('GameServer/Bot/Population/SpotProfiles').findById(id),
+                now, decisionPoint: 'meeting:e311-probe', slots: 5 });
+            return decision.answers.some(row => row.item.selfId === SKIN && Number(row.line.recordId) === ad.id && row.count >= 20);
+        };
+        const fixture = Life.cachedState(sellerId);
+        const kitBag = { ...fixture, spotId: String(spot.id), inventory: { ...fixture.inventory, ...Life.inventorySummaryFromItems([
+            { selfId: 1835, amount: 1500 }, { selfId: 1060, amount: 40 }, { selfId: 736, amount: 2 },
+            ...[1864, 1865, 1866, 1868, 1869, 1870, 1871, 1872, 1873, 1874, 1875, 1876, 1877, 1878, 1879, 1880, 1881, 1882, 1883, 1884]
+                .map(selfId => ({ selfId, amount: 3 }))]) } };
+        // Near the half-full sale limit the limit shortens the outing, so the
+        // kit targets differ with and without the retry.
+        const fullBag = { ...kitBag, inventory: { ...kitBag.inventory, ...Life.inventorySummaryFromItems(
+            [...Array(14).keys()].map(index => ({ selfId: 1885 + index, amount: 2 }))) } };
+        for (const [label, bag] of [['fixture bag', fixture], ['bag with loot and kit', kitBag], ['bag near the half-full limit', fullBag]]) {
+            const now = Date.now();
+            const before = consentAnswer(bag, now - 1000, now), held = consentAnswer(bag, now + 30 * 60 * 1000, now);
+            console.log(`E311 consent probe (${label}): answer without retry=${before}, with the saved retry=${held}`);
+            assert.equal(held, before, `${label}: the saved sale retry changes the seller's own consent to the answer`);
+        }
+
         // The payer's worker answers later; it refuses the deal, as live (the ad's need changed).
         const meetings = new Set();
         let refuse = null;
@@ -67,7 +108,7 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         assert.equal(meetings.size, 1, 'the first pass answered the buy ad through a trade meeting');
         assert.equal(Meetings.hasPreparation(sellerId), true, 'the deal is still being prepared');
         assert.equal(Life.cachedState(sellerId).activity, 'shopping', 'a deal in preparation keeps the visit');
-        assert(Number(Life.cachedState(sellerId).stats.marketSellRetryAfter) > Date.now(), 'the sale retry is saved with the pending deal');
+        const retryWhilePreparing = Number(Life.cachedState(sellerId).stats.marketSellRetryAfter);
         await Population.resolveColdState(Life.cachedState(sellerId));
         await settle();
         assert.equal(Life.cachedState(sellerId).activity, 'shopping', 'a pass during the preparation does not end the visit');
@@ -91,7 +132,30 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
             meetings: meetings.size, activity: after.activity, townVisit: after.stats.townVisit,
             marketSellRetryAfter: after.stats.marketSellRetryAfter, lastReason: after.stats.lastReason })}`);
         assert.equal(meetings.size, 1, 'no later pass answers the refused ad again');
+
+        // A refused deal while the town errands stop early (a purchase that
+        // waits on its own meeting, ColdMarketService.finishTownErrands): the
+        // visit cannot end on that pass (GoalExecutor.finishVisit), so the retry
+        // is saved before it; the next pass does not answer the ad again.
+        const errandMeetings = new Set();
+        Coordinator.requestMeetingPreparation = async (id, request) => {
+            errandMeetings.add(request.token);
+            throw Error('trade_meeting_need_changed');
+        };
+        const Errands = invoke('GameServer/Bot/Economy/ColdMarketService'), finishErrands = Errands.finishTownErrands;
+        Errands.finishTownErrands = async (state) => state;
+        for (let pass = 0; pass < 3; pass++) {
+            await Population.resolveColdState(Life.cachedState(errandSellerId));
+            await settle();
+        }
+        Errands.finishTownErrands = finishErrands;
+        const errandAfter = Life.cachedState(errandSellerId);
+        assert.equal(errandAfter.activity, 'shopping', 'the errands keep this visit open');
+        assert.equal(errandMeetings.size, 1, 'a visit held by its errands does not answer the refused ad again');
+        // The mechanism last: the sale retry saved with the pending deal.
+        assert(retryWhilePreparing > Date.now(), 'the sale retry is saved with the pending deal');
         assert(Number(after.stats.marketSellRetryAfter) > Date.now(), 'the ended visit keeps its sale retry');
+        assert(Number(errandAfter.stats.marketSellRetryAfter) > Date.now(), 'the errand seller keeps its sale retry');
         console.log('E311 refused trade meeting does not hold the town visit: passed');
     } finally {
         Coordinator.requestMeetingPreparation = prepare;

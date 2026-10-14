@@ -73,6 +73,7 @@ const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const ColdTrip = require('./ColdTrip');
 const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
+const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const activationFailureLogAt = new Map();
 // Returned by a resolveColdState branch method that did not take its branch.
 const COLD_RESOLVE_NEXT = Symbol('cold_resolve_next');
@@ -3917,23 +3918,24 @@ const PopulationService = {
             && (!workerPlan?.economyPlan || listingIntent.cleanup || listingIntent.saleVisit)
             ? openMarketListing(listingIntent, goal)
             : Promise.resolve({ state: purchasedState, listed: false });
-        const marketStatePromise = listingPromise.then((listingResult) => {
-            const listingState = listingResult.state || purchasedState;
+        const marketStatePromise = listingPromise.then(async (listingResult) => {
+            let listingState = listingResult.state || purchasedState;
             if (listingResult.pending) {
-                // A deal still preparing, or accepted as a meeting, keeps the bot in
-                // town with its sale retry saved; a refused one ends the visit below
-                // as every other sale outcome (E311).
-                const id = listingState.characterId, live = LifeState.cachedState(id) || listingState;
-                if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(id) || live.stats?.tradeMeeting) {
-                    if (LifeState.hotRow(id)) return LifeState.hotRow(id);
-                    const waiting = { ...live, stats: { ...live.stats, marketSellRetryAfter: listingState.stats?.marketSellRetryAfter } };
-                    return LifeState.upsertState(waiting, 'market_sale_pending').then((saved) => saved || waiting);
-                }
+                // The sale retry of a deal through a meeting is saved first, on the
+                // fresh row (a meeting marker may have come meanwhile). A deal still
+                // preparing, or accepted as a meeting, keeps the bot in town; a
+                // refused one ends the visit below as every other sale outcome (E311).
+                const id = listingState.characterId;
+                if (LifeState.hotRow(id)) return LifeState.hotRow(id);
+                const live = LifeState.cachedState(id) || listingState;
+                const waiting = { ...live, stats: { ...live.stats, marketSellRetryAfter: listingState.stats?.marketSellRetryAfter } };
+                listingState = await LifeState.upsertState(waiting, 'market_sale_pending') || waiting;
+                if (TradeMeetingService.hasPreparation(id) || listingState.stats?.tradeMeeting) return listingState;
             }
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
             return ColdMarketService.finishTownErrands(listingState).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
-                if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(restockedState.characterId)) return restockedState;
+                if (TradeMeetingService.hasPreparation(restockedState.characterId)) return restockedState;
                 const returnState = GoalExecutor.finishMarketVisit(restockedState);
                 return returnState
                     ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)
@@ -3942,7 +3944,7 @@ const PopulationService = {
         });
         return marketStatePromise.then((persistedState) => persistedState || purchasedState)
             .then((marketState) => {
-            if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(marketState.characterId)) return marketState;
+            if (TradeMeetingService.hasPreparation(marketState.characterId)) return marketState;
             return GoalService.review(marketState, { spot }).catch((err) => {
             utils.infoWarn('BotGoals', 'goal review failed for %s: %s', marketState.name, err.message);
             return null;
