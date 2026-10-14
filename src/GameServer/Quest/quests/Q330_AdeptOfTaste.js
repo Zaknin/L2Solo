@@ -1,9 +1,9 @@
 // Q330 Adept Of Taste. Source: l2j-lisvus fdc7e33 330_AdeptOfTaste.
 //
 // Mirien (7469) commissions five market ingredients from specialist handlers:
-// Sonia (7062) trades mandragora roots for sap, Jaycubs (7073) beekeeping goods
-// for honey, Panos (7078) a contract and hobgoblin amulets for Dionian potato,
-// Glyvkas (7067) marsh moss for moss bundles, and Rolant (7069) monster-eye
+// Sonia (7062) trades mandragora roots for sap, Jacob (7073) beekeeping goods
+// for honey, Pano (7078) a contract and hobgoblin amulets for Dionian potato,
+// Glyvka (7067) marsh moss for moss bundles, and Rollant (7069) monster-eye
 // bodies for eye meat. Five ingredients earn a cooked steak dish from Mirien,
 // rarer specials push the dish a tier up (ten percent chance of an upgrade,
 // jackpot sound on the fifth tier); the dish then trades to Chef Jonas (7461)
@@ -81,7 +81,7 @@ module.exports = {
             if (Number(state.session.actor.fetchLevel()) < 24) {
                 return page('Mirien', 'Cooking is not a game for children. Come back when you are level 24.');
             }
-            return page('Mirien', 'Chef Jonas needs market ingredients for his famous steaks. Visit Sonia, Jaycubs, Panos, Glyvkas and Rolant - each supplies one ingredient. Bring me five and I will cook.',
+            return page('Mirien', 'Chef Jonas needs market ingredients for his famous steaks. Visit Sonia, Jacob, Pano, Glyvka and Rollant - each supplies one ingredient. Bring me five and I will cook.',
                 link('start', 'Accept.'));
         }
         const cond = state.getInt('cond');
@@ -148,48 +148,48 @@ module.exports = {
         if (npcId === JAYCUBS && hasList(state) && ing < 5) {
             if (!count(state, JAYCUBS_BOOK) && !count(state, HONEY) && !count(state, GOLDEN_HONEY)) {
                 await step(state, { gives: [[JAYCUBS_BOOK, 1]], variables: { ...state.variables } });
-                return page('Beekeeper Jaycubs', 'Take my insect book and gather 20 nectar and 10 royal jelly from the forest bugs.');
+                return page('Beekeeper Jacob', 'Take my insect book and gather 20 nectar and 10 royal jelly from the forest bugs.');
             }
             if (count(state, JAYCUBS_BOOK)) {
-                if (count(state, NECTAR) < 20) return page('Beekeeper Jaycubs', 'Nectar! 20 jars of it.');
-                if (count(state, JELLY) < 10) return page('Beekeeper Jaycubs', 'Nectar enough - now 10 royal jelly, and I will render the honey.',
+                if (count(state, NECTAR) < 20) return page('Beekeeper Jacob', 'Nectar! 20 jars of it.');
+                if (count(state, JELLY) < 10) return page('Beekeeper Jacob', 'Nectar enough - now 10 royal jelly, and I will render the honey.',
                     link('jaycubs', 'Render common honey.'));
                 await step(state, {
                     takes: [[JAYCUBS_BOOK, count(state, JAYCUBS_BOOK)], [NECTAR, count(state, NECTAR)],
                         [JELLY, count(state, JELLY)]],
                     gives: [[GOLDEN_HONEY, 1]], variables: { ...state.variables } });
                 state.playSound('ItemSound.quest_middle');
-                return page('Beekeeper Jaycubs', 'Golden honey - the pride of my hives!');
+                return page('Beekeeper Jacob', 'Golden honey - the pride of my hives!');
             }
             if (count(state, HONEY) + count(state, GOLDEN_HONEY) === 1) {
-                return page('Beekeeper Jaycubs', 'My honey is not for resale. Keep it for the pot.');
+                return page('Beekeeper Jacob', 'My honey is not for resale. Keep it for the pot.');
             }
         }
         if (npcId === PANOS && hasList(state) && ing < 5) {
             if (!count(state, PANOS_CONTRACT) && !count(state, POTATO)) {
                 await step(state, { gives: [[PANOS_CONTRACT, 1]], variables: { ...state.variables } });
-                return page('Farmer Panos', 'Sign my contract and bring me 30 amulets off the hobgoblins to the west. Then the secret Dionian potato is yours.');
+                return page('Farmer Pano', 'Sign my contract and bring me 30 amulets off the hobgoblins to the west. Then the secret Dionian potato is yours.');
             }
             if (count(state, PANOS_CONTRACT)) {
-                if (count(state, AMULET) < 30) return page('Farmer Panos', '30 hobgoblin amulets. Count them yourself.');
+                if (count(state, AMULET) < 30) return page('Farmer Pano', '30 hobgoblin amulets. Count them yourself.');
                 await step(state, {
                     takes: [[PANOS_CONTRACT, count(state, PANOS_CONTRACT)], [AMULET, count(state, AMULET)]],
                     gives: [[POTATO, 1]], variables: { ...state.variables } });
                 state.playSound('ItemSound.quest_middle');
-                return page('Farmer Panos', 'A fine potato. The stew will sing.');
+                return page('Farmer Pano', 'A fine potato. The stew will sing.');
             }
-            if (count(state, POTATO)) return page('Farmer Panos', 'That potato is already yours, friend.');
+            if (count(state, POTATO)) return page('Farmer Pano', 'That potato is already yours, friend.');
         }
         if (npcId === GLYVKAS && hasList(state) && ing < 5) {
             if (!count(state, GLYVKAS_BOOK) && !count(state, GREEN_BUNDLE) && !count(state, BROWN_BUNDLE)) {
                 await step(state, { gives: [[GLYVKAS_BOOK, 1]], variables: { ...state.variables } });
-                return page('Glyvkas', 'My book knows every moss. Gather 20 green and 20 brown marsh moss for me.');
+                return page('Glyvka', 'My book knows every moss. Gather 20 green and 20 brown marsh moss for me.');
             }
             if (count(state, GLYVKAS_BOOK)) {
                 const moss = count(state, GREEN_MOSS) + count(state, BROWN_MOSS);
-                if (moss < 20) return page('Glyvkas', 'The marsh grows both green and brown moss. 20 of each, no less.');
+                if (moss < 20) return page('Glyvka', 'The marsh grows both green and brown moss. 20 of each, no less.');
                 if (count(state, BROWN_MOSS) < 20) {
-                    return page('Glyvkas', 'Bring the mosses with my book and I will bind a bundle.',
+                    return page('Glyvka', 'Bring the mosses with my book and I will bind a bundle.',
                         link('glyvkas', 'Bind the green bundle.'));
                 }
                 await step(state, {
@@ -197,26 +197,26 @@ module.exports = {
                         [BROWN_MOSS, count(state, BROWN_MOSS)]],
                     gives: [[BROWN_BUNDLE, 1]], variables: { ...state.variables } });
                 state.playSound('ItemSound.quest_middle');
-                return page('Glyvkas', 'A brown bundle - bitter, but rare.');
+                return page('Glyvka', 'A brown bundle - bitter, but rare.');
             }
             if (count(state, GREEN_BUNDLE) + count(state, BROWN_BUNDLE) === 1) {
-                return page('Glyvkas', 'One bundle is enough per cook, traveller.');
+                return page('Glyvka', 'One bundle is enough per cook, traveller.');
             }
         }
         if (npcId === ROLANT && hasList(state) && ing < 5) {
             if (!count(state, ROLANT_BOOK) && !count(state, EYE_MEAT)) {
                 await step(state, { gives: [[ROLANT_BOOK, 1]], variables: { ...state.variables } });
-                return page('Rolant', 'Monster eyes, 30 of them, from the fungi of the south. My creature book shows where.');
+                return page('Rollant', 'Monster eyes, 30 of them, from the fungi of the south. My creature book shows where.');
             }
             if (count(state, ROLANT_BOOK)) {
-                if (count(state, EYE_BODY) < 30) return page('Rolant', '30 eye bodies. The fungi are plentiful enough.');
+                if (count(state, EYE_BODY) < 30) return page('Rollant', '30 eye bodies. The fungi are plentiful enough.');
                 await step(state, {
                     takes: [[ROLANT_BOOK, count(state, ROLANT_BOOK)], [EYE_BODY, count(state, EYE_BODY)]],
                     gives: [[EYE_MEAT, 1]], variables: { ...state.variables } });
                 state.playSound('ItemSound.quest_middle');
-                return page('Rolant', 'Eye meat - the secret of the steak, eh?');
+                return page('Rollant', 'Eye meat - the secret of the steak, eh?');
             }
-            if (count(state, EYE_MEAT) === 1) return page('Rolant', 'A single serving of eye meat is all any cook needs.');
+            if (count(state, EYE_MEAT) === 1) return page('Rollant', 'A single serving of eye meat is all any cook needs.');
         }
         return page('Mirien', 'The kitchen never sleeps.');
     },
@@ -251,7 +251,7 @@ module.exports = {
                 takes: [[JAYCUBS_BOOK, count(state, JAYCUBS_BOOK)], [NECTAR, nectar], [JELLY, jelly]],
                 gives: [[HONEY, 1]], variables: { ...state.variables } });
             state.playSound('ItemSound.quest_itemget');
-            return page('Beekeeper Jaycubs', 'Plain honey, honest work.');
+            return page('Beekeeper Jacob', 'Plain honey, honest work.');
         }
         if (event === 'glyvkas') {
             if (!hasList(state) || ing >= 5 || !count(state, GLYVKAS_BOOK)) return null;
@@ -262,7 +262,7 @@ module.exports = {
                 takes: [[GLYVKAS_BOOK, count(state, GLYVKAS_BOOK)], [GREEN_MOSS, green], [BROWN_MOSS, brown]],
                 gives: [[GREEN_BUNDLE, 1]], variables: { ...state.variables } });
             state.playSound('ItemSound.quest_itemget');
-            return page('Glyvkas', 'A green bundle, bound tight.');
+            return page('Glyvka', 'A green bundle, bound tight.');
         }
         return null;
     },

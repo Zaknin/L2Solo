@@ -1,7 +1,7 @@
 // Q327 Reclaim The Land. Source: l2j-lisvus fdc7e33 327_ReclaimTheLand.
 //
-// Peter the farmer (7597) pays per Turek token on sight; Sorceress Iris (7034)
-// buys the altar fragments and relics for experience; Trader Ashley (7313)
+// Piotur the farmer (7597) pays per Turek token on sight; Sorceress Iris (7034)
+// buys the altar fragments and relics for experience; Trader Asha (7313)
 // reassembles five fragments into a relic with an eighty percent chance of
 // success. Every kill of a Turek patrol hands over one token, plus a possible
 // fragment of one of the four burned altars.
@@ -55,14 +55,14 @@ module.exports = {
         if (npcId === PETER) {
             if (!state.isStarted()) {
                 if (Number(state.session.actor.fetchLevel()) < 25) {
-                    return page('Peter', 'My farm is overrun with Turek Orcs, but you are not ready yet.');
+                    return page('Piotur', 'My farm is overrun with Turek Orcs, but you are not ready yet.');
                 }
-                return page('Peter', 'Turek Orcs are ravaging my land. Take the tokens from the dead and I will pay: 40 gold a dogtag, 50 a medallion. Their altars lie broken across the land.',
+                return page('Piotur', 'Turek Orcs are ravaging my land. Take the tokens from the dead and I will pay: 40 gold a dogtag, 50 a medallion. Their altars lie broken across the land.',
                     `${link('accept', 'Accept.')}`);
             }
             const tokens = count(state, DOGTAG) + count(state, MEDALLION);
-            if (!tokens) return page('Peter', 'No tokens, no pay. Bring me the proofs of dead Tureks.');
-            return page('Peter', 'Let me see the tokens on your corpse-pile.',
+            if (!tokens) return page('Piotur', 'No tokens, no pay. Bring me the proofs of dead Tureks.');
+            return page('Piotur', 'Let me see the tokens on your corpse-pile.',
                 `${link('sellTokens', 'Hand over the tokens.')}<br>${link('giveUp', 'Give up this task.')}`);
         }
         if (npcId === IRIS) {
@@ -73,8 +73,8 @@ module.exports = {
                 + `<br>${link('sellRelics', 'Sell all assembled relics.')}`);
         }
         if (npcId === ASHLEY) {
-            if (!state.isStarted()) return page('Trader Ashley', 'Pieces of old altars? I collect such things.');
-            return page('Trader Ashley', 'Five pieces of one altar may yet make a whole relic - though old stone crumbles under my hands.',
+            if (!state.isStarted()) return page('Trader Asha', 'Pieces of old altars? I collect such things.');
+            return page('Trader Asha', 'Five pieces of one altar may yet make a whole relic - though old stone crumbles under my hands.',
                 `${link('assembleUrn', 'Assemble urn fragments.')}<br>${link('assembleBrass', 'Assemble brass trinket pieces.')}`
                 + `<br>${link('assembleMirror', 'Assemble bronze mirror pieces.')}<br>${link('assembleJade', 'Assemble jade necklace beads.')}`);
         }
@@ -87,7 +87,7 @@ module.exports = {
             if (Number(state.session.actor.fetchLevel()) < 25) return null;
             await step(state, { variables: { ...state.variables, cond: '1' } });
             state.playSound('ItemSound.quest_accept');
-            return page('Peter', 'Go clean my land of the Turek Orcs.');
+            return page('Piotur', 'Go clean my land of the Turek Orcs.');
         }
         if (!state.isStarted()) return null;
 
@@ -100,14 +100,14 @@ module.exports = {
                 gives: [[57, adena(40 * dogs + 50 * medallions)]],
                 variables: { ...state.variables }
             });
-            return page('Peter', 'Here is your payment - 40 a dogtag, 50 a medallion.');
+            return page('Piotur', 'Here is your payment - 40 a dogtag, 50 a medallion.');
         }
         if (event.startsWith('assemble')) {
             const index = ['Urn', 'Brass', 'Mirror', 'Jade'].indexOf(event.slice(8));
             if (index < 0) return null;
             const fragment = FRAGMENTS[index];
             const relic = RELICS[index];
-            if (count(state, fragment) < 5) return page('Trader Ashley', 'You need five pieces of one altar.');
+            if (count(state, fragment) < 5) return page('Trader Asha', 'You need five pieces of one altar.');
             const success = Math.floor(Math.random() * 100) < 80;
             await step(state, {
                 takes: [[fragment, 5]],
@@ -115,7 +115,7 @@ module.exports = {
                 variables: { ...state.variables }
             });
             state.playSound(success ? 'ItemSound.quest_itemget' : 'ItemSound.quest_failed');
-            return page('Trader Ashley', success
+            return page('Trader Asha', success
                 ? 'A whole relic at last. The joints show, but it is beautiful.'
                 : 'The old stone just crumbled in my hands... I am sorry.');
         }
@@ -143,7 +143,7 @@ module.exports = {
             // The reference's exitQuest(1): every quest-owned token is surrendered.
             await require('../QuestStep').abandon(state, QUEST_ITEMS);
             state.playSound('ItemSound.quest_finish');
-            return page('Peter', 'Leaving already? Return the proofs of battle, then.');
+            return page('Piotur', 'Leaving already? Return the proofs of battle, then.');
         }
         return null;
     },

@@ -38,7 +38,7 @@ module.exports = {
     await s.set("cond", 1);
     await Q().giveItem(s.session, L, 1);
     s.playSound("ItemSound.quest_accept");
-    return p("Karrod", "Take this letter to Cekton.");
+    return p("Karrod", "Take this letter to Cecktinon.");
   },
   async onTalk(s, x) {
     const id = Number(x.fetchSelfId()),
@@ -65,7 +65,7 @@ module.exports = {
     };
     if (id === C && c === 1) {
       await step([L], [V1], 2);
-      return p("Cekton", "Speak with Harne.");
+      return p("Cecktinon", "Speak with Harne.");
     }
     if (id === H && c === 2) {
       await step([V1], [V2], 3);
@@ -73,15 +73,15 @@ module.exports = {
     }
     if (id === H && c === 4) {
       await step([V2, B], [S], 5);
-      return p("Harne", "Return to Cekton.");
+      return p("Harne", "Return to Cecktinon.");
     }
     if (id === C && c === 5) {
       await step([S], [O], 6);
-      return p("Cekton", "Use the oil on a zombie.");
+      return p("Cecktinon", "Use the oil on a zombie.");
     }
     if (id === C && c === 7) {
       await step([Z], [ST], 8);
-      return p("Cekton", "Return to Karrod.");
+      return p("Cecktinon", "Return to Karrod.");
     }
     if (id === K && c === 8) {
       await q.takeItem(s.session, ST);
@@ -97,7 +97,7 @@ module.exports = {
       return p("Karrod", "The spirit is at peace.");
     }
     return p(
-      id === C ? "Cekton" : id === H ? "Harne" : "Karrod",
+      id === C ? "Cecktinon" : id === H ? "Harne" : "Karrod",
       "Continue your task.",
     );
   },

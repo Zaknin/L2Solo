@@ -1,6 +1,6 @@
-const MINA = 7533;
-const MARYSE = 7520;
-const JACOB = 7650;
+const BALANKI = 7533;
+const REED = 7520;
+const GERALD = 7650;
 const NECKLACE = 7574;
 const SOE_GIRAN = 7559;
 const MARK_OF_TRAVELER = 7570;
@@ -19,15 +19,15 @@ module.exports = {
   id: 10,
   questItems: [NECKLACE],
   name: "Into the World",
-  npcs: [MINA, MARYSE, JACOB],
-  startNpcs: [MINA],
+  npcs: [BALANKI, REED, GERALD],
+  startNpcs: [BALANKI],
   eventNpc: (event) =>
     ({
-      start: MINA,
-      necklace: MARYSE,
-      appraise: JACOB,
-      report: MARYSE,
-      reward: MINA,
+      start: BALANKI,
+      necklace: REED,
+      appraise: GERALD,
+      report: REED,
+      reward: BALANKI,
     })[event] ?? null,
 
   async onEvent(state, event) {
@@ -37,7 +37,7 @@ module.exports = {
       await state.setState("started");
       await state.set("cond", 1);
       state.playSound(SOUND_ACCEPT);
-      return page("Mineral Trader Mina", "Take the necklace to Maryse.");
+      return page("Balanki", "Take the necklace to Reed.");
     }
     if (
       event === "necklace" &&
@@ -47,7 +47,7 @@ module.exports = {
       await service().giveItem(state.session, NECKLACE, 1);
       await state.set("cond", 2);
       state.playSound(SOUND_MIDDLE);
-      return page("Maryse", "Ask Jacob to appraise this necklace.");
+      return page("Warehouse Chief Reed", "Ask Gerald to appraise this necklace.");
     }
     if (
       event === "appraise" &&
@@ -57,11 +57,11 @@ module.exports = {
       if (!(await service().takeItem(state.session, NECKLACE))) return null;
       await state.set("cond", 3);
       state.playSound(SOUND_MIDDLE);
-      return page("Jacob", "Return to Maryse with my appraisal.");
+      return page("Gerald", "Return to Reed with my appraisal.");
     }
     if (event === "report" && state.isStarted() && state.getInt("cond") === 3) {
       await state.set("cond", 4);
-      return page("Maryse", "Report back to Mina.");
+      return page("Warehouse Chief Reed", "Report back to Balanki.");
     }
     if (event === "reward" && state.isStarted() && state.getInt("cond") === 4) {
       await service().giveItem(state.session, SOE_GIRAN, 1);
@@ -69,7 +69,7 @@ module.exports = {
       state.playSound(SOUND_FINISH);
       await state.exit(false);
       return page(
-        "Mineral Trader Mina",
+        "Balanki",
         "Your journey into the world begins now.",
       );
     }
@@ -82,48 +82,48 @@ module.exports = {
     if (state.isCompleted())
       return page("Quest", "You have already completed this quest.");
     if (!state.isStarted()) {
-      if (npcId !== MINA)
+      if (npcId !== BALANKI)
         return page("Quest", "You are not on a quest that involves this NPC.");
       if (Number(actor.fetchRace()) !== 4)
-        return page("Mineral Trader Mina", "This errand is for Dwarves.");
+        return page("Balanki", "This errand is for Dwarves.");
       return page(
-        "Mineral Trader Mina",
+        "Balanki",
         "Would you carry out a small errand?",
         '<a action="bypass -h quest 10 start">Accept.</a>',
       );
     }
     const cond = state.getInt("cond");
-    if (npcId === MINA)
+    if (npcId === BALANKI)
       return cond === 4
         ? page(
-            "Mineral Trader Mina",
+            "Balanki",
             "You have returned.",
             '<a action="bypass -h quest 10 reward">Receive the traveler’s mark.</a>',
           )
-        : page("Mineral Trader Mina", "Speak with Maryse.");
-    if (npcId === MARYSE) {
+        : page("Balanki", "Speak with Reed.");
+    if (npcId === REED) {
       if (cond === 1)
         return page(
-          "Maryse",
-          "Here is the necklace. Take it to Jacob.",
+          "Warehouse Chief Reed",
+          "Here is the necklace. Take it to Gerald.",
           '<a action="bypass -h quest 10 necklace">Receive the necklace.</a>',
         );
       if (cond === 3)
         return page(
-          "Maryse",
+          "Warehouse Chief Reed",
           "I have the appraisal.",
-          '<a action="bypass -h quest 10 report">Report Jacob’s appraisal.</a>',
+          '<a action="bypass -h quest 10 report">Report Gerald’s appraisal.</a>',
         );
-      return page("Maryse", "Take the necklace to Jacob.");
+      return page("Warehouse Chief Reed", "Take the necklace to Gerald.");
     }
-    if (npcId === JACOB)
+    if (npcId === GERALD)
       return cond === 2
         ? page(
-            "Jacob",
+            "Gerald",
             "I can appraise it.",
-            '<a action="bypass -h quest 10 appraise">Receive Jacob’s appraisal.</a>',
+            '<a action="bypass -h quest 10 appraise">Receive Gerald’s appraisal.</a>',
           )
-        : page("Jacob", "Bring me the necklace first.");
+        : page("Gerald", "Bring me the necklace first.");
     return null;
   },
 };
