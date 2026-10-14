@@ -9,6 +9,7 @@ const STAGING_ARRIVAL_RADIUS = 64;
 // larger goal radius can stop just around a shop wall with no line of sight.
 const INTERACTION_ARRIVAL_RADIUS = 16;
 const STAGING_READY_RADIUS = 80;
+const COUNTER_RESERVATION_DISTANCE = 240;
 // Give bots a little room to interact without micro-adjusting at the counter.
 // Line of sight and the 300-unit hard cap still guard interaction.
 const INTERACTION_READY_RADIUS = 48;
@@ -170,6 +171,15 @@ function openPointFor(target, bot) {
     return radialPoint(target, INTERACTION_DISTANCE, preferredAngle);
 }
 
+function openSlotsFor(target, fallback) {
+    const candidates = [];
+    for (let step = 0; step < 8; step++) {
+        const interaction = radialPoint(target, INTERACTION_DISTANCE, step * Math.PI / 4);
+        if (hasLineOfSight(interaction, target)) candidates.push(interaction);
+    }
+    return candidates.length ? candidates : [fallback];
+}
+
 function targetKey(kind, target) {
     return [
         String(kind || 'town_npc'),
@@ -204,8 +214,34 @@ function plan(session, bot, target, kind = 'town_npc') {
 
     const botPoint = pointOf(bot);
     const actorId = Number(bot?.fetchId?.() || 0);
-    if (session?.townNpcSlot && session.townNpcSlot.key !== `counter:${pointCacheKey(target)}`) Slots.release(session);
-    if (session && actorId && distance2d(botPoint, points.interaction) > INTERACTION_READY_RADIUS) {
+    const key = targetKey(kind, target);
+    let state = session?.townNpcApproach;
+    if (state?.key !== key) {
+        Slots.release(session);
+        const alreadyAtFront = distance2d(botPoint, points.interaction) <= INTERACTION_READY_RADIUS
+            && distance2d(botPoint, target) <= MAX_INTERACTION_DISTANCE;
+        state = { key, phase: alreadyAtFront ? 'interaction' : 'staging' };
+        if (session) {
+            session.townNpcApproach = state;
+            session.townRoutePlan = null;
+            delete session.companionNavigationRecovery;
+        }
+    }
+
+    if (state.phase === 'staging' && distance2d(botPoint, points.staging) <= STAGING_READY_RADIUS) {
+        state.phase = 'interaction';
+        if (session) {
+            session.townRoutePlan = null;
+            delete session.companionNavigationRecovery;
+        }
+    }
+
+    // Everyone can walk to the shop in parallel. Reserve its scarce counter
+    // places only for the short final approach, after reaching the public side.
+    const nearCounter = state.phase === 'interaction'
+        && distance2d(botPoint, points.interaction) <= COUNTER_RESERVATION_DISTANCE
+        && Math.abs(botPoint.locZ - points.interaction.locZ) <= 64;
+    if (session && actorId && nearCounter) {
         const base = points;
         points = Slots.reserve(session, `counter:${pointCacheKey(target)}`, () => {
             const dx = base.interaction.locX - target.locX, dy = base.interaction.locY - target.locY;
@@ -224,30 +260,7 @@ function plan(session, bot, target, kind = 'town_npc') {
             return candidates;
         }, actorId);
         if (!points) return { ready: false, waiting: true };
-    } else if (session?.townNpcSlot?.key === `counter:${pointCacheKey(target)}`) {
-        // Keep the leased point authoritative through the last few steps.
-        points = Slots.reserve(session, session.townNpcSlot.key, () => [points], actorId) || points;
-    }
-    const key = targetKey(kind, target);
-    let state = session?.townNpcApproach;
-    if (state?.key !== key) {
-        const alreadyAtFront = distance2d(botPoint, points.interaction) <= INTERACTION_READY_RADIUS
-            && distance2d(botPoint, target) <= MAX_INTERACTION_DISTANCE;
-        state = { key, phase: alreadyAtFront ? 'interaction' : 'staging' };
-        if (session) {
-            session.townNpcApproach = state;
-            session.townRoutePlan = null;
-            delete session.companionNavigationRecovery;
-        }
-    }
-
-    if (state.phase === 'staging' && distance2d(botPoint, points.staging) <= STAGING_READY_RADIUS) {
-        state.phase = 'interaction';
-        if (session) {
-            session.townRoutePlan = null;
-            delete session.companionNavigationRecovery;
-        }
-    }
+    } else Slots.release(session);
 
     const interactionDistance = distance2d(botPoint, points.interaction);
     const targetVisible = hasLineOfSight(botPoint, target);
@@ -294,10 +307,15 @@ function planOpen(session, bot, target, kind = 'town_npc') {
     let state = session?.townNpcApproach;
     if (state?.key !== key) {
         Slots.release(session);
+        const preferredPoint = openPointFor(target, bot);
+        const candidates = openSlotsFor(target, preferredPoint);
+        const preferred = candidates.reduce((best, point, index) =>
+            distance2d(point, preferredPoint) < distance2d(candidates[best], preferredPoint) ? index : best, 0);
         state = {
             key,
             phase: 'interaction',
-            destination: openPointFor(target, bot),
+            destination: candidates[preferred],
+            preferred,
             readyOnEntry: distance2d(botPoint, target) <= OPEN_INTERACTION_READY_RADIUS
                 && Math.abs(botPoint.locZ - Number(target.locZ)) <= 64 && hasLineOfSight(botPoint, target)
         };
@@ -308,18 +326,14 @@ function planOpen(session, bot, target, kind = 'town_npc') {
         }
     }
 
-    if (!state.readyOnEntry && session && Number(bot?.fetchId?.() || 0)) {
-        const assigned = Slots.reserve(session, `open:${pointCacheKey(target)}`, () => {
-            const candidates = [];
-            for (let step = 0; step < 8; step++) {
-                const interaction = radialPoint(target, INTERACTION_DISTANCE, step * Math.PI / 4);
-                if (hasLineOfSight(interaction, target)) candidates.push(interaction);
-            }
-            return candidates.length ? candidates : [state.destination];
-        }, Math.abs(Number(bot.fetchId())));
+    const nearNpc = distance2d(botPoint, target) <= COUNTER_RESERVATION_DISTANCE
+        && Math.abs(botPoint.locZ - Number(target.locZ)) <= 64;
+    if (!state.readyOnEntry && session && Number(bot?.fetchId?.() || 0) && nearNpc) {
+        const assigned = Slots.reserve(session, `open:${pointCacheKey(target)}`,
+            () => openSlotsFor(target, state.destination), state.preferred ?? Math.abs(Number(bot.fetchId())));
         if (!assigned) return { ready: false, waiting: true };
         state.destination = assigned;
-    }
+    } else Slots.release(session);
     const ready = distance2d(botPoint, target) <= OPEN_INTERACTION_READY_RADIUS
         && Math.abs(botPoint.locZ - Number(target.locZ)) <= 64
         && (state.readyOnEntry || !session?.townNpcSlot || distance2d(botPoint, state.destination) <= 32)
@@ -342,6 +356,7 @@ function planOpen(session, bot, target, kind = 'town_npc') {
 
 module.exports = {
     APPROACH_OVERRIDES,
+    COUNTER_RESERVATION_DISTANCE,
     INTERACTION_ARRIVAL_RADIUS,
     INTERACTION_DISTANCE,
     INTERACTION_READY_RADIUS,

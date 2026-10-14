@@ -170,7 +170,13 @@ class ActorModel extends CreatureModel {
 
     setIsOnline(data) {
         this.model.isOnline = data;
-        if (this.session?.actor === this) invoke('GameServer/World/World').updateUserLocation?.(this.session, this);
+        if (this.session?.actor === this) {
+            const World = invoke('GameServer/World/World');
+            World.updateUserLocation?.(this.session, this);
+            // SQLite's numeric flag and EnterWorld's boolean can share the
+            // same location-cache key. Presence still owns this transition.
+            World.updateUserPresence?.(this.session, this);
+        }
     }
 
     setPrivateStoreType(data) {

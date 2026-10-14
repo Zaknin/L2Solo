@@ -128,6 +128,11 @@ try {
 
     publishTravelSession(shoppingSession, shopper);
 
+    const Slots = invoke('GameServer/Bot/AI/TownNpcSlots');
+    const otherShopper = {};
+    Slots.reserve(otherShopper, 'completed-visit', () => [1]);
+    Slots.reserve(shoppingSession, 'completed-visit', () => [1]);
+    shoppingSession.townNpcApproach = { key: 'completed-visit', phase: 'interaction' };
     ShoppingState.scheduleRestock(shoppingSession, shopper, noTeleportGenerics, { say() {} });
 
     await settleScheduledWork();
@@ -135,6 +140,44 @@ try {
     assert.strictEqual(shoppingSession.preShopLocation, undefined);
     assert.strictEqual(shoppingSession.pendingFarmDepartureAnnouncement, true,
         'the next hunting-ground decision should announce a clear farming destination');
+    assert(!shoppingSession.townNpcQueue && !shoppingSession.townNpcSlot && !shoppingSession.townNpcApproach,
+        'finishing the visit must release all shop waiting state before hunting resumes');
+    Slots.release(otherShopper);
+
+    const HuntingState = invoke('GameServer/Bot/AI/States/HuntingState');
+    const departureBot = bot({ locX: 80456, locY: 147864, locZ: -3504 });
+    const departureSession = { actor: departureBot, plan: 'hunting', pendingFarmDepartureAnnouncement: true };
+    const savedMove = CompanionNavigationRecovery.move;
+    try {
+        let departureTarget;
+        CompanionNavigationRecovery.move = (_session, _actor, target) => {
+            departureTarget = target;
+            return { status: 'started' };
+        };
+        assert(HuntingState.leaveShop(departureSession, departureBot),
+            'a completed solo visit must leave the shop even before a suitable farm spot is selected');
+        assert(Math.hypot(departureTarget.locX - 83396, departureTarget.locY - 147904) < 200,
+            'the departure must walk toward the public square');
+        departureBot.locX = departureTarget.locX;
+        departureBot.locY = departureTarget.locY;
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'arriving on the square must resume normal decisions without a teleport');
+        departureBot.locX = 80456;
+        departureBot.locY = 147864;
+        departureSession.spotRelocation = { method: 'town_gatekeeper' };
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'an already chosen farming trip must retain ownership of movement');
+        departureSession.spotRelocation = undefined;
+        departureSession.incomingThreatId = 123;
+        departureSession.incomingThreatAt = Date.now();
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'leaving the shop must yield to incoming combat');
+        departureSession.incomingThreatId = undefined;
+        departureBot.fetchHp = () => 10;
+        departureBot.fetchMaxHp = () => 100;
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'a wounded bot must recover before walking out of the shop');
+    } finally { CompanionNavigationRecovery.move = savedMove; }
 
     BotBuffs.applyFullNewbieBlessing = () => ({ buffs: [], expiresAt: Date.now() + 60000 });
 
