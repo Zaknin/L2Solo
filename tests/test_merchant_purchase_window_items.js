@@ -22,6 +22,12 @@ const SHOT = 1835, SPIRIT = 1463, WIDE = 1464, UNKNOWN = 999999;
 const MERCHANT_ID = 3000077;
 let sent = [];
 const lists = [];
+function withoutName(row) {
+    const copy = { ...row };
+    delete copy.name;
+    return copy;
+}
+
 for (const name of ['userInfo', 'itemsList', 'privateStoreMsg', 'privateStoreBuyMsg', 'destSelected', 'relationChanged']) {
     ServerResponse[name] = () => ({ kind: name });
 }
@@ -85,7 +91,7 @@ async function main() {
     assert.deepStrictEqual(session.activeMerchantTrade.prices, { [SHOT]: 8, [SPIRIT]: 11, [UNKNOWN]: 13 });
     assert.strictEqual(lists.length, 1);
     assert.strictEqual(lists[0].adena, 4321);
-    assert.deepStrictEqual(lists[0].rows.map(({ name, ...row }) => row), [
+    assert.deepStrictEqual(lists[0].rows.map(withoutName), [
         { id: 91001, selfId: SHOT, amount: 100, price: 8 },
         { id: 91002, selfId: SPIRIT, amount: 50, price: 11 }
     ], 'open: rows carry the store object id, count and refreshed price; an unrepresentable price or an unknown item is omitted');
@@ -96,7 +102,7 @@ async function main() {
     await Purchase(session, packet([[SHOT, 2]]));
     assert.deepStrictEqual(steps, ['refresh:2000077', 'native', 'native'], 'after a purchase: refresh, then rows, then quotes');
     assert.strictEqual(lists.length, 2);
-    assert.deepStrictEqual(lists[1].rows.map(({ name, ...row }) => row), [
+    assert.deepStrictEqual(lists[1].rows.map(withoutName), [
         { id: 91001, selfId: SHOT, amount: 98, price: 9 },
         { id: 91002, selfId: SPIRIT, amount: 50, price: 11 }
     ], 'after a purchase: rows show the new count and the refreshed price');
