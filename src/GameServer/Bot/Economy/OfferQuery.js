@@ -69,7 +69,9 @@ function fill(lines, amount, { npcPrice = 0, money = Infinity, maxPrice = Infini
 }
 
 // E303: the quote depth cap of 5 (cheapestTown quoteDepth). Counts the check, and the cut with the lines it
-// dropped; returns whether it cut. cap:quotes:short (cheapestTown) is a cut call whose result is not whole.
+// dropped; returns whether it cut. cap:quotes:short (cheapestTown) is a cut call whose result is not whole;
+// one short call in 16 (`sampled`) is priced again over the whole list, `lost` counts those it fills.
+let shortCalls = 0;
 function noteQuoteCut(list, depth) {
     if (!Diagnostics.active()) return false;
     Diagnostics.count('cap', 'quotes', 'check');
@@ -126,7 +128,13 @@ function cheapestTown(index, selfId, options = {}) {
                 && String(town).localeCompare(best.town) < 0));
         if (better) best = { town, ...filled, npcPrice: price, trip, landed, whole, spendBudget: money };
     }
-    if (cut && !best?.whole) Diagnostics.count('cap', 'quotes', 'short');
+    if (cut && !best?.whole) {
+        Diagnostics.count('cap', 'quotes', 'short');
+        if ((++shortCalls & 15) === 0) {
+            Diagnostics.count('cap', 'quotes', 'sampled');
+            if (cheapestTown(index, selfId, { ...options, quoteDepth: 0 })?.whole) Diagnostics.count('cap', 'quotes', 'lost');
+        }
+    }
     return best;
 }
 
