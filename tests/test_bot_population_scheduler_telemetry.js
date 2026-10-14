@@ -156,6 +156,14 @@ try {
     PlayerActivitySignal.reset();
 }
 
+// Cold pull, share and party-buff counters reach the developerDiagnostics counts that the box and batch checks read.
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const reasons = ['party_buff_casts', 'pulls', 'pull_mobs', 'area_pull_hits', 'share_cut_fights', 'share_bound_resolves'];
+const read = () => reasons.map(reason => Diagnostics.metrics().counts?.[`cold:combat:${reason}`] || 0);
+const before = read();
+Metrics.recordCombat({ partyBuffCasts: 4, pulls: 2, pullMobs: 5, areaPullHits: 3, shareCut: 1 });
+assert.deepStrictEqual(read().map((n, i) => n - before[i]), [4, 2, 5, 3, 1, 1]);
+
 }
 
 main().catch(error => {

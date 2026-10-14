@@ -1,5 +1,6 @@
 const { DiagnosticMetricMap } = require('./DiagnosticMetricMap');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const { monitorEventLoopDelay } = require('perf_hooks');
 
 function now() {
@@ -267,6 +268,13 @@ const PopulationMetrics = {
         const shareCut = Math.max(0, Number(debug.shareCut) || 0);
         if (shareCut > 0) this.counters.coldShareBoundResolves += 1;
         this.counters.coldShareCutFights += shareCut;
+        // The summary line and the status show none of these; the box and batch checks read developerDiagnostics counts.
+        for (const [reason, amount] of [['party_buff_casts', debug.partyBuffCasts], ['pulls', debug.pulls],
+            ['pull_mobs', debug.pullMobs], ['area_pull_hits', debug.areaPullHits], ['share_cut_fights', shareCut],
+            ['share_bound_resolves', shareCut > 0 ? 1 : 0]]) {
+            const n = Math.trunc(Number(amount) || 0);
+            if (n > 0) Diagnostics.count('cold', 'combat', reason, n);
+        }
     },
 
     recordSkippedResolve(reason = 'unknown') {
