@@ -563,7 +563,10 @@ module.exports = {
         if (floor?.action === 'unload' && isSoloHunter(session)) {
             // Like the loot sell trip below and the cold sale visit: the trip starts
             // the sale retry, so a bag that sold nothing heavy hunts on at penalty 1.
-            pauseSelling(session);
+            // A trip deferred by a fight comes back every tick: the retry it
+            // already started stays, the trip itself waits in pendingTownTrip.
+            const retry = Number(session.coldLifeState?.stats?.marketSellRetryAfter || 0);
+            if (!(retry > Date.now())) pauseSelling(session);
             const trip = startShopping(session, bot, BotAI, `Inventory ${floor.reason}. Heading to town.`);
             if (trip !== 'deferred') return;
         }

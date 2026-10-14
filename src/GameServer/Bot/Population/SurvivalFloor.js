@@ -103,8 +103,9 @@ function bagMarks(actor) {
 // where the hot sale visit writes the same retry (HuntingState pauseSelling).
 function forActor(actor, state = null, timestamp = Date.now()) {
     if (!actor) return null;
+    // lazy: worker the cold worker loads this file (BackgroundResolver); forActor is hot only.
     const Attack = invoke('GameServer/Actor/Attack');
-    const Roles = invoke('GameServer/Bot/AI/BotRoles');
+    const Roles = invoke('GameServer/Bot/AI/BotRoles'); // lazy: worker as Attack above.
     const mask = Attack.weaponMaskFor(actor);
     const costs = (actor.skillset?.fetchSkills?.() || []).filter(skill => {
         const semantic = skill.fetchSemantic?.() || {};
