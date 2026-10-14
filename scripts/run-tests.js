@@ -298,6 +298,7 @@ const tests = [
     'tests/test_bot_party_menu.js',
     'tests/test_bot_command_aliases.js',
     'tests/test_bot_chat_commands.js',
+    'tests/test_player_speak_pins.js',
     'tests/test_bot_chat_text.js',
     'tests/test_bot_chat_location.js',
     'tests/test_bot_speech_templates.js',
