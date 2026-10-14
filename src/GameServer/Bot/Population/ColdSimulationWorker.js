@@ -737,6 +737,15 @@ function advisoryRefusal(deps, site, reason) {
 }
 // ColdEconomyPlan.edges bits, named for the L115 counters.
 const EDGE_NAMES = [[1, 'new_item'], [2, 'stock_keep'], [4, 'money_reached'], [8, 'review'], [16, 'level'], [32, 'death']];
+// Bit 8 has three triggers in ColdEconomyPlan.edges. A goal deadline that
+// passed during a rest or a trip is named as the goal review, so the rest
+// review counts only rests (L115C).
+function reviewTrigger(state, projected, context, timestamp) {
+    const goalAt = Number(context?.goalReviewAt);
+    if (goalAt > Number(state?.timing?.lastResolvedAt || 0) && goalAt <= timestamp) return 'review_goal';
+    if (projected.activity === 'shopping' && state.activity === 'traveling') return 'review_arrival';
+    return projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal';
+}
 // L115: a card lost on remember is counted by its first failing check, so the
 // next call's no_card refusal has a cause.
 function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
@@ -1027,15 +1036,18 @@ function startKernel(config = {}) {
                         .edges(state, projected, owner?.context || {}, timestamp,
                             { stockFor: (_state, kind) => (stock ||= Economy.basics(projected, deps)).stock(kind) });
                     if (economyEdges && refreshed) {
-                        refreshed = null; why.push('economy_edges');
+                        refreshed = null;
                         // L115: which native gate dropped a card that held its fence.
-                        // Bit 8 has three triggers in edges(); named apart here.
-                        if (economyDiagnostics.active()) for (const [bit, name] of EDGE_NAMES) {
-                            if (!(economyEdges & bit)) continue;
-                            economyDiagnostics.count('advisory', 'edge', bit !== 8 ? name
-                                : projected.activity === 'shopping' && state.activity === 'traveling' ? 'review_arrival'
-                                    : projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal');
-                        }
+                        // L115C: the refusal is named by a lone review trigger
+                        // (else 'other'), so its rebuild's refusal_plan
+                        // same/new count shows whether that edge changes the plan.
+                        if (economyDiagnostics.active()) {
+                            const review = economyEdges & 8 ? reviewTrigger(state, projected, owner?.context, timestamp) : null;
+                            for (const [bit, name] of EDGE_NAMES) {
+                                if (economyEdges & bit) economyDiagnostics.count('advisory', 'edge', bit === 8 ? review : name);
+                            }
+                            why.push(`economy_edges:${economyEdges === 8 ? review : 'other'}`);
+                        } else why.push('economy_edges');
                     }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
                     return Economy.forState(projected, advisoryRefusal(deps, 'result', why[0] || 'party'));
