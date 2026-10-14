@@ -1,5 +1,5 @@
 const Requests = invoke('GameServer/World/Generics/NativeItemRequests');
-const families = /^native(?:PartyUi|Finder|Friends|Arena|Status|Drop|Items|Menu)/;
+const families = /^native(?:PartyUi|Finder|Friends|Arena|Status|Drop|Items|Menu|Board)/;
 function reset(session, { clearDirection = false } = {}) {
     Requests.cancel(session);
     if (clearDirection && (session.nativeItemsWaypoint || session.playerBoardWaypoint) && session.dataSendToMe) {

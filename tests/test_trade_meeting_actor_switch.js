@@ -52,6 +52,22 @@ global.invoke = name => ({
         assert.equal(session.tradeMeetingPresence, undefined, 'no marker of character 5 is set on the new character');
         assert.deepEqual(presented, { notify: [], result: [] }, 'no meeting result of character 5 reaches the new character');
         assert.deepEqual(inventory, [5], 'the inventory sync stays bound to the meeting character');
+        // A marker for the same character retains the other participant's route
+        // for the native countdown, whichever side the player occupies.
+        session.actor = actor(5);
+        for (const playerIsA of [true, false]) {
+            anchorAsked = false;
+            const syncing = Service.accept('switch');
+            for (let i = 0; i < 50 && !anchorAsked; i++) await new Promise(resolve => setImmediate(resolve));
+            assert(anchorAsked);
+            releaseAnchor({ id: 11, actorA: playerIsA ? 5 : 8, actorB: playerIsA ? 8 : 5,
+                state: 'accepted', locX: 10, locY: 20, locZ: 0, town: 'Giran',
+                routeA: JSON.stringify({ durationMs: playerIsA ? 1000 : 45000 }),
+                routeB: JSON.stringify({ durationMs: playerIsA ? 45000 : 1000 }) });
+            await syncing;
+            assert.deepEqual(session.tradeMeetingPresence, { id: 11, actorId: 5, otherId: 8,
+                locX: 10, locY: 20, locZ: 0, present: null, town: 'Giran', route: { durationMs: 45000 } });
+        }
         console.log('Meeting result after character switch passed');
     } finally { Service.reset(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
