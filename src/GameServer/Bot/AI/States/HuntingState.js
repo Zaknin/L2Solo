@@ -712,8 +712,10 @@ module.exports = {
 
         // 3. Immediate self-defense outranks recovery. Sitting while a mob is
         // actively hitting the bot only turns the recovery state into a death loop.
+        // The danger moment reads the mobs on the bot from the same world scan.
+        const threatScan = {};
         const incomingMonster = isSoloHunter(session)
-            ? PartyAwareness.npcThreateningActor(session)
+            ? PartyAwareness.npcThreateningActor(session, undefined, threatScan)
             : PartyAwareness.recentIncomingNpc(session);
         if (incomingMonster) {
             invoke('GameServer/Bot/AI/PendingSweep').yieldToDefense(session, bot);
@@ -730,7 +732,8 @@ module.exports = {
                     equipment: equippedItems(bot)
                 })
                 : { allowed: true };
-            const moment = groundSafety.allowed ? DangerMoment.take(session, bot, incomingMonster, matchupProfiles) : null;
+            const moment = groundSafety.allowed ? DangerMoment.take(session, bot, incomingMonster,
+                { profiles: matchupProfiles, near: threatScan.near }) : null;
             if (moment === 'drank') return;
             if (!groundSafety.allowed || (moment ? moment === 'flee' : needsEmergencyRetreat(bot))) {
                 if (groundSafety.allowed && isSoloHunter(session) &&

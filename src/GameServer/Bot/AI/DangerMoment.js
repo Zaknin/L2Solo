@@ -4,6 +4,7 @@ const TendencyRoll = invoke('GameServer/Bot/AI/TendencyRoll');
 const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const ColdRest = invoke('GameServer/Bot/Population/ColdRest');
+const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 
 // E70, §13.6 "it got dangerous": drink a potion, run to heal, sit or keep
 // fighting, each priced in the bot's hours. First choices, calibrated later
@@ -30,11 +31,12 @@ function loseChance(survivalRatio) {
 // the hours the fight still needs (given up by running or sitting), the death price (EconomicValuation.deathHours), the price of money (hours
 // per adena), the trait weight on risk (EconomicValuation.riskWeight:
 // caution, resilience, frustration) and the decision's roll.
-// null leaves the caller's own rule in place.
+// null leaves the caller's own rule in place, also when the price of money is
+// unknown: a free potion would be drunk whenever the last one wears off.
 function decide({ hp, maxHp, survivalRatio, attacked = true, potion = null, restHours = 0, fightHours = 0,
     deathHours, moneyPrice, riskWeight, roll = 0.5 } = {}) {
     if (!Number.isFinite(survivalRatio) || !(maxHp > 0) || !(hp > 0)
-        || !(deathHours >= 0) || !(moneyPrice >= 0) || !(riskWeight >= 0)) return null;
+        || !(deathHours >= 0) || !Number.isFinite(moneyPrice) || moneyPrice < 0 || !(riskWeight >= 0)) return null;
     const risk = deathHours * riskWeight * (1 + ROLL_SPREAD * (2 * roll - 1));
     const lose = loseChance(survivalRatio);
     const hours = { fight: lose * risk };
@@ -57,14 +59,11 @@ function npcPAtk(npc, view) {
         * Math.max(1, Number(npc.matchupTarget?.atkSpd ?? npc.fetchCollectiveAtkSpd?.() ?? npc.fetchAtkSpd?.() ?? 253) || 253);
 }
 
-function attackersOf(actor, target) {
-    // lazy: worker the cold worker will load this file for decide(); the scan is hot only.
-    const World = invoke('GameServer/World/World');
-    const id = Number(actor.fetchId?.() || 0);
-    const near = World.fetchNpcsInRadius?.(actor.fetchLocX?.(), actor.fetchLocY?.(), ATTACKER_RADIUS) || [];
-    const others = near.filter(npc => npc !== target && npc.fetchId?.() !== target.fetchId?.()
-        && npc.fetchAttackable?.() === true && npc.isDead?.() !== true && npc.state?.fetchDead?.() !== true
-        && Number(npc.fetchDestId?.() || 0) === id);
+// The target and every other mob hitting the bot. `near` is a world scan
+// around the bot (PartyAwareness.npcThreateningActor) reused instead of a new one.
+function attackersOf(actor, target, near = null) {
+    const others = PartyAwareness.npcsAttackingActor(actor, ATTACKER_RADIUS, near)
+        .filter(npc => npc !== target && npc.fetchId?.() !== target.fetchId?.());
     return [target, ...others];
 }
 
@@ -85,18 +84,21 @@ function forActor(session, actor, target, options = {}) {
     const attackers = options.attackers || attackersOf(actor, target);
     const atkSpd = Math.max(1, Number(view.atkSpd || 253));
     // The mobs on the bot are judged as one mob with their HP and attack summed (minimum.md #3).
+    // An area skill hits each of them (F20: BotTargetMatchup reads `pull`).
     const enemy = { ...view, maxHp: attackers.reduce((sum, npc) => sum + npcHp(npc), 0),
-        pAtk: attackers.reduce((sum, npc) => sum + npcPAtk(npc, view), 0) / atkSpd, atkSpd };
+        pAtk: attackers.reduce((sum, npc) => sum + npcPAtk(npc, view), 0) / atkSpd, atkSpd, pull: attackers.length };
     const survival = TargetMatchup.soloSurvival(profiles, enemy);
     // Damage per second of the same attack envelope as the survival ratio.
     const damageRate = TargetMatchup.damageRate(profiles, enemy);
     // A potion still working or a cast in flight leaves no bottle to drink now.
     const potion = options.potion === null || actor.state?.fetchCasts?.() || HealingPotionStock.activePotionHot(actor) ? null
-        : HealingPotionStock.selectPotion(HealingPotionStock.actorInventory(actor), hp, maxHp, actor, { dangerMoment: true });
+        : HealingPotionStock.selectPotion(options.bag ? options.bag() : HealingPotionStock.actorInventory(actor), hp, maxHp, actor,
+            { dangerMoment: true });
     // Drinking costs the bottle the bot then buys again.
     const heldPotion = potion ? { heal: potion.heal, price: HealingPotionStock.purchasePotionFor(actor).price } : null;
-    const hourAdena = Number(economy.statsPacket?.money?.[0] || 0);
-    const moneyPrice = economy.moneyPrice > 0 ? economy.moneyPrice : hourAdena > 0 ? 1 / hourAdena : 0;
+    // The price of money as EconomyContext holds it (money[1] of its stats packet); unknown leaves the author rule.
+    const packetPrice = Number(economy.statsPacket?.money?.[1] || 0);
+    const moneyPrice = economy.moneyPrice > 0 ? economy.moneyPrice : packetPrice > 0 ? packetPrice : null;
     const targetId = Number(target.fetchId?.() ?? 0);
     const restHours = ColdRest.estimateRestMs({ level: actor.fetchLevel?.(), stats: { classId: actor.fetchClassId?.() } },
         { hp, maxHp, mp, maxMp }) / 3600000;
@@ -107,15 +109,39 @@ function forActor(session, actor, target, options = {}) {
     return moment;
 }
 
-// The moment a fight in progress takes, hunting (E70) or resting and attacked
-// (E71): 'drank', 'flee', 'fight', or null when the bot has no held economy
-// or the matchup is unknown (the author's retreat rule then). A potion it
-// could not drink leaves the moment to the other options.
-function take(session, actor, target, profiles) {
-    const moment = forActor(session, actor, target, { profiles });
-    if (moment?.action !== 'drink') return moment?.action || null;
-    if (HealingPotionStock.tryUseInCombat(session, actor, target, { dangerMoment: true })) return 'drank';
-    return forActor(session, actor, target, { profiles, potion: null })?.action || null;
+// Whether the moment can run at all: a wounded bot with a held economy. A
+// caller checks it before its own scan for the attackers.
+function applies(session, actor) {
+    const hp = Number(actor.fetchHp?.() || 0), maxHp = Number(actor.fetchMaxHp?.() || 0);
+    const economy = hp < maxHp ? DecisionEvents.held(session) : null;
+    if (economy && economy.deathHours >= 0) return true;
+    session.dangerMoment = undefined;
+    return false;
 }
 
-module.exports = { LOSE_SLOPE, FLEE_EXPOSURE, ROLL_SPREAD, loseChance, decide, forActor, take };
+// The moment a fight in progress takes, hunting (E70) or resting and attacked
+// (E71), or a hot party member (E70): 'drank', 'flee', 'fight', or null when
+// the bot has no held economy or the matchup is unknown (the author's retreat
+// rule then). A potion it could not drink leaves the moment to the other
+// options. A bot at full HP has nothing to drink and takes the author's rule
+// until the first hit, so a fight at full HP scans nothing. options: profiles
+// (the matchup profiles, built here once if absent), attackers (the mobs on
+// the bot) or near (a world scan around the bot to read them from).
+function take(session, actor, target, options = {}) {
+    if (!target) {
+        session.dangerMoment = undefined;
+        return null;
+    }
+    if (!applies(session, actor)) return null;
+    const profiles = options.profiles || TargetMatchup.actorProfiles([actor]);
+    const attackers = options.attackers || attackersOf(actor, target, options.near);
+    // The bag is read once, only when a potion is looked for.
+    let inventory = null;
+    const bag = () => inventory || (inventory = HealingPotionStock.actorInventory(actor));
+    const moment = forActor(session, actor, target, { profiles, attackers, attacked: options.attacked, bag });
+    if (moment?.action !== 'drink') return moment?.action || null;
+    if (HealingPotionStock.tryUseInCombat(session, actor, target, { dangerMoment: true, inventory: bag() })) return 'drank';
+    return forActor(session, actor, target, { profiles, attackers, attacked: options.attacked, potion: null })?.action || null;
+}
+
+module.exports = { LOSE_SLOPE, FLEE_EXPOSURE, ROLL_SPREAD, ATTACKER_RADIUS, loseChance, decide, forActor, applies, take };

@@ -253,7 +253,8 @@ function tryUseInCombat(session, actor, target, options = {}) {
     // the potion HoT and the item reuse limit the bottles, as on the cold side.
     if (!options.dangerMoment && !options.pvp && session.dangerMoment?.targetId === targetId) return null;
 
-    const inventory = actorInventory(actor);
+    // The danger moment passes the bag it already read this tick (options.inventory).
+    const inventory = options.inventory || actorInventory(actor);
     const potion = selectPotion(inventory, actor.fetchHp?.(), actor.fetchMaxHp?.(), actor, { ...options, activeHot });
     if (!potion) return null;
     const item = inventory.find((entry) => entry.selfId === potion.selfId && entry.amount > 0);

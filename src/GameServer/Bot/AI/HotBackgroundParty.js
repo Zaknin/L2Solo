@@ -12,12 +12,16 @@ const SpotTravel = invoke('GameServer/Bot/AI/BotSpotTravel');
 const TownTransit = invoke('GameServer/Bot/AI/TownTransitPolicy');
 const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
+const DangerMoment = invoke('GameServer/Bot/AI/DangerMoment');
+const BotRetreatPlanner = invoke('GameServer/Bot/AI/BotRetreatPlanner');
 // The cold party resolver's target rule: one answer for hot and cold parties.
 const PartyTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
 
 const RaidCombat = invoke('GameServer/Bot/AI/PartyRaidCombat');
 const RAID_PREPARATION_SETTLE_MS = 1500;
 const RAID_RECOVERY_BUFF_WAIT_MS = 8000;
+// The danger moment's run, as the solo hunter's emergency retreat (HuntingState).
+const DANGER_RETREAT_DISTANCE = 850;
 
 function roster(session) {
     const party = session?.hotBackgroundPartyId && Parties.find(session.hotBackgroundPartyId);
@@ -123,11 +127,47 @@ function partySpot(party) {
 }
 
 // A member restarted in town walks to the gatekeeper and returns to the party's
-// spot; a refused travel (retry cooldown) idles, it never walks to the leader.
-function returnToSpot(session, bot, spot, party, now) {
+// spot, beside the member who leads there when one does (a lone landing among
+// the spot's mobs is a fight without the party); a refused travel (retry
+// cooldown) idles, it never walks to the leader. A target held from before
+// would read as a fight and cancel the travel (BotTownTravel.hasCombatThreat).
+function returnToSpot(session, bot, spot, party, now, destination = null) {
+    if (session.currentTargetId) {
+        Tactics.stop(session, bot);
+        session.currentTargetId = undefined;
+        bot.unselect?.();
+    }
     if (session.spotRelocation) SpotTravel.tick(session, bot);
-    else SpotTravel.start(session, bot, spot);
+    else SpotTravel.start(session, bot, spot, destination);
     session.lastDecision = { action: 'party_return_to_spot', partyId: party.partyId, spotId: spot.id, at: now };
+}
+
+// E70 for a hot party member hit by mobs: the danger moment with the near
+// members' damage (only the member itself takes the hits) decides drink, fight
+// or run; a run hands the bot to FleeingState until it ends. true = acted.
+function dangerMoment(session, bot, target, near, scan, now) {
+    if (!DangerMoment.applies(session, bot)) return false;
+    const attackers = invoke('GameServer/Bot/AI/PartyAwareness').npcsAttackingActor(bot, DangerMoment.ATTACKER_RADIUS, scan.near);
+    if (!attackers.length) {
+        session.dangerMoment = undefined;
+        return false;
+    }
+    const profiles = [...TargetMatchup.actorProfiles([bot]), ...TargetMatchup.actorProfiles(near
+        .filter(s => s.actor !== bot).map(s => s.actor)).map(profile => ({ ...profile, soloDamageReceiver: false }))];
+    const moment = DangerMoment.take(session, bot, target, { profiles, attackers });
+    if (moment === 'drank') return true;
+    if (moment !== 'flee') return false;
+    Tactics.stop(session, bot);
+    session.currentTargetId = undefined;
+    bot.unselect?.();
+    session.plan = 'fleeing';
+    session.partyDangerFlee = true;
+    session.fleeStart = now;
+    session.incomingThreatId = undefined;
+    session.incomingThreatAt = undefined;
+    BotRetreatPlanner.retreat(session, bot, attackers[0], { distance: DANGER_RETREAT_DISTANCE });
+    session.lastDecision = { action: 'party_danger_flee', targetId: target.fetchId(), partyId: session.hotBackgroundPartyId, at: now };
+    return true;
 }
 
 function searchGround(session, owner, members, party, legal, now, present) {
@@ -195,6 +235,11 @@ function searchGround(session, owner, members, party, legal, now, present) {
 function tick(session, bot, Generics, AI, now = Date.now()) {
     const party = Parties.find(session.hotBackgroundPartyId);
     if (!party) return false;
+    // A member that ran by its danger moment finishes the run in FleeingState.
+    if (session.partyDangerFlee) {
+        if (session.plan === 'fleeing') return false;
+        session.partyDangerFlee = false;
+    }
     if (session.raidFailurePendingAt) {
         Tactics.stop(session, bot);
         session.currentTargetId = undefined;
@@ -239,9 +284,13 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
         || party.stats?.objective?.raidBoss === true;
     const spot = party.spotId && !raidObjective ? partySpot(party) : null;
     const present = s => !spot || Spots.containsLocation(spot, loc(s.actor));
+    // Away = outside the spot and in town or travelling back from it. A leader
+    // stepping over the spot cell's edge in a fight stays the leader: its held
+    // target and scan timer live on its session.
+    const away = s => !!spot && !present(s) && (!!s.spotRelocation || !!TownTransit.townAt(s.actor));
     const leading = members.find(s => s.actor.fetchId() === party.leaderId);
-    const owner = leading && present(leading) ? leading
-        : members.find(present) || leading || members[0];
+    const owner = leading && !away(leading) ? leading
+        : members.find(s => !away(s)) || leading || members[0];
     const Roster = require('../../Clan/ClanRaidRoster');
     if (Roster.markerFor(party) && !Roster.held(party)) {
         const registered = roster(session);
@@ -285,7 +334,15 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     const radius = 1800;
     const near = members.filter(s => Threats.distance(s.actor, owner.actor) <= radius);
     const Awareness = invoke('GameServer/Bot/AI/PartyAwareness');
-    const incoming = Awareness.npcThreateningActor(session) || near.map(s => Awareness.npcThreateningActor(s)).find(Boolean);
+    // A member restarted in town goes back on its own threat only: the party's
+    // fight at the spot is no target for a bot in town.
+    const ownScan = {};
+    const own = Awareness.npcThreateningActor(session, undefined, ownScan);
+    if (!own && away(session) && TownTransit.townAt(bot)) {
+        returnToSpot(session, bot, spot, party, now, owner !== session && !away(owner) ? loc(owner.actor) : null);
+        return true;
+    }
+    const incoming = own || near.map(s => Awareness.npcThreateningActor(s)).find(Boolean);
     const legal = (npc) => {
         if (!Threats.alive(npc)) return false;
         // During an autonomous raid, do not let a nearby field monster replace
@@ -307,10 +364,6 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     if (incoming && session.pendingSupportCast) {
         Support.cancelSupportCast(session, bot);
         Tactics.stop(session, bot);
-    }
-    if (!incoming && spot && !present(session) && TownTransit.townAt(bot)) {
-        returnToSpot(session, bot, spot, party, now);
-        return true;
     }
     const Revival = invoke('GameServer/Bot/AI/PartyRevivalService');
     const anchor = leader(session); // Keep attempts on the same session even if the leader dies.
@@ -469,6 +522,9 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     // and attack packets. Movement and casts likewise already own their
     // completion callbacks; wait for that action slot before choosing another
     // ordinary combat action.
+    // The danger moment does not wait for the swing flags (a melee bot re-arms
+    // them in the same callback), as on the solo hunter (minimum.md #1).
+    if (!raidObjective && dangerMoment(session, bot, combatTarget, near, ownScan, now)) return true;
     if (bot.state.fetchTowards?.() || bot.state.fetchHits?.() || bot.state.fetchCasts?.()) {
         return true;
     }

@@ -46,7 +46,7 @@ try {
     replace(TownTransit, 'townAt', a => a.town ? 'Giran' : null);
     const travel = { start: [], tick: [] };
     let startResult = true;
-    replace(Travel, 'start', (s, a, to) => { travel.start.push([s, a, to]); return startResult; });
+    replace(Travel, 'start', (s, a, to, at) => { travel.start.push([s, a, to, at]); return startResult; });
     replace(Travel, 'tick', (s) => { travel.tick.push(s); return true; });
     const AI = { executeCombat() {} };
     const tick = (s, now = 20000) => Party.tick(s, s.actor, Generics, AI, now);
@@ -91,5 +91,38 @@ try {
     healer.nextBackgroundTargetScanAt = 0;
     tick(healer, 24000);
     assert.notStrictEqual(healer.lastDecision.action, 'party_wait', 'the member at the spot is not parked behind the leader in town');
+
+    // E73: a member in town goes back even while the party fights (the
+    // party's incoming mob is no target for it), lands beside the member who
+    // leads at the spot and drops a target held from before, which would
+    // otherwise cancel the travel as combat.
+    leader.actor.x = 100; leader.actor.town = false;
+    healer.actor.x = 200;
+    follower.actor.x = 50000; follower.actor.town = true;
+    follower.spotRelocation = undefined; follower.currentTargetId = 4242; follower.actor.moved = false;
+    const mob = { ...actor(900, 300, 'Monster'), fetchAttackable: () => true };
+    leader.incoming = mob;
+    travel.start.length = 0;
+    tick(follower, 25000);
+    assert.strictEqual(follower.lastDecision.action, 'party_return_to_spot', 'the party fight does not hold a member in town');
+    assert.strictEqual(travel.start.length, 1);
+    assert.strictEqual(travel.start[0][3].locX, 100, 'it returns beside the leader at the spot, not to the spot centre');
+    assert.strictEqual(follower.currentTargetId, undefined, 'a stale target does not cancel the travel');
+    assert(!follower.actor.moved, 'it does not walk from town toward the party mob');
+    leader.incoming = null;
+
+    // E73: the leader stepping over the spot cell edge stays the leader: the
+    // others regroup to it instead of electing the first member inside.
+    leader.actor.x = 4500;
+    follower.actor.x = 100; follower.actor.town = false;
+    tick(follower, 26000);
+    assert.strictEqual(follower.lastDecision.action, 'party_regroup', 'the leader past the cell edge still leads');
+    assert.strictEqual(follower.actor.move.to.locX, 4500);
+    // ...but a leader travelling back from town does not lead.
+    leader.spotRelocation = { method: 'town_gatekeeper' };
+    follower.actor.moved = false;
+    tick(follower, 27000);
+    assert.notStrictEqual(follower.lastDecision.action, 'party_regroup', 'a leader on its way back from town is not followed');
+    leader.spotRelocation = undefined;
     console.log('Hot background party anchor: roster wait, regroup point and return from town passed');
 } finally { saved.reverse().forEach(restore => restore()); }
