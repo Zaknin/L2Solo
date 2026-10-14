@@ -55,20 +55,29 @@ function stateCastCosts(state, profile, timestamp) {
     });
 }
 
+// Weight penalty 1 is only the C4 walking-speed step. During the sale retry
+// it waits like a half-full bag and the bot hunts on, spending its shots,
+// instead of flying back to a town that bought nothing. A heavier step and a
+// full bag stay the floor.
+function saleRetryWaits(floor, state, timestamp) {
+    return floor?.reason === 'overweight' && floor.weightPenalty === 1
+        && Number(state.stats?.marketSellRetryAfter || 0) > timestamp ? null : floor;
+}
+
 function forState(state, timestamp = Date.now(), inputs = null) {
     if (!state) return null;
     if (state.activity === 'dead' || Number(state.vitals?.hp) <= 0) return { reason: 'dead', action: 'revive' };
     if (inputs || typeof invoke !== 'function') {
-        return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp, ...stateInventory(state, inputs?.items),
-            slotLimit: InventoryLimits.forState(state, inputs || {}), ...inputs });
+        return saleRetryWaits(evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp, ...stateInventory(state, inputs?.items),
+            slotLimit: InventoryLimits.forState(state, inputs || {}), ...inputs }), state, timestamp);
     }
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
     const profile = Profile.profileFor(state, timestamp);
-    return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp ?? profile.maxMp,
+    return saleRetryWaits(evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp ?? profile.maxMp,
         manaRequired: Roles.shouldRestForMana(state), castCosts: stateCastCosts(state, profile, timestamp),
         ...stateInventory(state, invoke('GameServer/DataCache').items),
-        slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad });
+        slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad }), state, timestamp);
 }
 
 function actorInventory(actor) {
