@@ -9,6 +9,7 @@ const PartyPulling = invoke('GameServer/Bot/AI/PartyPulling');
 const EffectStore    = invoke('GameServer/Effects/EffectStore');
 const BotRetreatPlanner = invoke('GameServer/Bot/AI/BotRetreatPlanner');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
+const DangerMoment = invoke('GameServer/Bot/AI/DangerMoment');
 
 const REST_FOLLOW_WAKE_DISTANCE = 600;
 const EMERGENCY_RETREAT_DISTANCE = 850;
@@ -233,7 +234,11 @@ module.exports = {
                     });
                     return;
                 }
-                if (needsRecovery(session, bot)) {
+                // E71: attacked while resting takes the danger moment of a fight
+                // (drink, fight back or flee); without one, the author's rule.
+                const moment = DangerMoment.take(session, bot, threat);
+                if (moment === 'drank') return;
+                if (moment ? moment === 'flee' : needsRecovery(session, bot)) {
                     retreatFromThreat(session, bot, threat);
                     return;
                 }

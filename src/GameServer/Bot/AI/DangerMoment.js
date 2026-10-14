@@ -107,4 +107,15 @@ function forActor(session, actor, target, options = {}) {
     return moment;
 }
 
-module.exports = { LOSE_SLOPE, FLEE_EXPOSURE, ROLL_SPREAD, loseChance, decide, forActor };
+// The moment a fight in progress takes, hunting (E70) or resting and attacked
+// (E71): 'drank', 'flee', 'fight', or null when the bot has no held economy
+// or the matchup is unknown (the author's retreat rule then). A potion it
+// could not drink leaves the moment to the other options.
+function take(session, actor, target, profiles) {
+    const moment = forActor(session, actor, target, { profiles });
+    if (moment?.action !== 'drink') return moment?.action || null;
+    if (HealingPotionStock.tryUseInCombat(session, actor, target, { dangerMoment: true })) return 'drank';
+    return forActor(session, actor, target, { profiles, potion: null })?.action || null;
+}
+
+module.exports = { LOSE_SLOPE, FLEE_EXPOSURE, ROLL_SPREAD, loseChance, decide, forActor, take };
