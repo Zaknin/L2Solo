@@ -46,13 +46,16 @@ module.exports = {
           )
         : p("Harrys", "Return at level 10.");
     if (id === A && c === 1) {
-      await q.takeItem(s.session, R1);
+      if (!(await q.takeItem(s.session, R1)))
+        return p("Altran", "You do not have Harrys's 1st Receipt.");
       await q.giveItem(s.session, R2, 1);
       await s.set("cond", 2);
       s.playSound("ItemSound.quest_middle");
       return p("Altran", "Bring five golem shards.");
     }
     if (id === A && c === 3) {
+      if (n(s, SHARD) < 5)
+        return p("Altran", "You do not have five Golem Shards.");
       await q.takeItem(s.session, SHARD, -1);
       await q.giveItem(s.session, BOX, 1);
       await s.set("cond", 4);
@@ -60,7 +63,8 @@ module.exports = {
       return p("Altran", "Take this tool box to Harrys.");
     }
     if (id === H && c === 4 && n(s, BOX)) {
-      await q.takeItem(s.session, R2);
+      if (!(await q.takeItem(s.session, R2)))
+        return p("Harris", "You do not have Harrys's 2nd Receipt.");
       await q.takeItem(s.session, BOX);
       await q.giveItem(s.session, ARMOR, 1);
       await q.rewardExpSp(s.session, 5000, 0);

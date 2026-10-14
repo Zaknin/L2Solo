@@ -11,7 +11,7 @@ const originalGive = QuestService.giveItem;
 const originalTake = QuestService.takeItem;
 const originalRandom = Math.random;
 QuestService.giveItem = async (_, itemId, amount) => calls.push(["give", itemId, amount]);
-QuestService.takeItem = async (_, itemId) => calls.push(["take", itemId]);
+QuestService.takeItem = async (_, itemId) => (calls.push(["take", itemId]), true);
 
 let cond = 1;
 const state = {

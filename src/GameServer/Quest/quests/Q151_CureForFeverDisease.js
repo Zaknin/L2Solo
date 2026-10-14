@@ -27,13 +27,15 @@ module.exports = {
     if (!s.isStarted())
       return p("Elias", '<a action="bypass -h quest 151 start">Accept.</a>');
     if (id === Y && c === 2) {
-      await q.takeItem(s.session, S);
+      if (!(await q.takeItem(s.session, S)))
+        return p("Yohanes", "You do not have the Poison Sac.");
       await q.giveItem(s.session, M, 1);
       await s.set("cond", 3);
       return p("Yohanes", "Take the medicine to Elias.");
     }
     if (id === E && c === 3) {
-      await q.takeItem(s.session, M);
+      if (!(await q.takeItem(s.session, M)))
+        return p("Elias", "You do not have the Fever Medicine.");
       await q.giveItem(s.session, 102, 1);
       s.playSound("ItemSound.quest_finish");
       await s.exit(false);
