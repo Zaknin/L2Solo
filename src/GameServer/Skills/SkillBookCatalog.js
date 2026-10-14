@@ -65,7 +65,7 @@ function missingBooks(state = {}) {
 }
 
 // K46: a bot clan leader's reserved SP (ClanReviewEvents) is not spendable;
-// the gates see what learnBotSkill sees. Empty in the cold worker, which only
+// the gate sees what learnBotSkill sees. Empty in the cold worker, which only
 // projects training; main recomputes the gate before every paid pass.
 function reservedSp(state) { return ClanReviewEvents.spReserve(state.characterId); }
 
@@ -90,7 +90,7 @@ function nextTrainingSp(state = {}) {
             next = Math.min(next, training.sp);
         }
     }
-    return next + reservedSp(state);
+    return next;
 }
 
 // Native training pays from the committed balance. Apply its exact delta to

@@ -1,5 +1,7 @@
 'use strict';
 
+const ClanRules = require('./ClanRules');
+
 // Addressed planning inputs, never clan/member snapshots. Native rows stay in
 // the lifecycle and warehouse; this queue only remembers which clan to visit.
 const dirty = new Map();
@@ -38,21 +40,10 @@ function spReserve(characterId) {
     return watched?.ready ? watched.requiredSp : 0;
 }
 
-// A hot gate cached cost + reserve; once the reserve drops it must not wait
-// for that old sum. Cold gates are recomputed on every resolve.
-function reserveReleased(leaderId) {
-    const World = require.cache[require.resolve('../World/World')]?.exports;
-    const session = World?.user?.sessions?.find(entry => Number(entry.actor?.fetchId?.()) === Number(leaderId));
-    if (session) delete session.skillTrainingGate;
-}
-
-function forgetLeader(clanId, release = true) {
-    const leaderId = clanLeaders.get(clanId), watched = leaders.get(leaderId);
-    const owned = watched?.clanId === clanId;
-    if (owned) leaders.delete(leaderId);
+function forgetLeader(clanId) {
+    const leaderId = clanLeaders.get(clanId);
+    if (leaders.get(leaderId)?.clanId === clanId) leaders.delete(leaderId);
     clanLeaders.delete(clanId);
-    if (owned && release && watched.ready) reserveReleased(leaderId);
-    return owned ? { leaderId, reserve: watched.ready ? watched.requiredSp : 0 } : null;
 }
 
 function untrack(clanId) {
@@ -105,14 +96,13 @@ function track(clan) {
     const id = Number(clan?.id);
     if (!(id > 0)) return;
     syncRecruitment(clan);
-    const before = forgetLeader(id, false);
+    forgetLeader(id);
     const leaderId = Number(clan.leaderId);
     if (cashLevelGoal(clan) && Number.isSafeInteger(leaderId) && leaderId > 0) {
         clanLeaders.set(id, leaderId);
-        leaders.set(leaderId, { clanId: id, requiredSp: require('./ClanRules').LEVEL_REQUIREMENTS[Number(clan.level)].sp,
+        leaders.set(leaderId, { clanId: id, requiredSp: ClanRules.LEVEL_REQUIREMENTS[Number(clan.level)].sp,
             ready: cashReady(clan.state.goal) });
     }
-    if (before && before.reserve > spReserve(before.leaderId)) reserveReleased(before.leaderId);
     const previous = clanItems.get(id) || new Set();
     const wanted = new Set();
     for (const goal of [clan.state?.goal, clan.state?.productionGoal]) {
@@ -130,7 +120,7 @@ function track(clan) {
         }
         for (const item of plan?.materials || []) if (Number(item.selfId) > 0) wanted.add(Number(item.selfId));
     }
-    if (Number(clan.level) === 2) wanted.add(require('./ClanRules').LEVEL_REQUIREMENTS[2].itemId);
+    if (Number(clan.level) === 2) wanted.add(ClanRules.LEVEL_REQUIREMENTS[2].itemId);
     for (const itemId of previous) {
         if (wanted.has(itemId)) continue;
         const group = items.get(itemId); group?.delete(id); if (!group?.size) items.delete(itemId);
@@ -353,7 +343,7 @@ function stop() {
     recruitment.clear(); recruitmentClasses.clear(); committedCandidates = null;
 }
 
-module.exports = { changed, track, untrack, untrackLeader: clanId => { forgetLeader(Number(clanId)); },
+module.exports = { changed, track, untrack, untrackLeader: clanId => forgetLeader(Number(clanId)),
     watchRecruitment, unwatchRecruitment, syncRecruitment, recruitmentCount: () => recruitment.size,
     beginCandidateCommit, commitCandidateInputs, discardCandidateCommit, candidateCheckpoint, restoreCandidateCheckpoint, attach,
     cashLevelGoal, leaderSpChanged, spReserve, tracks, trackedItems, committedMember, start, stop, drain, pending: () => dirty.size,

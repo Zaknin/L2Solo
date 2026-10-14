@@ -1,6 +1,7 @@
 'use strict';
 
 const Catalog = require('../Skills/SkillBookCatalog');
+const ClanReviewEvents = require('../Clan/ClanReviewEvents');
 const pending = new WeakMap();
 
 function stateFor(actor) {
@@ -19,7 +20,7 @@ function review(session, { onSpAward = false } = {}) {
     if (!actor || !String(session.accountId || '').startsWith('bot_')) return Promise.resolve(null);
     const gate = session.skillTrainingGate;
     if (onSpAward && gate && gate.level === actor.fetchLevel() && gate.classId === actor.fetchClassId()
-        && actor.fetchSp() < gate.nextSp) return Promise.resolve(null);
+        && actor.fetchSp() - ClanReviewEvents.spReserve(actor.fetchId()) < gate.nextSp) return Promise.resolve(null);
     if (pending.has(actor)) return pending.get(actor);
     const Progression = invoke('GameServer/Bot/BotClassProgression');
     const state = stateFor(actor);

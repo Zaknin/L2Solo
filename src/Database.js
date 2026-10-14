@@ -10646,7 +10646,7 @@ const Database = {
             };
         }, 'clan-simulation:level-up')).then(result => {
             if (result.ok) {
-                // The level and its SP are paid: release the leader's reserve now,
+                // The level and its SP are paid: the leader's reserve reads 0 now,
                 // not at the next clan projection.
                 ClanReviewInputs.untrackLeader(clan);
                 ClanReviewInputs.changed(clan, 'level');
