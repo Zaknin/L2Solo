@@ -10,15 +10,11 @@ isolated.assertConfigured(options.default);
 // any payment.
 const World = invoke('GameServer/World/World');
 const Purchase = invoke('GameServer/Network/Request/Purchase');
-const Sell = invoke('GameServer/Network/Request/Sell');
-const TradeService = invoke('GameServer/Bot/TradeService');
-const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
-const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 
 const ServerResponse = invoke('GameServer/Network/Response');
 ServerResponse.actionFailed = () => ({ kind: 'actionFailed' });
 
-const SHOT = 1835, SPIRIT = 2509;
+const SHOT = 1835;
 
 function packet(lines) {
     const buffer = Buffer.alloc(9 + lines.length * 8);
@@ -30,56 +26,8 @@ function packet(lines) {
     });
     return buffer;
 }
-const merchant = () => ({ fetchId: () => 3000001, fetchName: () => 'Merchant' });
 const player = () => ({ fetchId: () => 2000005, fetchName: () => 'Player', backpack: { fetchItems: () => [], fetchTotalAdena: () => 0 } });
 const kinds = (sent) => sent.map((p) => p?.kind);
-
-async function runPurchase(failAt) {
-    const done = [], events = [], sent = [];
-    const originals = [TradeService.buyFromStore, MarketTelemetry.recordTrade, BotSocialMemory.recordTradeCompleted];
-    TradeService.buyFromStore = async (actor, store, selfId, qty) => {
-        if (done.length === failAt) throw new Error('injected line failure');
-        done.push(selfId);
-        return { qty, name: `item${selfId}`, totalAdena: qty * 5 };
-    };
-    MarketTelemetry.recordTrade = () => {};
-    BotSocialMemory.recordTradeCompleted = (session, merch, detail) => { events.push(detail); return Promise.resolve(null); };
-    try {
-        const store = { storeType: 1, items: [] };
-        const session = { actor: player(), dataSendToMe: (p) => sent.push(p),
-            activeMerchantTrade: { store, merchant: merchant(), prices: { [SHOT]: 5, [SPIRIT]: 5 } } };
-        await Purchase(session, packet([[SHOT, 1], [SPIRIT, 1]]));
-    } finally {
-        [TradeService.buyFromStore, MarketTelemetry.recordTrade, BotSocialMemory.recordTradeCompleted] = originals;
-    }
-    return { done, events, sent };
-}
-
-async function runSell(failAt) {
-    const done = [], events = [], sent = [];
-    const keep = { ...TradeService };
-    TradeService.sellToStore = async (actor, store, selfId, qty) => {
-        if (done.length === failAt) throw new Error('injected line failure');
-        done.push(selfId);
-        return { qty, name: `item${selfId}`, totalAdena: qty * 5 };
-    };
-    TradeService.refreshStorePrices = () => {};
-    TradeService.nativeStoreItems = (s) => s.items;
-    TradeService.sellableCopy = (a, selfId, objectId) => ({ fetchId: () => objectId, fetchSelfId: () => selfId, fetchAmount: () => 5 });
-    TradeService.storeSaleQuote = () => ({ price: 5, count: 10 });
-    const record = MarketTelemetry.recordTrade, social = BotSocialMemory.recordTradeCompleted;
-    MarketTelemetry.recordTrade = () => {};
-    BotSocialMemory.recordTradeCompleted = (session, merch, detail) => { events.push(detail); return Promise.resolve(null); };
-    try {
-        const store = { storeType: 3, items: [{ selfId: SHOT, count: 10, price: 5 }, { selfId: SPIRIT, count: 10, price: 5 }] };
-        const session = { actor: player(), dataSendToMe: (p) => sent.push(p), activeMerchantTrade: { store, merchant: merchant() } };
-        await Sell.consumeMerchant(session, [{ objectId: 501, selfId: SHOT, amount: 1 }, { objectId: 502, selfId: SPIRIT, amount: 1 }]);
-    } finally {
-        Object.assign(TradeService, keep);
-        MarketTelemetry.recordTrade = record; BotSocialMemory.recordTradeCompleted = social;
-    }
-    return { done, events, sent };
-}
 
 async function npcAmounts() {
     const calls = [];

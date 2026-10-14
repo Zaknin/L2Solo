@@ -8,7 +8,6 @@ isolated.assertConfigured(options.default);
 
 // E253: a multi-line merchant trade whose later line fails records ONE social
 // event for the lines that completed (none when no line completed).
-const World = invoke('GameServer/World/World');
 const Purchase = invoke('GameServer/Network/Request/Purchase');
 const Sell = invoke('GameServer/Network/Request/Sell');
 const TradeService = invoke('GameServer/Bot/TradeService');
