@@ -41,8 +41,11 @@ const incomeBases = new Map();
 const MAX_INCOME_BASE_CELLS = 262144;
 let incomeBaseCells = 0;
 // Cache use for the cold worker heartbeat (L104); counted only with developer diagnostics.
-// memoEvictions counts the oldest-row drops at MAX_VALUE_MEMO; resets the catalog or rate changes in refreshCatalog.
-const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, resets: 0, baseClears: 0 };
+// memoEvictions, incomeEvictions, baseEvictions count the oldest-row drops at their caps; resets the
+// wholesale clears that dropped rows (catalog, table or rate change).
+const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, incomeEvictions: 0, baseEvictions: 0, resets: 0 };
+function countReset(rows) { DiagnosticConfig.developerDiagnostics && rows && (stats.resets += 1); }
+function cachedRows() { return valueMemo.size + bestRows.size + incomeRows.size + incomeBases.size; }
 function cacheStats() {
     return { memo: valueMemo.size, best: bestRows.size, income: incomeRows.size, bases: incomeBases.size,
         cells: incomeBaseCells, ...stats };
@@ -65,10 +68,10 @@ function refreshCatalog(rates) {
     if (spots !== rewardSpots || spots.length !== rewardSpotCount || revision !== rewardRevision) {
         rewardSpots = spots; rewardSpotCount = spots.length;
         rewardRevision = revision;
+        countReset(cachedRows());
         valueMemo.clear(); bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
         spoilLevels.clear();
-        DiagnosticConfig.developerDiagnostics && (stats.resets += 1);
     }
 }
 
@@ -87,15 +90,13 @@ const valueMemo = new Map();
 let valueMemoTable = null, valueMemoRates = null;
 function refreshValueMemo(t, rates) {
     if (t !== valueMemoTable || rates !== valueMemoRates) {
+        countReset(valueMemo.size);
         valueMemo.clear();
         valueMemoTable = t;
         valueMemoRates = rates;
     }
 }
-function clearIncomeBases() {
-    incomeBases.clear(); incomeBaseCells = 0;
-    DiagnosticConfig.developerDiagnostics && (stats.baseClears += 1);
-}
+function clearIncomeBases() { incomeBases.clear(); incomeBaseCells = 0; }
 
 // A curve with no value at a gap (no curve spot hunts there) takes the
 // nearest higher gap's value, else the nearest lower one.
@@ -287,6 +288,7 @@ function best(role, level, shots = true, metric = 'exp') {
     refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
+        countReset(cachedRows());
         bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
     }
@@ -308,6 +310,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
     refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
+        countReset(cachedRows());
         incomeRows.clear(); bestRows.clear(); valueMemo.clear();
         clearIncomeBases();
     }
@@ -346,6 +349,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
             const oldest = incomeBases.keys().next().value;
             incomeBaseCells -= incomeBases.get(oldest).indexes.length;
             incomeBases.delete(oldest);
+            DiagnosticConfig.developerDiagnostics && (stats.baseEvictions += 1);
         }
         if (count <= MAX_INCOME_BASE_CELLS) { incomeBases.set(basisKey, basis); incomeBaseCells += count; }
     }
@@ -362,7 +366,10 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         const spotId = t.spots[index][0];
         return Object.freeze({ ...memoValue(t, rates, spotId, role, level, shots, skill), income, spotId, useShots: shots });
     }));
-    if (incomeRows.size >= 128) incomeRows.delete(incomeRows.keys().next().value);
+    if (incomeRows.size >= 128) {
+        incomeRows.delete(incomeRows.keys().next().value);
+        DiagnosticConfig.developerDiagnostics && (stats.incomeEvictions += 1);
+    }
     incomeRows.set(key, result);
     return result;
 }
