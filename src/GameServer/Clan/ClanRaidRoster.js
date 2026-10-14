@@ -118,6 +118,8 @@ async function cancelUnopened(party, reason) {
         stats: { ...current.stats, partyBreakReason: reason, dissolvedAt: Date.now() } });
     if (!saved) return false;
     await invoke('GameServer/Bot/Population/BotLifeState').releaseDissolvedPartyMembers(party.partyId, reason);
+    // The clan goal stays executing after the party is gone: wake its review for a new attempt.
+    require('./ClanReviewEvents').changed(markerFor(current).clanId, 'raid_cancelled');
     return true;
 }
 module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened };
