@@ -1174,6 +1174,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     let mobReadyAt = Number(pending?.mobReadyAt || 0);
     let time = 0;
     // A pull is counted once, when its fight starts; a continued fight keeps its saved view.
+    // A won fight reports the kills it paid (`killsPaid`) for the spot share.
     const mob = pending ? picked : BotPullEstimate.pullView(picked, picked.pull);
     const pullMobs = pending ? 0 : Number(picked.pull || 1);
     let areaPullHits = 0;
@@ -1323,7 +1324,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
             musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
             potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
-            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit, pullMobs, areaPullHits }
+            mobSelfId: mob.selfId || null, timedOut: false, overhit: kill.overhit, pullMobs, areaPullHits, killsPaid: pulled }
     };
 }
 
@@ -1616,11 +1617,13 @@ function soloFightCount(spot, elapsedMs) {
 // E69: a cold solo bot kills at most its share of what the spot's spawns give
 // back during the round: the spot's mobs per hour (SpotService, from the
 // respawns) times the round's hours, split among the bots on the spot. Null
-// when the spot has no production table (raids, rooms, older profiles).
+// when the spot has no production table (raids, rooms, older profiles) or its
+// production is 0: a respawn of 0 means no respawn data, not an empty spot.
 function soloShareMobs(spot, elapsedMs, hunters) {
     const entries = (spot?.npcEntries || []).filter(entry => Number.isFinite(entry.production));
     if (!entries.length || spot.raidBoss === true) return null;
     const production = entries.reduce((sum, entry) => sum + entry.production, 0);
+    if (production <= 0) return null;
     return production * elapsedMs / 3600000 / Math.max(1, Number(hunters) || 1);
 }
 
@@ -1945,7 +1948,8 @@ const BackgroundResolver = {
 
             if (result.won) {
                 wins += 1;
-                mobsKilled += Math.max(1, Number(result.debug?.pullMobs) || 1);
+                // The share pays the kills the fight paid, also for a pull begun last round.
+                mobsKilled += Math.max(1, Number(result.debug?.killsPaid) || 1);
                 if (Number(result.debug?.mobSelfId) > 0) foughtNpcIds.push(Number(result.debug.mobSelfId));
             }
             if (result.died) {

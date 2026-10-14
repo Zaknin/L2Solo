@@ -559,7 +559,7 @@ const BackgroundPartyResolver = {
                         shotActions: memberShotActions.get(Number(state.characterId)) || 0,
                         // The worker delivers member results, not the outer
                         // aggregate. Carry combat totals on this owner only.
-                        ...(index === 0 ? { combatActions, skillUses, heals } : {})
+                        ...(index === 0 ? { combatActions, skillUses, heals, partyBuffCasts: huntBuffs?.buffCasts || 0 } : {})
                     }
                 }
             });

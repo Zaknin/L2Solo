@@ -60,6 +60,15 @@ PopulationMetrics.recordCombat(first.debug);
 PopulationMetrics.recordCombat(late.debug);
 assert.strictEqual(PopulationMetrics.snapshot().delta.partyBuffCasts, first.debug.partyBuffCasts + late.debug.partyBuffCasts,
     'population telemetry must count party buff casts of ordinary hunts');
+// The cold worker records each member's debug, not the outer aggregate:
+// the owner (index 0) carries the casts once, the others none.
+const memberDebug = (result, index) => result.memberResults[index].result.debug;
+assert.strictEqual(memberDebug(first, 0).partyBuffCasts, first.debug.partyBuffCasts);
+assert.strictEqual(memberDebug(first, 1).partyBuffCasts, undefined, 'only the telemetry owner carries the casts');
+PopulationMetrics.snapshot(); // a snapshot starts the next delta
+first.memberResults.forEach((_, index) => PopulationMetrics.recordCombat(memberDebug(first, index)));
+assert.strictEqual(PopulationMetrics.snapshot().delta.partyBuffCasts, first.debug.partyBuffCasts,
+    'the worker path counts the party buff casts once per party resolve');
 PopulationMetrics.counters = originalCounters;
 PopulationMetrics.lastSummaryCounters = originalSummary;
 

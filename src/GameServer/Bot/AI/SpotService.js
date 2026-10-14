@@ -263,8 +263,8 @@ const SpotService = {
         });
         // lazy: worker SpotService also loads in the cold worker; these aggro owners import the live world.
         const SocialAggro = invoke('GameServer/Npc/SocialAggro');
-        const NpcAggro = invoke('GameServer/Npc/NpcAggro');
-        const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
+        const NpcAggro = invoke('GameServer/Npc/NpcAggro'); // lazy: worker as SocialAggro above.
+        const MinionManager = invoke('GameServer/World/RaidBossMinionManager'); // lazy: worker as SocialAggro above.
         const pulls = BotPullEstimate.annotate(this.spots, {
             assistZ: SocialAggro.MAX_ASSIST_Z_DIFFERENCE,
             aggroRadius: NpcAggro.AGGRO_RADIUS,
