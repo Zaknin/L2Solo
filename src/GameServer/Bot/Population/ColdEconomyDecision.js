@@ -427,13 +427,15 @@ function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     return !refusal(state, accepted, deps, current, options);
 }
 // options.why: an array that receives the refusal's name; options.prepared:
-// an object that receives the basics a refusal already built (L116), so the
-// caller does not build them again for the same state and deps.
+// an object that receives the basics it built (L116; also on reuse, L120), so
+// the caller does not build them or their income route again for the same
+// state and deps.
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     let base;
     const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
     const refused = refusal(state, accepted, deps, current, options);
     if (refused) { options.why?.push(refused); if (base && options.prepared) options.prepared.basics = base; return null; }
+    if (options.prepared) options.prepared.basics = current();
     // This new result is fenced to the actual publication, wallet and MP;
     // never relax ColdEconomyDecisions.matches or any native write guard.
     const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),

@@ -727,6 +727,13 @@ const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
 // Few counter names (the worker keeps 256): a non-field activity is not a
 // lever and the structural segment is named once, not in every join. A bot
 // in a party or without a card never had a card to reuse: counted, not joined.
+// L120: the build after a basics of the same step takes its income route
+// (EconomyContext.incomeRouteFor checks the key and replays its price reads).
+// A copy, so the caller's deps (kept beside the advisory) never carry it.
+function withIncomeRoute(deps, basics) {
+    const route = basics?.preparedIncomeRoute;
+    return route ? { ...deps, preparedIncomeRoute: route } : deps;
+}
 function advisoryRefusal(deps, site, reason) {
     if (!economyDiagnostics.active()) return deps;
     const name = reason.startsWith('not_field:') ? 'not_field' : reason;
@@ -1034,7 +1041,7 @@ function startKernel(config = {}) {
                     let stock = refreshed?.economy || prepared.basics || null;
                     economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
                         .edges(state, projected, owner?.context || {}, timestamp,
-                            { stockFor: (_state, kind) => (stock ||= Economy.basics(projected, deps)).stock(kind) });
+                            { stockFor: (_state, kind) => (stock ||= prepared.basics = Economy.basics(projected, deps)).stock(kind) });
                     if (economyEdges && refreshed) {
                         refreshed = null;
                         // L115: which native gate dropped a card that held its fence.
@@ -1050,7 +1057,7 @@ function startKernel(config = {}) {
                         } else why.push('economy_edges');
                     }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                    return Economy.forState(projected, advisoryRefusal(deps, 'result', why[0] || 'party'));
+                    return Economy.forState(projected, withIncomeRoute(advisoryRefusal(deps, 'result', why[0] || 'party'), prepared.basics));
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
@@ -1138,10 +1145,10 @@ function startKernel(config = {}) {
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             const excluded = invoke('GameServer/Bot/Population/SpotRiskPolicy').excludedSpotIdsForStates([state], timestamp);
-            const why = [];
+            const why = [], prepared = {};
             const refreshed = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
                 && planHolds && !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery
-                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why }) : null;
+                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared }) : null;
             if (refreshed && !excluded.has(String(refreshed.economy.network.activity?.spotId))) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
@@ -1159,9 +1166,9 @@ function startKernel(config = {}) {
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus'
                 ? { ...state, stats: { ...state.stats,
                     equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
-            const preparedEconomy = Economy.forState(preparationState, advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
+            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
                 : why[0] || (state.party?.partyId || state.partyId || state.stats?.partyRequest ? 'party' : !planHolds ? 'plan_changed'
-                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')));
+                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')), prepared.basics));
             const selectedAcquisition = GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,

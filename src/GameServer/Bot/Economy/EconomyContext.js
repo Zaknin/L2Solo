@@ -687,14 +687,44 @@ function kitReader(data, price, scrollUseHours) {
 // the part of a review that needs no wish network. forState builds on it and
 // basics() returns it alone, so a reader that wants only these never builds
 // the network, and both give the same numbers.
-function foundation(state, deps, persona, timestamp, price) {
+// ARCH-NOTE: PERF (L120): the income route search (EquipmentIncomeRoute.select)
+// is most of a foundation. A cold step often builds basics() and then
+// forState() for the same projected state; the second build takes the
+// first one's route through deps.preparedIncomeRoute instead of searching
+// again. Key: the same state object, timestamp, spots and occupancy objects,
+// mode, maxChecks and required gear flag: every input of select but its
+// price reader. The record keeps each price(id) select made, in order, with
+// its value: the build replays them through its own price first, so its
+// read fence, price and belief maps and board watch fill exactly as a fresh
+// search would, and a price that came out different searches afresh. The
+// record travels only by deps (the cold worker passes its basics' record);
+// select returns plain data (no closure over price).
+function incomeRouteFor(state, deps, timestamp, price, keep) {
+    const required = invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required;
+    const prepared = deps.preparedIncomeRoute;
+    if (prepared && prepared.state === state && prepared.timestamp === timestamp && prepared.spots === deps.spots
+        && prepared.occupancy === deps.occupancy && prepared.mode === deps.mode
+        && prepared.maxChecks === deps.maxChecks && prepared.required === required) {
+        let same = true;
+        for (let i = 0; i < prepared.reads.length; i += 2) {
+            if (!Object.is(price(prepared.reads[i]), prepared.reads[i + 1])) same = false;
+        }
+        if (same) { keep?.(prepared); return prepared.route; }
+    }
+    const reads = keep ? [] : null;
+    const route = require('./EquipmentIncomeRoute').select(state, { ...deps, timestamp, required,
+        price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
+    keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
+        maxChecks: deps.maxChecks, required, reads, route });
+    return route;
+}
+function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const role = state.party?.role || state.stats?.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(state.stats?.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
     let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
-    const incomeRoute = require('./EquipmentIncomeRoute').select(state, { ...deps, timestamp, price,
-        required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
+    const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
     if (incomeRoute) {
         const row = incomeRoute.row;
         hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
@@ -776,7 +806,11 @@ function basics(state = {}, deps = {}) {
     const persona = personaOf(state, deps);
     const board = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
     const { price } = pricing(state, persona, board, timestamp, deps);
-    return { persona, price, timestamp, ...foundation(state, deps, persona, timestamp, price) };
+    let route = null;
+    const base = { persona, price, timestamp, ...foundation(state, deps, persona, timestamp, price, record => { route = record; }) };
+    // Not enumerable: a view spread over these basics does not carry it (L120).
+    Object.defineProperty(base, 'preparedIncomeRoute', { value: route });
+    return base;
 }
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
 // The build reads the bot's own combat profile several times at one
