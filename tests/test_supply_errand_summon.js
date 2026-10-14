@@ -11,6 +11,11 @@ require('../src/Global');
 // (PartyCompanionService.holdParty) skip it too: no botStay, no stayLocation
 // (the hidden town position), no "Holding this position." reply; an ordinary
 // companion still holds.
+// E301 (second part): PartyCompanionService.beginRegroup (the regroup_party
+// tool) leaves it alone too: no action cancel (setCasts(false) would break the
+// escape cast in phase cold), no change of its target, Hold or plan, not in the
+// directive's memberIds (the regroup does not wait for a hidden bot), and the
+// affected count is the real members only.
 
 const BotSupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
 const BotTownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
@@ -26,6 +31,7 @@ const BotAI = invoke('GameServer/Bot/BotAI');
 const PetTravel = invoke('GameServer/Pets/PetTravel');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 const HotBackgroundParty = invoke('GameServer/Bot/AI/HotBackgroundParty');
+const BotEventJournal = invoke('GameServer/Bot/AI/BotEventJournal');
 const CompanionControl = invoke('GameServer/World/Generics/NpcBypasses/CompanionControl');
 
 function item(id, selfId, amount) {
@@ -208,6 +214,40 @@ async function runCase(phaseWanted, failures) {
             check(none.ok === false && none.reason === 'no_party_companions', `holdParty only errand: result is ${JSON.stringify(none)}`);
             stateKept('holdParty only errand');
         } finally {
+            HotBackgroundParty.roster = realRoster;
+            delete leader.hotBackgroundPartyId;
+        }
+
+        // regroup_party (beginRegroup)
+        freeHold();
+        a.botStay = true;
+        a.stayLocation = { locX: 5, locY: 5, locZ: 5 };
+        errand.currentTargetId = 55;
+        let castsCleared = 0;
+        const realSetCasts = errand.actor.state.setCasts;
+        errand.actor.state.setCasts = (value) => { if (value === false) castsCleared += 1; };
+        const realRecord = BotEventJournal.record;
+        BotEventJournal.record = async () => ({});
+        leader.hotBackgroundPartyId = 'party';
+        HotBackgroundParty.roster = () => [leader, errand, a, b];
+        try {
+            const regrouped = PartyCompanionService.beginRegroup(leader, {});
+            check(regrouped.ok === true && regrouped.affected === 2, `beginRegroup: result is ${JSON.stringify(regrouped)} (expected 2 affected)`);
+            stateKept('beginRegroup');
+            check(castsCleared === 0, `beginRegroup: the cast flag of the errand companion was cleared ${castsCleared} time(s) (breaks the escape cast)`);
+            check(errand.currentTargetId === 55, `beginRegroup: currentTargetId of the errand companion is ${errand.currentTargetId} (expected 55)`);
+            const ids = (leader.partyRegroupDirective?.memberIds || []).slice().sort();
+            check(JSON.stringify(ids) === JSON.stringify([2, 3]), `beginRegroup: directive memberIds are ${JSON.stringify(ids)} (expected [2,3])`);
+            check(a.botStay === false && a.stayLocation === null, 'beginRegroup: an ordinary companion kept its Hold');
+            delete leader.partyRegroupDirective;
+            HotBackgroundParty.roster = () => [leader, errand];
+            const none = PartyCompanionService.beginRegroup(leader, {});
+            check(none.ok === false && none.reason === 'no_party_companions', `beginRegroup only errand: result is ${JSON.stringify(none)}`);
+            check(!leader.partyRegroupDirective, 'beginRegroup only errand: a directive was created');
+            check(castsCleared === 0 && errand.currentTargetId === 55, 'beginRegroup only errand: the errand companion was touched');
+        } finally {
+            errand.actor.state.setCasts = realSetCasts;
+            BotEventJournal.record = realRecord;
             HotBackgroundParty.roster = realRoster;
             delete leader.hotBackgroundPartyId;
         }
