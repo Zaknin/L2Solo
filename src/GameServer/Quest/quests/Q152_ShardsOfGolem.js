@@ -64,7 +64,7 @@ module.exports = {
     }
     if (id === H && c === 4 && n(s, BOX)) {
       if (!(await q.takeItem(s.session, R2)))
-        return p("Harris", "You do not have Harrys's 2nd Receipt.");
+        return p("Harrys", "You do not have Harrys's 2nd Receipt.");
       await q.takeItem(s.session, BOX);
       await q.giveItem(s.session, ARMOR, 1);
       await q.rewardExpSp(s.session, 5000, 0);
