@@ -112,4 +112,47 @@ const keltirX10 = Table.value('-15_42', 'dps', 5, true);
 near(keltirX10.exp, keltir.exp * 10, 'the committed table scales exp with the rate');
 process.env.L2NODE_PROGRESSION_RATE = 'x1';
 
+
+// The value memo drops its oldest row at the cap, in insertion order, and a clear restarts the order at the
+// first slot. Unknown spot names give one distinct string key each; every call stays a plain memo row.
+{
+    const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+    const developer = Config.developerDiagnostics;
+    const CAP = 32768;
+    const started = Date.now();
+    Config.developerDiagnostics = true;
+    try {
+        Table.useFile(path.join(__dirname, 'fixtures', 'spot_table.json'));
+        const ask = (name) => {
+            const before = Table.cacheStats();
+            Table.value(name, 'dps', 24);
+            const after = Table.cacheStats();
+            return { hit: after.memoHits - before.memoHits === 1, miss: after.memoMisses - before.memoMisses === 1,
+                evicted: after.memoEvictions - before.memoEvictions };
+        };
+        const fill = (prefix, count) => { for (let at = 0; at < count; at++) Table.value(`${prefix}${at}`, 'dps', 24); };
+        const evictions = () => Table.cacheStats().memoEvictions;
+        const base = evictions();
+        fill('wrap', CAP + 1);
+        assert.strictEqual(Table.cacheStats().memo, CAP, 'the memo holds the cap');
+        assert.strictEqual(evictions() - base, 1, 'one key over the cap drops one row');
+        assert(ask('wrap1').hit, 'the second key is still present');
+        assert(ask(`wrap${CAP}`).hit, 'the newest key is present');
+        // Three more keys drop the next three oldest, in insertion order.
+        fill('late', 3);
+        assert.strictEqual(evictions() - base, 4);
+        assert(ask('wrap4').hit && ask('wrap5').hit, 'wrap4 is the oldest row left');
+        for (const name of ['wrap0', 'wrap1', 'wrap2', 'wrap3']) assert(ask(name).miss, `${name} was dropped in order`);
+        // A clear restarts the ring at the first slot: the first key after it is the first one dropped.
+        Table.useFile(path.join(__dirname, 'fixtures', 'spot_table.json'));
+        assert.strictEqual(Table.cacheStats().memo, 0);
+        const cleared = evictions();
+        fill('again', CAP + 1);
+        assert.strictEqual(evictions() - cleared, 1);
+        assert(ask('again1').hit, 'after a clear the second key is present');
+        assert(ask('again0').miss, 'after a clear the first key is the one dropped');
+        assert.strictEqual(Table.cacheStats().memo, CAP);
+    } finally { Config.developerDiagnostics = developer; Table.useFile(); }
+    console.log(`Spot value memo ring order and clear passed in ${Date.now() - started} ms`);
+}
 console.log('Spot value table lookups, curves, caps, rates and the committed table passed');

@@ -88,7 +88,7 @@ function roleSpoilLevel(role, level) {
 // (ProgressionRates keeps one profile object while the rates are equal).
 const MAX_VALUE_MEMO = 32768;
 const valueMemo = new Map();
-// Insertion order of valueMemo's keys, oldest at valueMemoHead: the drop at the
+// ARCH-NOTE: PERF insertion order of valueMemo's keys, oldest at valueMemoHead: the drop at the
 // cap reads the oldest key here. Asking the Map for its first key walks every
 // slot an earlier drop left empty (4.3 s per 131k drops at the cap); a row is
 // only ever added on a miss and removed as the oldest, so both orders agree.

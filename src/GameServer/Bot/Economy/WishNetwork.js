@@ -253,14 +253,14 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
             const units = allocation && ['craft', 'crystallize'].includes(path.kind)
                 ? Math.ceil(amount / Number(path.productCount || 1)) : allocation ? amount : 1;
             if (!Number.isSafeInteger(units) || units <= 0) continue;
-            // Path-only facts, once per path (both evaluations read them).
+            // ARCH-NOTE: PERF path-only facts, once per path (both evaluations read them).
             const unitEffort = allocation ? priceOf(path, 0) : priceOf(path);
             const inputs = allocation ? path.grossRequirements || path.requirements || [] : path.requirements || path.grossRequirements || [];
             const leaf = Array.isArray(inputs) && inputs.length === 0;
             // Forecast the complete output first. A native batch limit only
             // bounds the next command, never the materials or price of the goal.
             const evaluate = (units, command = false) => {
-                // A path without inputs solves no child: it claims no stock, so the
+                // ARCH-NOTE: PERF a path without inputs solves no child: it claims no stock, so the
                 // claims need no copy and no merge back.
                 const local = allocation && !leaf ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
                 let price = nonnegative(path.price) * units, effort = unitEffort * units,
