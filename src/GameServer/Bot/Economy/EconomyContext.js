@@ -199,18 +199,29 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
 // structural key above, in its order: the inputKey fields, then the
 // capability, then the JSON tail (equipment plan, persona, spot deaths,
 // market trades, relations, production, role, account). A bounded set of
-// 12 names keeps the worker's counter keys few. The positions hold while no
+// 16 names keeps the worker's counter keys few. The positions hold while no
 // field before the differing one contains '|' (all are numbers, ids, or
-// JSON of numbers and town names).
+// JSON of numbers and town names). The trip part is named apart (L114):
+// the hunting spot, the route rows' readiness, and inside Trip.key the
+// field that moved (travel or activity before location, since a new
+// travel or activity also releases the session's location anchor).
 const STRUCTURAL_SEGMENTS = [
     'progress', 'progress', 'progress', 'loot', 'other', 'other', 'other', 'other', 'other',
     'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'time', 'other', 'other',
     'frustration', 'other', 'other', 'other', 'other', 'other', 'other', 'other',
-    'time', 'time', 'clan_loot', 'clan_loot', 'clan_loot', 'trip_loc', 'gear_threat', 'other', 'memory',
-    'other', 'other', 'other', 'other', 'trip_loc', 'trip_loc', 'other', 'other', 'other', 'progress', 'other',
+    'time', 'time', 'clan_loot', 'clan_loot', 'clan_loot', 'spot_id', 'gear_threat', 'other', 'memory',
+    'other', 'other', 'other', 'other', 'trip_key', 'route_ready', 'other', 'other', 'other', 'progress', 'other',
     'workshop', 'progress', 'progress', 'build'];
-function structuralSegment(index) {
-    return index < STRUCTURAL_SEGMENTS.length ? STRUCTURAL_SEGMENTS[index] : 'plan_tail';
+// held/current: the two structural keys, to name the Trip.key field.
+function structuralSegment(index, held = null, current = null) {
+    const name = index < STRUCTURAL_SEGMENTS.length ? STRUCTURAL_SEGMENTS[index] : 'plan_tail';
+    if (name !== 'trip_key' || held === null || current === null) return name;
+    try {
+        const [, a] = JSON.parse(held.split('|')[index]), [, b] = JSON.parse(current.split('|')[index]);
+        const same = field => JSON.stringify(field(a)) === JSON.stringify(field(b));
+        if (!same(row => [row.activity, row.stats?.travel])) return 'trip_travel';
+        return same(row => row.loc) ? 'trip_other' : 'trip_loc';
+    } catch { return 'trip_other'; }
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised; location, region and the travel target stay
@@ -458,7 +469,7 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
     // options.activity is the fence's own build activity, so one key compares;
     // options.leaf is its held leaf (a trip to the leaf's own spot).
     const structural = sectionKeys(fieldActivity(state, options.activity, options.leaf), deps, bands).structural;
-    if (key !== structural) return miss(why, why && Diagnostics.active() ? `structural:${structuralSegment(firstSegment(key, structural))}` : 'structural');
+    if (key !== structural) return miss(why, why && Diagnostics.active() ? `structural:${structuralSegment(firstSegment(key, structural), key, structural)}` : 'structural');
     const reads = new Map();
     for (let at = 0; at < items.length; at += 2) reads.set(items[at], tokens[items[at + 1]]);
     if (marketHolds(deps.board, reads, deps) && spotsHold(deps, spots)) return true;

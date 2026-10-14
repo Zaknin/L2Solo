@@ -420,6 +420,13 @@ async function run() {
     assert.equal(Economy.structuralSegment(50), 'plan_tail');
     assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, frustration: 0.7 } })), 'frustration');
     assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, memoryRevision: 99 } })), 'memory');
+    // L114: the trip part is named by what moved.
+    const tripName = changed => Economy.structuralSegment(firstMoved(changed), segments(mage).join('|'), segments(changed).join('|'));
+    assert.equal(tripName({ ...mage, spotId: 'moved-spot' }), 'spot_id');
+    assert.equal(tripName({ ...mage, loc: { locX: 1234, locY: 5678, locZ: -90 } }), 'trip_loc');
+    assert.equal(tripName({ ...mage, activity: 'shopping', loc: { locX: 1234, locY: 5678, locZ: -90 } }), 'trip_travel');
+    assert.equal(tripName({ ...mage, currentRegion: 'elsewhere' }), 'trip_other');
+    assert.equal(Economy.structuralSegment(40), 'route_ready');
     const artisan = Economy.forState({ ...base, characterId: 904, level: 70, adena: 1e6,
         stats: { ...base.stats, classId: 57, exp: Data.experience[69] } });
     console.log('CONTEXT artisan', JSON.stringify({ hour: artisan.hourAdena, hunt: artisan.hunt,
