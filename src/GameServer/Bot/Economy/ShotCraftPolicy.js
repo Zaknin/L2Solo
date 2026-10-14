@@ -313,49 +313,48 @@ function* recipeShotSearch(state, recipe, context, options = {}) {
     // 1..64 batches share the rank walks below, none of which depends on the
     // missing count. It lives as long as the request's iterator.
     const memo = options.searchMemo || null;
-    const perRank = (name, make) => {
-        if (!memo) return make();
+    // The first walk of a rank keeps the uncached walk's yields (one per row),
+    // so no planner unit grows; later batches read the list without them.
+    const perRank = function* (name, walk) {
         const key = `${name}:${rank}`;
-        if (!memo.has(key)) memo.set(key, make());
-        return memo.get(key);
+        if (memo?.has(key)) return memo.get(key);
+        const rows = yield* walk();
+        memo?.set(key, rows);
+        return rows;
     };
     const templateOf = id => options.itemTemplate?.(id) || invoke('GameServer/Item/ItemTemplateIndex')
         .find(invoke('GameServer/DataCache').items, Number(id));
     const gearKind = template => /^(Weapon|Armor)\./.test(String(template?.template?.kind || ''));
-    const scrapGear = function* (scrap, template, ownedFor) {
-        const inputs = yield* Basket.prepareBasket(scrap, () => null, ownedFor, 1, {
-            ...context, preparePurchase: (inputId, amount) => options.preparePurchase(state, inputId, amount, { npc: true, cost: trip }) });
-        if (!inputs) return null;
-        const materialInputs = [], materialAmounts = new Map(), inputQuotes = new Map();
-        for (const purchase of inputs.purchases) { inputQuotes.set(purchase.selfId, purchase); yield 'quote'; }
-        for (const row of scrap.materials || []) {
-            materialAmounts.set(Number(row.selfId), Number(materialAmounts.get(Number(row.selfId)) || 0) + Number(row.amount));
-            yield 'ingredient';
+    // Null edges and own lines never pass consider; only the rest are held,
+    // as the row and its score once a batch has scored it.
+    const gearRows = function* () {
+        const rows = [];
+        for (const row of options.gearRowsFor?.(rank) || []) {
+            yield 'edge';
+            if (row && Number(row.ownerId) !== Number(state.characterId)) rows.push({ row, scored: undefined });
         }
-        for (const [selfId, amount] of materialAmounts) {
-            const purchase = inputQuotes.get(selfId);
-            materialInputs.push({ selfId, amount, maxPrice: purchase ? purchase.cost / purchase.count : Infinity });
-            yield 'ingredient';
-        }
-        return { selfId: Number(scrap.productId), source: 'craft', recipe: scrap,
-            crystals: Number(template.etc.cristals), cash: inputs.cashCost + inputs.actualCashFees,
-            price: inputs.cost, ownedValue: inputs.ownedValue, travelHours: inputs.travelHours,
-            town: state.currentRegion, inputs: materialInputs, ownedInputs: inputs.owned,
-            purchases: inputs.purchases };
+        return rows;
     };
-    // The scrap basket sees the batch's allocation only through ownedFor: a
-    // stored basket is reused while every count it read is still the same.
-    const craftedGear = function* (scrap, template, availableOwn) {
-        if (!memo) return yield* scrapGear(scrap, template, availableOwn);
-        const key = `scrap:${scrap.recipeId}`, held = memo.get(key) || [];
-        const hit = held.find(row => row.reads.every(([inputId, count]) => (availableOwn(inputId)?.count ?? null) === count));
-        if (hit) return hit.value;
-        const reads = [];
-        const value = yield* scrapGear(scrap, template, inputId => {
-            const stock = availableOwn(inputId); reads.push([inputId, stock?.count ?? null]); return stock;
-        });
-        held.push({ reads, value }); memo.set(key, held);
-        return value;
+    const ownedRows = function* () {
+        const rows = [];
+        for (const [selfId, held] of ownStock) {
+            yield 'stock';
+            const template = templateOf(selfId);
+            if (template?.etc?.rank === rank && gearKind(template)) rows.push([selfId, held, Number(template.etc.cristals)]);
+        }
+        return rows;
+    };
+    const scrapRows = function* () {
+        const rows = [];
+        for (const known of options.knownRecipes || []) {
+            const scrap = Recipes.resolveByRecipeId(Number(known.recipeId ?? known));
+            yield 'recipe';
+            if (!scrap || scrap.type !== 'dwarven' || Number(scrap.successRate) !== 100 || Number(scrap.productCount) !== 1
+                || !CraftShopService.canCraft(state, scrap) || Number(scrap.mpCost) >= Number(state.vitals?.mp || 0)) continue;
+            const template = templateOf(scrap.productId);
+            if (template?.etc?.rank === rank && gearKind(template)) rows.push({ scrap, template });
+        }
+        return rows;
     };
     // The batch-independent part of a crystal source: its trip and score.
     const scoreGear = function* (gear) {
@@ -382,7 +381,7 @@ function* recipeShotSearch(state, recipe, context, options = {}) {
             cash: best.cost, crystals: missing, town: best.town }, score: best.landed };
         else best = null;
         const take = (gear, scored) => {
-            if (!best || scored.score < best.score) best = { town: gear.town, units: missing, whole: true,
+            best = { town: gear.town, units: missing, whole: true,
                 cost: scored.cash, ownedValue: scored.ownedValue, landed: scored.cash + scored.travel, tripDetails: scored.details,
                 processingHours: scored.processingHours, extraMp: scored.mp, repeatable: false, residualValue: 0, gear,
                 score: scored.score, ownedInputs: gear.ownedInputs };
@@ -391,39 +390,43 @@ function* recipeShotSearch(state, recipe, context, options = {}) {
             if (!gear) return;
             if (Number(gear.ownerId) === Number(state.characterId) || Number(gear.crystals) < missing) return;
             const scored = yield* scoreGear(gear);
-            if (scored) take(gear, scored);
+            if (scored && (!best || scored.score < best.score)) take(gear, scored);
         };
-        // Gear rows are fixed for the request. Each row is scored the first time
-        // it passes, in the uncached walk's order (the strict test keeps the first best).
-        for (const row of perRank('gear', () => Array.from(options.gearRowsFor?.(rank) || [],
-            gear => gear && { gear: { ...gear, cash: Number(gear.price), ownedValue: 0 }, scored: undefined }))) {
-            if (!row || Number(row.gear.ownerId) === Number(state.characterId) || Number(row.gear.crystals) < missing) continue;
-            if (row.scored === undefined) row.scored = yield* scoreGear(row.gear);
-            if (row.scored) take(row.gear, row.scored);
+        // Same order as the uncached walk: the strict score test keeps the first
+        // best, and a row's trip is first read where that walk first read it.
+        const gearSource = row => ({ ...row, cash: Number(row.price), ownedValue: 0 });
+        for (const entry of yield* perRank('gear', gearRows)) {
+            if (Number(entry.row.crystals) < missing) continue;
+            if (entry.scored === undefined) entry.scored = yield* scoreGear(gearSource(entry.row));
+            if (entry.scored && (!best || entry.scored.score < best.score)) take(gearSource(entry.row), entry.scored);
         }
-        const ownedGear = perRank('owned', () => [...ownStock].filter(([selfId]) => {
-            const template = templateOf(selfId);
-            return template?.etc?.rank === rank && gearKind(template);
-        }).map(([selfId, held]) => [selfId, held, Number(templateOf(selfId).etc.cristals)]));
-        for (const [selfId, held, crystals] of ownedGear) {
-            yield 'stock';
+        for (const [selfId, held, crystals] of yield* perRank('owned', ownedRows)) {
             if (!(availableOwn(selfId)?.count > 0) || !(crystals >= missing)) continue;
             yield* consider({ selfId, source: 'owned', crystals, cash: 0,
                 price: Number(held.unitValue), ownedValue: Number(held.unitValue), town: state.currentRegion,
                 ownedInputs: [{ selfId, count: 1, unitValue: Number(held.unitValue) }] });
         }
-        const scraps = perRank('scraps', () => (options.knownRecipes || []).map(known => {
-            const scrap = Recipes.resolveByRecipeId(Number(known.recipeId ?? known));
-            if (!scrap || scrap.type !== 'dwarven' || Number(scrap.successRate) !== 100 || Number(scrap.productCount) !== 1
-                || !CraftShopService.canCraft(state, scrap) || Number(scrap.mpCost) >= Number(state.vitals?.mp || 0)) return null;
-            const template = templateOf(scrap.productId);
-            return template?.etc?.rank === rank && gearKind(template) ? { scrap, template } : null;
-        }).filter(Boolean));
-        for (const { scrap, template } of scraps) {
-            yield 'recipe';
+        for (const { scrap, template } of yield* perRank('scraps', scrapRows)) {
             if (!(Number(template.etc.cristals) >= missing)) continue;
-            const gear = yield* craftedGear(scrap, template, availableOwn);
-            if (gear) yield* consider(gear);
+            const inputs = yield* Basket.prepareBasket(scrap, () => null, availableOwn, 1, {
+                ...context, preparePurchase: (inputId, amount) => options.preparePurchase(state, inputId, amount, { npc: true, cost: trip }) });
+            if (!inputs) continue;
+            const materialInputs = [], materialAmounts = new Map(), inputQuotes = new Map();
+            for (const purchase of inputs.purchases) { inputQuotes.set(purchase.selfId, purchase); yield 'quote'; }
+            for (const row of scrap.materials || []) {
+                materialAmounts.set(Number(row.selfId), Number(materialAmounts.get(Number(row.selfId)) || 0) + Number(row.amount));
+                yield 'ingredient';
+            }
+            for (const [selfId, amount] of materialAmounts) {
+                const purchase = inputQuotes.get(selfId);
+                materialInputs.push({ selfId, amount, maxPrice: purchase ? purchase.cost / purchase.count : Infinity });
+                yield 'ingredient';
+            }
+            yield* consider({ selfId: Number(scrap.productId), source: 'craft', recipe: scrap,
+                crystals: Number(template.etc.cristals), cash: inputs.cashCost + inputs.actualCashFees,
+                price: inputs.cost, ownedValue: inputs.ownedValue, travelHours: inputs.travelHours,
+                town: state.currentRegion, inputs: materialInputs, ownedInputs: inputs.owned,
+                purchases: inputs.purchases });
         }
         return best;
     };
