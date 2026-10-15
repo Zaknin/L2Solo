@@ -261,5 +261,25 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
     assert.strictEqual(builds[2].durationMs, undefined, 'a hit has no build time');
 }
 
+// A late read through a stored build's view (a price, a spot value) joins the
+// read set its held entry keeps: the next served view's fence names it.
+{
+    Economy.reset();
+    const actor = { ...state(), characterId: 904 };
+    const fenceOf = view => { const fields = Economy.decodeCalculationFence(view.calculationFence);
+        assert.ok(fields, 'the view has a calculation fence');
+        return { items: fields[1][1].filter((_, at) => at % 2 === 0), spots: fields[2].map(([id]) => id) }; };
+    const built = Economy.forState(actor, deps);
+    const before = fenceOf(built);
+    const item = 990003, spot = deps.spots.find(row => row?.id && !before.spots.includes(row.id));
+    assert.ok(!before.items.includes(item) && spot, 'fixture: an item and a spot the build did not read');
+    built.price(item); built.spotValue(spot);
+    const served = Economy.forState(actor, deps);
+    assert.strictEqual(served.plan, built.plan, 'the held entry serves the second request');
+    const after = fenceOf(served);
+    assert.ok(after.items.includes(item), 'a late price read joins the held item reads');
+    assert.ok(after.spots.includes(spot.id), 'a late spot read joins the held spot reads');
+}
+
 Date.now = realNow; Config.developerDiagnostics = false; Economy.reset();
 console.log('test_economy_context_shadow: ok');

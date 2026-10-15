@@ -395,13 +395,22 @@ function bagSafety(state, timestamp) {
     const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
     return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
 }
-function calculationFence(state, sections, reads, spots, deps, bands = [], safety = null) {
-    if (extensions.size || deps.nodes?.length || deps.workshops && !deps.workshopRevision && !deps.inputKey) return null;
-    const tokens = [], indexes = new Map(), items = [];
-    for (const [id, token] of reads) {
-        if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
-        items.push(id, indexes.get(token));
+// Each distinct token once, in first-seen order, and per [id, token] pair
+// the slot of its token in that list (the read sets and the fence share it).
+function indexTokens(pairs) {
+    const tokens = [], slots = [], index = new Map();
+    for (const [, token] of pairs) {
+        let slot = index.get(token);
+        if (slot === undefined) { index.set(token, slot = tokens.length); tokens.push(token); }
+        slots.push(slot);
     }
+    return { tokens, slots };
+}
+function calculationFence(state, reads, spots, deps, bands = [], safety = null) {
+    if (extensions.size || deps.nodes?.length || deps.workshops && !deps.workshopRevision && !deps.inputKey) return null;
+    const { tokens, slots } = indexTokens(reads), items = [];
+    let i = 0;
+    for (const id of reads.keys()) items.push(id, slots[i++]);
     return encodeCalculationFence([sectionKeys(state, deps, bands).structural,
         [tokens, items], [...spots], bands, safety], !isMainThread);
 }
@@ -419,12 +428,13 @@ function encodeCalculationFence(fields, compact = true) {
     if (!compact || plain.byteLength <= 2048) return plain.byteLength <= FENCE_BYTES ? plain : fenceDrop('plain_over_4k');
     if (plain.byteLength > FENCE_RAW_BYTES) return fenceDrop('raw_over_64k');
     if (fields[2].length > FENCE_SPOTS) return fenceDrop('spots_over_4096');
-    const tokens = [], indexes = new Map(), grid = [], other = [];
+    const { tokens, slots } = indexTokens(fields[2]), grid = [], other = [];
+    let i = 0;
     for (const [id, token] of fields[2]) {
-        if (!indexes.has(token)) { indexes.set(token, tokens.length); tokens.push(token); }
+        const slot = slots[i++];
         const parts = typeof id === 'string' && /^(?:0|[1-9]\d*|-[1-9]\d*)_(?:0|[1-9]\d*|-[1-9]\d*)$/.test(id)
             ? id.split('_').map(Number) : null;
-        if (parts?.every(Number.isSafeInteger)) grid.push([parts[0], parts[1], indexes.get(token)]);
+        if (parts?.every(Number.isSafeInteger)) grid.push([parts[0], parts[1], slot]);
         else other.push([id, token]);
     }
     grid.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -570,15 +580,9 @@ function marketHolds(board, reads, deps) {
 // go to a small Map after them.
 class HeldReads {
     constructor(map) {
-        const keys = [...map.keys()], tokens = [], index = new Map();
+        const keys = [...map.keys()], { tokens, slots } = indexTokens(map);
         this.ids = keys.every(id => (id | 0) === id) ? Int32Array.from(keys) : keys;
-        this.at = keys.length < 0xffff ? new Uint16Array(keys.length) : new Uint32Array(keys.length);
-        let i = 0;
-        for (const token of map.values()) {
-            let at = index.get(token);
-            if (at === undefined) { index.set(token, at = tokens.length); tokens.push(token); }
-            this.at[i++] = at;
-        }
+        this.at = keys.length < 0xffff ? Uint16Array.from(slots) : Uint32Array.from(slots);
         this.tokens = tokens;
         this.added = null;
     }
@@ -1030,7 +1034,7 @@ function buildForState(state, deps) {
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
             held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
-            fenceData: { sections: held.sections, reads: held.reads, spots: held.spotReads } });
+            fenceData: { reads: held.reads, spots: held.spotReads } });
     }
     const sections = sectionKeys(state, { ...deps, timestamp }, [], 'sources');
     const started = diagnostic ? performance.now() : 0;
@@ -1191,7 +1195,8 @@ function buildForState(state, deps) {
                 for (const [id] of input.spots) context.sourceSpot(id);
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
         readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
-            keep: kept => { for (const [id, token] of kept) if (!reads.has(id)) { reads.set(id, token); deps.onSourceRead?.(id); } } } };
+            keep: kept => { const into = heldReads || reads;
+                for (const [id, token] of kept) if (!into.has(id)) { into.set(id, token); deps.onSourceRead?.(id); } } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
         ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
@@ -1356,7 +1361,7 @@ function buildForState(state, deps) {
         }
     }
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
-        fenceData: { sections, reads: heldReads || reads, spots: heldSpots || spotReads } });
+        fenceData: { reads: heldReads || reads, spots: heldSpots || spotReads } });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -1510,7 +1515,7 @@ function view(state, plan, deps, built = {}) {
     Object.defineProperty(context, 'plan', { value: plan });
     let fence;
     Object.defineProperty(context, 'calculationFence', { get: () => fence === undefined
-        ? (fence = built.fenceData ? calculationFence(state, built.fenceData.sections, built.fenceData.reads, built.fenceData.spots, deps,
+        ? (fence = built.fenceData ? calculationFence(state, built.fenceData.reads, built.fenceData.spots, deps,
             plan.quantityBands, plan.bagSafety) : null) : fence });
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
