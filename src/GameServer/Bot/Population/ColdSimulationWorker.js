@@ -12,7 +12,8 @@ const srcRoot = path.resolve(__dirname, '../../..');
 require(path.join(srcRoot, 'Global'));
 
 const DataCache = invoke('GameServer/DataCache');
-DataCache.init();
+// Main checked these files against their schemas at startup; that check was ~3/4 of this boot (L71).
+DataCache.init({ validate: false });
 
 const originalInvoke = global.invoke;
 const npcShopTables = originalInvoke('GameServer/World/Generics/NpcShopBuyLists');

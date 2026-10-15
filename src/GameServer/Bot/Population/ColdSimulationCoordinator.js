@@ -2477,8 +2477,8 @@ class ColdSimulationCoordinator {
         if (stalled > 1000) this.lastHeartbeatAt = Math.min(now, this.lastHeartbeatAt + stalled);
         const age = now - this.lastHeartbeatAt;
         if (!this.ready) {
-            // Boot (module load, datapack validation, init) sends no heartbeat and
-            // takes 4 s idle, 20 s on a loaded Mac; a restart would only boot again.
+            // Boot (module load, datapack load, catalog transfer, init) sends no heartbeat and
+            // slows with the Mac's load ('running after N ms boot'); a restart would only boot again.
             if (age > Math.max(10000, Number(Config.coldWorkerBootMs) || 60000)) {
                 utils.infoWarn('ColdWorker', 'boot still running after %d ms: terminating the worker', age);
                 this.worker.terminate().catch(() => null);

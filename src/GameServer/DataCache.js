@@ -4,7 +4,10 @@ const ClassProgression = invoke('GameServer/ClassProgression');
 const RaidBossBalance = invoke('GameServer/RaidBoss/RaidBossBalance');
 
 const DataCache = {
-    init: () => {
+    // validate: false loads the same files without the schema check, which only warns:
+    // the cold worker re-reads the datapack the main thread checked at startup.
+    init: ({ validate = true } = {}) => {
+        const validateModel = (filepath) => loadModel(filepath, validate);
         const path = '../data/';
         // Generated NPC templates predate the source AI enum; merge the
         // source-backed profile before any NPC instance is spawned.
@@ -328,9 +331,10 @@ function applyNpcAiTypes(npcs, aiTypes) {
     });
 }
 
-function validateModel(filepath) {
-    const path   = require('path').dirname(filepath);
+function loadModel(filepath, validate) {
     const model  = invoke(filepath);
+    if (!validate) return model;
+    const path   = require('path').dirname(filepath);
     const result = validateSchema(model, invoke(path + '/.schema'));
 
     if (!result.valid) {
