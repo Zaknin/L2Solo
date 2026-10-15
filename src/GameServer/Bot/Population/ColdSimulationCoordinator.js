@@ -2130,6 +2130,11 @@ class ColdSimulationCoordinator {
             await this.step('buff', id, () => invoke('GameServer/Bot/Economy/ColdBuffService')
                 .applyOffer(entry.proposal.buffOffer, { beforeWrite }));
         }
+        // Hunts and party rewards can raise a level without producing any
+        // market work. Train after the prepared actions so their committed
+        // revision remains valid until they finish.
+        if (sourceCurrent()) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
+            LifeState.cachedState(id) || state, { beforeWrite })) || LifeState.cachedState(id) || state;
         if (Config.developerDiagnostics) await this.step('metrics', id, () => {
             Metrics.recordBackgroundResolve();
             Metrics.recordCombat(entry.proposal.result?.debug);

@@ -918,7 +918,7 @@ function save(row, options = {}) {
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
-    return Database.saveBotLifeState(statement, databaseOptions).then((result) => {
+    return Database.saveBotLifeState(statement, databaseOptions, row.characterId).then((result) => {
         if (result && typeof result.affectedRows === 'number' && result.affectedRows !== 1) {
             const error = new Error(`bot life state ownership conflict for ${row.characterId}`);
             error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
@@ -2417,8 +2417,11 @@ const BotLifeState = {
         };
     },
 
-    acceptPartyAssignments(prepared = []) {
-        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((snapshot) => {
+    acceptPartyAssignments(prepared = [], committedRows = []) {
+        const rows = new Map((committedRows || []).map(row => [Number(row.characterId), row]));
+        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((planned) => {
+            const row = rows.get(planned.characterId);
+            const snapshot = row ? normalize(row) : planned;
             cache.set(snapshot.characterId, snapshot);
             // Party membership changes the worker scheduling partition. Push
             // the committed state immediately instead of waiting for the old
@@ -2767,7 +2770,7 @@ const BotLifeState = {
         const nativeWriteOptions = options.persist !== false && workerOptions ? {
             beforeWrite: NativeWriteCheckpoint.create(characterId, workerOptions)
         } : undefined;
-        // ARCH-NOTE: Paid manual/worker training keeps private ROW version floors before SP/book/class writes.
+        // ARCH-NOTE: Automatic skill/class writes keep private ROW version floors.
         // Training wraps the original native capability only; ROW/after-writers keep their advancing original proof.
         const trainingWriteOptions = nativeWriteOptions && needsClassProgression && options.projectClassProgression !== true
             ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}, nativeWriteOptions.beforeWrite) }
@@ -2882,7 +2885,7 @@ const BotLifeState = {
                     });
             });
         });
-        // Projections and commands without paid training keep their existing promise/handler path.
+        // Projections and commands without skill grants keep their existing promise/handler path.
         if (trainingWriteOptions === nativeWriteOptions) return prepared;
         return prepared.catch(error => {
             if (Database.isColdTrainingSourceRetired(error)) return null;
@@ -2919,7 +2922,7 @@ const BotLifeState = {
             const resolved = await BotClassProgression.reconcile({ characterId: state.characterId,
                 classId: state.stats?.classId || 0, level: state.level, seed: state.characterId }, { beforeWrite });
             const row = await Database.publishColdTraining(state.characterId, resolved, { beforeWrite });
-            return this.acceptLifecycleRow(row, 'paid_training');
+            return this.acceptLifecycleRow(row, 'automatic_skills');
         });
     },
 

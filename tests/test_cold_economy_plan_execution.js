@@ -64,6 +64,11 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         assert.equal(Population.startLifecycleEconomyEvents, undefined);
         assert.equal(Population.runLifecycleEconomyEvent, undefined);
         assert.equal(Population.releaseWarehouseMaterials, undefined);
+        // The first commit can grant a new skill kit. Warm that build before
+        // measuring empty plans, excluding the earlier failed withdrawal too.
+        await coordinator.afterCommit({ ...result, proposal: { ...proposal,
+            economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
+        coordinator.economyPlanTimes.length = 0;
         for (let i = 0; i < 20; i++) await coordinator.afterCommit({ ...result, proposal: { ...proposal,
             economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
         state = await Life.upsertState({ ...(Life.cachedState(id) || state), stats: { ...state.stats,

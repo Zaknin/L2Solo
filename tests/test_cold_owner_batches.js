@@ -18,8 +18,7 @@ const Skillset = invoke('GameServer/Actor/Skillset');
 const Progression = invoke('GameServer/Progression/ProgressionCap');
 Data.init();
 
-// ARCH-NOTE: FX-E6 keeps native paid training outside the leased skill payload.
-// These declared100SP profiles pay100 once, then earn only their original10/11/12.
+// Automatic skills are persisted before leasing and preserve the initial 100 SP.
 const authoredProfiles = [0, 1, 2].map(index => ({
     initialLevel: 20 + index,
     nextLevel: 21 + index,
@@ -55,23 +54,23 @@ async function nativeAncestorPrefix(id) {
         assert.strictEqual(LifeState.cachedState(id), input, 'the actual prepared source remains current');
     });
     const training = await new Skillset().awardSkills(id, 0, input.level, { botTraining: true, beforeWrite });
-    assert.strictEqual(training.spentSp, 100);
-    assert.strictEqual(training.learnedCount, 5);
+    assert.strictEqual(training.spentSp, 0);
+    assert.strictEqual(training.learnedCount, invoke('GameServer/Bot/Population/ColdCombatProfile').skillRecordsFromTree(0, input.level).reduce((count, skill) => count + skill.level, 0));
     assert.deepStrictEqual(training.consumedBooks, []);
     const row = await Database.publishColdTraining(id, { ...training, transitions: [] }, { beforeWrite });
     const prepared = LifeState.acceptNewerLifecycleRow(row);
-    assert(prepared, 'the actual paid publisher row rebases the cached lease input');
-    assert.strictEqual(prepared.sp, 0);
+    assert(prepared, 'the actual free-grant publisher row rebases the cached lease input');
+    assert.strictEqual(prepared.sp, 100);
     assert.strictEqual(prepared.stats.classId, 0, 'ancestor-only preparation preserves the class CAS boundary');
     assert.strictEqual(prepared.simulation.revision, input.simulation.revision + 1);
     const after = await wholeImage(id);
     assert.strictEqual(after.characters[0].classId, 0);
     assert.strictEqual(after.characters[0].level, input.level);
     assert.strictEqual(after.characters[0].exp, input.exp);
-    assert.strictEqual(after.characters[0].sp, 0);
+    assert.strictEqual(after.characters[0].sp, 100);
     const nativeRanks = after.skills.filter(skill => skill.selfId !== 239)
         .map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]);
-    assert.deepStrictEqual(nativeRanks, [[3, 2], [194, 1], [1320, 1], [1322, 1]]);
+    assert.deepStrictEqual(nativeRanks, invoke('GameServer/Bot/Population/ColdCombatProfile').skillRecordsFromTree(0, input.level).map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]));
     for (const table of ['items', 'warehouse_items', 'afk_trade_shops', 'afk_trade_lines']) assert.deepStrictEqual(after[table], before[table]);
     preparedSkills.set(id, clone(after.skills).sort((a, b) => a.selfId - b.selfId));
     console.log('NATIVE_ANCESTOR_PREFIX', JSON.stringify({ id, authored: profileById.get(id), training,
@@ -178,7 +177,7 @@ async function createProbe(index) {
         ...LifeState.cachedState(grant.characterId),
         level: 21 + index,
         exp: authoredProfiles[index].committedExp,
-        sp: authoredProfiles[index].earnedSp,
+        sp: LifeState.cachedState(grant.characterId).sp + authoredProfiles[index].earnedSp,
         adena: 550 + index,
         timing: { ...LifeState.cachedState(grant.characterId).timing, lastResolvedAt: 3000, nextResolveAt: 6000 },
         updatedAt: 3000
@@ -231,7 +230,7 @@ async function createProbe(index) {
         'the rejected member retains its exact prepared physical/cache image');
     for (const state of states) {
         assert.deepStrictEqual(clone(await Database.fetchSkills(state.characterId)).sort((a, b) => a.selfId - b.selfId), preparedSkills.get(state.characterId),
-            'leased CAS ignores synthetic skills and preserves every actual paid/historical rank');
+            'leased CAS ignores synthetic skills and preserves every actual granted/historical rank');
         assert.deepStrictEqual(await Database.fetchSkill(state.characterId, 1000), []);
         assert.deepStrictEqual(await Database.fetchSkill(state.characterId, 1001), []);
     }
@@ -245,7 +244,7 @@ async function createProbe(index) {
     for (const index of [0, 2]) {
         const row = persisted.get(states[index].characterId);
         assert.strictEqual(Number(row.exp), authoredProfiles[index].committedExp);
-        assert.strictEqual(Number(row.sp), authoredProfiles[index].earnedSp);
+        assert.strictEqual(Number(row.sp), 100 + authoredProfiles[index].earnedSp);
         assert.strictEqual(Number(row.adena), 550 + index);
         assert.strictEqual(Number(row.lastResolvedAt), 3000);
         const stats = JSON.parse(row.statsJson);
@@ -266,7 +265,7 @@ async function createProbe(index) {
     ]);
     assert.deepStrictEqual(
         [Number(physical[0].classId), Number(physical[0].level), Number(physical[0].exp), Number(physical[0].sp)],
-        [1, 21, authoredProfiles[0].committedExp, authoredProfiles[0].earnedSp],
+        [1, 21, authoredProfiles[0].committedExp, 100 + authoredProfiles[0].earnedSp],
         'accepted CAS must atomically persist class and physical progression'
     );
     assert.strictEqual(Number(physical[0].adenaItem), 550, 'accepted CAS must atomically persist materialized inventory');

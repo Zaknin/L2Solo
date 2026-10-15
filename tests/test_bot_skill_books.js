@@ -38,7 +38,7 @@ async function main() {
         for (const skillId of [1011, 1027]) {
             const training = Catalog.nextTraining(16, 45, skillId);
             const learned = await Database.learnBotSkill(bishop, skillId, training.level);
-            assert(learned.learned, 'support training spends SP without a spellbook');
+            assert(learned.learned, 'support skills are free without a spellbook');
             assert.deepEqual(learned.consumedBooks, []);
         }
         const bishopState = { level: 45, clanLevel: 1, inventory: {}, stats: { clanId: 1, classId: 16, coldCombat: { skills: [] } } };
@@ -46,12 +46,10 @@ async function main() {
             assert(Profile.isAttackSkill(Profile.skillSnapshotsFromRecords([{ selfId: book.skillId, level: 1 }])[0]));
         }
         const seeded = await supportId('bot_seeded_books', 16);
-        // ARCH-NOTE: ensureBaseLoadout is private. Exercise its exact profile-training
-        // entry point with ample SP; ordinary seeding may exhaust its level-based SP.
         await invoke('GameServer/Bot/BotClassProgression').reconcile({ characterId: seeded, classId: 16, level: 45 });
         const seededSkills = await Database.fetchSkills(seeded);
-        assert(seededSkills.some(row => row.selfId === 1011), 'a Bishop seeded with enough SP learns Heal');
-        assert(seededSkills.some(row => row.selfId === 1027), 'a Bishop seeded with enough SP learns Group Heal');
+        assert(seededSkills.some(row => row.selfId === 1011), 'a Bishop automatically receives Heal');
+        assert(seededSkills.some(row => row.selfId === 1027), 'a Bishop automatically receives Group Heal');
         const songs = await supportId('bot_singer_books', 21);
         await new Skillset().awardSkills(songs, 21, 45, { botTraining: true });
         assert((await Database.fetchSkills(songs)).some(row => row.selfId === 267), 'Song of Warding is learned without its book');
@@ -60,7 +58,8 @@ async function main() {
         await Database.updateClanLevel(clanId, 1);
         await invoke('GameServer/Clan/ClanSupplyPolicy').init();
         await Database.updateCharacterClan(sorcerer, clanId, 0, 0, 0);
-        assert.equal((await Database.learnBotSkill(sorcerer, 1184, 1)).reason, 'missing_book', 'attack training still needs Ice Bolt');
+        assert.deepEqual(await Database.learnBotSkill(sorcerer, 1184, 1),
+            { learned: true, level: 1, spentSp: 0, consumedBooks: [] }, 'clan attack skills require no book');
         const supportInventory = { ...bishopState, inventory: { 1152: { selfId: 1152, amount: 2, kind: 'Other.Spellbook', rank: 'none', basePrice: 100 } } };
         assert.equal(Disposition.saleCandidates(supportInventory, { allowPreTradeCleanup: true }).find(row => row.selfId === 1152).count, 2,
             'unneeded support books may all be sold');
@@ -69,64 +68,64 @@ async function main() {
             classId: 10, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
             locX: 0, locY: 0, locZ: 0 })).insertId);
         await Database.updateCharacterClan(id, clanId, 0, 0, 0);
-        await Database.updateCharacterExperience(id, 14, Number(Data.experience[13]) + 1, 10000);
+        await Database.updateCharacterExperience(id, 14, Number(Data.experience[13]) + 1, 0);
         const first = Catalog.nextTraining(10, 14, 1184);
-        assert.equal(first.bookId, 1049); assert.equal(first.sp, 240);
-        assert.equal((await Database.learnBotSkill(id, 1184, first.level)).reason, 'missing_book');
+        assert.equal(Catalog.bookFor(1184), 1049);
+        assert.equal(first.bookId, null); assert.equal(first.sp, 0);
         assert.equal((await Database.learnBotSkill(id, 1184, first.level + 1)).reason, 'ineligible_rank');
-        await Database.setItem(id, { selfId: first.bookId, name: 'Spellbook: Ice Bolt', amount: 2 });
+        const free = await Database.learnBotSkill(id, 1184, first.level);
+        assert.deepEqual(free, { learned: true, level: first.level, spentSp: 0, consumedBooks: [] });
+        await Database.setItem(id, { selfId: 1049, name: 'Spellbook: Ice Bolt', amount: 2 });
         const snapshot = async () => ({ character: await Database.fetchCharacters('bot_pop_books'),
             skills: await Database.fetchSkills(id), items: await Database.fetchItems(id) });
         const before = await snapshot();
-        let calls = 0;
-        await assert.rejects(Database.learnBotSkill(id, 1184, first.level, { beforeWrite() {
-            if (++calls === 4) throw Error('retired_before_skill_write');
-        } }), /retired_before_skill_write/);
-        assert.equal(calls, 4); assert.deepEqual(await snapshot(), before, 'SP, book and rank roll back together');
-        const paid = await Database.learnBotSkill(id, 1184, first.level);
-        assert.equal(paid.learned, true); assert.equal(paid.spentSp, 240);
-        assert.equal((await Database.fetchItems(id))[0].amount, 1);
         const second = Catalog.nextTraining(10, 14, 1184, first.level);
-        assert.equal(second.bookId, null);
-        const promoted = await Database.learnBotSkill(id, 1184, second.level);
-        assert.equal(promoted.learned, true); assert.deepEqual(promoted.consumedBooks, []);
-        assert.equal((await Database.fetchItems(id))[0].amount, 1, 'a rank upgrade never consumes another book');
-        assert.equal((await Database.learnBotSkill(id, 1184, first.level)).reason, 'already_known');
+        let calls = 0;
+        await assert.rejects(Database.learnBotSkill(id, 1184, second.level, { beforeWrite() {
+            if (++calls === 2) throw Error('retired_before_skill_write');
+        } }), /retired_before_skill_write/);
+        assert.equal(calls, 2); assert.deepEqual(await snapshot(), before, 'retired grant changes no skills, SP or books');
         await Database.updateCharacterExperience(id, 14, Number(Data.experience[13]) + 1, 0);
-        const next = Catalog.nextTraining(10, 14, 1184, second.level);
-        assert.equal((await Database.learnBotSkill(id, 1184, next.level)).reason, 'insufficient_sp');
+        await new Skillset().awardSkills(id, 10, 14, { botTraining: true });
+        assert.equal((await Database.fetchSkill(id, 1184))[0].level, 4, 'all eligible ranks are free with zero SP');
+        assert.equal((await Database.fetchCharacters('bot_pop_books'))[0].sp, 0);
+        assert.deepEqual(await Database.fetchItems(id), before.items, 'held books are never consumed');
+        assert.equal((await Database.learnBotSkill(id, 1184, 1)).reason, 'already_known');
+        assert.equal((await Database.learnBotSkill(id, 1184, 5)).reason, 'ineligible_rank', 'future ranks remain level gated');
 
-        const empty = { characterId: id, level: 14, sp: 1000, inventory: {}, stats: { classId: 10, clanId,
+        const empty = { characterId: id, level: 14, sp: 0, inventory: {}, stats: { classId: 10, clanId,
             coldCombat: { classId: 10, skillSource: 'database', skills: [] } } };
-        assert.equal(Catalog.missingBooks(empty).find((book) => book.skillId === 1184).selfId, 1049);
-        assert.equal(Profile.treeSnapshot(empty).skills.length, 0);
-        assert.equal(Profile.profileFor(empty).skills.length, 0, 'empty DB kit cannot acquire free tree skills in combat');
+        assert.deepEqual(Catalog.requiredBooks(empty), []);
+        assert.deepEqual(Catalog.missingBooks(empty), []);
+        assert(Catalog.needsTraining(empty), 'missing skills reconcile with zero SP and no books');
+        assert.equal(Profile.profileFor(empty).skills.length, 0, 'combat uses persisted grants, not imaginary tree ranks');
         const held = { ...empty, inventory: { 1049: { selfId: 1049, name: 'Spellbook: Ice Bolt', amount: 2,
             kind: 'Other.Spellbook', rank: 'none', basePrice: 100 } } };
-        assert(Catalog.needsTraining(held)); assert.equal(Disposition.isNpcOnlyItem(held.inventory[1049]), false);
-        const sale = Disposition.saleCandidates(held, { allowPreTradeCleanup: true });
-        assert.equal(sale.find((row) => row.selfId === 1049).count, 1, 'keep the first own book; surplus is real board stock');
-        assert.equal(Disposition.skillBookSlotCount(held, sale), 0, 'market books do not force NPC cleanup');
-        const solo = { ...held, stats: { ...held.stats, clanId: 0 } };
-        assert.equal(Catalog.missingBooks(solo).length, 0, 'personal training never starts a skill-book errand');
-        assert(Catalog.needsTraining({ ...solo, inventory: {} }), 'SP opens personal training without a book');
-        assert.equal(Disposition.saleCandidates(solo).find(row => row.selfId === 1049).count, 2);
-        assert.equal(Disposition.skillBookSlotCount(solo), 1, 'all personal skill books trigger NPC cleanup');
-        const soloLearner = await supportId('bot_solo_books', 12);
-        const soloPaid = await Database.learnBotSkill(soloLearner, 1184, 1);
-        assert(soloPaid.learned && soloPaid.spentSp > 0);
-        assert.deepEqual(soloPaid.consumedBooks, [], 'native personal training still pays SP, without a book');
-        const incoming = Catalog.applyTraining({ ...held, sp: 1500 }, paid);
-        assert.equal(incoming.sp, 1260); assert.equal(incoming.inventory[1049].amount, 1);
-        const instanced = Catalog.applyTraining({ ...held, inventory: { 1049: { ...held.inventory[1049],
-            instances: [{ id: paid.consumedBooks[0].objectId, selfId: 1049, amount: 2 }] } } }, paid);
-        assert.equal(instanced.inventory[1049].instances[0].amount, 1, 'the physical instance mirrors the paid remainder');
+        for (const state of [held, { ...held, stats: { ...held.stats, clanId: 0 } }]) {
+            const sale = Disposition.saleCandidates(state, { allowPreTradeCleanup: true });
+            assert.equal(sale.find(row => row.selfId === 1049).count, 2, 'no bot reserves a skill book');
+            assert.equal(Disposition.isNpcOnlyItem(state.inventory[1049], undefined, state), true);
+            assert.equal(Disposition.skillBookSlotCount(state, sale), 1);
+        }
+        for (const [account, classId] of [
+            ['bot_free_solo', 12], ['bot_free_bishop', 16], ['bot_free_singer', 21],
+            ['bot_craft_free', 57], ['bot_free_transfer', 10]
+        ]) {
+            const botId = await supportId(account, classId);
+            await Database.updateCharacterExperience(botId, 45, Number(Data.experience[44]) + 1, 0);
+            const result = await invoke('GameServer/Bot/BotClassProgression').reconcile({ characterId: botId, classId, level: 45 });
+            assert.equal(result.spentSp, 0); assert.deepEqual(result.consumedBooks, []);
+            const skills = await Database.fetchSkills(botId);
+            assert.equal(Catalog.needsTraining({ level: 45, sp: 0, stats: { classId: result.classId, coldCombat: { skills } } }),
+                false, `${account} receives its complete eligible class tree`);
+            assert.equal((await Database.fetchCharacters(account))[0].sp, 0);
+            assert.deepEqual(await Database.fetchItems(botId), []);
+            const repeated = await invoke('GameServer/Bot/BotClassProgression').reconcile({ characterId: botId, classId: result.classId, level: 45 });
+            assert.equal(repeated.learnedCount, 0, 'reconciliation is idempotent');
+        }
+        const player = await supportId('player_skill_guard', 10);
+        assert.equal((await Database.learnBotSkill(player, 1184, 1)).reason, 'not_bot');
 
-        // The public bot path stops an unaffordable rank; it cannot skip it
-        // and award a later rank from the character's level alone.
-        await new Skillset().awardSkills(id, 10, 14, { botTraining: true });
-        assert.equal((await Database.fetchSkill(id, 1184))[0].level, second.level);
-        assert.equal((await Database.fetchItems(id))[0].amount, 1);
         const treeSource = Data.skillTree;
         const realLearn = Database.learnBotSkill;
         try {
@@ -156,14 +155,15 @@ async function main() {
             const trained = await work;
             await Queue.flushCharacter(id);
             assert(trained.learnedCount > 1);
-            assert.equal(session.actor.fetchSp(), 100500 - trained.spentSp);
+            assert.equal(trained.spentSp, 0); assert.deepEqual(trained.consumedBooks, []);
+            assert.equal(session.actor.fetchSp(), 100500);
             assert.equal((await Database.fetchCharacters('bot_pop_books'))[0].sp, session.actor.fetchSp(),
-                'SP earned during learning survives; queued hot writes cannot refund an earlier rank');
-            assert.equal((await Database.fetchItems(id)).length, 0);
-            assert.equal(session.actor.backpack.fetchItems().length, 0);
+                'SP earned during automatic grants survives in the actor and database');
+            assert.deepEqual(await Database.fetchItems(id), before.items);
+            assert.equal(session.actor.backpack.fetchItems()[0].fetchAmount(), 2);
             assert.equal(session.actor.skillset.fetchSkill(1184).fetchLevel(), (await Database.fetchSkill(id, 1184))[0].level);
         } finally { Data.skillTree = treeSource; Database.learnBotSkill = realLearn; }
-        console.log('Bot skill books: real SQLite cost/rollback, first book, rank/SP eligibility, public training, board reservation and authoritative cold kit passed');
+        console.log('Free bot skills: zero SP, no books, full trees/professions, native guards, hot rewards and NPC cleanup passed');
     } finally {
         await Database.close(); fs.rmSync(directory, { recursive: true, force: true });
     }

@@ -256,7 +256,6 @@ function buildProjection(state, ctx, deps) {
     const timestamp = ctx.timestamp ?? Date.now();
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const ownBuild = Profile.buildGainsFor(state, timestamp);
-    let beforeBook = null, beforeBookRate = null;
     const magic = need('./BotImprovementPolicy').isCaster(state);
     const Recipes = invoke('GameServer/Items/C4RecipeItems'), Profit = need('./CraftProfitPolicy');
     // `nodes` is the current target: the real projection, or one gear
@@ -918,23 +917,6 @@ function buildProjection(state, ctx, deps) {
     let step = admitting.next();
     while (!step.done) step = admitting.next();
     const admittedGear = step.value;
-    for (const book of Progression.personal(state) ? [] : invoke('GameServer/Skills/SkillBookCatalog').missingBooks(state)) {
-        if (nodes.length >= 36) break;
-        const gain = Profile.gainFor(ownBuild, `${magic ? 'm' : 'p'}:skill:${book.skillId}:${book.level}`, () => {
-            if (!beforeBook) {
-                beforeBook = profile();
-                beforeBookRate = attackRate(beforeBook);
-            }
-            return skillGain(state, book, beforeBook, beforeBookRate, timestamp, ownBuild);
-        });
-        const value = (gain.attack + gain.defence * ctx.deathHours) * horizon * powerWeight;
-        if (!(value > 0) || !(price(book.selfId) > 0)) continue;
-        const key = itemNode(book.selfId); if (!key) continue;
-        values.set(book.selfId, value);
-        root({ key: `book:${book.skillId}`, need: 'power', object: { itemId: book.selfId, skillId: book.skillId, kind: 'book' },
-            price: price(book.selfId), valueHours: value, benefitPerHour: (gain.attack + gain.defence * ctx.deathHours) * powerWeight,
-            horizonHours: horizon, paths: [{ requirements: [{ key, amount: 1 }] }] });
-    }
     if (!progression.required && rare && statusWeight > 0) {
         const held = admittedGear.some(row => row.node.object.itemId === Number(rare.item.selfId));
         const key = !held && itemNode(rare.item.selfId);

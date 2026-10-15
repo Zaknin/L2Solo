@@ -183,9 +183,8 @@ function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null)
     if (isQuestItem(item, template)) return false;
     if (isStarterEquipment(item, template)) return true;
     if (isEquipmentItem(item, template)) return false;
-    if (state && invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state) && (isSkillBookItem(item, template)
-        || invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId)))) return true;
-    if (invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId))) return false;
+    if (isSkillBookItem(item, template)
+        || invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId))) return true;
     if (isMarketRecipeItem(item)) return false;
     const kind = kindFor(item, template);
     return kind === 'Other.Tattoo'
@@ -194,7 +193,7 @@ function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null)
         || isRecipeItem(item, template)
         // Some later C4 skill books lost their canonical Other.Spellbook
         // kind in the source datapack. Orc skill books are named Amulet.
-        // Unmapped books remain NPC cleanup; mapped C4 books have real demand.
+        // Bots receive skills for free, so all books are NPC cleanup.
         || isSkillBookItem(item, template);
 }
 

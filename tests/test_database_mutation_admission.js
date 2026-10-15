@@ -95,7 +95,7 @@ async function main() {
         Data.init(); Database.init(); assert(Database.isReady());
         if (process.argv.includes('--returning')) { await returningMode(); return; }
         const training = Catalog.nextTraining(10, 14, 1184);
-        assert.equal(training.bookId, 1049); assert.equal(training.sp, 240);
+        assert.equal(training.bookId, null); assert.equal(training.sp, 0);
         const healthy = await seed(1);
         const expected = generation;
         let checks = 0;
@@ -103,12 +103,12 @@ async function main() {
             await Promise.resolve();
             return Database.learnBotSkill(healthy.id, 1184, training.level);
         });
-        assert.equal(learned.learned, true); assert.equal(learned.spentSp, 240);
-        assert.equal(checks, 3, 'each actual SP/book/rank write checks the captured scope');
+        assert.equal(learned.learned, true); assert.equal(learned.spentSp, 0);
+        assert.equal(checks, 1, 'the actual skill write checks the captured scope');
         const paid = await snapshot(healthy);
-        assert.equal(paid.characters[0].sp, 9760); assert.equal(paid.items[0].amount, 1);
+        assert.equal(paid.characters[0].sp, 10000); assert.equal(paid.items[0].amount, 2);
         assert.equal(paid.skills[0].level, training.level);
-        console.log('PASS healthy awaited native SP/book/rank writes');
+        console.log('PASS healthy awaited native free skill write');
 
         const awaited = await seed(2), beforeAwait = await snapshot(awaited);
         const entered = deferred(), resume = deferred(), oldGeneration = generation;
@@ -159,26 +159,26 @@ async function main() {
         await rejectedIdentity(flushing, flushFault);
         Database.registerCharacterWriteFlush(null);
         assert.equal(flushCalls, 1);
-        assert.deepEqual(await snapshot(flushed), beforeFlush, 'awaited flush cannot write or continue into skill payment');
+        assert.deepEqual(await snapshot(flushed), beforeFlush, 'awaited flush cannot write or continue into a skill grant');
         console.log('PASS native registered flush retains its original admission across await');
 
         const transaction = await seed(5), beforeTransaction = await snapshot(transaction);
         const transactionGeneration = generation, rollbackFault = Error('retired_before_rank');
         let mutationChecks = 0;
         await rejectedIdentity(Database.withMutationAdmission(guardFor(transactionGeneration, rollbackFault, () => {
-            if (++mutationChecks === 3) restart();
+            if (++mutationChecks === 1) restart();
         }), () => Database.learnBotSkill(transaction.id, 1184, training.level)), rollbackFault);
-        assert.equal(mutationChecks, 3, 'refusal occurs after actual SP and book writes, before rank SQL');
-        assert.deepEqual(await snapshot(transaction), beforeTransaction, 'native transaction rolls back both earlier writes');
+        assert.equal(mutationChecks, 1, 'retirement refuses the actual rank write');
+        assert.deepEqual(await snapshot(transaction), beforeTransaction, 'refused grant preserves skills, SP and books');
         const recoveredGeneration = generation;
         const recovered = await Database.withMutationAdmission(guardFor(recoveredGeneration, Error('recovery_retired')),
             () => Database.learnBotSkill(transaction.id, 1184, training.level));
         assert.equal(recovered.learned, true);
         await Database.setCharacterRecipe(transaction.id, 1, 'common');
         const after = await snapshot(transaction);
-        assert.equal(after.characters[0].sp, 9760); assert.equal(after.items[0].amount, 1);
+        assert.equal(after.characters[0].sp, 10000); assert.equal(after.items[0].amount, 2);
         assert.equal(after.skills.length, 1); assert.equal(after.recipes.length, 1);
-        console.log('PASS mid-multiwrite rollback and fresh/unwrapped recovery');
+        console.log('PASS retired grant refusal and fresh/unwrapped recovery');
         await returningMode();
     } finally {
         Database.registerCharacterWriteFlush(null);

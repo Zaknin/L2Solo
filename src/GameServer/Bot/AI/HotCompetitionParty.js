@@ -47,7 +47,7 @@ async function form(sides, context, valid) {
                 meta: { partyId, npcId: context.npcId, source: 'hot_competition' } } });
         if (!result.ok) return result;
         Parties.acceptCommit(prepared);
-        const assigned = Life.acceptPartyAssignments(assignments);
+        const assigned = Life.acceptPartyAssignments(assignments, result.lifeRows);
         // No await between durable membership and the complete live roster.
         sessions.forEach(s => {
             s.coldLifeState = assigned.find(state => state.characterId === s.actor.fetchId());

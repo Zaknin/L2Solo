@@ -350,34 +350,24 @@ check('night-free builds share day/night; native 294 tracks night and releases m
     assert.equal(Profile.size().buildGains, before.buildGains, 'both variants and marker leave with owners');
 });
 
-check('five books reuse the own before profile and cached gains on later reviews', () => {
+check('clan and personal providers never request skill-book purchases', () => {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Providers = invoke('GameServer/Bot/Economy/WishProviders');
     const Books = invoke('GameServer/Skills/SkillBookCatalog');
-    const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
-    // A cold bot carries the MP cap its resolver stored; craft facts read it, not the profile.
-    // Clan book wishes retain their existing gain cache. Personal bots sell
-    // skill books instead of reviewing them as equipment improvements. Only a
-    // clan with a warehouse (clan level 1+) takes custody; membership alone is personal.
     const state = base({ characterId: 820, level: 51, clanLevel: 1, stats: { ...base().stats, clanId: 7 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
-    const original = { profile: Profile.profileFor, books: Books.missingBooks, opportunities: Policy.opportunities };
-    let ownCalls = 0, bookReads = 0;
-    Profile.profileFor = function(value, ...args) { if (value === state) ownCalls++; return original.profile(value, ...args); };
-    Policy.opportunities = () => [];
-    Books.missingBooks = () => { bookReads++; return [1230, 1234, 1235, 1239, 1275].map((skillId, index) => ({ skillId, level: 1, selfId: 20000 + index })); };
+    const original = Books.missingBooks;
+    let bookReads = 0;
+    Books.missingBooks = () => { bookReads++; return [{ skillId: 1230, level: 1, selfId: 20000 }]; };
     try {
         const basics = Economy.basics(state, { spots: [] });
         const ctx = { ...basics, timestamp: 0, price: () => 1, buyback: () => 0, stock: () => ({}), spotValue: () => 0 };
-        Providers.build(state, ctx, { spots: [] });
-        assert.equal(ownCalls, 1);
-        Providers.build(state, ctx, { spots: [] });
-        assert.equal(ownCalls, 1, 'all five gains stay in the build');
-        const readCount = bookReads;
-        assert.ok(readCount > 0, 'a clan member with a warehouse reviews skill books');
-        Providers.build({ ...state, clanLevel: 0, stats: { ...state.stats, clanId: 0 } }, ctx, { spots: [] });
-        assert.equal(bookReads, readCount, 'personal bot reviews never nominate skill books');
-    } finally { Profile.profileFor = original.profile; Books.missingBooks = original.books; Policy.opportunities = original.opportunities; }
+        for (const owner of [state, state, { ...state, clanLevel: 0, stats: { ...state.stats, clanId: 0 } }]) {
+            const result = Providers.build(owner, ctx, { spots: [] });
+            assert(!result.nodes.some(node => node.key.startsWith('book:')), 'free skills never enter the purchase graph');
+        }
+        assert.equal(bookReads, 0, 'book availability cannot affect equipment reviews');
+    } finally { Books.missingBooks = original; }
 });
 
 check('the shared candidate index stops at 65536 without dropping uncached results', () => {

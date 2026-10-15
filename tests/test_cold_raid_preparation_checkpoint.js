@@ -25,7 +25,6 @@ const History = invoke('HistoryDatabase');
 const Data = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-const Progression = invoke('GameServer/Bot/BotClassProgression');
 const Cap = invoke('GameServer/Progression/ProgressionCap');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
@@ -76,7 +75,7 @@ async function seed(index, classId) {
         coldCombat: { skillSource: 'database', skills: [] } }, inventory: {} }, at);
     const id = Number((await Database.createCharacter(account, { name, classId, race: classId === 50 ? 3 : 0,
         sex: 0, face: 0, hair: 0, hairColor: 0, maxHp: profile.maxHp, maxMp: profile.maxMp, ...loc })).insertId);
-    const initialSp = classId === 50 ? 2900 : 0;
+    const initialSp = 0;
     const exp = Number(Data.experience[19]);
     assert.equal(Cap.levelForExperience(exp), 20);
     await Database.execute(['UPDATE characters SET level=?,exp=?,sp=? WHERE id=?', [20, exp, initialSp, id]]);
@@ -96,17 +95,17 @@ async function seed(index, classId) {
     if (classId === 50) {
         const training = Catalog.nextTraining(classId, 20, 1009, 0);
         assert.deepEqual({ level: training.level, sp: training.sp, bookId: training.bookId },
-            { level: 1, sp: 2900, bookId: null }, 'authored Orc Shaman Chant of Shielding, no attack book');
+            { level: 1, sp: 0, bookId: null }, 'authored Orc Shaman Chant of Shielding, no attack book');
         const receipt = await Database.learnBotSkill(id, 1009, 1, { beforeWrite });
         assert.equal(receipt.learned, true);
-        assert.equal(receipt.spentSp, 2900);
+        assert.equal(receipt.spentSp, 0);
         assert.deepEqual(receipt.consumedBooks, []);
-        observations.push({ stage: 'paid_native_skill', id, receipt: copy(receipt) });
+        observations.push({ stage: 'free_native_skill', id, receipt: copy(receipt) });
     }
-    const prefix = await Progression.reconcile({ characterId: id, classId, level: 20, seed: id }, { beforeWrite });
-    assert.equal(prefix.classId, classId, 'the declared native class stays coherent at level20');
-    assert.equal(prefix.spentSp, 0, 'paid cast skill exhausted SP before the genuine free prefix');
-    assert.deepEqual(prefix.consumedBooks, []);
+    // This deadline fixture deliberately captures a partial native kit after
+    // one persisted grant, before full class reconciliation. A single buff
+    // isolates the fractional cast deadline and its exact MP debit.
+    const prefix = { classId, transitions: [], spentSp: 0, consumedBooks: [] };
     Life.acceptNewerLifecycleRow(await Database.publishColdTraining(id, prefix, { beforeWrite }));
     const ready = Life.cachedState(id);
     const skills = await Database.fetchSkills(id);
@@ -246,7 +245,7 @@ async function main() {
             assert.equal(row.nextResolveAt, expectedDeadline);
             assert(Number.isSafeInteger(row.nextResolveAt));
             assert.equal(row.exp, member.exp);
-            assert.equal(row.sp, 0);
+            assert.equal(row.sp, member.sp);
             assert.equal(row.adena, 1000);
             assert.equal(row.simulationOwner, 'legacy_main');
             assert.equal(row.simulationLeaseId, null);
