@@ -2256,13 +2256,15 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     // re-enter the actor's wish policy (and resolve its module) per record.
     const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
     for (let ordinal = 0; ordinal < entries.length; ordinal++) {
-        const entry = entries[ordinal], target = sourceTargetOf(entry);
-        const value = dropYieldFor(entry.reward, itemId, entry.kind, target.npcLevel, killerLevel, ratesKey);
+        // The rule reads only the level, the raid flag and the NPC id of a
+        // record: no source target object per record (L130).
+        const entry = entries[ordinal], npcLevel = sourceRecordNpcLevel(entry);
+        const value = dropYieldFor(entry.reward, itemId, entry.kind, npcLevel, killerLevel, ratesKey);
         if (!value.chance) { reasons[ordinal] = FACT_RULE_NO_CHANCE; continue; }
         expected[ordinal] = value.expectedYield;
-        reasons[ordinal] = target.raidBoss ? FACT_RULE_RAID
-            : !sourceNpcHuntable(target.npcId) ? FACT_RULE_CANNOT_HUNT
-                : killerLevel && target.npcLevel && target.npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
+        reasons[ordinal] = entry.spot?.raidBoss === true ? FACT_RULE_RAID
+            : !sourceNpcHuntable(Number(entry.reward.selfId)) ? FACT_RULE_CANNOT_HUNT
+                : killerLevel && npcLevel && npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
         if (!retain) continue;
         const rule = reasons[ordinal];
         if (!rule) eligible[eligibleCount++] = ordinal;
