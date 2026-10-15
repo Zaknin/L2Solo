@@ -3911,6 +3911,22 @@ const PopulationService = {
             return ColdMarketService.finishTownErrands(listingState).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
                 if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(restockedState.characterId)) return restockedState;
+                const improvement = invoke('GameServer/Bot/Economy/BotImprovementService');
+                const continuation = improvement.acquisitionTravel(restockedState,
+                    ColdSimulationCoordinator.economyDecisions.activity(restockedState));
+                if (continuation) return LifeState.upsertState(continuation, 'equipment_improvement_travel');
+                // A paid-for C piece waits for a fresh worker command in town.
+                // Returning to the field here loses the purchase -> break ->
+                // exchange handoff when the purchase retired the previous card.
+                const crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
+                if (restockedState.activity === 'shopping' && crystals.ready(restockedState)
+                    && crystals.completionKey(restockedState)) {
+                    return LifeState.upsertState({ ...restockedState, timing: { ...restockedState.timing,
+                        nextResolveAt: Date.now() + 1000 } }, 'equipment_exchange_continue').then(saved => {
+                        if (saved) ColdSimulationCoordinator.requestEconomyRefresh(saved.characterId);
+                        return saved || restockedState;
+                    });
+                }
                 const returnState = GoalExecutor.finishMarketVisit(restockedState);
                 return returnState
                     ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)

@@ -62,13 +62,19 @@ function assess(state = {}) {
                 || Planner.itemScore(current, role, classId) < minScore));
         // From C expertise, finish the working weapon and armour before
         // jewellery. Empty jewellery does not outrank an under-grade weapon.
-        const priority = missedWeaponGrade ? 3 : level >= 40
+        const priority = level >= 40 && slot === 6 ? 0 : missedWeaponGrade ? 3 : level >= 40
             ? GearLifecycle.slotPriority(slot)
             : empty ? Compatibility.isWeaponSlot(slot) ? 3 : 2 : 1;
         if (empty || inadequate) gaps.set(slot, { slot, rank: requiredRank, minScore,
             priority });
     }
-    return { required: gaps.size > 0, gaps, starters, role, classId };
+    // C helmets have no Luxury exchange. Keep the opportunity without
+    // holding the working kit, earning routes or higher grades behind it.
+    return { required: [...gaps.values()].some(gap => gap.priority > 0), gaps, starters, role, classId };
+}
+
+function isCGradeHelmet(item) {
+    return item?.etc?.rank === 'c' && Number(item.etc.slot) === 6;
 }
 
 // Expertise permits wearing higher grades, but acquisition first closes every
@@ -125,4 +131,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition };
+module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition, isCGradeHelmet };

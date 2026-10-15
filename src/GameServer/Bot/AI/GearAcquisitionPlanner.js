@@ -1944,6 +1944,7 @@ function materializeSource(entry, itemId, killerLevel, ratesKey) {
 }
 
 function sourceForItem(itemId, spots = [], state = {}, options = {}) {
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').isCGradeHelmet(catalogItem(itemId))) return [];
     const sourceCache = options.sourceCache;
     const spoilCapable = options.spoilCapable === true || roleFor(state) === 'spoiler';
     const allowRaidSources = options.allowRaidSources === true;

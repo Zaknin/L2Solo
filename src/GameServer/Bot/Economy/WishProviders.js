@@ -331,9 +331,15 @@ function buildProjection(state, ctx, deps) {
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
+    const crystalPurchaseFor = luxury
+        ? need('./WishPurchaseEvidence').reader(state, ctx, deps, { npcOnly: true, town: 'Giran' }) : null;
     const purchases = new Map();
     const observedPurchase = id => {
-        if (!purchases.has(id)) purchases.set(id, purchaseFor(id));
+        if (!purchases.has(id)) {
+            const item = crystalPurchaseFor && need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
+            const retail = crystalPurchaseFor && need('./BotCrystallization').reward(item) ? crystalPurchaseFor(id) : null;
+            purchases.set(id, retail || purchaseFor(id));
+        }
         return purchases.get(id);
     };
     // The farm or spoil path reads GearAcquisitionPlanner.sourceFacts: the
@@ -341,6 +347,7 @@ function buildProjection(state, ctx, deps) {
     // trip is one row per town in the network, never once per unit.
     const sourcePath = (id, spoilOnly = false) => {
         if (!sourceIndex?.has(Number(id))) return null;
+        if (Progression.isCGradeHelmet(need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id)))) return null;
         const factsKey = spoilOnly ? `spoil:${id}` : Number(id);
         if (!farmFacts.has(factsKey)) {
             const input = ctx.nodeInputs?.begin();
@@ -490,7 +497,12 @@ function buildProjection(state, ctx, deps) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
             const self = Crystals.canSelf(state);
-            for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
+            const choices = Crystals.choices(state, observedPurchase, trip, ctx.hourAdena);
+            // A funded C kit has an authored unlimited supplier. Preserve
+            // that chain instead of forecasting thousands of crystals from
+            // one small public lot and repeatedly changing counterparties.
+            if (choices.some(choice => choice.sourceType === 'npc')) paths.length = 0;
+            for (const choice of choices) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
                     .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
                 if (requirements.some(row => !row.key)) continue;
