@@ -246,6 +246,9 @@ try {
         assert.strictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan, 'a moved market token waits');
         assert.equal(builds, before);
         assert(Decisions.refreshAdvisory(state, accepted, at(T + MINUTE)), 'the card waits on the same soft market');
+        const none = { ...accepted, card: Decisions.capture({ ...economy, network: { ...economy.network, activity: null } }, state) };
+        assert.equal(Decisions.refusal(state, none, at(T + MINUTE), null, { afterResult: true }), 'fence:market',
+            'a leafless card does not wait on a new offer: it may be the bot\'s candidate');
         assert.equal(Economy.calculationHolds(state, accepted.fence, at(T + MINUTE)), false,
             'without the card options the proof stays exact');
         assert.equal(Decisions.refreshAdvisory(state, accepted, at(T + 11 * MINUTE)), null, 'after 10 min the card is re-examined');
