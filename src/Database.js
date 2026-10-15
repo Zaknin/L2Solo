@@ -27,6 +27,7 @@ const ColdProtocol = require('./GameServer/Bot/Population/ColdSimulationProtocol
 const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCheckpoint');
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
+const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -2554,11 +2555,6 @@ function preserveColdVersionedStats(row, patch = {}) {
     return preserveColdVersionedStatsParsed(row, patch).patch;
 }
 
-// lazy: cycle ColdCombatProfile's AI and world modules load Database; resolved once, not per cold commit.
-let ColdCombatProfileModule;
-const coldCombatProfile = () => ColdCombatProfileModule
-    || (ColdCombatProfileModule = invoke('GameServer/Bot/Population/ColdCombatProfile'));
-
 // The rebuild below keeps a held rank's fields over the fresh ones and puts
 // the fresh keys first; a held skill whose keys already start with them and
 // whose identity fields match rebuilds into the same JSON.
@@ -2574,13 +2570,12 @@ function heldSkillCurrent(held, fresh) {
 // caller re-serializes stats only after a skill move (a level-up, a grant).
 function nativeColdCombatSkillsUnsafe(characterId, combat) {
     if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
-    const Profile = coldCombatProfile();
-    const learned = Profile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
+    const learned = ColdCombatProfile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
     const held = Array.isArray(combat.skills) ? combat.skills : null;
-    if (held && combat.version === Profile.PROFILE_VERSION && combat.skillSource === 'database'
+    if (held && combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database'
         && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill))) return combat;
     const proposed = new Map((held || []).map(skill => [Number(skill.selfId), skill]));
-    return { ...combat, version: Profile.PROFILE_VERSION, skillSource: 'database',
+    return { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
         skills: learned.map(skill => {
             const sameRank = proposed.get(skill.selfId);
             // Hot Skill models resolve C4 semantics (for example buff power)
