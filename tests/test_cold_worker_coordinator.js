@@ -23,13 +23,15 @@ function wait(ms) {
 
 let coordinator = null;
 (async () => {
-    await Database.createAccount('worker_probe', 'secret');
-    await Database.createCharacter('worker_probe', {
+    await Database.createAccount('bot_worker_probe', 'secret');
+    await Database.createCharacter('bot_worker_probe', {
         name: 'WorkerProbe', race: 0, classId: 0, maxHp: 300, maxMp: 120,
         sex: 0, face: 0, hair: 0, hairColor: 0, locX: -84191, locY: 244577, locZ: -3729
     });
-    const character = (await Database.fetchCharacters('worker_probe'))[0];
+    const character = (await Database.fetchCharacters('bot_worker_probe'))[0];
     const characterId = Number(character.id);
+    const experience = Number(DataCache.experience[19]);
+    await Database.updateCharacterExperience(characterId, 20, experience, 100);
     const dueAt = Date.now() - 60000;
     await Database.execute([
         `INSERT INTO bot_life_state (
@@ -38,15 +40,20 @@ let coordinator = null;
             activityStartedAt, nextResolveAt, lastResolvedAt,
             locX, locY, locZ, hp, maxHp, mp, maxMp,
             statsJson, inventorySummary, updatedAt
-        ) VALUES (?, 'worker_probe', 'WorkerProbe', 20, 1000, 100, 2000000,
+        ) VALUES (?, 'bot_worker_probe', 'WorkerProbe', 20, ?, 100, 2000000,
             'Talking Island', 'Talking Island', NULL, 'resting', 'cold',
             ?, ?, ?, -84191, 244577, -3729, 20, 300, 20, 120, ?, '{}', ?)`,
-        [characterId, dueAt - 60000, dueAt, dueAt - 60000, JSON.stringify({ restUntil: dueAt - 1 }), dueAt]
+        [characterId, experience, dueAt - 60000, dueAt, dueAt - 60000, JSON.stringify({ restUntil: dueAt - 1 }), dueAt]
     ]);
     assert.strictEqual(await LifeState.init(), true);
     const initial = LifeState.cachedState(characterId);
     assert(initial, 'startup hydration must expose the copied cold row to the coordinator');
     assert.strictEqual(initial.simulation.ownerId, Owner.LEGACY_OWNER_ID);
+    // Start with a native learned kit. A subsequent automatic grant correctly
+    // retires a decision built before that skill publication.
+    const trained = await LifeState.reviewTrainingAfterCommit(initial);
+    assert((await Database.fetchSkills(characterId)).length > 0, 'the worker starts with persisted bot skills');
+    assert.strictEqual(invoke('GameServer/Skills/SkillBookCatalog').needsTraining(trained), false);
 
     coordinator = new ColdSimulationCoordinator();
     await coordinator.start({

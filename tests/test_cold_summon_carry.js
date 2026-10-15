@@ -226,6 +226,7 @@ const physicalId = Number((await nativeDatabase.createCharacter('bot_carry_resou
     name: 'CarryResource', race: 0, classId: 14, maxHp: 3000, maxMp: 2500,
     sex: 0, face: 0, hair: 0, hairColor: 0, locX: 0, locY: 0, locZ: 0 })).insertId);
 await nativeDatabase.updateCharacterExperience(physicalId, 40, projectionInput.exp, 0);
+for (const skill of projectionInput.stats.coldCombat.skills) await nativeDatabase.setSkill({ ...skill, name: skill.name || '' }, physicalId);
 await nativeDatabase.setItem(physicalId, { selfId: 1459, name: crystal.template.name, amount: 1, slot: 0, enchant: 0, equipped: false });
 await Life.init();
 const physicalInput = await Life.upsertState({ ...projectionInput, characterId: physicalId,
