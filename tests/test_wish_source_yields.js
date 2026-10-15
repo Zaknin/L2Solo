@@ -107,6 +107,16 @@ try {
     const replaced = newIndex.get(Number(itemId)).find(row => row.reward.selfId === reward.selfId && row.kind === 'drop');
     assert.notDeepEqual(Planner.sourceYieldReaderFor(1)(replaced, itemId), oldYield);
     assert.deepEqual(Planner.sourceYieldReaderFor(1)(replaced, itemId), Planner.itemDropYield(replaced.reward, itemId, 'drop', { npcLevel: replaced.npcLevel, killerLevel: 1 }));
+    // Deep-blue yields (L129): a whole penalty is keyed by numbers, a capped one
+    // (gap 20 and 40 both 100) shares its pair, a fractional one keeps the string
+    // key; each read equals the uncached yield and a repeat read is the same pair.
+    const npcLevel = Number(replaced.npcLevel);
+    assert.ok(npcLevel > 0);
+    for (const gap of [9, 12, 20, 40, 9.5]) {
+        const deepReader = Planner.sourceYieldReaderFor(npcLevel + gap), first = deepReader(replaced, itemId);
+        assert.deepEqual(first, Planner.itemDropYield(replaced.reward, itemId, 'drop', { npcLevel, killerLevel: npcLevel + gap }));
+        assert.strictEqual(deepReader(replaced, itemId), first);
+    }
     const replacementSpots = structuredClone(spots); replacementSpots[0].npcEntries[0].count = 10;
     assert.equal(Planner.sourceIndexFor(replacementSpots).get(Number(itemId)).find(row => row.spot.id === 'mixed').sourceCount, 13);
 

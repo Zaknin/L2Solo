@@ -27,7 +27,7 @@ const MAX_SOURCE_YIELDS = 16384;
 // plus at most 4 bytes for their eligible ordinals (1 MiB of ordinals total).
 const MAX_SOURCE_FACT_RULE_CELLS = 262144;
 let sourceIndexCache = { byItemId: null, resolved: new Map(), yields: new Map(),
-    plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
+    plainYields: new Map(), deepYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const GearLifecycle = invoke('GameServer/Bot/AI/GearLifecycle');
@@ -1924,7 +1924,7 @@ function sourceIndexFor(spots = []) {
     const byItemId = GameCatalogue.sourceIndexFor(spots);
     if (byItemId !== NO_SOURCES && byItemId !== sourceIndexCache.byItemId) {
         sourceIndexCache = { byItemId, resolved: new Map(), yields: new Map(),
-            plainYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
+            plainYields: new Map(), deepYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
     }
     return byItemId;
 }
@@ -2013,7 +2013,7 @@ function sourceForItem(itemId, spots = [], state = {}, options = {}) {
 function sourceCacheSize() {
     return { resolved: sourceIndexCache.resolved.size,
         packedBytes: [...sourceIndexCache.resolved.values()].reduce((bytes, row) => bytes + row.byteLength, 0),
-        yields: sourceIndexCache.yields.size + sourceIndexCache.plainYields.size };
+        yields: sourceYieldCount() };
 }
 
 function sourceYieldRatesKey() {
@@ -2291,42 +2291,54 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
 // keeps a rebuild from recomputing every reward roll.
 // Without a deep-blue penalty (every fact the hunt band admits) the pair is
 // keyed by numbers, not a five-part string: the same bound, a cheaper read.
+// A deep-blue drop or spoil with a whole penalty is keyed by numbers too, in
+// its own map (L129): its string key was built and hashed on every read.
 const PLAIN_YIELD_ITEMS = 2 ** 20;
+// npc, item, kind and a 7-bit penalty (0..100) stay below 2 ** 53.
+const DEEP_YIELD_NPCS = 2 ** 24;
 function dropYieldFor(reward, itemId, kind, npcLevel, killerLevel, ratesKey) {
     const npcId = Number(reward.selfId), item = Number(itemId);
+    const penalty = Math.min(100, ProgressionRates.deepBluePenaltyPercent(npcLevel, killerLevel));
     if ((kind === 'drop' || kind === 'spoil') && Number.isInteger(npcId) && npcId >= 0 && npcId < 2 ** 31
         && Number.isInteger(item) && item >= 0 && item < PLAIN_YIELD_ITEMS
-        && !ProgressionRates.deepBlueActive(npcLevel, killerLevel)) {
+        && (penalty === 0 || (npcId < DEEP_YIELD_NPCS && Number.isInteger(penalty)))) {
         if (sourceIndexCache.plainRatesKey !== ratesKey) {
             sourceIndexCache.plainYields = new Map();
+            sourceIndexCache.deepYields = new Map();
             sourceIndexCache.plainRatesKey = ratesKey;
         }
-        const plain = sourceIndexCache.plainYields;
-        const key = (npcId * PLAIN_YIELD_ITEMS + item) * 2 + (kind === 'spoil' ? 1 : 0);
-        let value = plain.get(key);
+        const pair = (npcId * PLAIN_YIELD_ITEMS + item) * 2 + (kind === 'spoil' ? 1 : 0);
+        const map = penalty === 0 ? sourceIndexCache.plainYields : sourceIndexCache.deepYields;
+        const key = penalty === 0 ? pair : pair * 128 + penalty;
+        let value = map.get(key);
         if (!value) {
             value = itemDropYield(reward, itemId, kind, { npcLevel, killerLevel });
-            if (plain.size + sourceIndexCache.yields.size >= MAX_SOURCE_YIELDS) evictSourceYield();
-            plain.set(key, value);
+            if (sourceYieldCount() >= MAX_SOURCE_YIELDS) evictSourceYield();
+            map.set(key, value);
         }
         return value;
     }
-    const rule = ProgressionRates.deepBlueRule({ npcLevel, killerLevel });
-    const penalty = rule.active ? Math.min(100, rule.penaltyPercent) : 0;
     const key = `${ratesKey}:${reward.selfId}:${itemId}:${kind}:${penalty}`;
     let value = sourceIndexCache.yields.get(key);
     if (!value) {
         value = itemDropYield(reward, itemId, kind, { npcLevel, killerLevel });
-        if (sourceIndexCache.plainYields.size + sourceIndexCache.yields.size >= MAX_SOURCE_YIELDS) evictSourceYield();
+        if (sourceYieldCount() >= MAX_SOURCE_YIELDS) evictSourceYield();
         sourceIndexCache.yields.set(key, value);
     }
     return value;
 }
 
-// Both yield maps share one bound; the larger gives up its oldest pair.
+function sourceYieldCount() {
+    const { plainYields, deepYields, yields } = sourceIndexCache;
+    return yields.size + (plainYields?.size || 0) + (deepYields?.size || 0);
+}
+
+// The yield maps share one bound; the largest gives up its oldest pair.
 function evictSourceYield() {
-    const { plainYields, yields } = sourceIndexCache;
-    const map = plainYields.size >= yields.size ? plainYields : yields;
+    const { plainYields, deepYields, yields } = sourceIndexCache;
+    let map = yields;
+    if (plainYields && plainYields.size >= map.size) map = plainYields;
+    if (deepYields && deepYields.size > map.size) map = deepYields;
     map.delete(map.keys().next().value);
 }
 
