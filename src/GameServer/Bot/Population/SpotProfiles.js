@@ -493,13 +493,15 @@ const SpotProfiles = {
         // field yet (an orc mystic on fists before its first spell) would
         // otherwise be sent to another penalised field on every resolve and
         // never hunt. Checked only for the few young bots on foreign ground.
+        // One reader per spot loop: profiles and safety are read once (L131).
+        const homeAllowed = LevelingRoutes.spotAllowedReaderFor(state, routeOptions);
         const localityRelocate = currentSpot && currentMatch.localityPenalty > 0
             && spotsNearLevel(profiles, targetLevel).some((profile) => profile.id !== currentSpot.id
                 && !excludedSpotIds.has(String(profile.id))
                 && LevelingRoutes.localityPenaltyForSpot(profile, state, { level: targetLevel },
                     LevelingRoutes.tagsForSpot(profile)) === 0
                 && hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions)
-                && LevelingRoutes.isSpotAllowedForState(profile, state, routeOptions));
+                && homeAllowed(profile));
         const mustRelocate = currentSpot && (localityRelocate
             || (currentSpot.raidBoss === true && !explicitClanRaidSpot(state, currentSpot))
             || currentMatch.targetMatchup?.eligible === false
@@ -565,9 +567,10 @@ const SpotProfiles = {
             return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
         }
 
+        const allowed = LevelingRoutes.spotAllowedReaderFor(state, routeOptions);
         const candidates = spotsNearLevel(profiles, targetLevel)
             .filter((profile) => !excludedSpotIds.has(String(profile.id)))
-            .filter((profile) => LevelingRoutes.isSpotAllowedForState(profile, state, routeOptions));
+            .filter((profile) => allowed(profile));
         const relocationCandidates = mustRelocate
             ? candidates.filter((profile) => profile.id !== currentSpot.id)
             : candidates;
@@ -594,13 +597,14 @@ const SpotProfiles = {
                 .map(profile => ({ profile, value: spotValue(profile)?.valueHours ?? -Infinity }))
                 .sort((a, b) => b.value - a.value || String(a.profile.id).localeCompare(String(b.profile.id)));
             routeCandidates = [];
+            const recoveryAllowed = LevelingRoutes.spotAllowedReaderFor(recoveryState, routeOptions);
             // ARCH-NOTE: ALT optimistic damage prefilter preserves exact-safe
             // camps: naked L50 catalogue fixture finds 100% of best safe income
             // with 8 exact probes (default 128 found none). Same-catalogue first
             // search 65.9 -> 22.1 ms; warm 1.77 -> 2.38 ms. Shared gate unchanged.
             for (let checked = 0; checked < lower.length && checked < 128 && routeCandidates.length < 8; checked++) {
                 const profile = lower[checked].profile;
-                if (LevelingRoutes.isSpotAllowedForState(profile, recoveryState, routeOptions)) routeCandidates.push(profile);
+                if (recoveryAllowed(profile)) routeCandidates.push(profile);
             }
             suitable = [];
         }

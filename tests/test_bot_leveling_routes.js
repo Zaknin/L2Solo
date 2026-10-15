@@ -334,4 +334,66 @@ assert.deepStrictEqual([
 ].map((state) => LevelingRoutes.roleForState(state)), ['spoiler', 'crafter', 'crafter', 'spoiler', 'crafter', 'crafter'],
 'route roles of dwarves');
 
+// One reader per spot loop (L131): the same verdict as one call per spot,
+// with the matchup profiles and safety options read once, and not at all
+// when no spot passes the hunting ground check.
+{
+    const Data = invoke('GameServer/DataCache');
+    const Matchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+    const Hunt = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+    const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+    const timestamp = 1791825000000;
+    const field = (id, level, extra = {}) => {
+        const npc = Data.npcs.find((entry) => Number(entry.template?.level) === level && Hunt.canHunt(entry));
+        return { id, name: `Field ${id}`, minLevel: level, maxLevel: level, avgLevel: level, density: 6,
+            npcEntries: [{ selfId: npc.selfId, level, count: 4 }], npcSelfIds: [npc.selfId], ...extra };
+    };
+    const fields = [3, 5, 8, 12, 20].map((level) => field(`f${level}`, level));
+    const catacombs = [3, 5].map((level) => field(`cata${level}`, level, { name: `Catacomb ${level}` }));
+    const base = { characterId: 1, level: 20, vitals: { hp: 500, mp: 100 }, stats: { race: 0, classId: 0 } };
+    const states = {
+        solo: base,
+        // A cap of level 4 (20 - 16): it refuses the level-5 field a healthy
+        // naked level-20 fighter takes.
+        recovering: { ...base, stats: { ...base.stats, huntingRecovery: { levelPenalty: 16 } } },
+        party: { ...base, party: { partyId: 'p1' } }
+    };
+    const verdicts = new Set();
+    for (const [name, state] of Object.entries(states)) {
+        for (const options of [{ timestamp }, { timestamp, mode: 'solo',
+            matchupProfiles: Matchup.stateProfiles(state, { timestamp, mode: 'solo' }) }]) {
+            const read = LevelingRoutes.spotAllowedReaderFor(state, options);
+            for (const spot of [...fields, ...catacombs]) {
+                const allowed = LevelingRoutes.isSpotAllowedForState(spot, state, options);
+                verdicts.add(allowed);
+                assert.strictEqual(read(spot), allowed, `reader matches the per-spot gate: ${name} ${spot.id}`);
+            }
+        }
+    }
+    assert.deepStrictEqual([...verdicts].sort(), [false, true], 'the fixture has allowed and refused spots');
+    assert.notDeepStrictEqual(
+        fields.map((spot) => LevelingRoutes.isSpotAllowedForState(spot, states.solo, { timestamp })),
+        fields.map((spot) => LevelingRoutes.isSpotAllowedForState(spot, states.recovering, { timestamp })),
+        'the recovery level cap changes some verdicts');
+
+    const original = { profiles: Matchup.stateProfiles, recovery: Risk.recoveryFor };
+    let profileReads = 0, recoveryReads = 0;
+    try {
+        Matchup.stateProfiles = (...args) => { profileReads++; return original.profiles(...args); };
+        Risk.recoveryFor = (...args) => { recoveryReads++; return original.recovery(...args); };
+        const refused = LevelingRoutes.spotAllowedReaderFor(states.solo, { timestamp });
+        assert(catacombs.every((spot) => refused(spot) === false), 'solo bots are refused catacombs');
+        assert.deepStrictEqual([profileReads, recoveryReads], [0, 0], 'no profile or safety read when no spot passes');
+        const read = LevelingRoutes.spotAllowedReaderFor(states.recovering, { timestamp });
+        fields.forEach((spot) => read(spot));
+        assert.strictEqual(profileReads, 1, 'one profile read per reader');
+        assert(recoveryReads >= 1 && recoveryReads <= 2, `one safety read per reader, recovery read ${recoveryReads}`);
+        fields.forEach((spot) => LevelingRoutes.isSpotAllowedForState(spot, states.recovering, { timestamp }));
+        assert.strictEqual(profileReads, 1 + fields.length, 'the single-spot gate still reads per call');
+    } finally {
+        Matchup.stateProfiles = original.profiles;
+        Risk.recoveryFor = original.recovery;
+    }
+}
+
 console.log('Bot leveling route checks passed');

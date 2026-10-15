@@ -454,10 +454,27 @@ function bestSpot(spots, state = {}, options = {}) {
 }
 
 function isSpotAllowedForState(spot, state = {}, options = {}) {
-    const tags = tagsForSpot(spot);
-    return BotHuntingGroundPolicy.evaluate(spot, state, { ...options, tags }).allowed
-        && TargetMatchup.spotMatchup(spot, TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) }),
-            safetyOptions(state, options)).eligible;
+    return spotAllowedReaderFor(state, options)(spot);
+}
+
+// A spot search asks this for many spots of one bot with one state and
+// options (L131). The matchup profiles and safety options depend only on
+// those, so they are read once, on the first spot that passes the hunting
+// ground check. Exact only while state and options stay unchanged; without
+// options.matchupProfiles or options.timestamp the profiles read the clock
+// once here instead of once per spot.
+function spotAllowedReaderFor(state = {}, options = {}) {
+    let profiles = null;
+    let safety = null;
+    return (spot) => {
+        const tags = tagsForSpot(spot);
+        if (!BotHuntingGroundPolicy.evaluate(spot, state, { ...options, tags }).allowed) return false;
+        if (profiles === null) {
+            profiles = TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) });
+            safety = safetyOptions(state, options);
+        }
+        return TargetMatchup.spotMatchup(spot, profiles, safety).eligible;
+    };
 }
 
 function safetyOptions(state, options = {}) {
@@ -477,6 +494,7 @@ module.exports = {
     crowdPenaltyForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
+    spotAllowedReaderFor,
     scoreSpot,
     rankedSpots,
     bestSpot,

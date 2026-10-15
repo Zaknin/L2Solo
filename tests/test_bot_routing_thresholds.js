@@ -115,17 +115,23 @@ try {
     assert.strictEqual(search([spot('fallback_top', 30)], { ...level35, party: { partyId: 'p1' } }), null,
         'party bots do not fall back to easier ground');
     const allowed = Routes.isSpotAllowedForState;
+    const reader = Routes.spotAllowedReaderFor;
     let fallbackChecks = 0;
     try {
         Routes.isSpotAllowedForState = (...args) => { fallbackChecks++; return allowed(...args); };
+        Routes.spotAllowedReaderFor = (...args) => {
+            const read = reader(...args);
+            return (spot) => { fallbackChecks++; return read(spot); };
+        };
         const crowdedCatalogue = Array.from({ length: 200 }, (_, i) => ({
             ...spot(`bounded-${String(i).padStart(3, '0')}`, 19), npcEntries: [{ selfId: UNSAFE_NPC, count: 8 }] }));
         assert.strictEqual(search(crowdedCatalogue, level35), null);
         assert.strictEqual(fallbackChecks, 0, 'the cheap optimistic bound rejects certainly lethal camps');
         Routes.isSpotAllowedForState = () => { fallbackChecks++; return false; };
+        Routes.spotAllowedReaderFor = () => () => { fallbackChecks++; return false; };
         assert.strictEqual(search(crowdedCatalogue, level35, [{ ...mage, survivalKnown: false }]), null);
         assert.strictEqual(fallbackChecks, 128, 'one fallback search never runs more than 128 combat gates');
-    } finally { Routes.isSpotAllowedForState = allowed; }
+    } finally { Routes.isSpotAllowedForState = allowed; Routes.spotAllowedReaderFor = reader; }
 } finally { Spots.cache = original; }
 
 console.log('test_bot_routing_thresholds passed');

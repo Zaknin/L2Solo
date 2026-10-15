@@ -70,8 +70,10 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const shortlist = [true, false].flatMap(candidates).sort((a, b) => b.score - a.score
         || Number(a.spot.avgLevel || 1) - Number(b.spot.avgLevel || 1)
         || String(a.spot.id).localeCompare(String(b.spot.id)));
+    // One profile and safety read for the whole shortlist (L131).
+    const allowed = Routes.spotAllowedReaderFor(state, options);
     for (const candidate of shortlist.slice(0, Math.max(1, maxChecks))) {
-        if (Routes.isSpotAllowedForState(candidate.spot, state, options)) return candidate;
+        if (allowed(candidate.spot)) return candidate;
     }
     return null;
 }

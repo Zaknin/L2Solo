@@ -56,6 +56,7 @@ const Routes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const savedRandom = Math.random;
 const savedWorld = { npc: World.npc, user: World.user };
 const savedGate = Routes.isSpotAllowedForState;
+const savedReader = Routes.spotAllowedReaderFor;
 let catalogueSeed = 20261005;
 try {
     Config.knowledgeErrorsEnabled = false;
@@ -101,6 +102,13 @@ try {
         if (spot.maxLevel < 46) fallbackChecks++;
         return savedGate(spot, candidate, opts);
     };
+    Routes.spotAllowedReaderFor = (candidate, opts) => {
+        const read = savedReader(candidate, opts);
+        return (spot) => {
+            if (spot.maxLevel < 46) fallbackChecks++;
+            return read(spot);
+        };
+    };
     const picked = Spots.findForState(fighter, options);
     assert(fallbackChecks > 0 && fallbackChecks <= 128, `fallback checks ${fallbackChecks}`);
     assert(picked, 'the full catalogue must provide a surviving camp within the fixed fallback budget');
@@ -115,6 +123,7 @@ try {
     Math.random = savedRandom;
     World.npc = savedWorld.npc; World.user = savedWorld.user;
     Routes.isSpotAllowedForState = savedGate;
+    Routes.spotAllowedReaderFor = savedReader;
     Config.knowledgeErrorsEnabled = oldKnowledge;
     Service.reset(); Spots.reset();
 }
