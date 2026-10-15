@@ -8,7 +8,14 @@ const path = require('node:path'), { Worker } = require('node:worker_threads');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const spots = require('./helpers/wishSectionSpots')();
+// The source route gate (c0633909) admits a spot the bot can hunt: suitable
+// (3 band mobs per spot; an economic hunt skips this down to level - 15) and
+// solo-safe. 414's spots hold 1-2 mobs, so they are never admitted; 467
+// (level 28, the band floor of level 35) has 3 per spot and drops 736, a
+// graph item. The unskilled ordinary bot below is admitted nowhere, so its
+// hunting leaf is a money leaf; only checkEconomicLeaf's skilled D-kit
+// candidate reads sources.
+const spots = require('./helpers/wishSectionSpots')([414, 467]);
 const spot = spots.find(row => row.npcEntries?.some(entry => entry.selfId === 414));
 const timestamp = Date.now(), id = 92081;
 const state = { characterId: id, level: 35, exp: Number(Data.experience[34]), sp: 0,
@@ -208,7 +215,11 @@ module.exports.wishSectionsProbe = async id => {
                 { id: 920922, selfId: 1869, amount: 1000, equipped: 0, slot: 0 },
                 { id: 920923, selfId: 17, amount: 1000, equipped: 0, slot: 0 }]);
             let candidate = { ...ordinaryOwner.state, adena: wallet, inventory,
+                // Native class skills of a level 35 Warrior: unskilled, it is not
+                // solo-safe on 467 (survival 1.39 < 1.5), and the gate admits no source.
                 stats: { ...ordinaryOwner.state.stats, wishFocus: null, dormantWishes: [], activityLeaf: 0,
+                    coldCombat: { ...ordinaryOwner.state.stats.coldCombat,
+                        skills: Profile.skillSnapshotsFromRecords(Profile.skillRecordsFromTree(1, 35)) },
                     wishSections: undefined, wishDirty: 0, huntEfficiency: [], equipmentPlan: null } };
             const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
             assert.equal(Index.find(Data.items, 166).etc.rank, 'd', 'the native physical weapon really has D grade');

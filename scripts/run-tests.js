@@ -16,8 +16,7 @@ const notRunTests = new Map([
     ['tests/test_task4_b5_hot_cold_same.js', 'new red 2026-10-14: AssertionError: cold publishes one buy ad'],
     ['tests/test_task4_survival_tranche.js', 'new red 2026-10-14: AssertionError: the tranche funds a shot bid'],
     ['tests/test_wish_context_diagnostics.js', 'new red 2026-10-14: AssertionError: technical identity replacement is named separately'],
-    ['tests/test_wish_recipe_authority.js', 'new red 2026-10-14: AssertionError: recipe order and duplicate representations do not cause another decision'],
-    ['tests/test_wish_sections_worker.js', 'new red 2026-10-14: Error: AssertionError: the native graph evaluated real source dependencies']
+    ['tests/test_wish_recipe_authority.js', 'new red 2026-10-14: AssertionError: recipe order and duplicate representations do not cause another decision']
 ]);
 
 const tests = [
@@ -1305,7 +1304,8 @@ const tests = [
     'tests/test_wish_gear_replacement.js',
     'tests/test_wish_inventory_preparation.js',
     'tests/test_wish_network_diagnostics.js',
-    'tests/test_wish_quantity_allocation.js'
+    'tests/test_wish_quantity_allocation.js',
+    'tests/test_wish_sections_worker.js'
 ];
 
 // Real map loading and worker pathfinding are kept in an explicit integration run.
@@ -1683,7 +1683,8 @@ const defaultConfigTests = new Set([
     'tests/test_wish_gear_replacement.js',
     'tests/test_wish_inventory_preparation.js',
     'tests/test_wish_network_diagnostics.js',
-    'tests/test_wish_quantity_allocation.js'
+    'tests/test_wish_quantity_allocation.js',
+    'tests/test_wish_sections_worker.js'
 ]);
 // Gate: a test file nobody lists is a test CI never runs (E297). Checked before
 // anything runs, also for --list, so the mistake shows up on the developer's machine.
