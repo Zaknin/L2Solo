@@ -179,7 +179,7 @@ function isSpareConsumable(item, template = templateFor(item?.selfId)) {
     return basePrice(item, template) > 0;
 }
 
-function isNpcOnlyItem(item, template = templateFor(item?.selfId)) {
+function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null) {
     if (isQuestItem(item, template)) return false;
     if (isStarterEquipment(item, template)) return true;
     if (isEquipmentItem(item, template)) return false;
