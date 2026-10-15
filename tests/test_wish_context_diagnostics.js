@@ -61,10 +61,6 @@ assert.equal(context.wallet, 1000); assert.equal(context.escrow, 50);
 assert.equal(context.revision, 3);
 Economy.forState({ ...state, adena: 1100 }, deps);
 assert.equal(Diagnostics.metrics().counts['context:miss:input_dependency_changed'], 1);
-Economy.setPlanningContexts(64);
-assert.equal(Economy.size().context, 0);
-assert.equal(Diagnostics.metrics().counts['context:eviction:planning_capacity'], 1);
-Economy.setPlanningContexts(0);
 
 // Run the same native context module with its worker identity safety branch.
 // No copied evaluator, worker runtime, SQL or alternate economy policy.

@@ -216,7 +216,6 @@ const occupationPlanner = new ColdOccupationPlanner({
         && left.sourceReady === right.sourceReady
         && left.routeKey === right.routeKey
         && left.mode === right.mode && left.buyOrderEscrow === right.buyOrderEscrow,
-    onWorking: count => invoke('GameServer/Bot/Economy/EconomyContext').setPlanningContexts?.(count),
     capture: (id, input, read, readScope) => {
         const book = invoke('GameServer/Bot/Economy/RecipeBookCodec').unpack(input.recipeBook);
         return { state: input.state, board: boardReady(), timestamp: input.timestamp, read, readScope,
@@ -246,7 +245,9 @@ const occupationPlanner = new ColdOccupationPlanner({
             const economy = Context.forState(input.state, { board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: noWorkshop(),
                 buyOrderEscrow: input.buyOrderEscrow, npcOffersFor: OccupationSources.npcOffersFor,
-                caller: 'meeting_prepare', trigger: request.token });
+                // A meeting review (its own workshop input, maybe the meeting's incoming) never
+                // replaces the bot's held plan: its next request still finds it (L133).
+                rememberContext: false, caller: 'meeting_prepare', trigger: request.token });
             yield 'candidate';
             if (economy.intentPending || economy.routePending) throw Error('trade_meeting_preparation_pending');
             const intents = invoke('GameServer/Bot/Economy/TradeIntent').project(input.state, economy.network, economy.projection,
@@ -426,7 +427,6 @@ const occupationPlanner = new ColdOccupationPlanner({
     result: work => work.value,
     publish: (id, input, workshop, meta = {}) => {
         if (input.mode === 'meeting') {
-            if (input.state !== input.sourceState) invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'meeting_preparation_complete');
             occupationPlanner.release(id); return;
         }
         if (input.mode === 'refresh') {
@@ -917,7 +917,9 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             return invoke('GameServer/Bot/Economy/EconomyContext').forState(member, {
                 timestamp, spots: planningSpots, board: boardReady(),
                 occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
-                rememberContext: kernel.states.get(member.characterId)?.state === member,
+                // Never held: its occupation card moves the key off the bot's own plan and the
+                // worker entry keeps no graph nodes for withNodes, so it would only displace it (L133).
+                rememberContext: false,
                 buyOrderEscrow: context.buyOrderEscrow, caller: 'workerPartyGoal', withNodes: true });
         }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy
             && partyMembersAvailable(members), { spots: planningSpots });

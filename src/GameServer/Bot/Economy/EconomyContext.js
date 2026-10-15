@@ -22,6 +22,11 @@ const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const FENCE_BYTES = 4096;
 const FENCE_RAW_BYTES = 65536, FENCE_SPOTS = 4096;
 const SOURCE_MEMO_LIMIT = 8;
+// The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
+// 64-slot cache shrunk by them dropped a plan within ~2.5 s under a long cold queue, so every
+// same-key rebuild found nothing held (L133). A worker entry is the plan only (perf C1); the main
+// thread keeps the graph nodes too and stays at 64.
+const RETAIN_LIMIT = isMainThread ? 64 : 2048;
 const fenceEncoder = new TextEncoder(), fenceDecoder = new TextDecoder();
 let routeAnchors = new WeakMap();
 let mainColdForState = null;
@@ -35,14 +40,7 @@ function registerProvider(key, provider) {
 // actorKey -> { key, reads, plan, stateRef, gearThreat } of bots: bounded
 // (WishNetwork.remember). The plan is data (planOf); a reader gets view().
 const cache = new Map();
-let planningContexts = 0;
-function setPlanningContexts(count) {
-    planningContexts = Math.max(0, Math.min(64, Math.floor(Number(count) || 0)));
-    while (cache.size > 64 - planningContexts) {
-        const key = cache.keys().next().value; cache.delete(key); engine.forget(key, 'planning_capacity');
-        if (Diagnostics.active()) { Diagnostics.count('context', 'eviction', 'planning_capacity'); noteRelease(key, 'planning_capacity'); }
-    }
-}
+const sourceHolders = new Set(); // actor keys whose held entry keeps sourceSections, oldest first
 // Groups apart, so a party composition that weighs many candidate groups
 // never evicts the bots' own reviews: `group:<partyId>` -> { key, ids,
 // context }, removed when the party ends (forgetGroup) and bounded besides;
@@ -986,7 +984,7 @@ function buildForState(state, deps) {
         }
         held.gearThreat = gearThreat;
         held.stateRef = new WeakRef(state);
-        remember(cache, actorKey, held);
+        remember(cache, actorKey, held, RETAIN_LIMIT);
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
             held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
@@ -1022,7 +1020,7 @@ function buildForState(state, deps) {
         }
         if (same) {
             Diagnostics.count('context', 'shadow_gap', gapBucket(Math.max(0, at - last.at)));
-            // 'capacity' (LRU), 'planning_capacity', 'unkept' (forState did not keep it) or the owner's forgetContext reason.
+            // 'capacity' (LRU), 'unkept' (forState did not keep it) or the owner's forgetContext reason.
             if (diagnosticReason === 'not_retained') Diagnostics.count('context', 'shadow_released', last.released || 'unknown');
             // Why the held context did not serve this repeated request: the
             // first refusing clause of the hit check above.
@@ -1035,7 +1033,7 @@ function buildForState(state, deps) {
             probe = !held ? 'no_held' : Number(stats.activityLeaf || 0) === Number(packet?.activityLeaf || 0)
                 && Number(stats.decisionSeq || 0) === Number(packet?.decisionSeq || 0) ? 'echo' : 'no_echo';
         }
-        const kept = deps.rememberContext !== false && planningContexts < 64;
+        const kept = deps.rememberContext !== false;
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
@@ -1284,8 +1282,8 @@ function buildForState(state, deps) {
     // or a group closure must never retain a second copy outside that cap.
     const retainedSourceMemo = projection.sourceSections;
     projection.sourceSections = null;
-    if (deps.rememberContext !== false && planningContexts < 64) {
-        if (diagnostic && !cache.has(actorKey) && cache.size >= 64 - planningContexts) {
+    if (deps.rememberContext !== false) {
+        if (diagnostic && !cache.has(actorKey) && cache.size >= RETAIN_LIMIT) {
             Diagnostics.count('context', 'eviction', 'capacity');
             noteRelease(cache.keys().next().value, 'capacity');
         }
@@ -1297,9 +1295,14 @@ function buildForState(state, deps) {
         remember(cache, actorKey, { key, reads, spotReads, plan, stateRef: new WeakRef(state), gearThreat, sections,
             activity: state.activity, bandHash: fnv1a32(sectionKeys(state, { ...deps, timestamp }, choiceBands).structural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
-            projection: isMainThread ? projection : null }, 64 - planningContexts);
-        let retainedSources = 0;
-        for (const entry of [...cache.values()].reverse()) if (entry.sourceSections && ++retainedSources > SOURCE_MEMO_LIMIT) entry.sourceSections = null;
+            projection: isMainThread ? projection : null }, RETAIN_LIMIT);
+        if (retainedSourceMemo) {
+            sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
+            while (sourceHolders.size > SOURCE_MEMO_LIMIT) {
+                const oldest = sourceHolders.keys().next().value; sourceHolders.delete(oldest);
+                const entry = cache.get(oldest); if (entry) entry.sourceSections = null;
+            }
+        }
     }
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
         fenceData: { sections, reads, spots: spotReads } });
@@ -1611,6 +1614,7 @@ function forgetContext(id, reason = 'explicit_invalidation', expectedState = nul
     // Publication replaces the facts object, not the economic decision. The
     // next reader validates semantic section keys and all watched sources.
     if (reason !== 'state_publication') {
+        sourceHolders.delete(key);
         if (cache.delete(key) && Diagnostics.active()) { Diagnostics.count('context', 'eviction', reason); noteRelease(key, reason); }
         engine.forget(key, reason);
     }
@@ -1628,10 +1632,10 @@ function forget(id) {
 function reset() {
     if (Diagnostics.active() && cache.size) Diagnostics.count('context', 'eviction', 'reset', cache.size);
     if (Diagnostics.active() && groups.size) Diagnostics.count('context_group', 'eviction', 'reset', groups.size);
-    cache.clear(); groups.clear(); engine.clear(); lastKeyHashes.clear(); routeAnchors = new WeakMap();
+    cache.clear(); sourceHolders.clear(); groups.clear(); engine.clear(); lastKeyHashes.clear(); routeAnchors = new WeakMap();
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

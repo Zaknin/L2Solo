@@ -96,7 +96,7 @@ module.exports.wishSectionsProbe = async id => {
                 kernel.states.set(id, { ...kernel.states.get(id), state });
             }
             const entry = kernel.states.get(id);
-            Economy.forgetContext(id); // a cold population exceeds cache64
+            Economy.forgetContext(id); // the held plan is gone (an owner release or the LRU guard)
             const planned = await kernel.planLifecycle({ state, context: entry.context, timestamp: clock });
             assert.equal(builds, before, 'an ordinary native lifecycle retains its accepted preparation after eviction');
             assert.deepEqual(planned.acquisitionPlan, planBefore, 'a valid accepted native goal remains selected');

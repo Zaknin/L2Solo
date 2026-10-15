@@ -44,7 +44,6 @@ Config.developerDiagnostics = false; Economy.reset();
 for (const key of Object.keys(original)) Diagnostics[key] = () => { throw Error(`off reached ${key}`); };
 const offFirst = Economy.forState(state(), deps);
 assert.strictEqual(Economy.forState(state(), deps).plan, offFirst.plan);
-Economy.setPlanningContexts(64); Economy.setPlanningContexts(0);
 Economy.forState(state(), deps); Economy.forgetContext(901, 'state_publication');
 Economy.forState(state(), { ...deps, rememberContext: false });
 Object.assign(Diagnostics, original);
@@ -112,13 +111,9 @@ assert.deepEqual(changed, { 'context:shadow:not_retained:same_key': 1, 'context:
     'context:shadow_released:unkept': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:same_key:'))) });
 assert.strictEqual(Object.keys(changed).filter(key => key.startsWith('context:shadow_plan:same_key:')).length, 1, 'a same key compares its plan with the previous build');
 
-// Planner slots and the LRU capacity name their own release.
-Economy.setPlanningContexts(64); Economy.setPlanningContexts(0);
-before = shadow();
+// The LRU capacity names its own release.
 Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:lt1s': 1,
-    'context:shadow_released:planning_capacity': 1, 'context:shadow_plan:same_key:same_plan': 1 });
-for (let id = 1000; id < 1064; id++) Economy.forState({ ...state(), characterId: id }, deps);
+for (let id = 1000; id < 1000 + Economy.RETAIN_LIMIT; id++) Economy.forState({ ...state(), characterId: id }, deps);
 before = shadow();
 Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:lt1s': 1,

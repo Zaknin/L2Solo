@@ -234,20 +234,20 @@ try {
     const deceased = { ...state, activity: 'dead', stats: { ...state.stats } };
     assert(Events.reconcile(state, deceased, deps.timestamp).includes('combat'));
     assert.equal(deceased.stats.decisionSeq, state.stats.decisionSeq + 1, 'simultaneous death changes coalesce');
-    Economy.setPlanningContexts(64);
-    try {
+    {
+        const heldBefore = Economy.size().context;
         const beforeMemos = producedSourceMemos;
         const members = [92951, 92952].map(characterId => ({ ...state, characterId }));
         const memberViews = members.map(member => Economy.forState(member, { ...deps, withNodes: true }));
         assert(producedSourceMemos > beforeMemos, 'the native provider produced a real bounded source memo');
         assert(memberViews.every(view => view.projection.sourceSections === null),
-            'pool64 member views cannot retain a source memo outside the cache owner');
+            'member views cannot retain a source memo outside the cache owner');
         const group = Economy.forGroup({ id: 'source-cap64', adena: 100 }, members, { ...deps, memberContexts: memberViews });
         assert.equal(group.projection.sourceSections, null, 'the retained group has no copied source memo');
         assert(Number.isFinite(group.itemUsefulness(1)), 'the group still uses its member results');
-        assert.equal(Economy.size().context, 0, 'all member cache slots remain assigned to the planning pool');
+        assert.equal(Economy.size().context, heldBefore + 2, 'the cache owner keeps both member plans');
         Economy.forgetGroup('source-cap64');
-    } finally { Economy.setPlanningContexts(0); }
+    }
     const nativeProviders = Providers.build, heldRoll = Tendency.roll;
     try {
         const sourceBoard = new (invoke('GameServer/AfkTrade/BoardIndex').BoardIndex)();
