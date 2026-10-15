@@ -1,6 +1,8 @@
 'use strict';
 
 const GearLifecycle = require('./GearLifecycle');
+const Data = invoke('GameServer/DataCache');
+const Index = invoke('GameServer/Item/ItemTemplateIndex');
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 function adventurer(state = {}) {
     return !state.stats?.craftStationId
@@ -17,8 +19,6 @@ function assess(state = {}) {
     // Clan custody changes where surplus goes, not the member's need for a
     // working kit. Its own wallet and native sources still fund equipment.
     if (!adventurer(state)) return { required: false, gaps: new Map() };
-    const Data = invoke('GameServer/DataCache');
-    const Index = invoke('GameServer/Item/ItemTemplateIndex');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Gear = invoke('GameServer/Bot/AI/BotGear');
     const Compatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
@@ -96,10 +96,15 @@ function priority(item, slot, assessment) {
 
 // Preparation changes the acquisition ceiling, never the wear/expertise rule.
 // The future bag is short lived and uses the same class, paired-slot and armor
-// selection as a physical inventory reconciliation at level 40.
-function preparation(state, assessment = assess(state)) {
-    if (!personal(state) || state.level < 20 || state.level >= 40 || assessment.required) return null;
-    return futureState(state);
+// selection as a physical inventory reconciliation at PREPARED_LEVEL; its
+// grade is the lifted ceiling, read without building that bag.
+const PREPARED_LEVEL = 40;
+function preparing(state, assessment) {
+    if (!personal(state) || state.level < 20 || state.level >= PREPARED_LEVEL) return false;
+    return !(assessment || assess(state)).required;
+}
+function preparation(state, assessment) {
+    return preparing(state, assessment) ? futureState(state) : null;
 }
 // Warehouse custody does not remove the member's own C acquisition sources.
 // Early preparation keeps its existing personal-owner boundary.
@@ -107,14 +112,13 @@ function allowsCGradeAcquisition(state) {
     return adventurer(state) && (Number(state.level) >= 40 || personal(state));
 }
 function futureState(state) {
-    const exp = Number(invoke('GameServer/DataCache').experience[39]);
-    const next = { ...state, level: 40, exp, stats: { ...state.stats, exp } };
+    const exp = Number(Data.experience[PREPARED_LEVEL - 1]);
+    const next = { ...state, level: PREPARED_LEVEL, exp, stats: { ...state.stats, exp } };
     next.inventory = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').equipInventoryUpgrades(next, state.inventory);
     return next;
 }
 function preparedAmounts(state) {
-    if (!personal(state) || state.level < 20 || state.level >= 40) return {};
-    const Data = invoke('GameServer/DataCache'), Index = invoke('GameServer/Item/ItemTemplateIndex');
+    if (!personal(state) || state.level < 20 || state.level >= PREPARED_LEVEL) return {};
     if (!Object.values(state.inventory || {}).some(row => Number(row.amount) > 0
         && Index.find(Data.items, row.selfId)?.etc?.rank === 'c')) return {};
     const reserved = {};
@@ -125,4 +129,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition };
+module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, PREPARED_LEVEL, preparing, preparation, preparedAmounts, allowsCGradeAcquisition };

@@ -55,6 +55,15 @@ for (const classId of [0, 10, 18, 25, 38, 49, 50, 53, 54, 56]) {
 if (isMainThread) invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 1, level: 1, state: {} });
 else invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
 assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'clan early C preparation keeps its existing owner');
+// The native gate reads the same ceiling as the wish that chose a prepared C
+// target, so a retained wish_focus plan does not refuse the advisory forever.
+const cWish = { status: 'deferred', strategy: 'none', reason: 'wish_focus', next: null, target: { selfId: 883, slot: 4 } };
+assert.equal(Planner.acquisitionTargetAllowed(source, cWish), true, 'early C preparation admits its C target');
+assert.equal(Planner.replanContextFor(source, cWish, timestamp).invalidSource, null);
+const gapped = structuredClone(source);
+delete gapped.inventory[Object.values(gapped.inventory).find(row => row.equippedSlots.some(slot => [7, 14].includes(slot))).selfId];
+assert.equal(Planner.replanContextFor(gapped, cWish, timestamp).invalidSource?.reason, 'c_kit_incomplete', 'a D gap still holds C back');
+assert.equal(Planner.acquisitionTargetAllowed({ ...source, clanId: 1 }, cWish), false, 'clan custody keeps the plain ceiling');
 for (const classId of [0, 10, 18, 25, 38, 46, 49, 50, 53, 54, 56]) {
     for (const level of [40, 47, 51, 52, 60, 61, 78]) {
         const adult = bot(classId, level), member = { ...adult, clanId: 1 };

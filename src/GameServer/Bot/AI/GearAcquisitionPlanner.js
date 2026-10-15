@@ -31,6 +31,7 @@ let sourceIndexCache = { byItemId: null, resolved: new Map(), yields: new Map(),
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const GearLifecycle = invoke('GameServer/Bot/AI/GearLifecycle');
+const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const OfferOrder = require('../Economy/OfferOrder');
 const SpotIndex = require('./SpotIndex');
@@ -317,15 +318,19 @@ function suitable(item, state, role, requiredRank = gradeForLevel(state.level)) 
 
 // Compatibility and the acquisition ceiling, independent of a desired grade.
 // Shared wish targets/recovery can buy a useful lower-grade improvement.
-function considerable(item, state = {}, role = roleFor(state), acquisitionRank = invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state)) {
+function considerable(item, state = {}, role = roleFor(state), acquisitionRank = Progression.acquisitionRankFor(state)) {
     const rank = String(item?.etc?.rank || 'none').toLowerCase();
     return Sources.hasSource(item?.selfId) && RANKS.includes(rank) && rankIndex(rank) <= rankIndex(acquisitionRank)
         && suitable(item, state, role, rank);
 }
 
+// The C preparation lifts the ceiling to its level's grade, as for the wish
+// that chose the target; only a target above the plain one pays the assess.
 function acquisitionTargetAllowed(state = {}, plan = {}) {
     const target = catalogItem(plan?.combine?.resultId || plan?.target?.selfId);
-    return !target || rankIndex(target.etc?.rank) <= rankIndex(invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state));
+    const rank = rankIndex(target?.etc?.rank);
+    return !target || rank <= rankIndex(Progression.acquisitionRankFor(state))
+        || rank <= rankIndex(gradeForLevel(Progression.PREPARED_LEVEL)) && Progression.preparing(state);
 }
 
 function missingPairedCSlot(state, item, progression) {
@@ -636,7 +641,6 @@ function equipInventoryUpgrades(state = {}, inventory = {}) {
 function preferredTarget(state = {}, options = {}) {
     const role = roleFor(state);
     const classId = classIdFor(state);
-    const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
     const progression = Progression.assess(state);
     const missingDualSword = missingRequiredDualSword(state, role, classId);
     const owned = inventoryMap(state.inventory);
@@ -844,7 +848,7 @@ function marketPlan(state = {}, target, offer, options = {}) {
     return {
         status: 'active',
         phase: GearLifecycle.phaseFor(state),
-        grade: invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state),
+        grade: Progression.acquisitionRankFor(state),
         role,
         strategy: 'market',
         soloSafe: true,
@@ -1128,9 +1132,9 @@ function marketPlanForTarget(state = {}, targetId, options = {}) {
     const target = ItemTemplateIndex.find(DataCache.items, targetId);
     const role = roleFor(state);
     const ownedItems = inventoryItems(state.inventory);
-    const acquisitionState = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state;
+    const acquisitionState = Progression.preparation(state) || state;
     if (!target || !considerable(target, acquisitionState, role)) return null;
-    const pairedSlot = missingPairedCSlot(state, target, invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state));
+    const pairedSlot = missingPairedCSlot(state, target, Progression.assess(state));
     if (!pairedSlot && !isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
     const offer = marketOfferForTarget(target, state, options);
     return offer ? marketPlan(state, target, offer, { buyOrderEscrow: options.buyOrderEscrow, targetSlot: pairedSlot }) : null;
@@ -1390,7 +1394,7 @@ function recipeNeedsExcludedMaterial(recipe, state, excluded, seen = new Set()) 
 }
 
 function replanContextFor(state = {}, previousPlan = null, timestamp = Date.now()) {
-    const currentGrade = invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state);
+    const currentGrade = Progression.acquisitionRankFor(state);
     const currentLevel = Number(state.level || 1);
     const sameGrade = previousPlan?.grade === currentGrade;
     const levelingRecovery = levelingRecoveryFor(state, previousPlan, timestamp);
@@ -1549,7 +1553,7 @@ function levelingRecoveryFor(state = {}, plan = state.stats?.equipmentPlan, time
     const death = state.stats?.deathExperience;
     // Old plans may already have been restamped at the reduced level while
     // retaining a target from the old grade. Recover those persisted routes too.
-    const acquisitionLevel = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state)?.level || level;
+    const acquisitionLevel = Progression.preparing(state) ? Progression.PREPARED_LEVEL : level;
     const gradeRegression = rankIndex(plan.grade) > rankIndex(gradeForLevel(acquisitionLevel))
         && Number(death?.expLost || 0) > 0
         && Number(death?.penaltyAppliedAt || 0) >= Number(plan.startedAt || 0);
@@ -2455,7 +2459,7 @@ function combinationPurchase(recipe, state, options = {}) {
 function dualSwordBridgePlan(state, options = {}) {
     if (!missingRequiredDualSword(state)) return null;
     const role = roleFor(state);
-    const maxRank = rankIndex(invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state));
+    const maxRank = rankIndex(Progression.acquisitionRankFor(state));
     const excluded = excludedTargetIds(options);
     const offers = new Map();
     const purchaseOptions = { ...options, npcOnly: true, findNpcOffer: item => {
