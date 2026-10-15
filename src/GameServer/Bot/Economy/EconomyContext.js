@@ -561,6 +561,47 @@ function marketHolds(board, reads, deps) {
     for (const [id, token] of reads) if (marketToken(board, id, deps) !== token) return false;
     return true;
 }
+// A held entry's read set (items or spots with their tokens) in the build's
+// reading order, read as its Map was (has, set, keys, [id, token] pairs).
+// As Maps a bot's ~330 item reads and its spot reads held ~20 KB of the
+// ~37 KB entry (L104): here the ids sit in one array (Int32Array when all
+// are int32) and each distinct token once, with one index per id (~4 KB for
+// both). Reads joined after the store (a late price read of the served plan)
+// go to a small Map after them.
+class HeldReads {
+    constructor(map) {
+        const keys = [...map.keys()], tokens = [], index = new Map();
+        this.ids = keys.every(id => (id | 0) === id) ? Int32Array.from(keys) : keys;
+        this.at = keys.length < 0xffff ? new Uint16Array(keys.length) : new Uint32Array(keys.length);
+        let i = 0;
+        for (const token of map.values()) {
+            let at = index.get(token);
+            if (at === undefined) { index.set(token, at = tokens.length); tokens.push(token); }
+            this.at[i++] = at;
+        }
+        this.tokens = tokens;
+        this.added = null;
+    }
+    position(id) {
+        const at = this.ids.indexOf(id);
+        return at >= 0 || id === id ? at : this.ids.findIndex(key => key !== key); // NaN, as Map finds it
+    }
+    has(id) { return this.position(id) >= 0 || !!this.added?.has(id); }
+    set(id, token) {
+        const at = this.position(id);
+        if (at < 0) { (this.added ||= new Map()).set(id, token); return this; }
+        let slot = this.tokens.indexOf(token);
+        if (slot < 0) slot = this.tokens.push(token) - 1;
+        if (slot > 0xffff && this.at instanceof Uint16Array) this.at = Uint32Array.from(this.at);
+        this.at[at] = slot;
+        return this;
+    }
+    keys() { return this.added ? [...this.ids, ...this.added.keys()].values() : this.ids.values(); }
+    *[Symbol.iterator]() {
+        for (let i = 0; i < this.ids.length; i++) yield [this.ids[i], this.tokens[this.at[i]]];
+        if (this.added) yield* this.added;
+    }
+}
 function marketKey(reads) {
     let hash = 0x811c9dc5;
     for (const [id, token] of reads) {
@@ -1046,6 +1087,9 @@ function buildForState(state, deps) {
     let scope = null;
     const nodeScopes = [];
     const spotReads = new Map();
+    // Once the entry is stored, the read sets it holds: a late read of this
+    // build's own view joins them, as it joined the Maps they were made from.
+    let heldReads = null, heldSpots = null;
     // Diagnostics only (RTOKENS): every node bag row the build read, for its read set.
     const bagReads = shadowEntry ? new Map() : null;
     // Once the plan is known: keep this build's read set, compare it with the actor's previous build.
@@ -1095,9 +1139,10 @@ function buildForState(state, deps) {
         // token is held by all outer scopes too and the loop would change nothing (a Map.set on a held key keeps its place).
         const top = nodeScopes[nodeScopes.length - 1];
         if (top) { const held = tokenOf(id); if (held === undefined || top.items.get(id) !== held) for (const local of nodeScopes) local.items.set(id, tokenOf(id)); }
-        if (reads.has(id)) return;
+        const into = heldReads || reads;
+        if (into.has(id)) return;
         if (scope) { if (!scope.has(id)) scope.set(id, tokenOf(id)); return; }
-        reads.set(id, tokenOf(id)); deps.onSourceRead?.(id);
+        into.set(id, tokenOf(id)); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -1122,7 +1167,7 @@ function buildForState(state, deps) {
         walletBoundary: cash.watch,
         // Every evaluated source participates in admission/ranking, including a losing candidate.
         sourceSpot: id => { const token = spotTokenOf(id);
-            spotReads.set(id, token);
+            (heldSpots || spotReads).set(id, token);
             const top = nodeScopes[nodeScopes.length - 1];
             if (top && (token === undefined || top.spots.get(id) !== token)) for (const local of nodeScopes) local.spots.set(id, token); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
@@ -1294,7 +1339,11 @@ function buildForState(state, deps) {
         // The band-aware structure of this build (as its calculation fence)
         // and its own activity: the later reuse verdict compares the result
         // with them. A hash only; no second full key string is retained.
-        remember(cache, actorKey, { key, reads, spotReads, plan, stateRef: new WeakRef(state), gearThreat, sections,
+        // The source sections are read only to reuse the source memo, so
+        // they are kept with it and dropped with it (L104).
+        heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
+        remember(cache, actorKey, { key, reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
+            sections: retainedSourceMemo ? sections : null,
             activity: state.activity, bandHash: fnv1a32(sectionKeys(state, { ...deps, timestamp }, choiceBands).structural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
@@ -1302,12 +1351,12 @@ function buildForState(state, deps) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
             while (sourceHolders.size > SOURCE_MEMO_LIMIT) {
                 const oldest = sourceHolders.keys().next().value; sourceHolders.delete(oldest);
-                const entry = cache.get(oldest); if (entry) entry.sourceSections = null;
+                const entry = cache.get(oldest); if (entry) entry.sourceSections = entry.sections = null;
             }
         }
     }
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
-        fenceData: { sections, reads, spots: spotReads } });
+        fenceData: { sections, reads: heldReads || reads, spots: heldSpots || spotReads } });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -1368,7 +1417,9 @@ function compactNetwork(network) {
     if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange'].includes(leaf.kind)
         && all.has(leaf.rootKey)) plans.set(leaf.rootKey, trim(all.get(leaf.rootKey)));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
-    return { ...network, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
+    // The network's input key is the plan's key with its market (~2 KB of
+    // text per bot, L104): view() gives it back from them, in its place.
+    return { ...network, inputKey: undefined, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
 }
 // The build's prices of what the plan's own numbers were made from (the
 // kit, the queue, the watch list): a later view starts from them, so its
@@ -1439,10 +1490,11 @@ function view(state, plan, deps, built = {}) {
     // calculations is never a retained permission to spend an old balance.
     const funding = moneyQueue(plan.network.queue, positive(state.adena) + positive(deps.buyOrderEscrow),
         plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
-    const network = { ...plan.network, ...funding };
+    const inputKey = plan.market === null ? plan.key : `${plan.key}#${plan.market}`;
+    const network = { ...plan.network, inputKey, ...funding };
     const statsPacket = plan.pending ? plan.statsPacket : { ...plan.statsPacket,
         money: invoke('GameServer/Bot/Economy/PurchaseFunding').packetFor(network, plan.hourAdena, plan.survivalReserve) };
-    const context = { inputKey: plan.market === null ? plan.key : `${plan.key}#${plan.market}`, actorKey: plan.actorKey, state,
+    const context = { inputKey, actorKey: plan.actorKey, state,
         timestamp: plan.timestamp, gearThreatMask: plan.gearThreatMask, persona: plan.persona, board: built.board, hunt: plan.hunt,
         price, buyback, calibration: plan.calibration, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
         deathHours: plan.deathHours, lostGearHours: plan.lostGearHours, karmaHours: plan.karmaHours,
