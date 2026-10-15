@@ -6,7 +6,7 @@ const MAX_SOLO_CHECKS = 12;
 const soloChoices = new WeakMap();
 const positive = value => Math.max(0, Number(value) || 0);
 const rosterKey = members => members.map(member => Number(member.characterId)).sort((a, b) => a - b).join(',');
-const personal = state => invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state);
+const adventurer = state => invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state);
 const soloState = state => ({ ...state, activity: 'hunting', partyId: null,
     party: { ...state.party, partyId: null }, stats: { ...state.stats, backgroundPartyId: null, routeMode: 'solo' } });
 function tableRole(state) {
@@ -219,7 +219,7 @@ function soloItemRouteHours(state, spots, goal, timestamp) {
 }
 
 function compare(state, peers, options = {}) {
-    if (!personal(state) || options.objective?.clanGoalKey || options.objective?.sourceKind === 'raid') return null;
+    if (!adventurer(state) || options.objective?.clanGoalKey || options.objective?.sourceKind === 'raid') return null;
     if (!state.spotId || !Number.isFinite(Number(state.stats?.classId ?? state.classId))) return null;
     const members = [state, ...peers];
     const prepared = options.prepared || prepare(members, options);

@@ -81,6 +81,35 @@ try {
     assert.equal(fight.patch.activity, 'resting');
 } finally { Cold.profileFor = savedProfile; Spots.cache = savedSpots; }
 
+// A wealthy reward forecast or a future gear target cannot admit a lethal
+// ordinary hunt. Clan membership changes neither the equipped combat profile
+// nor the ability to earn on safe mobs below the character's level.
+try {
+    Cold.profileFor = () => mage;
+    const safe = { id: 'safe-lower-farm', name: 'Mandragora field', minLevel: 25, maxLevel: 25,
+        avgLevel: 25, density: 6, npcEntries: [{ selfId: 156, count: 6 }] };
+    const unsafe = { id: 'unsafe-level-farm', name: 'Patin field', minLevel: 29, maxLevel: 29,
+        avgLevel: 29, density: 6, npcEntries: [{ selfId: 608, count: 6 }] };
+    Spots.cache = [safe, unsafe];
+    const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
+    for (const clanLevel of [0, 1]) for (const grade of ['d', 'c', 'b', 'a', 's']) {
+        let hunter = { characterId: 990006, level: 29, activity: 'hunting', spotId: unsafe.id,
+            clanId: clanLevel ? 7 : 0, clanLevel, inventory: {},
+            vitals: { hp: mage.maxHp, mp: mage.maxMp }, stats: { classId: 12, role: 'mage',
+                wishFocus: ['power:200:14', 1, 1000000], equipmentPlan: { status: 'active',
+                    strategy: 'direct_drop', grade, next: { spotId: unsafe.id, npcId: 608 } } } };
+        for (let sample = 0; sample < 3; sample++) for (const spot of Spots.cache) {
+            hunter.stats.huntEfficiency = Efficiency.record(hunter, { spotId: spot.id, timestamp: at,
+                cycleMs: 60000, adena: spot === unsafe ? 100000 : 1000, costs: 100,
+                loot: 0, exp: 100, kills: 1 });
+        }
+        assert.equal(Route.select(hunter, { spots: Spots.cache, timestamp: at, required: true })?.spot.id,
+            safe.id, 'the earning selector rejects higher income on mobs the equipped bot cannot survive');
+        assert.equal(Spots.findForState(hunter, { timestamp: at, occupancy: {} })?.id, safe.id,
+            'an active unsafe gear source cannot override ordinary hunt safety for a clan member or a solo bot');
+    }
+} finally { Cold.profileFor = savedProfile; Spots.cache = savedSpots; }
+
 const bow = { role: 'archer', pAtk: 100, pDef: 100, maxHp: 1000, atkSpd: 300,
     weaponMask: 32, equipment: { weaponKind: 'Weapon.Bow' }, skills: [] };
 const resistedTarget = { ...target, vulnerabilities: { bowWpnVuln: 0.1 } };
