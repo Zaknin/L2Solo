@@ -161,6 +161,33 @@ module.exports.wishSectionsProbe = async id => {
                 context: { ...kernel.states.get(id).context, wishAdvisory: advice } });
             return { state: candidate, deps, advice };
         };
+        // A wish-network route (WishProviders.personalCraftPlan) never passes
+        // finalizePlan, so it has no native grade/level/rate stamps. The card
+        // judges it: an unchanged round reuses it, a native source gate does not.
+        // Its next step is the card's hunting leaf, as personalCraftPlan writes it.
+        const hunt = (await prepareNative(state, clock)).advice.card.activity;
+        assert.equal(hunt.activity, 'hunting');
+        const wishPlan = { strategy: 'luxury_exchange', status: 'active', target: { selfId: 626, slot: 8 },
+            exchange: { kind: 'luxury_exchange', itemId: 626, materials: [] }, materials: [],
+            next: { spotId: hunt.spotId, npcId: hunt.npcId, selfId: Number(hunt.itemId || hunt.object), sourceKind: hunt.kind },
+            valueRate: 1, source: 'wish_network' };
+        const assertWishRound = async (plan, reuse) => {
+            const prepared = await prepareNative({ ...state, stats: { ...state.stats, equipmentPlan: plan } }, clock);
+            assert.equal(Planner.replanContextFor(prepared.state, plan, clock).routeCurrent, false);
+            Economy.forgetContext(id);
+            const beforeWish = builds;
+            const planned = await kernel.planLifecycle({ state: prepared.state,
+                context: kernel.states.get(id).context, timestamp: clock });
+            assert.equal(builds - beforeWish, reuse ? 0 : 1, reuse
+                ? 'an unchanged round keeps the stamp-less wish route on its card'
+                : 'a native source gate still rebuilds the wish route');
+            if (reuse) assert.deepEqual(planned.acquisitionPlan, plan);
+            kernel.states.set(id, ordinaryOwner);
+        };
+        await assertWishRound(wishPlan, true);
+        const strongNpc = DataCache.npcs.find(npc => Planner.isBotEligibleSourceNpcId(npc.selfId)
+            && !Planner.isPlanSourceViableForState(state, { next: { npcId: npc.selfId } }));
+        await assertWishRound({ ...wishPlan, next: { ...wishPlan.next, npcId: strongNpc.selfId } }, false);
         // Actual native stock purchases and one-shot surplus liquidation can
         // be the selected next economic step while the bot is still hunting.
         // An unchanged round/publication never needs a second source graph.

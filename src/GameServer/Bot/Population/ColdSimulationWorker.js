@@ -1130,17 +1130,21 @@ function startKernel(config = {}) {
                 : previousPlan;
             // Failure counters and recovery deadlines are live native facts,
             // even when the expensive wish calculation still holds.
-            const deferredHolds = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
-                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+            const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+                && previousPlan.next == null && previousPlan.reason === 'wish_focus';
+            const wishHolds = (wishFocus || previousPlan?.source === 'wish_network')
                 && !previousPlan.levelingRecovery
                 && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
             const planHolds = !previousPlan
                 || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
                 // Native wish_focus retains inactive target/history fields,
-                // not a current route/quote. Their old level/rate stamps do
-                // not grant authority: the current advisory fence below does.
-                // A wake/expiry still goes through the native planner.
-                || deferredHolds
+                // not a current route/quote. A wish-network route
+                // (WishProviders.personalCraftPlan) never passes finalizePlan,
+                // so it has no grade/level/rate stamps. Neither is judged by
+                // native stamps: the current advisory fence below is (its
+                // build holds the level and worn kit). A wake/expiry still
+                // goes through the native planner.
+                || wishHolds
                 || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
                     && JSON.stringify(retainedPlan) === JSON.stringify(previousPlan);
             // A proved ordinary solo round keeps its accepted native plan.
@@ -1164,8 +1168,7 @@ function startKernel(config = {}) {
             }
             // Build the renewed proof against the native live history, so a
             // consumed wake/expiry does not invalidate it again on publication.
-            const preparationState = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
-                && previousPlan.next == null && previousPlan.reason === 'wish_focus'
+            const preparationState = wishFocus
                 ? { ...state, stats: { ...state.stats,
                     equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
             const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
