@@ -540,11 +540,13 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
 // values. Each caller gets its own top-level copy, as from a fresh build.
 // The scope also holds the state's build input key at one exact timestamp
 // (buildInputKey), read by the build's section keys, capability and wish
-// section snapshot; a string, shared as is.
+// section snapshot; a string, shared as is. The same holds the state's power
+// key (powerKey) per timestamp and slot form: buildGainsFor and buildInputKey
+// read the same inputs the profile does, so the key is built once per scope.
 let profileScope = null;
 function withProfileScope(state, work) {
     const outer = profileScope;
-    profileScope = { state, timestamp: NaN, profile: null, keyAt: NaN, key: null };
+    profileScope = { state, timestamp: NaN, profile: null, keyAt: NaN, key: null, powerAt: NaN, power: null, canonAt: NaN, canon: null };
     try { return work(); }
     finally { profileScope = outer; }
 }
@@ -905,6 +907,16 @@ function releaseBuild(key) {
     }
 }
 function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
+    const scope = profileScope !== null && profileScope.state === state ? profileScope : null;
+    if (scope === null) return computePowerKey(state, timestamp, canonicalSlots);
+    if (canonicalSlots) {
+        if (scope.canonAt !== timestamp) { scope.canon = computePowerKey(state, timestamp, true); scope.canonAt = timestamp; }
+        return scope.canon;
+    }
+    if (scope.powerAt !== timestamp) { scope.power = computePowerKey(state, timestamp, false); scope.powerAt = timestamp; }
+    return scope.power;
+}
+function computePowerKey(state, timestamp, canonicalSlots) {
     const saved = state.stats?.coldCombat || {};
     const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'

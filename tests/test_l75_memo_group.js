@@ -121,6 +121,62 @@ const Data = invoke('GameServer/DataCache'); Data.init();
     console.log('PASS profile scope: one build per state and timestamp, fresh values, private copies');
 }
 
+// 3b. The scope also holds the power key per state and timestamp: two
+// buildGainsFor calls in one scope build it once; the result is the unscoped
+// one; another timestamp, state or no scope builds again. The key reads the
+// state's hennas once per build, and a warm build entry reads nothing else.
+{
+    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+    const fixture = require('./fixtures/wish_spot_native_state.json');
+    const timestamp = 1791335800000;
+    const counted = () => {
+        const state = structuredClone(fixture), stats = state.stats;
+        let reads = 0;
+        state.stats = new Proxy(stats, { get(target, key) { if (key === 'hennas') reads++; return target[key]; } });
+        return { state, reads: () => reads };
+    };
+    const plain = counted();
+    const unscoped = Profile.buildGainsFor(plain.state, timestamp);
+    const before = plain.reads();
+    Profile.buildGainsFor(plain.state, timestamp);
+    const perKey = plain.reads() - before;
+    assert.equal(perKey, 1, 'an unscoped warm buildGainsFor builds the power key once');
+    const first = counted();
+    const [a, b] = Profile.withProfileScope(first.state, () => [Profile.buildGainsFor(first.state, timestamp),
+        Profile.buildGainsFor(first.state, timestamp)]);
+    const single = counted();
+    Profile.withProfileScope(single.state, () => Profile.buildGainsFor(single.state, timestamp));
+    assert.equal(first.reads(), single.reads(), 'two scoped calls read the state as one call does: the key is built once');
+    assert.deepEqual(a, unscoped); assert.deepEqual(b, unscoped);
+
+    const warm = counted();
+    Profile.buildGainsFor(warm.state, timestamp);
+    const warmReads = warm.reads();
+    Profile.withProfileScope(warm.state, () => {
+        Profile.buildGainsFor(warm.state, timestamp);
+        Profile.buildGainsFor(warm.state, timestamp);
+        assert.equal(warm.reads() - warmReads, perKey, 'one key for two calls at one timestamp');
+        Profile.buildInputKey(warm.state, timestamp);
+        assert.equal(warm.reads() - warmReads, 2 * perKey, 'buildInputKey adds the canonical-slot key once, then holds it');
+        Profile.buildInputKey(warm.state, timestamp);
+        Profile.buildGainsFor(warm.state, timestamp);
+        assert.equal(warm.reads() - warmReads, 2 * perKey, 'both forms are held');
+        Profile.buildGainsFor(warm.state, timestamp + 60000);
+        assert.equal(warm.reads() - warmReads, 3 * perKey, 'another timestamp builds a fresh key');
+        const stranger = counted();
+        Profile.buildGainsFor(stranger.state, timestamp);
+        Profile.buildGainsFor(stranger.state, timestamp);
+        assert(stranger.reads() >= 2 * perKey, 'another state is not served from this scope');
+    });
+    const after = warm.reads();
+    Profile.buildGainsFor(warm.state, timestamp);
+    assert.equal(warm.reads() - after, perKey, 'outside a scope the key is built on each call');
+    // A changed input after the scope is read again.
+    warm.state.level = Number(warm.state.level) + 1;
+    assert.notEqual(Profile.buildInputKey(warm.state, timestamp), Profile.buildInputKey(structuredClone(fixture), timestamp), 'a changed level gives another key');
+    console.log('PASS power key: built once per state, timestamp and form inside a scope');
+}
+
 // 4. EconomyContext.forState opens the scope for its own build: its readers
 // share one profile (fewer coldCombat reads) and the result is the same.
 {
