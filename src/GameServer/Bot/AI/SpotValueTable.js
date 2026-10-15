@@ -95,6 +95,32 @@ const valueMemo = new Map();
 const valueMemoOrder = [];
 let valueMemoHead = 0;
 function clearValueMemo() { valueMemo.clear(); valueMemoOrder.length = 0; valueMemoHead = 0; }
+// The Map holds a key's slot in valueMemoOrder; the row lives at that slot as
+// 12 numbers in one slab and a flag byte (L104: the memo at its cap held 6.8 MB
+// of the cold worker heap with object rows, 4.3 MB so). A new row takes the slot
+// of the row dropped for it, so a slot holds its key's row while the key lives.
+const ROW_NUMBERS = 12;
+const NO_ROW = 1, NO_STACKS = 2, NO_REWARDS = 4;
+const ADENA = 4, LOOT = 7, SHOTS = 8, POTIONS = 9;
+let memoNumbers = null, memoFlags = null;
+function storeRow(slot, row) {
+    if (!memoNumbers) { memoNumbers = new Float64Array(MAX_VALUE_MEMO * ROW_NUMBERS); memoFlags = new Uint8Array(MAX_VALUE_MEMO); }
+    if (!row) { memoFlags[slot] = NO_ROW; return; }
+    const n = memoNumbers, at = slot * ROW_NUMBERS;
+    n[at] = row.kills; n[at + 1] = row.deaths; n[at + 2] = row.exp; n[at + 3] = row.sp; n[at + ADENA] = row.adena;
+    n[at + 5] = row.dropLoot; n[at + 6] = row.spoilLoot; n[at + LOOT] = row.loot; n[at + SHOTS] = row.shots;
+    n[at + POTIONS] = row.potions; n[at + 10] = row.stacks ?? 0; n[at + 11] = row.busyShare;
+    memoFlags[slot] = (row.stacks === null ? NO_STACKS : 0) | (row.rewardSource === 'npc_rewards' ? 0 : NO_REWARDS);
+}
+// A fresh row of computeValue's shape and key order, or null.
+function rowAt(slot) {
+    const flags = memoFlags[slot];
+    if (flags & NO_ROW) return null;
+    const n = memoNumbers, at = slot * ROW_NUMBERS;
+    return { kills: n[at], deaths: n[at + 1], exp: n[at + 2], sp: n[at + 3], adena: n[at + ADENA], dropLoot: n[at + 5],
+        spoilLoot: n[at + 6], loot: n[at + LOOT], rewardSource: flags & NO_REWARDS ? 'unavailable' : 'npc_rewards',
+        shots: n[at + SHOTS], potions: n[at + POTIONS], stacks: flags & NO_STACKS ? null : n[at + 10], busyShare: n[at + 11] };
+}
 let valueMemoTable = null, valueMemoRates = null;
 function refreshValueMemo(t, rates) {
     if (t !== valueMemoTable || rates !== valueMemoRates) {
@@ -208,9 +234,8 @@ function value(spotId, role, level, shots = true, rewardOptions = {}) {
     refreshCatalog(rates);
     refreshValueMemo(t, rates);
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
-    // Callers own the result: a copy, never the remembered row.
-    const row = memoValue(t, rates, spotId, role, level, shots, skill);
-    return row && { ...row };
+    // Callers own the result: a fresh row.
+    return rowAt(memoValue(t, rates, spotId, role, level, shots, skill));
 }
 
 // The memo key: one small integer for a known spot, role, an integer level
@@ -234,21 +259,24 @@ function memoKey(t, spotId, role, level, shots, skill) {
     }
     return `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
 }
+// The slot of the argument set's row; valid until the next memoValue call.
 function memoValue(t, rates, spotId, role, level, shots, skill) {
     const key = memoKey(t, spotId, role, level, shots, skill);
-    let row = valueMemo.get(key);
-    if (row === undefined) {
+    let slot = valueMemo.get(key);
+    if (slot === undefined) {
         DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
-        row = computeValue(t, rates, spotId, role, level, shots, skill);
+        const row = computeValue(t, rates, spotId, role, level, shots, skill);
         if (valueMemo.size >= MAX_VALUE_MEMO) {
             valueMemo.delete(valueMemoOrder[valueMemoHead]);
             valueMemoHead = (valueMemoHead + 1) % MAX_VALUE_MEMO;
             DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
         }
-        valueMemoOrder[(valueMemoHead + valueMemo.size) % MAX_VALUE_MEMO] = key;
-        valueMemo.set(key, row);
+        slot = (valueMemoHead + valueMemo.size) % MAX_VALUE_MEMO;
+        valueMemoOrder[slot] = key;
+        storeRow(slot, row);
+        valueMemo.set(key, slot);
     } else DiagnosticConfig.developerDiagnostics && (stats.memoHits += 1);
-    return row;
+    return slot;
 }
 
 function computeValue(t, rates, spotId, role, level, shots, skill = roleSpoilLevel(role, level)) {
@@ -370,12 +398,13 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         for (let index = 0; index < t.spots.length; index++) {
             const spot = t.spots[index];
             if (spot[1] - level < minGap || spot[1] - level > 8) continue;
-            const row = memoValue(t, rates, spot[0], role, level, shots, skill);
-            if (!row) continue;
+            const slot = memoValue(t, rates, spot[0], role, level, shots, skill);
+            if (memoFlags[slot] & NO_ROW) continue;
+            const at = slot * ROW_NUMBERS;
             indexes[count] = index;
-            values[count * 3] = row.adena + row.loot;
-            values[count * 3 + 1] = row.shots;
-            values[count * 3 + 2] = row.potions;
+            values[count * 3] = memoNumbers[at + ADENA] + memoNumbers[at + LOOT];
+            values[count * 3 + 1] = memoNumbers[at + SHOTS];
+            values[count * 3 + 2] = memoNumbers[at + POTIONS];
             count++;
         }
         basis = { indexes: indexes.slice(0, count), values: values.slice(0, count * 3) };
@@ -398,7 +427,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
     rows.sort((a, b) => b.income - a.income || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
     const result = Object.freeze(rows.slice(0, 64).map(({ index, income }) => {
         const spotId = t.spots[index][0];
-        return Object.freeze({ ...memoValue(t, rates, spotId, role, level, shots, skill), income, spotId, useShots: shots });
+        return Object.freeze({ ...rowAt(memoValue(t, rates, spotId, role, level, shots, skill)), income, spotId, useShots: shots });
     }));
     if (incomeRows.size >= 128) {
         incomeRows.delete(incomeRows.keys().next().value);
