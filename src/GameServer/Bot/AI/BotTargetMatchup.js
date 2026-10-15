@@ -313,9 +313,13 @@ function stateProfiles(state, options = {}) {
 // bot after every commit, and bots of one class, level and kit share combat
 // fields, so verdicts are shared by every profile array with the same fields.
 // Profiles unused for VERDICT_PROFILE_IDLE_MS (level-up, new gear) are dropped
-// when a new profile is added.
+// when a new profile is added. The entry budget below bounds the memory; the
+// idle time only frees it early, so it is longer than a cold queue wait: at
+// 10 minutes a wave whose bots waited 15 (live 2026-10-15 07:54Z, wait 914 s)
+// dropped 781 waiting bots' fingerprints in 5 minutes, and spot misses went
+// from 25% to 52% as each came back to its turn.
 const VERDICT_PROFILE_LIMIT = 4096;
-const VERDICT_PROFILE_IDLE_MS = 10 * 60 * 1000;
+const VERDICT_PROFILE_IDLE_MS = 30 * 60 * 1000;
 // The memory is in the entries under each fingerprint, not in the fingerprints
 // (L104): live 2026-10-14, 1,910 fingerprints held ~240 verdicts and ~270 spot
 // results each. Measured offline (Node 22): ~33 B per verdict or spot entry
