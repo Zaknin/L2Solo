@@ -295,7 +295,7 @@ function saleDecision(state, options = {}) {
 // The bot's buy ad lines carry the quote, its authored worth and cursors.
 function buyLines(state, goal, options = {}) {
     return invoke('GameServer/Bot/Economy/BuyAdPolicy').linesFor(state, goal, {
-        ...options, townFor: items => buyAdTown(state, buyAds(state.characterId), items)
+        board: AfkTrade.boardIndex(), ...options, townFor: items => buyAdTown(state, buyAds(state.characterId), items)
     });
 }
 
@@ -897,7 +897,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         // A survival item's ad may spend its kit cost from the survival
         // reserve, as the meeting and the NPC restock do (each item once):
         // the tranche the worker decided the bid with (plan.buyKit).
-        const wanted = (plan.buyAds || []).slice(0, 3).map((row, at) => {
+        let wanted = (plan.buyAds || []).slice(0, 3).map((row, at) => {
             const [selfId, count, price] = row;
             const intent = row.length === 9 ? require('./TradeIntent').decode(row) : null;
             const survivalCost = Math.max(0, Math.round(Number(plan.buyKit?.[at]) || 0));
@@ -914,11 +914,22 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
                     { price, storeType: AfkTrade.BUY, enchant: 0, count: Number(count) }) };
         });
+        // A standing bid may have been repriced since worker preparation.
+        // Bound its prepared quantity at the price reconciliation will keep;
+        // this does not choose a new price or rebuild the worker's wishes.
+        const budgetState = { ...state, adena: PurchaseFunding.budget(state, buyOrderEscrow(ownerId)) };
+        const owned = AfkTrade.boardIndex().ownerLines(ownerId);
+        let town = buyAdTown(state, ads, wanted);
+        for (let pass = 0; pass <= 3; pass++) {
+            wanted = require('./BuyAdPolicy').retainedLines(budgetState, wanted, owned, town);
+            const nextTown = buyAdTown(state, ads, wanted);
+            if (!wanted.length || nextTown === town) break;
+            town = nextTown;
+        }
         if (!wanted.length) {
             if (ads.length) await publishBuyAds(ownerId, ads, [], ads[0].town, authority);
             return { state: LifeState.cachedState(ownerId) || state };
         }
-        const town = buyAdTown(state, ads, wanted);
         if (ads[0]?.town === town && sameBuyOrder({ storeType: AfkTrade.BUY, lines: existing }, wanted)) return { state };
         await publishBuyAds(ownerId, ads, wanted, town, authority);
         return { state: LifeState.cachedState(ownerId) || state };

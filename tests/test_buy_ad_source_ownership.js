@@ -8,7 +8,8 @@ const imports = {
     'GameServer/Items/ItemAcquisitionCatalog': { hasSource: id => [736, 1121].includes(Number(id)) },
     'GameServer/DataCache': { items: [{ selfId: 736, template: { price: 400 }, etc: {} },
         { selfId: 1121, template: { price: 8 }, etc: {} }] },
-    'GameServer/Bot/Economy/PurchaseFunding': { spendable: () => 50000, goalTerms: (goal, itemId) => ({ itemId }) },
+    'GameServer/Bot/Economy/PurchaseFunding': { budget: state => state.adena, spendable: () => 50000,
+        goalTerms: (goal, itemId) => ({ itemId }) },
     'GameServer/Bot/Economy/ItemDisposition': { isQuestItem: () => false },
     'GameServer/Bot/Economy/MarketListingPolicy': { traderContext: () => context },
     'GameServer/Bot/Economy/MarketTownPolicy': { targetTownForItems: () => 'Giran' },
@@ -36,6 +37,39 @@ assert.equal(priced.length, 4, 'excluded goals never evaluate a price');
 
 require('../src/Global');
 invoke('GameServer/DataCache').init();
+const NativePolicy = invoke('GameServer/Bot/Economy/BuyAdPolicy');
+const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+const retainedState = { characterId: 42, adena: 1000,
+    stats: { money: [100, .01, 100, 0, .2, 300, 76, .1, 500, 1458] } };
+const retainedIntent = { key: 'power:76:7', itemId: 1458, amount: 10, price: 50,
+    recipeId: 0, valueHours: 1, valueRate: .1 };
+const requested = { selfId: 1458, count: 10, price: 50, purchaseCap: Infinity, intent: retainedIntent };
+const owned = [{ kind: 'buy_ad', storeType: 3, town: 'Dion', selfId: 1458, count: 4, price: 110 }];
+const resized = NativePolicy.retainedLines(retainedState, [requested], owned, 'Dion')[0];
+assert.equal(Funding.spendable(retainedState, 0, { r: .1 }), 600);
+assert.equal(resized.price, 110); assert.equal(resized.count, 5,
+    'retained quantities protect both survival money and higher-priority funded wishes');
+assert.equal(resized.intent.amount, 5); assert.equal(resized.intent.price, 110);
+assert.equal(requested.count, 10); assert.equal(retainedIntent.amount, 10, 'preparation does not mutate its inputs');
+assert.equal(owned[0].price, 110, 'quantity preparation never reprices a native line');
+assert.equal(NativePolicy.retainedLines(retainedState, [{ ...requested, count: 3 }], owned, 'Dion')[0].count, 3,
+    'a cheaper remaining order cannot grow beyond the prepared need');
+assert.equal(NativePolicy.retainedLines(retainedState, [requested], [{ ...owned[0], price: 700 }], 'Dion').length, 0,
+    'a retained unit that no longer fits the budget withdraws instead of publishing zero units');
+assert.equal(NativePolicy.retainedLines(retainedState, [requested], owned, 'Giran')[0].price, 50,
+    'a different town is a new native identity, so it uses the prepared opening price');
+const capped = NativePolicy.retainedLines(retainedState,
+    [{ ...requested, price: 100, purchaseCap: 105 }], owned, 'Dion')[0];
+assert.equal(capped.price, 100); assert.equal(capped.count, 6,
+    'a finite violated purchase cap sizes the order at the price the fenced writer will install');
+const survival = NativePolicy.retainedLines(retainedState,
+    [{ ...requested, survivalCost: 250, intent: { ...retainedIntent, valueRate: .001 } }], owned, 'Dion')[0];
+assert.equal(survival.count, 2, 'an unfunded stock root may spend only its explicitly prepared survival tranche');
+const alternatives = NativePolicy.retainedLines(retainedState,
+    [requested, { ...requested, selfId: 1459, intent: { ...retainedIntent, itemId: 1459 } }],
+    [...owned, { ...owned[0], selfId: 1459 }], 'Dion');
+assert.deepEqual(alternatives.map(row => row.count), [5, 5],
+    'conditional alternatives each use their root allowance without reserving cash for another ad');
 const Intent = require('../src/GameServer/Bot/Economy/TradeIntent');
 const Pricing = invoke('GameServer/Bot/Economy/MarketPricing');
 const Look = require('../src/GameServer/Bot/Economy/BoardLook');
@@ -73,4 +107,28 @@ try {
     assert.equal(Pricing.lookOwn(state, [line], unknown, new Look.SeenLines()), null,
         'pending source preparation cannot withdraw or reprice a line');
 } finally { Counters.counter = original; }
+const Listing = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const priorContext = Listing.traderContext, priorBid = Pricing.bid;
+try {
+    Listing.traderContext = () => ({ economy: { moneyPrice: .00001, worth: () => 10000 } });
+    for (const sample of [
+        { id: 2004571, name: 'PoleFarm', wallet: 988520, price: 2948, count: 331, oldPrice: 3033, oldCount: 318,
+            expected: 325, money: [47353, .0000212, 0, 0, .000591, 345648, 76] },
+        { id: 2005478, name: 'clo4k', wallet: 5831800, price: 2386, count: 2440, oldPrice: 2455, oldCount: 2371,
+            expected: 2375, money: [12453, .0000803, 0, 0, .000423, 3965896, 76] }
+    ]) {
+        Pricing.bid = () => ({ price: sample.price, count: sample.count, purchaseCap: Infinity, pricing: {} });
+        const liveCase = { characterId: sample.id, adena: sample.wallet, stats: { money: sample.money } };
+        const [prepared] = NativePolicy.linesFor(liveCase, null, {
+            watchList: [{ itemId: 1458, amount: sample.count, key: 'power:76:7', recipeId: 0,
+                worth: sample.price, valueHours: 202, valueRate: sample.money[4] }],
+            board: { ownerLines: () => [{ kind: 'buy_ad', storeType: 3, town: 'Dion', selfId: 1458,
+                count: sample.oldCount, price: sample.oldPrice }] }, townFor: () => 'Dion'
+        });
+        assert.equal(prepared.price, sample.oldPrice); assert.equal(prepared.count, sample.expected,
+            `worker preparation sizes ${sample.name}'s observed crystal order at the retained native price`);
+        assert.equal(prepared.intent.amount, sample.expected); assert.equal(prepared.intent.price, sample.oldPrice);
+        assert(prepared.count * prepared.price <= liveCase.adena);
+    }
+} finally { Listing.traderContext = priorContext; Pricing.bid = priorBid; }
 console.log('PASS source ownership: NPC fallback/direct bids excluded, player/future alternatives retained, native look withdrawal fenced');
