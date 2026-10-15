@@ -57,7 +57,8 @@ const GROUP_LIMIT = 256;
 // The entry also keeps the hash of the plan that build produced (focus, queue
 // with funding, activity, dormant), so a rebuild is counted by whether its
 // inputs and its plan repeated the actor's previous build: how many rebuilds
-// change nothing a bot does (the B5 question). It never decides anything.
+// change nothing a bot does (the B5 question), and per key part its digest,
+// to name the parts that moved a rebuilt key. It never decides anything.
 const lastKeyHashes = new Map();
 const LAST_KEY_LIMIT = 8192;
 const GAP_BUCKETS = [[1000, 'lt1s'], [5000, '1_5s'], [15000, '5_15s'], [30000, '15_30s'], [60000, '30_60s'], [120000, '60_120s']];
@@ -136,7 +137,17 @@ const heldRowKey = row => {
     if (key === undefined) rowKeys.set(row, key = rowKey(row));
     return key;
 };
-function inputKey(state, deps = {}) {
+// One name per inputKeyParts element, in its order (diagnostics only: which
+// part moved between an actor's builds, `context:key_part`).
+const INPUT_KEY_PARTS = Object.freeze(['level', 'class_id', 'craft_level', 'items', 'adena', 'decision_seq', 'activity_leaf',
+    'visit_every_0', 'visit_every_1', 'workshop_recipe', 'workshop_product', 'workshop_income', 'workshop_cycle',
+    'recipe_ids', 'producer_revision', 'shot_recipe_demand', 'mp', 'buy_order_escrow',
+    'frustration', 'karma', 'stats_clan', 'state_clan', 'party_party_id', 'party_id',
+    'generated_cold', 'race', 'market_sell_retry_after', 'market_sell_retry_active', 'reservation', 'clan_material_demand',
+    'warehouse_version', 'spot_id', 'gear_threat', 'hunt_efficiency_at', 'memory_revision',
+    'deps_input_key', 'mode', 'incoming_pending', 'accepted_incoming', 'trip', 'route', 'pk', 'soul_crystal_quest', 'hennas',
+    'exp_bucket', 'knowledge', 'crafts', 'sp', 'skills']);
+function inputKeyParts(state, deps = {}) {
     const stats = state.stats || {};
     const items = Object.values(state.inventory || {}).map(rowKeys === null ? rowKey : heldRowKey).sort().join(',');
     // A native bag change, own sample or relation revision is an input event.
@@ -158,8 +169,12 @@ function inputKey(state, deps = {}) {
         Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
         deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled(),
         stats.production?.crafts || 0, positive(state.sp),
-        (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')].join('|');
+        (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')];
 }
+const inputKey = (state, deps = {}) => inputKeyParts(state, deps).join('|');
+// A part's digest as join() writes it (null and undefined are empty), so a
+// part counts as moved exactly when its text in the key moved.
+const partHashes = parts => Uint32Array.from(parts, part => fnv1a32(part == null ? '' : String(part)));
 // Every section keeps only its used inputs. Current combat resources and
 // financial facts do not invalidate a sword's benefit or its source graph.
 // A caller reads one part: the build compares only its source sections, the
@@ -832,10 +847,13 @@ function forState(state = {}, deps = {}) {
 // The shadow plan comparison, also by the card refusal that sent this build
 // (deps.advisoryRefusal, set by the cold worker while diagnostics run), so a
 // refusal that rebuilds the same plan shows itself (L114).
-function countShadowPlan(deps, sameKey, samePlan) {
+// A rebuild whose key moved in one part only also names that part with the
+// plan outcome: which single input change rebuilds an unchanged plan.
+function countShadowPlan(deps, sameKey, samePlan, singlePart = null) {
     const plan = samePlan ? 'same_plan' : 'new_plan';
     Diagnostics.count('context', 'shadow_plan', `${sameKey ? 'same_key' : 'new_key'}:${plan}`);
     if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_plan', `${deps.advisoryRefusal}:${plan}`);
+    if (singlePart !== null) Diagnostics.count('context', 'key_single', `${singlePart}:${plan}`);
 }
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
@@ -859,7 +877,9 @@ function buildForState(state, deps) {
     if (!deps.routeRows && held?.plan.routeKey === Trip.key(state)) deps.routeRows = held.plan.routeRows;
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
-    const key = inputKey(state, { ...deps, timestamp });
+    // Diagnostics keep the parts to name the moved ones; the plain path joins as before.
+    const keyParts = diagnostic ? inputKeyParts(state, { ...deps, timestamp }) : null;
+    const key = keyParts !== null ? keyParts.join('|') : inputKey(state, { ...deps, timestamp });
     if (held?.key !== key) rowKeys = new Map();
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
@@ -899,19 +919,29 @@ function buildForState(state, deps) {
         ? 'input_dependency_changed' : !isMainThread && held.stateRef.deref() !== state ? 'state_publication'
         : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let shadowSame = false, previousPlan = null, shadowEntry = null;
+    let shadowSame = false, previousPlan = null, shadowEntry = null, singlePart = null;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
-        const same = last?.hash === hash;
+        const same = last?.hash === hash, hashes = partHashes(keyParts);
         shadowSame = same; previousPlan = last?.plan ?? null;
         Diagnostics.count('context', 'shadow', `${diagnosticReason}:${same ? 'same_key' : 'new_key'}`);
+        // Which parts moved since the actor's previous build (none known without one).
+        if (!same && last?.parts?.length === hashes.length) {
+            let moved = 0, name = null;
+            for (let i = 0; i < hashes.length; i++) if (hashes[i] !== last.parts[i]) {
+                moved++; name = INPUT_KEY_PARTS[i] || `part_${i}`;
+                Diagnostics.count('context', 'key_part', name);
+            }
+            if (moved > 0) Diagnostics.count('context', 'key_parts', moved === 1 ? '1' : moved === 2 ? '2' : '3+');
+            if (moved === 1) singlePart = name;
+        }
         if (same) {
             Diagnostics.count('context', 'shadow_gap', gapBucket(Math.max(0, at - last.at)));
             // 'capacity' (LRU), 'planning_capacity', 'unkept' (forState did not keep it) or the owner's forgetContext reason.
             if (diagnosticReason === 'not_retained') Diagnostics.count('context', 'shadow_released', last.released || 'unknown');
         }
         const kept = deps.rememberContext !== false && planningContexts < 64;
-        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null };
+        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1036,7 +1066,7 @@ function buildForState(state, deps) {
             money: state.stats?.money || [0, 0, base.survivalReserve, 0], stockTargets: state.stats?.stockTargets || stockTargets(base) };
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
-            if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
+            if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart);
         }
         endTokens();
         return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
@@ -1112,7 +1142,7 @@ function buildForState(state, deps) {
         Diagnostics.duration('context', performance.now() - started);
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
-        if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
+        if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart);
     }
     if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
@@ -1475,6 +1505,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, setPlanningContexts, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

@@ -18,10 +18,22 @@ const state = () => ({ characterId: 901, updatedAt: 1, level: 20, phase: 'cold',
     stats: { classId: 1 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } }, currentRegion: 'Giran',
     simulation: { revision: 2 }, loc: { locX: 80000, locY: 148000, locZ: -3500 }, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
 const shadow = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:shadow')));
+const keyCounts = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:key_')));
 function delta(before, after) {
     const out = {};
     for (const [key, value] of Object.entries(after)) if (value !== (before[key] || 0)) out[key] = value - (before[key] || 0);
     return out;
+}
+
+// Every input key part is named, in order; the key is the parts joined.
+{
+    const probe = { ...state(), sp: 77, stats: { classId: 1, karma: null } }, probeDeps = { ...deps, workshop: { recipeId: 5 } };
+    const parts = Economy.inputKeyParts(probe, probeDeps), names = Economy.INPUT_KEY_PARTS;
+    assert.strictEqual(names.length, parts.length, 'a new input key part needs its name in INPUT_KEY_PARTS');
+    assert.strictEqual(new Set(names).size, names.length);
+    assert.strictEqual(Economy.inputKey(probe, probeDeps), parts.join('|'));
+    const at = name => parts[names.indexOf(name)];
+    assert.deepEqual([at('level'), at('class_id'), at('adena'), at('workshop_recipe'), at('sp')], [20, 1, 100, 5, 77]);
 }
 
 // Off: no diagnostic call is reached, the decision path is unchanged.
@@ -70,11 +82,13 @@ Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:1_5s': 1,
     'context:shadow_released:owner_release': 1, 'context:shadow_plan:same_key:same_plan': 1 }, 'the gap runs from the last use, a hit included');
 
-before = shadow();
+before = shadow(); const keyBefore = keyCounts();
 Economy.forState({ ...republished, adena: 5000 }, deps);
 let changed = delta(before, shadow());
 assert.deepEqual(changed, { 'context:shadow:input_dependency_changed:new_key': 1, 'context:shadow_plan:new_key:same_plan': 1 },
     'a richer wallet invalidates inputs while the mandatory kit remains the focus');
+assert.deepEqual(delta(keyBefore, keyCounts()), { 'context:key_part:adena': 1, 'context:key_parts:1': 1,
+    'context:key_single:adena:same_plan': 1 }, 'the one moved part is named with the plan outcome');
 
 // A build that waits on incoming stock (early return) still classifies its plan.
 before = shadow();
