@@ -2,6 +2,7 @@ const { fnv1a32 } = require('../Fnv1a');
 const ClanMembershipPolicy = require('../../Clan/ClanMembershipPolicy');
 const Database = invoke('Database');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 const TABLE = 'bot_background_parties';
 const cache = new Map();
@@ -101,6 +102,25 @@ function normalize(row) {
     };
 }
 
+// The bots' downtime (BotLifeState.bootPause, L136) moves the active parties'
+// due times too: the party row is the leader's scheduling authority. Before
+// loadActive, so the cache reads the moved row (party commits fence on its
+// updatedAt, which moves by the same delta for the next boot's measure).
+function shiftDueTimesByDowntime() {
+    return BotLifeState.bootPause().then(({ startedAt, downtimeMs }) => {
+        if (!(downtimeMs > 0)) return 0;
+        return Database.execute([
+            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?
+            WHERE status = 'active' AND nextResolveAt > 0 AND updatedAt > 0 AND updatedAt < ?`,
+            [downtimeMs, downtimeMs, startedAt]
+        ]).then((result) => {
+            const shifted = Number(result?.affectedRows || 0);
+            utils.infoWarn('BotParty', 'cold hydrate: shifted %d party due times by %d ms', shifted, downtimeMs);
+            return shifted;
+        });
+    });
+}
+
 function rowFromParty(party) {
     const current = cache.get(String(party.partyId))?.stats;
     if (Number(current?.clanGoalInvalidationVersion || 0) > Number(party.stats?.clanGoalInvalidationVersion || 0)) {
@@ -179,6 +199,7 @@ const BackgroundPartyState = {
 
         initPromise = Database.execute(['SELECT 1', []], 'schema:bot-parties')
             .then(() => Database.execute([`UPDATE ${TABLE} SET status = 'active', nextResolveAt = ?, updatedAt = ? WHERE status = 'hot'`, [now() + 30000, now()]], 'bot-party:startup-recovery'))
+            .then(() => shiftDueTimesByDowntime())
             .then(() => this.loadActive()).then(() => {
             initialized = true;
             utils.infoSuccess('BotParty', 'background party table ready');

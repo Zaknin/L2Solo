@@ -18,6 +18,7 @@ const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 const NativeWriteCheckpoint = require('./NativeWriteCheckpoint');
+const Uptime = require('./Uptime');
 
 const TABLE = 'bot_life_state';
 const GearSkillHints = invoke('GameServer/Bot/AI/GearSkillHints');
@@ -931,8 +932,42 @@ function save(row, options = {}) {
     });
 }
 
+// The world was paused while the server was down (L136): every persisted due
+// time moves by the downtime, so a restart does not make all bots due at once.
+// Downtime = this process start - the last row write before it, measured once
+// per boot; BackgroundPartyState moves its party due times by the same value.
+let bootPause = null;
+function measureBootPause() {
+    const startedAt = Math.floor(Uptime.SERVER_STARTED_AT);
+    return bootPause ||= Database.execute([
+        `SELECT MAX(updatedAt) AS lastWriteAt FROM ${TABLE} WHERE updatedAt < ?`, [startedAt]
+    ]).then(([row] = []) => {
+        const lastWriteAt = Number(row?.lastWriteAt);
+        return { startedAt, downtimeMs: lastWriteAt > 0 ? startedAt - lastWriteAt : 0 };
+    });
+}
+
+// Rows the boot repairs already rewrote carry fresh timers and keep them. The
+// row moves with the cache: the worker's first command checkpoint
+// (nextResolveAt included) is fenced against the row (NativeWriteCheckpoint).
+// updatedAt moves by the same delta, so the next boot measures from this start
+// even if no bot commits before it (a crash loop would compound otherwise).
+function shiftDueTimesByDowntime() {
+    return measureBootPause().then(({ startedAt, downtimeMs }) => {
+        if (!(downtimeMs > 0)) return 0;
+        return Database.execute([
+            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?
+            WHERE nextResolveAt > 0 AND updatedAt > 0 AND updatedAt < ?`, [downtimeMs, downtimeMs, startedAt]
+        ]).then((result) => {
+            const shifted = Number(result?.affectedRows || 0);
+            utils.infoWarn('BotLife', 'cold hydrate: shifted %d due times by %d ms', shifted, downtimeMs);
+            return shifted;
+        });
+    });
+}
+
 function hydrateCache() {
-    return Database.execute([
+    return shiftDueTimesByDowntime().then(() => Database.execute([
         `SELECT states.*, (SELECT json_group_array(json_object('slot', slot, 'symbolId', symbolId))
             FROM character_hennas WHERE characterId = states.characterId) AS nativeHennas,
             EXISTS(SELECT 1 FROM character_quests WHERE characterId = states.characterId AND questId = 350 AND state = 'started') AS nativeCrystalQuest,
@@ -943,7 +978,7 @@ function hydrateCache() {
                     FROM skills WHERE characterId = states.characterId) END AS nativeLearnedSkills
             FROM ${TABLE} states`,
         []
-    ]).then(async (rows) => {
+    ])).then(async (rows) => {
         for (const row of rows) {
             let state = normalize(row);
             const storedHennas = state.stats.hennas;
@@ -1637,6 +1672,11 @@ function reconcilePersistedLoadouts() {
 }
 
 const BotLifeState = {
+    // Boot only: { startedAt, downtimeMs } of this restart, measured once (L136).
+    bootPause() {
+        return measureBootPause();
+    },
+
     passiveWorkerStateSources(role) {
         if (!workerProjectorRole || role !== workerProjectorRole || initialized || initStarted) {
             throw new TypeError('invalid_worker_projector_role');
