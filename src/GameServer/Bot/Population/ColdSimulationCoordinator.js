@@ -2089,6 +2089,7 @@ class ColdSimulationCoordinator {
             }
         });
         let state = LifeState.cachedState(id) || entry.nextState;
+        const trained = { done: false };
         if (sourceCurrent()) await this.step('economyDecision', id,
             () => this.economyDecisions.accept(id, entry.proposal.economyDecision, committed));
         await this.step('journal', id, () => LifeEvents.recordMany(id, entry.proposal.result?.events || []));
@@ -2119,7 +2120,7 @@ class ColdSimulationCoordinator {
             this.economyDecisions.hold(id, decision);
             const preparedState = state;
             try {
-                state = await this.step('improvement', id, () => this.reviewCommittedEconomy(state, beforeWrite, decision || null)) || state;
+                state = await this.step('improvement', id, () => this.reviewCommittedEconomy(state, beforeWrite, decision || null, trained)) || state;
                 const applied = await this.step('economyPlan', id, () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
                     .executePlan(state, entry.proposal.economyPlan,
                         { beforeWrite, preparedState, step: work => this.step('economyPlan', id, work) }));
@@ -2200,7 +2201,7 @@ class ColdSimulationCoordinator {
         // Hunts and party rewards can raise a level without producing any
         // market work. Train after the prepared actions so their committed
         // revision remains valid until they finish.
-        if (sourceCurrent()) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
+        if (sourceCurrent() && !trained.done) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
             LifeState.cachedState(id) || state, { beforeWrite })) || LifeState.cachedState(id) || state;
         if (Config.developerDiagnostics) await this.step('metrics', id, () => {
             Metrics.recordBackgroundResolve();
@@ -2213,7 +2214,8 @@ class ColdSimulationCoordinator {
         return state;
     }
 
-    async reviewCommittedEconomy(state, beforeWrite, decisionOverride) {
+    // `trained.done` tells afterCommit this commit's training review already ran.
+    async reviewCommittedEconomy(state, beforeWrite, decisionOverride, trained = {}) {
         if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return LifeState.cachedState(state.characterId) || state;
         // The native commit has released its lease before these actions.
         // Each action validates the current row again inside its writer.
@@ -2222,6 +2224,7 @@ class ColdSimulationCoordinator {
             ? await this.step('improvement', state.characterId, () => this.economyDecisions.decided(state)) : decisionOverride;
         state = await this.step('training', state.characterId, () => LifeState.reviewTrainingAfterCommit(state, { beforeWrite }))
             || LifeState.cachedState(state.characterId) || state;
+        trained.done = true;
         const improved = await this.step('improvement', state.characterId, () => invoke('GameServer/Bot/Economy/BotImprovementService')
             .reviewCold(state, { beforeWrite, decide: () => decision }));
         return improved?.state || LifeState.cachedState(state.characterId) || state;
