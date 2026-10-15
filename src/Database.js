@@ -2152,6 +2152,15 @@ function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp);
 }
 
+function nativeHennaSlotsUnsafe(characterId) {
+    const slots = [null, null, null];
+    if (!Number.isSafeInteger(Number(characterId)) || Number(characterId) <= 0) return slots;
+    for (const row of all('SELECT slot, symbolId FROM character_hennas WHERE characterId = ?', [Number(characterId)])) {
+        if (row.slot >= 1 && row.slot <= 3) slots[row.slot - 1] = Number(row.symbolId);
+    }
+    return slots;
+}
+
 function economyOwnerUnsafe(characterId, authority, fresh = false) {
     checkMutationAdmission();
     const row = one('SELECT life.*, c.username FROM bot_life_state life JOIN characters c ON c.id=life.characterId WHERE life.characterId=?',
@@ -2320,6 +2329,7 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         else delete inventory[id];
     }
     const adena = Number(physical[57]?.amount || 0);
+    statsPatch = { ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) };
     write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
         statsJson = CASE WHEN ? IS NULL THEN statsJson ELSE json_patch(statsJson,json(?)) END,
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
@@ -2562,6 +2572,14 @@ function preserveColdVersionedStatsParsed(row, patch = {}) {
     const current = currentViews.plain;
     const incoming = next.statsJson === proposedRaw ? proposedViews.plain : jsonObject(next.statsJson);
     if (next.statsJson !== proposedRaw) stats = incoming;
+    // Physical symbols own these slots, including removals. A worker can
+    // still carry the kit from before a native improvement or hot handoff.
+    const hennas = nativeHennaSlotsUnsafe(row?.characterId);
+    if (JSON.stringify(incoming.hennas) !== JSON.stringify(hennas)) {
+        incoming.hennas = hennas;
+        next.statsJson = JSON.stringify(incoming);
+        stats = incoming;
+    }
     // The native transaction owns this leaf. A stale worker/handoff snapshot
     // cannot remove, fabricate or rewind an intent or its saved completion.
     if (Object.hasOwn(current, 'economyCommit') || Object.hasOwn(incoming, 'economyCommit')) {
@@ -8133,9 +8151,12 @@ const Database = {
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
                 const position = state ? life : character;
                 const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
+                const self = proposal.mode === 'self';
+                const learned = self && one('SELECT level FROM skills WHERE characterId = ? AND selfId = 248', [characterId]);
                 if (!invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(source)
-                    || Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
-                    || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
+                    || (self ? Number(learned?.level || 0) < 1
+                        : Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
+                            || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500))
                     throw Error('invalid_bot_crystallization');
                 const inputs = proposal.items || [{ selfId: proposal.sourceSelfId, amount: proposal.amount || 1 }];
                 if (!Array.isArray(inputs) || !inputs.length || inputs.length > Crystals.BATCH_LIMIT)
@@ -8149,7 +8170,7 @@ const Database = {
                     claimed.add(id);
                     const rows = physical.filter(row => row.selfId === id && !row.equipped && row.amount === 1).slice(0, count);
                     if (rows.length !== count) throw Error('improvement_source_changed');
-                    for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant).net; }
+                    for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant, self).net; }
                 }
                 const target = one('SELECT id,amount FROM items WHERE characterId=? AND selfId=1458 ORDER BY id LIMIT 1', [characterId]);
                 const amount = Number(target?.amount || 0) + total;

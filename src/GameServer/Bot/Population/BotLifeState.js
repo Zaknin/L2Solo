@@ -868,11 +868,15 @@ function save(row, options = {}) {
             inventorySummary = excluded.inventorySummary,
             -- Native takeover/release/restore owns player membership. A late
             -- actor snapshot cannot revive or remove that ownership marker.
-            statsJson = json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
+            statsJson = json_set(json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
                 THEN json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs', '$.economyCommit')
                 ELSE json_set(json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs'),
                     '$.economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')) END, '$.playerPartyTakeover'),
                 json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
+                '$.hennas', json_array(
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 3))),
             updatedAt = excluded.updatedAt
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
@@ -942,8 +946,14 @@ function hydrateCache() {
     ]).then(async (rows) => {
         for (const row of rows) {
             let state = normalize(row);
+            const storedHennas = state.stats.hennas;
+            state.stats.hennas = [null,null,null];
+            for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
+            const hennaRepair = JSON.stringify(storedHennas) !== JSON.stringify(state.stats.hennas);
             if (row.nativeLearnedSkills != null) {
                 state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, parseJson(row.nativeLearnedSkills, []), now());
+            }
+            if (row.nativeLearnedSkills != null || hennaRepair) {
                 // Startup repair precedes cache publication and worker reads.
                 // Use the existing guarded save; do not learn/spend here.
                 if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
@@ -953,8 +963,6 @@ function hydrateCache() {
                 }
             }
             delete row.nativeLearnedSkills;
-            state.stats.hennas = [null,null,null];
-            for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
             state.stats.soulCrystalQuest = !!row.nativeCrystalQuest;
             cache.set(state.characterId, state);
             invoke('GameServer/Bot/Economy/CraftWorkshopService').register(state);

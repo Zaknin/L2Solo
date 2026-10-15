@@ -3827,7 +3827,8 @@ const PopulationService = {
         const acquisitionLeaf = ColdSimulationCoordinator.economyDecisions.activity(updatedState);
         if (acquisitionLeaf?.activity === 'improving'
             && ['crystallize', 'luxury_exchange'].includes(acquisitionLeaf.improvement?.kind)
-            && updatedState.currentRegion === 'Giran' && improvementService.inTown(updatedState)) {
+            && (improvementService.selfCrystallization(acquisitionLeaf.improvement)
+                || updatedState.currentRegion === 'Giran' && improvementService.inTown(updatedState))) {
             const improved = await improvementService.reviewCold(updatedState);
             if (improved.changed) {
                 // Consumed inputs retire this card. Replan in town before

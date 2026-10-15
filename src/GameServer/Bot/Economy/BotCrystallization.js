@@ -4,13 +4,17 @@ const Rules = require('../../Items/C4EnchantRules');
 const Index = require('../../Item/ItemTemplateIndex');
 const BATCH_LIMIT = 16;
 let templates, candidates;
-function reward(template, enchant = 0) {
+function canSelf(state) {
+    return (state.stats?.coldCombat?.skills || state.skills || [])
+        .some(skill => Number(skill.selfId) === 248 && Number(skill.level) >= 1);
+}
+function reward(template, enchant = 0, self = false) {
     if (template?.etc?.rank !== 'd') return null;
     const kind = template.template.kind;
     const gross = Rules.crystalCount({ rank: 'd', cristals: template.etc.cristals, enchant,
         isWeapon: () => kind.startsWith('Weapon.'), isArmor: () => kind.startsWith('Armor.'),
         fetchKind: () => kind });
-    const net = gross - Math.ceil(gross * 15 / 100);
+    const net = self ? gross : gross - Math.ceil(gross * 15 / 100);
     return net > 0 ? { gross, net, crystalId: 1458 } : null;
 }
 function catalog() {
@@ -36,7 +40,9 @@ function free(state, id) {
         source.inventory?.[id] || {}, Disposition.reservedEquipmentAmounts(source));
 }
 function choices(state, purchase, trip, incomePerHour = 0) {
-    if (!trip?.known) return [];
+    const self = canSelf(state);
+    if (!self && !trip?.known) return [];
+    const operation = self ? { known: true, hours: 0, fees: 0 } : trip;
     const Data = invoke('GameServer/DataCache');
     const rows = [], seen = new Set(catalog()), source = spareState(state), bundle = [];
     const reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(source);
@@ -50,7 +56,7 @@ function choices(state, purchase, trip, incomePerHour = 0) {
         // A bought copy of worn/useful gear could be reconciled into the kit.
         // Prefer a different type or an already free physical spare.
         if (Number(held?.amount) > 0 && !own) continue;
-        const template = Index.find(Data.items, id), result = reward(template);
+        const template = Index.find(Data.items, id), result = reward(template, 0, self);
         if (own && bundle.length < 4 && bundleAmount < BATCH_LIMIT) {
             const amount = Math.min(own, BATCH_LIMIT - bundleAmount);
             bundle.push({ selfId: id, amount }); bundleAmount += amount; bundleNet += amount * result.net;
@@ -61,7 +67,7 @@ function choices(state, purchase, trip, incomePerHour = 0) {
         if (!batchLimit) continue;
         const total = own ? 0 : offer.price + offer.tripFees;
         rows.push({ selfId: id, ...result, score: (total + (own ? 0 : offer.tripHours) * incomePerHour) / result.net,
-            batchLimit, hours: (own ? 0 : offer.tripHours) + trip.hours });
+            batchLimit, hours: (own ? 0 : offer.tripHours) + operation.hours });
     }
     rows.sort((a, b) => a.score - b.score || a.hours - b.hours || a.selfId - b.selfId);
     const selected = [], limit = bundle.length > 1 ? 1 : 2;
@@ -100,4 +106,21 @@ function ready(state) {
     return inputs.length > 0 && inputs.length <= BATCH_LIMIT && inputs.every(row => Number(row.amount) > 0
         && amount(row.selfId) >= Number(row.amount));
 }
-module.exports = { reward, catalog, choices, free, inputAmount, ready, npcId: Station.npcId, BATCH_LIMIT };
+function completionKey(state) {
+    if (state.stats?.lastImprovement?.kind !== 'crystallize') return null;
+    const plan = invoke('GameServer/Bot/Economy/ItemDisposition').equipmentInputPlan(state);
+    if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active' || !plan.target?.slot) return null;
+    const Luxury = require('./BotLuxuryExchange'), exchange = Luxury.resolve(plan.exchange);
+    if (!exchange || Number(plan.target.selfId) !== exchange.itemId || !Luxury.eligible(state, exchange)
+        || !exchange.materials.every(row => invoke('GameServer/Bot/Economy/WealthCraftDecision')
+            .freeAmount(state, state.inventory?.[row.selfId] || {}) >= row.amount)) return null;
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+    if (Planner.equipmentTargetFulfilled(state, plan)) return null;
+    const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression'), assessment = Progression.assess(state);
+    const priority = Progression.priority(Index.find(invoke('GameServer/DataCache').items, exchange.itemId), plan.target.slot, assessment);
+    // Finish the selected paid-for kit piece before reallocating its crystals
+    // to alternatives. A newly missing weapon or urgent stock still wins.
+    if (!priority || priority < Math.max(0, ...[...assessment.gaps.values()].map(row => row.priority))) return null;
+    return `power:${exchange.itemId}:${Number(plan.target.slot)}`;
+}
+module.exports = { canSelf, reward, catalog, choices, free, inputAmount, ready, completionKey, npcId: Station.npcId, BATCH_LIMIT };

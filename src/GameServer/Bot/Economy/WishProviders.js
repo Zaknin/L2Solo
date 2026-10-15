@@ -490,6 +490,7 @@ function buildProjection(state, ctx, deps) {
         if (luxury && Number(id) === 1458) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
+            const self = Crystals.canSelf(state);
             for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
                     .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
@@ -497,9 +498,9 @@ function buildProjection(state, ctx, deps) {
                 paths.push({ kind: 'crystallize', activity: 'improving', itemId: 1458,
                     productCount: choice.net, batchLimit: choice.batchLimit,
                     availableUnits: choice.net * choice.batchLimit,
-                    costHours: 1 / 3600, town: 'Giran', quoted: true,
-                    tripHours: trip.hours, tripFees: trip.fees,
-                    improvement: { kind: 'crystallize', npcId: Crystals.npcId,
+                    costHours: 1 / 3600, quoted: true,
+                    ...(self ? {} : { town: 'Giran', tripHours: trip.hours, tripFees: trip.fees }),
+                    improvement: { kind: 'crystallize', ...(self ? { mode: 'self' } : { npcId: Crystals.npcId }),
                         ...(choice.inputs ? { items: choice.inputs } : { sourceSelfId: choice.selfId }) },
                     grossRequirements: requirements });
             }
@@ -808,7 +809,9 @@ function buildProjection(state, ctx, deps) {
             return a.readyGear;
         return a.node.progressionPriority !== b.node.progressionPriority
             ? a.node.progressionPriority > b.node.progressionPriority
-            : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+            : (a.node.key === ctx.completionKey) !== (b.node.key === ctx.completionKey)
+                ? a.node.key === ctx.completionKey
+                : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
     };
     const winners = open => {
         const best = new Map();
@@ -877,7 +880,8 @@ function buildProjection(state, ctx, deps) {
                     if (!SOLVER_LIMITS.has(error?.message)) throw error;
                 }
             }
-            rows.sort((a, b) => b.base.fullValueHours / Math.max(1, b.base.price) - a.base.fullValueHours / Math.max(1, a.base.price)
+            rows.sort((a, b) => Number(b.base.key === ctx.completionKey) - Number(a.base.key === ctx.completionKey)
+                || b.base.fullValueHours / Math.max(1, b.base.price) - a.base.fullValueHours / Math.max(1, a.base.price)
                 || a.base.key.localeCompare(b.base.key));
             used = new Map();
             for (const { row, solver } of rows) {

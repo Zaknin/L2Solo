@@ -484,7 +484,7 @@ class WishNetwork {
     // caller that holds the result itself, or a one-off proposal).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
-        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false }) {
+        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false, completionKey = null }) {
         const diagnostic = Diagnostics.active();
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
@@ -496,7 +496,8 @@ class WishNetwork {
         decisionSeq = Math.max(0, Math.trunc(Number(decisionSeq) || 0));
         activityLeaf = Number(activityLeaf) >>> 0;
         const cached = remembered ? this.cache.get(actorKey) : null;
-        if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf) {
+        if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf
+            && cached.completionKey === completionKey) {
             if (diagnostic) Diagnostics.count('network', 'hit', 'same_inputs');
             return remember(this.cache, actorKey, cached).result;
         }
@@ -526,6 +527,7 @@ class WishNetwork {
             wishes = wishes.filter(wish => wish.plan && wish.fullValueHours > 0);
             const used = new Map();
             const priority = [...wishes].sort((a, b) => b.progressionPriority - a.progressionPriority
+                || Number(b.key === completionKey) - Number(a.key === completionKey)
                 || b.fullValueHours / Math.max(1, b.price) - a.fullValueHours / Math.max(1, a.price) || a.key.localeCompare(b.key));
             for (const wish of priority) {
                 // Less free stock off the alone solve's claims only makes its
@@ -555,8 +557,9 @@ class WishNetwork {
         const score = wish => wish.valueHours / Math.max(1 / 3600, wish.effort);
         const held = focusWishes.find(wish => wish.key === previous.focus?.[0]);
         const challenger = focusWishes.reduce((best, wish) => !best || score(wish) > score(best) ? wish : best, null);
-        const focused = held && (preserveFocus || !challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
-            : choose(focusWishes, score, roll('focus'));
+        const focused = focusWishes.find(wish => wish.key === completionKey)
+            || (held && (preserveFocus || !challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
+                : choose(focusWishes, score, roll('focus')));
         const focus = focused ? [focused.key, held === focused ? previous.focus[1] : playedHours,
             nonnegative(focused.price)] : null;
         const inputDecisionSeq = decisionSeq, inputActivityLeaf = activityLeaf;
@@ -660,7 +663,8 @@ class WishNetwork {
             // rebuilding the same valid step is not another tendency roll.
             decisionSeq++; activityLeaf = 0;
         }
-        const activity = heldActivity || choose(candidates, leaf => leaf.valueHours / Math.max(1 / 3600, leaf.effort),
+        const completion = candidates.find(leaf => leaf.rootKey === completionKey && leaf.kind === 'luxury_exchange');
+        const activity = completion || heldActivity || choose(candidates, leaf => leaf.valueHours / Math.max(1 / 3600, leaf.effort),
             roll('activity'));
         const result = { inputKey, queue, moneyPrice, available, gap, hourAdena,
             quantityPrepared: !!stockFor,
@@ -680,7 +684,7 @@ class WishNetwork {
         if (remembered) {
             if (diagnostic && !this.cache.has(actorKey) && this.cache.size >= ACTOR_LIMIT)
                 Diagnostics.count('network', 'eviction', 'capacity');
-            remember(this.cache, actorKey, { inputKey, decisionSeq: inputDecisionSeq,
+            remember(this.cache, actorKey, { inputKey, completionKey, decisionSeq: inputDecisionSeq,
                 activityLeaf: inputActivityLeaf, result });
         }
         return result;

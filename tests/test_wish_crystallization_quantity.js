@@ -67,3 +67,34 @@ assert(!result.queue.find(row => row.object.itemId === 95).funded);
 assert.equal(result.activity.rootKey, boots.key, 'a cheap first batch cannot steal priority for the expensive weapon');
 assert.equal(result.activity.improvement.amount, 2);
 console.log('Crystallization quantities: full C cost, bounded commands, physical readiness, incoming stock and shared gear priority passed');
+
+// MeatShield had 631 physical crystals after breaking a bow, yet competing
+// equipment roots claimed them and selected another crystal purchase.
+function continuation(complete = true, urgent = false) {
+    const gear = (id, amount) => [
+        { key: `power:${id}:9`, need: 'power', progressionPriority: 2, valueHours: 10,
+            object: { itemId: id, slot: 9 }, paths: [{ requirements: [{ key: `item:${id}`, amount: 1 }] }] },
+        { key: `item:${id}`, paths: [{ kind: 'luxury_exchange', activity: 'improving', itemId: id,
+            improvement: { itemId: id }, grossRequirements: [{ key: 'item:1458', amount }] }] }
+    ];
+    const nodes = [...gear(397, 475), ...gear(608, 310),
+        { key: 'power:2387:11', need: 'power', progressionPriority: 2, valueHours: 10,
+            object: { itemId: 2387, slot: 11 }, paths: [{ requirements: [{ key: 'item:2387', amount: 1 }] }] },
+        { key: 'item:2387', paths: [{ kind: 'craft', activity: 'crafting',
+            grossRequirements: [{ key: 'item:1458', amount: 295 }, { key: 'item:1885', amount: 1 }] }] },
+        { key: 'item:1885', paths: [{ kind: 'drop', activity: 'hunting', itemId: 1885, costHours: 5 }] },
+        { key: 'item:1458', paths: [{ kind: 'buy', activity: 'shopping', price: 2419,
+            itemId: 1458, quoted: true, availableUnits: 10000 }] },
+        ...(urgent ? [{ key: 'stock:shots', need: 'power', progressionPriority: 4, valueHours: 100,
+            paths: [{ kind: 'buy', activity: 'shopping', itemId: 1464, price: 100 }] }] : [])];
+    return new WishNetwork().build({ actorKey: 'crystal-continuation', inputKey: 'after-native-break',
+        completionKey: 'power:608:9', nodes, roots: ['power:2387:11', 'power:397:9', 'power:608:9', ...(urgent ? ['stock:shots'] : [])],
+        stockFor: id => ({ owned: id === 1458 ? complete ? 631 : 100 : 0 }),
+        wallet: 30000000, hourAdena: 500000, persona: { traits: { commitment: 0 } }, remembered: false });
+}
+result = continuation();
+assert.equal(result.activity.kind, 'luxury_exchange', 'native crystallization finishes its funded C exchange before another crystal purchase');
+assert.equal(result.activity.itemId, 608);
+assert.equal(continuation(false).activity.kind, 'buy', 'a continuation cannot manufacture missing physical crystals');
+assert.equal(continuation(true, true).activity.itemId, 1464, 'urgent survival stock keeps its higher priority');
+console.log('PASS crystallization continuation / physical readiness / urgent stock');
