@@ -782,6 +782,7 @@ class ColdSimulationCoordinator {
                 }
             } else if (payload.phase === 'running') {
                 this.ready = true;
+                utils.infoSuccess('ColdWorker', 'running after a %d ms boot', Date.now() - this.lastHeartbeatAt);
                 this.lastHeartbeatAt = Date.now();
                 this.syncWorkerPressure();
                 if (this.pauseReasons.size) this.post('pause', { reasons: [...this.pauseReasons] });
@@ -2222,9 +2223,12 @@ class ColdSimulationCoordinator {
         state = LifeState.cachedState(state.characterId) || state;
         const decision = decisionOverride === undefined
             ? await this.step('improvement', state.characterId, () => this.economyDecisions.decided(state)) : decisionOverride;
-        state = await this.step('training', state.characterId, () => LifeState.reviewTrainingAfterCommit(state, { beforeWrite }))
-            || LifeState.cachedState(state.characterId) || state;
-        trained.done = true;
+        const source = LifeState.cachedState(state.characterId) === state;
+        const reviewed = await this.step('training', state.characterId, () => LifeState.reviewTrainingAfterCommit(state, { beforeWrite }));
+        // Done only when the review saw the cached state and had nothing to train. A stale source (it returns the newer
+        // state untrained), a failed step or a new row from training leaves the review at the end of afterCommit to run.
+        trained.done = source && reviewed === state;
+        state = reviewed || LifeState.cachedState(state.characterId) || state;
         const improved = await this.step('improvement', state.characterId, () => invoke('GameServer/Bot/Economy/BotImprovementService')
             .reviewCold(state, { beforeWrite, decide: () => decision }));
         return improved?.state || LifeState.cachedState(state.characterId) || state;
@@ -2475,7 +2479,10 @@ class ColdSimulationCoordinator {
         if (!this.ready) {
             // Boot (module load, datapack validation, init) sends no heartbeat and
             // takes 4 s idle, 20 s on a loaded Mac; a restart would only boot again.
-            if (age > Math.max(10000, Number(Config.coldWorkerBootMs) || 60000)) this.worker.terminate().catch(() => null);
+            if (age > Math.max(10000, Number(Config.coldWorkerBootMs) || 60000)) {
+                utils.infoWarn('ColdWorker', 'boot still running after %d ms: terminating the worker', age);
+                this.worker.terminate().catch(() => null);
+            }
             return;
         }
         if (age <= Math.max(5000, Number(Config.coldWorkerUnhealthyMs) || 5000)) {

@@ -2629,8 +2629,11 @@ function preserveColdVersionedStatsParsed(row, patch = {}) {
     }
     // The native transaction owns this leaf. A stale worker/handoff snapshot
     // cannot remove, fabricate or rewind an intent or its saved completion.
-    if (Object.hasOwn(current, 'economyCommit') || Object.hasOwn(incoming, 'economyCommit')) {
-        if (Object.hasOwn(current, 'economyCommit')) incoming.economyCommit = current.economyCommit;
+    // A bot keeps its last receipt, so an equal leaf (the usual case) leaves the proposal string as it is.
+    const heldCommit = Object.hasOwn(current, 'economyCommit');
+    if ((heldCommit || Object.hasOwn(incoming, 'economyCommit'))
+        && (heldCommit !== Object.hasOwn(incoming, 'economyCommit') || JSON.stringify(incoming.economyCommit) !== JSON.stringify(current.economyCommit))) {
+        if (heldCommit) incoming.economyCommit = current.economyCommit;
         else delete incoming.economyCommit;
         dirty = true;
     }
