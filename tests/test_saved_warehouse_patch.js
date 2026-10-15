@@ -32,7 +32,7 @@ async function run() {
             loc: { locX: 83396, locY: 147904, locZ: -3400 }, timing: {},
             vitals: { hp: 187, maxHp: 187, mp: 74, maxMp: 74 },
             inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
-            stats: { classId: 0, loadProbe: 'x'.repeat(22000), marketSellRetryAfter: 1791220000000 } }, 'withdrawal_probe');
+            stats: { classId: 0, hennas: [null, null, null], loadProbe: 'x'.repeat(22000), marketSellRetryAfter: 1791220000000 } }, 'withdrawal_probe');
         for (let i = 0; i < 30; i++) await Database.execute([
             'INSERT INTO warehouse_items(characterId,selfId,name,amount,enchant) VALUES(?,1864,\'Stem\',1,0)', [id]]);
         await Database.execute(['CREATE TABLE withdrawal_stats_writes(n INTEGER)']);

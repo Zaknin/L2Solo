@@ -383,10 +383,8 @@ const skillBooks = DataCache.items.filter((item) => {
         && (kind.startsWith('Other.Spellbook') || name.includes('spellbook') || /^amulet\b/.test(name));
 });
 assert(skillBooks.length > 100, 'the datapack must expose the full C4 skill-book catalog');
-// FX-E6 preserves books present in the authored C4 skill catalogue for
-// market/training. Unmapped books remain NPC junk; the original full item
-// list and quantities are unchanged. Expected ids come from the catalogue,
-// independently of ItemDisposition's classification helper.
+// Automatic bot skills consume no books. Both mapped and unmapped books
+// go to NPC cleanup while quest items retain their native protection.
 const mappedBookIds = new Set(require('../data/Skills/c4-skill-books.json').skills.map(row => Number(row[1])));
 let mappedBooks = 0, unmappedBooks = 0;
 for (const item of skillBooks) {
@@ -394,9 +392,9 @@ for (const item of skillBooks) {
     if (mapped) mappedBooks++; else unmappedBooks++;
     assert.strictEqual(ItemDisposition.isNpcOnlyItem({
         selfId: item.selfId, name: item.template.name, kind: item.template.kind, amount: 1
-    }), !mapped && item.template.kind !== 'Other.Quest', `original book ${item.selfId} follows the authored C4 training catalogue`);
+    }), item.template.kind !== 'Other.Quest', `original book ${item.selfId} needs no paid bot training`);
 }
-assert(mappedBooks > 0 && unmappedBooks > 0, 'the unchanged catalogue must exercise both preserved and NPC-only books');
+assert(mappedBooks > 0 && unmappedBooks > 0, 'the unchanged catalogue must exercise both mapped and unmapped books');
 const orcAmulets = DataCache.items.filter((item) => /^amulet\b/i.test(item?.template?.name || ''));
 assert(orcAmulets.length > 40, 'the datapack must expose the C4 Orc amulet catalog');
 assert(orcAmulets.every((item) => ItemDisposition.isSkillBookItem({
@@ -438,11 +436,12 @@ const stationChantBefore = structuredClone(stationChant);
 const stationChantDisposition = MarketListingPolicy.evaluate(stationChant);
 assert.strictEqual(stationChantDisposition.candidates[0]?.count, 1);
 assert.deepStrictEqual(MarketListingPolicy.classify(stationChant, stationChantDisposition.candidates[0]),
-    { action: 'market', reason: 'market' }, 'the mapped amulet is available to the native infrastructure market decision');
-assert(stationChantDisposition.decisions.every(row => ['expected_value', 'no_board_slot'].includes(row.reason)),
-    'market value and the native roll choose disposition for the allowed mapped-book owner');
-assert.strictEqual(ItemDisposition.npcOnlySlotCount(stationChant), 0);
-assert.strictEqual(ItemDisposition.inventoryCleanupNeed(stationChant, { now }), null);
+    { action: 'npc', reason: 'npc_only_item' }, 'infrastructure also receives free skills and cleans up mapped amulets');
+assert(stationChantDisposition.decisions.every(row => row.reason === 'npc_only_item'));
+assert.strictEqual(ItemDisposition.npcOnlySlotCount(stationChant), 1);
+assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(stationChant, { now }), {
+    reason: 'npc_only_inventory', slots: 1, npcOnlySlots: 1, limit: ItemDisposition.INVENTORY_SLOT_LIMIT
+});
 assert.deepStrictEqual(stationChant, stationChantBefore, 'the infrastructure quote retains original physical ownership');
 const npcState = {
     ...state,
@@ -486,8 +485,8 @@ assert.strictEqual(
 const expectedNpcBookFixtures = npcFixtures.filter(item => !mappedBookIds.has(Number(item.selfId)));
 assert(expectedNpcBookFixtures.length > 0 && expectedNpcBookFixtures.length < npcFixtures.length,
     'the unchanged 21-item mixed bag contains both NPC junk and mapped training books');
-// The quotation helper exposes cheap mapped books too. Personal owners sell
-// them to the NPC; infrastructure owners use the native market decision.
+// The quotation helper exposes cheap mapped books too. Both ordinary and
+// infrastructure owners clean them up without paid training demand.
 assert(npcFixtures.every(item => !mappedBookIds.has(Number(item.selfId))
     || Number(item.template.price) <= ItemDisposition.NPC_LIQUIDATION_MAX_UNIT_PRICE),
     'the reachable bag combines explicit NPC junk and cheap mapped books');
@@ -505,13 +504,14 @@ for (const item of npcFixtures.filter(item => mappedBookIds.has(Number(item.self
     assert(candidate, 'an original mapped book remains a physical disposition candidate');
     assert.deepStrictEqual(MarketListingPolicy.classify(npcState, candidate), { action: 'npc', reason: 'npc_only_item' });
     assert(mixedBookDisposition.decisions.filter(row => Number(row.item.selfId) === Number(item.selfId))
-        .every(row => row.reason === 'npc_only_item'), 'ordinary mapped books follow the personal NPC policy');
+        .every(row => row.reason === 'npc_only_item'), 'ordinary mapped books follow the free-skill cleanup policy');
     const stationCandidate = stationMixedDisposition.candidates.find(row => Number(row.selfId) === Number(item.selfId));
     assert(stationCandidate, 'the same mapped stock remains available to the infrastructure owner');
-    assert.deepStrictEqual(MarketListingPolicy.classify(stationMixedState, stationCandidate), { action: 'market', reason: 'market' });
+    assert.deepStrictEqual(MarketListingPolicy.classify(stationMixedState, stationCandidate), { action: 'npc', reason: 'npc_only_item' });
     assert(stationMixedDisposition.decisions.filter(row => Number(row.item.selfId) === Number(item.selfId))
-        .every(row => row.reason !== 'npc_only_item'), 'native expected value decides the mapped book disposition');
+        .every(row => row.reason === 'npc_only_item'), 'infrastructure uses the same free-skill cleanup policy');
 }
+assert.strictEqual(stationMixedDisposition.npc.length, npcFixtures.length, 'all original mixed stock reaches NPC cleanup');
 assert.deepStrictEqual(stationMixedState, stationMixedBefore, 'the mixed infrastructure quote preserves physical stock');
 const protectedNpcState = {
     ...npcState,

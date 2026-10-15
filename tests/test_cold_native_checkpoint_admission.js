@@ -5,12 +5,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const gameRoot = process.env.N53_GAME_ROOT || path.resolve(__dirname, '..');
 require(path.join(gameRoot, 'tests/helpers/databaseIsolation'));
-const isolated = require(path.join(gameRoot, 'tests/helpers/isolatedSocialDatabase'))('native-checkpoint-paid-profile', gameRoot);
+const isolated = require(path.join(gameRoot, 'tests/helpers/isolatedSocialDatabase'))('native-checkpoint-free-profile', gameRoot);
 // Admission-only authoring explicitly uses native Knowledge OFF, before Global.
 fs.writeFileSync(isolated.ini, fs.readFileSync(isolated.ini, 'utf8')
     .replace(/^knowledgeErrorsEnabled\s*=\s*true$/m, 'knowledgeErrorsEnabled = false'));
 const { DatabaseSync } = require('node:sqlite');
-assert(!fs.existsSync(path.join(process.cwd(), 'config/local.ini')), 'no local override');
+assert.equal(process.env.L2NODE_CONFIG_FILE, isolated.ini, 'explicit fixture overrides local configuration');
 require(path.join(gameRoot, 'src/Global'));
 isolated.assertConfigured(options.default);
 const Database = invoke('Database');
@@ -57,14 +57,13 @@ const point = value => ({ characterId: value.characterId, phase: value.phase, ac
     lastHotAt: Number(value.lastHotAt || 0), updatedAt: Number(value.updatedAt || 0) });
 
 
-// ARCH-NOTE: FX-E6 retains native SP costs. With the declared 120 SP the
-// class0 prefix is two 50-SP ranks plus three free skills, not nine grants.
-const ancestorRanks = [[3, 2], [194, 1], [1320, 1], [1322, 1]];
-const firstProfessionRanks = [[3, 2], [194, 1], [239, 1], [1320, 2], [1322, 1]];
+// Expected combat tree is independent of the native grant/persistence path.
+const expectedRanksFor = (classId, level) => invoke('GameServer/Bot/Population/ColdCombatProfile')
+    .skillRecordsFromTree(classId, level).map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]);
 const skillRows = (image, id) => image.skills.filter(skill => skill.characterId === id);
 const skillRanks = (image, id) => skillRows(image, id)
     .map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]);
-function assertAuthoredPaidPlan(targetClass = 0) {
+function assertAuthoredTree(targetClass = 0) {
     const authoredRank = (classId, skillId, level) => Data.skillTree
         .find(tree => Number(tree.classId) === classId)?.skills
         .find(skill => Number(skill.selfId) === skillId)?.levels
@@ -103,13 +102,13 @@ async function prepareNativeProfile(id) {
     assert.equal(physical(before, id).sp, 120);
     assert.equal(input.sp, 120);
     assert.deepEqual(skillRows(before, id), []);
-    assertAuthoredPaidPlan();
+    assertAuthoredTree();
     const beforeWrite = Database.createColdTrainingGuard(input, () => {
         assert.equal(Life.cachedState(id), input);
     });
     const training = await Progression.reconcile({ characterId: id, classId: 0, level: 7, seed: id }, { beforeWrite });
-    assert.equal(training.spentSp, 100);
-    assert.equal(training.learnedCount, 5);
+    assert.equal(training.spentSp, 0);
+    assert.equal(training.learnedCount, 15);
     assert.deepEqual(training.consumedBooks, []);
     assert.deepEqual(training.transitions, []);
     const returned = await Database.publishColdTraining(id, training, { beforeWrite });
@@ -117,12 +116,12 @@ async function prepareNativeProfile(id) {
     assert.equal(accepted, Life.cachedState(id));
     assert.equal(accepted.level, 7);
     assert.equal(accepted.exp, input.exp);
-    assert.equal(accepted.sp, 20);
+    assert.equal(accepted.sp, 120);
     assert.equal(accepted.stats.classId, 0);
     assert.equal(invoke('GameServer/Skills/SkillBookCatalog').needsTraining(accepted), false);
     const after = facts(id);
-    assert.deepEqual(skillRanks(after, id), ancestorRanks);
-    assert.equal(physical(after, id).sp, 20);
+    assert.deepEqual(skillRanks(after, id), expectedRanksFor(0, 7));
+    assert.equal(physical(after, id).sp, 120);
     assert.equal(physical(after, id).exp, physical(before, id).exp);
     assert.equal(physical(after, id).classId, 0);
     assert.equal(accepted.adena, input.adena);
@@ -333,13 +332,13 @@ async function boundary(target, mode) {
         if (queueTarget || target === 'class') assert.equal(row(partial, id).hp, 85);
         else assert.equal(row(partial, id).hp, target === 'death' ? 0 : 90, 'accepted own ROW is already durable');
         if (target === 'class') {
-            assertAuthoredPaidPlan(Progression.plan({ classId: 0, level: 20, seed: id }).classId);
-            assert.deepEqual(skillRanks(partial, id), ancestorRanks, 'native paid ancestor prefix completed BEFORE FIRST class SQL');
-            assert.equal(physical(partial, id).sp, 20);
+            assertAuthoredTree(Progression.plan({ classId: 0, level: 20, seed: id }).classId);
+            assert.deepEqual(skillRanks(partial, id), expectedRanksFor(0, 20), 'native free ancestor prefix completed BEFORE FIRST class SQL');
+            assert.equal(physical(partial, id).sp, 120);
         }
         if (preparedProfiles.has(id)) {
             assert.deepEqual(skillRows(partial, id), preparedProfiles.get(id), 'no NEW skill write before held ROW/after writer');
-            assert.equal(physical(partial, id).sp, 20);
+            assert.equal(physical(partial, id).sp, 120);
         }
         if (queueTarget && target !== 'row') assert.equal(physical(partial, id).sp, 120,
             'the held first native learner has not debited physical SP');
@@ -412,11 +411,10 @@ async function boundary(target, mode) {
                 assert.notEqual(trainingCallbacks[0].callback, afterCallbacks[0].callback,
                     'private immutable training floors cannot leak into ROW/advance');
             } else assert.deepEqual(trainingCallbacks, [], 'prepared ROW/after profile does not silently train inside this boundary');
-            const expectedRanks = target === 'class' ? firstProfessionRanks
-                : target === 'skill_update' ? [[3, 3], [194, 1], [1320, 1], [1322, 1]] : ancestorRanks;
+            const expectedRanks = expectedRanksFor(physical(after, id).classId, target === 'class' ? 20 : 7);
             assert.deepEqual(skillRanks(after, id), expectedRanks);
-            assert.equal(physical(after, id).sp, 20);
-            assert.equal(after.cache.sp, 20);
+            assert.equal(physical(after, id).sp, 120);
+            assert.equal(after.cache.sp, 120);
             assert.equal(after.cache.adena, 1000);
             assert.deepEqual(after.items.filter(item => item.characterId === id && item.selfId === 57),
                 before.items.filter(item => item.characterId === id && item.selfId === 57), 'paid skills never invent/debit currency');
@@ -424,8 +422,8 @@ async function boundary(target, mode) {
                 'ROW/after targets preserve the exact pre-trained physical rows');
             else {
                 const learned = trainingReceipts.filter(receipt => receipt.result.learned);
-                assert.equal(learned.length, target === 'class' ? 7 : 5);
-                assert.equal(learned.reduce((total, receipt) => total + receipt.result.spentSp, 0), 100);
+                assert.equal(learned.length, expectedRanks.reduce((count, skill) => count + skill[1], 0) - (target === 'skill_update' ? 1 : 0));
+                assert.equal(learned.reduce((total, receipt) => total + receipt.result.spentSp, 0), 0);
                 assert.deepEqual(learned.flatMap(receipt => receipt.result.consumedBooks), []);
             }
             console.log('SHARED_CALLBACK', JSON.stringify({ target, id, writers: writerCallbacks.map(value => value.name), exactFunctions: new Set(writerCallbacks.map(value => value.callback)).size }));

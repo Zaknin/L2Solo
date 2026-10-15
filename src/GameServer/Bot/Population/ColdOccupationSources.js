@@ -66,9 +66,6 @@ function* reservations(state) {
                 if (!current || rank > current.rank || rank === current.rank && candidate.score > current.score) staged.set(slot, candidate);
             }
         }
-        // Books are never ingredients of this catalogue. Keeping them also
-        // prevents a captured, untrained first-rank book from being allocated.
-        if (String(template?.template?.kind || '').startsWith('Other.Spellbook')) reserved[item.selfId] = 1;
         yield 'stock';
     }
     for (const [slot, candidate] of staged) {

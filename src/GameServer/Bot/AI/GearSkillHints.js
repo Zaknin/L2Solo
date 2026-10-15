@@ -219,7 +219,7 @@ const ROLE_TIERS = {
         { min: 76, max: 99, label: 's_grade_tank', exampleGear: ['Health weapon', 'Imperial Crusader heavy'], skillPriorities: ['endgame aggro control', 'positioning'], playstyle: 'endgame_frontline', warnings: ['never chase while healer is behind'] }
     ],
     spoiler: [
-        { min: 1, max: 19, label: 'starter_spoil', exampleGear: ['starter blunt', 'no-grade heavy/light'], skillPriorities: ['learn Spoil and Sweeper at 10', 'spoil before kill'], playstyle: 'material_starter', warnings: ['save SP for Spoil/Sweeper'] },
+        { min: 1, max: 19, label: 'starter_spoil', exampleGear: ['starter blunt', 'no-grade heavy/light'], skillPriorities: ['use automatic Spoil and Sweeper from level 10', 'spoil before kill'], playstyle: 'material_starter', warnings: ['Sweep spoiled corpses before moving on'] },
         { min: 20, max: 39, label: 'd_grade_spoil', exampleGear: ['Tarbar-style D blunt', 'D heavy armor'], skillPriorities: ['Spoil every valuable mob', 'Sweep quickly'], playstyle: 'adena_material_route', warnings: ['XP-only spots are a waste for spoilers'] },
         { min: 40, max: 51, label: 'c_grade_spoil', exampleGear: ['Yaksa/Aoba-style blunt with Haste or Health', 'Full Plate or heavy set'], skillPriorities: ['Spoil/Sweeper loop', 'Hammer Crush utility'], playstyle: 'branded_cruma_material_farm', warnings: ['party kill speed matters more than personal DPS'] },
         { min: 52, max: 60, label: 'b_grade_spoil', exampleGear: ['Art of Battle Axe + Haste/Health', 'Doom Plate', 'BO jewels'], skillPriorities: ['high-value material targets', 'stun if party threatened'], playstyle: 'party_spoil_volume', warnings: ['carry capacity and return-to-town matter'] },

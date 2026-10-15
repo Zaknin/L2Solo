@@ -2152,6 +2152,15 @@ function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp);
 }
 
+function nativeHennaSlotsUnsafe(characterId) {
+    const slots = [null, null, null];
+    if (!Number.isSafeInteger(Number(characterId)) || Number(characterId) <= 0) return slots;
+    for (const row of all('SELECT slot, symbolId FROM character_hennas WHERE characterId = ?', [Number(characterId)])) {
+        if (row.slot >= 1 && row.slot <= 3) slots[row.slot - 1] = Number(row.symbolId);
+    }
+    return slots;
+}
+
 function economyOwnerUnsafe(characterId, authority, fresh = false) {
     checkMutationAdmission();
     const row = one('SELECT life.*, c.username FROM bot_life_state life JOIN characters c ON c.id=life.characterId WHERE life.characterId=?',
@@ -2320,6 +2329,7 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         else delete inventory[id];
     }
     const adena = Number(physical[57]?.amount || 0);
+    statsPatch = { ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) };
     write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
         statsJson = CASE WHEN ? IS NULL THEN statsJson ELSE json_patch(statsJson,json(?)) END,
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
@@ -2541,6 +2551,22 @@ function preserveColdVersionedStats(row, patch = {}) {
     return preserveColdVersionedStatsParsed(row, patch).patch;
 }
 
+function nativeColdCombatSkillsUnsafe(characterId, combat) {
+    if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
+    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+    const proposed = new Map((Array.isArray(combat.skills) ? combat.skills : []).map(skill => [Number(skill.selfId), skill]));
+    const learned = Profile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
+    return { ...combat, version: Profile.PROFILE_VERSION, skillSource: 'database',
+        skills: learned.map(skill => {
+            const sameRank = proposed.get(skill.selfId);
+            // Hot Skill models resolve C4 semantics (for example buff power)
+            // beyond the raw datapack DTO. Keep that metadata for the exact
+            // learned rank; changed/missing ranks need a fresh native DTO.
+            return Number(sameRank?.level) === skill.level
+                ? { ...skill, ...sameRank, selfId: skill.selfId, level: skill.level, passive: skill.passive } : skill;
+        }) };
+}
+
 // Resolved on first use; require() re-resolved the path on every cold commit.
 let ClanMembershipPolicyModule;
 const clanMembershipPolicy = () => ClanMembershipPolicyModule
@@ -2562,6 +2588,22 @@ function preserveColdVersionedStatsParsed(row, patch = {}) {
     const current = currentViews.plain;
     const incoming = next.statsJson === proposedRaw ? proposedViews.plain : jsonObject(next.statsJson);
     if (next.statsJson !== proposedRaw) stats = incoming;
+    // A resolve owns effects, cooldowns and other transient combat state.
+    // Only the native learned rows own the skill set and its ranks.
+    const combat = incoming.coldCombat || current.coldCombat;
+    if (combat && Number(row?.characterId) > 0) {
+        incoming.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
+        next.statsJson = JSON.stringify(incoming);
+        stats = incoming;
+    }
+    // Physical symbols own these slots, including removals. A worker can
+    // still carry the kit from before a native improvement or hot handoff.
+    const hennas = nativeHennaSlotsUnsafe(row?.characterId);
+    if (JSON.stringify(incoming.hennas) !== JSON.stringify(hennas)) {
+        incoming.hennas = hennas;
+        next.statsJson = JSON.stringify(incoming);
+        stats = incoming;
+    }
     // The native transaction owns this leaf. A stale worker/handoff snapshot
     // cannot remove, fabricate or rewind an intent or its saved completion.
     if (Object.hasOwn(current, 'economyCommit') || Object.hasOwn(incoming, 'economyCommit')) {
@@ -4156,7 +4198,7 @@ const Database = {
 
     // The lifecycle save's protected stats and its cache row are read from
     // the same queued statement; a later trade cannot slip between them.
-    saveBotLifeState(statement, options = {}) {
+    saveBotLifeState(statement, options = {}, characterId) {
         const admission = captureWriteAdmission(options, 'invalid_bot_life_before_write', null, statement);
         return enqueue(() => {
             let phase = 'row_admission';
@@ -4165,8 +4207,23 @@ const Database = {
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
                 const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'statsJson';
+                let params = statement[1] || [];
+                if (characterId !== undefined) {
+                    // BotLifeState.save supplies its native 29-column ROW.
+                    // Read skills inside this queued job, after admission and
+                    // immediately before SQL, so an earlier await cannot age it.
+                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 29 || params[0] !== characterId)
+                        throw new TypeError('invalid_bot_life_skill_snapshot');
+                    const stats = jsonObject(params[27]);
+                    const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
+                    if (combat) {
+                        stats.coldCombat = nativeColdCombatSkillsUnsafe(characterId, combat);
+                        params = [...params];
+                        params[27] = JSON.stringify(stats);
+                    }
+                }
                 phase = 'write';
-                const row = one(`${statement[0]} RETURNING ${returning}`, statement[1] || []);
+                const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
                 return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson };
@@ -5356,7 +5413,7 @@ const Database = {
                 }
             }
             const placeholders = characterIds.map(() => '?').join(', ');
-            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt
+            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);
             const currentById = new Map(currentRows.map((row) => [Number(row.characterId), row]));
             const conflicts = batch.filter((entry) => {
@@ -5414,6 +5471,9 @@ const Database = {
 
             for (const entry of batch) {
                 const row = entry.row;
+                const stats = jsonObject(row.statsJson);
+                const combat = stats.coldCombat || jsonObject(currentById.get(Number(row.characterId))?.statsJson).coldCombat;
+                if (combat) stats.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
                 const result = write(`UPDATE bot_life_state
                     SET activity = ?, activityStartedAt = ?, nextResolveAt = ?,
                         partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId)
@@ -5423,7 +5483,7 @@ const Database = {
                     AND COALESCE(partyId, '') = ?
                     AND updatedAt = ?`, [
                     row.activity, row.activityStartedAt, row.nextResolveAt,
-                    row.partyId, row.statsJson, row.updatedAt,
+                    row.partyId, combat ? JSON.stringify(stats) : row.statsJson, row.updatedAt,
                     expectedPhase === 'hot' ? row.spotId : null,
                     row.characterId, expectedPhase, LEGACY_SIMULATION_OWNER,
                     String(entry.expectedPartyId || ''), Number(entry.expectedUpdatedAt || 0)
@@ -6836,14 +6896,14 @@ const Database = {
             write('UPDATE bot_life_state SET sp = ?, inventorySummary = ?, statsJson = ?, simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?',
                 [character.sp, JSON.stringify(inventory), JSON.stringify(stats), now(), characterId]);
             return one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
-        }, 'cold:paid-training'));
+        }, 'cold:automatic-skills'));
     },
     learnBotSkill(characterId, skillSelfId, skillLevel, options = {}) {
         const id = Number(characterId);
         const admission = captureWriteAdmission(options, 'invalid_skill_before_write', id);
         return withCharacterFlush(id, () => inTransaction(() => {
             checkCapturedWriteAdmission(admission, id);
-            const character = one('SELECT username, classId, level, sp, clanId FROM characters WHERE id = ?', [id]);
+            const character = one('SELECT username, classId, level FROM characters WHERE id = ?', [id]);
             if (!character || !String(character.username).startsWith('bot_')) return { learned: false, reason: 'not_bot' };
             const known = one('SELECT level FROM skills WHERE characterId = ? AND selfId = ?', [id, skillSelfId]);
             if (Number(known?.level || 0) >= Number(skillLevel)) return { learned: false, reason: 'already_known' };
@@ -6854,32 +6914,13 @@ const Database = {
                 || definition?.levels == null || !require('./GameServer/Skills/SkillRankIndex').has(definition.levels, training.level)) {
                 return { learned: false, reason: 'ineligible_rank' };
             }
-            // Static workshops are authored infrastructure, rather than a
-            // progressing character. Personal bots pay SP and sell skill books;
-            // clan training retains its existing book requirement.
-            const infrastructure = String(character.username).startsWith('bot_craft_');
-            const spentSp = infrastructure ? 0 : training.sp;
-            if (Number(character.sp) < spentSp) return { learned: false, reason: 'insufficient_sp' };
-            const requiresBook = !infrastructure && Number(character.clanId) > 0 && training.bookId;
-            const book = requiresBook
-                ? one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id LIMIT 1', [id, training.bookId]) : null;
-            if (requiresBook && !book) return { learned: false, reason: 'missing_book' };
-            if (spentSp) {
-                checkCapturedWriteAdmission(admission, id);
-                write('UPDATE characters SET sp = sp - ? WHERE id = ?', [spentSp, id]);
-            }
-            const consumedBooks = [];
-            if (book) {
-                checkCapturedWriteAdmission(admission, id);
-                if (Number(book.amount) > 1) write('UPDATE items SET amount = amount - 1 WHERE id = ? AND characterId = ?', [book.id, id]);
-                else write('DELETE FROM items WHERE id = ? AND characterId = ?', [book.id, id]);
-                consumedBooks.push({ selfId: training.bookId, amount: 1, objectId: book.id, remaining: Number(book.amount) - 1 });
-            }
+            // Every bot receives its eligible class ranks automatically.
+            // SP and physical books are never part of this write.
             checkCapturedWriteAdmission(admission, id);
             write(`INSERT INTO skills (selfId, name, passive, level, characterId) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(characterId, selfId) DO UPDATE SET name = excluded.name, passive = excluded.passive, level = excluded.level`,
             [Number(skillSelfId), definition.template?.name || training.name || '', definition.template?.passive ? 1 : 0, training.level, id]);
-            return { learned: true, level: training.level, spentSp, consumedBooks };
+            return { learned: true, level: training.level, spentSp: 0, consumedBooks: [] };
         }, 'skill:learn-bot'));
     },
     deleteSkills(characterId) {
@@ -8133,9 +8174,12 @@ const Database = {
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
                 const position = state ? life : character;
                 const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
+                const self = proposal.mode === 'self';
+                const learned = self && one('SELECT level FROM skills WHERE characterId = ? AND selfId = 248', [characterId]);
                 if (!invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(source)
-                    || Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
-                    || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
+                    || (self ? Number(learned?.level || 0) < 1
+                        : Number(proposal.npcId) !== Crystals.npcId || town.name !== 'Giran'
+                            || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500))
                     throw Error('invalid_bot_crystallization');
                 const inputs = proposal.items || [{ selfId: proposal.sourceSelfId, amount: proposal.amount || 1 }];
                 if (!Array.isArray(inputs) || !inputs.length || inputs.length > Crystals.BATCH_LIMIT)
@@ -8149,7 +8193,7 @@ const Database = {
                     claimed.add(id);
                     const rows = physical.filter(row => row.selfId === id && !row.equipped && row.amount === 1).slice(0, count);
                     if (rows.length !== count) throw Error('improvement_source_changed');
-                    for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant).net; }
+                    for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant, self).net; }
                 }
                 const target = one('SELECT id,amount FROM items WHERE characterId=? AND selfId=1458 ORDER BY id LIMIT 1', [characterId]);
                 const amount = Number(target?.amount || 0) + total;

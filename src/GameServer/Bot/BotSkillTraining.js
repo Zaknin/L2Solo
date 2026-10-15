@@ -30,12 +30,6 @@ function review(session, { onSpAward = false } = {}) {
     const work = Progression.reconcile({ characterId: actor.fetchId(), classId: actor.fetchClassId(),
         level: actor.fetchLevel(), seed: actor.fetchId() }, { beforeWrite() {
         if (session.actor !== actor || session.populationStaging) throw new Error('bot_training_actor_retired');
-    }, onTrained(result) {
-        // Reflect each committed cost before another rank flushes hot writes.
-        // XP earned during the await is retained in the current actor balance.
-        Catalog.applyActor(session, result);
-        invoke('GameServer/Persistence/CharacterWriteQueue').experience(actor.fetchId(), actor.fetchLevel(),
-            actor.fetchExp(), actor.fetchSp());
     } }).then(async (result) => {
         if (session.actor !== actor) return result;
         if (Number(result.classId) !== Number(actor.fetchClassId())) actor.setClassId(result.classId);

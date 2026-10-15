@@ -49,7 +49,7 @@ function joint(party, members, { context = null, memberContexts, spots, timestam
     let review = {};
     if (!previous?.clanGoalKey && previous?.sourceKind !== 'raid' && !previous?.helpDeal
         && timestamp - Number(party.stats?.lastIncomeReviewAt || party.startedAt || timestamp) >= Income.REVIEW_MS
-        && members.every(member => invoke('GameServer/Bot/AI/PersonalGearProgression').personal(member))
+        && members.every(member => invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(member))
         && members.some(member => member.spotId)) {
         const prepared = Income.prepare(members, { party, objective: previous, timestamp, memberContexts, spots });
         review = { lastIncomeReviewAt: timestamp, incomeReviews: members.map(member => ({ characterId: Number(member.characterId),
@@ -75,7 +75,7 @@ function formingMembers(members, requested) {
     const Income = require('./PartyIncomeComparison');
     const filter = roster => {
         const prepared = Income.prepare(roster, { objective: requested });
-        return roster.filter(member => !invoke('GameServer/Bot/AI/PersonalGearProgression').personal(member)
+        return roster.filter(member => !invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(member)
             && member.stats?.partyRequest?.priority === 'required'
             || decide(member, roster.filter(peer => peer !== member), { prepared, objective: requested }).accept);
     };

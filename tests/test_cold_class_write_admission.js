@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const gameRoot = process.env.N53_GAME_ROOT || path.resolve(__dirname, '..');
 require(path.join(gameRoot, 'tests/helpers/databaseIsolation'));
-const isolated = require(path.join(gameRoot, 'tests/helpers/isolatedSocialDatabase'))('class-write-native-paid-profile', gameRoot);
+const isolated = require(path.join(gameRoot, 'tests/helpers/isolatedSocialDatabase'))('class-write-native-free-profile', gameRoot);
 // Admission-only authoring explicitly uses native Knowledge OFF, before Global.
 fs.writeFileSync(isolated.ini, fs.readFileSync(isolated.ini, 'utf8')
     .replace(/^knowledgeErrorsEnabled\s*=\s*true$/m, 'knowledgeErrorsEnabled = false'));
@@ -42,14 +42,13 @@ function facts(id) {
     } finally { db.close(); }
 }
 
-// ARCH-NOTE: FX-E6 retains native SP costs. With the declared 120 SP the
-// class0 prefix is two 50-SP ranks plus three free skills, not nine grants.
-const ancestorRanks = [[3, 2], [194, 1], [1320, 1], [1322, 1]];
-const firstProfessionRanks = [[3, 2], [194, 1], [239, 1], [1320, 2], [1322, 1]];
+// Expected combat tree is independent of the native grant/persistence path.
+const expectedRanksFor = (classId, level) => invoke('GameServer/Bot/Population/ColdCombatProfile')
+    .skillRecordsFromTree(classId, level).map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]);
 const skillRows = (image, id) => image.skills.filter(skill => skill.characterId === id);
 const skillRanks = (image, id) => skillRows(image, id)
     .map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]);
-function assertAuthoredPaidPlan(targetClass = 0) {
+function assertAuthoredTree(targetClass = 0) {
     const authoredRank = (classId, skillId, level) => Data.skillTree
         .find(tree => Number(tree.classId) === classId)?.skills
         .find(skill => Number(skill.selfId) === skillId)?.levels
@@ -146,7 +145,7 @@ async function workerBoundary(stage, mode) {
             return result;
         });
     };
-    // Earlier native skill reads/payments remain real and finish before the
+    // Earlier native skill reads/grants remain real and finish before the
     // intended FIRST class DAO; the generic first flush used to trap those.
     Database.registerCharacterWriteFlush(async currentId => {
         if (currentId !== id || !targetEntered || ++flushes !== 1) return;
@@ -161,14 +160,14 @@ async function workerBoundary(stage, mode) {
         const before = facts(id), oldCharacter = before.characters.find(row => row.id === id);
         assert.equal(oldCharacter.classId, 0); assert.equal(oldCharacter.hp, 85);
         assert.equal(before.bot_life_state.find(row => row.characterId === id).hp, 85);
-        assertAuthoredPaidPlan(Progression.plan({ classId: 0, level: 20, seed: id }).classId);
-        assert.deepEqual(skillRanks(before, id), ancestorRanks, 'the genuinely paid ancestor prefix is durable');
-        assert.equal(oldCharacter.sp, 20, 'only the authored 100 SP has been spent before FIRST class SQL');
+        assertAuthoredTree(Progression.plan({ classId: 0, level: 20, seed: id }).classId);
+        assert.deepEqual(skillRanks(before, id), expectedRanksFor(0, 20), 'the automatically granted ancestor prefix is durable');
+        assert.equal(oldCharacter.sp, 120, 'automatic grants preserve SP before FIRST class SQL');
         assert.equal(oldCharacter.exp, state.exp);
         assert.equal(before.cache.sp, 120, 'the original cache is unpublished at the held class writer');
         const prefixReceipts = trainingReceipts.filter(receipt => receipt.result.learned);
-        assert.equal(prefixReceipts.length, 5);
-        assert.equal(prefixReceipts.reduce((total, receipt) => total + receipt.result.spentSp, 0), 100);
+        assert.equal(prefixReceipts.length, 39);
+        assert.equal(prefixReceipts.reduce((total, receipt) => total + receipt.result.spentSp, 0), 0);
         assert.deepEqual(prefixReceipts.flatMap(receipt => receipt.result.consumedBooks), []);
         assert.deepEqual(before.items.filter(item => item.characterId === id), []);
         if (mode === 'replace') { c.worker = worker('B'); c.workerEpoch = 'class:replacement'; }
@@ -190,15 +189,15 @@ async function workerBoundary(stage, mode) {
         assert.equal(c.commandInflight.size, 0);
         if (mode === 'current') {
             assert.equal(character.classId, Progression.plan({ classId: 0, level: 20, seed: id }).classId);
-            assert.notEqual(character.classId, 0); assert.deepEqual(skillRanks(after, id), firstProfessionRanks, 'free 239/1 and 1320/2 add one distinct row');
-            assert.equal(character.sp, 20);
+            assert.notEqual(character.classId, 0); assert.deepEqual(skillRanks(after, id), expectedRanksFor(character.classId, 20), 'the complete first-profession tree is persisted');
+            assert.equal(character.sp, 120);
             assert.equal(character.exp, state.exp);
-            assert.equal(after.cache.sp, 20);
+            assert.equal(after.cache.sp, 120);
             assert.equal(after.cache.adena, 0);
-            const paid = trainingReceipts.filter(receipt => receipt.result.learned);
-            assert.equal(paid.length, 7);
-            assert.equal(paid.reduce((total, receipt) => total + receipt.result.spentSp, 0), 100);
-            assert.deepEqual(paid.flatMap(receipt => receipt.result.consumedBooks), []);
+            const granted = trainingReceipts.filter(receipt => receipt.result.learned);
+            assert.equal(granted.length, expectedRanksFor(character.classId, 20).reduce((count, skill) => count + skill[1], 0));
+            assert.equal(granted.reduce((total, receipt) => total + receipt.result.spentSp, 0), 0);
+            assert.deepEqual(granted.flatMap(receipt => receipt.result.consumedBooks), []);
             assert.deepEqual(after.items.filter(item => item.characterId === id), []);
             assert.equal(character.hp, 90); assert.equal(after.bot_life_state.find(row => row.characterId === id).hp, 90);
             assert.equal(acks.length, 1); assert.equal(acks[0].label, 'A'); assert.equal(acks[0].message.payload.results[0].ok, true);

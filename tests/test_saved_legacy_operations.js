@@ -10,7 +10,8 @@ const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/Bo
 const id = 719114, at = 1791221234567;
 const exact = { playedHours: 10.5, wishFocus: ['gear:2', 1234.56789, 100000],
     dormantWishes: [['gear:3', 3, 4, 5, 1234.56789, 6]],
-    money: [77000, 1.3e-5, 15000, 0], coldCombat: { clock: 0.12345678912345 } };
+    money: [77000, 1.3e-5, 15000, 0], coldCombat: { clock: 0.12345678912345,
+        version: invoke('GameServer/Bot/Population/ColdCombatProfile').PROFILE_VERSION, skillSource: 'database', skills: [] } };
 
 async function readStats() {
     const [row] = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=?', [id]]);

@@ -75,21 +75,20 @@ async function prepareNativeProfile(id) {
     const training = await invoke('GameServer/Bot/BotClassProgression').reconcile({
         characterId: id, classId: 0, level: 7, seed: id,
     }, { beforeWrite });
-    // Authored class0 order: Power Strike ranks1/2 cost50 each; remaining20
-    // cannot buy rank3. Lucky/CommonCraft/CreateCommon each cost0 at level7.
-    assert.equal(training.spentSp, 100);
-    assert.equal(training.learnedCount, 5);
+    // All nine eligible class0 skills are granted, preserving all 120 SP.
+    assert.equal(training.spentSp, 0);
+    assert.equal(training.learnedCount, 15);
     assert.deepEqual(training.consumedBooks, []);
     assert.deepEqual(training.transitions, []);
     const row = await Database.publishColdTraining(id, training, { beforeWrite });
     const accepted = Life.acceptNewerLifecycleRow(row);
     assert.equal(accepted, Life.cachedState(id));
     assert.equal(accepted.level, 7); assert.equal(accepted.exp, input.exp);
-    assert.equal(accepted.sp, 20); assert.equal(accepted.stats.classId, 0);
+    assert.equal(accepted.sp, 120); assert.equal(accepted.stats.classId, 0);
     assert.equal(invoke('GameServer/Skills/SkillBookCatalog').needsTraining(accepted), false);
     const after = facts(id), skills = after.skills.filter(skill => skill.characterId === id);
     assert.deepEqual(skills.map(skill => [skill.selfId, skill.level]).sort((a, b) => a[0] - b[0]),
-        [[3, 2], [194, 1], [1320, 1], [1322, 1]]);
+        [[3, 3], [16, 3], [56, 3], [141, 1], [142, 1], [194, 1], [226, 1], [1320, 1], [1322, 1]]);
     assert.equal(after.characters.find(character => character.id === id).sp, accepted.sp);
     for (const table of ['items', 'warehouse_items', 'afk_trade_shops', 'afk_trade_lines'])
         assert.deepEqual(after[table], before[table], 'native profile preparation never changes physical items/trade');

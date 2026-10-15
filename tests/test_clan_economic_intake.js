@@ -32,6 +32,8 @@ for (const m of [...owns, ...Array.from({ length: 64 }, (_, index) => member(bas
     member(secondCrafter, 57, [{ selfId: 172, level: 6 }]), member(base + 200, 57, [{ selfId: 254, level: 1 }, { selfId: 42, level: 1 }])]) {
     seed.prepare(`INSERT INTO characters(id,username,name,classId,race,level,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
         VALUES(?,'bot_pop_economic',?,?,0,50,1000,1000,0,0,0,0,83400,148600,-3400)`).run(m.characterId, `Economic${m.characterId}`, m.classId);
+    for (const skill of m.stats.coldCombat.skills) seed.prepare('INSERT INTO skills(selfId,name,passive,level,characterId) VALUES(?,?,?,?,?)')
+        .run(skill.selfId, skill.name || '', skill.passive ? 1 : 0, skill.level, m.characterId);
     seed.prepare(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,phase,activity,spotId,locX,locY,locZ,hp,maxHp,mp,maxMp,inventorySummary,statsJson,updatedAt)
         VALUES(?,'bot_pop_economic',?,50,'cold','hunting','ordinary:economic-fixture',83400,148600,-3400,1000,1000,1000,1000,?,?,1)`)
         .run(m.characterId, `Economic${m.characterId}`, JSON.stringify(m.inventory), JSON.stringify(m.stats));

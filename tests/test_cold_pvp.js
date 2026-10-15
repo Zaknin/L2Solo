@@ -326,6 +326,7 @@ async function main() {
 
     // A real accepted cold heal commits the grievance with its HP/MP outcome.
     await party([35, 36]);
+    for (const skill of healer.stats.coldCombat.skills) await Database.setSkill({ ...skill, name: skill.name || '' }, 35);
     for (const id of [35, 36]) {
         const s = state(id);
         await Life.upsertState({ ...s, vitals: { ...s.vitals, hp: id === 36 ? 350 : 1000 },

@@ -256,7 +256,6 @@ function buildProjection(state, ctx, deps) {
     const timestamp = ctx.timestamp ?? Date.now();
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const ownBuild = Profile.buildGainsFor(state, timestamp);
-    let beforeBook = null, beforeBookRate = null;
     const magic = need('./BotImprovementPolicy').isCaster(state);
     const Recipes = invoke('GameServer/Items/C4RecipeItems'), Profit = need('./CraftProfitPolicy');
     // `nodes` is the current target: the real projection, or one gear
@@ -490,6 +489,7 @@ function buildProjection(state, ctx, deps) {
         if (luxury && Number(id) === 1458) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
+            const self = Crystals.canSelf(state);
             for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
                     .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
@@ -497,9 +497,9 @@ function buildProjection(state, ctx, deps) {
                 paths.push({ kind: 'crystallize', activity: 'improving', itemId: 1458,
                     productCount: choice.net, batchLimit: choice.batchLimit,
                     availableUnits: choice.net * choice.batchLimit,
-                    costHours: 1 / 3600, town: 'Giran', quoted: true,
-                    tripHours: trip.hours, tripFees: trip.fees,
-                    improvement: { kind: 'crystallize', npcId: Crystals.npcId,
+                    costHours: 1 / 3600, quoted: true,
+                    ...(self ? {} : { town: 'Giran', tripHours: trip.hours, tripFees: trip.fees }),
+                    improvement: { kind: 'crystallize', ...(self ? { mode: 'self' } : { npcId: Crystals.npcId }),
                         ...(choice.inputs ? { items: choice.inputs } : { sourceSelfId: choice.selfId }) },
                     grossRequirements: requirements });
             }
@@ -808,7 +808,9 @@ function buildProjection(state, ctx, deps) {
             return a.readyGear;
         return a.node.progressionPriority !== b.node.progressionPriority
             ? a.node.progressionPriority > b.node.progressionPriority
-            : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
+            : (a.node.key === ctx.completionKey) !== (b.node.key === ctx.completionKey)
+                ? a.node.key === ctx.completionKey
+                : score(a) > score(b) || score(a) === score(b) && a.node.key < b.node.key;
     };
     const winners = open => {
         const best = new Map();
@@ -877,7 +879,8 @@ function buildProjection(state, ctx, deps) {
                     if (!SOLVER_LIMITS.has(error?.message)) throw error;
                 }
             }
-            rows.sort((a, b) => b.base.fullValueHours / Math.max(1, b.base.price) - a.base.fullValueHours / Math.max(1, a.base.price)
+            rows.sort((a, b) => Number(b.base.key === ctx.completionKey) - Number(a.base.key === ctx.completionKey)
+                || b.base.fullValueHours / Math.max(1, b.base.price) - a.base.fullValueHours / Math.max(1, a.base.price)
                 || a.base.key.localeCompare(b.base.key));
             used = new Map();
             for (const { row, solver } of rows) {
@@ -914,23 +917,6 @@ function buildProjection(state, ctx, deps) {
     let step = admitting.next();
     while (!step.done) step = admitting.next();
     const admittedGear = step.value;
-    for (const book of Progression.personal(state) ? [] : invoke('GameServer/Skills/SkillBookCatalog').missingBooks(state)) {
-        if (nodes.length >= 36) break;
-        const gain = Profile.gainFor(ownBuild, `${magic ? 'm' : 'p'}:skill:${book.skillId}:${book.level}`, () => {
-            if (!beforeBook) {
-                beforeBook = profile();
-                beforeBookRate = attackRate(beforeBook);
-            }
-            return skillGain(state, book, beforeBook, beforeBookRate, timestamp, ownBuild);
-        });
-        const value = (gain.attack + gain.defence * ctx.deathHours) * horizon * powerWeight;
-        if (!(value > 0) || !(price(book.selfId) > 0)) continue;
-        const key = itemNode(book.selfId); if (!key) continue;
-        values.set(book.selfId, value);
-        root({ key: `book:${book.skillId}`, need: 'power', object: { itemId: book.selfId, skillId: book.skillId, kind: 'book' },
-            price: price(book.selfId), valueHours: value, benefitPerHour: (gain.attack + gain.defence * ctx.deathHours) * powerWeight,
-            horizonHours: horizon, paths: [{ requirements: [{ key, amount: 1 }] }] });
-    }
     if (!progression.required && rare && statusWeight > 0) {
         const held = admittedGear.some(row => row.node.object.itemId === Number(rare.item.selfId));
         const key = !held && itemNode(rare.item.selfId);

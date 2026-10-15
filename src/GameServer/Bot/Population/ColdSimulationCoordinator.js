@@ -2044,7 +2044,10 @@ class ColdSimulationCoordinator {
                 .applyReview(id, entry.proposal.market, { coldAuthority, canCommitReview }));
         }
         await this.step('equipment', id, () => LifeState.enqueueEquipmentGoalAdvanceForState(state));
-        if (sourceCurrent() && entry.proposal.economyPlan) {
+        // Main can replace the worker's resolved state with a paid forced
+        // cleanup trip. Its old optional actions were prepared before that
+        // fare and activity change; the accepted resolve is not fresh consent.
+        if (sourceCurrent() && entry.proposal.economyPlan && !entry.proposal.inventoryCleanupForced) {
             const started = Config.developerDiagnostics ? performance.now() : 0;
             const decision = await this.step('improvement', id, () => this.economyDecisions.decided(state));
             // Native moves publish a new timestamp. Hold the worker's one
@@ -2130,11 +2133,18 @@ class ColdSimulationCoordinator {
             await this.step('buff', id, () => invoke('GameServer/Bot/Economy/ColdBuffService')
                 .applyOffer(entry.proposal.buffOffer, { beforeWrite }));
         }
+        // Hunts and party rewards can raise a level without producing any
+        // market work. Train after the prepared actions so their committed
+        // revision remains valid until they finish.
+        if (sourceCurrent()) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
+            LifeState.cachedState(id) || state, { beforeWrite })) || LifeState.cachedState(id) || state;
         if (Config.developerDiagnostics) await this.step('metrics', id, () => {
             Metrics.recordBackgroundResolve();
             Metrics.recordCombat(entry.proposal.result?.debug);
             Metrics.recordResolveDuration(Math.max(0, Date.now() - Number(entry.proposal.enqueuedAt || Date.now())));
         });
+        if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
+            this.requestEconomyRefresh(id);
         await this.step('announce', id, () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
         return state;
     }
