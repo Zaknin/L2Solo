@@ -128,7 +128,7 @@ function rowFromParty(party) {
             acquisitionGoal: current.acquisitionGoal, lastRequirementRefreshAt: current.lastRequirementRefreshAt,
             clanGoalInvalidationVersion: current.clanGoalInvalidationVersion } };
     }
-    const leader = invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(Number(party.leaderId));
+    const leader = BotLifeState.cachedState?.(Number(party.leaderId));
     party = ClanMembershipPolicy.reconcileParty(party, leader?.stats?.clanId);
     const timestamp = now();
     const membership = normalizeMembership(party);
@@ -274,7 +274,7 @@ const BackgroundPartyState = {
                 // Only the whole-party lifecycle can change a hot roster.
                 // A cold maintenance job may have prepared this save before activation.
                 if (!result.affectedRows) return null;
-                (result.lifeRows || []).forEach(row => invoke('GameServer/Bot/Population/BotLifeState').acceptNewerLifecycleRow(row));
+                (result.lifeRows || []).forEach(row => BotLifeState.acceptNewerLifecycleRow(row));
                 return result.row ? this.acceptRow(result.row) : this.acceptCommit(prepared);
             });
         }).catch((err) => {
