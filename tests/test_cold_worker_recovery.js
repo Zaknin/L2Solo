@@ -83,6 +83,10 @@ function wait(ms) {
         });
         assert.strictEqual(coordinator.snapshot().invalidMessages, 1, 'late messages from the crashed epoch must be rejected');
 
+        coordinator.lastHeartbeatAt = Date.now() - 20000;
+        coordinator.watchdog();
+        assert.notStrictEqual(second.terminated, true, 'a booting worker sends no heartbeat and is not killed for it');
+        coordinator.ready = true;
         coordinator.lastHeartbeatAt = Date.now() - 6000;
         coordinator.watchdog();
         assert.strictEqual(second.messages.at(-1).type, 'pause', 'a stale heartbeat must pause new claims');

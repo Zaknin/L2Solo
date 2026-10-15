@@ -782,6 +782,7 @@ class ColdSimulationCoordinator {
                 }
             } else if (payload.phase === 'running') {
                 this.ready = true;
+                this.lastHeartbeatAt = Date.now();
                 this.syncWorkerPressure();
                 if (this.pauseReasons.size) this.post('pause', { reasons: [...this.pauseReasons] });
                 await this.sendSnapshots(true);
@@ -2468,6 +2469,12 @@ class ColdSimulationCoordinator {
         this.lastWatchdogAt = now;
         if (stalled > 1000) this.lastHeartbeatAt = Math.min(now, this.lastHeartbeatAt + stalled);
         const age = now - this.lastHeartbeatAt;
+        if (!this.ready) {
+            // Boot (module load, datapack validation, init) sends no heartbeat and
+            // takes 4 s idle, 20 s on a loaded Mac; a restart would only boot again.
+            if (age > Math.max(10000, Number(Config.coldWorkerBootMs) || 60000)) this.worker.terminate().catch(() => null);
+            return;
+        }
         if (age <= Math.max(5000, Number(Config.coldWorkerUnhealthyMs) || 5000)) {
             this.setPauseReason('heartbeat_stale', false);
             return;
