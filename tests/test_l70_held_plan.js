@@ -97,18 +97,6 @@ try {
             'only hunting, resting and travelling are equalised');
         assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
             at(T + 1000), { afterResult: true }), null, 'a location change stays exact');
-        // A card without a leaf (no executable candidate): restamped after a
-        // result like any held card; before an action the native plan runs.
-        const none = { ...accepted, card: Decisions.capture({ ...economy, network: { ...economy.network, activity: null } }, state) };
-        assert.equal(none.card.activity, null, 'fixture: the card has no leaf');
-        const noneBuilds = builds;
-        const restamped = Decisions.refreshAdvisory(next, none, at(T + 1000), { afterResult: true });
-        assert(restamped && restamped.decision.activity === null, 'after a result the leafless card is restamped');
-        assert.equal(restamped.economy.network.activity, null, 'the reused economy has no leaf either');
-        assert.equal(builds, noneBuilds);
-        assert.equal(Decisions.refusal(next, none, at(T + 1000)), 'leaf_kind', 'before an action a leafless card rebuilds');
-        assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, none,
-            at(T + 1000), { afterResult: true }), null, 'the fence still holds a leafless card exact');
     }
     // (h) a trip to the held hunting leaf's own spot executes the plan: no
     // event; a trip to another spot or a town stays exact (lever 2).
@@ -246,9 +234,6 @@ try {
         assert.strictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan, 'a moved market token waits');
         assert.equal(builds, before);
         assert(Decisions.refreshAdvisory(state, accepted, at(T + MINUTE)), 'the card waits on the same soft market');
-        const none = { ...accepted, card: Decisions.capture({ ...economy, network: { ...economy.network, activity: null } }, state) };
-        assert.equal(Decisions.refusal(state, none, at(T + MINUTE), null, { afterResult: true }), 'fence:market',
-            'a leafless card does not wait on a new offer: it may be the bot\'s candidate');
         assert.equal(Economy.calculationHolds(state, accepted.fence, at(T + MINUTE)), false,
             'without the card options the proof stays exact');
         assert.equal(Decisions.refreshAdvisory(state, accepted, at(T + 11 * MINUTE)), null, 'after 10 min the card is re-examined');

@@ -1059,14 +1059,7 @@ function startKernel(config = {}) {
                             why.push(`economy_edges:${economyEdges === 8 ? review : 'other'}`);
                         } else why.push('economy_edges');
                     }
-                    if (refreshed) {
-                        if (economyDiagnostics.active()) {
-                            economyDiagnostics.count('advisory', 'reuse', 'result');
-                            // A card without a leaf, restamped after a result (L114).
-                            if (!refreshed.decision.activity) economyDiagnostics.count('advisory', 'reuse_no_leaf', 'result');
-                        }
-                        return refreshed.economy;
-                    }
+                    if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
                     return Economy.forState(projected, withIncomeRoute(advisoryRefusal(deps, 'result', why[0] || 'party'), prepared.basics));
                 },
                 onEconomy: (built, seen) => {

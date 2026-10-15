@@ -405,12 +405,8 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     // The ordinary fight path resumes hunting even when its accepted next
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
-    // No leaf (no executable candidate) is only restamped after a result: the
-    // fence holds the inputs, so a build finds no candidate either; before an
-    // action the native plan still runs. Its market and spots stay exact (no
-    // soft delay below): a new offer or a freed spot is the bot's candidate.
     const leaf = accepted.card.activity;
-    if (leaf ? !['hunting', 'shopping', 'selling'].includes(leaf.activity) : !options.afterResult) return 'leaf_kind';
+    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)) return 'leaf_kind';
     if (state.incomingPending) return 'incoming';
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
@@ -423,11 +419,9 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
     if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
         return `events:${why[0]}`;
-    const fenced = { activity: accepted.activity, leaf, timestamp, countDeferral: true, why };
-    if (leaf) fenced.baseline = baseline; // without it calculationHolds keeps the market and spots exact
-    if (!Economy.calculationHolds(state, accepted.fence, deps, fenced))
+    if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true, why }))
         return `fence:${why[0]}`;
-    return !leaf || Economy.acceptedActivityHolds(state, leaf, deps, current) ? '' : 'accepted_leaf';
+    return Economy.acceptedActivityHolds(state, leaf, deps, current) ? '' : 'accepted_leaf';
 }
 function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     return !refusal(state, accepted, deps, current, options);
