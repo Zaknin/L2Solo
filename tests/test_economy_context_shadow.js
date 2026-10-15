@@ -12,6 +12,8 @@ invoke('GameServer/DataCache').init();
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
+const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const deps = { board: new BoardIndex(), spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure(), timestamp: 1e12 };
 const state = () => ({ characterId: 901, updatedAt: 1, level: 20, phase: 'cold', activity: 'resting', adena: 100,
@@ -121,6 +123,75 @@ before = shadow();
 Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:lt1s': 1,
     'context:shadow_released:capacity': 1, 'context:shadow_plan:same_key:same_plan': 1 });
+
+// L134 probes: the shadow plan per miss reason (context:same_key_<plan>:<reason>),
+// the clause that refused a same-key request (context:same_key_refused), the
+// activity_leaf echo (context:leaf_echo) and the trip rows (context:trip_rows).
+{
+    const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
+        .filter(([key]) => /^context:(same_key_|leaf_echo:|trip_rows:)/.test(key)));
+    const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
+    const actor = (loc, stats = {}) => ({ ...state(), characterId: 902, loc: { locX: 80000 + loc, locY: 148000, locZ: -3500 },
+        stats: { ...state().stats, ...stats } });
+    function scenario() {
+        let revision = 1;
+        // The board stays still; a moved workshop revision moves every read item's market token.
+        const at = { ...deps, workshops: Workshops.publicForRecipe, workshopRevision: () => revision, routeRows: rows(1) };
+        const moveMarket = () => { revision++; at.timestamp += 3600e3; };
+        const views = {}, deltas = {};
+        const step = (name, build) => { const before = probeKeys(); views[name] = build(); deltas[name] = delta(before, probeKeys()); };
+        step('first', () => Economy.forState(actor(0), at));
+        // Trip only: the location moves; the rows' content repeats, then moves.
+        step('trip_same', () => Economy.forState(actor(100), { ...at, routeRows: rows(1) }));
+        at.routeRows = rows(2);
+        step('trip_moved', () => Economy.forState(actor(200), at));
+        // The bot accepts the decision; then only its leaf moves, to the held build's own output.
+        const accepted = views.trip_moved.statsPacket;
+        const decided = { decisionSeq: accepted.decisionSeq, wishFocus: accepted.wishFocus, dormantWishes: accepted.dormantWishes };
+        step('decided', () => Economy.forState(actor(200, decided), at));
+        const leaf = views.decided.statsPacket.activityLeaf;
+        moveMarket();
+        step('echo', () => Economy.forState(actor(200, { ...decided, activityLeaf: leaf }), at));
+        Economy.forgetContext(902, 'explicit_invalidation');
+        step('leaf_no_held', () => Economy.forState(actor(200, { ...decided, activityLeaf: 7 }), at));
+        // The same key with a held entry of that key: the moved market refuses it.
+        moveMarket();
+        step('market', () => Economy.forState(actor(200, { ...decided, activityLeaf: 7 }), at));
+        // The same key as an unkept build: the held older entry refuses on its decision.
+        const later = { ...decided, decisionSeq: decided.decisionSeq + 5, activityLeaf: 7 };
+        step('unkept', () => Economy.forState(actor(200, later), { ...at, rememberContext: false }));
+        step('decision', () => Economy.forState(actor(200, later), at));
+        return { views, deltas, leaf };
+    }
+    // Off: no counter is reached and the plans are the reference.
+    Config.developerDiagnostics = false; Economy.reset();
+    const offCalls = [], saved = { count: Diagnostics.count, duration: Diagnostics.duration };
+    Diagnostics.count = (...args) => offCalls.push(args); Diagnostics.duration = (...args) => offCalls.push(args);
+    const off = scenario();
+    Object.assign(Diagnostics, saved);
+    assert.deepEqual(offCalls, [], 'diagnostics off: no counter is touched');
+    Config.developerDiagnostics = true; Economy.reset();
+    const on = scenario();
+    for (const name of Object.keys(off.views)) {
+        assert.deepEqual(on.views[name].statsPacket, off.views[name].statsPacket, `${name}: counting never changes the decision`);
+        assert.deepEqual(on.views[name].network, off.views[name].network, `${name}: the same wishes, funding and activity`);
+    }
+    assert.notStrictEqual(on.leaf, 0, 'the fixture chooses an activity leaf');
+    const one = (name, pattern) => {
+        const keys = Object.keys(on.deltas[name]).filter(key => pattern.test(key));
+        assert.deepEqual(keys.map(key => on.deltas[name][key]), [1], `${name}: one ${pattern} in ${JSON.stringify(on.deltas[name])}`);
+        return keys[0];
+    };
+    assert.deepEqual(on.deltas.first, {}, 'a first build has no previous build to compare');
+    one('trip_same', /^context:trip_rows:same:/);
+    one('trip_moved', /^context:trip_rows:moved:/);
+    one('echo', /^context:leaf_echo:echo:/);
+    one('leaf_no_held', /^context:leaf_echo:no_held:/);
+    assert.strictEqual(one('market', /^context:same_key_refused:/), 'context:same_key_refused:market_due');
+    one('market', /^context:same_key_(same|new)_plan:used_market_changed$/);
+    assert.strictEqual(one('decision', /^context:same_key_refused:/), 'context:same_key_refused:decision_seq');
+    one('decision', /^context:same_key_(same|new)_plan:input_dependency_changed$/);
+}
 
 Date.now = realNow; Config.developerDiagnostics = false; Economy.reset();
 console.log('test_economy_context_shadow: ok');
