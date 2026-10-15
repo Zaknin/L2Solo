@@ -5,7 +5,7 @@ const Config = require('../Population/PopulationConfig');
 const { isMainThread } = require('node:worker_threads');
 const LIMITS = Object.freeze({ recordBytes: 1024, batch: 16, batchBytes: 16384,
     mainRecords: 256, workerRecords: 64, keys: 512, owners: 16, perSecond: 64,
-    layers: 16, durationSamples: 32 });
+    layers: 32, durationSamples: 32 });
 const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 'remaining', 'recordId', 'lineId',
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
     'errandAt', 'receiptUnits', 'receiptSpent', 'decisionSeq', 'activityLeaf', 'inputHash', 'target', 'owned', 'missing', 'requested', 'planned',

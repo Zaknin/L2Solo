@@ -17,6 +17,7 @@ assert.equal(Object.values(metrics.counts).reduce((a, b) => a + b), LIMITS.keys 
 assert.equal(metrics.durations.context.count, LIMITS.keys + 20); assert.equal(metrics.durations.context.samples.length, LIMITS.durationSamples);
 for (let i = 0; i < 40; i++) collector.duration('layer' + i, 1);
 assert.equal(Object.keys(collector.metrics().durations).length, LIMITS.layers);
+assert(LIMITS.layers >= 32 && collector.metrics().durations.layer16, 'a 17th duration group is kept (main thread holds 12 live + up to 5 context reasons)');
 assert(collector.push({ owner: 64, commandId: 'first', sequence: 1, phase: 'native_purchase' }));
 assert.equal(collector.push({ owner: 64, commandId: 'second', sequence: 2, phase: 'native_purchase' }), false);
 assert.equal(collector.stats().drops.queue, 1);
