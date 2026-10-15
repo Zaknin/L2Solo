@@ -882,6 +882,53 @@ function outerRefusal(held, board, deps, timestamp) {
 }
 // Route rows' content, as the build reads them (context.routeRows), or null.
 const rowsHash = rows => rows ? fnv1a32(JSON.stringify(rows)) : null;
+// Diagnostics only (RTOKENS): the build's read set, one digest per kind in
+// READSET_KINDS order, kept in the actor's shadow entry. item: the ids read;
+// market: each read id with its token; spot: each evaluated spot with its
+// occupancy token; node: the node bag rows (id with its bag token, -1 the
+// whole bag's ids); time: the side of each deadline the build compared its
+// timestamp with, as its owners answer it. A digest is a sum of per-entry
+// digests, so the providers' read order does not move it. Continuous time
+// (counter decay, elapsed hours, demand windows) and state read outside
+// the fence are not here: a same read set with a new plan counts them.
+const READSET_KINDS = Object.freeze(['item', 'market', 'spot', 'node', 'time']);
+const entriesHash = (map, withToken) => {
+    let sum = 0;
+    for (const [id, token] of map) sum = (sum + fnv1a32(withToken ? `${id}=${token}` : String(id))) >>> 0;
+    return sum;
+};
+function readSetHashes(state, timestamp, keyParts, sections, own, reads, spotReads, bagReads) {
+    const part = name => keyParts[INPUT_KEY_PARTS.indexOf(name)];
+    const time = [sections.build, part('shot_recipe_demand'), part('market_sell_retry_active'),
+        own.map(row => `${row.spotId}@${row.at}`).join(','),
+        [...SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp)].sort().join(',')].join('|');
+    return Uint32Array.of(entriesHash(reads, false), entriesHash(reads, true), entriesHash(spotReads, true),
+        entriesHash(bagReads, true), fnv1a32(time));
+}
+// The first kind whose digest moved, or null when the read set repeated.
+const readSetMoved = (previous, current) => {
+    for (let at = 0; at < current.length; at++) if (previous[at] !== current[at]) return READSET_KINDS[at];
+    return null;
+};
+// Key parts named apart when a same read set rebuilds a new plan (the
+// largest movers, live 2026-10-15); the rest count as 'other'.
+const READSET_GAP_PARTS = new Set(['items', 'trip', 'mp', 'sp', 'adena', 'activity_leaf', 'decision_seq', 'hunt_efficiency_at']);
+// context:readset:<same_key|new_key>_<same|moved>:<plan> per build with a
+// previous one; a moved read set names its first moved kind
+// (context:readset_moved). A same read set with a new plan is an input the
+// fence does not record: context:readset_gap names the moved key parts
+// (same_key when none moved) and route_rows when the read route rows moved.
+function countReadSet(sameKey, samePlan, previous, current, movedParts, rowsMoved) {
+    const moved = readSetMoved(previous, current);
+    Diagnostics.count('context', 'readset', `${sameKey ? 'same_key' : 'new_key'}_${moved === null ? 'same' : 'moved'}:${samePlan ? 'same_plan' : 'new_plan'}`);
+    if (moved !== null) { Diagnostics.count('context', 'readset_moved', moved); return; }
+    if (samePlan) return;
+    if (sameKey) Diagnostics.count('context', 'readset_gap', 'same_key');
+    let other = false;
+    for (const name of movedParts) if (READSET_GAP_PARTS.has(name)) Diagnostics.count('context', 'readset_gap', name); else other = true;
+    if (other) Diagnostics.count('context', 'readset_gap', 'other');
+    if (rowsMoved) Diagnostics.count('context', 'readset_gap', 'route_rows');
+}
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('context', 'request');
@@ -947,16 +994,18 @@ function buildForState(state, deps) {
         : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
+    let previousReadset = null, movedParts = null;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         shadowSame = same; previousPlan = last?.plan ?? null; previousRows = last?.rows ?? null;
+        previousReadset = last?.readset ?? null; movedParts = [];
         Diagnostics.count('context', 'shadow', `${diagnosticReason}:${same ? 'same_key' : 'new_key'}`);
         // Which parts moved since the actor's previous build (none known without one).
         if (!same && last?.parts?.length === hashes.length) {
             let moved = 0, name = null;
             for (let i = 0; i < hashes.length; i++) if (hashes[i] !== last.parts[i]) {
-                moved++; name = INPUT_KEY_PARTS[i] || `part_${i}`;
+                moved++; name = INPUT_KEY_PARTS[i] || `part_${i}`; movedParts.push(name);
                 Diagnostics.count('context', 'key_part', name);
             }
             if (moved > 0) Diagnostics.count('context', 'key_parts', moved === 1 ? '1' : moved === 2 ? '2' : '3+');
@@ -978,7 +1027,7 @@ function buildForState(state, deps) {
                 && Number(stats.decisionSeq || 0) === Number(packet?.decisionSeq || 0) ? 'echo' : 'no_echo';
         }
         const kept = deps.rememberContext !== false && planningContexts < 64;
-        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null };
+        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -990,6 +1039,14 @@ function buildForState(state, deps) {
     let scope = null;
     const nodeScopes = [];
     const spotReads = new Map();
+    // Diagnostics only (RTOKENS): every node bag row the build read, for its read set.
+    const bagReads = shadowEntry ? new Map() : null;
+    // Once the plan is known: keep this build's read set, compare it with the actor's previous build.
+    const noteReadSet = shadowEntry === null ? null : plan => {
+        shadowEntry.readset = readSetHashes(state, timestamp, keyParts, sections, own, reads, spotReads, bagReads);
+        if (previousPlan !== null && previousReadset !== null) countReadSet(shadowSame, plan === previousPlan,
+            previousReadset, shadowEntry.readset, movedParts, previousRows !== shadowEntry.rows);
+    };
     const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
     const bagIds = () => Object.keys(state.inventory || {}).filter(id => Number(id) !== 57);
     // ARCH-NOTE: PERF: the build is one synchronous call (its generators are
@@ -1065,11 +1122,13 @@ function buildForState(state, deps) {
             end: () => nodeScopes.pop(),
             bag: id => { if (!(Number(id) > 0) || !nodeScopes.length) return;
                 const token = bagTokenOf(id);
+                if (bagReads !== null) bagReads.set(Number(id), token);
                 const top = nodeScopes[nodeScopes.length - 1];
                 if (token === undefined || top.bag.get(Number(id)) !== token) for (const local of nodeScopes) local.bag.set(Number(id), token); },
             wholeBag: () => { if (!nodeScopes.length) return;
                 for (const id of wholeBagIds()) context.nodeInputs.bag(id);
                 const token = wholeBagKeys();
+                if (bagReads !== null) bagReads.set(-1, token);
                 const top = nodeScopes[nodeScopes.length - 1];
                 if (token === undefined || top.bag.get(-1) !== token) for (const local of nodeScopes) local.bag.set(-1, token); },
             holds: input => (!deps.workshops || !!deps.workshopRevision || !!deps.inputKey)
@@ -1116,6 +1175,7 @@ function buildForState(state, deps) {
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
             if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart, diagnosticReason, probe);
+            noteReadSet(plan);
         }
         endTokens();
         return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
@@ -1196,6 +1256,7 @@ function buildForState(state, deps) {
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
         if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart, diagnosticReason, probe);
+        noteReadSet(plan);
     }
     if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,

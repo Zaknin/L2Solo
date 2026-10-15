@@ -133,7 +133,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
     const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
     const actor = (loc, stats = {}) => ({ ...state(), characterId: 902, loc: { locX: 80000 + loc, locY: 148000, locZ: -3500 },
         stats: { ...state().stats, ...stats } });
-    function scenario() {
+    const scenario = () => {
         let revision = 1;
         // The board stays still; a moved workshop revision moves every read item's market token.
         const at = { ...deps, workshops: Workshops.publicForRecipe, workshopRevision: () => revision, routeRows: rows(1) };
@@ -162,7 +162,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
         step('unkept', () => Economy.forState(actor(200, later), { ...at, rememberContext: false }));
         step('decision', () => Economy.forState(actor(200, later), at));
         return { views, deltas, leaf };
-    }
+    };
     // Off: no counter is reached and the plans are the reference.
     Config.developerDiagnostics = false; Economy.reset();
     const offCalls = [], saved = { count: Diagnostics.count, duration: Diagnostics.duration };
@@ -191,6 +191,56 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
     one('market', /^context:same_key_(same|new)_plan:used_market_changed$/);
     assert.strictEqual(one('decision', /^context:same_key_refused:/), 'context:same_key_refused:decision_seq');
     one('decision', /^context:same_key_(same|new)_plan:input_dependency_changed$/);
+}
+
+// RTOKENS: the read set of a build (item ids, their market tokens, spots,
+// node bag rows, deadline sides) against the actor's previous build, split
+// by key outcome and plan outcome; a moved read set names its first moved kind.
+{
+    const readsetKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
+        .filter(([key]) => key.startsWith('context:readset')));
+    const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
+    const start = 1e12;
+    // A shot investment whose 30-minute deadline the time step crosses; its item has no recipe.
+    const actor = () => ({ ...state(), characterId: 903, stats: { ...state().stats, shotRecipeDemand: { at: start, itemId: 999999 } } });
+    const scenario = () => {
+        let revision = 1;
+        const at = { ...deps, timestamp: start + 29 * 60e3, workshops: Workshops.publicForRecipe,
+            workshopRevision: () => revision, routeRows: rows(1) };
+        const views = {}, deltas = {};
+        const step = (name, build) => { const before = readsetKeys(); views[name] = build(); deltas[name] = delta(before, readsetKeys()); };
+        step('first', () => Economy.forState(actor(), at));
+        Economy.forgetContext(903, 'explicit_invalidation');
+        step('repeat', () => Economy.forState(actor(), at));
+        // The read items stay; their market tokens move (a workshop revision).
+        revision++; Economy.forgetContext(903, 'explicit_invalidation');
+        step('market', () => Economy.forState(actor(), at));
+        // Only the clock moves, across the investment's deadline.
+        at.timestamp = start + 31 * 60e3;
+        step('time', () => Economy.forState(actor(), at));
+        return { views, deltas };
+    };
+    Config.developerDiagnostics = false; Economy.reset();
+    const offCalls = [], saved = { count: Diagnostics.count, duration: Diagnostics.duration };
+    Diagnostics.count = (...args) => offCalls.push(args); Diagnostics.duration = (...args) => offCalls.push(args);
+    const off = scenario();
+    Object.assign(Diagnostics, saved);
+    assert.deepEqual(offCalls, [], 'diagnostics off: no read set is counted');
+    Config.developerDiagnostics = true; Economy.reset();
+    const on = scenario();
+    for (const name of Object.keys(off.views)) {
+        assert.strictEqual(on.views[name].inputKey, off.views[name].inputKey, `${name}: the same key`);
+        assert.deepEqual(on.views[name].statsPacket, off.views[name].statsPacket, `${name}: counting never changes the decision`);
+        assert.deepEqual(on.views[name].network, off.views[name].network, `${name}: the same wishes, funding and activity`);
+    }
+    assert.deepEqual(on.deltas.first, {}, 'a first build has no previous read set');
+    assert.deepEqual(on.deltas.repeat, { 'context:readset:same_key_same:same_plan': 1 }, 'equal reads, equal read set');
+    const moved = name => Object.keys(on.deltas[name]).filter(key => key.startsWith('context:readset_moved:'));
+    assert.deepEqual(moved('market'), ['context:readset_moved:market'], JSON.stringify(on.deltas.market));
+    assert.strictEqual(Object.keys(on.deltas.market).filter(key => /^context:readset:same_key_moved:/.test(key)).length, 1);
+    assert.deepEqual(moved('time'), ['context:readset_moved:time'], JSON.stringify(on.deltas.time));
+    assert.strictEqual(Object.keys(on.deltas.time).filter(key => /^context:readset:new_key_moved:/.test(key)).length, 1,
+        'the deadline is a key part too');
 }
 
 Date.now = realNow; Config.developerDiagnostics = false; Economy.reset();
