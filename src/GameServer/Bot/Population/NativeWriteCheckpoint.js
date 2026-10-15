@@ -80,7 +80,17 @@ function checkTarget(proof, characterId) {
 function check(proof, row) {
     const captured = captures.get(proof), current = nativePoint(row);
     if (!captured || !current || current.phase !== 'cold' || current.simulationOwner !== 'legacy_main'
-        || !Protocol.sameCommandCheckpoint(captured.expected, current)) refuse();
+        || !Protocol.sameCommandCheckpoint(captured.expected, current)) refuseDrift(captured, current);
+}
+
+// Failure-only detail for the save failure log (L127): the checkpoint fields
+// the row moved past the command's copy. A fence moves only the revision and
+// updatedAt; a real state change also moves activity or the clocks.
+function refuseDrift(captured, current) {
+    const error = new WorkerCommandAdmissionRefusal('stale_command');
+    const expected = captured && Protocol.commandCheckpoint(captured.expected);
+    if (expected && current) error.checkpointDrift = Object.keys(current).filter(key => expected[key] !== current[key]);
+    throw error;
 }
 
 // Database calls this only with its same queued successful ROW RETURNING.

@@ -161,6 +161,9 @@ async function rejection(work, expected) {
     assert.equal(logs[1].phase, 'write_admission');
     assert.equal(logs[1].code, 'BOT_WORKER_COMMAND_ADMISSION_REFUSED');
     assert.equal(logs[1].sqliteCode, null);
+    assert.equal(logs[1].characterId, id, 'a refusal names its bot');
+    assert.deepEqual(logs[1].checkpointDrift, ['simulationRevision'], 'a refusal names the moved checkpoint fields');
+    assert.equal(logs[0].checkpointDrift, null, 'an SQL failure has no checkpoint drift');
     assert.deepEqual(await facts(), revised, 'a native stale checkpoint cannot rewrite the state');
     const captureFailure = Error('SECRET_CAPTURE_MESSAGE');
     await rejection(() => Database.saveBotLifeState(statement, new Proxy({}, {

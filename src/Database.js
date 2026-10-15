@@ -448,7 +448,7 @@ function reportTransactionSqliteFailure(operation, phase, error) {
 // ARCH-NOTE: A queued lifecycle save can reject a stale native command before
 // SQL. Failure-only diagnostics distinguish that admission from a SQLite fault
 // without changing either rejection identity or the existing failure counters.
-function reportBotLifeSaveFailure(phase, error) {
+function reportBotLifeSaveFailure(phase, error, characterId = null) {
     try {
         if (!DiagnosticConfig.developerDiagnostics) {
             console.warn('DB          :: bot life save failure %s %s', phase, error?.message || 'unknown');
@@ -464,6 +464,9 @@ function reportBotLifeSaveFailure(phase, error) {
             sqliteCode: error?.errcode ?? null, sqliteReason: error?.errstr ?? null,
             admissionRefusalReason: error instanceof WorkerCommandAdmissionRefusal
                 && reasons.includes(error.message) ? error.message : null,
+            characterId: Number.isSafeInteger(characterId) ? characterId : null,
+            checkpointDrift: error instanceof WorkerCommandAdmissionRefusal && Array.isArray(error.checkpointDrift)
+                ? error.checkpointDrift : null,
             configuredWriterBusyTimeoutMs: 5000, frames
         }));
     } catch (_) { /* Diagnostics must preserve the original save rejection. */ }
@@ -4171,7 +4174,7 @@ const Database = {
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
                 return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson };
             } catch (error) {
-                reportBotLifeSaveFailure(phase, error);
+                reportBotLifeSaveFailure(phase, error, Array.isArray(statement?.[1]) ? statement[1][0] : null);
                 throw error;
             }
         }, { operation: 'bot-life:save', read: false });
