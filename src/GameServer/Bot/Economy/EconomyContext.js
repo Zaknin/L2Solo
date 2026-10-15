@@ -990,7 +990,10 @@ function buildForState(state, deps) {
     const wholeBagKeys = () => tokensLive ? liveBagKeys ??= JSON.stringify(wholeBagIds().slice().sort())
         : JSON.stringify(bagIds().sort());
     const read = id => { id = Number(id);
-        for (const local of nodeScopes) local.items.set(id, tokenOf(id));
+        // PERF L128: every write goes to every open scope at once, so a key the innermost scope already holds with this
+        // token is held by all outer scopes too and the loop would change nothing (a Map.set on a held key keeps its place).
+        const top = nodeScopes[nodeScopes.length - 1];
+        if (top) { const held = tokenOf(id); if (held === undefined || top.items.get(id) !== held) for (const local of nodeScopes) local.items.set(id, tokenOf(id)); }
         if (reads.has(id)) return;
         if (scope) { if (!scope.has(id)) scope.set(id, tokenOf(id)); return; }
         reads.set(id, tokenOf(id)); deps.onSourceRead?.(id);
@@ -1019,16 +1022,19 @@ function buildForState(state, deps) {
         // Every evaluated source participates in admission/ranking, including a losing candidate.
         sourceSpot: id => { const token = spotTokenOf(id);
             spotReads.set(id, token);
-            for (const local of nodeScopes) local.spots.set(id, token); },
+            const top = nodeScopes[nodeScopes.length - 1];
+            if (top && (token === undefined || top.spots.get(id) !== token)) for (const local of nodeScopes) local.spots.set(id, token); },
         nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
             bag: id => { if (!(Number(id) > 0) || !nodeScopes.length) return;
                 const token = bagTokenOf(id);
-                for (const local of nodeScopes) local.bag.set(Number(id), token); },
+                const top = nodeScopes[nodeScopes.length - 1];
+                if (token === undefined || top.bag.get(Number(id)) !== token) for (const local of nodeScopes) local.bag.set(Number(id), token); },
             wholeBag: () => { if (!nodeScopes.length) return;
                 for (const id of wholeBagIds()) context.nodeInputs.bag(id);
                 const token = wholeBagKeys();
-                for (const local of nodeScopes) local.bag.set(-1, token); },
+                const top = nodeScopes[nodeScopes.length - 1];
+                if (token === undefined || top.bag.get(-1) !== token) for (const local of nodeScopes) local.bag.set(-1, token); },
             holds: input => (!deps.workshops || !!deps.workshopRevision || !!deps.inputKey)
                 && marketHolds(sourceBoard, input.items || [], deps)
                 && input.spots.every(([id, token]) => spotTokenOf(id) === token)
