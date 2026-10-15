@@ -40,7 +40,7 @@ async function reclaim(objective, { parties, life, database, metrics }, now = Da
                 meta: { partyId: party.partyId, clanId: objective.clanId, clanGoalKey: objective.clanGoalKey } } });
         // A worker claim or membership change wins over this stale decision.
         if (!result?.ok) continue;
-        life.acceptPartyAssignments(prepared);
+        life.acceptPartyAssignments(prepared, result.lifeRows);
         parties.acceptCommit(preparedParty);
         metrics.recordPartyDissolution();
         return true;

@@ -22,6 +22,28 @@ function goalMoney(state, goal, escrow = 0, economy = null) {
         { ...PurchaseFunding.goalTerms(goal), survivalCost: survivalCost(economy, goal?.target?.itemId) });
 }
 
+// Quantity reviews retain the native line's price unless the prepared
+// purchase cap requires a fenced reprice. Size the bid at that actual price,
+// with the same root priority and survival tranche as native admission.
+function retainedLines(state, lines, owned, town) {
+    let money = PurchaseFunding.budget(state);
+    const result = [];
+    for (const line of lines) {
+        const previous = owned.find(row => row.kind === 'buy_ad' && row.storeType === 3 && row.town === town
+            && Number(row.selfId) === Number(line.selfId) && Number(row.enchant || 0) === Number(line.enchant || 0));
+        const price = previous && (!Number.isFinite(line.purchaseCap) || Number(previous.price) <= line.purchaseCap)
+            ? Number(previous.price) : Number(line.price);
+        const available = Math.min(line.intent ? Infinity : money, PurchaseFunding.spendable(state, 0,
+            { ...(line.intent ? { r: line.intent.valueRate } : { itemId: line.selfId }), survivalCost: line.survivalCost }));
+        const count = Math.min(Number(line.count), Math.floor(available / price));
+        if (!(count > 0)) continue;
+        if (!line.intent) money -= count * price;
+        result.push({ ...line, price, count,
+            ...(line.intent ? { intent: { ...line.intent, amount: count, price } } : {}) });
+    }
+    return result;
+}
+
 function bidFor(state, goal, { money = Infinity, ...options } = {}) {
     // The selected goal already has a native store executor. It cannot re-enter the
     // public projection through a caller's legacy goal fallback.
@@ -108,6 +130,7 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
             Diagnostics.count('cap', 'buy_ads', 'dropped', goals.length - 3);
         }
     }
+    const owned = options.board?.ownerLines?.(Number(state.characterId)) || [];
     const candidates = goals.slice(0, 3);
     const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
     let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));
@@ -126,12 +149,13 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
                 ...(candidate.intent?.key ? { intent: { ...candidate.intent, price: bid.price, amount: bid.count } } : {}) });
             // Conditional alternatives hold no cash until a native agreement.
         }
-        if (!lines.length || townFor(lines) === town) return lines;
-        const ids = new Set(lines.map(line => line.selfId));
+        const retained = retainedLines(state, lines, owned, town);
+        if (!retained.length || townFor(retained) === town) return retained;
+        const ids = new Set(retained.map(line => line.selfId));
         for (let at = candidates.length - 1; at >= 0; at--) if (!ids.has(Number(candidates[at].target.itemId))) candidates.splice(at, 1);
-        town = townFor(lines);
+        town = townFor(retained);
     }
     return [];
 }
 
-module.exports = { survivalCost, goalMoney, bidFor, linesFor };
+module.exports = { survivalCost, goalMoney, bidFor, linesFor, retainedLines };

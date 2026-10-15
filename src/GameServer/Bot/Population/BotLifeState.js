@@ -868,11 +868,15 @@ function save(row, options = {}) {
             inventorySummary = excluded.inventorySummary,
             -- Native takeover/release/restore owns player membership. A late
             -- actor snapshot cannot revive or remove that ownership marker.
-            statsJson = json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
+            statsJson = json_set(json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
                 THEN json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs', '$.economyCommit')
                 ELSE json_set(json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs'),
                     '$.economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')) END, '$.playerPartyTakeover'),
                 json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
+                '$.hennas', json_array(
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 3))),
             updatedAt = excluded.updatedAt
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
@@ -914,7 +918,7 @@ function save(row, options = {}) {
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
-    return Database.saveBotLifeState(statement, databaseOptions).then((result) => {
+    return Database.saveBotLifeState(statement, databaseOptions, row.characterId).then((result) => {
         if (result && typeof result.affectedRows === 'number' && result.affectedRows !== 1) {
             const error = new Error(`bot life state ownership conflict for ${row.characterId}`);
             error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
@@ -942,8 +946,14 @@ function hydrateCache() {
     ]).then(async (rows) => {
         for (const row of rows) {
             let state = normalize(row);
+            const storedHennas = state.stats.hennas;
+            state.stats.hennas = [null,null,null];
+            for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
+            const hennaRepair = JSON.stringify(storedHennas) !== JSON.stringify(state.stats.hennas);
             if (row.nativeLearnedSkills != null) {
                 state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, parseJson(row.nativeLearnedSkills, []), now());
+            }
+            if (row.nativeLearnedSkills != null || hennaRepair) {
                 // Startup repair precedes cache publication and worker reads.
                 // Use the existing guarded save; do not learn/spend here.
                 if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
@@ -953,8 +963,6 @@ function hydrateCache() {
                 }
             }
             delete row.nativeLearnedSkills;
-            state.stats.hennas = [null,null,null];
-            for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
             state.stats.soulCrystalQuest = !!row.nativeCrystalQuest;
             cache.set(state.characterId, state);
             invoke('GameServer/Bot/Economy/CraftWorkshopService').register(state);
@@ -2409,8 +2417,11 @@ const BotLifeState = {
         };
     },
 
-    acceptPartyAssignments(prepared = []) {
-        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((snapshot) => {
+    acceptPartyAssignments(prepared = [], committedRows = []) {
+        const rows = new Map((committedRows || []).map(row => [Number(row.characterId), row]));
+        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((planned) => {
+            const row = rows.get(planned.characterId);
+            const snapshot = row ? normalize(row) : planned;
             cache.set(snapshot.characterId, snapshot);
             // Party membership changes the worker scheduling partition. Push
             // the committed state immediately instead of waiting for the old
@@ -2759,7 +2770,7 @@ const BotLifeState = {
         const nativeWriteOptions = options.persist !== false && workerOptions ? {
             beforeWrite: NativeWriteCheckpoint.create(characterId, workerOptions)
         } : undefined;
-        // ARCH-NOTE: Paid manual/worker training keeps private ROW version floors before SP/book/class writes.
+        // ARCH-NOTE: Automatic skill/class writes keep private ROW version floors.
         // Training wraps the original native capability only; ROW/after-writers keep their advancing original proof.
         const trainingWriteOptions = nativeWriteOptions && needsClassProgression && options.projectClassProgression !== true
             ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}, nativeWriteOptions.beforeWrite) }
@@ -2874,7 +2885,7 @@ const BotLifeState = {
                     });
             });
         });
-        // Projections and commands without paid training keep their existing promise/handler path.
+        // Projections and commands without skill grants keep their existing promise/handler path.
         if (trainingWriteOptions === nativeWriteOptions) return prepared;
         return prepared.catch(error => {
             if (Database.isColdTrainingSourceRetired(error)) return null;
@@ -2911,7 +2922,7 @@ const BotLifeState = {
             const resolved = await BotClassProgression.reconcile({ characterId: state.characterId,
                 classId: state.stats?.classId || 0, level: state.level, seed: state.characterId }, { beforeWrite });
             const row = await Database.publishColdTraining(state.characterId, resolved, { beforeWrite });
-            return this.acceptLifecycleRow(row, 'paid_training');
+            return this.acceptLifecycleRow(row, 'automatic_skills');
         });
     },
 

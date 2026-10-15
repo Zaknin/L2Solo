@@ -75,10 +75,23 @@ try {
     const decision = Goals.decide(state, [peer], { prepared, roll: 0 });
     assert.equal(decision.accept, false, 'required request and maximum sociability cannot bypass the funding comparison');
     assert.deepEqual(Goals.formingMembers([state, peer], { clanGoalKey: 'clan-kit' }), [state, peer]);
-    // Only a clan with a warehouse (clan level 1+) takes over equipment custody;
-    // plain membership keeps the personal income comparison.
-    assert.equal(Income.compare({ ...state, clanLevel: 1, stats: { ...state.stats, clanId: 1 } }, [peer], { prepared }), null);
-    assert.notEqual(Income.compare({ ...state, clanLevel: 0, stats: { ...state.stats, clanId: 1 } }, [peer], { prepared }), null);
+    // Ordinary farming compares personal returns regardless of clan custody.
+    // A concrete clan assignment keeps its separate participation policy.
+    for (const clanLevel of [0, 1, 5]) {
+        const member = { ...state, clanLevel, stats: { ...state.stats, clanId: 1 } };
+        const memberPeer = { ...peer, clanLevel, stats: { ...peer.stats, clanId: 1 } };
+        assert.equal(Income.compare(member, [memberPeer], { prepared })?.accept, false);
+        assert.equal(Goals.decide(member, [memberPeer], { prepared, roll: 0 }).accept, false,
+            'membership and a required request cannot bypass ordinary farm profitability');
+        assert.deepEqual(Goals.formingMembers([member, memberPeer], { spotId: 'peer' }), [],
+            'ordinary clan-member parties must also beat the safe solo earning route');
+        assert.equal(Income.compare(member, [memberPeer], { prepared, objective: { clanGoalKey: 'clan-kit' } }), null);
+        assert.deepEqual(Goals.formingMembers([member, memberPeer], { clanGoalKey: 'clan-kit' }), [member, memberPeer]);
+        const review = Goals.joint({ startedAt: at - Income.REVIEW_MS, spotId: 'peer', stats: {} },
+            [member, memberPeer], { timestamp: at, spots });
+        assert.equal(review.incomeReviews?.length, 2,
+            'ordinary party income review also runs for members of a clan with a warehouse');
+    }
     const heldObjective = { spotId: 'peer', objectiveKey: 'held' };
     const pending = Goals.joint({ startedAt: at - Income.REVIEW_MS, spotId: 'peer',
         stats: { objective: heldObjective } }, [state, peer], { timestamp: at,
@@ -174,4 +187,4 @@ assert.equal(Hunt.buffPurchaseCost({ stats: { huntClock: { at }, lastBuffService
 assert(Match.damageRate([{ pAtk: 100, atkSpd: 300, role: 'dps', skills: [], equipment: {} }])
     < Match.damageRate([{ pAtk: 120, atkSpd: 300, role: 'dps', skills: [], equipment: {} }]),
     'buff evaluation uses the same native attack envelope as survival');
-console.log('PASS solo/party clocks, equipment ETA, fees, random loot, consumables, clan exclusion and sample retention');
+console.log('PASS solo/party clocks, equipment ETA, fees, random loot, consumables, clan assignment boundary and sample retention');

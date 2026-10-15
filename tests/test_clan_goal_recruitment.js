@@ -50,6 +50,8 @@ const life = seed.prepare(`INSERT INTO bot_life_state(characterId,accountName,ch
  inventorySummary,statsJson,updatedAt) VALUES(?,'bot_pop_recruitment',?,50,'cold','hunting','ordinary:fixture',500,500,300,300,?,?,?)`);
 for (const value of [...roster, healer, damage, ...Array.from({ length: 71 }, (_, i) => member(base + 100 + i, 15, i === 70 ? heal : []))]) {
     character.run(value.characterId, `Recruit${value.characterId}`, value.classId);
+    for (const skill of value.stats.coldCombat.skills) seed.prepare('INSERT INTO skills(selfId,name,passive,level,characterId) VALUES(?,?,?,?,?)')
+        .run(skill.selfId, skill.name || '', skill.passive ? 1 : 0, skill.level, value.characterId);
     life.run(value.characterId, `Recruit${value.characterId}`, JSON.stringify(value.inventory), JSON.stringify(value.stats), value.characterId);
     seed.prepare(`INSERT INTO bot_personas(characterId,seed,primaryDrive,archetype,traitsJson) VALUES(?,'fixture','power','fighter',?)`)
         .run(value.characterId, JSON.stringify({ commitment: 1 }));

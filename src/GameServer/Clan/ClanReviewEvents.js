@@ -26,20 +26,6 @@ function cashLevelGoal(clan, goal = clan?.state?.goal) {
         && goal.controlledBy !== 'player' && Number(goal.target?.level) === level + 1;
 }
 
-// K46: while the clan's ledger holds its next level's Adena, the bot leader
-// keeps that level's SP for the native level-up check and trains only above
-// it. Memory only: track() rebuilds it from the stored goal at start and on
-// every clan projection; the native check still owns the SP payment.
-function cashReady(goal) {
-    const required = Number(goal?.required);
-    return required > 0 && Number(goal.progress) >= required;
-}
-
-function spReserve(characterId) {
-    const watched = leaders.get(Number(characterId));
-    return watched?.ready ? watched.requiredSp : 0;
-}
-
 function forgetLeader(clanId) {
     const leaderId = clanLeaders.get(clanId);
     if (leaders.get(leaderId)?.clanId === clanId) leaders.delete(leaderId);
@@ -100,8 +86,7 @@ function track(clan) {
     const leaderId = Number(clan.leaderId);
     if (cashLevelGoal(clan) && Number.isSafeInteger(leaderId) && leaderId > 0) {
         clanLeaders.set(id, leaderId);
-        leaders.set(leaderId, { clanId: id, requiredSp: ClanRules.LEVEL_REQUIREMENTS[Number(clan.level)].sp,
-            ready: cashReady(clan.state.goal) });
+        leaders.set(leaderId, { clanId: id, requiredSp: ClanRules.LEVEL_REQUIREMENTS[Number(clan.level)].sp });
     }
     const previous = clanItems.get(id) || new Set();
     const wanted = new Set();
@@ -346,5 +331,5 @@ function stop() {
 module.exports = { changed, track, untrack, untrackLeader: clanId => forgetLeader(Number(clanId)),
     watchRecruitment, unwatchRecruitment, syncRecruitment, recruitmentCount: () => recruitment.size,
     beginCandidateCommit, commitCandidateInputs, discardCandidateCommit, candidateCheckpoint, restoreCandidateCheckpoint, attach,
-    cashLevelGoal, leaderSpChanged, spReserve, tracks, trackedItems, committedMember, start, stop, drain, pending: () => dirty.size,
+    cashLevelGoal, leaderSpChanged, tracks, trackedItems, committedMember, start, stop, drain, pending: () => dirty.size,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };

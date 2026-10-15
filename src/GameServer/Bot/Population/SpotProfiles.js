@@ -517,7 +517,7 @@ const SpotProfiles = {
         // they advance. A gear plan otherwise remains the normal route choice
         // for established bots.
         const collectingGear = acquisitionPlan?.status === 'active' && acquisitionPlan.next?.spotId;
-        if (!protectedStarterCohort && !collectingGear && !GearAcquisitionPlanner.isClanOwnedPlan(acquisitionPlan)) {
+        if (!protectedStarterCohort && !collectingGear) {
             const incomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').select(state, {
                 spots: profiles, occupancy, timestamp, mode,
                 required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });

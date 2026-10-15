@@ -11,8 +11,12 @@ function inTown(state) {
     const town = invoke('GameServer/World/TownRespawn').getClosestTown(state.loc?.locX || 0, state.loc?.locY || 0, state.loc?.locZ || 0);
     return town.name === state.currentRegion && Math.hypot(state.loc?.locX - town.locX, state.loc?.locY - town.locY) <= 7500;
 }
+function selfCrystallization(improvement) {
+    return improvement?.kind === 'crystallize' && improvement.mode === 'self';
+}
 function acquisitionTravel(state, leaf, timestamp = Date.now()) {
     if (leaf?.activity !== 'improving' || !['crystallize', 'luxury_exchange'].includes(leaf.improvement?.kind)
+        || selfCrystallization(leaf.improvement)
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)
         || state.party?.partyId || state.partyId || state.stats?.pveEncounter || state.stats?.pvpEncounter
         || !['hunting', 'resting', 'party_wait'].includes(state.activity)
@@ -37,8 +41,9 @@ async function reviewCold(state, options = {}) {
         ? { network: { activity: decision.activity }, riskWeight: decision.riskWeight }
         : null;
     const improvement = chosen(state, context);
-    if (!improvement || improvement.kind !== 'enchant' && !inTown(state)) return Promise.resolve({state,changed:false});
-    if (['luxury_exchange', 'crystallize'].includes(improvement.kind) && state.currentRegion !== 'Giran') return { state, changed: false };
+    if (!improvement || improvement.kind !== 'enchant' && !selfCrystallization(improvement) && !inTown(state)) return Promise.resolve({state,changed:false});
+    if (['luxury_exchange', 'crystallize'].includes(improvement.kind)
+        && !selfCrystallization(improvement) && state.currentRegion !== 'Giran') return { state, changed: false };
     const original = Life.cachedState(state.characterId);
     const work = invoke('Database').applyBotImprovement(state.characterId, {
         ...improvement, lossHours: improvement.riskHours * context.riskWeight
@@ -67,7 +72,7 @@ function reviewHot(session, context = null) {
     if (!current()) return Promise.resolve(null);
     // Smiths and symbol makers use the actual town interaction, never a
     // remote synthetic NPC grant. Enchant itself has no NPC requirement.
-    if (improvement.kind !== 'enchant') {
+    if (improvement.kind !== 'enchant' && !selfCrystallization(improvement)) {
         const candidates = World.fetchNpcsInRadius(actor.fetchLocX(),actor.fetchLocY(),300);
         const target = candidates.find(npc => stationMatches(npc, improvement));
         if (!target || !invoke('GameServer/Bot/AI/TownNpcApproach').hasLineOfSight({locX:actor.fetchLocX(),locY:actor.fetchLocY(),locZ:actor.fetchLocZ()}, {locX:target.fetchLocX(),locY:target.fetchLocY(),locZ:target.fetchLocZ()})) return Promise.resolve(null);
@@ -119,5 +124,5 @@ function stationTarget(actor, improvement) {
     return npc ? { npcId:npc.fetchId(), npcSelfId:npc.fetchSelfId(), name:npc.fetchName(), town:town.name,
         locX:npc.fetchLocX(),locY:npc.fetchLocY(),locZ:npc.fetchLocZ(),head:npc.fetchHead?.() } : null;
 }
-module.exports = { reviewCold, reviewHot, chosen, inTown, acquisitionTravel, Policy, stationTarget,
+module.exports = { reviewCold, reviewHot, chosen, inTown, selfCrystallization, acquisitionTravel, Policy, stationTarget,
     summary: () => DiagnosticConfig.developerDiagnostics ? ({ improvementDeferred }) : { enabled: false } };

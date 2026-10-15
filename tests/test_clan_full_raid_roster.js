@@ -40,6 +40,8 @@ seed.exec("INSERT INTO accounts(username,password) VALUES('bot_pop_full','fixtur
 for (const member of seeded) {
     seed.prepare(`INSERT INTO characters(id,username,name,classId,race,level,exp,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
         VALUES(?,'bot_pop_full',?,?,0,50,?,500,300,0,0,0,0,0,0,0)`).run(member.characterId, `Full${member.characterId}`, member.classId, Number(Data.experience[49]));
+    for (const skill of member.stats.coldCombat.skills) seed.prepare(`INSERT INTO skills(characterId,selfId,name,passive,level)
+        VALUES(?,?,?,0,?)`).run(member.characterId, skill.selfId, `Fixture skill ${skill.selfId}`, skill.level);
     seed.prepare(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,exp,phase,activity,spotId,hp,maxHp,mp,maxMp,
         inventorySummary,statsJson,updatedAt) VALUES(?,'bot_pop_full',?,50,?,'cold','hunting',?,500,500,300,300,?,?,?)`)
         .run(member.characterId, `Full${member.characterId}`, Number(Data.experience[49]), spot.id, JSON.stringify(member.inventory), JSON.stringify(member.stats), Date.now());
@@ -55,7 +57,7 @@ const admission = members => Roster.admission(party, members, spot, { owner: own
 function nativeSessions(states) {
     const Actor = invoke('GameServer/Actor/Actor'), Item = invoke('GameServer/Item/Item');
     return states.map(state => {
-        const session = { hotBackgroundPartyId: party.partyId, persistenceMode: 'ephemeral',
+        const session = { hotBackgroundPartyId: party.partyId, persistenceMode: 'ephemeral', hennas: state.stats?.hennas || [null,null,null],
             accountId: 'raid-fixture', dataSendToMe() {}, dataSendToOthers() {}, dataSendToMeAndOthers() {} };
         const actor = new Actor(session, { id: state.characterId, name: state.name, title: '', classId: state.classId, clanId: marker.clanId,
             level: state.level, exp: state.exp, sp: state.sp, race: 0, sex: 0, head: 0, isOnline: true,
@@ -93,6 +95,8 @@ async function nativeImpactCases(sessions, registry) {
     boss.automation.stopReplenish = () => {};
     Index.bossByTemplateId = () => boss;
     Formulas.calcHitChance = () => true;
+    await Database.setSkill({ selfId: 1184, name: 'Ice Bolt', level: 1 }, sessions[5].actor.fetchId());
+    await Database.setSkill({ selfId: 1015, name: 'Heal', level: 1 }, sessions[1].actor.fetchId());
     sessions[5].actor.skillset.populateSnapshot([{ selfId: 1184, level: 1 }]);
     sessions[1].actor.skillset.populateSnapshot([{ selfId: 1068, level: 1 }, { selfId: 1015, level: 1 }]);
     World.user = { sessions };

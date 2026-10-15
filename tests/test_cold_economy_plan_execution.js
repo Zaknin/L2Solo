@@ -64,6 +64,11 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         assert.equal(Population.startLifecycleEconomyEvents, undefined);
         assert.equal(Population.runLifecycleEconomyEvent, undefined);
         assert.equal(Population.releaseWarehouseMaterials, undefined);
+        // The first commit can grant a new skill kit. Warm that build before
+        // measuring empty plans, excluding the earlier failed withdrawal too.
+        await coordinator.afterCommit({ ...result, proposal: { ...proposal,
+            economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
+        coordinator.economyPlanTimes.length = 0;
         for (let i = 0; i < 20; i++) await coordinator.afterCommit({ ...result, proposal: { ...proposal,
             economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
         state = await Life.upsertState({ ...(Life.cachedState(id) || state), stats: { ...state.stats,
@@ -75,6 +80,33 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         assert(boughtAd, 'main publishes the worker quoted buy ad');
         assert.equal(boughtAd.lines[0].count, 5); assert.equal(boughtAd.lines[0].price, 110);
         assert.equal(funded.state.adena + boughtAd.escrowAdena, walletBefore, 'native writer conserves wallet plus escrow');
+        await Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [],
+            buyAds: [[1867, 1000, 90, 1, 76, 7, 0, 1, .001]], travel: null }, { step: work => work() });
+        const resized = Afk.ownerRecords(id).find(row => row.kind === 'buy_ad');
+        assert.equal(resized.id, boughtAd.id, 'quantity review retains the standing native record');
+        assert.equal(resized.lines[0].price, 110, 'quantity review does not author a lower opening price');
+        assert.equal(resized.lines[0].count, Math.floor((walletBefore - 100) / 110),
+            'quantity fits the retained price after protecting the survival reserve');
+        assert.deepEqual(resized.lines[0].pricing, boughtAd.lines[0].pricing,
+            'quantity review preserves the native repricing cursors');
+        assert.equal(JSON.parse(resized.lines[0].intentJson)[1], resized.lines[0].count,
+            'the root certificate carries the actual advertised quantity');
+        assert.equal(JSON.parse(resized.lines[0].intentJson)[2], 110);
+        assert.equal(Life.cachedState(id).adena, walletBefore, 'resizing a conditional bid moves no money');
+        await Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [],
+            buyAds: [[1867, 1000, 90, 1, 76, 7, 0, 1, .001]], travel: null }, { step: work => work() });
+        assert.deepEqual(Afk.ownerRecords(id).find(row => row.kind === 'buy_ad'), resized,
+            'the same bounded quantity is a native no-op on the next review');
+        const packetBefore = Life.cachedState(id).stats.money;
+        const priorityState = await Life.upsertState({ ...Life.cachedState(id), stats: { ...Life.cachedState(id).stats,
+            money: [10000, .0001, 10000, 0, .002, 50000, 76, .001, 60000, 1867] } }, 'priority_bid_fixture');
+        await Market.executePlan(priorityState, { sell: [], withdraw: [],
+            buyAds: [[1867, 400, 90, 1, 76, 7, 0, 1, .001]], travel: null }, { step: work => work() });
+        assert.equal(Afk.ownerRecords(id).find(row => row.kind === 'buy_ad').lines[0].count,
+            Math.floor((walletBefore - 10000 - 50000) / 110),
+            'publication also protects higher-priority money when the desired quantity shrinks');
+        await Life.upsertState({ ...Life.cachedState(id), stats: { ...Life.cachedState(id).stats,
+            money: packetBefore } }, 'restore_bid_packet');
         await Market.executePlan(Life.cachedState(id), { sell: [], withdraw: [], buyAds: [[1867, 5, 100]],
             buyCaps: [105], travel: null }, { step: work => work() });
         assert.equal(Afk.ownerRecords(id).find(row => row.kind === 'buy_ad').lines[0].price, 100,

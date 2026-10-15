@@ -309,7 +309,7 @@ async function versionedTraining(key, mode, worker = false) {
         assert.equal(result.ok, true, `${key} ${mode} must accept the same original ROW <= comparison`);
         const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
         const paid = Catalog.nextTraining(0, 7, 3, 0).sp + Catalog.nextTraining(0, 7, 3, 1).sp;
-        assert(paid > 0 && paid <= state.sp);
+        assert.equal(paid, 0);
         assert.equal(after.characters.find(row => row.id === id).sp, state.sp - paid);
         assert(after.skills.filter(row => row.characterId === id).length > 0, 'current/lower training really writes native skills');
         assert.equal(after.characters.find(row => row.id === id).hp, 90);
@@ -320,12 +320,13 @@ async function versionedTraining(key, mode, worker = false) {
 async function versionedBookTraining(key, mode) {
     const id = await seed(), Catalog = invoke('GameServer/Skills/SkillBookCatalog');
     const training = Catalog.nextTraining(10, 20, 1184, 0);
-    assert(training && training.bookId && training.sp > 0, 'authored first Ice Bolt rank consumes its actual SP/book');
+    assert(training && training.bookId === null && training.sp === 0, 'first Ice Bolt rank is free');
+    const bookId = Catalog.bookFor(1184);
     const clanId = Number((await Database.createClan({ name: `BookTrainingClan${serial}`, leaderId: id })).insertId);
     await Database.updateClanLevel(clanId, 1);
     await Database.updateCharacterClan(id, clanId, 0, 0, 0);
     await Database.updateCharacterClassId(id, 10);
-    await Database.setItem(id, { selfId: training.bookId, name: 'Spellbook: Ice Bolt', amount: 1,
+    await Database.setItem(id, { selfId: bookId, name: 'Spellbook: Ice Bolt', amount: 1,
         equipped: false, enchant: 0, slot: 0 });
     const initial = Life.snapshot(id);
     // Joining publishes a real membership revision; compare against that floor.
@@ -340,17 +341,16 @@ async function versionedBookTraining(key, mode) {
     if (mode === 'stale') {
         await assert.rejects(Database.learnBotSkill(id, training.skillId, training.level, { beforeWrite }),
             error => Database.isColdTrainingSourceRetired(error));
-        assert.deepEqual(await facts(id), before, `${key} rejects before real spellbook/SP/skill transaction`);
+        assert.deepEqual(await facts(id), before, `${key} rejects before the native skill grant`);
         assert.equal(Database.stats().failures, failuresBefore + 1);
     } else {
         const result = await Database.learnBotSkill(id, training.skillId, training.level, { beforeWrite });
         assert.equal(result.learned, true);
         assert.equal(result.spentSp, training.sp);
-        assert.equal(result.consumedBooks.length, 1);
-        assert.equal(result.consumedBooks[0].selfId, training.bookId);
+        assert.deepEqual(result.consumedBooks, []);
         const after = await facts(id);
         assert.equal(after.characters.find(row => row.id === id).sp, 0);
-        assert.equal(after.items.filter(row => row.characterId === id && row.selfId === training.bookId).length, 0);
+        assert.equal(after.items.filter(row => row.characterId === id && row.selfId === bookId).length, 1);
         assert.equal(after.skills.find(row => row.characterId === id && row.selfId === training.skillId).level, training.level);
         assert.equal(Database.stats().failures, failuresBefore);
     }

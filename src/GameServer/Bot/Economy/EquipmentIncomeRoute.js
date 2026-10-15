@@ -4,15 +4,16 @@ let SpotEconomics = null;
 
 // Only economic errands may deliberately hunt below the ordinary XP band.
 // Deep-blue drop/spoil penalties still apply in the native reward facts.
+// Clan warehouse custody does not change a member's ordinary earning routes.
 function economicHunt(state) {
-    return invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)
+    return invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)
         && /^(power:|resale:)/.test(String(state.stats?.wishFocus?.[0] || ''));
 }
 
 function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), price, required = false, mode,
     maxChecks = 32 } = {}) {
     if (!spots.length || state.party?.partyId || ['party', 'duo'].includes(mode)
-        || !invoke('GameServer/Bot/AI/PersonalGearProgression').personal(state)) return null;
+        || !invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return null;
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
     const role = state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
     const spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,

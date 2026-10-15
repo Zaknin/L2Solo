@@ -19,8 +19,8 @@ const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 
-// Rebuild database-derived snapshots that omitted template magic/cast/reuse metadata.
-const PROFILE_VERSION = 5;
+// Rebuild persisted kits that could have been overwritten by an older resolve.
+const PROFILE_VERSION = 6;
 const npcCombatCache = new WeakMap();
 
 const WEAPON_MASK_BY_KIND = Object.freeze({

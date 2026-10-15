@@ -118,7 +118,7 @@ async function run() {
         assert.equal(Cold.summary().sold, 1);
         coordinator.stopping = true;
         await coordinator.afterCommit({ ...entry, proposal: { ...entry.proposal, buffOffer: { ...packet,
-            providerRevision: 43, recipientRevision: 18 } } });
+            providerRevision: Life.cachedState(provider.characterId).simulation.revision, recipientRevision: 18 } } });
         assert.equal(guarded, 1, 'a retired source cannot reach the buff writer');
         assert.equal(coordinator.counters.afterCommitStepErrors.buff, 1);
         const sellerNow = Life.cachedState(provider.characterId), buyerNow = Life.cachedState(buyer.characterId);

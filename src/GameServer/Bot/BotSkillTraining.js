@@ -1,7 +1,6 @@
 'use strict';
 
 const Catalog = require('../Skills/SkillBookCatalog');
-const ClanReviewEvents = require('../Clan/ClanReviewEvents');
 const pending = new WeakMap();
 
 function stateFor(actor) {
@@ -10,7 +9,7 @@ function stateFor(actor) {
         const selfId = Number(item.fetchSelfId());
         inventory[selfId] = { amount: Number(inventory[selfId]?.amount || 0) + Number(item.fetchAmount()) };
     }
-    return { characterId: actor.fetchId(), level: actor.fetchLevel(), sp: actor.fetchSp(), inventory, stats: { classId: actor.fetchClassId(), clanId: Number(actor.fetchClanId?.() || 0),
+    return { level: actor.fetchLevel(), sp: actor.fetchSp(), inventory, stats: { classId: actor.fetchClassId(), clanId: Number(actor.fetchClanId?.() || 0),
         coldCombat: { skills: (actor.skillset?.fetchSkills?.() || []).map((skill) => ({
             selfId: skill.fetchSelfId(), level: skill.fetchLevel() })) } } };
 }
@@ -20,7 +19,7 @@ function review(session, { onSpAward = false } = {}) {
     if (!actor || !String(session.accountId || '').startsWith('bot_')) return Promise.resolve(null);
     const gate = session.skillTrainingGate;
     if (onSpAward && gate && gate.level === actor.fetchLevel() && gate.classId === actor.fetchClassId()
-        && actor.fetchSp() - ClanReviewEvents.spReserve(actor.fetchId()) < gate.nextSp) return Promise.resolve(null);
+        && actor.fetchSp() < gate.nextSp) return Promise.resolve(null);
     if (pending.has(actor)) return pending.get(actor);
     const Progression = invoke('GameServer/Bot/BotClassProgression');
     const state = stateFor(actor);
@@ -31,12 +30,6 @@ function review(session, { onSpAward = false } = {}) {
     const work = Progression.reconcile({ characterId: actor.fetchId(), classId: actor.fetchClassId(),
         level: actor.fetchLevel(), seed: actor.fetchId() }, { beforeWrite() {
         if (session.actor !== actor || session.populationStaging) throw new Error('bot_training_actor_retired');
-    }, onTrained(result) {
-        // Reflect each committed cost before another rank flushes hot writes.
-        // XP earned during the await is retained in the current actor balance.
-        Catalog.applyActor(session, result);
-        invoke('GameServer/Persistence/CharacterWriteQueue').experience(actor.fetchId(), actor.fetchLevel(),
-            actor.fetchExp(), actor.fetchSp());
     } }).then(async (result) => {
         if (session.actor !== actor) return result;
         if (Number(result.classId) !== Number(actor.fetchClassId())) actor.setClassId(result.classId);

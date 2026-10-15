@@ -431,19 +431,18 @@ async function run() {
         stockFor: id => id === 990002 ? { owned: 4 } : {}, remembered: false });
     assert.equal(closureNetwork.plans.get(ownedCraftRoot.key).requirements.length, 0,
         'physical owned ingredients remain executable after native provider pruning');
-    // Clan 1 has a warehouse, so the mage's skill books stay outside personal custody.
+    // Clan membership does not introduce a book requirement for free skills.
     Supply.useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
     const mage = { ...base, characterId: 903, level: 40, sp: 100000,
         stats: { ...base.stats, clanId: 1, classId: 14, exp: Data.experience[39], coldCombat: { classId: 14, skillSource: 'database', skills: [] } } };
-    const missing = Catalog.missingBooks(mage);
-    const valuable = missing.find(book => Providers.skillGain(mage, book).attack > 0);
-    assert(valuable, 'actual unlearned first-rank offensive skill has native improvement');
+    assert.deepEqual(Catalog.missingBooks(mage), []);
+    const valuable = { skillId: 1184, level: 1, selfId: Catalog.bookFor(1184) };
     const bookContext = Economy.forState(mage);
-    assert(bookContext.projection.nodes.some(node => node.key === `book:${valuable.skillId}`), 'real book competes with gear roots');
+    assert(!bookContext.projection.nodes.some(node => node.key.startsWith('book:')), 'free skills never compete for gear funding');
     const withBook = { ...mage, inventory: { ...mage.inventory, [valuable.selfId]: { selfId: valuable.selfId, amount: 2 } } };
-    const paid = Catalog.applyTraining(withBook, { spentSp: valuable.sp, consumedBooks: [{ selfId: valuable.selfId, amount: 1 }] });
-    assert.equal(paid.sp, withBook.sp - valuable.sp);
-    assert.equal(paid.inventory[valuable.selfId].amount, 1);
+    const granted = Catalog.applyTraining(withBook, { spentSp: 0, consumedBooks: [] });
+    assert.equal(granted.sp, withBook.sp);
+    assert.deepEqual(granted.inventory, withBook.inventory);
     assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, sp: mage.sp + 1 }));
     assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, stats: { ...mage.stats,
         coldCombat: { ...mage.stats.coldCombat, skills: [{ selfId: valuable.skillId, level: 1 }] } } }));
@@ -477,7 +476,7 @@ async function run() {
         assert.equal(score.efficiencyAdjustment, valued.valueHours * 100, 'route and wish readers share the same native table valuation');
     }
     Supply.useRowSource(null);
-    console.log('PASS actual book gain/provider/paid delta and skill/SP event key');
+    console.log('PASS no book wishes, free grant balance and skill/SP event key');
 
     const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
     const decisions = new Decisions.ColdEconomyDecisions();

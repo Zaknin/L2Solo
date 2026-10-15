@@ -164,6 +164,31 @@ function verify() {
             adena: 800, costs: 100, loot: 0, exp: 10, kills: 10 }) } };
     assert.equal(Route.select(weak, { spots, timestamp, required: true }).spot.id, 'rich',
         'a kit goal can use easier safe ground when the normal earning band has no profitable spot');
+    for (const clanLevel of [0, 1, 5]) for (const grade of ['none', 'd', 'c', 'b', 'a', 's']) {
+        const member = { ...weak, clanId: clanLevel ? 1 : 0, clanLevel,
+            stats: { ...weak.stats, clanId: clanLevel ? 1 : 0, wishFocus: ['power:200:14', 1, 1000000],
+                equipmentPlan: { status: 'active', grade, strategy: 'market' } } };
+        assert.equal(Route.economicHunt(member), true,
+            `ordinary earning band is independent of clan level ${clanLevel} and target grade ${grade}`);
+        assert.equal(Route.select(member, { spots, timestamp, required: true })?.spot.id, 'rich',
+            `clan level ${clanLevel} and target grade ${grade} preserve the better net-income camp`);
+        const tooLow = spots.map(spot => ({ ...spot, minLevel: 9, maxLevel: 9, avgLevel: 9 }));
+        assert.equal(Route.select(member, { spots: tooLow, timestamp, required: true }), null,
+            'economic hunts still reject a camp more than fifteen levels below the character');
+    }
+    for (const service of [{ stats: { ...weak.stats, craftStationId: 1 } },
+        { activity: 'crafting', stats: { ...weak.stats, craftShop: {}, generatedIndex: 10000 } }]) {
+        const stationary = { ...weak, ...service };
+        assert.equal(Route.select(stationary, { spots, timestamp, required: true }), null,
+            'stationary services do not enter ordinary farming');
+    }
+    const clanFunding = { ...earning, clanId: 1, clanLevel: 1,
+        stats: { ...earning.stats, clanId: 1, wishFocus: ['power:200:14', 1, 1000000],
+            equipmentPlan: { status: 'active', strategy: 'luxury_exchange',
+                clanGoal: { clanId: 1, goalKey: 'member-equipment' } } } };
+    assert.equal(invoke('GameServer/Bot/Population/SpotProfiles').findForState(clanFunding,
+        { profiles: spots, occupancy: {}, timestamp })?.id, 'rich',
+        'a clan-owned purchase plan without a hunting assignment still uses the best ordinary earning route');
 
     const item = { key: 'item:1', price: 1000, paths: [
         { kind: 'drop', activity: 'hunting', spotId: 'rare', costHours: 0, readyHours: 10 },

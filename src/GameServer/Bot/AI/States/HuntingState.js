@@ -637,7 +637,9 @@ module.exports = {
             }
             if (economy.network.activity?.activity === 'improving') {
                 const state = MarketListingPolicy.actorState(session);
-                if (economy.network.activity.improvement?.kind !== 'enchant' && !invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state)) {
+                const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');
+                if (economy.network.activity.improvement?.kind !== 'enchant'
+                    && !improvementService.selfCrystallization(economy.network.activity.improvement) && !improvementService.inTown(state)) {
                     const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned improvement.');
                     if (trip !== 'deferred' && trip !== false) return;
                 }

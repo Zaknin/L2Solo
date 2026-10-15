@@ -81,7 +81,7 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
                         slot: 8
                     }
                 }),
-                statsJson: JSON.stringify({ classId: 7, role: 'dagger' }),
+                statsJson: JSON.stringify({ classId: 7, role: 'dagger', hennas: [null, null, null] }),
                 updatedAt: 1
             };
         }

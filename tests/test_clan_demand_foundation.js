@@ -32,6 +32,7 @@ for (let i = 0; i < 240; i++) {
         coldCombat: { version: Combat.PROFILE_VERSION, skillSource: 'database', classId, skills: [] } };
     if (i === 239) stats.coldCombat.skills = Combat.skillSnapshotsFromRecords([{ selfId: 1015, level: 1 }]);
     insertCharacter.run(base + i, `Demand${i}`, classId);
+    if (i === 239) seed.prepare('INSERT INTO skills(selfId,name,passive,level,characterId) VALUES(1015,\'Heal\',0,1,?)').run(base + i);
     insertLife.run(base + i, `Demand${i}`, JSON.stringify(stats), 1000 + i);
 }
 seed.close();

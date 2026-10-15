@@ -1191,6 +1191,7 @@ function buildForState(state, deps) {
     // build; the projection is read lazily once it exists (stock roots).
     context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
+    context.completionKey = invoke('GameServer/Bot/Economy/BotCrystallization').completionKey(state);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = held?.sections?.sources === sections.sources
         ? held.sourceSections : null;
@@ -1219,6 +1220,7 @@ function buildForState(state, deps) {
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
+        completionKey: context.completionKey,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0 && unchangedChoice,
@@ -1347,7 +1349,8 @@ function planTrimmer(unresolved = new Set()) {
 // Queue rows keep the fields read after the build (funding, the money packet
 // ratio, the card, trade intents, gear and companion choices). network.plans
 // keeps the item plans (TradeIntent.npcOwnsPurchase asks by `item:<id>`) and
-// the plans of requirement rows that have none, not every graph node.
+// the plans of requirement rows that have none. A selected crystal operation
+// also keeps its one root: owned inputs can remove it from the money queue.
 function compactNetwork(network) {
     const unresolved = new Set(), trim = planTrimmer(unresolved);
     const row = wish => ({ key: wish.key, need: wish.need, object: wish.object, price: wish.price, reserved: wish.reserved,
@@ -1362,6 +1365,8 @@ function compactNetwork(network) {
         ...(leaf.intentionPath ? { intentionPath: trim(leaf.intentionPath) } : {}) };
     const all = network.plans || new Map(), plans = new Map();
     for (const [key, plan] of all) if (key.startsWith('item:')) plans.set(key, trim(plan));
+    if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange'].includes(leaf.kind)
+        && all.has(leaf.rootKey)) plans.set(leaf.rootKey, trim(all.get(leaf.rootKey)));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
     return { ...network, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
 }
