@@ -1139,7 +1139,11 @@ function buildForState(state, deps) {
 
     if (diagnostic) {
         Diagnostics.count('context', 'build', diagnosticReason);
-        Diagnostics.duration('context', performance.now() - started);
+        // Per reason too: a wave's builds cost ~3x a calm one's (2026-10-15);
+        // the split says whether lost retention or a moved input is the dear one.
+        const elapsed = performance.now() - started;
+        Diagnostics.duration('context', elapsed);
+        Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
         if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart);

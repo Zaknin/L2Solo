@@ -53,6 +53,10 @@ Config.developerDiagnostics = true; Economy.reset();
 let before = shadow();
 const first = Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:new_key': 1 }, 'first build has no previous key');
+{
+    const durations = Diagnostics.metrics().durations || {};
+    assert.strictEqual(durations['context:not_retained']?.count, durations.context?.count, 'build time is split by reason');
+}
 
 // Publication replaces the facts object while retaining the checked decision.
 before = shadow();
