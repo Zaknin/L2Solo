@@ -251,6 +251,25 @@ async function persistState(current) {
         assert.strictEqual(Chat.onDuty(serviceSession, startedAt + 9 * 60000), true);
         assert.strictEqual(Chat.onDuty(serviceSession, startedAt + 10 * 60000), false, 'city service ends after ten minutes');
         assert.strictEqual(Chat.onDuty(serviceSession, startedAt + 11 * 60000), false, 'city service has a cooldown');
+
+        const shopActor = { ...serviceActor, fetchLocX: () => 80456, fetchLocY: () => 147864, fetchLocZ: () => -3504 };
+        Policy.serviceClass = actor => actor === serviceActor || actor === shopActor;
+        const shopSession = { actor: shopActor, plan: 'hunting', buffServiceShiftUntil: startedAt + 10 * 60000 };
+        assert.strictEqual(Chat.onDuty(shopSession, startedAt), false,
+            'finishing a purchase inside Helvetia must not start or retain a ten-minute buff shift');
+        assert.strictEqual(shopSession.buffServiceShiftUntil, 0);
+        for (const ongoing of [
+            { townNpcQueue: { key: 'counter' } }, { townNpcApproach: { phase: 'interaction' } },
+            { spotRelocation: { method: 'town_gatekeeper' } }, { pendingTownTrip: {} }
+        ]) {
+            const busy = { actor: serviceActor, plan: 'hunting', ...ongoing };
+            serviceActor.stopped = false;
+            assert.strictEqual(Chat.onDuty(busy, startedAt), false, 'buff advertising must yield to unfinished town travel');
+            assert.strictEqual(serviceActor.stopped, false, 'a service shift must not abort the route out of a shop');
+        }
+        serviceActor.stopped = false;
+        assert.strictEqual(Chat.onDuty({ actor: serviceActor, plan: 'hunting' }, startedAt), true,
+            'an idle buffer on the town square must still offer the paid service');
     } finally {
         TradeChat.deliver = originalDeliver;
         Planner.supportSkills = originalSupportSkills;

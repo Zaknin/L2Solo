@@ -116,7 +116,9 @@ async function syncActors(row) {
         // travel and window stay untouched; the inventory sync is bound to the ID.
         if (session.actor === actor) {
             session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
-                locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null } : undefined;
+                locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null,
+                otherId: Number(anchor.actorA) === Number(id) ? anchor.actorB : anchor.actorA, town: anchor.town,
+                route: JSON.parse(Number(anchor.actorA) === Number(id) ? anchor.routeB || '{}' : anchor.routeA || '{}') } : undefined;
             if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
         }
         await afk().syncOnlineInventory(id, await db().fetchItems(id, 'trade_meeting_sync'));

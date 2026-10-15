@@ -211,6 +211,10 @@ class ColdSimulationCoordinator {
         this.economyDecisions = new ColdEconomyDecisions();
         this.economyRoutes = new (invoke('GameServer/Bot/Economy/EconomyRouteCache').EconomyRouteCache)({
             send: payload => !this.stopping && this.ready && !!this.post('economy_route_request', payload),
+            evictable: id => {
+                const record = invoke('GameServer/World/World').registeredActorById(id);
+                return !record || record.retired || record.session?.actor !== record.actor || record.session.aiActive !== true;
+            },
             prepared: (id, key) => {
                 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
                 Economy.forgetContext(id, 'state_publication');
@@ -1794,6 +1798,8 @@ class ColdSimulationCoordinator {
                 timer = setTimeout(() => reject(new Error('cold_worker_accept_timeout')), Math.max(50, Number(timeoutMs) || 500));
                 this.waiters.set(msgId, { resolve, reject });
             });
+            // A cold handoff retires the visible owner's unconsumed route.
+            this.economyRoutes.forget(Number(state.characterId));
             return { ok: true, reason: 'accepted', ...payload };
         } catch (error) {
             this.waiters.delete(msgId);

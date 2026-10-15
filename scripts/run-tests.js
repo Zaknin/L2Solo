@@ -21,6 +21,7 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_native_board.js',
     'tests/test_c4_import_integration.js',
     'tests/test_generated_cold_loadout.js',
     'tests/test_c4_elven_forest_quests.js',
@@ -451,6 +452,7 @@ const tests = [
     'tests/test_life_state_hot_row_guard.js',
     'tests/test_cold_inventory_jewelry.js',
     'tests/test_cold_inventory_instance_sync.js',
+    'tests/test_inventory_summary_stackability.js',
     'tests/test_bot_cold_market_listing.js',
     'tests/test_bot_recipe_disposition.js',
     'tests/test_bot_inventory_cleanup_goal.js',

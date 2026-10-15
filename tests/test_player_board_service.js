@@ -69,6 +69,14 @@ async function main() {
     board.put({ ...record, id: 6, kind: 'buy_ad', storeType: BUY, custodyPolicy: 1,
         lines: [{ lineId: 16, selfId: 1864, count: 10, price: 90 }] }, {});
     const buyAd = { ...conditional, id: 6, lineId: 16 };
+    assert.deepEqual(service.entries(player, { side: SELL, tradeType: 'meeting' }).entries.map(row => row.id), [5]);
+    assert.deepEqual(service.entries(player, { side: SELL, tradeType: 'shop' }).entries.map(row => row.id), [1]);
+    assert.deepEqual(service.itemIds(player, { side: SELL, tradeType: 'meeting' }), [1864]);
+    assert.deepEqual(service.itemIds(player, { side: SELL, tradeType: 'shop' }), [1152]);
+    assert.deepEqual(service.entries(player, { side: BUY, tradeType: 'meeting' }).entries.map(row => row.id), [6]);
+    assert.deepEqual(service.entries(player, { side: BUY, tradeType: 'shop' }).entries, []);
+    const filteredFirst = service.entries(player, { side: SELL, tradeType: 'meeting', limit: 1 });
+    assert.equal(filteredFirst.next, null, 'excluded shops do not create a false Next page');
     assert.equal((await service.answer(player, buyAd)).action, 'meet');
     assert.deepEqual((await service.answer(player, { ...buyAd, locateOnly: true })).loc, { locX: 1000, locY: 0, locZ: 0 });
     meetingX = NaN;
@@ -135,6 +143,21 @@ async function main() {
     player.actor = newActor; finishCraft({ product: { id: 99, amount: 1 } });
     assert.equal((await pendingCraft).reason, 'player_unavailable');
     assert.deepEqual(newActor.backpack.items, [{ id: 500 }]); player.actor = originalActor;
-    console.log('Player board server contract: native index/read pages, current quote, own record, physical store interaction, workshop adapter and no remote purchase passed');
+    const mixed = new BoardIndex();
+    for (let id = 1; id <= 25; id++) mixed.put({ ...record, id, ownerId: 100 + id,
+        kind: id % 2 ? 'sell_ad' : 'shop', custodyPolicy: id % 2,
+        lines: [{ lineId: id, selfId: 1864, count: 10, price: id }] });
+    const filtered = create({ afk: () => ({ isBoardReady: () => true, boardIndex: () => mixed,
+        offerOf: () => ({ sourceName: 'Merchant', itemName: 'Coal' }) }) });
+    for (const tradeType of ['meeting', 'shop']) {
+        let cursor = null;const seen = [];
+        do {
+            const page = filtered.entries(player, { side: SELL, tradeType, limit: 2, cursor });
+            seen.push(...page.entries.map(row => row.id));cursor = page.next;
+        } while (cursor);
+        assert.deepEqual(seen, Array.from({ length: 25 }, (_, i) => i + 1).filter(id => tradeType === 'meeting' ? id % 2 : !(id % 2)),
+            'filtering precedes pagination and preserves raw cursor positions without duplicates or skipped offers');
+    }
+    console.log('Player board server contract: native index/read pages, trade-type search/pagination, current quote, own record, physical store interaction, workshop adapter and no remote purchase passed');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

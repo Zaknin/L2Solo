@@ -44,12 +44,12 @@ try {
     const Queries = require('../src/GameServer/World/ActorSpatialQueries');
     const Database = invoke('Database');
     let serial = 9980000;
-    const member = (x, { bot = false, online = true, id = ++serial } = {}) => {
+    const member = (x, { bot = false, online = true, loadedOnline = false, id = ++serial } = {}) => {
         const session = { accountId: (bot ? 'bot_' : 'player_') + id,
             fetchAccountId() { return this.accountId; }, socket: { destroy() {} },
             dataSendToMe() {}, dataSendToMeAndOthers() {}, dataSendToOthers() {} };
         const actor = new Model({ id, name: session.accountId, username: session.accountId, level: 35,
-            isOnline: false, locX: x, locY: 0, locZ: 0, hp: 100, maxHp: 100, mp: 100, maxMp: 100, karma: 0 });
+            isOnline: loadedOnline, locX: x, locY: 0, locZ: 0, hp: 100, maxHp: 100, mp: 100, maxMp: 100, karma: 0 });
         session.actor = actor; actor.session = session;
         World.insertUser(session); actor.setIsOnline(online);
         return session;
@@ -75,6 +75,28 @@ try {
         player.actor.setIsOnline(true); player.actor.setLocX(6000);
         assert.equal(Policy.evaluate(bot, World, 41000).tier, 'visible');
         assert.equal(World.nearestRealPlayer({ locX: 0, locY: 0 }).session, player);
+    });
+
+    check('SQLite online flags publish presence before a same-cell shopping tick', () => {
+        for (const loadedOnline of [0, 1]) {
+            const entering = member(100, { loadedOnline });
+            const record = World.registeredActorById(entering.actor.fetchId());
+            assert.equal(entering.actor.fetchIsOnline(), true);
+            assert(World.actorPresenceSessions().includes(entering),
+                'EnterWorld must publish online presence even when numeric SQLite flags keep the location cache unchanged');
+            assert.equal(World.nearestRealPlayer({ locX: 0, locY: 0 }).session, entering);
+            const shopper = { ...bot, plan: 'shopping', hotActorLod: null };
+            assert.equal(Policy.evaluate(shopper, World, 50000).tier, 'full',
+                'a shopper beside the entering player must execute AI instead of remaining in preload');
+            entering.actor.setIsOnline(0);
+            assert(!World.actorPresenceSessions().includes(entering),
+                'a numeric offline transition also removes the previous presence without movement');
+            entering.actor.setIsOnline(true);
+            assert(World.actorPresenceSessions().includes(entering));
+            assert.equal(World.registeredActorById(entering.actor.fetchId()), record,
+                'presence updates retain the registered actor and its token');
+            World.removeUser(entering);
+        }
     });
 
     // Observe the entire authored Status module's lexical nearby consumer.

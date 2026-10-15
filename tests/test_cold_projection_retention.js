@@ -177,12 +177,19 @@ async function publish() {
         assert.equal(message.payload.priority, 'P0');
         assert.equal(coordinator.projectedEntryFor(row.characterId).ok, true);
 
+        const pendingRoute = { key: 'visible-visit', requestId: 1,
+            rows: Array(16).fill([true, 0, 0]), consumed: false };
+        coordinator.economyRoutes.cards.set(row.characterId, pendingRoute);
         const acceptance = coordinator.acceptColdState(state);
         message = await receive();
         assert.equal(message.payload.ack, true);
+        assert.equal(coordinator.economyRoutes.cards.get(row.characterId), pendingRoute,
+            'an unacknowledged handoff retains the hot owner route');
         await coordinator.onMessage(Protocol.envelope('ready', coordinator.workerEpoch,
             { phase: 'state_loaded', characterId: row.characterId }, message.msgId));
         assert.equal((await acceptance).ok, true);
+        assert.equal(coordinator.economyRoutes.cards.has(row.characterId), false,
+            'accepted cold ownership releases the unconsumed visible route slot');
         assert.equal(coordinator.projectedEntryFor(row.characterId).ok, true);
 
         delivered = receive();

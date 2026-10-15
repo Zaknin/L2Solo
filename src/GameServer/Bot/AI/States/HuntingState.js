@@ -28,6 +28,8 @@ const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPosi
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
 const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const TownNpcApproach = invoke('GameServer/Bot/AI/TownNpcApproach');
+const TownPathfinder = invoke('GameServer/Bot/AI/TownPathfinder');
+const CompanionNavigationRecovery = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
 const HotTownRebuff = invoke('GameServer/Bot/AI/HotTownRebuff');
 const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
@@ -48,6 +50,35 @@ const MAX_SPOT_RELOCATION_MS = 120000;
 const FAILED_SPOT_RETRY_MS = 60000;
 const FULL_TARGET_CANDIDATE_LIMIT = 96;
 const VISIBLE_TARGET_CANDIDATE_LIMIT = 32;
+const SHOP_DEPARTURE_RADIUS = 900;
+
+function leaveShop(session, bot, now = Date.now()) {
+    if (!isSoloHunter(session) || !session.pendingFarmDepartureAnnouncement || session.spotRelocation
+        || BotTownTravel.hasCombatThreat(session, bot) || bot.state?.fetchCasts?.()) return false;
+    if (RestPolicy.needsRest(bot, bot.fetchHp?.() / bot.fetchMaxHp?.(), bot.fetchMp?.() / bot.fetchMaxMp?.())) return false;
+    const point = botLocation(bot);
+    const town = TownPathfinder.getTown(point);
+    if (!town || SpotService.distance2d(point, town.center) <= SHOP_DEPARTURE_RADIUS) return false;
+    if (Number(session.shopDepartureRetryAt || 0) > now) return true;
+    // Choose a farming destination after clearing the shop, even when no
+    // suitable hunt is available yet. Do not wander against the counter wall.
+    const angle = Math.abs(Number(bot.fetchId()) % 16) * Math.PI / 8;
+    const destination = {
+        locX: Math.round(town.center.locX + Math.cos(angle) * 160),
+        locY: Math.round(town.center.locY + Math.sin(angle) * 160),
+        locZ: town.center.locZ,
+        town: town.name
+    };
+    TownNpcApproach.reset(session);
+    const navigation = CompanionNavigationRecovery.move(session, bot, destination, 'shop_departure',
+        { targetActor: null, arrivalRadius: 160 });
+    session.lastDecision = { action: 'leave_shop', reason: navigation.status, town: town.name, at: now };
+    if (navigation.status === 'exhausted') {
+        session.shopDepartureRetryAt = now + 5000;
+        CompanionNavigationRecovery.clear(session);
+    }
+    return true;
+}
 
 function isSoloHunter(session) {
     return session.plan === 'hunting' && session.partyCompanion !== true && !session.followPlayerSession;
@@ -288,6 +319,7 @@ function rememberEncounterReadiness(session, target, readiness) {
 
 function beginVoluntaryRecovery(session, bot, BotAI, readiness = null) {
     if (session.currentTargetId) clearTarget(session, bot, session.currentTargetId);
+    TownNpcApproach.reset(session);
     session.lastTargetEvaluation = undefined;
     session.lastCombatDecision = undefined;
     session.lastPvpDecision = undefined;
@@ -539,6 +571,7 @@ function targetProgressing(session, bot, target) {
 }
 
 module.exports = {
+    leaveShop,
     economyForHunt,
     sellTripDue,
     pauseSelling,
@@ -554,6 +587,7 @@ module.exports = {
         const floor = SurvivalFloor.forActor(bot, session.coldLifeState);
         if (isSoloHunter(session)) DecisionEvents.observe(session, bot);
         if (floor?.action === 'rest') {
+            TownNpcApproach.reset(session);
             bot.automation.abortAll(bot);
             session.plan = 'resting';
             return;
@@ -568,6 +602,8 @@ module.exports = {
             const trip = startShopping(session, bot, BotAI, `Inventory ${floor.reason}. Heading to town.`);
             if (trip !== 'deferred') return;
         }
+
+        if (leaveShop(session, bot)) return;
 
         // 1. Expire buffs check for hunting bots. A hot bot already in a
         // starter town also refreshes once per visit before going back out.

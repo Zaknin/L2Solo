@@ -230,6 +230,8 @@ function shoppingNpcSale(session) {
 }
 
 function clearShoppingServiceState(session) {
+    TownNpcApproach.reset(session);
+    CompanionNavigationRecovery.clear(session);
     session.shoppingNpcSale = undefined;
     session.shoppingServicePhase = undefined;
     session.shoppingWarehouseDone = undefined;
@@ -357,6 +359,12 @@ async function craftAtWorkshop(session, bot, target) {
 module.exports = {
     workshopTarget, craftAtWorkshop,
     tick(session, bot, Generics, BotAI) {
+        // The receipt/return callback owns the rest of this visit. Rejoining
+        // the counter queue during its delay steals time from real shoppers.
+        if (session.shoppingDoneAnnounced) {
+            TownNpcApproach.reset(session);
+            return;
+        }
         if (require('../../../AfkTrade/TradeMeetingService').hasPreparation(bot.fetchId())
             || session.coldLifeState?.stats?.tradeMeeting || invoke('GameServer/Bot/Population/BotLifeState').cachedState(bot.fetchId())?.stats?.tradeMeeting) {
             return;

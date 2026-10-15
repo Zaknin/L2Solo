@@ -21,6 +21,8 @@ async function main() {
         nativeItemsView: { tab: 'map', places: [{ id: 1 }] }, nativeItemsOpen: true,
         nativeFinderVisible: ['OldBot'], nativeFriendsVisible: [{ id: 9 }], nativeStatusView: { name: 'OldBot' },
         nativeMenuVersion: 1, nativeArenaOpen: true, nativePartyUiOpen: true,
+        nativeBoardVersion: 1, nativeBoardEpoch: 6, nativeBoardRevision: 12, nativeBoardOpen: true,
+        nativeBoardActions: [{ command: 'board agree' }], nativeBoardModel: { title: 'Old trade' }, nativeBoardBusy: {},
         botFriendsView: { mode: 'add' }, botStatusName: 'OldBot', botPartyCatalogState: { page: 9 },
         playerBoardView: { town: 'Giran', selfId: 57 }, playerBoardNavigation: { cursors: [{ selfId: 57, n: 1 }] },
         playerBoardSearch: 'Shield', playerBoardWaypoint: { x: 7, y: 8, z: 9 },
@@ -32,10 +34,12 @@ async function main() {
     select(2);
     assert.equal(session.nativeItemsVersion, 1); assert.equal(session.nativeMenuVersion, 1);
     assert.equal(session.nativeItemsEpoch, 4); assert.equal(session.nativeItemsRevision, 8);
+    assert.equal(session.nativeBoardVersion, 1); assert.equal(session.nativeBoardEpoch, 6); assert.equal(session.nativeBoardRevision, 12);
     for (const field of ['nativeItemsWaypoint', 'nativeItemsView', 'nativeItemsOpen', 'nativeFinderVisible',
         'nativeFriendsVisible', 'nativeStatusView', 'nativeMenuOpen', 'nativeArenaOpen', 'nativePartyUiOpen',
         'botFriendsView', 'botStatusName', 'botPartyCatalogState', 'playerBoardView', 'playerBoardNavigation',
-        'playerBoardSearch', 'playerBoardWaypoint', 'playerBoardPreparation']) assert.equal(session[field], undefined, field);
+        'playerBoardSearch', 'playerBoardWaypoint', 'playerBoardPreparation', 'nativeBoardOpen', 'nativeBoardActions',
+        'nativeBoardModel', 'nativeBoardBusy']) assert.equal(session[field], undefined, field);
     assert.equal(session.questWaypoints.size, 0);
     const consume = Speak.consume;
     let executed = 0;
