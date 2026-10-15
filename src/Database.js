@@ -2554,11 +2554,32 @@ function preserveColdVersionedStats(row, patch = {}) {
     return preserveColdVersionedStatsParsed(row, patch).patch;
 }
 
+// lazy: cycle ColdCombatProfile's AI and world modules load Database; resolved once, not per cold commit.
+let ColdCombatProfileModule;
+const coldCombatProfile = () => ColdCombatProfileModule
+    || (ColdCombatProfileModule = invoke('GameServer/Bot/Population/ColdCombatProfile'));
+
+// The rebuild below keeps a held rank's fields over the fresh ones and puts
+// the fresh keys first; a held skill whose keys already start with them and
+// whose identity fields match rebuilds into the same JSON.
+function heldSkillCurrent(held, fresh) {
+    if (!held || held.selfId !== fresh.selfId || held.level !== fresh.level || held.passive !== fresh.passive) return false;
+    const heldKeys = Object.keys(held);
+    let index = 0;
+    for (const key in fresh) if (heldKeys[index++] !== key) return false;
+    return true;
+}
+
+// Returns `combat` itself when the learned rows rebuild it unchanged, so the
+// caller re-serializes stats only after a skill move (a level-up, a grant).
 function nativeColdCombatSkillsUnsafe(characterId, combat) {
     if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const proposed = new Map((Array.isArray(combat.skills) ? combat.skills : []).map(skill => [Number(skill.selfId), skill]));
+    const Profile = coldCombatProfile();
     const learned = Profile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
+    const held = Array.isArray(combat.skills) ? combat.skills : null;
+    if (held && combat.version === Profile.PROFILE_VERSION && combat.skillSource === 'database'
+        && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill))) return combat;
+    const proposed = new Map((held || []).map(skill => [Number(skill.selfId), skill]));
     return { ...combat, version: Profile.PROFILE_VERSION, skillSource: 'database',
         skills: learned.map(skill => {
             const sameRank = proposed.get(skill.selfId);
@@ -2591,41 +2612,42 @@ function preserveColdVersionedStatsParsed(row, patch = {}) {
     const current = currentViews.plain;
     const incoming = next.statsJson === proposedRaw ? proposedViews.plain : jsonObject(next.statsJson);
     if (next.statsJson !== proposedRaw) stats = incoming;
+    // Each repair below edits `incoming`; it is serialized once after the last.
+    let dirty = false;
     // A resolve owns effects, cooldowns and other transient combat state.
     // Only the native learned rows own the skill set and its ranks.
     const combat = incoming.coldCombat || current.coldCombat;
     if (combat && Number(row?.characterId) > 0) {
-        incoming.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
+        const rebuilt = nativeColdCombatSkillsUnsafe(row.characterId, combat);
+        // A non-string proposal leaves this step serialized, as it always did.
+        if (rebuilt !== incoming.coldCombat || typeof next.statsJson !== 'string') {
+            incoming.coldCombat = rebuilt;
+            dirty = true;
+        }
     }
     // Physical symbols own these slots, including removals. A worker can
     // still carry the kit from before a native improvement or hot handoff.
     const hennas = nativeHennaSlotsUnsafe(row?.characterId);
     if (JSON.stringify(incoming.hennas) !== JSON.stringify(hennas)) {
         incoming.hennas = hennas;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
+        dirty = true;
     }
     // The native transaction owns this leaf. A stale worker/handoff snapshot
     // cannot remove, fabricate or rewind an intent or its saved completion.
     if (Object.hasOwn(current, 'economyCommit') || Object.hasOwn(incoming, 'economyCommit')) {
         if (Object.hasOwn(current, 'economyCommit')) incoming.economyCommit = current.economyCommit;
         else delete incoming.economyCommit;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
+        dirty = true;
     }
     // ARCH-NOTE: old workers can still carry the retired counters; the row table owns them now.
     if (incoming.marketTrades || incoming.priceBeliefs) {
         delete incoming.marketTrades;
         delete incoming.priceBeliefs;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
+        dirty = true;
     }
     if (Number(current.nameGeneratorVersion || 0) > Number(incoming.nameGeneratorVersion || 0)) {
         incoming.nameGeneratorVersion = current.nameGeneratorVersion;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
+        dirty = true;
     }
     if (Number(current.nameGeneratorVersion || 0) > 0 && 'characterName' in next) {
         next.characterName = row.characterName;
@@ -2634,6 +2656,9 @@ function preserveColdVersionedStatsParsed(row, patch = {}) {
         for (const key of ['clanId', 'clanMembershipVersion', 'clanDiscipline', 'clanPartyObjective']) incoming[key] = current[key];
         if (Number(current.clanDiscipline?.clanId) > 0
             && incoming.equipmentPlan?.clanGoal?.clanId === current.clanDiscipline.clanId) incoming.equipmentPlan = null;
+        dirty = true;
+    }
+    if (dirty) {
         next.statsJson = JSON.stringify(incoming);
         stats = incoming;
     }
@@ -4219,8 +4244,10 @@ const Database = {
                         throw new TypeError('invalid_bot_life_skill_snapshot');
                     const stats = jsonObject(params[27]);
                     const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
-                    if (combat) {
-                        stats.coldCombat = nativeColdCombatSkillsUnsafe(characterId, combat);
+                    const rebuilt = combat && nativeColdCombatSkillsUnsafe(characterId, combat);
+                    // An unchanged kit keeps the ROW's own JSON.stringify output.
+                    if (combat && (rebuilt !== stats.coldCombat || typeof params[27] !== 'string')) {
+                        stats.coldCombat = rebuilt;
                         params = [...params];
                         params[27] = JSON.stringify(stats);
                     }
