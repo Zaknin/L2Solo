@@ -453,8 +453,12 @@ function bestSpot(spots, state = {}, options = {}) {
         .find((candidate) => candidate.huntingGround?.allowed !== false && candidate.targetMatchup?.eligible !== false) || null;
 }
 
+// One spot: the reader's checks without its closure (L131 review).
 function isSpotAllowedForState(spot, state = {}, options = {}) {
-    return spotAllowedReaderFor(state, options)(spot);
+    const tags = tagsForSpot(spot);
+    return BotHuntingGroundPolicy.evaluate(spot, state, { ...options, tags }).allowed
+        && TargetMatchup.spotMatchup(spot, TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) }),
+            safetyOptions(state, options)).eligible;
 }
 
 // A spot search asks this for many spots of one bot with one state and

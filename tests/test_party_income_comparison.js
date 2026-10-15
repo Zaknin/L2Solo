@@ -35,7 +35,7 @@ for (const multiplier of [1, 10, 50]) assert.equal(Income.evaluate({ ...base,
     solo: { income: 1000 * multiplier }, party: { income: 200 * multiplier } }).accept, false);
 
 const original = { value: Table.value, ranked: Table.rankedIncome, hunt: Hunt.huntIncome,
-    samples: Hunt.sampledRows, costs: Hunt.consumablePrices, ensure: Profiles.ensure, gate: Routes.isSpotAllowedForState,
+    samples: Hunt.sampledRows, costs: Hunt.consumablePrices, ensure: Profiles.ensure, gate: Routes.isSpotAllowedForState, reader: Routes.spotAllowedReaderFor,
     forState: Economy.forState, forGroup: Economy.forGroup, npcs: Data.npcs, rewards: Data.npcRewards,
     rewardValue: Rewards.value };
 const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
@@ -66,6 +66,7 @@ try {
     Hunt.consumablePrices = () => ({ shots: 1, potions: 10 });
     Profiles.ensure = () => spots;
     Routes.isSpotAllowedForState = () => { gates++; return true; };
+    Routes.spotAllowedReaderFor = () => () => { gates++; return true; };
     Economy.forState = Economy.forGroup = () => { builds++; throw Error('admission built a wish network'); };
     const selected = Route.select(state, { spots, timestamp: at, required: true });
     assert.equal(selected.spot.id, 'lower'); assert.equal(selected.row.useShots, false,
@@ -152,7 +153,7 @@ try {
 } finally {
     Table.value = original.value; Table.rankedIncome = original.ranked;
     Hunt.huntIncome = original.hunt; Hunt.sampledRows = original.samples; Hunt.consumablePrices = original.costs;
-    Profiles.ensure = original.ensure; Routes.isSpotAllowedForState = original.gate;
+    Profiles.ensure = original.ensure; Routes.isSpotAllowedForState = original.gate; Routes.spotAllowedReaderFor = original.reader;
     Economy.forState = original.forState; Economy.forGroup = original.forGroup;
     Data.npcs = original.npcs; Data.npcRewards = original.rewards;
     Rewards.value = original.rewardValue;
