@@ -88,23 +88,32 @@ function roleSpoilLevel(role, level) {
 // (ProgressionRates keeps one profile object while the rates are equal).
 const MAX_VALUE_MEMO = 32768;
 const valueMemo = new Map();
-// ARCH-NOTE: PERF insertion order of valueMemo's keys, oldest at valueMemoHead: the drop at the
-// cap reads the oldest key here. Asking the Map for its first key walks every
-// slot an earlier drop left empty (4.3 s per 131k drops at the cap); a row is
-// only ever added on a miss and removed as the oldest, so both orders agree.
+// ARCH-NOTE: PERF valueMemo's keys by slot, a ring in insertion order; valueMemoTail is the next
+// slot to fill, at the cap the oldest row's, so the drop at the cap reads the oldest key here.
+// Asking the Map for its first key walks every slot an earlier drop left empty (4.3 s per 131k
+// drops at the cap).
 const valueMemoOrder = [];
-let valueMemoHead = 0;
-function clearValueMemo() { valueMemo.clear(); valueMemoOrder.length = 0; valueMemoHead = 0; }
-// The Map holds a key's slot in valueMemoOrder; the row lives at that slot as
-// 12 numbers in one slab and a flag byte (L104: the memo at its cap held 6.8 MB
-// of the cold worker heap with object rows, 4.3 MB so). A new row takes the slot
-// of the row dropped for it, so a slot holds its key's row while the key lives.
+let valueMemoTail = 0;
+function clearValueMemo() { valueMemo.clear(); valueMemoOrder.length = 0; valueMemoTail = 0; }
+// The Map holds a key's slot; the row lives at that slot as 12 numbers in a slab and a flag
+// byte. A new row drops the key filed at its slot, so a slot holds its key's row while the key
+// lives. L104: at the cap (x10, 24k real rows) the memo held 7.0 MB of the cold worker heap
+// with object rows, 1.0 MB so, plus the slab's 3 MB outside the JS heap (arrayBuffers). The ring fills
+// its slots in order before it wraps, so the slab grows by doubling and a small memo stays small.
 const ROW_NUMBERS = 12;
 const NO_ROW = 1, NO_STACKS = 2, NO_REWARDS = 4;
 const ADENA = 4, LOOT = 7, SHOTS = 8, POTIONS = 9;
-let memoNumbers = null, memoFlags = null;
+let memoNumbers = new Float64Array(0), memoFlags = new Uint8Array(0);
+function growSlab() {
+    const rows = Math.min(MAX_VALUE_MEMO, Math.max(1024, memoFlags.length * 2));
+    const numbers = new Float64Array(rows * ROW_NUMBERS), flags = new Uint8Array(rows);
+    numbers.set(memoNumbers);
+    flags.set(memoFlags);
+    memoNumbers = numbers;
+    memoFlags = flags;
+}
 function storeRow(slot, row) {
-    if (!memoNumbers) { memoNumbers = new Float64Array(MAX_VALUE_MEMO * ROW_NUMBERS); memoFlags = new Uint8Array(MAX_VALUE_MEMO); }
+    if (slot >= memoFlags.length) growSlab();
     if (!row) { memoFlags[slot] = NO_ROW; return; }
     const n = memoNumbers, at = slot * ROW_NUMBERS;
     n[at] = row.kills; n[at + 1] = row.deaths; n[at + 2] = row.exp; n[at + 3] = row.sp; n[at + ADENA] = row.adena;
@@ -266,12 +275,10 @@ function memoValue(t, rates, spotId, role, level, shots, skill) {
     if (slot === undefined) {
         DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
         const row = computeValue(t, rates, spotId, role, level, shots, skill);
-        if (valueMemo.size >= MAX_VALUE_MEMO) {
-            valueMemo.delete(valueMemoOrder[valueMemoHead]);
-            valueMemoHead = (valueMemoHead + 1) % MAX_VALUE_MEMO;
-            DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
-        }
-        slot = (valueMemoHead + valueMemo.size) % MAX_VALUE_MEMO;
+        slot = valueMemoTail;
+        valueMemoTail = (valueMemoTail + 1) % MAX_VALUE_MEMO;
+        const dropped = valueMemoOrder[slot];
+        if (dropped !== undefined && valueMemo.delete(dropped)) DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
         valueMemoOrder[slot] = key;
         storeRow(slot, row);
         valueMemo.set(key, slot);

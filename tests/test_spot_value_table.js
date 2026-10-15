@@ -152,6 +152,16 @@ process.env.L2NODE_PROGRESSION_RATE = 'x1';
         assert(ask('again1').hit, 'after a clear the second key is present');
         assert(ask('again0').miss, 'after a clear the first key is the one dropped');
         assert.strictEqual(Table.cacheStats().memo, CAP);
+        // A row that outlives a wrap still reads its own numbers: real rows first, then the ring wraps
+        // over the older half of them; the newer half is asked newest first, so no ask drops one unread.
+        Table.useFile(path.join(__dirname, 'fixtures', 'spot_table.json'));
+        const real = [];
+        for (const spot of ['S', 'T']) for (let level = 16; level <= 80; level++) for (const shots of [true, false]) real.push([spot, 'dps', level, shots]);
+        const rows = real.map((args) => Table.value(...args));
+        fill('pad', CAP - real.length / 2);
+        const hits = Table.cacheStats().memoHits;
+        for (let at = real.length - 1; at >= 0; at--) assert.deepStrictEqual(Table.value(...real[at]), rows[at], `${real[at]} after the wrap`);
+        assert.strictEqual(Table.cacheStats().memoHits - hits, real.length / 2, 'the newer half was read from the memo');
     } finally { Config.developerDiagnostics = developer; Table.useFile(); }
     console.log(`Spot value memo ring order and clear passed in ${Date.now() - started} ms`);
 }
