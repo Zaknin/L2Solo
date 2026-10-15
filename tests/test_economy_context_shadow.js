@@ -243,5 +243,28 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
         'the deadline is a key part too');
 }
 
+// The per-build record (tools/timeline) names the cause: the miss reason, the moved key parts, the plan outcome,
+// the read-set verdict and the build time; a served request leaves a hit record with what was deferred.
+{
+    const records = [], saved = { push: Diagnostics.push, enabled: Diagnostics.enabled };
+    Diagnostics.push = row => { records.push(row); return true; }; Diagnostics.enabled = () => true;
+    Economy.reset();
+    const base = { ...state(), characterId: 903 };
+    Economy.forState(base, deps);
+    Economy.forState({ ...base, adena: 9000 }, deps);
+    Economy.forState({ ...base, adena: 9000 }, deps);
+    Object.assign(Diagnostics, saved);
+    const builds = records.filter(row => row.phase === 'wish_context');
+    assert.deepEqual(builds.map(row => [row.reason, row.outcome, row.moved]), [
+        ['not_retained', 'first_build', ''],
+        ['input_dependency_changed', 'same_plan', 'adena'],
+        ['hit_same_inputs', 'held', '']], JSON.stringify(builds));
+    assert.strictEqual(builds[0].readset, 'none', 'a first build has no read set to compare');
+    assert.ok(['same', ...Economy.READSET_KINDS || ['item', 'market', 'spot', 'node', 'time']].includes(builds[1].readset), builds[1].readset);
+    assert.strictEqual(builds[2].readset, undefined);
+    assert.ok(builds[0].durationMs >= 0 && builds[1].durationMs >= 0, 'a build records its time');
+    assert.strictEqual(builds[2].durationMs, undefined, 'a hit has no build time');
+}
+
 Date.now = realNow; Config.developerDiagnostics = false; Economy.reset();
 console.log('test_economy_context_shadow: ok');

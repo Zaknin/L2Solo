@@ -918,17 +918,21 @@ const READSET_GAP_PARTS = new Set(['items', 'trip', 'mp', 'sp', 'adena', 'activi
 // (context:readset_moved). A same read set with a new plan is an input the
 // fence does not record: context:readset_gap names the moved key parts
 // (same_key when none moved) and route_rows when the read route rows moved.
+// Returns the first moved kind, or 'same' (the build's record names it).
 function countReadSet(sameKey, samePlan, previous, current, movedParts, rowsMoved) {
     const moved = readSetMoved(previous, current);
     Diagnostics.count('context', 'readset', `${sameKey ? 'same_key' : 'new_key'}_${moved === null ? 'same' : 'moved'}:${samePlan ? 'same_plan' : 'new_plan'}`);
-    if (moved !== null) { Diagnostics.count('context', 'readset_moved', moved); return; }
-    if (samePlan) return;
+    if (moved !== null) { Diagnostics.count('context', 'readset_moved', moved); return moved; }
+    if (samePlan) return 'same';
     if (sameKey) Diagnostics.count('context', 'readset_gap', 'same_key');
     let other = false;
     for (const name of movedParts) if (READSET_GAP_PARTS.has(name)) Diagnostics.count('context', 'readset_gap', name); else other = true;
     if (other) Diagnostics.count('context', 'readset_gap', 'other');
     if (rowsMoved) Diagnostics.count('context', 'readset_gap', 'route_rows');
+    return 'same';
 }
+// The moved key parts as one record field (text fields are cut at 64 chars).
+const movedText = parts => parts.length <= 4 ? parts.join(',') : `${parts.slice(0, 4).join(',')}+${parts.length - 4}`;
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('context', 'request');
@@ -974,6 +978,11 @@ function buildForState(state, deps) {
             // The gap is measured from the last use, as the cache keeps by last use.
             const last = lastKeyHashes.get(actorKey);
             if (last) last.at = Date.now();
+            // The timeline sees the served request too (tools/timeline): what held, what was deferred.
+            if (Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
+                caller: deps.caller || 'economy_context', trigger: deps.trigger || 'request', phase: 'wish_context',
+                reason: held.key === key ? 'hit_same_inputs' : 'hit_own_result', outcome: 'held', moved: deferred.join(','),
+                revision: state.simulation?.revision, wallet: positive(state.adena) });
         }
         held.gearThreat = gearThreat;
         held.stateRef = new WeakRef(state);
@@ -994,7 +1003,7 @@ function buildForState(state, deps) {
         : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
-    let previousReadset = null, movedParts = null;
+    let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
         const same = last?.hash === hash, hashes = partHashes(keyParts);
@@ -1044,7 +1053,7 @@ function buildForState(state, deps) {
     // Once the plan is known: keep this build's read set, compare it with the actor's previous build.
     const noteReadSet = shadowEntry === null ? null : plan => {
         shadowEntry.readset = readSetHashes(state, timestamp, keyParts, sections, own, reads, spotReads, bagReads);
-        if (previousPlan !== null && previousReadset !== null) countReadSet(shadowSame, plan === previousPlan,
+        if (previousPlan !== null && previousReadset !== null) readsetVerdict = countReadSet(shadowSame, plan === previousPlan,
             previousReadset, shadowEntry.readset, movedParts, previousRows !== shadowEntry.rows);
     };
     const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
@@ -1250,17 +1259,21 @@ function buildForState(state, deps) {
         Diagnostics.count('context', 'build', diagnosticReason);
         // Per reason too: a wave's builds cost ~3x a calm one's (2026-10-15);
         // the split says whether lost retention or a moved input is the dear one.
-        const elapsed = performance.now() - started;
+        elapsed = performance.now() - started;
         Diagnostics.duration('context', elapsed);
         Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
+        planOutcome = previousPlan === null ? 'first_build' : plan === previousPlan ? 'same_plan' : 'new_plan';
         if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart, diagnosticReason, probe);
         noteReadSet(plan);
     }
+    // The build's record carries its cause (tools/timeline): the miss reason, the key parts that moved since
+    // the actor's previous build, whether the plan repeated, the read-set verdict and the time it took.
     if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
+        outcome: planOutcome, moved: movedText(movedParts || []), readset: readsetVerdict || 'none', durationMs: Math.round(elapsed * 100) / 100,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0] });
