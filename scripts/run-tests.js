@@ -164,6 +164,7 @@ const tests = [
     'tests/test_player_party_raid_chatter.js',
     'tests/test_raid_strategy_regressions.js',
     'tests/test_hot_ground_loot.js',
+    'tests/test_spawn_drop_height.js',
     'tests/test_hot_background_party_revival.js',
     'tests/test_hot_background_party_buffs.js',
     'tests/test_bot_effect_handoff.js',

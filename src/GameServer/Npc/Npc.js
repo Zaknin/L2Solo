@@ -52,10 +52,9 @@ class Npc extends NpcModel {
         // Parent inheritance
         super(data);
 
-        // NOTE: Do NOT snap spawn Z to geodata here.
-        // Coordinates in spawns.json are already correct (taken from authentic L2J data).
-        // Applying GeodataEngine.getHeight() overwrites them with inaccurate geodata values
-        // causing NPCs to spawn under terrain in Dion, Gludio, Dark Elf Village, etc.
+        // Explicit datapack coordinates must retain their authored Z (towns
+        // and dungeon floors). SpawnNpcs resolves terrain only for random
+        // territory positions before constructing the NPC.
 
         // Local
         this.automation = new Automation();
