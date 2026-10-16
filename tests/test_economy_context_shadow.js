@@ -205,6 +205,114 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     } finally { Providers.build = build; Evidence.reader = reader; Config.developerDiagnostics = true; }
 }
 
+// Selected hunting progress and explicit equipment acquisition are shadow-only.
+// Raw bag+incoming progress is not a proof of allocatable stock or craft readiness.
+{
+    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
+    const build = Providers.build, enabled = Diagnostics.enabled, push = Diagnostics.push;
+    const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`;
+    let summaries = [], targetClaimed = false, funding = false, targetAmount = 1;
+    Providers.build = (_state, context) => {
+        if (targetClaimed) {
+            const stock = context.stockFor;
+            // A physically present target can be unavailable to this root.
+            context.stockFor = (id, root) => id === targetId ? { owned: 0, incoming: 0 } : stock(id, root);
+        }
+        return { nodes: [
+            { key: rootKey, need: 'power', object: { itemId: targetId, slot: 4 }, valueHours: 1000, price: 50,
+                paths: [{ requirements: [{ key: `item:${targetId}`, amount: targetAmount }] }] },
+            { key: `item:${targetId}`, price: 50, paths: [{ kind: 'craft', productCount: 1, costHours: .1,
+                requirements: [{ key: `item:${itemId}`, amount: 5 }] }] },
+            { key: `item:${itemId}`, price: 10, paths: [{ kind: 'drop', activity: 'hunting', itemId,
+                funding, costHours: 1, executable: true }] }
+        ], roots: [rootKey], values: new Map([[itemId, 10], [targetId, 50]]), moneyPaths: [], horizon: 1, sourceSections: null };
+    };
+    Diagnostics.enabled = () => true;
+    Diagnostics.push = row => {
+        if (row.phase !== 'wish_context' || !row.gate) return;
+        summaries.push(row);
+        const buffer = Diagnostics.create({ config: { developerDiagnostics: true, economyDiagnostics: true,
+            economyDiagnosticsBotIds: '913' }, thread: 'worker', now: () => clock });
+        let encoded;
+        buffer.connect(message => { encoded = message.records[0]; });
+        assert.equal(buffer.push(row), true, 'quantity and input/output evidence fits the unchanged serialized record budget');
+        assert.ok(Buffer.byteLength(encoded) + 1 <= Diagnostics.LIMITS.recordBytes);
+        assert.equal(JSON.parse(encoded).inputActivityLeaf, row.inputActivityLeaf, 'input leaf survives the public diagnostic schema');
+    };
+    const scenario = diagnostic => {
+        Config.developerDiagnostics = diagnostic; Economy.reset(); summaries = [];
+        const native = { ...state(), characterId: 913, adena: 1e6,
+            inventory: { ...state().inventory, [itemId]: { selfId: itemId, amount: 3, stackable: true } } };
+        const results = [], verdicts = [];
+        const request = (current, extra = {}) => {
+            const before = Diagnostics.metrics().counts || {};
+            const result = Economy.forState(current, { ...deps, ...extra });
+            if (diagnostic) verdicts.push(Object.keys(delta(before, Diagnostics.metrics().counts || {}))
+                .filter(key => key.startsWith('context:gate:')));
+            results.push({ network: result.network, packet: result.statsPacket });
+            assert.equal(Object.hasOwn(result.plan.network.activity || {}, 'heldAtDecision'), false);
+            return result;
+        };
+        const first = request(native);
+        assert.equal(first.network.activity?.itemId, itemId);
+        assert.equal(first.network.activity?.amount, 2);
+        assert.equal(request(native).plan, first.plan);
+        const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
+        const partial = { ...accepted, acceptedIncoming: { [itemId]: 1 } };
+        request(partial, { rememberContext: false });
+        if (diagnostic) assert.equal(summaries.at(-1).inputActivityLeaf, accepted.stats.activityLeaf);
+        request({ ...accepted, inventory: { ...accepted.inventory, [itemId]: { ...native.inventory[itemId], amount: 4 } } },
+            { rememberContext: false });
+        request({ ...partial, incomingPending: true });
+        request({ ...accepted, acceptedIncoming: { [itemId]: 2 } }, { rememberContext: false });
+        request({ ...accepted, inventory: { ...accepted.inventory, [itemId]: { ...native.inventory[itemId], amount: 2 } } },
+            { rememberContext: false });
+        request({ ...accepted, inventory: { ...accepted.inventory, [targetId]: { selfId: targetId, amount: 1 } } },
+            { rememberContext: false });
+        if (diagnostic) {
+            assert.deepEqual(verdicts, [['context:gate:no_held'], [], ['context:gate:would_hold'], ['context:gate:would_hold'],
+                ['context:gate:event_key'], ['context:gate:check_failed'], ['context:gate:check_failed'], ['context:gate:check_failed']]);
+            const complete = summaries.find(row => row.gate === 'check_failed' && row.actual === 2);
+            assert.deepEqual([complete.item, complete.requested, complete.before, complete.owned, complete.actual, complete.remaining],
+                [itemId, 2, 3, 3, 2, 0]);
+            assert.equal(complete.sequence, accepted.stats.decisionSeq, 'sequence is the request input; decisionSeq is the network output');
+            const acquired = summaries.at(-1);
+            assert.deepEqual([acquired.target, acquired.planned, acquired.after], [targetId, 0, 1]);
+        }
+        // An explicitly claimed target is physically present but not free stock.
+        Economy.reset(); targetClaimed = true;
+        const present = { ...native, inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } };
+        const held = request(present);
+        request({ ...native, stats: { ...native.stats, ...held.statsPacket } }, { rememberContext: false });
+        if (diagnostic) {
+            assert.deepEqual(verdicts.at(-1), ['context:gate:check_failed']);
+            assert.deepEqual([summaries.at(-1).target, summaries.at(-1).planned, summaries.at(-1).after], [targetId, 1, 0]);
+        }
+        targetClaimed = false;
+        // Funding hunts do not acquire a requested material; stack targets
+        // are not one-unit equipment acquisition boundaries.
+        Economy.reset(); funding = true; targetAmount = 2;
+        const fundingHeld = request(native);
+        request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 } },
+            { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a funding hunt does not use item acquisition progress');
+        request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 },
+            inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:bag'],
+            'multi-unit target arrival is left to the existing bag proof, not a one-unit acquisition event');
+        funding = false; targetAmount = 1;
+        Economy.reset();
+        const original = request(native);
+        const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
+        request({ ...native, stats: { ...native.stats, ...renewed.statsPacket } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:check_failed'],
+            'an actual completed retention advances the baseline; losing its new incoming unit is a refusal');
+        return results;
+    };
+    try { assert.deepEqual(scenario(true), scenario(false), 'hunting and target diagnostics preserve complete live networks and packets'); }
+    finally { Providers.build = build; Diagnostics.enabled = enabled; Diagnostics.push = push; Config.developerDiagnostics = true; }
+}
+
 // The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})

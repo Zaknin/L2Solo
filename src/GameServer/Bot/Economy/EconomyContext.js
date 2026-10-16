@@ -397,6 +397,19 @@ function bagHolds(state, plan, timestamp) {
 }
 // Pure diagnostic verdict. The live fingerprint and decisionHolds stay in
 // charge until the event crossings and shadow plan comparisons are complete.
+function materialHunt(leaf) {
+    return leaf?.activity === 'hunting' && leaf.funding !== true
+        && Number.isSafeInteger(leaf.itemId) && leaf.itemId > 0 && Number.isFinite(leaf.amount) && leaf.amount > 0;
+}
+// Only an explicit one-unit equipment acquisition: stock and resale targets
+// have different quantities. Read the retained build's admitted root, not its key.
+function acquisitionTarget(projection, focus) {
+    const root = projection.nodes.find(node => node.key === focus);
+    const id = root?.object?.itemId, path = root?.paths?.[0], requirement = path?.requirements?.[0];
+    return root?.need === 'power' && root.object?.slot != null && Number.isSafeInteger(id) && id > 0
+        && root.paths?.length === 1 && path?.requirements?.length === 1
+        && requirement?.key === `item:${id}` && requirement.amount === 1 ? id : undefined;
+}
 function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietSections) {
     if (!held) return 'no_held';
     if (last?.heldEventHash !== eventHash) return 'event_key';
@@ -407,9 +420,15 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, null, why)) return why[0];
     if (!bandsHold(state, held.plan.quantityBands, held.plan.network?.activity)) return 'bands';
+    if (last?.heldTargetItem && (positive(state.inventory?.[last.heldTargetItem]?.amount) > 0) !== last.heldTargetPresent) return 'check_failed';
     if (!bagHolds(state, held.plan, timestamp)) return 'bag';
     if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'market';
     const leaf = held.plan.network?.activity;
+    if (materialHunt(leaf)) {
+        const baseline = last?.heldHuntingUnits;
+        if (!Number.isFinite(baseline) || ColdEconomyDecision.heldFor(state, leaf.itemId) < baseline
+            || ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: baseline }, state) <= 0) return 'check_failed';
+    }
     let buyHolds = null;
     if (leaf?.activity === 'shopping' && leaf.kind === 'buy') {
         if (!Number.isFinite(last?.heldShoppingUnits)) return 'check_failed';
@@ -422,6 +441,20 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
     if (deps.withNodes && !held.projection || deps.nodes?.length || extensions.size) return 'nodes_needed';
     if (held.plan.pending) return 'plan_pending';
     return 'would_hold';
+}
+// Sampled proof uses existing numeric fields: item/requested = held hunting
+// item/amount, before = retained raw bag+incoming, owned/actual = current bag/
+// incoming, remaining = raw progress gap. This is not allocatable craft stock.
+// target/planned/after = target id and retained/current physical presence.
+function shadowQuantityEvidence(state, held, last) {
+    const leaf = held?.plan.network?.activity, out = {};
+    if (materialHunt(leaf)) Object.assign(out, { item: leaf.itemId, requested: leaf.amount, before: last?.heldHuntingUnits,
+        owned: positive(state.inventory?.[leaf.itemId]?.amount), actual: positive(state.acceptedIncoming?.[leaf.itemId]),
+        remaining: Number.isFinite(last?.heldHuntingUnits)
+            ? ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: last.heldHuntingUnits }, state) : undefined });
+    if (last?.heldTargetItem) Object.assign(out, { target: last.heldTargetItem, planned: Number(last.heldTargetPresent),
+        after: Number(positive(state.inventory?.[last.heldTargetItem]?.amount) > 0) });
+    return out;
 }
 // Compare funded flags only after both plans see the request's current wallet.
 function gatePlanDiff(state, held, fresh, deps) {
@@ -1103,6 +1136,8 @@ function countReadSet(sameKey, samePlan, previous, current, movedParts, rowsMove
 const movedText = parts => parts.length <= 4 ? parts.join(',') : `${parts.slice(0, 4).join(',')}+${parts.length - 4}`;
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
+    const inputSequence = diagnostic ? Number(state.stats?.decisionSeq || 0) : undefined;
+    const inputActivityLeaf = diagnostic ? Number(state.stats?.activityLeaf || 0) : undefined;
     if (diagnostic) Diagnostics.count('context', 'request');
     if (diagnostic && isMainThread && state.phase === 'cold') {
         const caller = deps.caller || 'other';
@@ -1209,7 +1244,9 @@ function buildForState(state, deps) {
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
             sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined,
-            heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined };
+            heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined,
+            heldHuntingUnits: held ? last?.heldHuntingUnits : undefined, heldTargetItem: held ? last?.heldTargetItem : undefined,
+            heldTargetPresent: held ? last?.heldTargetPresent : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1487,11 +1524,13 @@ function buildForState(state, deps) {
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
         outcome: planOutcome, moved: movedText(movedParts || []), readset: readsetVerdict || 'none', durationMs: Math.round(elapsed * 100) / 100,
-        decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
+        sequence: inputSequence, decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
+        inputActivityLeaf: gate === 'would_hold' ? inputActivityLeaf : undefined,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
-        heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
+        heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
+        ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held, shadowEntry) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     plan.bagSafety = bagSafety(state, timestamp);
@@ -1529,6 +1568,10 @@ function buildForState(state, deps) {
             const leaf = plan.network?.activity;
             shadowEntry.heldShoppingUnits = leaf?.activity === 'shopping' && leaf.kind === 'buy'
                 ? ColdEconomyDecision.heldFor(state, leaf.itemId) : undefined;
+            shadowEntry.heldHuntingUnits = materialHunt(leaf) ? ColdEconomyDecision.heldFor(state, leaf.itemId) : undefined;
+            shadowEntry.heldTargetItem = acquisitionTarget(projection, plan.network?.focus?.[0]);
+            shadowEntry.heldTargetPresent = shadowEntry.heldTargetItem
+                ? positive(state.inventory?.[shadowEntry.heldTargetItem]?.amount) > 0 : undefined;
         }
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
