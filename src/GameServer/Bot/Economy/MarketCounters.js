@@ -33,6 +33,9 @@ const STARTING_MOVE = 0.05;
 const COUNTER_KEYS = Object.freeze(['gear', 'shot', 'recipe', 'material']
     .flatMap((kind) => ['none', 'd', 'c', 'b', 'a', 's'].map((grade) => `${kind} ${grade}`)));
 
+// The table row key of each counter, built once (a fresh string is hashed on every read).
+const COUNTER_ROW_KEYS = Object.freeze(COUNTER_KEYS.map((key) => `c:${key}`));
+
 let spotsSource = () => [];
 const counterCache = new Map();
 const counters = new Map();
@@ -285,15 +288,23 @@ function counter(key, timestamp = Date.now()) {
     return { key, deals, perHour, index, move };
 }
 
+// The hourly move of one counter alone, null before a deal pair measured it.
+// The same field counter() reads, without its rate, clock or object.
+function measuredMove(key, rows, rowKey = `c:${key}`) {
+    return rows ? rows.get(rowKey)?.[6] ?? null : counters.get(key)?.move ?? null;
+}
+
 // The hourly move of a counter: its own, else the mean of the counters that
-// have one, else the starting value.
-function moveOf(key, timestamp = Date.now()) {
-    const own = counter(key, timestamp).move;
+// have one, else the starting value. A move needs no clock; the table is read
+// once and no counter object is built (24 reads on every unmeasured counter).
+function moveOf(key) {
+    const rows = mirror ? mirror() : null;
+    const own = measuredMove(key, rows);
     if (own !== null) return own;
     let sum = 0;
     let count = 0;
-    for (const other of COUNTER_KEYS) {
-        const move = counter(other, timestamp).move;
+    for (let at = 0; at < COUNTER_KEYS.length; at++) {
+        const move = measuredMove(COUNTER_KEYS[at], rows, COUNTER_ROW_KEYS[at]);
         if (move === null) continue;
         sum += move;
         count += 1;
