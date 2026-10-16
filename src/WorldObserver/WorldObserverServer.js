@@ -28,6 +28,10 @@ const ClanService = invoke('GameServer/Clan/ClanService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
 const Database = invoke('Database');
 const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
+const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const HotResourceCompetition = invoke('GameServer/Bot/AI/HotResourceCompetition');
+const ClanSocialRuntime = invoke('GameServer/Clan/ClanSocialRuntime');
+const HistoryDatabase = invoke('HistoryDatabase');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
@@ -450,7 +454,8 @@ const projectionRuntime = {
     lastPollAt: 0
 };
 // Read through worldStatus().runtime.developerDiagnostics.observer.
-const observerStats = { coldProjectionBinds: 0, coldProjectionUnbinds: 0, coldProjectionResyncs: 0 };
+const observerStats = { coldProjectionBinds: 0, coldProjectionUnbinds: 0, coldProjectionResyncs: 0,
+    clanContributionBuilds: 0, clanContributionReuses: 0 };
 const PROJECTION_FIELDS = Object.freeze([
     'id', 'name', 'phase', 'mode', 'intent', 'role', 'level', 'classId', 'className',
     'raceId', 'exp', 'adena', 'equipmentValue', 'loc', 'area', 'region', 'online',
@@ -630,6 +635,30 @@ function clanOverviewQuery() {
     `, [], { read: true }], 'observer:clans');
 }
 
+// The ledger only gains rows, so its newest id says whether the per-clan sums
+// moved; the sums scan the whole history and are rebuilt only then (a clan or a
+// member deleted with its rows is picked up with the next contribution).
+const clanContributions = { tail: -1, rows: [] };
+async function clanContributionTotals() {
+    const [row] = await Database.execute(['SELECT COALESCE(MAX(id), 0) AS tail FROM clan_contributions', []],
+        'observer:clan-contribution-tail');
+    const tail = Number(row?.tail || 0);
+    if (tail === clanContributions.tail) {
+        observerStats.clanContributionReuses += 1;
+        return clanContributions.rows;
+    }
+    const rows = await Database.execute([`
+        SELECT clanId, targetLevel, COUNT(*) AS entries, COALESCE(SUM(amount), 0) AS amount
+        FROM clan_contributions
+        GROUP BY clanId, targetLevel
+        ORDER BY clanId ASC, targetLevel ASC
+    `, []], 'observer:clan-contributions');
+    observerStats.clanContributionBuilds += 1;
+    clanContributions.tail = tail;
+    clanContributions.rows = rows;
+    return rows;
+}
+
 function clanAuxiliaryRows() {
     const bloodMarkId = Number(ClanSimulationConfig.bloodMarkItemId || 1419);
     return Promise.all([
@@ -642,12 +671,7 @@ function clanAuxiliaryRows() {
             WHERE amount > 0
             GROUP BY clanId
         `, [bloodMarkId]], 'observer:clan-warehouse'),
-        Database.execute([`
-            SELECT clanId, targetLevel, COUNT(*) AS entries, COALESCE(SUM(amount), 0) AS amount
-            FROM clan_contributions
-            GROUP BY clanId, targetLevel
-            ORDER BY clanId ASC, targetLevel ASC
-        `, []], 'observer:clan-contributions'),
+        clanContributionTotals(),
         Database.execute([`
             SELECT clanId, COUNT(*) AS openDemands,
                    COALESCE(SUM(amount), 0) AS requestedUnits,
@@ -2155,7 +2179,7 @@ function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
     const diagnostics = PopulationConfig.developerDiagnostics === true;
     const memory = diagnostics ? process.memoryUsage() : null;
-    const cold = diagnostics ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot() : null;
+    const cold = diagnostics ? ColdSimulationCoordinator.snapshot() : null;
     return {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
@@ -2164,16 +2188,16 @@ function worldStatus() {
         population: PopulationStatus.counts(),
         coldCompetition: cold ? cold.worker?.competition || null : null,
         coldCompetitionActions: cold ? cold.competitionActions || null : null,
-        hotCompetitionActions: diagnostics ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
+        hotCompetitionActions: diagnostics ? HotResourceCompetition.report : null,
         partyReviews: cold ? cold.partyReviews || null : null,
-        clanSocial: diagnostics ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
+        clanSocial: diagnostics ? ClanSocialRuntime.summary() : null,
         runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
             developerDiagnostics: {
                 main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
                 worker: cold.worker?.developerDiagnostics || null,
-                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false },
+                transport: HistoryDatabase.stats().economyDiagnostics || { enabled: false },
                 observer: observerDiagnostics()
             },
             townNavigation: {
