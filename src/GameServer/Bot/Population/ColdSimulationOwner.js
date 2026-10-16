@@ -63,8 +63,8 @@ function ownership(state = {}) {
     };
 }
 
-function persistencePatch(state = {}, timestamp = Date.now()) {
-    const inventory = InventorySummary.canonicalize(state.inventory);
+function persistencePatch(state = {}, timestamp = Date.now(),
+    inventorySummary = JSON.stringify(InventorySummary.canonicalize(state.inventory))) {
     return {
         level: Number(state.level || 1),
         exp: Number(state.exp || 0),
@@ -89,7 +89,7 @@ function persistencePatch(state = {}, timestamp = Date.now()) {
         targetLevelBand: state.levelBand || null,
         deathCount: Number(state.stats?.deaths || 0),
         partyId: state.party?.partyId || null,
-        inventorySummary: JSON.stringify(inventory),
+        inventorySummary,
         statsJson: JSON.stringify(state.stats || {}),
         updatedAt: Number(state.updatedAt || timestamp)
     };
@@ -98,7 +98,8 @@ function persistencePatch(state = {}, timestamp = Date.now()) {
 function withPersistedStats(state, result) {
     if (!state || typeof result?.row?.statsJson !== 'string') return state;
     try {
-        const stats = JSON.parse(result.row.statsJson);
+        // The commit hands over its own parse of the stats it wrote when nothing rewrote them.
+        const stats = result.committedStats || JSON.parse(result.row.statsJson);
         if (!stats || typeof stats !== 'object') return state;
         const persisted = { ...state, name: result.row.characterName || state.name, stats };
         // The commit merged what the board held for the bot (deals, closed
@@ -316,7 +317,8 @@ function commitAndReleaseBatch(entries = [], options = {}) {
         const canonicalState = { ...nextState, inventory: canonicalInventory };
         states.set(Number(token.characterId), canonicalState);
         const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
-        const inventoryChanged = JSON.stringify(previousInventory) !== JSON.stringify(canonicalInventory);
+        const inventorySummary = JSON.stringify(canonicalInventory);
+        const inventoryChanged = JSON.stringify(previousInventory) !== inventorySummary;
         // The physical writer needs explicit removals even though persisted
         // summaries omit empty stacks. Only remove items owned by this proposal.
         const physicalInventory = { ...canonicalInventory };
@@ -329,7 +331,7 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             ownerId: OWNER_ID,
             leaseId: token.leaseId,
             timestamp,
-            patch: persistencePatch(canonicalState, timestamp),
+            patch: persistencePatch(canonicalState, timestamp, inventorySummary),
             physical: {
                 level: Number(nextState.level || 1),
                 exp: Number(nextState.exp || 0),
