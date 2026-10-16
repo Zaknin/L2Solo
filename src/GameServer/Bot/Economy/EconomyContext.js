@@ -2,6 +2,7 @@
 const ClassProgression = invoke('GameServer/ClassProgression');
 
 const GearThreat = require('./GearThreat');
+const Improvement = require('./BotImprovementPolicy');
 
 const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
@@ -412,7 +413,7 @@ function acquisitionTarget(projection, focus) {
         && root.paths?.length === 1 && path?.requirements?.length === 1
         && requirement?.key === `item:${id}` && requirement.amount === 1 ? id : undefined;
 }
-function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietSections) {
+function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietSections, improvementMark) {
     if (!held) return 'no_held';
     if (last?.heldEventHash !== eventHash) return 'event_key';
     if (state.stats?.wishDirty) return 'wish_dirty';
@@ -421,6 +422,7 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
         Number(packet.activityLeaf || 0), packet.wishFocus?.[0] ?? null);
     if (echo) return echo === 'decision_seq' ? 'silent_seq' : 'check_failed';
     if (!quietSections) return 'sections';
+    if (last?.heldImprovementMark !== improvementMark) return 'check_failed';
     const why = [];
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, null, why)) return why[0];
@@ -1252,12 +1254,16 @@ function buildForState(state, deps) {
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     let gate = null, gateDiff = null;
+    let improvementMark;
     if (diagnostic) {
+        // Only a diagnostic miss scans native targets. A hit performs none;
+        // raw instance identity is not ordinary stack-count drift.
+        improvementMark = Sections.hash(Improvement.targetInputs(state));
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey);
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         const eventHash = eventKeyHash(hashes), baseline = held?.plan.statsPacket.wishSections;
         const quietSections = !!baseline && Sections.factEvents(name => baseline[name], Sections.semanticFacts(state, timestamp), state).length === 0;
-        gate = shadowGate(state, held, last, eventHash, timestamp, deps, sourceBoard, quietSections);
+        gate = shadowGate(state, held, last, eventHash, timestamp, deps, sourceBoard, quietSections, improvementMark);
         Diagnostics.count('context', 'gate', gate);
         if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
         Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(state, held, sourceBoard, deps, timestamp));
@@ -1284,7 +1290,8 @@ function buildForState(state, deps) {
             heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined,
             heldHuntingUnits: held ? last?.heldHuntingUnits : undefined, heldTargetItem: held ? last?.heldTargetItem : undefined,
             heldTargetPresent: held ? last?.heldTargetPresent : undefined,
-            heldCraftProof: held ? last?.heldCraftProof : undefined };
+            heldCraftProof: held ? last?.heldCraftProof : undefined,
+            heldImprovementMark: held ? last?.heldImprovementMark : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1620,6 +1627,7 @@ function buildForState(state, deps) {
         if (shadowEntry) {
             shadowEntry.heldEventHash = shadowEntry.eventHash;
             shadowEntry.heldParts = shadowEntry.parts;
+            shadowEntry.heldImprovementMark = improvementMark;
             // Diagnostic execution proof only: raw leaves keep their live semantics.
             const leaf = plan.network?.activity;
             shadowEntry.heldShoppingUnits = leaf?.activity === 'shopping' && leaf.kind === 'buy'

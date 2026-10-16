@@ -19,6 +19,20 @@ function adapter(item) {
         fetchCristals: () => Number(source?.etc?.cristals || 0),
         isWeapon: () => kind.startsWith('Weapon.'), isArmor: () => kind.startsWith('Armor.') };
 }
+// The same ordered native targets feed admission and its diagnostic input
+// mark. Market interest, benefit, costs and tendency belong to opportunities.
+function targets(state) {
+    const Rules = invoke('GameServer/Items/C4EnchantRules'), result = [];
+    for (const item of instances(state)) {
+        if (!Sources.hasSource(item.selfId)) continue;
+        const a = adapter(item), category = Rules.categoryOf(a);
+        if (category && Rules.CRYSTAL_IDS[Rules.gradeOf(a)]) result.push({ item, a, category });
+    }
+    return result;
+}
+function targetInputs(state) {
+    return targets(state).map(({ item }) => [item.selfId, item.id, item.enchant, item.equipped, item.slot, item.amount]);
+}
 function changedInventory(state, item, patch) {
     const inventory = { ...state.inventory };
     const row = inventory[item.selfId];
@@ -104,13 +118,10 @@ function opportunities(state, ctx) {
         return (effect.attack + effect.defence * ctx.deathHours) * horizon * weight;
     };
     const result = [];
-    for (const item of instances(state)) {
-        if (!Sources.hasSource(item.selfId)) continue;
-        const a = adapter(item), category = Rules.categoryOf(a);
+    for (const { item, a, category } of targets(state)) {
         // What losing this weapon costs: once per item, only where a try can fail.
         let stuck = null;
         const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, Profile.powerNumbers(build)));
-        if (!category || !Rules.CRYSTAL_IDS[Rules.gradeOf(a)]) continue;
         const equipped = item.equipped;
         const buyer = !equipped && ctx.board?.first(item.selfId, 3, { excludeOwner: state.characterId });
         if (!equipped && !buyer && !ctx.board?.first(item.selfId, 1, { excludeOwner: state.characterId })) continue;
@@ -224,4 +235,4 @@ function crystalPath(state, id, ctx, spots = []) {
     }
     return best;
 }
-module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, adapter, changedInventory, enchantCost, stuckCost };
+module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, targetInputs, adapter, changedInventory, enchantCost, stuckCost };

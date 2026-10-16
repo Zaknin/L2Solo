@@ -477,6 +477,103 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         'the deadline is a key part too');
 }
 
+// Physical target identity belongs to native improvement admission even when
+// no amount, worn stat, bag slot or semantic event changes.
+{
+    const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
+    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
+    const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+    const Life = invoke('GameServer/Bot/Population/BotLifeState');
+    const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
+    const Data = invoke('GameServer/DataCache');
+    const Sources = invoke('GameServer/Items/ItemAcquisitionCatalog');
+    const weapon = Data.items.find(row => String(row.etc?.rank).toLowerCase() === 'c'
+        && Number(row.etc?.cristals) > 0 && row.template?.kind?.startsWith('Weapon.') && Sources.hasSource(row.selfId));
+    assert(weapon, 'a source-admitted native C4 weapon exists');
+    const originalBuild = Providers.build, targetId = weapon.selfId;
+    const board = new BoardIndex();
+    board.itemRevision = id => board.itemFingerprint(id);
+    board.put({ id: 9801, kind: 'shop', storeType: 1, ownerId: 7, town: 'Giran',
+        lines: [{ lineId: 1, selfId: targetId, count: 1, price: 5e6 }] });
+    const input = { ...state(), characterId: 9801, level: 35, adena: 1e8,
+        stats: { classId: 1, exp: Data.experience[34] },
+        inventory: Life.inventorySummaryFromItems([
+            { id: 1, selfId: 1, amount: 1, equipped: true, slot: 7 },
+            { id: 98010, selfId: targetId, amount: 1, equipped: false, enchant: 0, slot: 0 },
+            { id: 98011, selfId: 951, amount: 10, equipped: false },
+            { id: 98012, selfId: 953, amount: 10, equipped: false },
+            { id: 98013, selfId: 1835, amount: 100000, equipped: false }]) };
+    const options = { ...deps, timestamp: clock, board };
+    const context = { ...Economy.basics(input, options), board };
+    assert(context.hunt.perHour > 0, `native hunting income is positive: ${context.hunt.perHour}`);
+    assert(context.price(951) > 0, 'the native C4 enchant scroll has a positive observed price');
+    const item = input.inventory[targetId].instances[0];
+    let opportunity;
+    // The native tendency may choose stop. Find a real admitted attempt;
+    // do not replace its roll, benefit, cost, recipe or eligibility rules.
+    for (let offset = 0; offset < 32 && !opportunity; offset++) {
+        item.id = 98010 + offset * 100;
+        opportunity = Policy.opportunities(input, context).find(row => row.kind === 'enchant' && row.objectId === item.id);
+    }
+    assert(opportunity, `a native C4 unequipped ${weapon.template.name} enchant opportunity exists`);
+    const oldId = item.id, rootKey = opportunity.key;
+    assert(rootKey.startsWith(`enchant:${oldId}:`));
+    const changed = { ...input, inventory: { ...input.inventory,
+        [targetId]: { ...input.inventory[targetId], instances: [{ ...item, id: oldId + 100000 }] } } };
+    assert.deepEqual(Sections.semanticFacts(changed, clock), Sections.semanticFacts(input, clock),
+        'old semantic facts cannot see the unequipped physical target ID');
+    assert.deepEqual(Floor.stateInventory(changed, Data.items), Floor.stateInventory(input, Data.items));
+    assert.equal(changed.inventory[targetId].amount, input.inventory[targetId].amount);
+    assert.notDeepEqual(Policy.targetInputs(input), Policy.targetInputs(changed), 'native target inputs include physical identity');
+    assert.deepEqual(Policy.targetInputs(input).find(row => row[1] === oldId), [targetId, oldId, 0, false, 0, 1]);
+    const ordered = { ...input, inventory: { [targetId]: { ...input.inventory[targetId], amount: 2,
+        instances: [{ ...item, id: String(oldId + 1) }, item] } } };
+    assert.deepEqual(Policy.targetInputs(ordered).map(row => row[1]), [String(oldId + 1), oldId],
+        'target identity types and native enumeration order are preserved');
+    assert.equal(Policy.opportunities(changed, { ...Economy.basics(changed, options), board })
+        .some(row => row.key === rootKey), false, 'the old physical enchant root disappears at its native owner');
+    Providers.build = (...args) => {
+        const projection = originalBuild(...args);
+        // Keep native generated enchant roots and their complete item graph;
+        // unrelated equipment/resale competitors do not choose this fixture.
+        const roots = projection.nodes.filter(row => row.key.startsWith('enchant:'));
+        return { ...projection, roots: roots.map(row => row.key), moneyPaths: [] };
+    };
+    const targetInputs = Policy.targetInputs;
+    let markReads = 0;
+    Policy.targetInputs = (...args) => { markReads++; return targetInputs(...args); };
+    const scenario = (enabled, mode) => {
+        Config.developerDiagnostics = enabled; Economy.reset();
+        const initialReads = markReads;
+        const first = Economy.forState(input, options);
+        assert.equal(markReads - initialReads, Number(enabled), 'one native target scan per diagnostic miss, none while off');
+        const hitReads = markReads;
+        assert.strictEqual(Economy.forState(input, options).plan, first.plan);
+        assert.equal(markReads, hitReads, 'a live cache hit scans no improvement targets');
+        assert(first.network.focus?.[0]?.startsWith(`enchant:${oldId}:`), 'a real native enchant root is the held focus');
+        const next = { ...changed, stats: { ...changed.stats, ...first.statsPacket } };
+        if (mode === 'unkept') Economy.forState(next, { ...options, rememberContext: false });
+        if (mode === 'pending') Economy.forState({ ...next, incomingPending: true }, options);
+        const prior = Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0;
+        const fresh = Economy.forState(next, options);
+        if (enabled) assert.equal((Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0) - prior, 1,
+            `${mode}: the actual retained native target mark survives temporary/pending builds`);
+        assert.notEqual(fresh.network.focus?.[0], first.network.focus[0], 'the old native focus cannot survive a replaced target ID');
+        assert.notEqual(fresh.network.activityLeaf, first.network.activityLeaf, 'the selected native leaf changes too');
+        return { first, fresh };
+    };
+    try {
+        for (const mode of ['plain', 'unkept', 'pending']) {
+            const off = scenario(false, mode), on = scenario(true, mode);
+            for (const key of ['first', 'fresh']) {
+                assert.deepEqual(on[key].network, off[key].network, `${mode}: full native network is identical off/on`);
+                assert.deepEqual(on[key].statsPacket, off[key].statsPacket, `${mode}: full packet is identical off/on`);
+            }
+        }
+        console.log(`PASS native enchant identity proof: ${rootKey} disappears after objectId-only replacement`);
+    } finally { Providers.build = originalBuild; Policy.targetInputs = targetInputs; Config.developerDiagnostics = true; Economy.reset(); }
+}
+
 // The per-build record (tools/timeline) names the cause: the miss reason, the moved key parts, the plan outcome,
 // the read-set verdict and the build time; a served request leaves a hit record with what was deferred.
 {
