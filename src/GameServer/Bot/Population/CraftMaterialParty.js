@@ -8,6 +8,14 @@ const positive = value => Math.max(0, Number(value) || 0);
 const isObjective = objective => objective?.materialParty === true && !objective.clanGoalKey;
 const requestOf = state => isObjective(state.stats?.partyRequest) ? state.stats.partyRequest : null;
 
+// Match the native party reward resolver: only its first spoiler can cast,
+// and a class declaration cannot substitute for the learned Spoil skill.
+function partySpoiler(members) {
+    const member = members.slice(0, MAX_MEMBERS).find(state => invoke('GameServer/Bot/AI/BotRoles').isSpoiler(state));
+    return member ? require('./ColdKillRewards').spoilerFor(member,
+        { skills: require('./ColdCombatProfile').skillsFor(member) }) : null;
+}
+
 // One indexed item lookup, never a scan of the hunting atlas. Bound both the
 // cold-cache work and retained alternatives; shared static rows die with the
 // source index. Actor combat/route checks are separate and never cached here.
@@ -210,5 +218,5 @@ function selectMembers(candidates, { minSize = 2, maxSize = MAX_MEMBERS, levelRa
     return members.length >= minSize ? members : [];
 }
 
-module.exports = { request, requestOf, isObjective, needs, remaining, selectMembers, agreement, departureRequest, joint, target,
+module.exports = { request, requestOf, isObjective, needs, remaining, selectMembers, agreement, departureRequest, joint, target, campsFor, partySpoiler,
     MAX_SOURCE_CHECKS, MAX_CAMPS, MAX_CORE, MAX_MEMBERS, REVIEW_MS };

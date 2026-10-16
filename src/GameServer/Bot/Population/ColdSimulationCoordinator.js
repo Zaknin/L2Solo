@@ -1130,6 +1130,13 @@ class ColdSimulationCoordinator {
         const sharedSpot = party?.stats?.objective?.spotId;
         let selected = partyRoute && sharedSpot && !excludedSpotIds.has(String(sharedSpot))
             ? index.spots.get(String(sharedSpot)) || null : wishDestination || fallbackSpot;
+        let materialRoute = null;
+        const materialHunt = partyRoute && require('./CraftMaterialParty').isObjective(party.stats?.objective);
+        if (!selected && materialHunt) {
+            materialRoute = require('./CraftMaterialPartyRoute').select(party, partyMembers,
+                index.profiles || [...index.spots.values()], options);
+            selected = materialRoute?.spot || null;
+        }
         try {
             // A party-mode search of a lone member builds no profiles at all.
             if (!selected) selected = SpotProfiles.findForState(routeState, !partyRoute
@@ -1186,7 +1193,8 @@ class ColdSimulationCoordinator {
                 && !member.stats?.pvpEncounter && !member.stats?.travel)
             && (!invoke('GameServer/Bot/Population/PartyHuntingAssembly').nearby(partyMembers)
                 || partyMembers.some(member => !SpotService.containsLocation(selected, member.loc)));
-        if (String(selected.id) === String(currentId || '') && !repairingPartyPosition
+        const materialReplan = materialRoute || materialHunt && String(selected.id) !== String(sharedSpot);
+        if (String(selected.id) === String(currentId || '') && !repairingPartyPosition && !materialReplan
             && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
 
         const reserved = partyRoute ? SpotProfiles.reservePartyCapacity(index.occupancy, selected, routedMembers)
@@ -1221,7 +1229,9 @@ class ColdSimulationCoordinator {
             ...(spotBackoff ? { cause: 'death_pressure', spotBackoff }
                 : repairingPartyPosition ? { cause: 'position_mismatch' } : {}),
             to: destinations[String(state.characterId)] || null,
-            destinations
+            destinations,
+            ...(materialRoute ? { materialSources: materialRoute.sources }
+                : materialHunt && String(selected.id) !== String(sharedSpot) ? { materialEvacuation: true } : {})
         };
     }
 

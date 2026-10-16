@@ -3324,14 +3324,19 @@ const PopulationService = {
                         .then(() => ({ ok: true, party: updatedParty || party, debug: meeting.debug })));
             }
 
-            if (partySessionExpired(party, startedAt)
-                || invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy').needsReview(party, members, startedAt)) {
+            if (!require('./CraftMaterialPartyRoute').evacuating(party) && (partySessionExpired(party, startedAt)
+                || invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy').needsReview(party, members, startedAt))) {
                 return commitPartyReview(party, members, startedAt);
             }
 
             if (party.stats?.travel?.reason === 'party_spot_replan') {
                 const arrivalAt = Number(party.stats.travel.arrivalAt || 0);
                 if (arrivalAt > startedAt) {
+                    if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
+                        return require('./CraftMaterialPartyRoute').commitLegacy(party, members,
+                            { ...party, nextResolveAt: arrivalAt }, members.map(member => ({ ...member,
+                                timing: { ...member.timing, nextResolveAt: arrivalAt } })), startedAt, 'party_travel_wait');
+                    }
                     return BackgroundPartyState.createOrUpdate({ ...party, nextResolveAt: arrivalAt })
                         .then((updatedParty) => ({ ok: true, party: updatedParty || party, debug: { activity: 'party_travel' } }));
                 }
@@ -3345,16 +3350,25 @@ const PopulationService = {
                         name: party.stats.travel.regionName,
                         center: recordedArrival || null
                     };
-                const arrivedMembers = members.map((member) => finishPartySpotTravel(
+                let arrivedMembers = members.map((member) => finishPartySpotTravel(
                     member,
                     startedAt,
                     destinationSpot,
                     party.stats.travel
                 ));
+                const materialArrival = require('./CraftMaterialPartyRoute').arrived(party, arrivedMembers, startedAt);
+                if (materialArrival) arrivedMembers = materialArrival.members;
+                if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
+                    return require('./CraftMaterialPartyRoute').commitLegacy(party, members,
+                        materialArrival?.party || finishPartyTravelRecord(party, startedAt), arrivedMembers,
+                        startedAt, 'party_arrival').then(result => result.ok ? LifeEvents.record(party.leaderId,
+                        'party_travel', `Party ${party.partyId} arrived near ${party.stats.travel.regionName || party.spotId}`,
+                        { partyId: party.partyId, spotId: party.spotId }, 1).then(() => result) : result);
+                }
                 return arrivedMembers.reduce((chain, member) => (
                     chain.then(() => LifeState.upsertState(member, 'party_spot_arrival'))
                 ), Promise.resolve()).then(() => BackgroundPartyState.createOrUpdate(
-                    finishPartyTravelRecord(party, startedAt)
+                    materialArrival?.party || finishPartyTravelRecord(party, startedAt)
                 )).then((updatedParty) => LifeEvents.record(
                     party.leaderId,
                     'party_travel',
@@ -3378,7 +3392,11 @@ const PopulationService = {
                 excludedSpotIds,
                 timestamp: startedAt
             };
-            const spot = objectiveSpot || SpotProfiles.findForState({
+            const materialHunt = require('./CraftMaterialParty').isObjective(party.stats?.objective);
+            const materialRoute = !objectiveSpot && materialHunt
+                ? require('./CraftMaterialPartyRoute').select(party, members, SpotProfiles.ensure(), {
+                    ...partyRouteOptions, occupancy: SpotProfiles.currentOccupancy(SpotProfiles.ensure()) }) : null;
+            const spot = objectiveSpot || materialRoute?.spot || SpotProfiles.findForState({
                 ...leader,
                 spotId: party.spotId,
                 party: {
@@ -3399,9 +3417,10 @@ const PopulationService = {
 
             const leaderPhysicalSpot = SpotService.findCurrentSpot(leader.loc);
             const physicalSpotId = leaderPhysicalSpot?.id || leader.spotId || party.spotId;
+            const materialReplan = materialRoute || materialHunt && String(spot.id) !== String(objectiveSpotId);
             const assembling = members.every(member => member.phase === 'cold' && member.vitals?.hp > 0
                 && ['grouped', 'hunting'].includes(member.activity) && !member.stats?.travel && !member.stats?.pvpEncounter)
-                && !invoke('GameServer/Bot/Population/PartyHuntingAssembly').ready(party, members, spot);
+                && (materialReplan || !invoke('GameServer/Bot/Population/PartyHuntingAssembly').ready(party, members, spot));
             const occupancy = assembling ? SpotProfiles.currentOccupancy(SpotProfiles.ensure()) : null;
             const assemblyAdmitted = assembling && SpotProfiles.reservePartyCapacity(occupancy, spot, members);
             const needsTravel = (physicalSpotId && physicalSpotId !== spot.id && !assembling) || assemblyAdmitted;
@@ -3418,14 +3437,14 @@ const PopulationService = {
                 )) : null;
             if (travellingMembers?.every(Boolean)) {
                 const arrivalAt = startedAt + travelMs;
-                return travellingMembers.reduce((chain, member) => (
-                    chain.then(() => LifeState.upsertState(member, 'party_spot_travel'))
-                ), Promise.resolve()).then(() => BackgroundPartyState.createOrUpdate({
+                const travellingParty = {
                     ...party,
                     spotId: spot.id,
                     nextResolveAt: arrivalAt,
                     stats: {
-                        ...(invoke('GameServer/Bot/Population/PartySpotRiskPolicy').withBackoff(party, spotBackoff, startedAt).stats || {}),
+                        ...(require('./CraftMaterialPartyRoute').retarget(
+                            invoke('GameServer/Bot/Population/PartySpotRiskPolicy').withBackoff(party, spotBackoff, startedAt),
+                            materialRoute?.sources).stats || {}),
                         pveEncounter: null,
                         travel: {
                             reason: 'party_spot_replan',
@@ -3433,15 +3452,23 @@ const PopulationService = {
                             regionName: spot.name,
                             spotId: spot.id,
                             startedAt,
-                            arrivalAt
+                            arrivalAt,
+                            ...(materialHunt && !materialRoute && String(spot.id) !== String(objectiveSpotId)
+                                ? { materialEvacuation: true } : {})
                         }
                     }
-                })).then((updatedParty) => ({
+                };
+                if (materialHunt) return require('./CraftMaterialPartyRoute').commitLegacy(
+                    party, members, travellingParty, travellingMembers, startedAt, 'party_travel');
+                return travellingMembers.reduce((chain, member) => (
+                    chain.then(() => LifeState.upsertState(member, 'party_spot_travel'))
+                ), Promise.resolve()).then(() => BackgroundPartyState.createOrUpdate(travellingParty)).then((updatedParty) => ({
                     ok: true,
                     party: updatedParty || party,
                     debug: { activity: 'party_travel', spotId: spot.id }
                 }));
             }
+            if (materialReplan) return { ok: false, reason: 'material_route_pending', party };
 
             const elapsedMs = party.stats?.lastResolveAt ? Math.max(1000, Date.now() - party.stats.lastResolveAt) : 60000;
             const targetNpcId = partyTargetNpcId(party, leader);

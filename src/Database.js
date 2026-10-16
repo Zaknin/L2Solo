@@ -5913,6 +5913,7 @@ const Database = {
                         const result = results.find(result => result.characterId === Number(request.characterId));
                         result.row = coldSimulationRow(result.characterId);
                         result.revision = Number(result.row.simulationRevision);
+                        if (payment.touched.has(result.characterId)) result.partyPayment = true;
                         if (!partyRowRead) {
                             partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                             partyRowRead = true;

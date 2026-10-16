@@ -187,7 +187,15 @@ function itemHours(state, spot, kills, goal, members, agreement) {
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const next = state.stats?.equipmentPlan?.next;
     const spoil = goal.sourceKind === 'spoil' || goal.strategy === 'spoil' || Number(next?.itemId) === itemId && next.kind === 'spoil';
-    if (spoil && !invoke('GameServer/Bot/AI/BotRoles').isSpoiler(state)) return null;
+    const Material = require('./CraftMaterialParty');
+    const owners = agreement?.materialNeeds ? Material.needs(members, { spotId: spot.id }, agreement)
+        .filter(row => Number(row.itemId) === itemId) : [];
+    const ownNeed = owners.find(row => row.characterId === Number(state.characterId));
+    // A material contract forwards the helper's actual spoil to its owner.
+    // Ordinary/solo loot still requires the recipient to be the spoiler.
+    if (spoil && !invoke('GameServer/Bot/AI/BotRoles').isSpoiler(state)
+        && !(agreement?.spoil === 'need' && ownNeed?.sourceKind === 'spoil'
+            && Number(ownNeed.npcId) === npcId && Material.partySpoiler(members))) return null;
     const killerLevel = Math.max(...members.map(member => Number(member.level)));
     const expected = Planner.itemDropYield(reward, itemId, spoil ? 'spoil' : 'drop',
         { npcLevel: Number(npc.template?.level || spot.avgLevel), killerLevel }).expectedYield;
@@ -196,12 +204,8 @@ function itemHours(state, spot, kills, goal, members, agreement) {
     // required requests and a proposed 'need' agreement get the random share.
     const reserved = agreement?.help?.status === 'funded' && Number(agreement.help.payerId) === Number(state.characterId)
         && Number(agreement.help.itemId) === itemId;
-    const Material = require('./CraftMaterialParty');
-    const owners = agreement?.materialNeeds ? Material.needs(members, { spotId: spot.id }, agreement)
-        .filter(row => Number(row.itemId) === itemId) : [];
     // Forecast completing the shared need, with no helper loot dilution.
     const totalNeed = owners.reduce((sum, row) => sum + row.amount, 0);
-    const ownNeed = owners.find(row => row.characterId === Number(state.characterId));
     const ownerShare = ownNeed && totalNeed > 0 ? ownNeed.amount / totalNeed : spoil || reserved ? 1 : 1 / members.length;
     const perHour = kills * expected * (total > 0 ? count / total : 0) * ownerShare;
     const amount = goal.amount || (Number(next?.itemId) === itemId ? next.amount : 1);

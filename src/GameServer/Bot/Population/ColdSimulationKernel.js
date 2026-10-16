@@ -255,6 +255,16 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
         id: `party:${party.partyId}:${timestamp}:${activity}`,
         memberIds: memberStates.map((state) => Number(state.characterId)).filter(Boolean)
     };
+    // Material travel changes the collection contract, and evacuation returns
+    // funded help. Fence that party row in the same transaction as every leg.
+    if (require('./CraftMaterialParty').isObjective(run.party.stats?.objective)
+        && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
+        party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
+        atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
+            expectedUpdatedAt: run.party.updatedAt, updatedAt: party.updatedAt,
+            nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
+            cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
+    }
     return memberStates.map((state) => {
         const id = Number(state.characterId);
         const events = event && id === resolutionMemberId
@@ -1665,7 +1675,8 @@ class ColdSimulationKernel {
             const rescuing = run.members.some(s => s.vitals?.hp <= 0);
             const equipmentBridgeReview = !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
-            if (!meetingPending && !rescuing && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
+            if (!meetingPending && !rescuing && !require('./CraftMaterialPartyRoute').evacuating(run.party)
+                && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
                 || require('./ClanEquipmentPartyPolicy').needsReview(run.party, run.members, startedAt)
                 || equipmentBridgeReview)) {
                 const review = BackgroundPartyLifecycle.review(run.party, run.members, startedAt, {
@@ -1720,7 +1731,7 @@ class ColdSimulationKernel {
                         timing: { ...(state.timing || {}), nextResolveAt: startedAt + 1000 }
                     }
                 ));
-                const arrivedParty = {
+                let arrivedParty = {
                     ...run.party,
                     nextResolveAt: startedAt + 1000,
                     stats: {
@@ -1729,6 +1740,11 @@ class ColdSimulationKernel {
                         travel: null
                     }
                 };
+                const materialArrival = require('./CraftMaterialPartyRoute').arrived(run.party, arrivedMembers, startedAt);
+                if (materialArrival) {
+                    arrivedMembers.splice(0, arrivedMembers.length, ...materialArrival.members);
+                    arrivedParty = materialArrival.party;
+                }
                 const proposals = partyTransitionProposals(
                     run,
                     arrivedMembers,
@@ -1763,14 +1779,17 @@ class ColdSimulationKernel {
                     spotId: run.route.spotId,
                     nextResolveAt: arrivalAt,
                     stats: {
-                        ...(require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt).stats || {}),
+                        ...(require('./CraftMaterialPartyRoute').retarget(
+                            require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt),
+                            run.route.materialSources).stats || {}),
                         pveEncounter: null,
                         travel: {
                             reason: 'party_spot_replan',
                             regionName: run.route.regionName,
                             spotId: run.route.spotId,
                             startedAt,
-                            arrivalAt
+                            arrivalAt,
+                            ...(run.route.materialEvacuation ? { materialEvacuation: true } : {})
                         }
                     }
                 };

@@ -1370,6 +1370,16 @@ function clearPassivePartyRequests() {
     });
 }
 
+// RETURNING couples publication to the rows actually changed, including native
+// revisions. A claim already in transit must fail its old revision even before
+// the critical snapshot reaches the worker.
+function publishDeferredPartyRequests(rows) {
+    for (const row of rows) {
+        const snapshot = module.exports.acceptNewerLifecycleRow(row);
+        if (snapshot) notifyColdSnapshot(snapshot, 'party_request_deferred', { critical: true });
+    }
+}
+
 function expireStalePartyRequests(limit = 0) {
     const timestamp = now();
     const requiredMaxAge = PartyRequestPlanner.maxAgeMs('required');
@@ -1402,8 +1412,9 @@ function expireStalePartyRequests(limit = 0) {
                 '$.partyRequest.expiredAt', ?,
                 '$.partyRequest.attempts', COALESCE(CAST(json_extract(statsJson, '$.partyRequest.attempts') AS INTEGER), 0) + 1
             ),
+            simulationRevision = COALESCE(simulationRevision, 0) + 1,
             updatedAt = ?
-        WHERE ${target}`;
+        WHERE ${target} RETURNING *`;
     const params = [
         timestamp + cooldownMs,
         Math.max(1, staggerMs),
@@ -1414,47 +1425,21 @@ function expireStalePartyRequests(limit = 0) {
     ];
     const staleParams = [timestamp - preferredMaxAge, timestamp - requiredMaxAge];
     const selectStale = () => Database.execute([
-        `SELECT characterId, statsJson FROM ${TABLE} WHERE ${target}`,
+        `SELECT characterId FROM ${TABLE} WHERE ${target}`,
         staleParams
     ]);
-    const updateCache = (rows) => {
-        (rows || []).forEach((row) => {
-            const characterId = Number(row.characterId || 0);
-            const cached = cache.get(characterId);
-            if (!cached) return;
-            const request = parseJson(row.statsJson, {}).partyRequest;
-            if (request?.status !== 'open') return;
-            if (cached.stats?.partyRequest?.status !== 'open') return;
-            cache.set(characterId, {
-                ...cached,
-                updatedAt: timestamp,
-                stats: {
-                    ...(cached.stats || {}),
-                    partyRequest: {
-                        ...request,
-                        status: 'deferred',
-                        deferredUntil: timestamp + cooldownMs + (Math.abs(characterId) % Math.max(1, staggerMs)),
-                        expiredAt: timestamp,
-                        attempts: Number(request.attempts || 0) + 1
-                    }
-                }
-            });
-        });
-    };
     const waitForPending = (rows) => Promise.all((rows || [])
         .map((row) => pendingWrites.get(Number(row.characterId || 0)))
         .filter(Boolean)
         .map((pending) => pending.catch(() => null)));
     return selectStale()
-        .then((rows) => waitForPending(rows).then(() => selectStale()))
-        .then((rows) => Database.execute([sql, params]).then((result) => {
-            if (Number(result?.affectedRows || 0) > 0) updateCache(rows);
-            const expired = Number(result?.affectedRows || 0);
-            if (expired > 0) {
-                utils.infoWarn('BotLife', 'deferred %d stale party requests', expired);
-            }
-            return expired;
-        }));
+        .then(waitForPending)
+        .then(() => Database.execute([sql, params, { read: true }]))
+        .then((rows) => {
+            publishDeferredPartyRequests(rows);
+            if (rows.length) utils.infoWarn('BotLife', 'deferred %d stale party requests', rows.length);
+            return rows.length;
+        });
 }
 
 function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible_level_match') {
@@ -1473,7 +1458,7 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
         AND partyRequestStatus = 'open'
         AND partyRequestPriority = 'required'`;
     const selectCurrent = () => Database.execute([
-        `SELECT characterId, statsJson FROM ${TABLE} WHERE ${selection}`,
+        `SELECT characterId FROM ${TABLE} WHERE ${selection}`,
         ids
     ]);
     const waitForPending = (rows) => Promise.all((rows || [])
@@ -1489,8 +1474,9 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
                 '$.partyRequest.attempts', COALESCE(CAST(json_extract(statsJson, '$.partyRequest.attempts') AS INTEGER), 0) + 1,
                 '$.partyRequest.lastReason', ?
             ),
+            simulationRevision = COALESCE(simulationRevision, 0) + 1,
             updatedAt = ?
-        WHERE ${selection}`;
+        WHERE ${selection} RETURNING *`;
     const params = [
         timestamp + cooldownMs,
         Math.max(1, staggerMs),
@@ -1499,41 +1485,14 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
         timestamp,
         ...ids
     ];
-    const updateCache = (rows) => {
-        (rows || []).forEach((row) => {
-            const characterId = Number(row.characterId || 0);
-            const cached = cache.get(characterId);
-            if (!cached) return;
-            const request = parseJson(row.statsJson, {}).partyRequest;
-            if (request?.status !== 'open' || request.priority !== 'required') return;
-            cache.set(characterId, {
-                ...cached,
-                updatedAt: timestamp,
-                stats: {
-                    ...(cached.stats || {}),
-                    partyRequest: {
-                        ...request,
-                        status: 'deferred',
-                        deferredUntil: timestamp + cooldownMs + (Math.abs(characterId) % Math.max(1, staggerMs)),
-                        expiredAt: timestamp,
-                        attempts: Number(request.attempts || 0) + 1,
-                        lastReason: String(reason || 'no_compatible_level_match')
-                    }
-                }
-            });
-        });
-    };
-
     return selectCurrent()
-        .then((rows) => waitForPending(rows).then(() => selectCurrent()))
-        .then((rows) => Database.execute([sql, params]).then((result) => {
-            const deferred = Number(result?.affectedRows || 0);
-            if (deferred > 0) {
-                updateCache(rows);
-                utils.infoWarn('BotLife', 'deferred %d unformable party requests reason=%s', deferred, String(reason || 'unknown'));
-            }
-            return deferred;
-        }));
+        .then(waitForPending)
+        .then(() => Database.execute([sql, params, { read: true }]))
+        .then((rows) => {
+            publishDeferredPartyRequests(rows);
+            if (rows.length) utils.infoWarn('BotLife', 'deferred %d unformable party requests reason=%s', rows.length, String(reason || 'unknown'));
+            return rows.length;
+        });
 }
 
 function discardInvalidEquipmentPlans() {

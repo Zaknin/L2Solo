@@ -65,6 +65,37 @@ try {
     const shared = Material.agreement([core, secondOwner], objective);
     assert.equal(Income.itemHours(core, spot, 100, { ...objective, amount: 12 }, [core, secondOwner], shared), alone * 2,
         'two owners conservatively forecast delivery of the combined physical need');
+    const materialRoute = require('../src/GameServer/Bot/Population/CraftMaterialPartyRoute');
+    const spoilSpot = { ...spot, id: 'spoil-camp' }, spoilOwner = { ...core, spotId: spoilSpot.id };
+    const spoiler = { ...helper, spotId: spoilSpot.id, stats: { ...helper.stats, classId: 54, role: 'spoiler',
+        coldCombat: { classId: 54, skillSource: 'database', skills: [{ selfId: 254, level: 9 }] } } };
+    const spoilParty = materialRoute.retarget({ stats: { objective, agreement } }, [{
+        characterId: core.characterId, itemId, targetId: objective.targetId,
+        spotId: spoilSpot.id, npcId: source, sourceKind: 'spoil' }]);
+    const spoilAgreement = spoilParty.stats.agreement;
+    const spoilGoal = Material.needs([spoilOwner, spoiler], spoilParty.stats.objective, spoilAgreement)[0];
+    const dropRewards = Data.npcRewards;
+    try {
+        Data.npcRewards = [{ selfId: source, rewards: [], spoils: [{ overall: 100,
+            items: [{ selfId: itemId, chance: 100, min: 1, max: 1 }] }] }];
+        const hours = Income.itemHours(spoilOwner, spoilSpot, 100, spoilGoal, [spoilOwner, spoiler], spoilAgreement);
+        assert(hours > 0, 'retargeted spoil has a delivery ETA for its nonspoiler material owner');
+        const measured = { ...prepared, spot: spoilSpot, spots: [spoilSpot], rows: new Map([
+            [core.characterId, { income: 100000, kills: 100, source: 'own_party', travelHours: 0 }]]) };
+        const decision = Income.compare(spoilOwner, [spoiler], { prepared: measured,
+            objective: spoilParty.stats.objective, party: spoilParty });
+        assert.equal(decision.accept, true, 'measured party income retains the real helper-spoil delivery path during roster review');
+        assert.equal(decision.reason, 'goal_requires_party');
+        assert.equal(decision.partyHours, hours);
+        assert.equal(decision.partySource, 'own_party');
+        assert.equal(Income.itemHours(spoilOwner, spoilSpot, 100, spoilGoal, [spoilOwner, spoiler]), null,
+            'ordinary spoil loot still belongs to its spoiler without a material contract');
+        assert.equal(Income.itemHours(spoilOwner, spoilSpot, 100, spoilGoal, [spoilOwner], spoilAgreement), null,
+            'a solo nonspoiler cannot invent the absent helper');
+        const untrained = { ...spoiler, stats: { ...spoiler.stats, coldCombat: { skills: [] } } };
+        assert.equal(Income.itemHours(spoilOwner, spoilSpot, 100, spoilGoal, [spoilOwner, untrained], spoilAgreement), null,
+            'class alone cannot promise spoil without the native learned skill');
+    } finally { Data.npcRewards = dropRewards; }
     const scanBaseline = scans, exactBaseline = exact, durations = [];
     for (let i = 0; i < 1000; i++) {
         const start = performance.now();

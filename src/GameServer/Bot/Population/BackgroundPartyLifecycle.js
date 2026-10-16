@@ -56,7 +56,7 @@ function releaseMember(state, timestamp = Date.now(), reason = 'party_session_ro
     const partyTravel = state.stats?.travel?.reason === 'party_spot_replan';
     const releasedFromObjective = raidRelease || [
         AssemblyRecovery.REASON, 'party_session_rotation', 'clan_priority',
-        'party_min_size', 'clan_party_unsafe', 'craft_materials_collected',
+        'party_min_size', 'clan_party_unsafe', 'craft_materials_collected', 'party_material_route_unavailable',
         'invalid_party_size',
         'party_membership_mismatch',
         'party_relationship_conflict', 'party_goals_diverged', 'party_no_progress', 'party_no_experience',
@@ -80,7 +80,8 @@ function releaseMember(state, timestamp = Date.now(), reason = 'party_session_ro
             backgroundPartySpotId: null,
             partyBreakReason: reason,
             ...(reason === 'clan_party_unsafe' ? { clanPartyObjective: null } : {}),
-            partyRequest: !raidRelease && reason === AssemblyRecovery.REASON
+            partyRequest: !raidRelease && (reason === AssemblyRecovery.REASON
+                || reason === 'party_material_route_unavailable' && objective)
                 ? { ...(objective || {}), status: 'deferred', deferReason: reason,
                     requestedAt: timestamp, deferredUntil: timestamp + AssemblyRecovery.RETRY_MS }
                 : null

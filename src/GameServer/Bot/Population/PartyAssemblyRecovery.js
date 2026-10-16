@@ -24,7 +24,9 @@ function expired(party) {
 
 function coolingDown(state, timestamp = Date.now()) {
     const request = state?.stats?.partyRequest;
-    return request?.deferReason === REASON && Number(request.deferredUntil || 0) > timestamp;
+    return (request?.deferReason === REASON
+        || request?.materialParty === true && request.deferReason === 'party_material_route_unavailable')
+        && Number(request.deferredUntil || 0) > timestamp;
 }
 
 module.exports = { WAIT_LIMIT_MS, RETRY_MS, REASON, record, expired, coolingDown };
