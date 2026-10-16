@@ -233,7 +233,7 @@ function* prepareNative(state, economy, options) {
             inputHash: economy.inputHash ?? fnv1a32(economy.inputKey || ''),
             decisionSeq: economy.network?.decisionSeq ?? state.stats?.decisionSeq,
             activityLeaf: economy.network?.activityLeaf ?? state.stats?.activityLeaf,
-            goalRevision: goal?.revision, wishKey: goal?.plan?.wishKey,
+            wishKey: goal?.plan?.wishKey,
             wallet: state.adena, escrow: options.buyOrderEscrow,
             budget: money, available: money, reserve: state.stats?.money?.[2] };
         Diagnostics.push({ ...trace, reason: plan.travel ? 'travel_planned' : 'plan_prepared', town: goal?.plan?.marketTown });

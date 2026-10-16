@@ -641,7 +641,18 @@ function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow
         if (options.prepared) options.prepared.eventVerdict = verdict;
         return holds ? '' : `events:${why[0] || 'unproved'}`;
     }
-    if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
+    if (Sections.capability(state, timestamp) !== baseline.build) {
+        // Place 'card_kit' (shadow, counter only): would the card stand if
+        // only the fight condition (effects, night) moved? held: the kit is
+        // the baseline's; build: the kit moved; unproved: no kit in the
+        // baseline. The card is still refused; the social and card_leaf
+        // shadows (socialShadow) are not counted.
+        if (!socialShadow && Hold.asked('card_kit', deps)) {
+            Hold.check('card_kit', baseline.kit === undefined ? ['unproved']
+                : Sections.kit(state) === baseline.kit ? [] : ['build'], deps);
+        }
+        return 'capability';
+    }
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
     if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
