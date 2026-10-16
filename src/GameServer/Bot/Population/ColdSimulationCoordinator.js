@@ -7,6 +7,7 @@ const { Worker } = require('worker_threads');
 const { performance } = require('perf_hooks');
 
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Database = invoke('Database');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
@@ -268,7 +269,7 @@ class ColdSimulationCoordinator {
                 if (state) this.markDirty(state, { critical: true, reason: 'competition_action' });
             },
             canRun: () => !this.stopping && this.ready && this.snapshotsLoaded && !this.pauseReasons.size
-                && !this.queue?.flushing && !invoke('Database').pending()
+                && !this.queue?.flushing && !Database.pending()
                 && Number(Metrics.currentEventLoopLag()) < 40
         });
         this.commandInflight = new Map();
@@ -1344,7 +1345,7 @@ class ColdSimulationCoordinator {
             isPartyLeader: !!party,
             party,
             ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
-                ? { raidOwner: invoke('Database').clanRaidOwner(party.stats.objective.fullRoster) } : {}),
+                ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
             route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })
