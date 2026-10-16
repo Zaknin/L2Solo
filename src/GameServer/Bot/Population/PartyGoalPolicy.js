@@ -1,5 +1,7 @@
 'use strict';
 
+const TendencyRoll = require('../AI/TendencyRoll');
+
 const positive = value => Math.max(0, Number(value) || 0);
 
 function declaration(state) {
@@ -23,8 +25,14 @@ function decide(state, peers, options = {}) {
         roll: options.roll ?? 0.5, goal: declaration(state) };
     return participation(state, peers, { ...options,
         persona: options.persona || invoke('GameServer/Bot/AI/BotPersona').of(state),
-        roll: options.roll ?? require('../AI/TendencyRoll').roll('party', state.characterId,
-            peers.map(peer => peer.characterId).join(':'), state.stats?.partyRequest?.requestedAt || state.updatedAt) });
+        roll: options.roll ?? TendencyRoll.roll('party', state.characterId, peerKey(peers),
+            state.stats?.partyRequest?.requestedAt || state.spotId || state.updatedAt) });
+}
+
+// One decision per (bot, peer set, request or spot), as PersonaPartyPolicy.backgroundIntent
+// seeds it: the peers in id order, and no drifting life-row stamp while a request or spot names it.
+function peerKey(peers) {
+    return peers.map(peer => Number(peer.characterId)).sort((a, b) => a - b).join(':');
 }
 
 // Goals that wait for the wish engine keep the party's current objective.
