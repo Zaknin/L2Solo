@@ -1,3 +1,4 @@
+const { isMainThread } = require('node:worker_threads');
 const Tendency = require('../AI/TendencyRoll');
 const Valuation = require('./EconomicValuation');
 const { fnv1a32 } = require('../Fnv1a');
@@ -89,7 +90,12 @@ function moneyQueue(wishes, wallet, survivalReserve = 0, floor = 0) {
 // a resolve, a hot tick); a bot's next decision rebuilds the cheap layer
 // anyway (new adena, exp), while the expensive one is kept per build
 // (ColdCombatProfile.buildGainsFor). So few are held, least recently used out.
+// Only the main thread holds them (its group solve and repeated readers hit).
+// The cold worker keeps the result in the held plan (EconomyContext cache,
+// 2048 plans), so a second per-actor copy there never hit and only cost
+// copies and evictions (live: 0 hits, 15,893 misses).
 const ACTOR_LIMIT = 64;
+const RETAIN_ACTORS = isMainThread;
 function remember(map, key, value, limit = ACTOR_LIMIT) {
     map.delete(key);
     map.set(key, value);
@@ -511,7 +517,8 @@ class WishNetwork {
     }
 
     // `remembered: false` builds without touching the per-actor cache (a
-    // caller that holds the result itself, or a one-off proposal).
+    // caller that holds the result itself, or a one-off proposal). The worker
+    // never retains (RETAIN_ACTORS).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
         caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false, completionKey = null }) {
@@ -525,7 +532,8 @@ class WishNetwork {
         const individual = Number(characterId) > 0;
         decisionSeq = Math.max(0, Math.trunc(Number(decisionSeq) || 0));
         activityLeaf = Number(activityLeaf) >>> 0;
-        const cached = remembered ? this.cache.get(actorKey) : null;
+        const retain = remembered && RETAIN_ACTORS;
+        const cached = retain ? this.cache.get(actorKey) : null;
         if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf
             && cached.completionKey === completionKey) {
             if (diagnostic) Diagnostics.count('network', 'hit', 'same_inputs');
@@ -535,7 +543,7 @@ class WishNetwork {
         const detail = diagnostic && Diagnostics.enabled(characterId);
         const trace = detail ? { owner: Number(characterId), caller, trigger,
             inputHash: fnv1a32(inputKey), decisionSeq, activityLeaf } : null;
-        if (diagnostic) Diagnostics.count('network', 'miss', !remembered ? 'uncached_actor' : cached ? 'input_dependency_changed' : 'not_retained');
+        if (diagnostic) Diagnostics.count('network', 'miss', !remembered ? 'uncached_actor' : !retain ? 'held_plan_only' : cached ? 'input_dependency_changed' : 'not_retained');
         // ARCH-NOTE: group and clan decisions retain their existing event-key seed.
         const roll = kind => individual ? Tendency.roll(characterId, decisionSeq, kind)
             : Tendency.roll(actorKey, inputKey, kind);
@@ -716,7 +724,7 @@ class WishNetwork {
             item: activity?.itemId, planned: activity?.amount, quote: activity?.price,
             npcId: activity?.npcId, town: activity?.town, recipeId: activity?.recipeId,
             valueHours: activity?.valueHours, available, reserve: survivalReserve });
-        if (remembered) {
+        if (retain) {
             if (diagnostic && !this.cache.has(actorKey) && this.cache.size >= ACTOR_LIMIT)
                 Diagnostics.count('network', 'eviction', 'capacity');
             remember(this.cache, actorKey, { inputKey, completionKey, decisionSeq: inputDecisionSeq,
