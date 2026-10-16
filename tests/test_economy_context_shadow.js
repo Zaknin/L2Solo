@@ -39,9 +39,12 @@ function delta(before, after) {
 }
 
 // Off: no diagnostic call is reached, the decision path is unchanged.
-const original = { count: Diagnostics.count, duration: Diagnostics.duration, enabled: Diagnostics.enabled, push: Diagnostics.push };
+const original = { count: Diagnostics.count, duration: Diagnostics.duration, enabled: Diagnostics.enabled, push: Diagnostics.push,
+    laps: Diagnostics.laps };
 Config.developerDiagnostics = false; Economy.reset();
 for (const key of Object.keys(original)) Diagnostics[key] = () => { throw Error(`off reached ${key}`); };
+// laps is called unconditionally by the provider and must hand back null (no clock, no allocation) while off.
+Diagnostics.laps = prefix => { assert.strictEqual(original.laps(prefix), null, 'laps is null while diagnostics are off'); return null; };
 const offFirst = Economy.forState(state(), deps);
 assert.strictEqual(Economy.forState(state(), deps).plan, offFirst.plan);
 Economy.forState(state(), deps); Economy.forgetContext(901, 'state_publication');
@@ -279,6 +282,35 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
     const after = fenceOf(served);
     assert.ok(after.items.includes(item), 'a late price read joins the held item reads');
     assert.ok(after.spots.includes(spot.id), 'a late spot read joins the held spot reads');
+}
+
+// Sampled owner: the projection hash, its size and the provider block layers are recorded; the same
+// state rebuilt after an explicit release repeats the projection (`same` is a lower bound in general).
+{
+    const saved = { economyDiagnostics: Config.economyDiagnostics, economyDiagnosticsBotIds: Config.economyDiagnosticsBotIds };
+    Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '901';
+    try {
+        Economy.reset();
+        const counts = () => Diagnostics.metrics().counts || {};
+        Economy.forState(state(), deps);
+        const sameBefore = counts()['context:projection:not_retained:same'] || 0;
+        Economy.forgetContext(901, 'explicit_invalidation');
+        Economy.forState(state(), deps);
+        assert.strictEqual((counts()['context:projection:not_retained:same'] || 0) - sameBefore, 1,
+            'an unchanged state rebuilds the same projection');
+        assert.ok(Object.keys(counts()).some(key => key.startsWith('context:projection_size:')), 'a sampled owner records the size');
+        const durations = Diagnostics.metrics().durations || {};
+        for (const layer of ['build', 'sources', 'benefits', 'admission', 'tail'])
+            assert.ok(durations[`provider:${layer}`]?.count > 0, `provider:${layer} is timed`);
+        // An unsampled owner pays for neither the hash nor the size.
+        Config.economyDiagnosticsBotIds = '777';
+        const projectionKeys = () => Object.keys(counts()).filter(key => key.startsWith('context:projection')).map(key => key + counts()[key]);
+        const sampled = projectionKeys();
+        Economy.forState(state(), deps); Economy.forgetContext(901, 'explicit_invalidation'); Economy.forState(state(), deps);
+        assert.deepEqual(projectionKeys(), sampled, 'an unsampled owner adds no projection counts');
+    } finally {
+        Object.assign(Config, saved); Economy.reset();
+    }
 }
 
 Date.now = realNow; Config.developerDiagnostics = false; Economy.reset();

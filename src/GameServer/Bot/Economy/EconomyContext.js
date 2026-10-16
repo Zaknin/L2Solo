@@ -1299,18 +1299,18 @@ function buildForState(state, deps) {
     }
     const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra] });
     context.projection = projection;
-    if (shadowEntry) {
-        // Would the provider's output repeat the actor's previous one, per miss reason
-        // (the workshop path below is added outside the provider, so it is left out).
+    // Sampled owners only: the hash and the size walk the whole projection (0.4-1.7 ms live), so an
+    // unsampled bot keeps projection null. Would the provider's output repeat the actor's previous one,
+    // per miss reason (`same` is a lower bound: float scalars like valueHours move with hourAdena per
+    // build; the workshop path below is added outside the provider, so it is left out), and the size
+    // a retained projection would hold.
+    if (shadowEntry && Diagnostics.enabled(state.characterId)) {
         shadowEntry.projection = projectionHash(projection);
         if (previousProjection !== null) Diagnostics.count('context', 'projection',
             `${diagnosticReason}:${shadowEntry.projection === previousProjection ? 'same' : 'differ'}`);
-        // The size a retained projection would hold, on sampled owners only.
-        if (Diagnostics.enabled(state.characterId)) {
-            let bytes = -1;
-            try { bytes = Buffer.byteLength(JSON.stringify(projection.nodes)); } catch (_) { /* A node JSON cannot hold (a cycle, a BigInt). */ }
-            Diagnostics.count('context', 'projection_size', bytes < 0 ? 'unmeasured' : Diagnostics.sizeBucket(bytes));
-        }
+        let bytes = -1;
+        try { bytes = Buffer.byteLength(JSON.stringify(projection.nodes)); } catch (_) { /* A node JSON cannot hold (a cycle, a BigInt). */ }
+        Diagnostics.count('context', 'projection_size', bytes < 0 ? 'unmeasured' : Diagnostics.sizeBucket(bytes));
     }
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,

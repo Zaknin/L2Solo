@@ -2831,18 +2831,6 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
     }
 }
 
-// Diagnostics only: time spent in each part of one bot's cold commit; no clock
-// read and no allocation while developer diagnostics are off.
-function coldCommitParts() {
-    if (!DiagnosticConfig.developerDiagnostics) return null;
-    let last = performance.now();
-    const spent = {};
-    return {
-        lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
-        done() { for (const part in spent) Diagnostics.duration(`commit_${part}`, spent[part]); }
-    };
-}
-
 function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) {
     const before = one('SELECT hp,karma,pk FROM characters WHERE id = ?', [characterId]);
     // Use the persisted XP delta inside the fenced transaction: unchanged
@@ -5837,7 +5825,7 @@ const Database = {
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
             if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
-            const parts = coldCommitParts();
+            const parts = Diagnostics.laps('commit_');
             const row = coldSimulationRow(characterId);
             const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
             parts?.lap('row_read');
