@@ -4,6 +4,9 @@ const path = require('path');
 const vm = require('vm');
 const { createRequire } = require('module');
 const root = path.resolve(__dirname, '..');
+// The real Die below requires the real ClanHall/Runtime outside the sandbox;
+// it links its owners with the server's global invoke, as at server start.
+require('../src/Global');
 const Rules = require('../src/GameServer/Clan/ClanAllianceRules');
 let state = { kind: 'player', stage: 'gathering', leaderId: 1, members: [
     { id: 2, itemId: 3833, npcId: 685, herb: false, delivered: false, blood: false }
