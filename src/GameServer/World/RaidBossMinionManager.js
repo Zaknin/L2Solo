@@ -1,4 +1,5 @@
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
+const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
@@ -13,13 +14,14 @@ const groupsByBoss = new Map();
 const minionTemplates = new Map();
 // The last ordinary leader of each spawn definition, to replace its group.
 const leaderBySpawnDefinition = new WeakMap();
-const MINION_MAINTENANCE_INTERVAL_MS = 5000;
 // C4/Lisvus Config.RAID_MINION_RESPAWN_TIME defaults to five minutes.
 const MINION_RESPAWN_DELAY_MS = 300000;
 // Raid groups short of minions, group -> boss: a minion leaving the world adds
 // its group (a death, and RaidEntityIndex announces every removal, with or
-// without a death) and the tick visits only these.
+// without a death) and the alarm visits only these.
 const refillDue = new Map();
+// One timer on the nearest respawnAt of refillDue, for the world start() bound.
+const alarm = { world: null, timer: null, at: 0 };
 const telemetry = {
     // Fills that spawned at least one minion.
     refills: 0,
@@ -207,6 +209,7 @@ function markShort(boss, group) {
     if (!boss?.minionState || !group) return false;
     if (!group.respawnAt) group.respawnAt = Date.now() + MINION_RESPAWN_DELAY_MS;
     refillDue.set(group, boss);
+    armRefill();
     return true;
 }
 
@@ -275,8 +278,9 @@ function maintainGroup(world, boss, group, now) {
     const before = group.members.length;
     fillGroup(world, boss, group);
     group.respawnAt = 0;
-    // A spawn that failed keeps the group due: the next tick starts its wait.
+    // A spawn that failed keeps the group due and starts its next wait.
     if (aliveMinions(world, group).length >= group.desired) refillDue.delete(group);
+    else group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
     const spawned = Math.max(0, group.members.length - before);
     DiagnosticConfig.developerDiagnostics && spawned > 0 && (telemetry.refills += 1);
     return spawned;
@@ -295,21 +299,51 @@ function maintain(world, now = Date.now()) {
         DiagnosticConfig.developerDiagnostics && (telemetry.groupVisits += 1);
         spawned += maintainGroup(world, boss, group, now);
     }
+    armRefill();
     return spawned;
 }
 
+// Sleeps until the nearest respawnAt of a short group. Called wherever that
+// can move: a group marked short, the end of a refill pass, start. A short
+// group is a refill wait, so no group short means no timer.
+function armRefill() {
+    if (!alarm.world) return;
+    let dueAt = Infinity;
+    for (const group of refillDue.keys()) dueAt = Math.min(dueAt, group.respawnAt || 0);
+    if (dueAt === Infinity) {
+        clearTimeout(alarm.timer);
+        alarm.timer = null;
+        alarm.at = 0;
+        return;
+    }
+    if (alarm.timer && alarm.at <= dueAt) return;
+    clearTimeout(alarm.timer);
+    alarm.at = dueAt;
+    alarm.timer = setTimeout(onRefillAlarm, Math.max(1, dueAt - Date.now()));
+    alarm.timer.unref?.();
+}
+
+function onRefillAlarm() {
+    alarm.timer = null;
+    alarm.at = 0;
+    const spawned = maintain(alarm.world);
+    DiagnosticConfig.developerDiagnostics && Diagnostics.count('raid_minions', spawned > 0 ? 'wake' : 'empty', 'refill');
+}
+
 function start(world) {
-    stop(world);
+    stop(alarm.world);
     if (!world?.npc) return null;
-    world.npc.raidBossMinionTicker = setInterval(() => maintain(world), MINION_MAINTENANCE_INTERVAL_MS);
-    world.npc.raidBossMinionTicker.unref?.();
-    return world.npc.raidBossMinionTicker;
+    alarm.world = world;
+    armRefill();
+    return alarm;
 }
 
 function stop(world) {
-    if (!world?.npc?.raidBossMinionTicker) return;
-    clearInterval(world.npc.raidBossMinionTicker);
-    world.npc.raidBossMinionTicker = undefined;
+    if (!world || alarm.world !== world) return;
+    clearTimeout(alarm.timer);
+    alarm.world = null;
+    alarm.timer = null;
+    alarm.at = 0;
 }
 
 module.exports = {
