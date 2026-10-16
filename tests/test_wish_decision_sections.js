@@ -323,7 +323,14 @@ try {
         effects: [{ id: 1068, key: 'might', stats: { pAtkMul: 1.1 }, expiresAt: deps.timestamp + 10 }] } } };
     buffed.stats.wishSections = { ...state.stats.wishSections, build: Sections.capability(buffed, deps.timestamp) };
     const expired = structuredClone(buffed);
-    assert(Events.reconcile(buffed, expired, deps.timestamp + 11).includes('build'), 'expiry is compared with the accepted build');
+    assert.equal(typeof buffed.stats.wishSections.kit, 'number', 'a build baseline records its kit');
+    const expiry = Events.reconcile(buffed, expired, deps.timestamp + 11);
+    assert.deepEqual([...expiry].sort(), ['benefits', 'combat', 'sources'],
+        'an expired buff is compared with the accepted build and raises the fight sections, not a new build');
+    const noKit = structuredClone(buffed);
+    delete noKit.stats.wishSections.kit;
+    assert(Events.reconcile(noKit, structuredClone(buffed), deps.timestamp + 11).includes('build'),
+        'a baseline saved before the kit names a build event, as before');
     const deceased = { ...state, activity: 'dead', stats: { ...state.stats } };
     assert(Events.reconcile(state, deceased, deps.timestamp).includes('combat'));
     assert.equal(deceased.stats.decisionSeq, state.stats.decisionSeq + 1, 'simultaneous death changes coalesce');

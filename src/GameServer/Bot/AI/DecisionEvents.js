@@ -1,12 +1,19 @@
 'use strict';
 const DiagnosticConfig = require('../Population/PopulationConfig');
 const Sections = require('../Economy/DecisionSections');
+const GameTime = require('../../World/GameTime');
 const reasons = { town: 0, revived: 0, level: 0, weight: 0, bag: 0, money: 0,
-    build: 0, sources: 0, supply: 0, occupation: 0, relations: 0, combat: 0, benefits: 0 };
+    build: 0, fight: 0, sources: 0, supply: 0, occupation: 0, relations: 0, combat: 0, benefits: 0 };
 // Every reason marks a section, so the next build reconsiders the held focus and activity.
 const bit = Sections.sectionBit;
-const sectionBits = { ...Object.fromEntries(Sections.SECTIONS.map(name => [name, bit(name)])), funding: bit('money'),
-    level: bit('build'), revived: bit('combat'), weight: bit('supply'), bag: bit('supply'), town: bit('supply') | bit('money') };
+// A section name (reconcile: the cold factEvents' list) marks its own bit.
+const sectionBits = { ...Object.fromEntries(Sections.SECTIONS.map(name => [name, bit(name)])), funding: bit('money') };
+// A hot reason marks the sections of its fact in the one table the cold facts
+// use (DecisionSections.FACT_SECTIONS); town is an arrival, no fact.
+const factBits = fact => Sections.sectionMask(Sections.FACT_SECTIONS[fact]);
+const reasonBits = { ...sectionBits, money: factBits('funding'), build: factBits('build'), level: factBits('build'),
+    fight: factBits('fight'), revived: factBits('dead'), weight: factBits('supply'), bag: factBits('supply'),
+    benefits: factBits('horizon'), relations: factBits('relations'), town: bit('supply') | bit('money') };
 let hotEconomyBuilds = 0, reportedBuilds = 0, reportedAt = 0;
 function statsFor(session) {
     return session.coldLifeState ? (session.coldLifeState.stats ||= {}) : (session.decisionStats ||= {});
@@ -23,7 +30,7 @@ function raiseDecision(session, reason, { impossible = false } = {}) {
     // inputs do not record that failure, so the step would be chosen again.
     stats.decisionSeq = Math.max(0, Math.trunc(Number(stats.decisionSeq) || 0)) + 1;
     if (impossible) stats.activityLeaf = 0;
-    stats.wishDirty = (Number(stats.wishDirty) || 0) | (sectionBits[reason] || 0);
+    stats.wishDirty = (Number(stats.wishDirty) || 0) | (reasonBits[reason] || 0);
     // ARCH-NOTE: visit ends share the arrival clock until a single native arrival event exists.
     if (reason === 'town') stats.visitEvery = require('../Economy/TownVisitInterval').arrived(stats);
     if (DiagnosticConfig.developerDiagnostics) reasons[reason]++;
@@ -57,13 +64,16 @@ function marksFor(session, actor) {
     const progress = { characterId: actor.fetchId?.(), level, stats: { exp }, persona: session.coldLifeState?.persona };
     const horizon = !!baseline && Number.isFinite(Number(exp)) && Sections.horizonEvent(progress,
         baseline, baseline.expHour, invoke('GameServer/Bot/AI/BotPersona').of(progress), timestamp);
-    const build = Sections.hash([actor.fetchClassId?.(), actor.fetchClanId?.(), actor.hennaStats,
-        session.decisionEquipmentMark, session.decisionSkillsMark,
-        Number(stats.wishSections?.night) >= 0 ? Number(invoke('GameServer/World/GameTime').isNight(timestamp)) : -1,
+    // The build in two facts as the cold ones (DecisionSections.kit): the
+    // character's kit, and the fight condition (night for a night-dependent
+    // build, the active effects) that moves without a new build.
+    const kit = Sections.hash([actor.fetchClassId?.(), actor.fetchClanId?.(), actor.hennaStats,
+        session.decisionEquipmentMark, session.decisionSkillsMark, stats.recipes, stats.workshop]);
+    const fight = Sections.hash([Number(stats.wishSections?.night) >= 0 ? Number(GameTime.isNight(timestamp)) : -1,
         Object.values(actor.effects || {}).filter(effect => !effect.expiresAt || effect.expiresAt > timestamp)
-            .map(effect => [effect.id, effect.key, effect.stats]), stats.recipes, stats.workshop]);
+            .map(effect => [effect.id, effect.key, effect.stats])]);
     return { level, weight: bag.weight, bag: bag.full,
-        build, horizon, money: Sections.fundingMark(physical, escrow),
+        kit, fight, horizon, money: Sections.fundingMark(physical, escrow),
         meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp, escrow),
         relations: Sections.hash([stats.memoryRevision, stats.relations, session.hotBackgroundPartyId, stats.clanId]) };
 }
@@ -74,14 +84,15 @@ function observe(session, actor) {
         if (marks.level !== prior.level) changed.push('level');
         if (marks.weight !== prior.weight) changed.push('weight');
         if (marks.bag > prior.bag) changed.push('bag');
-        if (marks.build !== prior.build) changed.push('build');
+        if (marks.kit !== prior.kit) changed.push('build');
+        else if (marks.fight !== prior.fight) changed.push('fight');
         if (marks.horizon && !prior.horizon) changed.push('benefits');
         if (marks.relations !== prior.relations) changed.push('relations');
         if (marks.money !== prior.money || marks.meaningfulMoney) changed.push('money');
         if (changed.length) {
             raiseDecision(session, changed[0]);
             const stats = statsFor(session);
-            for (const reason of changed.slice(1)) { stats.wishDirty = (Number(stats.wishDirty) || 0) | (sectionBits[reason] || 0);
+            for (const reason of changed.slice(1)) { stats.wishDirty = (Number(stats.wishDirty) || 0) | (reasonBits[reason] || 0);
                 if (DiagnosticConfig.developerDiagnostics) reasons[reason]++; }
         }
     } else if (marks.horizon) raiseDecision(session, 'benefits');

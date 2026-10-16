@@ -6,6 +6,7 @@
 const { fnv1a32 } = require('../Fnv1a');
 const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
+const Diagnostics = require('./EconomyDiagnostics');
 // Read through the module object at call time (tests replace buildInputKey).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -59,6 +60,22 @@ function sectionBit(name) {
 function sectionMask(names) {
     return names.reduce((bits, name) => bits | sectionBit(name), 0);
 }
+// The one table of what a moved fact touches, for the cold facts
+// (factEvents) and the hot marks (DecisionEvents): the reader of a fact
+// differs by thread, the sections it raises do not. build: the character
+// build (class, level, gear, hennas, skills, craft); fight: only its
+// condition moved (a buff or the day/night flip of a night-dependent build).
+const FACT_SECTIONS = Object.freeze({
+    build: Object.freeze(['build', 'benefits', 'sources']),
+    fight: Object.freeze(['combat', 'benefits', 'sources']),
+    dead: Object.freeze(['combat']),
+    relations: Object.freeze(['relations']),
+    funding: Object.freeze(['money']),
+    occupation: Object.freeze(['occupation']),
+    riskDeaths: Object.freeze(['combat', 'occupation']),
+    supply: Object.freeze(['supply']),
+    horizon: Object.freeze(['benefits'])
+});
 // The names of the sections raised in wishDirty bits, in table order.
 function sectionNames(bits) {
     const names = [];
@@ -68,6 +85,15 @@ function sectionNames(bits) {
 function capability(state, timestamp = Date.now()) {
     const stats = state.stats || {};
     return hash([CombatProfile.buildInputKey(state, timestamp),
+        state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
+}
+// The slow part of the build fact: class, level, worn gear, hennas, skills,
+// the hot capture (ColdCombatProfile.holdEvents without its last two parts,
+// effects and night) and the craft. When the build fact moves and this does
+// not, only the fight condition moved. Its parts do not read the clock.
+function kit(state, timestamp = Date.now()) {
+    const stats = state.stats || {};
+    return hash([CombatProfile.holdEvents(state, timestamp).slice(0, -2),
         state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
 }
 function fundingMark(state, escrow = 0) {
@@ -224,7 +250,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
-        ...(facts || semanticFacts(state, context.timestamp)), horizon: context.horizonHours,
+        ...(facts || semanticFacts(state, context.timestamp)), kit: kit(state, context.timestamp), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };
@@ -276,22 +302,45 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before,
         Number(before.timing?.lastResolvedAt || before.updatedAt || timestamp)))[key];
     const current = semanticFacts(after, timestamp);
-    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
+    const changed = factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
         || !previous.funding && fundingMark(before) !== fundingMark(after));
+    // Shadow (counter only): an occupation change the held decision itself
+    // ordered (a trip it began, or the arrival where its trip led) is its own
+    // output, not an input; it still raises the section today.
+    if (Diagnostics.active() && changed.includes('occupation'))
+        Diagnostics.count('sections', 'occupation', plannedOccupation(before, after) ? 'planned' : 'unplanned');
+    return changed;
+}
+// The occupation change the held trip describes: a trip begun this round, or
+// the arrival at its spot in its arrival activity (hunting unless named).
+function plannedOccupation(before, after) {
+    const trip = before.stats?.travel;
+    if (after.activity === 'traveling') return before.activity !== 'traveling' && !!after.stats?.travel;
+    if (before.activity !== 'traveling' || !trip) return false;
+    return after.activity === (trip.arrivalActivity || 'hunting')
+        && (trip.spotId == null || String(after.spotId) === String(trip.spotId));
 }
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.
+// current.kit: read only when the build fact moved (a baseline without one
+// names a build event, as before the split).
 function factEvents(previousFact, current, after, funding = false) {
     const sections = new Set();
-    if (!previousFact('dead') && current.dead) sections.add('combat');
-    if (previousFact('build') !== current.build) { sections.add('build'); sections.add('benefits'); sections.add('sources'); }
-    if (previousFact('relations') !== current.relations) sections.add('relations');
+    const raise = fact => { for (const name of FACT_SECTIONS[fact]) sections.add(name); };
+    if (!previousFact('dead') && current.dead) raise('dead');
+    if (previousFact('build') !== current.build) {
+        const held = previousFact('kit');
+        const fight = held !== undefined && held === (current.kit ??= kit(after));
+        if (Diagnostics.active()) Diagnostics.count('sections', 'build_fact', fight ? 'fight' : held === undefined ? 'no_kit' : 'kit');
+        raise(fight ? 'fight' : 'build');
+    }
+    if (previousFact('relations') !== current.relations) raise('relations');
     if (funding) sections.add('funding');
-    if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') sections.add('occupation');
-    if (current.riskDeaths > previousFact('riskDeaths')) { sections.add('combat'); sections.add('occupation'); }
+    if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') raise('occupation');
+    if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
-    if (previousFact('supply') !== current.supply) sections.add('supply');
+    if (previousFact('supply') !== current.supply) raise('supply');
     return [...sections];
 }
-module.exports = { SECTIONS, sectionBit, sectionMask, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
+module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, capability, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
     SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };
