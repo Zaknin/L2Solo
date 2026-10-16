@@ -755,6 +755,25 @@ function reviewTrigger(state, projected, context, timestamp) {
     if (projected.activity === 'shopping' && state.activity === 'traveling') return 'review_arrival';
     return projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal';
 }
+// Diagnostics only: the card a lifecycle rebuild remembered, by the step
+// timestamp that built it. A lone review edge at the result site of that
+// same step names its refusal '<trigger>_fresh', so refusal_plan shows
+// whether the review rebuild after a decision of this very step repeats it.
+const freshLifecycleCards = new WeakMap();
+// Diagnostics only: a lifecycle rebuild before a finite travel, death or
+// rest step (resolveTravel, resolveDeathRecovery and resolveRest read none
+// of its pick) names what it changed that the step still carries into the
+// next state: the gear plan, the party request, a started trip or a spot.
+// 'same' counts the rebuilds whose skip would give the same next state.
+function countTransitRebuild(state, plannedState, previousPlan) {
+    const travel = state.activity === 'traveling' && BackgroundResolver.travelRecord(state.stats?.travel);
+    if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return;
+    const stats = plannedState.stats || {};
+    const moved = JSON.stringify(stats.equipmentPlan ?? null) !== JSON.stringify(previousPlan ?? null) ? 'plan'
+        : JSON.stringify(stats.partyRequest ?? null) !== JSON.stringify(state.stats?.partyRequest ?? null) ? 'party_request'
+            : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip' : 'same';
+    economyDiagnostics.count('lifecycle', 'transit_rebuild', `${state.activity}:${moved}`);
+}
 // L115: a card lost on remember is counted by its first failing check, so the
 // next call's no_card refusal has a cause.
 function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
@@ -1057,7 +1076,8 @@ function startKernel(config = {}) {
                             for (const [bit, name] of EDGE_NAMES) {
                                 if (economyEdges & bit) economyDiagnostics.count('advisory', 'edge', bit === 8 ? review : name);
                             }
-                            why.push(`economy_edges:${economyEdges === 8 ? review : 'other'}`);
+                            const fresh = freshLifecycleCards.get(owner?.context?.wishAdvisory) === timestamp ? '_fresh' : '';
+                            why.push(`economy_edges:${economyEdges === 8 ? review + fresh : 'other'}`);
                         } else why.push('economy_edges');
                     }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
@@ -1219,6 +1239,11 @@ function startKernel(config = {}) {
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
             rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
                 ColdEconomyDecision.advisory(economy, seen, preparationState.activity), seen, deps);
+            if (economyDiagnostics.active()) {
+                const card = kernel.states.get(Number(state.characterId))?.context?.wishAdvisory;
+                if (card) freshLifecycleCards.set(card, timestamp);
+                countTransitRebuild(state, routedState, previousPlan);
+            }
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,
