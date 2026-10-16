@@ -9,6 +9,11 @@ const Evidence = invoke('GameServer/Bot/Economy/WishPurchaseEvidence');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Gear = invoke('GameServer/Bot/AI/BotGear');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+// A context holds only by its event proof, which needs the warehouse rows
+// and a recompute generation; without them every request builds anew.
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const inventory = {};
 for (const row of Gear.planFor({ classId: 46, level: 20 }).items) {
     if ([7, 14].includes(row.slot)) continue;
@@ -99,11 +104,14 @@ const expensive = Economy.forState(state, deps);
 const crystalPaths = context => context.projection.nodes.find(row => row.key === 'item:1458').paths
     .filter(row => row.kind === 'crystallize');
 assert(crystalPaths(expensive).some(row => row.improvement.sourceSelfId === 90));
+// The bot publishes the build's decision; later reviews read that state.
+const published = { ...state, stats: { ...state.stats, ...expensive.statsPacket } };
 offer(166, 206926);
-const cheaper = Economy.forState(state, deps);
+const cheaper = Economy.forState(published, deps);
 assert.deepEqual(cheaper.network.queue, expensive.network.queue,
     'a new unrelated quote waits through the held decision market delay');
-const refreshed = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 1 });
+assert.strictEqual(cheaper.plan, expensive.plan, 'the published decision is held, not rebuilt');
+const refreshed = Economy.forState(published, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 1 });
 assert(crystalPaths(refreshed).some(row => row.improvement.sourceSelfId === 166),
     'the newly listed cheap input enters at the next decision after the market delay');
 assert(refreshed.network.queue.some(row => {
@@ -111,7 +119,7 @@ assert(refreshed.network.queue.some(row => {
     return old && row.price < old.price;
 }), 'the native full C-goal estimate falls, rather than just a single-batch price');
 offer(166, 206926, 0);
-const depleted = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 2 });
+const depleted = Economy.forState(published, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 2 });
 assert(!crystalPaths(depleted).some(row => row.improvement.sourceSelfId === 166),
     'quote depletion invalidates the selected crystal path');
 assert.deepEqual(state, before);
