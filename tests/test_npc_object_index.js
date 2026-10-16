@@ -4,6 +4,7 @@ const { performance } = require('perf_hooks');
 require('../src/Global');
 
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const Index = require('../src/GameServer/World/NpcObjectIndex');
 const Awareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const Combat = invoke('GameServer/Bot/AI/PartyCombatState');
@@ -41,7 +42,7 @@ function actor(id) {
             fetchId() { fillerReads++; return 1000000 + i; }
         }));
         World.npc = { spawns: [...filler, target, add], grid: {}, gridKeys: new WeakMap() };
-        World.user = { sessions: [leader, companion] };
+        registerSessions([leader, companion]);
         BotManager.sessions = [companion];
         leader.actor.targetId = target.id;
         companion.incomingThreatId = add.id;
