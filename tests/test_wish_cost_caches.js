@@ -16,6 +16,10 @@ Data.init();
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const ItemIndex = invoke('GameServer/Item/ItemTemplateIndex');
+// A build holds only by its event proof, which needs the warehouse rows and
+// a recompute generation.
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+require('../src/GameServer/Bot/Population/RecomputeGeneration').configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 
 let failures = 0;
 function check(name, fn) {
@@ -233,37 +237,40 @@ check('a wish review is rebuilt only by changes on items it read (design 16.5)',
         stats: { classId: 1, exp: Data.experience[34], persona: { traits: { commitment: .5, caution: .5,
             resilience: .5, ambition: .5, empathy: .5, sociability: .5, assertiveness: .5 }, understanding: .8 } },
         timing: {}, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
-    const context = Economy.forState(state, now());
-    assert.equal(Economy.forState(state, now()).plan, context.plan);
+    // The bot publishes each reviewed decision; a later review of that state holds it.
+    const review = () => { const reviewed = Economy.forState(state, now());
+        state.stats = { ...state.stats, ...reviewed.statsPacket }; return reviewed; };
+    const context = review();
+    assert.equal(review().plan, context.plan);
     // a line and a deal of an item nobody here looked at
     const unread = 1 + Math.max(...Data.items.map(item => Number(item.selfId)));
     board.put({ id: 11, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: unread, count: 1, price: 10 }] });
-    assert.equal(Economy.forState(state, now()).plan, context.plan, 'another item on the board rebuilds nobody');
+    assert.equal(review().plan, context.plan, 'another item on the board rebuilds nobody');
     // an item the review priced while it was built
     const wished = context.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
     assert.ok(wished, 'fixture: a wished item');
     board.put({ id: 12, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
     clock += MARKET_DELAY;
-    const rebuilt = Economy.forState(state, now());
+    const rebuilt = review();
     assert.notEqual(rebuilt.plan, context.plan, 'a line of a wished item rebuilds');
-    assert.equal(Economy.forState(state, now()).plan, rebuilt.plan);
+    assert.equal(review().plan, rebuilt.plan);
     // a deal in the counter of an item the review read
     Counters.deal(wished, 1000, 1, Date.now(), 7, null, 8);
     clock += MARKET_DELAY;
-    const afterDeal = Economy.forState(state, now());
+    const afterDeal = review();
     assert.notEqual(afterDeal.plan, rebuilt.plan, 'a deal in the counter of a read item rebuilds');
     // an item first read later through the context (worth) joins the watched items
     const lazy = Data.items.map(item => Number(item.selfId)).find(id => id > 1000 && id !== wished && afterDeal.price(id) >= 0);
-    assert.equal(Economy.forState(state, now()).plan, afterDeal.plan);
+    assert.equal(review().plan, afterDeal.plan);
     board.put({ id: 13, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: lazy, count: 1, price: 10 }] });
     clock += MARKET_DELAY;
-    assert.notEqual(Economy.forState(state, now()).plan, afterDeal.plan, 'a later price read is watched too');
+    assert.notEqual(review().plan, afterDeal.plan, 'a later price read is watched too');
     // a later board look through the context (a market look) does not widen the review's inputs
-    const held = Economy.forState(state, now());
+    const held = review();
     const looked = Data.items.map(item => Number(item.selfId)).find(id => id > 2000 && id !== wished && id !== lazy);
     held.board.first(looked, SELL);
     board.put({ id: 14, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: looked, count: 1, price: 10 }] });
-    assert.equal(Economy.forState(state, now()).plan, held.plan, 'a board look after the review is not its input');
+    assert.equal(review().plan, held.plan, 'a board look after the review is not its input');
 });
 
 check('basics() and stockFor() give what forState gives, without building a network', () => {
@@ -300,6 +307,8 @@ check('a party composition keeps no proposed groups; a real group is kept until 
     const members = [member(971), member(972)];
     Economy.reset();
     const own = Economy.forState(members[0], deps);
+    // The member publishes its own decision; a later review of it holds that decision.
+    members[0] = { ...members[0], stats: { ...members[0].stats, ...own.statsPacket } };
     const proposal = Economy.forGroup({ partyId: 'proposal:971:972', adena: 1000 }, members, deps);
     assert.notEqual(Economy.forGroup({ partyId: 'proposal:971:972', adena: 1000 }, members, deps), proposal, 'a proposal is not kept');
     const real = Economy.forGroup({ partyId: 'bgp_test', adena: 1000 }, members, deps);
