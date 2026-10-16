@@ -261,6 +261,9 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
             const result = work();
             EconomyJournal.commit();
             if (!connection?.isTransaction) ClanReviewInputs.commitCandidateInputs();
+            // A committed job may have added history outbox rows (directly or
+            // by a trigger); the history thread sleeps until told.
+            if (!read && operation !== 'history:outbox-delete') History.wake();
             if (timed) record(operation, wait, now() - startedAt, read);
             return result;
         } catch (error) {
