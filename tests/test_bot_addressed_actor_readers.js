@@ -47,6 +47,7 @@ function reader(relative, world = World, target = false) {
 }
 const Pulling = reader('src/GameServer/Bot/AI/PartyPulling.js');
 const Status = reader('src/GameServer/Bot/AI/BotStatus.js', World, true);
+const Awareness = reader('src/GameServer/Bot/AI/PartyAwareness.js');
 function reset() { World.user = { sessions: [], revision: 0 }; World.npc = { spawns: [] }; NpcIndex.reset(World); }
 function build({ id = ++serial, account = `player_reader_${++serial}`, online = true, hp = 100, ...fields } = {}) {
     const session = { ...fields, accountId: account, fetchAccountId() { return this.accountId; },
@@ -165,6 +166,10 @@ try {
         const unrelated = Array.from({ length: count }, () => member());
         assert.equal(Pulling.hasDeadPartyMember(chosen), true, 'genuine positive precedes access traps');
         assert.equal(target(corpse.actor.fetchId(), chosen).id, corpse.actor.fetchId());
+        // The full-list reader is the reference for the party group read.
+        const fullList = reader('src/GameServer/Bot/AI/PartyAwareness.js', { user: World.user, npc: World.npc });
+        const expectedParty = fullList.partySessions(chosen);
+        assert.ok(expectedParty.includes(chosen));
         const restores = []; let unrelatedReads = 0;
         const patch = (object, field, descriptor) => {
             const previous = Object.getOwnPropertyDescriptor(object, field);
@@ -187,14 +192,17 @@ try {
             Runtime.index.cells, Runtime.index.spots]) {
             for (const field of ['values', 'entries', Symbol.iterator]) patch(map, field, { value: forbidden });
         }
-        let death, userTarget, missingTarget;
+        let death, userTarget, missingTarget, party;
         try {
+            party = Awareness.partySessions(chosen);
             death = Pulling.hasDeadPartyMember(chosen);
             userTarget = target(corpse.actor.fetchId(), chosen);
             missingTarget = target(++serial, chosen);
         } finally { for (const restore of restores.reverse()) restore(); }
         assert.equal(death, true); assert.equal(userTarget.id, corpse.actor.fetchId());
         assert.deepEqual(missingTarget, { type: 'unknown', id: serial });
+        assert.ok(party.length === expectedParty.length && party.every((session, index) => session === expectedParty[index]),
+            'the party group read returns the full-list members in the same order');
         assert.equal(unrelatedReads, 0);
         passed(`native readers avoid roster enumeration and ${count} unrelated actors`, { unrelatedReads });
     }

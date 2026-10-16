@@ -1,5 +1,6 @@
 const ActorQueries = require('../../../World/ActorSpatialQueries');
 const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
+const NpcObjectIndex = require('../../../World/NpcObjectIndex');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const World          = invoke('GameServer/World/World');
@@ -133,17 +134,6 @@ function economyForHunt(session, bot) {
         invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session));
 }
 
-function isClaimedByOtherSoloBot(session, npc) {
-    const BotManager = invoke('GameServer/Bot/BotManager');
-    const npcId = npc.fetchId();
-
-    return BotManager.sessions.some((otherSession) => {
-        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) return false;
-        if (otherSession.currentTargetId !== npcId) return false;
-        return !otherSession.actor.state.fetchDead();
-    });
-}
-
 function startShopping(session, bot, BotAI, reason, townName = null) {
     if (isPartyCompanion(session)) {
         session.plan = 'following';
@@ -160,13 +150,18 @@ function startShopping(session, bot, BotAI, reason, townName = null) {
     } : {});
 }
 
+// The targets other live solo hunters hold. No index owns session.currentTargetId
+// (it has writers in many modules, hot and cold), so this is one pass over the
+// sessions; a caller that asks twice in one decision passes the set along.
 function claimedTargetIds(session, sessions = invoke('GameServer/Bot/BotManager').sessions || []) {
+    const startedAt = performance.now();
     const claimed = new Set();
-    sessions.forEach((otherSession) => {
-        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) return;
-        if (!otherSession.currentTargetId || otherSession.actor.state.fetchDead()) return;
+    for (const otherSession of sessions) {
+        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) continue;
+        if (!otherSession.currentTargetId || otherSession.actor.state.fetchDead()) continue;
         claimed.add(Number(otherSession.currentTargetId));
-    });
+    }
+    HotActorLodPolicy.recordSubsystem('claimScan', performance.now() - startedAt, sessions.length);
     return claimed;
 }
 
@@ -194,7 +189,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         .filter((npc) => BotHuntingTargetPolicy.canHunt(npc))
         .filter((npc) => npc.fetchAttackable() && !npc.isDead());
     const nearbyNpcs = limitTargetCandidates(session, bot, eligibleNearbyNpcs);
-    const claimedIds = claimedTargetIds(session);
+    const claimedIds = options.claimedIds || claimedTargetIds(session);
     const spotIdAt = (actor) => `${Math.floor(actor.fetchLocX() / SPOT_CELL_SIZE)}_${Math.floor(actor.fetchLocY() / SPOT_CELL_SIZE)}`;
     const currentSpotId = String(session.currentSpot?.id || spotIdAt(bot)).split(':')[0];
     const partyActors = session.followPlayerSession || session.hotBackgroundPartyId
@@ -295,7 +290,7 @@ function liveCurrentNpcTarget(session, bot, radius = 2500) {
     const targetId = Number(session.currentTargetId || 0);
     if (!targetId) return null;
 
-    const target = (World.npc?.spawns || []).find((npc) => Number(npc.fetchId?.() || 0) === targetId);
+    const target = NpcObjectIndex.find(World, targetId);
     if (!target || target.fetchAttackable?.() !== true || target.isDead?.() === true || target.state?.fetchDead?.() === true) {
         return null;
     }
@@ -945,10 +940,12 @@ module.exports = {
                             return;
                         }
 
-                        if (isClaimedByOtherSoloBot(session, npc)) {
+                        const claimedIds = claimedTargetIds(session);
+                        if (claimedIds.has(Number(npc.fetchId()))) {
                             const alternateMonster = findPreferredMonster(session, bot, 2500, {
                                 excludeTargetId: npc.fetchId(),
-                                freeOnly: true
+                                freeOnly: true,
+                                claimedIds
                             });
                             if (alternateMonster) {
                                 assignTarget(session, bot, alternateMonster);

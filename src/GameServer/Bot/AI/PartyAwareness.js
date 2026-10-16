@@ -46,11 +46,28 @@ function partySessions(leaderSession) {
             .filter(session => isOnlineActor(session.actor));
     }
 
-    return (world().user?.sessions || []).filter((session) => (
+    return playerPartyCandidates(leaderSession).filter((session) => (
         session &&
         isPartySession(session, leaderSession) &&
         isOnlineActor(session.actor)
     ));
+}
+
+// The sessions that can be in a player's party: the who-where map's party
+// group keyed by the leader session (PvpPartyMembershipKeys), in registration
+// order like the full session list, instead of every online session.
+function playerPartyCandidates(leaderSession) {
+    const World = world();
+    if (World.pvpPartyMembershipIndex !== true) return World.user?.sessions || [];
+    const members = World.pvpPartySessionsForKey(leaderSession);
+    if (members.includes(leaderSession)) return members;
+    // A leader that is itself a companion keys its own leader, yet stays in its party.
+    const leader = World.registeredActorById(actorId(leaderSession.actor));
+    if (leader?.session !== leaderSession) return members;
+    let at = members.length;
+    while (at > 0 && World.registeredActorById(actorId(members[at - 1].actor))?.order > leader.order) at -= 1;
+    members.splice(at, 0, leaderSession);
+    return members;
 }
 
 function partyActors(leaderSession) {

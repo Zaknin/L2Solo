@@ -824,7 +824,12 @@ const BotAI = {
             Generics.skillExec(session,bot,{id:bot.fetchId(),selfId:selfTactic.skill.fetchSelfId(),ctrl:true});
             return true;
         }
-        const chargePlan = basicAttackOnly || !canCast ? null : BotCombatUtility.selectChargePlan(bot, role, combatPolicy, npc);
+        combatPolicy.rejectedAlternatives = [];
+        // One offensive select per call: the charge plan competes with it and
+        // the cast below uses it when no charge is prepared.
+        const offense = basicAttackOnly || !canCast ? null
+            : BotCombatUtility.selectAttackAndChargePlan(bot, npc, role, combatPolicy);
+        const chargePlan = offense?.charge;
         const chargeSkill = chargePlan?.skill;
         if (chargeSkill) {
             session.lastCombatDecision = {
@@ -846,10 +851,7 @@ const BotAI = {
             });
             return true;
         }
-        combatPolicy.rejectedAlternatives = [];
-        const decision = basicAttackOnly || !canCast
-            ? null
-            : BotCombatUtility.select(bot, npc, role, combatPolicy);
+        const decision = offense?.ready || null;
         if (decision) {
             session.lastCombatDecision = {
                 action: 'cast_skill',
