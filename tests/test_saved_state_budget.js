@@ -178,7 +178,6 @@ async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, he
                     activityLeaf: after.stats?.activityLeaf, wishDirty: after.stats?.wishDirty };
                 if (changed.length) {
                     expected.decisionSeq = Math.max(Number(before.stats?.decisionSeq) || 0, Number(after.stats?.decisionSeq) || 0) + 1;
-                    expected.activityLeaf = 0;
                     expected.wishDirty = changed.reduce((bits, name) => bits | sectionBits[name], 0);
                 }
                 reconciled.push({ changed, expected });
@@ -213,11 +212,10 @@ async function workerPacketSurvivesMainPreparation(source, { huntSpot = null, he
                 assert.equal(prepared.stats.decisionSeq,
                     Math.max(Number(request.state.stats.decisionSeq) || 0, Number(packet.decisionSeq) || 0) + 1,
                     'main retains the focus event and adds exactly one completed-round event');
-                assert.equal(prepared.stats.activityLeaf, 0, 'a completed hunting round reopens activity selection');
                 const retried = await Life.applyResolve.call(receiver, applyInput, request.precomputedResult,
                     { statsPacket: packet, workerAdmission: admission });
                 assert.equal(retried.stats.decisionSeq, prepared.stats.decisionSeq, 'retrying one input cannot raise another event');
-                assert.equal(retried.stats.activityLeaf, 0);
+                assert.equal(retried.stats.activityLeaf, prepared.stats.activityLeaf);
                 assert.deepEqual(retried.stats.money, packet.money);
             }
             const beforeMissing = Funding.summary().moneyPacketMissing;

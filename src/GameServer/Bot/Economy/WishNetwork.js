@@ -585,10 +585,12 @@ class WishNetwork {
         const focusWishes = wishes.filter(wish => wish.progressionPriority === activePriority);
         const loyalty = Math.min(1, nonnegative(persona.traits?.commitment ?? 0.5));
         const score = wish => wish.valueHours / Math.max(1 / 3600, wish.effort);
+        // A held choice survives a reconsideration while no row beats it by the bot's loyalty.
+        // Leaf values already carry the off-focus (1 - loyalty) weight; the margin is the same trait.
+        const loyal = (choice, rows) => preserveFocus || rows.every(row => score(row) <= score(choice) * (1 + loyalty));
         const held = focusWishes.find(wish => wish.key === previous.focus?.[0]);
-        const challenger = focusWishes.reduce((best, wish) => !best || score(wish) > score(best) ? wish : best, null);
         const focused = focusWishes.find(wish => wish.key === completionKey)
-            || (held && (preserveFocus || !challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
+            || (held && loyal(held, focusWishes) ? held
                 : choose(focusWishes, score, roll('focus')));
         const focus = focused ? [focused.key, held === focused ? previous.focus[1] : playedHours,
             nonnegative(focused.price)] : null;
@@ -687,21 +689,24 @@ class WishNetwork {
             || funded.has(leaf.rootKey) || leaf.price === 0 && (leaf.rootKey === unfunded?.key || unfundable.has(leaf.rootKey)));
         // A cheap intermediate material cannot claim the whole upgrade's
         // benefit as an instantaneous income. Use the complete chosen path.
-        const heldActivity = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
+        const heldLeaf = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
+        const heldActivity = heldLeaf && loyal(heldLeaf, candidates) ? heldLeaf : null;
         if (individual && activityLeaf && !heldActivity && decisionSeq === inputDecisionSeq) {
-            // Completion or an impossible accepted step is a real event;
+            // A completed, impossible or outscored step is a real reconsideration;
             // rebuilding the same valid step is not another tendency roll.
             decisionSeq++; activityLeaf = 0;
         }
         const completion = candidates.find(leaf => leaf.rootKey === completionKey && leaf.kind === 'luxury_exchange');
-        const activity = completion || heldActivity || choose(candidates, leaf => leaf.valueHours / Math.max(1 / 3600, leaf.effort),
-            roll('activity'));
+        const activity = completion || heldActivity || choose(candidates, score, roll('activity'));
         const result = { inputKey, queue, moneyPrice, available, gap, hourAdena,
             quantityPrepared: !!stockFor,
             focus, dormant, activity, demands, plans, decisionSeq,
             activityLeaf: individual && activity ? fnv1a32(activity.key) : 0 };
         if (diagnostic) {
             Diagnostics.count('network', 'build');
+            Diagnostics.count('network', 'activity', completion ? 'completion' : heldActivity ? 'held'
+                : heldLeaf ? 'outscored' : !inputActivityLeaf ? activity ? 'fresh' : 'none'
+                : focus?.[0] !== previous.focus?.[0] ? 'focus_moved' : 'gone');
             Diagnostics.count('network', cached ? sameResult(cached.result, result) ? 'unchanged' : 'changed' : 'comparison_unavailable');
             Diagnostics.duration('network', performance.now() - started);
         }

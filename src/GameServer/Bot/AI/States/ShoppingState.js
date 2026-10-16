@@ -350,7 +350,7 @@ async function craftAtWorkshop(session, bot, target) {
         if (!session.workshopOriginal) {
             session.shoppingTarget = undefined;
             session.shoppingServicePhase = undefined;
-            raiseDecision(session, 'town');
+            raiseDecision(session, 'town', { impossible: true });
         }
         utils.infoWarn('Workshop', '%s: %s', bot.fetchName(), error.message);
     } finally { session.workshopCrafting = false; }
@@ -434,7 +434,7 @@ module.exports = {
                 session.shoppingTarget = townMerchantTarget(closestTown, bot);
                 if (!session.shoppingTarget) {
                     session.plan = 'hunting';
-                    raiseDecision(session, 'town');
+                    raiseDecision(session, 'town', { impossible: true });
                     session.shoppingDoneAnnounced = false;
                     session.preShopLocation = undefined;
                     clearShoppingServiceState(session);
@@ -532,7 +532,7 @@ module.exports = {
                 deferEquipmentRetry(session);
                 session.plan = returningToCompanion ? 'following' : 'hunting';
                 // ARCH-NOTE: an unreachable shopping route also ends this town visit.
-                if (session.plan === 'hunting') raiseDecision(session, 'town');
+                if (session.plan === 'hunting') raiseDecision(session, 'town', { impossible: true });
                 session.shoppingDoneAnnounced = false;
                 session.shoppingTarget = undefined;
                 session.companionShopping = undefined;

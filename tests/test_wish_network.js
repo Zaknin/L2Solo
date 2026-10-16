@@ -106,7 +106,29 @@ assert.notEqual(removed.activityLeaf, eventFirst.activityLeaf);
 assert.equal(removed.decisionSeq, 2, 'a new focus raises the decision once before its activity roll');
 const sameKeyNewEvent = network.build({ ...eventInput, decisionSeq: 51 });
 assert.equal(sameKeyNewEvent.decisionSeq, 51, 'an unchanged input key cannot reuse another decision');
-console.log('PASS individual event seeds / held leaves / missing leaf / focus transition');
+// An event keeps the held step while no other step beats it by the bot's
+// loyalty; a step that became much better is rolled for once.
+const valued = hours => ({ ...eventInput, previous: { focus: ['right', 0, 0] },
+    nodes: [eventInput.nodes[0], { ...eventInput.nodes[1], valueHours: hours }] });
+let leftLeaf = 0;
+for (let decisionSeq = 1; !leftLeaf && decisionSeq <= 50; decisionSeq++) {
+    const pick = network.build({ ...valued(3), decisionSeq, remembered: false });
+    if (pick.activity.rootKey === 'left') leftLeaf = pick.activityLeaf;
+}
+assert(leftLeaf > 0);
+const outscoredPicks = new Set();
+for (let decisionSeq = 2; decisionSeq <= 30; decisionSeq++) {
+    // Loyalty .5: the held off-focus step is worth 1 * .5, the focus step .7 <= .5 * 1.5.
+    const loyal = network.build({ ...valued(0.7), persona: { traits: { commitment: 0.5 } }, decisionSeq,
+        activityLeaf: leftLeaf, remembered: false });
+    assert.equal(loyal.activityLeaf, leftLeaf, 'a step within the loyalty margin survives the event');
+    assert.equal(loyal.decisionSeq, decisionSeq);
+    const outscored = network.build({ ...valued(3), decisionSeq, activityLeaf: leftLeaf, remembered: false });
+    assert.equal(outscored.decisionSeq, decisionSeq + 1, 'an outscored step is rolled for under a new seed');
+    outscoredPicks.add(outscored.activity.rootKey);
+}
+assert(outscoredPicks.has('right'), 'the better step can win the roll');
+console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf');
 
 const liquidationInput = { actorKey: 'finite-sale', inputKey: 'bag', remembered: false,
     wallet: 10, hourAdena: 0, roots: ['upgrade'], nodes: [{ key: 'upgrade', need: 'power',

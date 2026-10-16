@@ -3,16 +3,22 @@ const DiagnosticConfig = require('../Population/PopulationConfig');
 const Sections = require('../Economy/DecisionSections');
 const reasons = { town: 0, revived: 0, level: 0, weight: 0, bag: 0, money: 0,
     build: 0, sources: 0, supply: 0, occupation: 0, relations: 0, combat: 0, benefits: 0 };
-const sectionBits = { build: 1, combat: 2, supply: 4, benefits: 8, sources: 16, occupation: 32, money: 64, funding: 64, relations: 128 };
+// Every reason marks a section, so the next build reconsiders the held focus and activity.
+const sectionBits = { build: 1, combat: 2, supply: 4, benefits: 8, sources: 16, occupation: 32, money: 64, funding: 64, relations: 128,
+    level: 1, revived: 2, weight: 4, bag: 4, town: 4 | 64 };
 let hotEconomyBuilds = 0, reportedBuilds = 0, reportedAt = 0;
 function statsFor(session) {
     return session.coldLifeState ? (session.coldLifeState.stats ||= {}) : (session.decisionStats ||= {});
 }
-function raiseDecision(session, reason) {
+function raiseDecision(session, reason, { impossible = false } = {}) {
     if (!Object.hasOwn(reasons, reason)) throw new TypeError('unknown_decision_event');
     const stats = statsFor(session);
+    // A new sequence invalidates the held decision; the held activity stays and
+    // WishNetwork rerolls it only when gone, outscored or off a moved focus. An
+    // execution that proved the held step impossible drops it: the economy
+    // inputs do not record that failure, so the step would be chosen again.
     stats.decisionSeq = Math.max(0, Math.trunc(Number(stats.decisionSeq) || 0)) + 1;
-    stats.activityLeaf = 0;
+    if (impossible) stats.activityLeaf = 0;
     stats.wishDirty = (Number(stats.wishDirty) || 0) | (sectionBits[reason] || 0);
     // ARCH-NOTE: visit ends share the arrival clock until a single native arrival event exists.
     if (reason === 'town') stats.visitEvery = require('../Economy/TownVisitInterval').arrived(stats);
@@ -106,7 +112,6 @@ function reconcile(before, after, timestamp) {
     if (!changed.length) return [];
     const stats = after.stats ||= {};
     stats.decisionSeq = Math.max(Number(before.stats?.decisionSeq) || 0, Number(stats.decisionSeq) || 0) + 1;
-    stats.activityLeaf = 0;
     stats.wishDirty = changed.reduce((bits, section) => bits | (sectionBits[section] || 0), 0);
     return changed;
 }

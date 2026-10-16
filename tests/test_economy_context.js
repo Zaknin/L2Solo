@@ -514,7 +514,7 @@ async function run() {
     const actualDeath = await Life.prepareResolve(resolveInput, { ...resolveResult,
         patch: { activity: 'dead' } }, resolveOptions);
     assert.equal(actualDeath.stats.decisionSeq, 10, 'actual death creates one meaningful decision');
-    assert.equal(actualDeath.stats.activityLeaf, 0);
+    assert.equal(actualDeath.stats.activityLeaf, resolveInput.stats.activityLeaf, 'death keeps the held step for the next build to reconsider');
     const levelExpGain = Math.max(1, Data.experience[base.level] - resolveInput.exp + 1);
     const levelGain = await Life.prepareResolve(resolveInput, { ...resolveResult,
         materialize: { ...resolveResult.materialize, exp: levelExpGain } }, resolveOptions);

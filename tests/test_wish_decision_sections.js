@@ -205,7 +205,7 @@ try {
     const levelled = { ...state, level: state.level + 1, stats: { ...state.stats } };
     assert(Events.reconcile(state, levelled, deps.timestamp).includes('build'));
     assert.equal(levelled.stats.decisionSeq, state.stats.decisionSeq + 1);
-    assert.equal(levelled.stats.activityLeaf, 0);
+    assert.equal(levelled.stats.activityLeaf, state.stats.activityLeaf, 'an event keeps the held activity; the network rerolls only a gone leaf');
     const paired = { ...state, inventory: { ...state.inventory, 1: { ...state.inventory[1], amount: 2 } } };
     assert.notEqual(Sections.capability(paired, deps.timestamp), Sections.capability(state, deps.timestamp));
     const classAlias = { ...state, classId: state.stats.classId };
