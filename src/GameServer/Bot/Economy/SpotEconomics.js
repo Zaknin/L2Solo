@@ -43,7 +43,7 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
     const calibration = calibrations.length ? calibrations.reduce((sum, value) => sum + value, 0) / calibrations.length : 1;
     const incomeError = Learning.knowledgeEnabled() ? Learning.stageError(0.03 + 0.25 * (1 - Number(persona.understanding ?? 0.3)),
         0.03, state.stats?.lifelongKills ?? state.stats?.fightsWon ?? 0, Learning.gradeOfLevel(state.level)) : 0;
-    const reader = (spot, shots = hunt.useShots !== false) => {
+    return (spot, shots = hunt.useShots !== false) => {
         // Charged observations cannot estimate a deliberately uncharged hunt.
         const observed = shots ? own.find(row => row.spotId === spot.id) : null;
         const rate = observed ? 3600000 / observed.cycleMs : 0;
@@ -74,8 +74,5 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
             + row.income / hourAdena * weight - row.riskHours;
         return row;
     };
-    // The own-sample calibration of table spots, for a caller that reports it (EconomyContext).
-    reader.calibration = calibration;
-    return reader;
 }
 module.exports = { create, moneyWeight };

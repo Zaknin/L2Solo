@@ -1274,8 +1274,6 @@ function buildForState(state, deps) {
             : previousRows === shadowEntry.rows ? 'same' : 'moved';
     }
     const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
-    // The own-sample calibration is the spot reader's (the same samples over the same table).
-    context.calibration = readSpot.calibration;
     context.spotValue = (spot, ...args) => { context.sourceSpot(spot.id); return readSpot(spot, ...args); };
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
@@ -1531,7 +1529,7 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
     for (const node of projection?.nodes || [])
         if (node.key.startsWith('stock:') && !stockRoots.has(node.key)) stockRoots.set(node.key, node.object?.itemId);
     return { pending: !projection, key, market, actorKey: context.actorKey, timestamp: context.timestamp,
-        gearThreatMask: context.gearThreatMask, persona: context.persona, hunt: context.hunt, calibration: context.calibration,
+        gearThreatMask: context.gearThreatMask, persona: context.persona, hunt: context.hunt,
         riskWeight: context.riskWeight, bestSpotId: context.bestSpotId, deathHours: context.deathHours,
         lostGearHours: context.lostGearHours, karmaHours: context.karmaHours, expectedDeathHours: context.expectedDeathHours,
         survivalReserve: context.survivalReserve, kit: base.kit, hourAdena: context.hourAdena, workshop: context.workshop,
@@ -1590,7 +1588,7 @@ function view(state, plan, deps, built = {}) {
         money: invoke('GameServer/Bot/Economy/PurchaseFunding').packetFor(network, plan.hourAdena, plan.survivalReserve) };
     const context = { inputKey, actorKey: plan.actorKey, state,
         timestamp: plan.timestamp, gearThreatMask: plan.gearThreatMask, persona: plan.persona, board: built.board, hunt: plan.hunt,
-        price, buyback, calibration: plan.calibration, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
+        price, buyback, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
         deathHours: plan.deathHours, lostGearHours: plan.lostGearHours, karmaHours: plan.karmaHours,
         expectedDeathHours: plan.expectedDeathHours, stock, survivalReserve: plan.survivalReserve, kitCost,
         hourAdena: plan.hourAdena, workshop: plan.workshop, routeKey: plan.routeKey, routeRows: plan.routeRows,
