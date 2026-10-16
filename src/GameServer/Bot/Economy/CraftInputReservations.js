@@ -21,5 +21,11 @@ function selectedCraftAmounts(state, network) {
     visit(plan);
     return reserved;
 }
+// The same reservation as [id, amount] rows of the held units only: the
+// decision card's craftReservations and the held build's craft inputs.
+function selectedCraftRows(state, network) {
+    return Object.entries(selectedCraftAmounts(state, network)).filter(([, amount]) => amount > 0)
+        .map(([id, amount]) => [Number(id), amount]);
+}
 
-module.exports = { selectedCraftAmounts };
+module.exports = { selectedCraftAmounts, selectedCraftRows };

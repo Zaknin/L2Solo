@@ -27,6 +27,7 @@ const RecomputeGeneration = require('../Population/RecomputeGeneration');
 const Warehouse = require('./PersonalWarehouseIndex');
 const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Recipes = require('../../Items/C4RecipeItems');
+const CraftInputReservations = require('./CraftInputReservations');
 const ProductionIndex = require('./RecipeProductionIndex');
 const Bytes = require('./CompactBytes');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
@@ -474,15 +475,13 @@ function materialHunt(leaf) {
     return leaf?.activity === 'hunting' && leaf.funding !== true
         && Number.isSafeInteger(leaf.itemId) && leaf.itemId > 0 && Number.isFinite(leaf.amount) && leaf.amount > 0;
 }
-// Only an explicit one-unit equipment acquisition: stock and resale targets
-// have different quantities. Read the retained build's admitted root, not its key.
-function acquisitionTarget(projection, focus) {
-    const root = projection.nodes.find(node => node.key === focus);
-    const id = root?.object?.itemId, path = root?.paths?.[0], requirement = path?.requirements?.[0];
-    return root?.need === 'power' && root.object?.slot != null && Number.isSafeInteger(id) && id > 0
-        && root.paths?.length === 1 && path?.requirements?.length === 1
-        && requirement?.key === `item:${id}` && requirement.amount === 1 ? id : undefined;
+// The item a held leaf itself brings in (a buy, a material hunt): its bag and
+// incoming count is the leaf's own progress, measured from the decision.
+function ownItem(leaf) {
+    return leaf?.activity === 'shopping' && leaf.kind === 'buy' || materialHunt(leaf) ? leaf.itemId : null;
 }
+// The item of one quantity proof row (WishNetwork createQuantityInputs layout).
+const quantityItem = row => row[0] === 'stock' || row[0] === 'stockPhysical' ? row[2] : row[1];
 // This proof is produced by the completed native build, shared by its cache
 // entry and compact execution card. It is never reconstructed from a later
 // publication. Market/occupancy reads retain their original soft deadline.
@@ -571,20 +570,35 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         || safety.some((value, at) => value !== proof.safety[at]))
         return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
+    const leaf = options.leaf;
+    // A held craft's reserved inputs may only grow before it runs; a loss
+    // below what the decision reserved stays a quantity event.
+    const reserved = leaf?.activity === 'crafting' && Array.isArray(options.craftReservations) ? options.craftReservations : null;
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
+        if (reserved?.some(row => row[0] === id) && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
             && (band[2] === null || currentOwned <= band[2]) ? originalOwned : currentOwned;
     };
-    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state),
+    // Own outputs are not inputs: the leaf's own item moves with its progress.
+    // It holds while the bot keeps what it held at the decision; the order's
+    // completion is the activity check below, a loss is a quantity event.
+    const own = ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
+    const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
+        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || quantityItem(row) !== own) };
+    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state),
         stockFor: stockReader(state, key => roots.get(key)) }, stockAmount)) return refuse('quantity', ['sources', 'money']);
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
-    const originalSales = proof.liquidation?.rows;
+    // The leaf's own item and a craft's reserved inputs are not sales: their
+    // count moves with the leaf's progress, held above by the quantity check.
+    const sale = own === null && !reserved ? null : row => row[0] !== own && !reserved?.some(input => input[0] === row[0]);
+    const originalSales = sale ? proof.liquidation.rows.filter(sale) : proof.liquidation.rows;
+    const currentSales = liquidation.proof && (sale ? liquidation.proof.rows.filter(sale) : liquidation.proof.rows);
     let changedLoot = false;
-    const sameSales = liquidation.proof && Array.isArray(originalSales)
-        && liquidation.proof.rows.length === originalSales.length
-        && liquidation.proof.rows.every(([id, count], at) => {
+    const sameSales = currentSales && currentSales.length === originalSales.length
+        && currentSales.every(([id, count], at) => {
             const original = originalSales[at];
             if (id !== original?.[0]) return false;
             if (count === original[1]) return true;
@@ -606,15 +620,15 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
-    const leaf = options.leaf;
+    const checked = own === null ? leaf : { ...leaf, heldAtDecision: options.heldUnits };
     if (leaf === null) {
         // A completed native graph may choose no economic action. Execution
         // keeps its ordinary hunt/rest/travel path after every shared check.
     } else if (leaf.activity === 'shopping' || leaf.activity === 'selling') {
-        if (!acceptedActivityHolds(state, leaf, deps, null, { liquidation: liquidation.candidates }))
+        if (!acceptedActivityHolds(state, checked, deps, null, { liquidation: liquidation.candidates }))
             return refuse('check_failed', ['sources', 'money']);
     } else if (leaf.activity === 'hunting') {
-        if (materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(leaf, state) <= 0)
+        if (materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
             return refuse('check_failed', ['sources']);
     } else if (leaf.activity === 'pvp' || leaf.activity === 'helping') {
         if (!Number.isSafeInteger(leaf.targetId) || leaf.targetId <= 0
@@ -713,18 +727,16 @@ function wireEventProof(proof) {
     } catch (_) { return null; }
 }
 // Sampled proof uses existing numeric fields: item/requested = held hunting
-// item/amount, before = retained raw bag+incoming, owned/actual = current bag/
-// incoming, remaining = raw progress gap. This is not allocatable craft stock.
-// target/planned/after = target id and retained/current physical presence.
-function shadowQuantityEvidence(state, held, last) {
-    const leaf = held?.plan.network?.activity, out = {};
-    if (materialHunt(leaf)) Object.assign(out, { item: leaf.itemId, requested: leaf.amount, before: last?.heldHuntingUnits,
+// item/amount, before = the held build's bag+incoming at the decision,
+// owned/actual = current bag/incoming, remaining = raw progress gap. This is
+// not allocatable craft stock.
+function shadowQuantityEvidence(state, held) {
+    const leaf = held?.plan.network?.activity;
+    if (!materialHunt(leaf)) return null;
+    return { item: leaf.itemId, requested: leaf.amount, before: held.heldUnits,
         owned: positive(state.inventory?.[leaf.itemId]?.amount), actual: positive(state.acceptedIncoming?.[leaf.itemId]),
-        remaining: Number.isFinite(last?.heldHuntingUnits)
-            ? ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: last.heldHuntingUnits }, state) : undefined });
-    if (last?.heldTargetItem) Object.assign(out, { target: last.heldTargetItem, planned: Number(last.heldTargetPresent),
-        after: Number(positive(state.inventory?.[last.heldTargetItem]?.amount) > 0) });
-    return out;
+        remaining: Number.isFinite(held.heldUnits)
+            ? ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: held.heldUnits }, state) : undefined };
 }
 const FOCUS_KINDS = new Set(['power', 'stock', 'resale', 'level', 'care', 'scores', 'status', 'book', 'enchant', 'sa', 'henna']);
 function focusKind(key) {
@@ -1516,7 +1528,8 @@ function buildForState(state, deps) {
     const replay = held?.key === key && input && !Sections.decisionRefusal(state, input[0], input[1], input[2]);
     let eventVerdict = activeEvents ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
-        leaf: held?.plan.network?.activity, mp: held?.mp, timestamp, currentKey: key }) : null;
+        leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
+        mp: held?.mp, timestamp, currentKey: key }) : null;
     if ((activeEvents ? eventVerdict.valid : replay || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
         && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
@@ -1546,7 +1559,8 @@ function buildForState(state, deps) {
     }
     eventVerdict ||= diagnostic ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
-        leaf: held?.plan.network?.activity, mp: held?.mp, timestamp })
+        leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
+        mp: held?.mp, timestamp })
         : { valid: false, reason: 'unproved', touchedSections: 0 };
     // A lost graph cache still has the bot's accepted execution card. Compare
     // its verdict with the one fresh card the normal publication captures;
@@ -1555,10 +1569,12 @@ function buildForState(state, deps) {
     const eventShadow = candidate ? { accepted: candidate,
         verdict: heldBuildVerdict(state, candidate.eventProof, deps, {
             baseline: candidate.baseline, activity: candidate.activity, leaf: candidate.card?.activity,
+            heldUnits: candidate.card?.activity?.heldAtDecision, craftReservations: candidate.card?.activity?.craftReservations,
             mp: candidate.mp, timestamp, softPrefix: candidate.softPrefix === true }) } : null;
     const basis = activeEvents && eventVerdict.reason === 'money' && heldBuildVerdict(state, held.plan.eventProof, deps, {
         baseline: held.plan.statsPacket.wishSections, activity: held.activity, leaf: held.plan.network?.activity,
-        mp: held.mp, timestamp, currentKey: key, rebuildBasis: true }).basisValid ? held.plan : null;
+        heldUnits: held.heldUnits, craftReservations: held.craftReservations, mp: held.mp, timestamp, currentKey: key,
+        rebuildBasis: true }).basisValid ? held.plan : null;
     // With diagnostics the same key also names its parts; they are not retained.
     const { parts: sourceParts, tail: sourceTail, ...sections } = sectionKeys(state, { ...deps, timestamp }, [],
         diagnostic ? 'source_parts' : 'sources');
@@ -1575,11 +1591,7 @@ function buildForState(state, deps) {
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     let gate = null, gateDiff = null, socialDiff = null, gateEvidence = null;
-    let improvementMark;
     if (diagnostic) {
-        // Only a diagnostic miss scans native targets. A hit performs none;
-        // raw instance identity is not ordinary stack-count drift.
-        improvementMark = Sections.hash(Improvement.targetInputs(state));
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey);
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         const eventHash = eventKeyHash(hashes), baseline = held?.plan.statsPacket.wishSections;
@@ -1609,11 +1621,7 @@ function buildForState(state, deps) {
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
             sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined,
-            heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined,
-            heldHuntingUnits: held ? last?.heldHuntingUnits : undefined, heldTargetItem: held ? last?.heldTargetItem : undefined,
-            heldTargetPresent: held ? last?.heldTargetPresent : undefined,
-            heldCraftProof: held ? last?.heldCraftProof : undefined,
-            heldImprovementMark: held ? last?.heldImprovementMark : undefined };
+            heldParts: held ? last?.heldParts : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1841,11 +1849,9 @@ function buildForState(state, deps) {
         : softEvent(state, { baseline: acceptedSections, expPerHour: acceptedSections?.expHour, persona }, timestamp, deps))
         ?? (held && Sections.softDue(acceptedSections, 'market', timestamp) && !heldReadsHold() ? 'market' : null);
     const reconsider = dirty !== 0 || soft !== null;
-    let readyCraftProof = null;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
-        onReadyCraftProof: diagnostic ? proof => { readyCraftProof = proof; } : undefined,
         completionKey: context.completionKey,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
@@ -1948,7 +1954,7 @@ function buildForState(state, deps) {
             social: `${deps.socialShadow.kind}:${socialDiff}`, baselineAt: deps.socialShadow.baseline.at,
             reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet'
         } : null),
-        ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held, shadowEntry) : null) });
+        ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     plan.bagSafety = bagSafety(state, timestamp);
@@ -1975,7 +1981,13 @@ function buildForState(state, deps) {
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
         plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots });
+        // What the card stamps on its leaf, read once for the held verdict: the
+        // own item's bag+incoming at the decision (heldAtDecision) and a
+        // craft's reserved inputs (craftReservations).
+        const leaf = plan.network?.activity, own = ownItem(leaf);
         remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
+            heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
+            craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.selectedCraftRows(state, network) : undefined,
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
             activity: state.activity, bandHash: fnv1a32(bandStructural),
@@ -1984,22 +1996,6 @@ function buildForState(state, deps) {
         if (shadowEntry) {
             shadowEntry.heldEventHash = shadowEntry.eventHash;
             shadowEntry.heldParts = shadowEntry.parts;
-            shadowEntry.heldImprovementMark = improvementMark;
-            // Diagnostic execution proof only: raw leaves keep their live semantics.
-            const leaf = plan.network?.activity;
-            shadowEntry.heldShoppingUnits = leaf?.activity === 'shopping' && leaf.kind === 'buy'
-                ? ColdEconomyDecision.heldFor(state, leaf.itemId) : undefined;
-            shadowEntry.heldHuntingUnits = materialHunt(leaf) ? ColdEconomyDecision.heldFor(state, leaf.itemId) : undefined;
-            shadowEntry.heldTargetItem = acquisitionTarget(projection, plan.network?.focus?.[0]);
-            shadowEntry.heldTargetPresent = shadowEntry.heldTargetItem
-                ? positive(state.inventory?.[shadowEntry.heldTargetItem]?.amount) > 0 : undefined;
-            // The proof belongs to the build actually retained, never a
-            // temporary/pending result. Keep only its small native quantities.
-            shadowEntry.heldCraftProof = readyCraftProof && leaf?.activity === 'crafting'
-                && readyCraftProof.rootKey === leaf.rootKey && readyCraftProof.nodeKey === leaf.nodeKey
-                && readyCraftProof.output[0] === leaf.itemId
-                ? { ...readyCraftProof, recipeId: leaf.recipeId, batches: leaf.batches,
-                    rootItem: projection.nodes.find(node => node.key === leaf.rootKey)?.object?.itemId } : undefined;
         }
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);

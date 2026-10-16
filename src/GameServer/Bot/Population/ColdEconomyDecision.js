@@ -13,8 +13,9 @@ const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const RestartAdvisoryProbe = require('../Economy/RestartAdvisoryProbe');
 const RestartDecision = require('./EconomyRestartDecision');
+const CraftInputReservations = require('../Economy/CraftInputReservations');
 // Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
-let CraftInputReservations = null, PurchaseFunding = null, DecisionSections = null;
+let PurchaseFunding = null, DecisionSections = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -289,8 +290,7 @@ function capture(economy, state, seen = state) {
     if (economy?.network?.quantityPrepared) for (const row of queue) visit(row.plan);
     const activity = leaf ? new CompactActivity(leaf) : null;
     if (activity) {
-        const reserved = (CraftInputReservations ||= require('../Economy/CraftInputReservations')).selectedCraftAmounts(seen, economy?.network);
-        const rows = Object.entries(reserved).filter(([, amount]) => amount > 0).map(([id, amount]) => [Number(id), amount]);
+        const rows = CraftInputReservations.selectedCraftRows(seen, economy?.network);
         if (rows.length) activity.craftReservations = rows;
     }
     if (activity?.activity === 'shopping') {

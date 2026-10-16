@@ -14,12 +14,29 @@ const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
 const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const deps = { board: new BoardIndex(), spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure(), timestamp: 1e12 };
 const state = () => ({ characterId: 901, updatedAt: 1, level: 20, phase: 'cold', activity: 'resting', adena: 100,
     stats: { classId: 1 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } }, currentRegion: 'Giran',
     simulation: { revision: 2 }, loc: { locX: 80000, locY: 148000, locZ: -3500 }, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
 const shadow = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:shadow')));
 const keyCounts = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:key_')));
+// A held build carries its event proof only under a native generation and a
+// ready warehouse source. A branch checkout has no generation, CI's detached
+// one has it: each proof block fixes both and restores them in its finally.
+function proofScope() {
+    const generation = Generation.metadata();
+    Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
+    Warehouse.useRowSource(() => null, () => true);
+    return () => { Generation.configure(generation); Warehouse.useRowSource(null); };
+}
+// A stubbed projection publishes the liquidation proof as WishProviders.build does.
+function stubLiquidation(state, context, values) {
+    context.liquidationInputs = Providers.liquidationInputs(state, { shots: context.stock('shots'), potions: context.stock('potions'),
+        excluded: [...values.keys()].filter(id => Object.hasOwn(state.inventory || {}, id)) }).proof;
+}
 function delta(before, after) {
     const out = {};
     for (const [key, value] of Object.entries(after)) if (value !== (before[key] || 0)) out[key] = value - (before[key] || 0);
@@ -135,19 +152,20 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
 // Shopping shadow checks use the retained decision's total bag + incoming baseline.
 // The live leaf and decisions stay identical with diagnostics disabled/enabled.
 {
-    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
     const Evidence = invoke('GameServer/Bot/Economy/WishPurchaseEvidence');
-    const build = Providers.build, reader = Evidence.reader;
+    const build = Providers.build, reader = Evidence.reader, restoreProof = proofScope();
     const itemId = 1864, itemKey = `item:${itemId}`, rootKey = `resale:${itemId}`;
     let quoteReads = 0;
-    Providers.build = (_state, context) => {
+    Providers.build = (current, context) => {
         context.board.first(itemId, 1);
+        const values = new Map([[itemId, 10]]);
+        stubLiquidation(current, context, values);
         return { nodes: [
             { key: rootKey, need: 'power', object: { itemId, kind: 'resale' }, valueHours: 1000, price: 50,
                 paths: [{ requirements: [{ key: itemKey, amount: 5 }] }] },
             { key: itemKey, price: 10, paths: [{ kind: 'buy', activity: 'shopping', itemId, price: 10,
                 unitPrice: 10, sourceType: 'afk', town: 'Giran', availableUnits: 100, quoted: true, executable: true }] }
-        ], roots: [rootKey], values: new Map([[itemId, 10]]), moneyPaths: [], horizon: 1, sourceSections: null };
+        ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
     };
     Evidence.reader = (...args) => {
         const read = reader(...args);
@@ -202,17 +220,18 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     try {
         const off = scenario(false), on = scenario(true);
         assert.deepEqual(on, off, 'shopping diagnostics never change live funding, activities, rolls or packets');
-    } finally { Providers.build = build; Evidence.reader = reader; Config.developerDiagnostics = true; }
+    } finally { Providers.build = build; Evidence.reader = reader; restoreProof(); Config.developerDiagnostics = true; }
 }
 
-// Selected hunting progress and explicit equipment acquisition are shadow-only.
+// Selected hunting progress is measured from the held decision and is shadow-only.
 // Raw bag+incoming progress is not a proof of allocatable stock or craft readiness.
 {
-    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
-    const build = Providers.build, enabled = Diagnostics.enabled, push = Diagnostics.push;
+    const build = Providers.build, enabled = Diagnostics.enabled, push = Diagnostics.push, restoreProof = proofScope();
     const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`;
     let summaries = [], targetClaimed = false, funding = false, targetAmount = 1;
-    Providers.build = (_state, context) => {
+    Providers.build = (current, context) => {
+        const values = new Map([[itemId, 10], [targetId, 50]]);
+        stubLiquidation(current, context, values);
         if (targetClaimed) {
             const stock = context.stockFor;
             // A physically present target can be unavailable to this root.
@@ -225,7 +244,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
                 requirements: [{ key: `item:${itemId}`, amount: 5 }] }] },
             { key: `item:${itemId}`, price: 10, paths: [{ kind: 'drop', activity: 'hunting', itemId,
                 funding, costHours: 1, executable: true }] }
-        ], roots: [rootKey], values: new Map([[itemId, 10], [targetId, 50]]), moneyPaths: [], horizon: 1, sourceSections: null };
+        ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
     };
     Diagnostics.enabled = () => true;
     Diagnostics.push = row => {
@@ -271,66 +290,65 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             { rememberContext: false });
         if (diagnostic) {
             assert.deepEqual(verdicts, [['context:gate:no_held'], [], ['context:gate:would_hold'], ['context:gate:would_hold'],
-                ['context:gate:event_key'], ['context:gate:check_failed'], ['context:gate:check_failed'], ['context:gate:check_failed']]);
+                ['context:gate:event_key'], ['context:gate:check_failed'], ['context:gate:quantity'], ['context:gate:event_key']],
+                'a bag loss below the decision count is a quantity event; a new target stack moves the event key');
             const complete = summaries.find(row => row.gate === 'check_failed' && row.actual === 2);
             assert.deepEqual([complete.item, complete.requested, complete.before, complete.owned, complete.actual, complete.remaining],
                 [itemId, 2, 3, 3, 2, 0]);
             assert.equal(complete.sequence, accepted.stats.decisionSeq, 'sequence is the request input; decisionSeq is the network output');
-            const acquired = summaries.at(-1);
-            assert.deepEqual([acquired.target, acquired.planned, acquired.after], [targetId, 0, 1]);
         }
         // An explicitly claimed target is physically present but not free stock.
         Economy.reset(); targetClaimed = true;
         const present = { ...native, inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } };
         const held = request(present);
         request({ ...native, stats: { ...native.stats, ...held.statsPacket } }, { rememberContext: false });
-        if (diagnostic) {
-            assert.deepEqual(verdicts.at(-1), ['context:gate:check_failed']);
-            assert.deepEqual([summaries.at(-1).target, summaries.at(-1).planned, summaries.at(-1).after], [targetId, 1, 0]);
-        }
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a claimed target stack that leaves the bag moves the event key');
         targetClaimed = false;
-        // Funding hunts do not acquire a requested material; stack targets
-        // are not one-unit equipment acquisition boundaries.
+        // A funding hunt's drops are not its own progress: they are a wished
+        // material reaching its count. A new target stack moves the event key.
         Economy.reset(); funding = true; targetAmount = 2;
         const fundingHeld = request(native);
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 } },
             { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a funding hunt does not use item acquisition progress');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'], 'a funding hunt has no own item: its material rows hold exactly');
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 },
             inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:bag'],
-            'multi-unit target arrival is left to the existing bag proof, not a one-unit acquisition event');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a new target stack moves the event key');
         funding = false; targetAmount = 1;
         Economy.reset();
         const original = request(native);
         const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
         request({ ...native, stats: { ...native.stats, ...renewed.statsPacket } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:check_failed'],
-            'an actual completed retention advances the baseline; losing its new incoming unit is a refusal');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'],
+            'an actual completed retention advances the baseline; losing its new incoming unit is a quantity event');
         return results;
     };
     try { assert.deepEqual(scenario(true), scenario(false), 'hunting and target diagnostics preserve complete live networks and packets'); }
-    finally { Providers.build = build; Diagnostics.enabled = enabled; Diagnostics.push = push; Config.developerDiagnostics = true; }
+    finally { Providers.build = build; Diagnostics.enabled = enabled; Diagnostics.push = push; restoreProof(); Config.developerDiagnostics = true; }
 }
 
 // A ready craft loses its physical prerequisites even when its target is
 // still absent and the material keeps the same bag slot and weight tier.
 {
-    const Providers = invoke('GameServer/Bot/Economy/WishProviders'), build = Providers.build;
+    const build = Providers.build, restoreProof = proofScope();
     const productId = 1865, materialId = 1864, rootKey = `power:${productId}:7`;
-    Providers.build = () => ({ nodes: [
-        { key: rootKey, need: 'power', object: { itemId: productId }, valueHours: 1000,
-            paths: [{ requirements: [{ key: `item:${productId}`, amount: 5 }] }] },
-        { key: `item:${productId}`, price: 500, paths: [{ kind: 'craft', activity: 'crafting',
-            itemId: productId, recipeId: 7, productCount: 2, costHours: .1,
-            grossRequirements: [{ key: `item:${materialId}`, amount: 10 }],
-            requirements: [{ key: `item:${materialId}`, amount: 10 }] }] },
-        { key: `item:${materialId}`, price: 2, paths: [{ kind: 'buy', activity: 'shopping',
-            itemId: materialId, price: 2, unitPrice: 2, sourceType: 'afk', town: 'Giran',
-            executable: true, quoted: true, availableUnits: 100 }] }
-    ], roots: [rootKey], values: new Map([[productId, 1000]]), moneyPaths: [], horizon: 1, sourceSections: null });
+    Providers.build = (current, context) => {
+        const values = new Map([[productId, 1000]]);
+        stubLiquidation(current, context, values);
+        return { nodes: [
+            { key: rootKey, need: 'power', object: { itemId: productId }, valueHours: 1000,
+                paths: [{ requirements: [{ key: `item:${productId}`, amount: 5 }] }] },
+            { key: `item:${productId}`, price: 500, paths: [{ kind: 'craft', activity: 'crafting',
+                itemId: productId, recipeId: 7, productCount: 2, costHours: .1,
+                grossRequirements: [{ key: `item:${materialId}`, amount: 10 }],
+                requirements: [{ key: `item:${materialId}`, amount: 10 }] }] },
+            { key: `item:${materialId}`, price: 2, paths: [{ kind: 'buy', activity: 'shopping',
+                itemId: materialId, price: 2, unitPrice: 2, sourceType: 'afk', town: 'Giran',
+                executable: true, quoted: true, availableUnits: 100 }] }
+        ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
+    };
     const counters = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => key.startsWith('context:craft_material:') || key.startsWith('context:gate:')));
+        .filter(([key]) => key.startsWith('context:gate:')));
     const scenario = (diagnostic, mode) => {
         Config.developerDiagnostics = diagnostic; Economy.reset();
         const board = new BoardIndex(); board.itemRevision = id => board.itemFingerprint(id);
@@ -358,12 +376,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             assert.deepEqual(on.next.network, off.next.network, `${mode}: material evidence never changes the new network`);
             assert.deepEqual(on.next.statsPacket, off.next.statsPacket, `${mode}: the new packet is unchanged`);
             const lost = mode === 'loss' || mode === 'incoming';
-            assert.equal(on.counts[`context:craft_material:${lost ? 'loss' : 'unchanged'}`], 1,
-                `${mode}: the actual retained craft supplies the native material proof`);
-            assert.equal(on.counts[`context:gate:${lost ? 'check_failed' : 'would_hold'}`], 1,
+            assert.equal(on.counts[`context:gate:${lost ? 'quantity' : 'would_hold'}`], 1,
                 `${mode}: material loss is an event; unkept and pending builds preserve the original proof`);
         }
-    } finally { Providers.build = build; Config.developerDiagnostics = true; Economy.reset(); }
+    } finally { Providers.build = build; restoreProof(); Config.developerDiagnostics = true; Economy.reset(); }
 }
 
 // The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
@@ -481,7 +497,6 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
 // no amount, worn stat, bag slot or semantic event changes.
 {
     const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
-    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
     const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
@@ -490,7 +505,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     const weapon = Data.items.find(row => String(row.etc?.rank).toLowerCase() === 'c'
         && Number(row.etc?.cristals) > 0 && row.template?.kind?.startsWith('Weapon.') && Sources.hasSource(row.selfId));
     assert(weapon, 'a source-admitted native C4 weapon exists');
-    const originalBuild = Providers.build, targetId = weapon.selfId;
+    const originalBuild = Providers.build, targetId = weapon.selfId, restoreProof = proofScope();
     const board = new BoardIndex();
     board.itemRevision = id => board.itemFingerprint(id);
     board.put({ id: 9801, kind: 'shop', storeType: 1, ownerId: 7, town: 'Giran',
@@ -546,7 +561,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         Config.developerDiagnostics = enabled; Economy.reset();
         const initialReads = markReads;
         const first = Economy.forState(input, options);
-        assert.equal(markReads - initialReads, Number(enabled), 'one native target scan per diagnostic miss, none while off');
+        assert.equal(markReads - initialReads, 1, 'the event key scans the native targets once per build, on and off');
         const hitReads = markReads;
         assert.strictEqual(Economy.forState(input, options).plan, first.plan);
         assert.equal(markReads, hitReads, 'a live cache hit scans no improvement targets');
@@ -554,10 +569,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const next = { ...changed, stats: { ...changed.stats, ...first.statsPacket } };
         if (mode === 'unkept') Economy.forState(next, { ...options, rememberContext: false });
         if (mode === 'pending') Economy.forState({ ...next, incomingPending: true }, options);
-        const prior = Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0;
+        const prior = Diagnostics.metrics().counts?.['context:gate:event_key'] || 0;
         const fresh = Economy.forState(next, options);
-        if (enabled) assert.equal((Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0) - prior, 1,
-            `${mode}: the actual retained native target mark survives temporary/pending builds`);
+        if (enabled) assert.equal((Diagnostics.metrics().counts?.['context:gate:event_key'] || 0) - prior, 1,
+            `${mode}: a replaced target moves the retained build's event key across temporary/pending builds`);
         assert.notEqual(fresh.network.focus?.[0], first.network.focus[0], 'the old native focus cannot survive a replaced target ID');
         assert.notEqual(fresh.network.activityLeaf, first.network.activityLeaf, 'the selected native leaf changes too');
         return { first, fresh };
@@ -571,7 +586,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             }
         }
         console.log(`PASS native enchant identity proof: ${rootKey} disappears after objectId-only replacement`);
-    } finally { Providers.build = originalBuild; Policy.targetInputs = targetInputs; Config.developerDiagnostics = true; Economy.reset(); }
+    } finally { Providers.build = originalBuild; Policy.targetInputs = targetInputs; restoreProof(); Config.developerDiagnostics = true; Economy.reset(); }
 }
 
 // The per-build record (tools/timeline) names the cause: the miss reason, the moved key parts, the plan outcome,
