@@ -56,6 +56,8 @@ orphaned.forget(2);
 require('./helpers/databaseIsolation');
 require('../src/Global');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+// The event input key at one fixed time (deps.timestamp when given).
+const KEY_AT = Date.now(), eventKey = (state, deps = {}) => Economy.eventInputKey(state, deps, deps.timestamp ?? KEY_AT);
 const Trip = require('../src/GameServer/Bot/Economy/EconomicTrip');
 const Events = require('../src/GameServer/Bot/AI/DecisionEvents');
 const Party = require('../src/GameServer/Bot/Population/PartyGoalPolicy');
@@ -66,9 +68,9 @@ const first = Economy.routeState(base, session);
 const walking = Economy.routeState({ ...base, loc: { ...base.loc, locX: 81000 } }, session);
 assert.equal(Trip.key(first), Trip.key(walking), 'walking within held event preserves location anchor');
 const arrived = Economy.routeState({ ...base, activity: 'shopping', currentRegion: 'Dion' }, session);
-assert.notEqual(Economy.inputKey(first), Economy.inputKey(arrived), 'arrival invalidates economic input cache');
-assert.notEqual(Economy.inputKey(first), Economy.inputKey({ ...first, inventory: { 736: { amount: 1 } } }));
-assert.notEqual(Economy.inputKey(first), Economy.inputKey({ ...first, stats: { ...first.stats,
+assert.notEqual(eventKey(first), eventKey(arrived), 'arrival invalidates economic input cache');
+assert.notEqual(eventKey(first), eventKey({ ...first, inventory: { 736: { amount: 1 } } }));
+assert.notEqual(eventKey(first), eventKey({ ...first, stats: { ...first.stats,
     marketReturn: { loc: { ...first.loc, locX: 70000 } } } }));
 const objective = { spotId: 'held', objectiveKey: 'same', status: 'open' };
 const joint = Party.joint({ stats: { objective } }, [base], { context: { routePending: true,

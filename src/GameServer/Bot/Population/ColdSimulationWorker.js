@@ -779,7 +779,7 @@ function advisoryRefusal(deps, site, reason) {
     economyDiagnostics.count('advisory', 'refuse', name);
     economyDiagnostics.count('advisory', 'refuse_site', site);
     if (name === 'party' || name === 'no_card') return deps;
-    return { ...deps, advisoryRefusal: name.startsWith('fence:structural:') ? 'fence:structural' : name };
+    return { ...deps, advisoryRefusal: name };
 }
 // The sampled same/new of a card a Hold.js place kept in shadow while the
 // step rebuilt (held: { place, why, card, startedAt }, set by the place's
@@ -869,11 +869,11 @@ function transitHold(state, previousPlan, nativeReplan, context, timestamp) {
     else if (nativeReplan.failure || nativeReplan.invalidSource || nativeReplan.levelingRecovery) why.push('native');
     // No held MP (wishSections keeps none): a crafter refuses on crafter_mp.
     else EconomyContext.heldEventsQuiet(state, { baseline, expPerHour: baseline.expHour, persona: BotPersona.of(state) },
-        timestamp, { buyOrderEscrow: context?.buyOrderEscrow }, null, why);
+        timestamp, { buyOrderEscrow: context?.buyOrderEscrow }, why);
     return { why, held: Hold.check('transit', why, context), startedAt: performance.now() };
 }
-// L115: legacy execution rejected on remember is counted by its first failing
-// check. A complete event proof remains at the same owner for shadow coverage.
+// L115: a publication the event proof refuses drops the advice, counted by
+// its first failing check.
 function rememberWishAdvisory(owner, advisory, seen = null, deps = null, actualBuild = true) {
     const diagnostic = economyDiagnostics.active();
     if (!owner?.context || !Object.isExtensible(owner.context)) {
@@ -887,28 +887,23 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null, actualB
     }
     if (advisory?.eventProof && seen
         && !ColdEconomyDecision.advisoryPublicationHolds(seen, advisory, current.context.wishAdvisory)) return;
-    // Validate this publication against the original build's proof. The legacy
-    // fence remains the shadow baseline; neither path renews soft clocks.
+    // Validate this publication against the original build's proof; it does
+    // not renew soft clocks.
     const why = diagnostic ? [] : undefined;
     const Economy = advisory && seen && deps ? EconomyContext : null;
     const options = advisory && deps ? { baseline: advisory.baseline, activity: advisory.activity,
         leaf: advisory.card?.activity, mp: advisory.mp, softPrefix: advisory.softPrefix === true,
         timestamp: Number(deps.timestamp || Date.now()), why } : null;
-    if (advisory && seen && (!Economy || !(advisory.eventProof && Economy.eventReuseEnabled(deps)
-        ? Economy.eventProofHolds(seen, advisory.eventProof, deps, options)
-        : Economy.calculationHolds(seen, advisory.fence, deps, options)))) {
+    if (advisory && seen && (!Economy || !(advisory.eventProof && Economy.eventProofHolds(seen, advisory.eventProof, deps, options)))) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
-        if (advisory.eventProof && !EconomyContext.eventReuseEnabled(deps || {})) {
-            advisory = { ...advisory, legacyRejected: true };
-            delete advisory.builtAt;
-        } else advisory = null;
+        advisory = null;
     }
     // Diagnostics only: the step that built this card (a reuse passes no seen
     // state and keeps its stamp), read by the result site's edge_fresh count.
     // A result-site build is stamped with its own step too, but the result
     // site reads the stamp before it writes one, so only the same step's
     // lifecycle build can match.
-    if (diagnostic && actualBuild && advisory && !advisory.legacyRejected && seen && deps?.timestamp)
+    if (diagnostic && actualBuild && advisory && seen && deps?.timestamp)
         advisory.builtAt = Number(deps.timestamp);
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
@@ -1230,15 +1225,13 @@ function startKernel(config = {}) {
                         refreshed = null;
                         // L115: which native gate dropped a card that held its fence.
                         // L115C: the refusal is named by a lone review trigger
-                        // (else 'other'), so its rebuild's refusal_plan
-                        // same/new count shows whether that edge changes the plan.
+                        // (else 'other').
                         if (economyDiagnostics.active()) {
                             const names = ColdEconomyPlan.edgeNames(economyEdges, state, projected, edgeContext, timestamp);
                             for (const name of names) economyDiagnostics.count('advisory', 'edge', name);
                             why.push(`economy_edges:${economyEdges === 8 ? names[0] : 'other'}`);
                             // A lone review edge on a card this step's own
-                            // lifecycle built: the refusal's rebuild also
-                            // counts as refusal_plan_fresh (EconomyContext).
+                            // lifecycle built.
                             fresh = economyEdges === 8 && owner?.context?.wishAdvisory?.builtAt === timestamp;
                             if (fresh) economyDiagnostics.count('advisory', 'edge_fresh', names[0]);
                         } else why.push('economy_edges');
@@ -1248,7 +1241,7 @@ function startKernel(config = {}) {
                     heldCard ||= prepared.held || null;
                     const eventDeps = prepared.eventVerdict || prepared.eventCandidate ? { ...deps,
                         eventVerdict: prepared.eventVerdict, eventCandidate: prepared.eventCandidate } : deps;
-                    const refusalDeps = advisoryRefusal(fresh ? { ...eventDeps, advisoryFresh: true } : eventDeps, 'result', why[0] || 'party');
+                    const refusalDeps = advisoryRefusal(eventDeps, 'result', why[0] || 'party');
                     const candidateDeps = socialShadowDeps(projected, refusalDeps, prepared, timestamp, () => {
                         const plan = projected.stats?.equipmentPlan || null;
                         const replan = GearAcquisitionPlanner.replanContextFor(projected, plan, timestamp);

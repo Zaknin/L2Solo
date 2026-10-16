@@ -11,10 +11,8 @@
 const { isMainThread } = require('node:worker_threads');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
-const RestartAdvisoryProbe = require('../Economy/RestartAdvisoryProbe');
 const RestartDecision = require('./EconomyRestartDecision');
 const CraftInputReservations = require('../Economy/CraftInputReservations');
-const Bytes = require('../Economy/CompactBytes');
 const Hold = require('../Economy/Hold');
 // Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
 let PurchaseFunding = null, DecisionSections = null;
@@ -55,7 +53,6 @@ const SHOT = 32768;
 const FEASIBILITY = 65536;
 const URGENCY_STAGE = 1, URGENCY_SHOTS = 2, URGENCY_POTIONS = 3;
 const MAX_BYTES = 800, MAX_SHOT_BYTES = 128;
-const MAX_ADVISORY_BYTES = 4096;
 const COMMAND_HEADER_BYTES = Buffer.byteLength(JSON.stringify(['00000000-0000-0000-0000-000000000000', 5, Number.MAX_SAFE_INTEGER]));
 const MAX_SHOT_PAYLOAD_BYTES = MAX_SHOT_BYTES - COMMAND_HEADER_BYTES;
 const cardWireRoom = key => MAX_BYTES - 48 - encoder.encode(String(key || '')).length;
@@ -422,7 +419,6 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
     const eventProof = economy?.eventProof?.() || null;
     // lazy: cycle EconomyContext creates accepted cards after its full build.
     const Economy = eventProof ? invoke('GameServer/Bot/Economy/EconomyContext') : null;
-    const fence = eventProof && Economy.eventReuseEnabled(deps) ? null : economy?.calculationFence;
     const packet = economy?.statsPacket;
     const diagnostic = Diagnostics.active();
     if (diagnostic && economy.eventShadow) {
@@ -435,40 +431,34 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
             Diagnostics.count('card', 'event_output', same === null ? 'unavailable' : same ? 'same' : 'differ');
         }
     }
-    if (!(fence instanceof Uint8Array) && !eventProof) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_fence'); return null; }
+    // A card is held only by its event proof (Hold place economy).
+    if (!eventProof) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_proof'); return null; }
     if (diagnostic) {
-        // L115: the real size of every card (fence + card), dropped or kept.
-        const total = (fence?.byteLength || 0) + card.data.byteLength;
+        // L115: the real size of every card, dropped or kept.
+        const total = card.data.byteLength;
         Diagnostics.count('card', 'size', total <= 2048 ? 'le2k' : total <= 4096 ? '2-4k' : total <= 8192 ? '4-8k' : '8k+');
-        if (card.data.byteLength > MAX_BYTES) Diagnostics.count('card', 'drop', 'oversize_card');
-        else if (!eventProof && total > MAX_ADVISORY_BYTES) Diagnostics.count('card', 'drop', 'oversize_total');
+        if (total > MAX_BYTES) Diagnostics.count('card', 'drop', 'oversize_card');
     }
-    if (card.data.byteLength > MAX_BYTES || !eventProof && fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
+    if (card.data.byteLength > MAX_BYTES) return null;
     // Acceptance belongs to the build's output, even before its caller has
     // published that packet. A later publication never restarts its delays.
-    const accepted = { card, fence: fence?.byteLength + card.data.byteLength <= MAX_ADVISORY_BYTES ? fence : null,
-        eventProof, characterId: Number(state.characterId), decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
+    const accepted = { card, eventProof, characterId: Number(state.characterId), decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
         activityLeaf: packet ? Number(packet.activityLeaf || 0) : undefined,
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
         activity, mp: Number(state.vitals?.mp), preparedMp: Number(state.vitals?.mp),
         // The goal revision the build saw (main's context), the baseline of
         // the goal review edge (ColdEconomyPlan.heldEdges); not saved.
         ...(Number.isFinite(deps.goalRevision) ? { goalRevision: deps.goalRevision } : {}) };
-    const restartProof = Economy?.restartEventProof(eventProof, accepted);
+    const restartProof = Economy.restartEventProof(eventProof, accepted);
     // lazy: cycle the shared sections also read the economy owner.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
         Sections.baselineIdentity(accepted.baseline), Sections.clockBytes(accepted.baseline)) : null;
     // A card saved as null is rebuilt at restart: no prefix, or one over the saved field.
-    if (diagnostic && eventProof) Diagnostics.count('card', 'restart', accepted.saved ? 'armed'
+    if (diagnostic) Diagnostics.count('card', 'restart', accepted.saved ? 'armed'
         : restartProof ? 'oversize' : 'unarmed');
     if (packet) packet.wishAdvisory = accepted.saved;
     if (publishedPacket(state, packet)) state.stats.wishAdvisory = accepted.saved;
-    if (diagnostic && fence instanceof Uint8Array && RestartAdvisoryProbe.selected(state?.characterId)) {
-        // lazy: cycle EconomyContext constructs its accepted cards here.
-        const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-        RestartAdvisoryProbe.observe(accepted, Economy.decodeCalculationFence);
-    }
     return accepted;
 }
 
@@ -495,7 +485,7 @@ function restoreAdvisory(state, timestamp = Date.now()) {
     }
     if (card.activity === null && (accepted.activityLeaf !== 0 || eventProof.activity !== null)) return null;
     if (Diagnostics.active()) Diagnostics.count('card', 'restart', 'candidate');
-    return { ...accepted, eventProof, card, preparedMp: accepted.mp, fence: null };
+    return { ...accepted, eventProof, card, preparedMp: accepted.mp };
 }
 function publishedPacket(state, packet) {
     if (!packet?.wishSections || state.stats?.wishSections !== packet.wishSections) return false;
@@ -534,8 +524,7 @@ function wireAdvisory(accepted) {
     const eventProof = Economy ? Economy.wireEventProof(accepted.eventProof) : null;
     if (accepted.eventProof && !eventProof) return null;
     return { ...accepted, eventProof, card: { key: accepted.card.key,
-        data: Buffer.from(accepted.card.data).toString('base64') },
-        fence: accepted.fence instanceof Uint8Array ? Buffer.from(accepted.fence).toString('base64') : null };
+        data: Buffer.from(accepted.card.data).toString('base64') } };
 }
 function receiveAdvisory(value) {
     if (value?.card instanceof CompactDecision && value.card.data.byteLength <= MAX_BYTES
@@ -547,15 +536,10 @@ function receiveAdvisory(value) {
         || value.focus !== null && typeof value.focus !== 'string' || !Number.isFinite(value.baseline?.at)
         || !Number.isFinite(value.mp) || typeof value.activity !== 'string'
         || card.activity === null && (value.activityLeaf !== 0 || value.eventProof?.activity !== null)) return null;
-    let fence = value.fence;
-    if (typeof fence === 'string') {
-        fence = Bytes.fromBase64(fence, MAX_ADVISORY_BYTES - card.data.byteLength);
-        if (!fence) return null;
-    } else if (fence !== null && !(fence instanceof Uint8Array)) return null;
     // lazy: cycle EconomyContext owns its proof's wire form.
     const eventProof = value.eventProof ? invoke('GameServer/Bot/Economy/EconomyContext').receiveEventProof(value.eventProof) : value.eventProof;
     if (value.eventProof && !eventProof) return null;
-    return { ...value, card, fence, eventProof };
+    return { ...value, card, eventProof };
 }
 function advisoryMatches(state, accepted) {
     if (!accepted || accepted.characterId !== Number(state?.characterId)) return false;
@@ -585,9 +569,8 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     // lazy: cycle EconomyContext constructs and validates these cards.
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const eventReuse = accepted.eventProof && Economy.eventReuseEnabled(deps);
-    // Keep rejected publications available to the shadow, without allowing a
-    // later legacy fence match to revive their old execution permission.
-    if (accepted.legacyRejected && !eventReuse) return 'no_card';
+    // A card holds only by its event proof while the economy place is on.
+    if (!eventReuse) return 'no_card';
     if (state.stats?.wishDirty) return 'wish_dirty';
     // lazy: cycle keep the section and card modules loadable in either order.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
@@ -655,21 +638,18 @@ function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow
     }
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
-    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
+    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, why))
         return `events:${why[0]}`;
-    if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: !socialShadow, why }))
-        return `fence:${why[0]}`;
     // The event verdict's per-leaf check (a social leaf: its target and root).
     return Economy.heldLeafRefusal(state, leaf, deps, undefined, current) ? 'accepted_leaf' : '';
 }
 // A card refusal by the shared hold reason names (hold-scheme.md §3).
-const FENCE_REASONS = Object.freeze({ bands: 'bands', safety: 'bag', structural: 'sections', market: 'market' });
 const CARD_REASONS = Object.freeze({ not_field: 'not_field', capability: 'sections', incoming: 'bag',
     travel_record: 'native', accepted_leaf: 'native' });
 function holdReason(refused) {
     const [head, tail] = refused.split(':');
     if (head === 'events') return tail || 'unproved';
-    return (head === 'fence' ? FENCE_REASONS[tail] : CARD_REASONS[head]) || 'unproved';
+    return CARD_REASONS[head] || 'unproved';
 }
 function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     return !refusal(state, accepted, deps, current, options);
@@ -697,7 +677,6 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
         wishAdvisory: accepted.saved || null };
     Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
-    Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });
     Object.defineProperty(economy, 'eventProof', { value: () => accepted.eventProof });
     return { economy, decision, advisory: { ...accepted, card: decision } };
 }
@@ -889,4 +868,4 @@ class ColdEconomyDecisions {
 }
 
 module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateKey, eventKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, kindCode, kindFor, compact, workshopValues,
-    unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };
+    unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

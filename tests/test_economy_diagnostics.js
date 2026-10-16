@@ -97,7 +97,7 @@ const noDetail = create({ config: { developerDiagnostics: true, economyDiagnosti
 assert.equal(noDetail.push(mismatch), false);
 const oversizeWitness = { ...mismatch };
 for (const field of ['trigger', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey',
-    'proposalId', 'moved', 'readset', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot'])
+    'proposalId', 'moved', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot'])
     oversizeWitness[field] = 'x'.repeat(96);
 assert.equal(automatic.push(oversizeWitness), false);
 assert.equal(automatic.stats().drops.size, 1, 'mismatch admission never bypasses the record byte cap');
@@ -131,7 +131,7 @@ const compact = compactWriter();
 const witnessBase = { ...mismatch, owner: maxNumber, baselineAt: maxNumber,
     sequence: maxNumber, inputActivityLeaf: 0xffffffff, decisionSeq: maxNumber, activityLeaf: 0xffffffff,
     heldFocus: maxText, heldLeaf: maxText,
-    moved: maxText, readset: 'market', reconsidered: 1, choiceEvent: maxText, social: 'helping:focus' };
+    moved: maxText, reconsidered: 1, choiceEvent: maxText, social: 'helping:focus' };
 assert(compact.push({ ...witnessBase, gateDiff: 'funded',
     queueIndex: 11, heldRoot: maxText, freshRoot: maxText, heldFunded: 1, freshFunded: 0 }));
 assert(compactWriter().push({ ...witnessBase, gateDiff: 'queue', queueIndex: 11, heldRoot: maxText, freshRoot: maxText,
@@ -151,7 +151,7 @@ assert.equal(compact.stats().selected, 0);
     const source = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Economy/EconomyContext.js'), 'utf8');
     const start = source.indexOf('function gatePlanDiff(');
     let reprices = 0;
-    const compare = require('node:vm').runInNewContext(`(${source.slice(start, source.indexOf('\n// Soft market', start))})`,
+    const compare = require('node:vm').runInNewContext(`(${source.slice(start, source.indexOf('\nfunction occupancyToken(', start))})`,
         { Funding, moneyQueue(...args) { reprices++; return moneyQueue(...args); } });
     const wish = (key, price = 10, valueHours = 10) => ({ key, price, valueHours, ratio: valueHours / price });
     const network = queue => ({ focus: ['power:1'], activity: { key: 'leaf:1' }, queue });

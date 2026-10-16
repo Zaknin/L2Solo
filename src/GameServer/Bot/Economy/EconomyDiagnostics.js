@@ -13,7 +13,7 @@ const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 're
     'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'baselineAt', 'reconsidered',
     'queueIndex', 'heldFunded', 'freshFunded', 'queueEntered', 'queueLeft', 'heldRootDrift', 'freshRootDrift', 'soft'];
 const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
-    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot', 'queueMoved'];
+    'moved', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot', 'queueMoved'];
 
 // A completed native comparison is useful even outside the owner detail
 // sample. Its rows (any of the bots) have their own per-second budget, so a

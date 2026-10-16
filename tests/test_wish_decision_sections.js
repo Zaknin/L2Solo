@@ -16,6 +16,10 @@ const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const Tendency = invoke('GameServer/Bot/AI/TendencyRoll');
 const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+// A build holds only by its event proof, which needs the warehouse rows and
+// a recompute generation.
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+require('../src/GameServer/Bot/Population/RecomputeGeneration').configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const deps = { timestamp: 1e12, knowledgeEnabled: true,
     board: new (invoke('GameServer/AfkTrade/BoardIndex').BoardIndex)(),
     spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure() };
@@ -70,10 +74,8 @@ try {
     assert.equal(refreshed.wallet, state.adena);
     const accepted = Decisions.advisory(first, state);
     assert(accepted, 'the ordinary native decision fits the bounded advisory proof');
-    assert(accepted.fence.byteLength <= Economy.FENCE_BYTES);
+    assert(accepted.eventProof, 'the accepted decision carries its event proof');
     assert(accepted.card.data.byteLength <= Decisions.MAX_BYTES);
-    assert(accepted.fence.byteLength + accepted.card.data.byteLength <= Decisions.MAX_ADVISORY_BYTES);
-    assert.equal(accepted.fence.buffer.byteLength, accepted.fence.byteLength, 'no hidden pooled backing slab');
     Economy.forgetContext(state.characterId);
     const coldNext = { ...state, adena: state.adena + 1, updatedAt: state.updatedAt + 1,
         vitals: { ...state.vitals, mp: state.vitals.mp - 1 } };
@@ -92,8 +94,8 @@ try {
         'advisory reuse never relaxes the native exact wallet fence');
     assert.equal(Decisions.refreshAdvisory({ ...coldNext, incomingPending: true }, accepted, deps), null);
     assert.equal(Decisions.refreshAdvisory({ ...coldNext, stats: { ...coldNext.stats, wishDirty: 16 } }, accepted, deps), null);
-    assert.equal(Decisions.refreshAdvisory(coldNext, { ...accepted, fence: new Uint8Array(Economy.FENCE_BYTES + 1) }, deps), null,
-        'unknown and oversized proofs fall back without hiding candidates');
+    assert.equal(Decisions.refreshAdvisory(coldNext, { ...accepted, eventProof: { ...accepted.eventProof, hard: 'unknown' } }, deps), null,
+        'an unknown proof falls back without hiding candidates');
     const rebuilt = Economy.forState(state, deps);
     assert.deepEqual(rebuilt.network.focus, acceptedFocus, 'eviction retains the accepted goal');
     assert.equal(rebuilt.statsPacket.activityLeaf, acceptedLeaf, 'eviction retains a still feasible accepted step');
@@ -110,10 +112,10 @@ try {
     stocked = { ...stocked, stats: { ...stocked.stats, ...stockContext.statsPacket } };
     const stockAdvice = Decisions.advisory(stockContext, stocked);
     assert(stockAdvice);
-    const proof = Economy.decodeCalculationFence(stockAdvice.fence);
-    const shotBand = proof[3].find(row => row[0] === 1835);
+    const bands = stockAdvice.eventProof.bands;
+    const shotBand = bands.find(row => row[0] === 1835);
     assert(shotBand, 'real native stock target provides the reuse boundary');
-    assert(proof[3].some(row => row[0] === 1869), 'the native unrelated free material is reusable');
+    assert(bands.some(row => row[0] === 1869), 'the native unrelated free material is reusable');
     const consumed = { ...stocked, adena: stocked.adena + 1, updatedAt: stocked.updatedAt + 1,
         inventory: Life.inventorySummaryFromItems([
             { id: 920041, selfId: 1, amount: 1, equipped: 1, slot: 7 },
@@ -137,15 +139,9 @@ try {
             kind: consumed.inventory[1869].kind, rank: consumed.inventory[1869].rank } } };
     assert(Decisions.refreshAdvisory(projectedLoot, stockAdvice, deps),
         'native loot and publication default metadata and an empty native plan are the same calculation inputs');
-    assert.equal(Decisions.refreshAdvisory({ ...projectedLoot, stats: { ...projectedLoot.stats,
-        equipmentPlan: { ...projectedLoot.stats.equipmentPlan, target: { selfId: 1869 } } } }, stockAdvice, deps), null,
-        'a real target added to the plan is never normalised as empty');
     const shortage = { ...consumed, inventory: { ...consumed.inventory,
         1835: { ...consumed.inventory[1835], amount: shotBand[1] - 1 } } };
     assert.equal(Decisions.refreshAdvisory(shortage, stockAdvice, deps), null, 'new stock need is an actual dependency');
-    const reservedStock = { ...consumed, inventory: { ...consumed.inventory,
-        1835: { ...consumed.inventory[1835], protectedAmount: 1 } } };
-    assert.equal(Decisions.refreshAdvisory(reservedStock, stockAdvice, deps), null, 'ownership/reservation facts are exact');
     const differentOwner = { ...consumed, inventory: { ...consumed.inventory, 1: { ...consumed.inventory[1],
         instances: [{ ...consumed.inventory[1].instances[0], id: 999999 }] } } };
     assert.equal(Decisions.refreshAdvisory(differentOwner, stockAdvice, deps), null, 'instance identities are not quantity noise');
@@ -393,13 +389,8 @@ try {
             else if (event === 'observation') assert.equal(Economy.forState(subject,
                 { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY.observation - 1 }).network.focus[0], 'held',
                 'a moved sample waits for the observation delay');
-            else {
-                // A required material's count is a bag row, not an event: the
-                // held focus stays until a raised section re-weighs it.
-                assert.equal(Economy.forState(subject, options).network.focus[0], 'held',
-                    'a quiet material move keeps the held focus');
-                invoke('GameServer/Bot/AI/DecisionEvents').raiseDecision({ coldLifeState: subject }, 'bag');
-            }
+            // A required material's count is a quantity input of the event
+            // proof: reaching the requirement re-weighs the focus at once.
             const due = { quote: 'market', observation: 'observation' }[event];
             const changed = Economy.forState(subject, due
                 ? { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY[due] } : options);
@@ -419,16 +410,30 @@ try {
     };
     try {
         const subject = { ...state, characterId: 92099 };
-        const scoped = Economy.forState(subject, { ...deps, rememberContext: false });
-        const fields = Economy.decodeCalculationFence(scoped.calculationFence);
-        assert(fields, 'the scoped proof remains bounded');
-        const sources = new Map(fields[2]);
+        // A kept build: an unkept caller's view carries no event proof.
+        const scoped = Economy.forState(subject, deps);
+        const published = { ...subject, stats: { ...subject.stats, ...scoped.statsPacket } };
+        const advice = Decisions.advisory(scoped, published), proof = advice?.eventProof;
+        assert(proof, 'the scoped proof remains bounded');
+        const sources = new Map(proof.spots);
         for (const id of ['scope-common', 'scope-first', 'scope-second']) assert(sources.has(id));
         assert(sources.has('scope-discarded'), 'losing admission/ranking inputs remain watched');
-        for (const id of ['scope-common', 'scope-first', 'scope-second', 'scope-discarded']) assert.equal(Economy.calculationHolds(subject,
-            scoped.calculationFence, { ...deps, occupancy: new Map([[id, { count: 1 }]]) }), false,
+        // A crowd read is soft: it refuses once the market delay since the
+        // decision is due.
+        const at = advice.baseline.at + Sections.SOFT_DELAY.market;
+        const unread = new Map([['scope-unread', { count: 1 }]]);
+        assert(!sources.has('scope-unread'));
+        assert(Economy.eventProofHolds(published, proof, { ...deps, occupancy: unread, timestamp: at },
+            { activity: advice.activity, leaf: advice.card.activity, baseline: advice.baseline, mp: advice.mp, timestamp: at }),
+        'a source the build never read is no event at the same time');
+        for (const id of ['scope-common', 'scope-first', 'scope-second', 'scope-discarded']) {
+            const why = [];
+            assert.equal(Economy.eventProofHolds(published, proof, { ...deps, occupancy: new Map([[id, { count: 1 }]]), timestamp: at },
+                { activity: advice.activity, leaf: advice.card.activity, baseline: advice.baseline, mp: advice.mp, timestamp: at, why }), false,
             'a change to a retained or losing source forces native reconsideration');
-    } finally { Providers.build = scopedProvider; }
+            assert.deepEqual(why, ['market']);
+        }
+    } finally { Providers.build = scopedProvider; Economy.forget(92099); }
     // Source descriptors must follow the native timed route exclusions even
     // when a real money/event review leaves item, occupancy and bag tokens equal.
     {

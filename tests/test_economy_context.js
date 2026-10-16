@@ -14,7 +14,10 @@ fs.writeFileSync(config, fs.readFileSync(path.join(root, 'config/default.ini'), 
 process.env.L2NODE_CONFIG_FILE = config;
 delete process.env.L2NODE_SHARED_CONFIG_FILE;
 process.chdir(root);
-let Economy;
+let Economy, generation = null;
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+// The event input key at one fixed time (deps.timestamp when given).
+const KEY_AT = Date.now(), eventKey = (state, deps = {}) => Economy.eventInputKey(state, deps, deps.timestamp ?? KEY_AT);
 async function run() {
     require(path.join(root, 'src/Global'));
     const Data = invoke('GameServer/DataCache'); Data.init();
@@ -24,6 +27,11 @@ async function run() {
     const Valuation = invoke('GameServer/Bot/Economy/EconomicValuation');
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    // A build holds only by its event proof, which needs the warehouse rows
+    // and a recompute generation.
+    invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+    generation = Generation.metadata();
+    Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Supply = invoke('GameServer/Clan/ClanSupplyPolicy');
     const capture = Profile.capture;
@@ -53,13 +61,13 @@ async function run() {
             assert.equal(gearProgression.personal(learned), false,
                 'native hot membership retains clan custody of surplus');
         } finally { Supply.useRowSource(null); }
-        assert.notEqual(Economy.inputKey(unlearned), Economy.inputKey(learned), 'learning invalidates the planning inputs');
-        assert.notEqual(Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
-            Economy.inputKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));
+        assert.notEqual(eventKey(unlearned), eventKey(learned), 'learning invalidates the planning inputs');
+        assert.notEqual(eventKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 0 } }),
+            eventKey({ level: 16, stats: { classId: 53, dwarvenCraftLevel: 1 } }));
         const plain = { level: 16, stats: { classId: 53 } };
-        assert.equal(Economy.inputKey({ ...plain, incomingPending: false }), Economy.inputKey(plain),
+        assert.equal(eventKey({ ...plain, incomingPending: false }), eventKey(plain),
             'an absent and a false delivery flag are one planning input');
-        assert.notEqual(Economy.inputKey({ ...plain, incomingPending: true }), Economy.inputKey(plain),
+        assert.notEqual(eventKey({ ...plain, incomingPending: true }), eventKey(plain),
             'a pending delivery invalidates the planning inputs');
     } finally { Profile.capture = capture; }
     const Board = invoke('GameServer/AfkTrade/BoardIndex').BoardIndex;
@@ -199,23 +207,26 @@ async function run() {
     assert.equal(typeof context.statsPacket.decisionSeq, 'number');
     assert.equal(typeof context.statsPacket.activityLeaf, 'number');
     assert(context.statsPacket.activityLeaf !== 0);
-    assert.equal(Economy.forState(base).plan, context.plan, 'unchanged own inputs reuse the complete context');
-    // Native membership representations normalize to the same event part.
+    // A hit needs the build's own output published (its decision echo).
+    const published = { ...base, stats: { ...base.stats, ...context.statsPacket } };
+    assert.equal(Economy.forState(published).plan, context.plan, 'unchanged own inputs reuse the complete context');
+    // A membership change is an input event.
     const member = { ...base, stats: { ...base.stats, clanId: 9 }, partyId: 17 };
-    assert.equal(Economy.inputKey(member), Economy.inputKey({ ...member, clanId: 9, party: { partyId: 17 } }));
-    assert.notEqual(Economy.inputKey(member), Economy.inputKey({ ...member, clanId: 0 }));
-    assert.notEqual(Economy.inputKey(member), Economy.inputKey({ ...member, partyId: 18 }));
-    assert.equal(Economy.forState(base, { rememberContext: false }).plan, context.plan,
+    assert.notEqual(eventKey(member), eventKey({ ...member, clanId: 0 }));
+    assert.notEqual(eventKey(member), eventKey({ ...member, partyId: 18 }));
+    assert.equal(Economy.forState(published, { rememberContext: false }).plan, context.plan,
         'an unkept caller can read an existing valid decision');
-    const temporary = Economy.forState({ ...base, adena: base.adena + 1000 }, { rememberContext: false });
+    const temporary = Economy.forState({ ...published, level: base.level + 1 }, { rememberContext: false });
     assert.notEqual(temporary.plan, context.plan);
-    assert.equal(Economy.forState(base).plan, context.plan, 'an unkept build never replaces the held decision');
+    assert.equal(Economy.forState(published).plan, context.plan, 'an unkept build never replaces the held decision');
     {
-        const T = Date.now(), native = { ...base, characterId: 990021 }, spotId = 'event-gate-fixture';
+        const T = Date.now(), native = { ...base, characterId: 990021 };
         const held = Economy.forState(native, { timestamp: T });
-        held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId };
-        const excluded = { ...native, stats: { ...native.stats, capacityBackoffs: [{ spotId, until: T + 60000 }] } };
-        assert.equal(Economy.inputKey(excluded), Economy.inputKey(native), 'risk exclusion is an unkeyed native fact');
+        const spotId = held.network.activity?.spotId, published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+        assert(held.network.activity?.activity === 'hunting' && spotId, 'fixture: a hunting decision at a spot');
+        assert.equal(Economy.forState(published, { timestamp: T }).plan, held.plan, 'fixture: the published decision holds');
+        const excluded = { ...published, stats: { ...published.stats, capacityBackoffs: [{ spotId, until: T + 60000 }] } };
+        assert.equal(eventKey(excluded), eventKey(published), 'risk exclusion is an unkeyed native fact');
         assert.notEqual(Economy.forState(excluded, { timestamp: T }).plan, held.plan, 'a new exclusion refuses a same-key hunting decision');
     }
     {
@@ -226,12 +237,11 @@ async function run() {
             Route.select = (_state, input) => { void input.occupancy.fixture; return null; };
             const preparedIncomeRoute = Economy.basics(native, deps).preparedIncomeRoute;
             const held = Economy.forState(native, { ...deps, preparedIncomeRoute });
-            held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId: 'fixture' };
-            const fields = Economy.decodeCalculationFence(held.calculationFence);
-            assert(fields[2].some(([id]) => id === 'fixture'), 'a replayed income route retains its occupancy reads');
+            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+            assert([...held.eventProof().spots.keys()].includes('fixture'), 'a replayed income route retains its occupancy reads');
             occupancy.fixture.count++;
-            assert.equal(Economy.forState(native, deps).plan, held.plan, 'income crowd waits for its market delay');
-            assert.notEqual(Economy.forState(native, { ...deps, timestamp: T + 600000 }).plan, held.plan,
+            assert.equal(Economy.forState(published, deps).plan, held.plan, 'income crowd waits for its market delay');
+            assert.notEqual(Economy.forState(published, { ...deps, timestamp: T + 600000 }).plan, held.plan,
                 'income crowd refuses a held build once its market delay is due');
         } finally { Route.select = select; }
     }
@@ -242,15 +252,12 @@ async function run() {
         try {
             Providers.build = (state, ctx, options) => { [...ctx.board.itemIds(3)]; return build(state, ctx, options); };
             const held = Economy.forState(native, deps);
-            held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId: 'fixture' };
-            const fields = Economy.decodeCalculationFence(held.calculationFence);
-            assert(fields[1][1].includes(-3), 'the whole buy-side list is a valid retained fence token');
-            assert.equal(Economy.decodeCalculationFence(Economy.encodeCalculationFence(['key', [['x'], [-9, 0]], [], [], null])), null,
-                'an unknown negative item token is rejected');
+            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+            assert([...held.eventProof().market.keys()].includes(-3), 'the whole buy-side list is a retained market read');
             localBoard.put({ id: 990023, ownerId: 99, storeType: 3, lines: [{ lineId: 1, selfId: 990099, count: 1, price: 1 }] });
-            assert.equal(Economy.forState(native, deps).plan, held.plan, 'a new board item waits for the market delay');
+            assert.equal(Economy.forState(published, deps).plan, held.plan, 'a new board item waits for the market delay');
             assert(sources.every(id => id > 0), 'list pseudo ids never escape through item source callbacks');
-            assert.notEqual(Economy.forState(native, { ...deps, timestamp: T + 600000 }).plan, held.plan,
+            assert.notEqual(Economy.forState(published, { ...deps, timestamp: T + 600000 }).plan, held.plan,
                 'a new ad for a previously unseen item invalidates the list after its delay');
         } finally { Providers.build = build; }
     }
@@ -270,14 +277,15 @@ async function run() {
         const scopedDeps = () => ({ workshops: invoke('GameServer/Bot/Economy/CraftWorkshopService').publicForRecipe, workshopRevision: id => revisions.get(id) || 0, onSourceRead: id => sources.add(id) });
         const scoped = { ...base, characterId: 905 };
         const scopedContext = Economy.forState(scoped, scopedDeps());
+        const scopedOut = { ...scoped, stats: { ...scoped.stats, ...scopedContext.statsPacket } };
         assert(sources.has(990001) && !sources.has(990002), 'only the kept scope subscribes its sources');
         revisions.set(990002, 1);
-        assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a rejected candidate\'s market change keeps the context');
+        assert.equal(Economy.forState(scopedOut, scopedDeps()).plan, scopedContext.plan, 'a rejected candidate\'s market change keeps the context');
         revisions.set(990001, 1);
         // L70: a read market token is soft; it is re-examined once the
         // market delay since the last actual decision has passed.
-        assert.equal(Economy.forState(scoped, scopedDeps()).plan, scopedContext.plan, 'a moved source waits for the market delay');
-        assert.notEqual(Economy.forState(scoped, { ...scopedDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, scopedContext.plan,
+        assert.equal(Economy.forState(scopedOut, scopedDeps()).plan, scopedContext.plan, 'a moved source waits for the market delay');
+        assert.notEqual(Economy.forState(scopedOut, { ...scopedDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, scopedContext.plan,
             'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
@@ -289,7 +297,7 @@ async function run() {
         const fixture = equippedFixture(1310, 1, 30, 20000);
         const worn = Object.keys(fixture.inventory).find(id => fixture.inventory[id].equipped);
         const state = { ...fixture, inventory: { ...fixture.inventory, [worn]: { ...fixture.inventory[worn] } } };
-        const keyBefore = Economy.inputKey(state, deps), buildBefore = Profile.buildInputKey(state, T);
+        const keyBefore = eventKey(state, deps), buildBefore = Profile.buildInputKey(state, T);
         const capabilityBefore = Sections.capability(state, T);
         const bagRead = ctx => { const local = ctx.nodeInputs.begin(); ctx.nodeInputs.bag(worn); ctx.nodeInputs.end();
             return local.bag.get(Number(worn)); };
@@ -299,7 +307,7 @@ async function run() {
                 if (subject === state && outer === null) {
                     outer = ctx; bagDuring = bagRead(ctx);
                     Economy.forState(equippedFixture(1311, 1, 32, 30000), deps);
-                    nested = [Economy.inputKey(state, deps), Profile.buildInputKey(state, T), Sections.capability(state, T), bagRead(ctx)];
+                    nested = [eventKey(state, deps), Profile.buildInputKey(state, T), Sections.capability(state, T), bagRead(ctx)];
                 }
                 return build(subject, ctx, buildDeps);
             };
@@ -310,8 +318,8 @@ async function run() {
             'a nested build of another bot leaves the outer build\'s keys');
         state.inventory[worn].enchant = 3;
         const fresh = structuredClone(state);
-        assert.notEqual(Economy.inputKey(state, deps), keyBefore);
-        assert.equal(Economy.inputKey(state, deps), Economy.inputKey(fresh, deps), 'the row key reads the changed row');
+        assert.notEqual(eventKey(state, deps), keyBefore);
+        assert.equal(eventKey(state, deps), eventKey(fresh, deps), 'the row key reads the changed row');
         assert.notEqual(Profile.buildInputKey(state, T), buildBefore);
         assert.equal(Sections.capability(state, T), Sections.capability(fresh, T), 'the capability reads the changed row');
         assert.notEqual(Sections.capability(state, T), capabilityBefore);
@@ -335,11 +343,12 @@ async function run() {
         const absentDeps = () => ({ board: absentBoard, onSourceRead: id => sources.add(id) });
         const absent = { ...base, characterId: 906 };
         const absentContext = Economy.forState(absent, absentDeps());
+        const absentOut = { ...absent, stats: { ...absent.stats, ...absentContext.statsPacket } };
         assert(sources.has(ABSENT), 'an item with no offer is an input of the review');
-        assert.equal(Economy.forState(absent, absentDeps()).plan, absentContext.plan, 'no offer change keeps the context');
+        assert.equal(Economy.forState(absentOut, absentDeps()).plan, absentContext.plan, 'no offer change keeps the context');
         absentBoard.put({ id: 1, ownerId: 77, storeType: 1, custodyPolicy: 1, revision: 1, town: 'Giran',
             lines: [{ lineId: 2, selfId: ABSENT, count: 1, price: 100 }] });
-        assert.notEqual(Economy.forState(absent, { ...absentDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, absentContext.plan,
+        assert.notEqual(Economy.forState(absentOut, { ...absentDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, absentContext.plan,
             'a first offer for an absent item rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS absent item is an input');
@@ -358,12 +367,13 @@ async function run() {
         const shopDeps = () => ({ workshops: Workshop.publicForRecipe,
             workshopRevision: () => Workshop.publicRecipeDigest(shopRecipe.productId) });
         const shopContext = Economy.forState(base, shopDeps());
-        assert.equal(Economy.forState(base, shopDeps()).plan, shopContext.plan);
+        const shopBase = { ...base, stats: { ...base.stats, ...shopContext.statsPacket } };
+        assert.equal(Economy.forState(shopBase, shopDeps()).plan, shopContext.plan);
         shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 6 } });
-        assert.equal(Economy.forState(base, shopDeps()).plan, shopContext.plan,
+        assert.equal(Economy.forState(shopBase, shopDeps()).plan, shopContext.plan,
             'a workshop owner save without an offer change keeps the customer cache hit');
         shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 2 } });
-        assert.notEqual(Economy.forState(base, { ...shopDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, shopContext.plan,
+        assert.notEqual(Economy.forState(shopBase, { ...shopDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, shopContext.plan,
             'halved capacity is an offer change');
     } finally { Workshop.remove(shopOwner.characterId); }
     const physicalSpot = { id: 'gear-physical', npcEntries: [{ selfId: 130 }] };
@@ -375,6 +385,10 @@ async function run() {
     const threatDeps = { spots: threatSpots };
     const physical = Economy.forState(threatBot, threatDeps);
     assert.equal(physical.gearThreatMask, 1);
+    assert.equal(threatBot.stats.activityLeaf, 88, 'preparing threat never changes the saved activity');
+    assert.equal(threatBot.stats.decisionSeq, 7, 'preparing threat never starts a decision event');
+    // A hit needs the build's own output published (its decision echo).
+    Object.assign(threatBot.stats, physical.statsPacket);
     assert.equal(Economy.forState(threatBot, threatDeps).plan, physical.plan);
     threatBot.stats.targetCombat.lastDefeatedNpcIds = [130, 130];
     assert.equal(Economy.forState(threatBot, threatDeps).plan, physical.plan, 'same applicability preserves context');
@@ -386,8 +400,6 @@ async function run() {
     assert.equal(magical.gearThreatMask, 3);
     assert.notEqual(magical.plan, stillPhysical.plan, 'own magic observation invalidates the whole projection');
     assert.equal(magical.statsPacket.decisionSeq, physical.statsPacket.decisionSeq);
-    assert.equal(threatBot.stats.activityLeaf, 88, 'preparing threat never changes the saved activity');
-    assert.equal(threatBot.stats.decisionSeq, 7, 'preparing threat never starts a decision event');
     threatBot.stats.targetCombat.lastDefeatedNpcIds = [130];
     assert.equal(Economy.forState(threatBot, threatDeps).gearThreatMask, 1);
     threatBot.stats.relations = [{ hostility: 1, targetId: 77 }];
@@ -497,28 +509,8 @@ async function run() {
     const granted = Catalog.applyTraining(withBook, { spentSp: 0, consumedBooks: [] });
     assert.equal(granted.sp, withBook.sp);
     assert.deepEqual(granted.inventory, withBook.inventory);
-    assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, sp: mage.sp + 1 }));
-    assert.notEqual(Economy.inputKey(mage), Economy.inputKey({ ...mage, stats: { ...mage.stats,
+    assert.notEqual(eventKey(mage), eventKey({ ...mage, stats: { ...mage.stats,
         coldCombat: { ...mage.stats.coldCombat, skills: [{ selfId: valuable.skillId, level: 1 }] } } }));
-    // L115: the segment names of the structural key follow inputKey's order;
-    // a new field shifts them, so the fixed count and positions are pinned.
-    const segments = state => Economy.sectionKeys(state, {}, []).structural.split('|');
-    const firstMoved = changed => { const before = segments(mage), after = segments(changed);
-        let at = 0; while (at < before.length && before[at] === after[at]) at++; return at; };
-    assert.equal(segments(mage).length, 49, 'structural key: 47 inputKey fields, capability, tail');
-    assert.equal(Economy.structuralSegment(3), 'loot');
-    assert.equal(Economy.structuralSegment(18), 'frustration');
-    assert.equal(Economy.structuralSegment(32), 'memory');
-    assert.equal(Economy.structuralSegment(48), 'plan_tail');
-    assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, frustration: 0.7 } })), 'frustration');
-    assert.equal(Economy.structuralSegment(firstMoved({ ...mage, stats: { ...mage.stats, memoryRevision: 99 } })), 'memory');
-    // L114: the trip part is named by what moved.
-    const tripName = changed => Economy.structuralSegment(firstMoved(changed), segments(mage).join('|'), segments(changed).join('|'));
-    assert.equal(tripName({ ...mage, spotId: 'moved-spot' }), 'spot_id');
-    assert.equal(tripName({ ...mage, loc: { locX: 1234, locY: 5678, locZ: -90 } }), 'trip_loc');
-    assert.equal(tripName({ ...mage, activity: 'shopping', loc: { locX: 1234, locY: 5678, locZ: -90 } }), 'trip_travel');
-    assert.equal(tripName({ ...mage, currentRegion: 'elsewhere' }), 'trip_other');
-    assert.equal(Economy.structuralSegment(38), 'route_ready');
     const artisan = Economy.forState({ ...base, characterId: 904, level: 70, adena: 1e6,
         stats: { ...base.stats, classId: 57, exp: Data.experience[69] } });
     console.log('CONTEXT artisan', JSON.stringify({ hour: artisan.hourAdena, hunt: artisan.hunt,
@@ -530,7 +522,7 @@ async function run() {
         assert.equal(score.efficiencyAdjustment, valued.valueHours * 100, 'route and wish readers share the same native table valuation');
     }
     Supply.useRowSource(null);
-    console.log('PASS no book wishes, free grant balance and skill/SP event key');
+    console.log('PASS no book wishes, free grant balance and skill event key');
 
     const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
     const decisions = new Decisions.ColdEconomyDecisions();
@@ -580,6 +572,8 @@ async function run() {
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
     Economy?.reset();
+    invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(null);
+    if (generation) Generation.configure(generation);
     process.chdir(oldCwd);
     if (oldConfig === undefined) delete process.env.L2NODE_CONFIG_FILE; else process.env.L2NODE_CONFIG_FILE = oldConfig;
     if (oldShared === undefined) delete process.env.L2NODE_SHARED_CONFIG_FILE; else process.env.L2NODE_SHARED_CONFIG_FILE = oldShared;

@@ -252,7 +252,7 @@ module.exports.wishSectionsProbe = async id => {
             candidate = prepared.state;
             const accepted = prepared.advice, leaf = accepted.card.activity;
             const nativeReads = observedSources.get(candidate.characterId),
-                proofSources = new Map(Economy.decodeCalculationFence(accepted.fence)[2]);
+                proofSources = new Map(accepted.eventProof.spots);
             assert(nativeReads && nativeReads.size, 'the native graph evaluated real source dependencies');
             for (const source of nativeReads) assert(proofSources.has(source),
                 'every source read by native ranking/admission survives graph pruning');
@@ -260,9 +260,18 @@ module.exports.wishSectionsProbe = async id => {
                 get: id => id === source ? { reservedCount: Number(proofSources.get(source)) + 1 }
                     : prepared.deps.occupancy?.get?.(id) || prepared.deps.occupancy?.[id]
             };
-            assert.equal(Economy.calculationHolds(candidate, accepted.fence,
-                { ...prepared.deps, occupancy: changedOccupancy }), false,
-                'an actual native evaluated source change invalidates the retained decision');
+            // A crowd read is soft: it refuses the retained decision once
+            // the market delay since that decision is due.
+            const due = accepted.baseline.at + DecisionSections.SOFT_DELAY.market, why = [];
+            assert.equal(Economy.eventProofHolds(candidate, accepted.eventProof, { ...prepared.deps, occupancy: changedOccupancy,
+                timestamp: due }, { activity: accepted.activity, leaf, baseline: accepted.baseline, mp: accepted.mp, timestamp: due, why }),
+            false, 'an actual native evaluated source change invalidates the retained decision');
+            assert.deepEqual(why, ['market'], 'through the soft market clause');
+            const unreadOccupancy = { get: id => id === 'unread-source' ? { reservedCount: 1 }
+                : prepared.deps.occupancy?.get?.(id) || prepared.deps.occupancy?.[id] };
+            assert(Economy.eventProofHolds(candidate, accepted.eventProof, { ...prepared.deps, occupancy: unreadOccupancy, timestamp: due },
+                { activity: accepted.activity, leaf, baseline: accepted.baseline, mp: accepted.mp, timestamp: due }),
+            'a source the build never read is no event at the same time');
             assert.equal(leaf.activity, activity, 'the fixture selects its real native economic leaf: ' + JSON.stringify(leaf));
             assert.equal(leaf.kind, activity === 'shopping' ? 'buy' : 'liquidate');
             if (activity === 'shopping') assert(leaf.rootKey.startsWith('power:'), 'the actual funded equipment wish remains the purchase owner');
@@ -380,7 +389,7 @@ module.exports.wishSectionsProbe = async id => {
         await assertRecoveryReplan({ levelingRecovery: { reason: 'level_regression', until: clock + 10,
             resumeLevel: state.level, resumeExp: state.exp, targetId: 626 } }, clock + 11);
         await assertRecoveryReplan({ recoveryTargets: [{ targetId: 626, reason: 'combat_unviable',
-            failedAt: clock, wake: [state.level, 0, 0] }] }, clock,
+            failedAt: clock, wake: [state.level, 0, 0] }] }, clock + 11, // the world clock does not run back
             subject => ({ ...subject, level: subject.level + 1 }));
         const classPrepared = await prepareNative(state, clock);
         const changedClass = { ...classPrepared.state, stats: { ...classPrepared.state.stats, classId: 2 } };
@@ -448,13 +457,16 @@ module.exports.wishSectionsProbe = async id => {
         } finally { Selection.selectAcquisitionPlan = nativeSelection; }
         // L70: own observed income is a soft change, re-examined at the
         // bot's next decision point 5 min after the last actual decision.
-        // Advance the clock against the accepted build's own baseline;
-        // replacing a publication's snapshot cannot age an older card.
+        // Advance the clock against the held build's own baseline: the
+        // publication keeps the newer of the two cards (a recovery replan
+        // above), and replacing a publication's snapshot cannot age it.
         assert.equal(accepted.baseline.sample.length, 0, 'two native samples are not usable own knowledge yet');
-        clock = Math.max(clock, accepted.baseline.at + DecisionSections.SOFT_DELAY.observation);
-        assert(DecisionSections.softDue(accepted.baseline, 'observation', clock), 'the accepted observation delay has actually elapsed');
         Economy.forgetContext(id); // the held plan of that older decision is evicted as in a cold population
         kernel.states.set(id, { ...kernel.states.get(id), state, context: { wishAdvisory: accepted } });
+        const held = kernel.states.get(id).context.wishAdvisory;
+        assert.equal(held.baseline.sample.length, 0, 'the held card has no usable own knowledge either');
+        clock = Math.max(clock, held.baseline.at + DecisionSections.SOFT_DELAY.observation);
+        assert(DecisionSections.softDue(held.baseline, 'observation', clock), 'the held observation delay has actually elapsed');
         const beforeLearning = builds;
         const learned = await kernel.projectResolve(state, {
             patch: { inventory: { ...state.inventory, 1835: { ...state.inventory[1835], amount: state.inventory[1835].amount - 1 } } },
@@ -463,7 +475,7 @@ module.exports.wishSectionsProbe = async id => {
         }, ++clock);
         state = learned.state;
         assert(state.stats.wishSections.sample.length > 0, 'the third native sample creates usable own knowledge');
-        assert(DecisionSections.observationEvent(state, accepted.baseline, clock),
+        assert(DecisionSections.observationEvent(state, held.baseline, clock),
             'the third native sample is a real observation event against the accepted build');
         assert(builds > beforeLearning, 'new usable income knowledge remains a real calculation trigger');
         kernel.states.set(id, { ...kernel.states.get(id), state });
@@ -531,10 +543,14 @@ parentPort.on('message', message => {
         for (let at = 0; at < catalog.length; at += Protocol.MAX_BATCH) send('catalog_page', { catalog: 'npc_offers',
             rows: catalog.slice(at, at + Protocol.MAX_BATCH), done: at + Protocol.MAX_BATCH >= catalog.length });
         for (let at = 0; at < spots.length; at += Protocol.MAX_BATCH) send('catalog_page', { catalog: 'spots', rows: spots.slice(at, at + Protocol.MAX_BATCH) });
-        send('init', { config: { loopIntervalMs: 1000 } }, 'init');
+        // A build holds only by its event proof: a recompute generation and
+        // the ready owner tables (personal warehouse, clan supplies).
+        send('init', { config: { loopIntervalMs: 1000 }, recomputeGeneration: { code: '1'.repeat(40), config: '2'.repeat(64) } }, 'init');
         await wait(message => message.type === 'ready' && message.payload.phase === 'running'); send('pause', {}, 'pause');
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
-            { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
+            { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true },
+            { name: 'personal_warehouse', from: null, to: 0, full: true, rows: [], removed: [], last: true },
+            { name: 'clan_supplies', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
         send('snapshot_page', { rows: [{ state, context: {} }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), wishSectionsProbe: id });

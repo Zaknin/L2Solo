@@ -476,8 +476,8 @@ try {
         assert.equal(owner.size(), 0, 'actual retirement drops the retained advice');
         Warehouse.useRowSource(null);
     }
-    // A legacy publication refusal removes execution permission, not the
-    // original native evidence needed by the next ordinary shadow rebuild.
+    // With the economy place on, a publication holds its advice only by the
+    // original build's event proof; a refused one drops it.
     {
         const diagnostic = Config.developerDiagnostics;
         Config.developerDiagnostics = true;
@@ -492,35 +492,19 @@ try {
                 source.indexOf('function reviewMarket(')) + ';rememberWishAdvisory', {
                 economyDiagnostics: Diagnostics, kernel: { states }, EconomyContext: Economy, ColdEconomyDecision: Decisions
             });
-            const published = { ...state, stats: { ...state.stats,
-                equipmentPlan: invoke('GameServer/Bot/AI/GearPlanSelection').deferredWishPlan({
-                    target: { selfId: 626, name: 'Bronze Shield', slot: 8 } }, {}) } };
             const check = { baseline: accepted.baseline, activity: accepted.activity, leaf: accepted.card.activity,
                 timestamp: T, mp: accepted.mp };
-            assert.equal(Economy.calculationHolds(published, accepted.fence, deps, check), false,
-                'native own plan publication changes the strict legacy fence');
-            assert.equal(Economy.calculationHolds(state, accepted.fence, deps, check), true,
-                'the original input still matches that same legacy fence');
+            assert.equal(Economy.eventProofHolds(state, accepted.eventProof, deps, check), true,
+                'the original input holds its own event proof');
             accepted.builtAt = T;
-            remember(owner, accepted, published, deps);
+            remember(owner, accepted, state, deps);
             const retained = owner.context.wishAdvisory;
-            assert(retained?.legacyRejected, 'the existing native owner retains a shadow-only rejected publication');
+            assert.strictEqual(retained, accepted, 'a publication the proof holds keeps the advice');
             for (const key of ['card', 'eventProof', 'baseline', 'mp', 'saved']) assert.strictEqual(retained[key], accepted[key]);
-            assert.equal(Object.hasOwn(retained, 'builtAt'), false, 'a rejected publication has no accepted fresh-build stamp');
             const prepared = {}, before = builds;
-            assert.equal(Decisions.refusal(state, retained, deps, null, { prepared }), 'no_card',
-                'a later legacy fence match cannot revive the rejected execution permission');
-            assert.strictEqual(prepared.eventCandidate, retained, 'the diagnostic receives the candidate before off-mode refusal');
-            assert.equal(builds, before, 'retaining diagnostic evidence does not run a solver');
-            const wire = Decisions.receiveAdvisory(structuredClone(Decisions.wireAdvisory(retained)));
-            assert.equal(wire.legacyRejected, true, 'ownership transfer preserves the execution rejection');
-            const active = Economy.eventProofHolds(state, retained.eventProof, { ...deps, eventReuse: true }, check);
-            assert.equal(active, true, 'the native fixture still passes the complete shared event verdict');
-            const resumed = Decisions.refreshAdvisory(state, retained, { ...deps, eventReuse: true });
-            assert(resumed, 'only an enabled successful shared verdict can use the retained candidate');
-            assert.equal(resumed.advisory.legacyRejected, true);
-            assert.strictEqual(resumed.advisory.baseline, retained.baseline);
-            assert.equal(Decisions.refusal(state, resumed.advisory, deps), 'no_card', 'returning to off mode remains conservative');
+            assert.equal(Decisions.refusal(state, retained, deps, null, { prepared }), '', 'the card holds by its event proof');
+            assert.strictEqual(prepared.eventCandidate, retained, 'the diagnostic receives the candidate');
+            assert.equal(builds, before, 'the card verdict runs no solver');
             Economy.forgetContext(state.characterId);
             const next = Economy.forState(state, { ...at(T + 1), eventCandidate: prepared.eventCandidate });
             assert.equal(builds, before + 1, 'cache eviction takes exactly the ordinary rebuild');
@@ -528,21 +512,26 @@ try {
             const shadowCount = () => ['would_hold', 'refused'].reduce((sum, name) =>
                 sum + Number(Diagnostics.metrics().counts?.[`card:event_gate:${name}`] || 0), 0);
             const compared = shadowCount();
-            const fresh = Decisions.advisory(next, { ...state, stats: { ...state.stats, ...next.statsPacket } });
+            Decisions.advisory(next, { ...state, stats: { ...state.stats, ...next.statsPacket } });
             assert.equal(shadowCount(), compared + 1, 'the ordinary completed build contributes one real card-shadow verdict');
             assert.equal(builds, before + 1, 'diagnostic comparison adds no second solver');
-            const proofless = { ...accepted, eventProof: null };
-            remember(owner, proofless, published, deps);
-            assert.equal(owner.context.wishAdvisory, null, 'a proofless legacy rejection still drops the old advice');
+            const drops = () => Object.entries(Diagnostics.metrics().counts || {})
+                .filter(([name]) => name.startsWith('card:drop:remember:')).reduce((sum, [, value]) => sum + Number(value), 0);
+            const dropped = drops(), moved = { ...state, level: Number(state.level || 1) + 1 };
+            assert.equal(Economy.eventProofHolds(moved, accepted.eventProof, deps, check), false, 'fixture: a level change refuses the proof');
+            remember(owner, accepted, moved, deps);
+            assert.equal(owner.context.wishAdvisory, null, 'a publication the proof refuses drops the advice');
+            assert.equal(drops(), dropped + 1, 'the drop is counted as card:drop:remember:<reason>');
+            remember(owner, { ...accepted, eventProof: null }, state, deps);
+            assert.equal(owner.context.wishAdvisory, null, 'a proofless publication drops the advice');
             const reused = { ...accepted, builtAt: T - 1 };
             remember(owner, reused, state, { ...deps, timestamp: T + 1000 }, false);
             assert.strictEqual(owner.context.wishAdvisory, reused);
             assert.equal(reused.builtAt, T - 1, 'a checked reused publication keeps its actual build stamp');
             const newer = { ...retained, baseline: { ...retained.baseline, at: T + 1000 } };
             owner.context.wishAdvisory = newer;
-            remember(owner, accepted, published, deps);
+            remember(owner, accepted, state, deps);
             assert.strictEqual(owner.context.wishAdvisory, newer, 'an older publication cannot replace newer owner advice');
-            assert.equal(fresh.legacyRejected, undefined, 'an actual fresh advisory replaces the old rejection state');
         } finally { Config.developerDiagnostics = diagnostic; Warehouse.useRowSource(null); }
     }
     // Binary transport distinguishes a completed explicit null from a missing
@@ -562,8 +551,8 @@ try {
             const received = Decisions.receiveAdvisory(structuredClone(wire));
             assert(received);
             assert.equal(received.card.activity, null, 'an explicit completed null survives binary ownership transfer');
-            assert.equal(Decisions.refusal({ ...state, stats: { ...state.stats, activityLeaf: 0 } }, received, deps), 'leaf_kind',
-                'off mode keeps the ordinary unsupported-activity refusal');
+            assert.equal(Decisions.refusal({ ...state, stats: { ...state.stats, activityLeaf: 0 } }, received, deps), '',
+                'the economy place admits a completed null by its event proof');
             for (const value of [{ ...wire, activityLeaf: undefined }, { ...wire, activityLeaf: 1 },
                 { ...wire, eventProof: { ...wire.eventProof, activity: accepted.eventProof.activity } },
                 { ...wire, card: { ...wire.card, data: Buffer.from(card.data).subarray(0, 27).toString('base64') } }])
@@ -571,20 +560,21 @@ try {
         } finally { Warehouse.useRowSource(null); }
     }
     // Social leaves are calculated intentions, not native attack/help commands.
-    // The shadow joins the exact accepted build to its ordinary rebuild only.
+    // Under the economy place a pvp/helping card holds by its event proof:
+    // the verdict's leaf check (heldLeafRefusal) reads its target and root.
     {
         const diagnostic = Config.developerDiagnostics;
         const workerSource = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'), 'utf8');
         const helpers = workerSource.slice(workerSource.indexOf('function samePlanJson('),
             workerSource.indexOf('// Diagnostics only: a lifecycle rebuild'));
-        const { nativePlanHolds, socialShadowDeps } = require('node:vm').runInNewContext(
-            `${helpers}; ({ nativePlanHolds, socialShadowDeps })`, {
+        const { nativePlanHolds } = require('node:vm').runInNewContext(
+            `${helpers}; ({ nativePlanHolds })`, {
                 DecisionSections: Sections, GearAcquisitionPlanner: invoke('GameServer/Bot/AI/GearAcquisitionPlanner'),
                 SpotRiskPolicy: invoke('GameServer/Bot/Population/SpotRiskPolicy'), economyDiagnostics: Diagnostics
             });
         const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
-        const Plan = invoke('GameServer/Bot/Population/ColdEconomyPlan');
-        const count = key => Diagnostics.metrics().counts?.[key] || 0;
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
         let socialKind = 'pvp';
         Providers.build = (...args) => {
             builds++;
@@ -613,6 +603,7 @@ try {
                     const state = { ...native, stats: { ...native.stats, ...built.statsPacket } };
                     assert.equal(built.network.activity.activity, kind);
                     const accepted = Decisions.advisory(built, state);
+                    assert(accepted?.eventProof, 'the social build carries its event proof');
                     const rest = Resolver.resolveRest(state, 1000, T + 1000);
                     assert.deepEqual(rest.materialize, { exp: 0, sp: 0, adena: 0, items: [] });
                     assert.equal(rest.patch.activity, 'resting', 'quiet native recovery is still in progress');
@@ -620,89 +611,42 @@ try {
                     const current = { ...options, timestamp: T + 1000 };
                     board.put({ id, kind: 'shop', storeType: SELL, ownerId: 7,
                         lines: [{ lineId: 1, selfId: 1864, count: 1, price: 10 }] });
-                    const prepared = {}, why = [];
-                    assert.equal(Decisions.refreshAdvisory(next, accepted, current,
-                        { prepared, why, socialShadow: true }), null, 'live reuse remains refused');
-                    assert.deepEqual(why, ['leaf_kind']);
-                    if (enabled) assert.equal(prepared.socialShadow?.holds, true, 'all later card checks hold');
-                    else assert.equal(prepared.socialShadow, undefined, 'off creates no candidate');
-                    const before = builds, same = count(`card:social_plan:${kind}:same`);
-                    const wouldHold = count('hold:economy_leaf:held');
-                    const candidate = socialShadowDeps(next, current, prepared, T + 1000, () => true);
-                    const fresh = Economy.forState(next, candidate);
-                    // Shadow first: the shared leaf check (heldLeafRefusal) would hold
-                    // the soft market move; the legacy path counts it and rebuilds.
-                    assert.equal(builds, before + 1, 'only the ordinary soft-market rebuild runs');
-                    if (enabled) {
-                        assert.equal(count(`card:social_plan:${kind}:same`) - same, 1,
-                            'the matching accepted baseline compares its existing fresh build');
-                        assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
-                    }
-                    return { built, accepted, next, current, fresh };
+                    const prepared = {}, why = [], before = builds;
+                    const reused = Decisions.refreshAdvisory(next, accepted, current, { prepared, why });
+                    return { built, accepted, next, current, reused, prepared, why, solved: builds - before };
                 };
                 const off = scenario(false), on = scenario(true);
-                for (const name of ['built', 'fresh']) {
-                    assert.deepEqual(on[name].network, off[name].network, `${kind}: full network unchanged off/on`);
-                    assert.deepEqual(on[name].statsPacket, off[name].statsPacket, `${kind}: complete packet unchanged off/on`);
+                for (const name of ['network', 'statsPacket'])
+                    assert.deepEqual(on.built[name], off.built[name], `${kind}: ${name} unchanged with diagnostics off/on`);
+                for (const run of [off, on]) {
+                    assert(run.reused, `${kind}: the soft market move keeps the card`);
+                    assert.deepEqual(run.why, []);
+                    assert.equal(run.solved, 0, 'the card verdict runs no solver');
                 }
-                const { accepted, next, current, fresh } = on;
-                const candidateFor = (state = next, card = accepted, input = current) => {
-                    const prepared = {};
-                    assert.equal(Decisions.refreshAdvisory(state, card, input, { prepared, socialShadow: true }), null);
-                    return prepared;
+                assert.equal(on.prepared.eventVerdict.valid, true, 'the shared event verdict holds');
+                const { accepted, next, current } = on;
+                const refused = (state, input = current) => {
+                    const why = [];
+                    assert.equal(Decisions.refreshAdvisory(state, accepted, input, { prepared: {}, why }), null);
+                    return why[0];
                 };
-                assert.equal(candidateFor(next, accepted, { ...current, memory: { ...memory, revision: 2 } }).socialShadow?.holds, false,
-                    'changed native memory revision refuses the candidate');
-                assert.equal(candidateFor({ ...next, stats: { ...next.stats, relations: [{ targetId: 4, trust: 1 }] } }).socialShadow?.holds, false,
-                    'changed fallback relations refuse the candidate');
-                for (const changed of [{ activityLeaf: next.stats.activityLeaf + 1 }, { wishFocus: ['foreign:focus', 0, 0] }])
-                    assert.equal(candidateFor({ ...next, stats: { ...next.stats, ...changed } }).socialShadow, undefined,
-                        'a foreign accepted tuple cannot become a candidate');
-                for (const leaf of [{ ...accepted.card.activity, targetId: 0 }, { ...accepted.card.activity, rootKey: 'scores:other' }])
-                    assert.equal(candidateFor(next, { ...accepted, card: { activity: leaf } }).socialShadow, undefined,
-                        'only canonical concrete social targets are considered');
-                for (const [state, nativeHolds, edges] of [
-                    [{ ...next, partyId: 2 }, true, 0], [{ ...next, stats: { ...next.stats, partyRequest: {} } }, true, 0],
-                    [next, false, 0], [next, true, Plan.edges(next, { ...next, activity: 'hunting' }, {}, T + 1000)]
-                ]) {
-                    if (nativeHolds && state === next) assert(edges, 'native recovery completion creates a result-site edge');
-                    const prepared = candidateFor(), refused = count(`card:social_check:${kind}:refused`);
-                    assert.strictEqual(socialShadowDeps(state, current, prepared, T + 1000, () => nativeHolds, edges), current);
-                    assert.equal(count(`card:social_check:${kind}:refused`) - refused, 1);
-                }
+                assert.equal(refused(next, { ...current, memory: { ...memory, revision: 2 } }), 'events:event_key',
+                    'changed native memory revision refuses the card');
+                assert.equal(refused({ ...next, stats: { ...next.stats, relations: [{ targetId: 4, trust: 1 }] } }), 'events:sections',
+                    'changed fallback relations refuse the card');
+                assert.equal(refused({ ...next, partyId: 2 }), 'events:event_key', 'a party refuses the card');
+                assert.equal(refused({ ...next, stats: { ...next.stats, activityLeaf: next.stats.activityLeaf + 1 } }), 'activity_leaf',
+                    'a foreign accepted tuple refuses the card');
                 const replan = { recoveryTargets: [], routeCurrent: false };
                 assert(nativePlanHolds(next, null, replan, T + 1000));
                 assert.equal(nativePlanHolds(next, { status: 'active' }, replan, T + 1000), false,
                     'a stale native route does not pass the shared plan proof');
-                // Same tuple, another actual build: the old advisory must not
-                // be compared with the newer cache entry as though it were its own.
-                assert.notStrictEqual(accepted.baseline, fresh.statsPacket.wishSections);
-                current.board.put({ id, kind: 'shop', storeType: SELL, ownerId: 7,
-                    lines: [{ lineId: 1, selfId: 1864, count: 2, price: 10 }] });
-                let prepared = candidateFor(), unavailable = count(`card:social_plan:${kind}:unavailable`);
-                Economy.forState(next, socialShadowDeps(next, current, prepared, T + 1000, () => true));
-                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1,
-                    'accepted/cache identity mismatch is unavailable, never same');
-                const latest = Economy.forState(next, current);
-                const published = { ...next, stats: { ...next.stats, ...latest.statsPacket } };
-                const card = Decisions.advisory(latest, published);
-                prepared = candidateFor(published, card);
-                unavailable = count(`card:social_plan:${kind}:unavailable`);
-                const before = builds;
-                Economy.forState(published, socialShadowDeps(published, current, prepared, T + 1000, () => true));
-                assert.equal(builds, before, 'a cache hit does not manufacture a second solver call');
-                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1, 'a hit is unavailable');
-                Economy.forgetContext(id);
-                prepared = candidateFor(published, card);
-                unavailable = count(`card:social_plan:${kind}:unavailable`);
-                Economy.forState(published, socialShadowDeps(published, current, prepared, T + 1000, () => true));
-                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1, 'a missing held build is unavailable');
                 assert.equal(next.stats.pvpEncounter, undefined);
-                assert.equal(next.partyId, undefined, 'the shadow neither attacks nor creates a party');
+                assert.equal(next.partyId, undefined, 'the card neither attacks nor creates a party');
                 current.board.remove(id);
             }
         } finally {
-            Config.developerDiagnostics = diagnostic;
+            Config.developerDiagnostics = diagnostic; Warehouse.useRowSource(null);
             Providers.build = (...args) => { builds++; return originalBuild(...args); };
         }
     }
@@ -717,10 +661,12 @@ try {
         Warehouse.useRowSource(() => null, () => true);
         const input = subject(93014), economy = Economy.forState(input, deps);
         assert(economy.eventProof(), 'the tuple shadow fixture has complete native owner input proof');
-        const before = builds;
-        assert.strictEqual(Economy.forState(input, deps).plan, economy.plan, 'exact prepublication input replay remains valid');
-        assert.equal(builds, before);
         const published = { ...input, stats: { ...input.stats, ...economy.statsPacket } };
+        const before = builds;
+        assert.strictEqual(Economy.forState(published, deps).plan, economy.plan, 'the published own output holds');
+        assert.equal(builds, before);
+        assert.notStrictEqual(Economy.forState(input, { ...deps, rememberContext: false }).plan, economy.plan,
+            'an input before its build published refuses on decision_seq');
         const accepted = Decisions.advisory(economy, input);
         assert.equal(accepted.decisionSeq, economy.statsPacket.decisionSeq, 'acceptance uses build output before publication');
         assert.equal(accepted.activityLeaf, economy.statsPacket.activityLeaf);
@@ -739,28 +685,26 @@ try {
             assert.equal(Diagnostics.metrics().counts?.['context:gate:would_hold'] || 0, held);
         }
         const foreignInput = { ...input, stats: { ...input.stats, wishFocus: ['foreign:input', 0, 0] } };
-        assert.equal(Economy.inputKey(foreignInput, deps), Economy.inputKey(input, deps), 'the old raw key omits focus');
         assert.notStrictEqual(Economy.forState(foreignInput, { ...deps, rememberContext: false }).plan, economy.plan,
-            'an equal raw key still requires the original input tuple');
+            'a foreign input focus requires the original input tuple');
         assert.equal(Decisions.refusal(published, { ...accepted, baseline: undefined }, deps), 'no_sections',
             'legacy accepted metadata takes one conservative rebuild');
         assert.equal(Decisions.refusal(published, { ...accepted, focus: undefined }, deps), 'wish_focus',
             'legacy missing focus cannot bless an otherwise equal tuple');
         Config.developerDiagnostics = diagnostic;
-        Warehouse.useRowSource(null);
+        // The warehouse row source stays on to the end: with the economy
+        // place on, a build holds only by its event proof, which needs it.
     }
     // (a) after-result own result only: no new build, the card is restamped.
     {
         const { state, economy, accepted } = decided(93001);
         assert(state.stats.wishSections.at === T, 'the saved baseline records the time of the actual decision');
         assert(accepted && accepted.activity === 'hunting');
-        const band = Economy.decodeCalculationFence(accepted.fence)[3].find(row => row[0] === 1869);
+        const band = accepted.eventProof.bands.find(row => row[0] === 1869);
         assert(band && band[2] >= 100001, 'fixture: the free material has a quantity band');
         const [low, high] = state.stats.wishSections.cashBounds;
         assert(state.adena + 1 > low && (high === null || state.adena + 1 < high), 'fixture: adena stays inside the cash bounds');
         const next = ownResult(state);
-        assert.notEqual(Economy.inputKey(next, at(T + 1000)), Economy.inputKey(state, at(T + 1000)),
-            'fixture: the own result changes the raw input key (activity in the route frame, loot)');
         const before = builds;
         const reused = Economy.forState(next, at(T + 1000));
         assert.equal(builds, before, 'an own result inside the bands rebuilds nothing');
@@ -792,8 +736,8 @@ try {
         assert.equal(Decisions.refusal(next, accepted, at(T + 1000)), '', 'a reusable card has no refusal');
         assert.equal(Decisions.refreshAdvisory({ ...next, activity: 'shopping' }, accepted, at(T + 1000), { afterResult: true }), null,
             'only hunting, resting and travelling are equalised');
-        assert.equal(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
-            at(T + 1000), { afterResult: true }), null, 'a location change stays exact');
+        assert(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
+            at(T + 1000), { afterResult: true }), 'position drift inside one route is not an event (eventInputKey)');
     }
     // (h) a trip to the held hunting leaf's own spot executes the plan: no
     // event; a trip to another spot or a town stays exact (lever 2).
@@ -809,10 +753,8 @@ try {
         let before = builds;
         assert.strictEqual(Economy.forState(own, at(T + 1000)).plan, economy.plan, 'the cache keeps the plan on its own trip');
         assert.equal(builds, before);
-        assert.equal(Economy.calculationHolds(own, accepted.fence, at(T + 1000)), false,
-            'without the card options the proof stays exact');
-        assert(Economy.calculationHolds(own, accepted.fence, at(T + 1000), { activity: 'hunting', leaf }),
-            'the build activity and the own leaf accept the trip start');
+        assert(Economy.eventProofHolds(own, accepted.eventProof, at(T + 1000), { activity: 'hunting', leaf,
+            baseline: accepted.baseline, timestamp: T + 1000 }), 'the build activity and the own leaf accept the trip start');
         Economy.forgetContext(state.characterId);
         assert(Decisions.refreshAdvisory(own, accepted, at(T + 1000)), 'before an action the own trip keeps the card');
         assert(Decisions.refreshAdvisory(own, accepted, at(T + 1000), { afterResult: true }), 'after a result as well');
@@ -843,7 +785,7 @@ try {
         const economy = Economy.forState(state, deps);
         state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
         const accepted = Decisions.advisory(economy, state);
-        const band = Economy.decodeCalculationFence(accepted.fence)[3].find(row => row[0] === 1835);
+        const band = accepted.eventProof.bands.find(row => row[0] === 1835);
         assert(band && band[2] === amount && band[1] >= floor && band[1] < amount,
             'shots below the target have a consumption band ' + JSON.stringify(band));
         const used = shots => ({ ...state, inventory: shotBag(shots), updatedAt: state.updatedAt + 1, stats: { ...state.stats } });
@@ -851,21 +793,8 @@ try {
         const hit = Economy.forState(used(amount - 1), at(T + 1000));
         assert.strictEqual(hit.plan, economy.plan, 'one shot used inside the band');
         assert.equal(builds, before);
-        // The own-result check made the band structure of this very state at
-        // the request's timestamp: the hit's fence reuses it (no second
-        // capability read). Another activity reshapes the state: made again.
-        const capability = Sections.capability;
-        let capabilityReads = 0;
-        Sections.capability = (...args) => { capabilityReads++; return capability(...args); };
-        try {
-            assert(hit.calculationFence, 'fixture: the hit has a fence');
-            assert.equal(capabilityReads, 0, 'the hit fence shares the own-result structure');
-            const resting = Economy.forState({ ...used(amount - 1), activity: 'resting' }, at(T + 1000));
-            assert.strictEqual(resting.plan, economy.plan, 'fixture: a resting own result holds');
-            capabilityReads = 0;
-            assert(resting.calculationFence, 'fixture: the resting hit has a fence');
-            assert.equal(capabilityReads, 1, 'a reshaped state makes its own fence structure');
-        } finally { Sections.capability = capability; }
+        assert.strictEqual(Economy.forState({ ...used(amount - 1), activity: 'resting' }, at(T + 1000)).plan, economy.plan,
+            'a resting own result holds');
         Economy.forgetContext(state.characterId);
         assert(Decisions.refreshAdvisory(used(amount - 1), accepted, at(T + 1000), { afterResult: true }), 'the card holds too');
         assert(Decisions.refreshAdvisory(used(band[1]), accepted, at(T + 1000), { afterResult: true }), 'the band edge holds');
@@ -875,13 +804,6 @@ try {
             'below the survival line rebuilds at once');
         assert.equal(Decisions.refreshAdvisory(used(amount + 1), accepted, at(T + 1000), { afterResult: true }), null,
             'a rise below the target stays exact');
-        // A held purchase of the shots themselves orders only the rise since
-        // its decision, so its own item stays exact (else it would buy short).
-        const options = { activity: accepted.activity, leaf: accepted.card.activity };
-        assert(Economy.calculationHolds(used(amount - 1), accepted.fence, at(T + 1000), options), 'fixture: the held leaf holds the band');
-        assert.equal(Economy.calculationHolds(used(amount - 1), accepted.fence, at(T + 1000),
-            { ...options, leaf: { activity: 'shopping', kind: 'buy', itemId: 1835, amount: target - amount + 1 } }), false,
-        'a held shots purchase keeps the shots exact');
     }
     // (j) the build publishes its potion and shot targets; the sale list keeps
     // by them without a second earning-spot search (L72).
@@ -961,10 +883,8 @@ try {
         const changedCapability = { ...newer, level: newer.level + 1 };
         changedCapability.stats = { ...newer.stats, wishSections: { ...newer.stats.wishSections,
             build: Sections.capability(changedCapability, T + MINUTE) } };
-        assert.equal(Decisions.refusal(changedCapability, accepted, at(T + MINUTE)), 'capability',
+        assert.equal(Decisions.refusal(changedCapability, accepted, at(T + MINUTE)), 'events:sections',
             'a foreign snapshot cannot bless a capability change against an older card');
-        assert.equal(Economy.calculationHolds(state, accepted.fence, at(T + MINUTE)), false,
-            'without the card options the proof stays exact');
         assert.equal(Decisions.refreshAdvisory(state, accepted, at(T + 11 * MINUTE)), null, 'after 10 min the card is re-examined');
         before = builds;
         assert.notStrictEqual(Economy.forState(state, at(T + 11 * MINUTE)).plan, economy.plan, 'after 10 min the plan is rebuilt');
@@ -982,82 +902,29 @@ try {
         assert(wished, 'fixture: a wished item the review read');
         board.put({ id: 9300901, kind: 'shop', storeType: SELL, ownerId: 7, town: 'Giran',
             lines: [{ lineId: 1, selfId: wished, count: 5, price: 10 }] });
-        // fixture: the held decision's own next step buys that line
-        economy.plan.network.activity = { activity: 'shopping', kind: 'buy', itemId: wished, amount: 1, unitPrice: 10,
-            sourceType: 'afk', town: 'Giran' };
-        assert(Economy.acceptedActivityHolds(state, economy.plan.network.activity, tdeps(T + MINUTE)),
-            'fixture: the own offer, funding and route hold');
-        let before = builds;
-        assert.strictEqual(Economy.forState(state, tdeps(T + MINUTE)).plan, economy.plan,
-            'a moved read token waits while the own offer holds');
-        assert.equal(builds, before);
+        // fixture: a held decision whose own next step buys that line
+        const leaf = { activity: 'shopping', kind: 'buy', itemId: wished, amount: 1, unitPrice: 10, sourceType: 'afk', town: 'Giran' };
+        assert(Economy.acceptedActivityHolds(state, leaf, tdeps(T + MINUTE)), 'fixture: the own offer, funding and route hold');
+        // The verdict runs this leaf check before its soft market clause.
+        assert.equal(Economy.heldLeafRefusal(state, leaf, tdeps(T + MINUTE)), '', 'the own offer holds the leaf');
         board.put({ id: 9300901, kind: 'shop', storeType: SELL, ownerId: 7, town: 'Giran',
             lines: [{ lineId: 1, selfId: wished, count: 5, price: 20 }] });
-        before = builds;
-        assert.notStrictEqual(Economy.forState(state, tdeps(T + 2 * MINUTE)).plan, economy.plan,
-            'the own line moved: rebuild inside the market delay');
-        assert(builds > before);
+        assert.equal(Economy.heldLeafRefusal(state, leaf, tdeps(T + 2 * MINUTE)).reason, 'check_failed',
+            'the own line moved: the leaf refuses inside the market delay');
+        board.remove(9300901);
     }
-    // (f2) the legacy soft market hold runs the event verdict's per-leaf
-    // check; shadow first: a pvp leaf it would hold counts on Hold place
-    // economy_leaf and still rebuilds.
+    // (f2) the event verdict's per-leaf check (heldLeafRefusal) on a pvp
+    // leaf: its root must be the leaf's own; the trade check never held it.
     {
-        const diagnostic = Config.developerDiagnostics, detail = Config.economyDiagnostics;
-        const owners = Config.economyDiagnosticsBotIds;
-        const count = key => Diagnostics.metrics().counts?.[key] || 0;
-        // The bot is a sampled owner: its compare row reaches the transport.
-        const rows = [];
-        let batch = null;
-        const drain = () => { while (batch) { const sent = batch; batch = null; Diagnostics.ack(sent.id, sent.records.length); } };
-        try {
-            Config.developerDiagnostics = true; Economy.reset();
-            Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '93011';
-            assert(Diagnostics.connect(message => { rows.push(...message.records.map(JSON.parse)); batch = message; return true; }));
-            drain();
-            let state = subject(93011, 1e6);
-            const economy = Economy.forState(state, at(T));
-            state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
-            const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
-            assert(wished, 'fixture: a wished item the review read');
-            const pvp = { activity: 'pvp', targetId: 4242, rootKey: 'scores:4242' };
-            economy.plan.network.activity = pvp;
-            assert.equal(Economy.heldLeafRefusal(state, pvp, at(T + MINUTE)), '', 'a well-formed pvp leaf holds');
-            assert.equal(Economy.heldLeafRefusal(state, { ...pvp, rootKey: 'care:4242' }, at(T + MINUTE)).reason, 'check_failed',
-                'a pvp leaf on a foreign root refuses');
-            assert.equal(Economy.acceptedActivityHolds(state, pvp, at(T + MINUTE)), false,
-                'fixture: the trade check alone never held a social leaf');
-            board.put({ id: 9301101, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
-            // The place switched on (the test override) serves the held pvp plan.
-            let before = builds, wouldHold = count('hold:economy_leaf:held');
-            assert.strictEqual(Economy.forState(state, { ...at(T + MINUTE), hold: { economy_leaf: true } }).plan, economy.plan,
-                'economy_leaf on: the soft market move keeps the pvp plan');
-            assert.equal(builds, before);
-            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the hold is counted on its hold place');
-            before = builds; wouldHold = count('hold:economy_leaf:held');
-            const ownLeaf = count('context:hold_refused:market_own_leaf');
-            drain(); rows.length = 0;
-            // A sampled rebuild offers ~42 rows of its own; the compare row comes
-            // last, inside the 48 non-summary rows a second (Diagnostics LIMITS):
-            // start in a fresh second so earlier builds' rows do not crowd it out.
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1001 - Date.now() % 1000);
-            assert.notStrictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan,
-                'a moved market token rebuilds the pvp plan until the shadow reads same');
-            assert(builds > before);
-            assert.equal(count('context:hold_refused:market_own_leaf') - ownLeaf, 1,
-                'the rebuild is the soft market own-leaf refusal, not an earlier clause');
-            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
-            drain();
-            const compared = rows.filter(row => row.phase === 'hold' && row.layer === 'economy_leaf');
-            assert.equal(compared.length, 1, 'the sampled owner gets one compare row');
-            assert(['same', 'new'].includes(compared[0].outcome));
-            assert.equal(compared[0].moved === undefined, compared[0].outcome === 'same', 'a new row names <activity>:<diff>');
-            if (compared[0].moved !== undefined) assert.match(compared[0].moved, /^pvp:(focus|leaf|queue|funded)$/);
-            board.remove(9301101);
-        } finally {
-            Diagnostics.disconnect();
-            Config.developerDiagnostics = diagnostic; Config.economyDiagnostics = detail;
-            Config.economyDiagnosticsBotIds = owners; Economy.reset();
-        }
+        let state = subject(93011, 1e6);
+        const economy = Economy.forState(state, at(T));
+        state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+        const pvp = { activity: 'pvp', targetId: 4242, rootKey: 'scores:4242' };
+        assert.equal(Economy.heldLeafRefusal(state, pvp, at(T + MINUTE)), '', 'a well-formed pvp leaf holds');
+        assert.equal(Economy.heldLeafRefusal(state, { ...pvp, rootKey: 'care:4242' }, at(T + MINUTE)).reason, 'check_failed',
+            'a pvp leaf on a foreign root refuses');
+        assert.equal(Economy.acceptedActivityHolds(state, pvp, at(T + MINUTE)), false,
+            'fixture: the trade check alone never held a social leaf');
     }
     // (f3) a material hunt whose gap reached the bag since the decision is
     // done: the shared check refuses it for the held build (heldUnits) and
@@ -1074,18 +941,15 @@ try {
     }
     // (f4) a partial buy: the shared check funds only the rest after the
     // part delivered since the decision (heldUnits), the raw leaf the whole
-    // amount. That hold is new, so it is a shadow on Hold place economy_leaf.
+    // amount.
     {
-        const diagnostic = Config.developerDiagnostics;
-        const count = key => Diagnostics.metrics().counts?.[key] || 0;
         const tripCost = Object.assign(() => 0, { details: () => ({ known: true, hours: .1, fees: 0 }) });
         const tdeps = timestamp => ({ ...deps, tripCost, timestamp });
         try {
-            Config.developerDiagnostics = true; Economy.reset();
+            Economy.reset();
             // A bare bag buys its shots: the held build records 0 own units.
-            // The fixture's leaf buys 1864 instead, whose 3 units in the bag
-            // stand for the part delivered since that decision (a delivery
-            // itself moves the structural key, an earlier refusal).
+            // The leaf buys 1864 instead, whose 3 units in the bag stand for
+            // the part delivered since that decision.
             let state = { ...subject(93013, 1e6), inventory: Life.inventorySummaryFromItems([
                 { id: 1, selfId: 1, amount: 1, equipped: 1, slot: 7 }, { id: 2, selfId: 1864, amount: 3, equipped: 0, slot: 0 }]) };
             const economy = Economy.forState(state, tdeps(T));
@@ -1103,18 +967,8 @@ try {
             assert.equal(Economy.acceptedActivityHolds(state, leaf, tdeps(T + MINUTE)), false,
                 'the raw leaf needs funding for all 5 units');
             assert.equal(Economy.heldLeafRefusal(state, leaf, tdeps(T + MINUTE), 0), '', 'the checked leaf funds the 2 left');
-            economy.plan.network.activity = leaf;
-            const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
-            board.put({ id: 9301302, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
-            const before = builds, wouldHold = count('hold:economy_leaf:held');
-            const ownLeaf = count('context:hold_refused:market_own_leaf');
-            assert.notStrictEqual(Economy.forState(state, tdeps(T + MINUTE)).plan, economy.plan,
-                'a moved market token rebuilds the partial buy until the shadow reads same');
-            assert(builds > before);
-            assert.equal(count('context:hold_refused:market_own_leaf') - ownLeaf, 1, 'through the soft market own-leaf hold');
-            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
-            board.remove(9301301); board.remove(9301302);
-        } finally { Config.developerDiagnostics = diagnostic; Economy.reset(); }
+            board.remove(9301301);
+        } finally { Economy.reset(); }
     }
     // (g) a resting crafter's MP is a resource: the card is refused (critic 2a).
     {
@@ -1177,6 +1031,7 @@ try {
     console.log('PASS L70 held plan: own result reuse and restamp, own-spot trip, shot use below target, hard events, soft market delay, reconcile kept, shared money verdict');
 } finally {
     Providers.build = originalBuild;
+    invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(null);
     fs.rmSync(dir, { recursive: true, force: true });
 }
 

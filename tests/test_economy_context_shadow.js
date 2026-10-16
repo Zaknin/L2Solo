@@ -1,5 +1,5 @@
 'use strict';
-// Shadow counters compare rebuild keys and plans. Never a decision input.
+// The economy hold and its counters (hold:economy, context:gate). Never a decision input.
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'economy-context-shadow-'));
@@ -24,8 +24,7 @@ const deps = { board: new BoardIndex(), spots: invoke('GameServer/Bot/Population
 const state = () => ({ characterId: 901, updatedAt: 1, level: 20, phase: 'cold', activity: 'resting', adena: 100,
     stats: { classId: 1 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } }, currentRegion: 'Giran',
     simulation: { revision: 2 }, loc: { locX: 80000, locY: 148000, locZ: -3500 }, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } });
-const shadow = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:shadow')));
-const keyCounts = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('context:key_')));
+const hold = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {}).filter(([key]) => key.startsWith('hold:economy:')));
 // A held build carries its event proof only under a native generation and a
 // ready warehouse source. A branch checkout has no generation, CI's detached
 // one has it: each proof block fixes both and restores them in its finally.
@@ -40,117 +39,69 @@ function stubLiquidation(state, context, values) {
     context.liquidationInputs = Providers.liquidationInputs(state, { shots: context.stock('shots'), potions: context.stock('potions'),
         excluded: [...values.keys()].filter(id => Object.hasOwn(state.inventory || {}, id)) }).proof;
 }
+// The state after the bot accepted a view's decision (its packet in stats):
+// the held build's echo (decision sequence, leaf, focus) is its output.
+const accept = (view, current = state()) => ({ ...current, stats: { ...current.stats, ...view.statsPacket } });
 function delta(before, after) {
     const out = {};
     for (const [key, value] of Object.entries(after)) if (value !== (before[key] || 0)) out[key] = value - (before[key] || 0);
     return out;
 }
 
-// Every input key part is named, in order; the key is the parts joined.
-{
-    const probe = { ...state(), sp: 77, stats: { classId: 1, karma: null } }, probeDeps = { ...deps, workshop: { recipeId: 5 } };
-    const parts = Economy.inputKeyParts(probe, probeDeps), names = Economy.INPUT_KEY_PARTS;
-    assert.strictEqual(names.length, parts.length, 'a new input key part needs its name in INPUT_KEY_PARTS');
-    assert.strictEqual(new Set(names).size, names.length);
-    assert.strictEqual(Economy.inputKey(probe, probeDeps), parts.join('|'));
-    const at = name => parts[names.indexOf(name)];
-    assert.deepEqual([at('level'), at('class_id'), at('adena'), at('workshop_recipe'), at('sp')], [20, 1, 100, 5, 77]);
-}
-
 // Off: no diagnostic call is reached, the decision path is unchanged.
 const original = { count: Diagnostics.count, duration: Diagnostics.duration, enabled: Diagnostics.enabled, push: Diagnostics.push,
     laps: Diagnostics.laps };
+let restoreScope = proofScope();
 Config.developerDiagnostics = false; Economy.reset();
 for (const key of Object.keys(original)) Diagnostics[key] = () => { throw Error(`off reached ${key}`); };
 // laps is called unconditionally by the provider and must hand back null (no clock, no allocation) while off.
 Diagnostics.laps = prefix => { assert.strictEqual(original.laps(prefix), null, 'laps is null while diagnostics are off'); return null; };
 const offFirst = Economy.forState(state(), deps);
-assert.strictEqual(Economy.forState(state(), deps).plan, offFirst.plan);
+assert.strictEqual(Economy.forState(accept(offFirst), deps).plan, offFirst.plan);
 Economy.forState(state(), deps); Economy.forgetContext(901, 'state_publication');
 Economy.forState(state(), { ...deps, rememberContext: false });
 Object.assign(Diagnostics, original);
 
-// On, with a fake clock for deterministic native deadlines.
+// On, with a fake clock for deterministic native deadlines. The economy
+// place counts every held build's verdict: hold:economy:<held|reason>.
 const realNow = Date.now; let clock = 1e12; Date.now = () => clock;
 Config.developerDiagnostics = true; Economy.reset();
-let before = shadow();
+let before = hold();
 const first = Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:new_key': 1 }, 'first build has no previous key');
+assert.deepEqual(delta(before, hold()), { 'hold:economy:unproved': 1 }, 'a first build has no held build');
 {
     const durations = Diagnostics.metrics().durations || {};
     assert.strictEqual(durations['context:not_retained']?.count, durations.context?.count, 'build time is split by reason');
 }
 
 // Publication replaces the facts object while retaining the checked decision.
-before = shadow();
+before = hold();
 Economy.forgetContext(901, 'state_publication');
-const publicationState = state();
+const publicationState = accept(first);
 const publication = Economy.forState(publicationState, deps);
 assert.strictEqual(publication.plan, first.plan, 'publication retains the same decision');
 assert.strictEqual(publication.state, publicationState, 'the view reads the newly published facts');
 assert.notStrictEqual(publication.state, first.state, 'publication supplies a new facts object');
-assert.deepEqual(delta(before, shadow()), {}, 'publication without changed inputs is not a rebuild');
+assert.deepEqual(delta(before, hold()), { 'hold:economy:held': 1 }, 'publication without changed inputs is not a rebuild');
 
-before = shadow(); clock += 7000;
+before = hold(); clock += 7000;
 Economy.forgetContext(901, 'explicit_invalidation');
 const republished = state();
 const second = Economy.forState(republished, deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 },
-'a released context with an equal key counts the repeated plan');
+assert.deepEqual(delta(before, hold()), { 'hold:economy:unproved': 1 }, 'a released context has no held build');
 assert.deepEqual(second.statsPacket, first.statsPacket, 'counting never changes the decision');
 
-before = shadow(); clock += 40000;
-assert.strictEqual(Economy.forState(republished, deps).plan, second.plan, 'a hit is not a rebuild');
-assert.deepEqual(delta(before, shadow()), {});
-before = shadow(); clock += 2000;
-Economy.forgetContext(901, 'owner_release');
-Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 }, 'a later released context keeps the aggregate key and plan counts');
-
-before = shadow(); const keyBefore = keyCounts();
-Economy.forState({ ...republished, adena: 5000 }, deps);
-let changed = delta(before, shadow());
-assert.deepEqual(changed, { 'context:shadow:new_key': 1, 'context:shadow_plan:new_key:same_plan': 1 },
-    'a richer wallet invalidates inputs while the mandatory kit remains the focus');
-assert.deepEqual(delta(keyBefore, keyCounts()), { 'context:key_part:adena': 1, 'context:key_parts:1': 1 }, 'the one moved input part is named');
-
-// A build that waits on incoming stock (early return) still classifies its plan.
-before = shadow();
-Economy.forState({ ...republished, adena: 5000, incomingPending: true }, deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:new_key': 1, 'context:shadow_plan:new_key:new_plan': 1 });
-Economy.forState({ ...republished, adena: 5000 }, deps);
-
-// An unkept build stays unkept even when an older kept context of the actor is released later.
-Economy.forState({ ...state(), adena: 5001 }, { ...deps, rememberContext: false });
-Economy.forgetContext(901, 'explicit_invalidation');
-before = shadow(); clock += 200000;
-Economy.forState(state(), deps);
-changed = delta(before, shadow());
-assert.deepEqual(changed, { 'context:shadow:new_key': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:new_key:'))) });
-assert.strictEqual(Object.keys(changed).filter(key => key.startsWith('context:shadow_plan:new_key:')).length, 1, 'a new key compares its plan with the previous build');
+before = hold(); clock += 40000;
+assert.strictEqual(Economy.forState(accept(second, republished), deps).plan, second.plan, 'a hit is not a rebuild');
+assert.deepEqual(delta(before, hold()), { 'hold:economy:held': 1 });
 
 // The LRU capacity names its own release.
-Economy.forState(state(), deps);
 for (let id = 1000; id < 1000 + Economy.RETAIN_LIMIT; id++) Economy.forState({ ...state(), characterId: id }, deps);
-before = shadow();
+before = Diagnostics.metrics().counts || {};
 Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 });
-
-// A temporary caller's predecessor is not the held decision's baseline.
-{
-    const counts = () => Diagnostics.metrics().counts || {};
-    const ownWorkshop = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
-    const changedWorkshop = { ...ownWorkshop, recipeId: 7 };
-    for (const [id, currentWorkshop, expected] of [[910, undefined, 0], [911, changedWorkshop, 1]]) {
-        const native = { ...state(), characterId: id };
-        Economy.forState(native, { ...deps, workshop: ownWorkshop });
-        Economy.forState(native, { ...deps, workshop: changedWorkshop, rememberContext: false });
-        const before = counts()['context:silent:workshop_recipe'] || 0;
-        Economy.forState({ ...native, adena: native.adena + 1 }, { ...deps, workshop: currentWorkshop || ownWorkshop });
-        assert.equal((counts()['context:silent:workshop_recipe'] || 0) - before, expected,
-            'silent event parts compare against the actual held build, not the temporary predecessor');
-    }
-}
+assert.deepEqual(Object.keys(delta(before, Diagnostics.metrics().counts || {})).filter(key => /^(hold:economy|context:(eviction|miss)):/.test(key)).sort(),
+    ['context:eviction:capacity', 'context:miss:not_retained', 'hold:economy:unproved']);
+restoreScope();
 
 // Shopping shadow checks use the retained decision's total bag + incoming baseline.
 // The live leaf and decisions stay identical with diagnostics disabled/enabled.
@@ -192,7 +143,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             const quotes = quoteReads;
             const result = Economy.forState(current, { ...options, ...extra });
             if (diagnostic) verdicts.push(Object.keys(delta(before, Diagnostics.metrics().counts || {}))
-                .filter(key => key.startsWith('context:gate:')));
+                .filter(key => key.startsWith('hold:economy:')));
             results.push({ network: result.network, packet: result.statsPacket });
             assert.equal(Object.hasOwn(result.plan.network.activity || {}, 'heldAtDecision'), false,
                 'shadow metadata never stamps the live network leaf');
@@ -201,12 +152,12 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const first = request(native).result;
         assert.equal(first.network.activity?.activity, 'shopping');
         assert.equal(first.network.activity?.amount, 2, 'the real quantity solver subtracts the three owned units');
-        assert.equal(request(native).result.plan, first.plan, 'a cache hit preserves the original diagnostic baseline');
         const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
+        assert.equal(request(accepted).result.plan, first.plan, 'a cache hit preserves the original diagnostic baseline');
         const partial = { ...accepted, acceptedIncoming: { [itemId]: 1 } };
         const part = request(partial, { rememberContext: false });
         if (diagnostic) assert.equal(part.quotes, 1, 'one current offer check on an otherwise quiet partial fill');
-        assert.equal(part.result.network.activity.amount, 1, 'the fresh decision orders only the missing unit');
+        assert.equal(part.result.plan, first.plan, 'a quiet partial fill keeps the held decision');
         offer(99); // Token moved, quote stayed usable: the same buy proof covers soft deferral.
         const transferred = { ...accepted, inventory: { ...accepted.inventory,
             [itemId]: { ...accepted.inventory[itemId], amount: 4 } } };
@@ -215,8 +166,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         request({ ...partial, incomingPending: true });
         request({ ...accepted, acceptedIncoming: { [itemId]: 2 } }, { rememberContext: false });
         if (diagnostic) assert.deepEqual(verdicts, [
-            ['context:gate:no_held'], [], ['context:gate:would_hold'], ['context:gate:would_hold'],
-            ['context:gate:event_key'], ['context:gate:check_failed']
+            ['hold:economy:unproved'], ['hold:economy:held'], ['hold:economy:held'], ['hold:economy:held'],
+            ['hold:economy:event_key'], ['hold:economy:check_failed']
         ], 'partial fills and incoming-to-bag transfer hold; full arrival refuses despite intervening unkept/pending builds');
         return results;
     };
@@ -272,7 +223,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             const before = Diagnostics.metrics().counts || {};
             const result = Economy.forState(current, { ...deps, ...extra });
             if (diagnostic) verdicts.push(Object.keys(delta(before, Diagnostics.metrics().counts || {}))
-                .filter(key => key.startsWith('context:gate:')));
+                .filter(key => key.startsWith('hold:economy:')));
             results.push({ network: result.network, packet: result.statsPacket });
             assert.equal(Object.hasOwn(result.plan.network.activity || {}, 'heldAtDecision'), false);
             return result;
@@ -280,11 +231,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const first = request(native);
         assert.equal(first.network.activity?.itemId, itemId);
         assert.equal(first.network.activity?.amount, 2);
-        assert.equal(request(native).plan, first.plan);
         const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
+        assert.equal(request(accepted).plan, first.plan);
         const partial = { ...accepted, acceptedIncoming: { [itemId]: 1 } };
         request(partial, { rememberContext: false });
-        if (diagnostic) assert.equal(summaries.at(-1).inputActivityLeaf, accepted.stats.activityLeaf);
         request({ ...accepted, inventory: { ...accepted.inventory, [itemId]: { ...native.inventory[itemId], amount: 4 } } },
             { rememberContext: false });
         request({ ...partial, incomingPending: true });
@@ -294,8 +244,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         request({ ...accepted, inventory: { ...accepted.inventory, [targetId]: { selfId: targetId, amount: 1 } } },
             { rememberContext: false });
         if (diagnostic) {
-            assert.deepEqual(verdicts, [['context:gate:no_held'], [], ['context:gate:would_hold'], ['context:gate:would_hold'],
-                ['context:gate:event_key'], ['context:gate:check_failed'], ['context:gate:quantity'], ['context:gate:event_key']],
+            assert.deepEqual(verdicts, [['hold:economy:unproved'], ['hold:economy:held'], ['hold:economy:held'], ['hold:economy:held'],
+                ['hold:economy:event_key'], ['hold:economy:check_failed'], ['hold:economy:quantity'], ['hold:economy:event_key']],
                 'a bag loss below the decision count is a quantity event; a new target stack moves the event key');
             const complete = summaries.find(row => row.gate === 'check_failed' && row.actual === 2);
             assert.deepEqual([complete.item, complete.requested, complete.before, complete.owned, complete.actual, complete.remaining],
@@ -307,7 +257,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const present = { ...native, inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } };
         const held = request(present);
         request({ ...native, stats: { ...native.stats, ...held.statsPacket } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a claimed target stack that leaves the bag moves the event key');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:event_key'], 'a claimed target stack that leaves the bag moves the event key');
         targetClaimed = false;
         // A funding hunt's drops are not its own progress: they are a wished
         // material reaching its count. A new target stack moves the event key.
@@ -315,10 +265,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const fundingHeld = request(native);
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 } },
             { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'], 'a funding hunt has no own item: its material rows hold exactly');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:quantity'], 'a funding hunt has no own item: its material rows hold exactly');
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 },
             inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a new target stack moves the event key');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:event_key'], 'a new target stack moves the event key');
         funding = false; targetAmount = 1;
         // A material hunt from none: its first drop is a new bag row of its
         // own item, its progress, not an input event.
@@ -329,7 +279,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const firstDrop = { ...none, stats: { ...none.stats, ...fromNone.statsPacket },
             inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } };
         request(firstDrop, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a material hunt from none holds after its first drop');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:held'], 'a material hunt from none holds after its first drop');
         if (diagnostic) {
             // The card path passes only the leaf: its heldAtDecision stands in
             // for the held entry's heldUnits. The options mirror the entry.
@@ -349,7 +299,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         // bag is an event even when the new row is the hunt's own progress.
         // With two free slots the same filler and drop still hold.
         const limit = InventoryLimits.forState(none), fillerId = 1869;
-        for (const [free, gate] of [[2, 'would_hold'], [1, 'bag']]) {
+        for (const [free, gate] of [[2, 'held'], [1, 'bag']]) {
             Economy.reset();
             const filled = { ...none, inventory: { ...none.inventory,
                 [fillerId]: { selfId: fillerId, amount: limit - free - 1, stackable: false } } };
@@ -359,7 +309,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
                 [rootKey, itemId, 5], 'a filled bag keeps the same material hunt');
             request({ ...filled, stats: { ...filled.stats, ...held.statsPacket },
                 inventory: { ...filled.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
-            if (diagnostic) assert.deepEqual(verdicts.at(-1), [`context:gate:${gate}`],
+            if (diagnostic) assert.deepEqual(verdicts.at(-1), [`hold:economy:${gate}`],
                 `a first drop with ${free} free slot(s) ${gate === 'bag' ? 'fills the bag and refuses' : 'holds'}`);
         }
         // Another root's stock row on the hunted item stays its input: its
@@ -370,14 +320,17 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         assert.equal(shared.network.activity?.itemId, itemId);
         request({ ...native, stats: { ...native.stats, ...shared.statsPacket },
             inventory: { ...native.inventory, [itemId]: { ...native.inventory[itemId], amount: 4 } } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'], 'a second root on the hunted item reaching its count refuses');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:quantity'], 'a second root on the hunted item reaching its count refuses');
         second = false;
         Economy.reset();
         const original = request(native);
-        const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
+        const progressed = { ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } };
+        assert.strictEqual(request(progressed).plan, original.plan, 'own progress keeps the held build');
+        Economy.forgetContext(913, 'explicit_invalidation');
+        const renewed = request(progressed);
         request({ ...native, stats: { ...native.stats, ...renewed.statsPacket } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'],
-            'an actual completed retention advances the baseline; losing its new incoming unit is a quantity event');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:quantity'],
+            'an actual completed rebuild advances the baseline; losing its new incoming unit is a quantity event');
         return results;
     };
     try { assert.deepEqual(scenario(true), scenario(false), 'hunting and target diagnostics preserve complete live networks and packets'); }
@@ -405,7 +358,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
     };
     const counters = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => key.startsWith('context:gate:')));
+        .filter(([key]) => key.startsWith('hold:economy:')));
     const scenario = (diagnostic, mode) => {
         Config.developerDiagnostics = diagnostic; Economy.reset();
         const board = new BoardIndex(); board.itemRevision = id => board.itemFingerprint(id);
@@ -437,16 +390,17 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             // out of the bag with one accepted incoming, or the network's own
             // delivery (incoming into the bag), is no loss.
             const lost = mode === 'loss';
-            assert.equal(on.counts[`context:gate:${lost ? 'quantity' : 'would_hold'}`], 1,
+            assert.equal(on.counts[`hold:economy:${lost ? 'quantity' : 'held'}`], 1,
                 `${mode}: material loss is an event; its own delivery, unkept and pending builds preserve the original proof`);
         }
     } finally { Providers.build = build; restoreProof(); Config.developerDiagnostics = true; Economy.reset(); }
 }
 
-// The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
+// The held build's verdict names every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => /^context:(hold_refused:)/.test(key)));
+        .filter(([key]) => key.startsWith('hold:economy:')));
+    const restoreProof = proofScope();
     const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
     const actor = (loc, stats = {}) => ({ ...state(), characterId: 902, loc: { locX: 80000 + loc, locY: 148000, locZ: -3500 },
         stats: { ...state().stats, ...stats } });
@@ -471,9 +425,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         step('echo', () => Economy.forState(actor(200, { ...decided, activityLeaf: leaf }), at));
         Economy.forgetContext(902, 'explicit_invalidation');
         step('leaf_no_held', () => Economy.forState(actor(200, { ...decided, activityLeaf: 7 }), at));
-        // The same key with a held entry of that key: the moved market refuses it.
+        // The held entry's own decision accepted: the moved market refuses it.
+        const echo = views.leaf_no_held.statsPacket;
         moveMarket();
-        step('market', () => Economy.forState(actor(200, { ...decided, activityLeaf: 7 }), at));
+        step('market', () => Economy.forState(actor(200, { ...decided, ...echo }), at));
         // The same key as an unkept build: the held older entry refuses on its decision.
         const later = { ...decided, decisionSeq: decided.decisionSeq + 5, activityLeaf: 7 };
         step('unkept', () => Economy.forState(actor(200, later), { ...at, rememberContext: false }));
@@ -499,59 +454,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         assert.deepEqual(keys.map(key => on.deltas[name][key]), [1], `${name}: one ${pattern} in ${JSON.stringify(on.deltas[name])}`);
         return keys[0];
     };
-    assert.deepEqual(on.deltas.first, { 'context:hold_refused:no_held': 1 }, 'a first build has no held decision');
-    assert.strictEqual(one('market', /^context:hold_refused:/), 'context:hold_refused:market_due');
-    assert.strictEqual(one('decision', /^context:hold_refused:/), 'context:hold_refused:decision_seq');
-}
-
-// RTOKENS: the read set of a build (item ids, their market tokens, spots,
-// node bag rows, deadline sides) against the actor's previous build, split
-// by key outcome and plan outcome; a moved read set names its first moved kind.
-{
-    const readsetKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => key.startsWith('context:readset')));
-    const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
-    const start = 1e12;
-    // A shot investment whose 30-minute deadline the time step crosses; its item has no recipe.
-    const actor = () => ({ ...state(), characterId: 903, stats: { ...state().stats, shotRecipeDemand: { at: start, itemId: 999999 } } });
-    const scenario = () => {
-        let revision = 1;
-        const at = { ...deps, timestamp: start + 29 * 60e3, workshops: Workshops.publicForRecipe,
-            workshopRevision: () => revision, routeRows: rows(1) };
-        const views = {}, deltas = {};
-        const step = (name, build) => { const before = readsetKeys(); views[name] = build(); deltas[name] = delta(before, readsetKeys()); };
-        step('first', () => Economy.forState(actor(), at));
-        Economy.forgetContext(903, 'explicit_invalidation');
-        step('repeat', () => Economy.forState(actor(), at));
-        // The read items stay; their market tokens move (a workshop revision).
-        revision++; Economy.forgetContext(903, 'explicit_invalidation');
-        step('market', () => Economy.forState(actor(), at));
-        // Only the clock moves, across the investment's deadline.
-        at.timestamp = start + 31 * 60e3;
-        step('time', () => Economy.forState(actor(), at));
-        return { views, deltas };
-    };
-    Config.developerDiagnostics = false; Economy.reset();
-    const offCalls = [], saved = { count: Diagnostics.count, duration: Diagnostics.duration };
-    Diagnostics.count = (...args) => offCalls.push(args); Diagnostics.duration = (...args) => offCalls.push(args);
-    const off = scenario();
-    Object.assign(Diagnostics, saved);
-    assert.deepEqual(offCalls, [], 'diagnostics off: no read set is counted');
-    Config.developerDiagnostics = true; Economy.reset();
-    const on = scenario();
-    for (const name of Object.keys(off.views)) {
-        assert.strictEqual(on.views[name].inputKey, off.views[name].inputKey, `${name}: the same key`);
-        assert.deepEqual(on.views[name].statsPacket, off.views[name].statsPacket, `${name}: counting never changes the decision`);
-        assert.deepEqual(on.views[name].network, off.views[name].network, `${name}: the same wishes, funding and activity`);
-    }
-    assert.deepEqual(on.deltas.first, {}, 'a first build has no previous read set');
-    assert.deepEqual(on.deltas.repeat, { 'context:readset:same_key_same:same_plan': 1 }, 'equal reads, equal read set');
-    const moved = name => Object.keys(on.deltas[name]).filter(key => key.startsWith('context:readset_moved:'));
-    assert.deepEqual(moved('market'), ['context:readset_moved:market'], JSON.stringify(on.deltas.market));
-    assert.strictEqual(Object.keys(on.deltas.market).filter(key => /^context:readset:same_key_moved:/.test(key)).length, 1);
-    assert.deepEqual(moved('time'), ['context:readset_moved:time'], JSON.stringify(on.deltas.time));
-    assert.strictEqual(Object.keys(on.deltas.time).filter(key => /^context:readset:new_key_moved:/.test(key)).length, 1,
-        'the deadline is a key part too');
+    assert.deepEqual(on.deltas.first, { 'hold:economy:unproved': 1 }, 'a first build has no held decision');
+    assert.strictEqual(one('market', /^hold:economy:/), 'hold:economy:market');
+    assert.strictEqual(one('decision', /^hold:economy:/), 'hold:economy:decision_seq');
+    restoreProof();
 }
 
 // Physical target identity belongs to native improvement admission even when
@@ -620,10 +526,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         Config.developerDiagnostics = enabled; Economy.reset();
         const initialReads = markReads;
         const first = Economy.forState(input, options);
-        assert.equal(markReads - initialReads, 1, 'the event key scans the native targets once per build, on and off');
+        assert.equal(markReads - initialReads, 2, 'the request key and the proof key each scan the native targets once, on and off');
         const hitReads = markReads;
-        assert.strictEqual(Economy.forState(input, options).plan, first.plan);
-        assert.equal(markReads, hitReads, 'a live cache hit scans no improvement targets');
+        assert.strictEqual(Economy.forState({ ...input, stats: { ...input.stats, ...first.statsPacket } }, options).plan, first.plan);
+        assert.equal(markReads - hitReads, 1, 'a live cache hit scans the targets once, for its request key');
         assert(first.network.focus?.[0]?.startsWith(`enchant:${oldId}:`), 'a real native enchant root is the held focus');
         const next = { ...changed, stats: { ...changed.stats, ...first.statsPacket } };
         if (mode === 'unkept') Economy.forState(next, { ...options, rememberContext: false });
@@ -648,73 +554,49 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     } finally { Providers.build = originalBuild; Policy.targetInputs = targetInputs; restoreProof(); Config.developerDiagnostics = true; Economy.reset(); }
 }
 
-// The per-build record (tools/timeline) names the cause: the miss reason, the moved key parts, the plan outcome,
-// the read-set verdict and the build time; a served request leaves a hit record with what was deferred.
+// The per-build record (tools/timeline) names the cause: the miss reason and
+// the build time; a served request leaves a hit record.
 {
-    const records = [], saved = { push: Diagnostics.push, enabled: Diagnostics.enabled };
+    const records = [], saved = { push: Diagnostics.push, enabled: Diagnostics.enabled }, restoreProof = proofScope();
     Diagnostics.push = row => { records.push(row); return true; }; Diagnostics.enabled = () => true;
     Economy.reset();
     const base = { ...state(), characterId: 903 };
-    Economy.forState(base, deps);
-    Economy.forState({ ...base, adena: 9000 }, deps);
-    Economy.forState({ ...base, adena: 9000 }, deps);
-    Object.assign(Diagnostics, saved);
+    const built = Economy.forState(base, deps);
+    const richer = Economy.forState({ ...accept(built, base), adena: 9000 }, deps);
+    Economy.forState({ ...accept(richer, base), adena: 9000 }, deps);
+    Object.assign(Diagnostics, saved); restoreProof();
     const builds = records.filter(row => row.phase === 'wish_context');
-    assert.deepEqual(builds.map(row => [row.reason, row.outcome, row.moved]), [
-        ['not_retained', 'first_build', ''],
-        ['input_dependency_changed', 'same_plan', 'adena'],
-        ['hit_same_inputs', 'held', '']], JSON.stringify(builds));
-    assert.strictEqual(builds[0].readset, 'none', 'a first build has no read set to compare');
-    assert.ok(['same', ...Economy.READSET_KINDS || ['item', 'market', 'spot', 'node', 'time']].includes(builds[1].readset), builds[1].readset);
-    assert.strictEqual(builds[2].readset, undefined);
+    assert.deepEqual(builds.map(row => [row.reason, row.outcome]), [
+        ['not_retained', undefined],
+        ['held_refused', undefined],
+        ['hit_same_inputs', 'held']], JSON.stringify(builds));
     assert.ok(builds[0].durationMs >= 0 && builds[1].durationMs >= 0, 'a build records its time');
     assert.strictEqual(builds[2].durationMs, undefined, 'a hit has no build time');
 }
 
 // A late read through a stored build's view (a price, a spot value) joins the
-// read set its held entry keeps: the next served view's fence names it.
+// read set its held entry keeps; the held entry still serves the next request.
 {
+    const restoreProof = proofScope();
     Economy.reset();
     const actor = { ...state(), characterId: 904 };
-    const fenceOf = view => { const fields = Economy.decodeCalculationFence(view.calculationFence);
-        assert.ok(fields, 'the view has a calculation fence');
-        return { items: fields[1][1].filter((_, at) => at % 2 === 0), spots: fields[2].map(([id]) => id) }; };
     const built = Economy.forState(actor, deps);
-    const before = fenceOf(built);
-    const item = 990003, spot = deps.spots.find(row => row?.id && !before.spots.includes(row.id));
-    assert.ok(!before.items.includes(item) && spot, 'fixture: an item and a spot the build did not read');
-    built.price(item); built.spotValue(spot);
-    const served = Economy.forState(actor, deps);
+    built.price(990003); built.spotValue(deps.spots.find(row => row?.id));
+    const served = Economy.forState(accept(built, actor), deps);
     assert.strictEqual(served.plan, built.plan, 'the held entry serves the second request');
-    const after = fenceOf(served);
-    assert.ok(after.items.includes(item), 'a late price read joins the held item reads');
-    assert.ok(after.spots.includes(spot.id), 'a late spot read joins the held spot reads');
+    restoreProof();
 }
 
-// Sampled owner: the projection hash, its size and the provider block layers are recorded; the same
-// state rebuilt after an explicit release repeats the projection (`same` is a lower bound in general).
+// Sampled owner: the provider block layers are timed.
 {
     const saved = { economyDiagnostics: Config.economyDiagnostics, economyDiagnosticsBotIds: Config.economyDiagnosticsBotIds };
     Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '901';
     try {
         Economy.reset();
-        const counts = () => Diagnostics.metrics().counts || {};
         Economy.forState(state(), deps);
-        const sameBefore = counts()['context:projection:same'] || 0;
-        Economy.forgetContext(901, 'explicit_invalidation');
-        Economy.forState(state(), deps);
-        assert.strictEqual((counts()['context:projection:same'] || 0) - sameBefore, 1,
-            'an unchanged state rebuilds the same projection');
-        assert.ok(Object.keys(counts()).some(key => key.startsWith('context:projection_size:')), 'a sampled owner records the size');
         const durations = Diagnostics.metrics().durations || {};
         for (const layer of ['build', 'sources', 'benefits', 'admission', 'tail'])
             assert.ok(durations[`provider:${layer}`]?.count > 0, `provider:${layer} is timed`);
-        // An unsampled owner pays for neither the hash nor the size.
-        Config.economyDiagnosticsBotIds = '777';
-        const projectionKeys = () => Object.keys(counts()).filter(key => key.startsWith('context:projection')).map(key => key + counts()[key]);
-        const sampled = projectionKeys();
-        Economy.forState(state(), deps); Economy.forgetContext(901, 'explicit_invalidation'); Economy.forState(state(), deps);
-        assert.deepEqual(projectionKeys(), sampled, 'an unsampled owner adds no projection counts');
     } finally {
         Object.assign(Config, saved); Economy.reset();
     }

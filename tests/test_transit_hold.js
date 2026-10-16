@@ -64,7 +64,7 @@ assert.equal(count('hold:transit:held'), held);
 // A quiet solo step: the verdict asks the shared event check with the
 // build's baseline, its expected hour and the persona, then counts held.
 const calls = [];
-economy = { heldEventsQuiet: (state, input, at, deps, deferred, list) => { calls.push({ input, at, deps, deferred, list }); return true; } };
+economy = { heldEventsQuiet: (state, input, at, deps, list, skipMoney) => { calls.push({ input, at, deps, list, skipMoney }); return true; } };
 const travel = { to: { locX: 1, locY: 2 }, arrivalAt: T + 60000 };
 for (const state of [resting(), bot('traveling', { travel }), bot('dead')]) {
     const result = verdict(state, plan, quiet, { buyOrderEscrow: 300 });
@@ -79,7 +79,8 @@ assert.equal(calls[0].input.persona, persona, 'the persona comes from its owner'
 assert.equal(calls[0].input.mp, undefined, 'no held MP: a crafter refuses');
 assert.equal(calls[0].at, T);
 assert.equal(calls[0].deps.buyOrderEscrow, 300);
-assert.equal(calls[0].deferred, null);
+assert(Array.isArray(calls[0].list), 'the event names go to the transit why');
+assert.equal(calls[0].skipMoney, undefined, 'money stays an event');
 assert.equal(verdict(resting(), plan, quiet, { hold: { transit: true } }).held, true, 'on skips a quiet step');
 
 // Refusals carry the shared reason names, are counted, and never skip.

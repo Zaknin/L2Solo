@@ -1,7 +1,7 @@
 'use strict';
 // L120: a build takes the income route of a basics of the same step through
 // deps.preparedIncomeRoute only on an equal key, and replays its price reads
-// so the build's read fence equals a fresh build's.
+// so the build's reads equal a fresh build's.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -51,7 +51,7 @@ function run() {
     const built = (target, extra) => {
         const reads = [];
         const context = Economy.forState(target, { ...deps, onSourceRead: id => reads.push(Number(id)), ...extra });
-        return { reads, fence: Buffer.from(context.calculationFence || []).toString('hex'), hunt: context.hunt,
+        return { reads, hunt: context.hunt,
             statsPacket: context.statsPacket, price: [...context.plan.prices] };
     };
     const fresh = built(structuredClone(state), {});
@@ -59,7 +59,6 @@ function run() {
     const reused = built(state, { preparedIncomeRoute: record });
     assert.equal(calls, 2, 'an equal key takes the prepared route');
     assert.deepEqual(reused.reads, fresh.reads, 'the replay reads the items in a fresh build\'s order');
-    assert.equal(reused.fence, fresh.fence, 'the read fence equals a fresh build\'s');
     assert.deepEqual(reused.hunt, fresh.hunt);
     assert.equal(reused.hunt.source, 'route');
     assert.deepEqual(reused.statsPacket, fresh.statsPacket);
@@ -87,8 +86,7 @@ function run() {
     const repriced = built(state, { preparedIncomeRoute: moved });
     assert.equal(calls, before + 1, 'a price that differs from the record searches afresh');
     assert.deepEqual(repriced.reads, fresh.reads);
-    assert.equal(repriced.fence, fresh.fence);
-    console.log('PASS L120 income route reuse: equal key fires, other inputs miss, fence order as fresh');
+    console.log('PASS L120 income route reuse: equal key fires, other inputs miss, read order as fresh');
 }
 try { run(); } catch (error) { console.error(error); process.exitCode = 1; } finally {
     if (Route && select) Route.select = select;
