@@ -64,7 +64,6 @@ cache.subscribePublications(({ characterId, state, previousState }) => {
 let initialized = false;
 let initStarted = false;
 let initPromise = null;
-let marketGoalCursor = { updatedAt: 0, characterId: 0 };
 
 function notifyMarketReviewState(state, previous) {
     if (!state?.characterId) return;
@@ -3001,71 +3000,6 @@ const BotLifeState = {
 
     shouldRecoverOrphanedGiranState,
 
-    marketGoalCandidates(limit = 8, timestamp = now(), options = {}) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(50, Number(limit) || 8));
-        // Filter cooldowns from compact indexed metadata before loading full
-        // lifecycle and goal payloads for the bounded candidate page.
-        const fetchAfter = (cursor) => Database.execute([
-            `WITH candidates AS MATERIALIZED (
-                SELECT states.characterId, states.updatedAt FROM ${TABLE} states
-                INDEXED BY bot_life_state_market_page
-                WHERE states.phase = 'cold'
-                AND (states.partyId IS NULL OR states.partyId = '')
-                AND states.activity NOT IN ('traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting')
-                AND states.activity <> 'clan_hall'
-                AND COALESCE(CAST(json_extract(states.statsJson, '$.marketSellRetryAfter') AS INTEGER), 0) <= ?
-                AND (states.updatedAt > ?
-                    OR (states.updatedAt = ? AND states.characterId > ?))
-                ORDER BY states.updatedAt ASC, states.characterId ASC
-                LIMIT ${safeLimit}
-            )
-            SELECT states.*, goals.goalJson AS currentGoalJson,
-                goals.updatedAt AS currentGoalUpdatedAt FROM candidates
-            INNER JOIN ${TABLE} states ON states.characterId = candidates.characterId
-            LEFT JOIN bot_goal_state goals ON goals.characterId = states.characterId
-            ORDER BY candidates.updatedAt ASC, candidates.characterId ASC`,
-            [
-                Number(timestamp) || now(),
-                Number(cursor?.updatedAt || 0),
-                Number(cursor?.updatedAt || 0),
-                Number(cursor?.characterId || 0)
-            ],
-            { read: true, onTiming: Config.developerDiagnostics === true ? options.onTiming : undefined }
-        ], 'bot-life:market-goal-candidates');
-        return fetchAfter(marketGoalCursor).then(async (rows) => {
-            if (!rows.length && (marketGoalCursor.updatedAt > 0 || marketGoalCursor.characterId > 0)) {
-                marketGoalCursor = { updatedAt: 0, characterId: 0 };
-                rows = await fetchAfter(marketGoalCursor);
-            }
-            if (rows.length) {
-                const last = rows[rows.length - 1];
-                marketGoalCursor = {
-                    updatedAt: Math.max(0, Number(last.updatedAt || 0)),
-                    characterId: Math.max(0, Number(last.characterId || 0))
-                };
-            }
-            const startedAt = Config.developerDiagnostics === true ? now() : null;
-            const states = rows.map((row) => {
-                const state = normalize(row);
-                if (row.currentGoalJson) {
-                    invoke('GameServer/Bot/Goals/GoalState').prime(
-                        state.characterId,
-                        row.currentGoalJson,
-                        row.currentGoalUpdatedAt
-                    );
-                }
-                cache.set(state.characterId, state);
-                return state;
-            });
-            if (Config.developerDiagnostics === true) options.onStage?.('hydrate', now() - startedAt);
-            return states;
-        }).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch market-goal candidates: %s', err.message);
-            return [];
-        });
-    },
-
     coldPartyCandidateProjections() {
         if (!initialized) return Promise.resolve([]);
 
@@ -3276,50 +3210,6 @@ const BotLifeState = {
             return { ...state, simulationOwner: state.simulation.ownerId };
         })).catch((err) => {
             utils.infoWarn('BotLife', 'failed to hydrate %d party candidate(s): %s', ids.length, err.message);
-            return [];
-        });
-    },
-
-    staleGoalCandidates(limit = 8, timestamp = now(), options = {}) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(50, Number(limit) || 8));
-        // Drive selection from ordered, indexed goal metadata. CROSS JOIN keeps
-        // SQLite from scanning large lifecycle rows before applying the limit.
-        return Database.execute([
-            `WITH candidates AS MATERIALIZED (
-                SELECT states.characterId FROM bot_goal_state goals INDEXED BY bot_goal_state_review_queue
-                CROSS JOIN ${TABLE} states INDEXED BY bot_life_state_goal_review
-                    ON goals.characterId = states.characterId
-                WHERE states.phase = 'cold'
-                AND (states.partyId IS NULL OR states.partyId = '')
-                AND states.activity NOT IN ('traveling', 'shopping', 'merchant', 'crafting')
-                AND states.activity <> 'clan_hall'
-                AND COALESCE(CAST(json_extract(goals.goalJson, '$.nextReviewAt') AS INTEGER), 0) <= ?
-                ORDER BY goals.updatedAt ASC, states.updatedAt ASC
-                LIMIT ${safeLimit}
-            )
-            SELECT states.*, goals.goalJson AS currentGoalJson, goals.updatedAt AS currentGoalUpdatedAt
-            FROM candidates INNER JOIN ${TABLE} states USING (characterId)
-            INNER JOIN bot_goal_state goals USING (characterId)
-            ORDER BY goals.updatedAt ASC, states.updatedAt ASC`,
-            [Number(timestamp) || now()],
-            { read: true, onTiming: Config.developerDiagnostics === true ? options.onTiming : undefined }
-        ], 'bot-life:stale-goal-candidates').then((rows) => {
-            const startedAt = Config.developerDiagnostics === true ? now() : null;
-            const states = rows.map((row) => {
-                const state = normalize(row);
-                invoke('GameServer/Bot/Goals/GoalState').prime(
-                    state.characterId,
-                    row.currentGoalJson,
-                    row.currentGoalUpdatedAt
-                );
-                cache.set(state.characterId, state);
-                return state;
-            });
-            if (Config.developerDiagnostics === true) options.onStage?.('hydrate', now() - startedAt);
-            return states;
-        }).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch stale goal candidates: %s', err.message);
             return [];
         });
     },
@@ -4186,10 +4076,6 @@ const BotLifeState = {
         // Do not inspect limit+1 rows just to predict that final read.
         const done = rows.length < limit || lastId === highWaterId;
         return { rows, cursor: { afterId: done ? highWaterId : lastId, highWaterId }, done };
-    },
-
-    marketGoalCursorSnapshot() {
-        return { ...marketGoalCursor };
     },
 
     // Bots by phase and level, counted from the cache: it holds every row of

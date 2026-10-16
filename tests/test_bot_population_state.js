@@ -47,7 +47,6 @@ const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 const statements = [];
 const classUpdates = [];
 let stalePartyRows = [];
-let marketCandidateRows = [];
 
 try {
     ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
@@ -69,9 +68,6 @@ try {
         if (String(sql).startsWith('UPDATE bot_life_state')) {
             if (String(sql).includes("'$.partyRequest.lastReason'")) return Promise.resolve({ affectedRows: 1 });
             return Promise.resolve({ affectedRows: 2 });
-        }
-        if (String(sql).includes('marketSellRetryAfter') && String(sql).includes('FROM bot_life_state states')) {
-            return Promise.resolve(marketCandidateRows);
         }
         if (String(sql).startsWith('SELECT * FROM bot_life_state')) {
             return Promise.resolve([]);
@@ -332,13 +328,7 @@ try {
                 const classUpdate = classUpdates.at(-1);
                 assert(classUpdate, 'migration must persist the profession on the physical character');
                 assert.ok([36, 37].includes(classUpdate.classId), 'migration must use the physical character class as its source of truth');
-                marketCandidateRows = [
-                    { characterId: 71, characterName: 'MarketCursorA', phase: 'cold', activity: 'hunting', updatedAt: 10 },
-                    { characterId: 72, characterName: 'MarketCursorB', phase: 'cold', activity: 'hunting', updatedAt: 10 }
-                ];
-                return BotLifeState.dueCold(5, 1000)
-                    .then(() => BotLifeState.marketGoalCandidates(5, 123456))
-                    .then(() => BotLifeState.marketGoalCandidates(5, 123457));
+                return BotLifeState.dueCold(5, 1000);
             }))
         .then(() => {
             const due = statements.find((entry) => entry.sql.includes("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"));
@@ -351,27 +341,7 @@ try {
             assert(due.sql.includes("json_extract(statsJson, '$.equipmentPlan.next.spotId')"), 'due cold states must prioritize active gear plans whose source spot differs from the saved spot');
             assert(due.sql.includes("startup_craft_wait_recovery"), 'startup craft recovery must immediately replan before the ordinary hunting backlog');
             assert(due.sql.includes('COALESCE(nextResolveAt, 0) ASC'), 'due cold states must remain fair by schedule within each lifecycle bucket');
-            const marketCandidateQueries = statements.filter((entry) => entry.sql.includes("FROM bot_life_state states")
-                && entry.sql.includes("marketSellRetryAfter"));
-            const marketCandidates = marketCandidateQueries[0];
-            assert(marketCandidates, 'market reconciliation must query current lifecycle market state');
-            assert.strictEqual(marketCandidates.queryOptions?.read, true,
-                'the candidate CTE must return rows through the database read path');
-            assert(!marketCandidates.sql.includes('goalJson LIKE'), 'market reconciliation must not trust stale goal metadata');
-            assert(marketCandidates.sql.includes("'$.marketSellRetryAfter'"), 'market reconciliation must exclude sellers whose retry cooldown is still active');
-            assert(marketCandidates.sql.includes('INDEXED BY bot_life_state_market_page'),
-                'market reconciliation must use its keyset-compatible lifecycle index');
-            assert(!marketCandidates.sql.includes('COALESCE(states.updatedAt'),
-                'a redundant updatedAt expression must not force a temporary sort');
-            assert(marketCandidates.sql.includes('states.characterId > ?'), 'market reconciliation must advance with a stable keyset cursor');
-            assert.deepStrictEqual(marketCandidates.params, [123456, 0, 0, 0], 'the first market pass must start at the beginning of the rotation');
-            assert.deepStrictEqual(marketCandidateQueries[1].params, [123457, 10, 10, 72],
-                'the next market pass must continue after the last projected lifecycle row');
-            return BotLifeState.staleGoalCandidates(5, 123456).then(() => {
-                const staleGoals = statements.at(-1);
-                assert(staleGoals.sql.includes('INNER JOIN bot_goal_state goals'), 'goal metadata review must read persisted goal rows');
-                assert(staleGoals.sql.includes("'$.nextReviewAt'"), 'goal metadata review must select rows whose review deadline is due');
-                assert.deepStrictEqual(staleGoals.params, [123456], 'goal metadata review must bind the current review cutoff');
+            return Promise.resolve().then(() => {
                 return BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match').then((deferred) => {
                     const deferUpdate = statements.at(-1);
                     assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
@@ -579,16 +549,7 @@ try {
         }, 'summary_probe').then(() => {
             const summary = BotLifeState.coldDueSummary(1000);
             assert(summary.due >= 1, 'cold due telemetry must include stale hunting plans before their persisted deadline');
-        })).then(async () => {
-            const config = invoke('GameServer/Bot/Population/PopulationConfig');
-            config.developerDiagnostics = false;
-            const diagnosticOptions = {};
-            for (const field of ['onTiming', 'onStage']) Object.defineProperty(diagnosticOptions, field,
-                { get() { throw Error('optional lifecycle timing callback read off'); } });
-            try {
-                await BotLifeState.marketGoalCandidates(5, 123458, diagnosticOptions);
-                await BotLifeState.staleGoalCandidates(5, 123458, diagnosticOptions);
-            } finally { config.developerDiagnostics = true; }
+        })).then(() => {
             console.log('Bot population state checks passed');
         });
     }).catch((err) => {

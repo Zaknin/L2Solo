@@ -114,7 +114,6 @@ const PopulationStatus = {
         const hotDispatch = invoke('GameServer/Bot/AI/HotAiDispatcher').snapshot();
         const governor = BackgroundWorkGovernor.snapshot();
         const backgroundJobs = BackgroundJobRegistry.snapshot();
-        const marketGoalCursor = LifeState.marketGoalCursorSnapshot();
         const clanSimulation = {
             founder: ClanSimulationService.metrics(),
             actions: ClanActionService.metrics(),
@@ -144,13 +143,6 @@ const PopulationStatus = {
                 const actualAvg = Math.round(Number(value.actualMs || 0) / Math.max(1, Number(value.completed || 0)));
                 return `${job}:${value.admitted || 0}/${value.deferred || 0}/${value.completed || 0}/${value.overruns || 0}:${grantedAvg}>${actualAvg}ms`;
             })
-            .join('|') || 'none';
-        const goalMetadataStages = [
-            ['stale', governor.jobs?.goal_stale_review],
-            ['warehouse', governor.jobs?.goal_warehouse_release],
-            ['market', governor.jobs?.goal_market_reconcile]
-        ].flatMap(([label, job]) => Object.entries(job?.stages || {})
-            .map(([stage, value]) => `${label}.${stage}:${value.p95Ms || 0}`))
             .join('|') || 'none';
         const partyRequiredReasons = Object.entries(counts.partyRequests.requiredReasons || {})
             .map(([reason, count]) => `${reason}:${count}`)
@@ -272,7 +264,7 @@ const PopulationStatus = {
         const delay = metrics.eventLoop.delay || {};
         summary.line += ` clanPlannerWorker=${clanWorker.running ? 'ready' : 'idle'}/${clanWorker.pending || 0}/${clanWorker.completed || 0}/${clanWorker.failures || 0} clanPlannerRunMax=${Math.round(clanWorker.maxRunMs || 0)}ms`;
         summary.line += ` loopDelay=${delay.p95Ms || 0}/${delay.p99Ms || 0}/${delay.maxMs || 0}ms:${delay.windowMs || 0}ms bgProgress=${backgroundProgress}`;
-        summary.line += ` bgGovernorJobs=${governorJobs} bgGoalP95=${goalMetadataStages} marketGoalCursor=${marketGoalCursor.updatedAt || 0}/${marketGoalCursor.characterId || 0} bgJobs=${backgroundJobs.registered || 0}/${backgroundJobs.inFlight || 0}/${backgroundJobs.tickMs || 0}ms bgJobFlow=${backgroundJobs.due || 0}/${backgroundJobs.started || 0}/${backgroundJobs.completed || 0}/${backgroundJobs.skipped || 0}/${backgroundJobs.deferred || 0}/${backgroundJobs.coalesced || 0}/${backgroundJobs.errors || 0}`;
+        summary.line += ` bgGovernorJobs=${governorJobs} bgJobs=${backgroundJobs.registered || 0}/${backgroundJobs.inFlight || 0}/${backgroundJobs.tickMs || 0}ms bgJobFlow=${backgroundJobs.due || 0}/${backgroundJobs.started || 0}/${backgroundJobs.completed || 0}/${backgroundJobs.skipped || 0}/${backgroundJobs.deferred || 0}/${backgroundJobs.coalesced || 0}/${backgroundJobs.errors || 0}`;
         const coldWorker = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot();
         const worker = coldWorker.worker || {};
         const queueHead = worker.queueHead;

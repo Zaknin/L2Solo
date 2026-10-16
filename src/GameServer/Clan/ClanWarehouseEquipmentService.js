@@ -7,8 +7,6 @@ const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const running = new Map();
 const itemCursors = new Map();
 const memberCursors = new Map();
-let clanCursor = 0;
-let nextScanAt = 0;
 
 function liveRows(actor) {
     return actor.backpack.fetchItems().map((item) => ({
@@ -152,16 +150,4 @@ function resolveClan(clanId, options = {}) {
     return work;
 }
 
-async function resolveBatch(deadlineAt) {
-    if (!Database.isReady() || Date.now() < nextScanAt || Date.now() >= deadlineAt) return;
-    nextScanAt = Date.now() + 5000;
-    const clans = await Database.execute([`SELECT DISTINCT clanId FROM clan_warehouse_items
-        WHERE clanId > ? AND amount > reservedAmount AND (kind LIKE 'Weapon.%' OR kind LIKE 'Armor.%')
-        ORDER BY clanId LIMIT 1`, [clanCursor]], 'clan-gear:candidates');
-    if (!clans.length) { clanCursor = 0; return; }
-    if (Date.now() >= deadlineAt) return;
-    clanCursor = Number(clans[0].clanId);
-    return resolveClan(clanCursor, { deadlineAt });
-}
-
-module.exports = { resolveClan, resolveBatch, available, publish };
+module.exports = { resolveClan, available, publish };

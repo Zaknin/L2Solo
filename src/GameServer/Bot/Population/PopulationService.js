@@ -1,5 +1,4 @@
 const PartyMarketBreak = require('./PartyMarketBreak');
-const BackgroundCandidateQueue = require('./BackgroundCandidateQueue');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 const { PartyAdmission, priority: admissionPriority } = require('./PartyAdmission');
 const partyAdmission = new PartyAdmission();
@@ -1047,12 +1046,6 @@ const PopulationService = {
     resolving: false,
     classProgressionMigrationRunning: false,
     coldCombatProfileMigrationRunning: false,
-    staleGoalReviewRunning: false,
-    warehouseReleaseRunning: false,
-    marketGoalReconcileRunning: false,
-    nextStaleGoalReviewAt: 0,
-    nextWarehouseReleaseAt: 0,
-    nextMarketGoalReconcileAt: 0,
     coldOwnerRecoveryRunning: false,
     warehouseCleanupRunning: false,
     stateRetentionRunning: false,
@@ -1246,12 +1239,6 @@ const PopulationService = {
             this.classProgressionMigrationTimer = null;
         }
         this.nextColdCombatProfileMigrationAt = 0;
-        this.staleGoalReviewRunning = false;
-        this.warehouseReleaseRunning = false;
-        this.marketGoalReconcileRunning = false;
-        this.nextStaleGoalReviewAt = 0;
-        this.nextWarehouseReleaseAt = 0;
-        this.nextMarketGoalReconcileAt = 0;
         this.partyRequestCleanupRunning = false;
         if (this.personaBackfillTimer) {
             clearInterval(this.personaBackfillTimer);
@@ -1804,153 +1791,6 @@ const PopulationService = {
             playerProtected: !!activity?.protected,
             ...(Config.developerDiagnostics ? { elapsedMs: Date.now() - startedAt } : {})
         })));
-    },
-
-    goalMetadataCadenceMs() {
-        return Math.max(5000, Number(Config.goalMetadataReconcileIntervalMs) || 30000);
-    },
-
-    goalMetadataContinuationMs() {
-        return Math.max(
-            Math.max(50, Number(Config.backgroundJobTickMs) || 250),
-            Math.max(100, Number(Config.backgroundGovernorWindowMs) || 1000)
-        );
-    },
-
-    scheduleGoalBackgroundJob(nextAtKey, continuation = false) {
-        const delayMs = continuation ? this.goalMetadataContinuationMs() : this.goalMetadataCadenceMs();
-        this[nextAtKey] = Date.now() + delayMs;
-        return this[nextAtKey];
-    },
-
-    runGovernedGoalBackgroundJob(options = {}) {
-        const job = String(options.job || 'goal_background');
-        const runningKey = String(options.runningKey || 'staleGoalReviewRunning');
-        const nextAtKey = String(options.nextAtKey || 'nextStaleGoalReviewAt');
-        if (this[runningKey] || Config.enabled === false || Config.backgroundResolverEnabled === false) {
-            return Promise.resolve([]);
-        }
-        const activity = this.playerActivityProfile();
-        const lagMs = Math.max(0, Number(Metrics.currentEventLoopLag()) || 0);
-        const lagAbort = Math.max(0, Number(Config.schedulerLagAbortMs) || 0);
-        const protectedPass = !!activity?.protected;
-        const batchSize = Math.max(1, Number(protectedPass
-            ? Config.goalMetadataPlayerBatchSize
-            : Config.goalMetadataIdleBatchSize) || (protectedPass ? 2 : 8));
-        const requestedBudgetMs = Math.max(25, Number(protectedPass
-            ? Config.goalMetadataPlayerBudgetMs
-            : Config.goalMetadataIdleBudgetMs) || (protectedPass ? 75 : 500));
-        const admission = BackgroundWorkGovernor.admit({
-            job,
-            resource: 'sqlite-heavy',
-            requestedBudgetMs,
-            minimumBudgetMs: 25,
-            playerProtected: protectedPass,
-            realPlayers: activity?.realPlayers,
-            lagMs
-        });
-        if (!admission.ok) {
-            this.scheduleGoalBackgroundJob(nextAtKey, true);
-            Config.developerDiagnostics && Metrics.recordBackgroundDeferral();
-            return Promise.resolve([]);
-        }
-        if (lagAbort > 0 && lagMs >= lagAbort) {
-            BackgroundWorkGovernor.complete(admission.lease, { durationMs: 0 });
-            this.scheduleGoalBackgroundJob(nextAtKey, true);
-            Config.developerDiagnostics && Metrics.recordBackgroundDeferral();
-            return Promise.resolve([]);
-        }
-        const budgetMs = admission.budgetMs;
-        const deadlineAt = Date.now() + budgetMs;
-        const startedAt = Date.now();
-        let needsContinuation = false;
-        this[runningKey] = true;
-
-        return Promise.resolve().then(() => options.run({
-            job,
-            batchSize,
-            budgetMs,
-            deadlineAt,
-            activity,
-            markContinuation: () => { needsContinuation = true; }
-        })).then((result) => {
-            if (result?.continuation) needsContinuation = true;
-            return Array.isArray(result?.results) ? result.results : [];
-        })
-            .catch((error) => {
-                needsContinuation = true;
-                utils.infoWarn('BotGoals', '%s failed: %s', job, error?.message || error);
-                return [];
-            })
-            .finally(() => {
-                const durationMs = Date.now() - startedAt;
-                if (Date.now() >= deadlineAt) needsContinuation = true;
-                BackgroundWorkGovernor.complete(admission.lease, { durationMs });
-                BackgroundWorkGovernor.recordStage(job, 'total', durationMs);
-                this.scheduleGoalBackgroundJob(nextAtKey, needsContinuation);
-                this[runningKey] = false;
-            });
-    },
-
-    reconcileStaleGoals() {
-        return this.runGovernedGoalBackgroundJob({
-            job: 'goal_stale_review',
-            runningKey: 'staleGoalReviewRunning',
-            nextAtKey: 'nextStaleGoalReviewAt',
-            run: ({ job, batchSize, deadlineAt }) => {
-                this.staleGoalQueue ||= new BackgroundCandidateQueue();
-                return this.staleGoalQueue.run({
-                    limit: batchSize, deadlineAt,
-                    select: () => LifeState.staleGoalCandidates(batchSize, Date.now(), this.goalProjectionTelemetry(job)),
-                    refresh: (state) => this.refreshGoalCandidate(state),
-                    work: async (state) => (await GoalService.reviewBatch([state], { now: Date.now() }))[0],
-                    onStage: Config.developerDiagnostics ? (stage, duration) => BackgroundWorkGovernor.recordStage(job, stage, duration) : undefined,
-                    onProgress: (progress) => BackgroundWorkGovernor.recordProgress(job, progress)
-                });
-            }
-        });
-    },
-
-    reconcileWarehouseReleases() {
-        return this.runGovernedGoalBackgroundJob({
-            job: 'goal_warehouse_release',
-            runningKey: 'warehouseReleaseRunning',
-            nextAtKey: 'nextWarehouseReleaseAt',
-            run: ({ job, deadlineAt }) => {
-                const limit = Math.max(1, Number(Config.maxWarehouseReleasesPerTick) || 8);
-                const releaseStartedAt = Config.developerDiagnostics ? Date.now() : 0;
-                return invoke('GameServer/Clan/ClanWarehouseEquipmentService').resolveBatch(deadlineAt)
-                    .then((results = []) => ({
-                    results,
-                    continuation: results.continuation || results.length >= limit || Date.now() >= deadlineAt
-                })).finally(() => {
-                    Config.developerDiagnostics && BackgroundWorkGovernor.recordStage(job, 'release', Date.now() - releaseStartedAt);
-                });
-            }
-        });
-    },
-
-    reconcileMarketGoalBatch() {
-        return this.runGovernedGoalBackgroundJob({
-            job: 'goal_market_reconcile',
-            runningKey: 'marketGoalReconcileRunning',
-            nextAtKey: 'nextMarketGoalReconcileAt',
-            run: ({ batchSize, deadlineAt }) => this.reconcileMarketGoals(
-                deadlineAt,
-                batchSize,
-                'goal_market_reconcile'
-            ).then((results) => ({
-                results,
-                continuation: Number(results.candidateCount || 0) >= batchSize || Date.now() >= deadlineAt
-            }))
-        });
-    },
-
-    // Compatibility entrypoint for targeted tooling written before the three
-    // independently admitted jobs were split. Production scheduling uses the
-    // explicit stage methods above.
-    reconcileGoalMetadata() {
-        return this.reconcileStaleGoals();
     },
 
     isRestingActivationState(state) {
@@ -3127,60 +2967,6 @@ const PopulationService = {
         }).finally(() => {
             this.stateRetentionRunning = false;
         });
-    },
-
-    goalProjectionTelemetry(job) {
-        if (!Config.developerDiagnostics) return {};
-        return {
-            onTiming: ({ waitMs, runMs }) => {
-                BackgroundWorkGovernor.recordStage(job, 'queue_wait', waitMs);
-                BackgroundWorkGovernor.recordStage(job, 'sql', runMs);
-            },
-            onStage: (stage, duration) => BackgroundWorkGovernor.recordStage(job, stage, duration)
-        };
-    },
-
-    refreshGoalCandidate(selected, market = false) {
-        const state = LifeState.cachedState(selected.characterId) || selected;
-        const excluded = ['traveling', 'shopping', 'merchant', 'crafting'];
-        if (market) excluded.push('dead', 'pk_hunting');
-        if (state.phase !== 'cold' || state.party?.partyId || excluded.includes(state.activity)
-            || (market && state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main')) return null;
-        if (market && Number(state.stats?.marketSellRetryAfter || 0) > Date.now()) return null;
-        return state;
-    },
-
-    async reconcileMarketGoals(deadlineAt = Infinity, limit = Config.maxMarketGoalReconcilesPerTick, telemetryJob = 'goal_market_reconcile') {
-        this.marketGoalQueue ||= new BackgroundCandidateQueue();
-        const result = await this.marketGoalQueue.run({
-            limit, deadlineAt,
-            select: () => LifeState.marketGoalCandidates(limit, Date.now(), this.goalProjectionTelemetry(telemetryJob)),
-            refresh: (state) => this.refreshGoalCandidate(state, true),
-            work: async (state) => {
-                const [snapshot] = await GoalService.reviewBatch([state], {
-                    now: Date.now(), optionsForState: (value) => ({ spot: SpotProfiles.findForState(value) })
-                });
-                // Goal persistence yielded. Never write a journey over newer
-                // inventory, ownership or a player activation.
-                const current = this.refreshGoalCandidate(state, true);
-                if (!current || current !== state) return null;
-                const remote = await BotAfkMarketService.reconcile(current, snapshot?.current, snapshot?.candidates);
-                if (remote.changed) return remote.state;
-                const travel = GoalExecutor.beginMarketTravel(current, snapshot?.current, Date.now(), { economy: snapshot?.economy });
-                if (!travel) return null;
-                const startedAt = Config.developerDiagnostics ? Date.now() : 0;
-                const saved = await LifeState.upsertState(travel, 'reconciled_market_travel');
-                Config.developerDiagnostics && BackgroundWorkGovernor.recordStage(telemetryJob, 'travel', Date.now() - startedAt);
-                if (saved) Config.developerDiagnostics && console.info('BotPopulation :: reconciled market travel for %s', state.name);
-                return saved;
-            },
-            onStage: Config.developerDiagnostics ? (stage, duration) => BackgroundWorkGovernor.recordStage(telemetryJob, stage, duration) : undefined,
-            onProgress: Config.developerDiagnostics ? (progress) => BackgroundWorkGovernor.recordProgress(telemetryJob, progress) : undefined
-        });
-        Object.defineProperty(result.results, 'candidateCount', {
-            value: result.continuation ? limit : result.processed || 0, configurable: true
-        });
-        return result.results;
     },
 
     yieldSchedulerSlice(sliceStartedAt) {

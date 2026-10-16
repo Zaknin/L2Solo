@@ -14,30 +14,27 @@ if (process.argv[2] === '--bootstrap') {
 } else {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'test-selection-indexes-'));
     const databasePath = path.join(directory, 'states.sqlite');
-    const indexNames = ['bot_goal_state_review_queue', 'bot_life_state_goal_review',
-        'warehouse_items_positive_self_owner', 'bot_life_state_warehouse_release', 'bot_life_state_warehouse_demand',
-        'bot_life_state_market_page'];
+    const indexNames = ['warehouse_items_positive_self_owner', 'bot_life_state_warehouse_release',
+        'bot_life_state_warehouse_demand'];
+    // Migration 67 drops what the removed goal and market reconcile passes paged through.
+    const droppedNames = ['bot_goal_state_review_queue', 'bot_life_state_goal_review', 'bot_life_state_market_page'];
     const bootstrap = () => {
         const result = spawnSync(process.execPath, [__filename, '--bootstrap', databasePath], { encoding: 'utf8' });
         assert.strictEqual(result.status, 0, result.stdout + result.stderr);
     };
-    const lifeSource = fs.readFileSync('src/GameServer/Bot/Population/BotLifeState.js', 'utf8');
-    const warehouseSource = fs.readFileSync('src/GameServer/Bot/Economy/BotWarehouseService.js', 'utf8');
-    const extract = (source, marker) => source.slice(source.indexOf(marker)).match(/`([\s\S]*?)`/)[1];
-    const goalSql = extract(lifeSource, '    staleGoalCandidates(').replaceAll('${TABLE}', 'bot_life_state');
-    const marketSql = extract(lifeSource, '    marketGoalCandidates(').replaceAll('${TABLE}', 'bot_life_state');
     const scrollIds = Object.entries(require('../src/GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS)
         .filter(([, value]) => value.grade === 'D').map(([id]) => Number(id));
     let db;
     try {
         bootstrap();
         db = new DatabaseSync(databasePath);
+        const hasIndex = name => Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('index', name));
         for (const name of indexNames) {
-            assert(db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('index', name),
-                'fresh databases must have ' + name);
+            assert(hasIndex(name), 'fresh databases must have ' + name);
             db.exec('DROP INDEX ' + name);
         }
-        db.exec('DELETE FROM schema_migrations WHERE version IN (33, 34, 35, 55)');
+        for (const name of droppedNames) assert(!hasIndex(name), 'fresh databases must not keep ' + name);
+        db.exec('DELETE FROM schema_migrations WHERE version IN (33, 34, 35, 55, 67)');
         // Query fixtures do not require a running world or player accounts.
         db.exec('PRAGMA foreign_keys = OFF; BEGIN');
         const stateInsert = db.prepare(`INSERT INTO bot_life_state
@@ -77,40 +74,11 @@ if (process.argv[2] === '--bootstrap') {
         assert(!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_market_review'").get(),
             'the board drops the expression index every statsJson write maintained');
 
+        // Partial indexes must follow every lifecycle transition of their rows.
         function verify() {
-            const states = db.prepare('SELECT * FROM bot_life_state').all();
-            const goals = new Map(db.prepare('SELECT * FROM bot_goal_state').all().map(row => [row.characterId, row]));
-            for (const timestamp of [-1, 0, 250, 20000]) for (const limit of [1, 8, 50]) {
-                const expected = states.filter(state => {
-                    const goal = goals.get(state.characterId);
-                    return state.phase === 'cold' && !state.partyId
-                        && !['traveling', 'shopping', 'merchant', 'crafting'].includes(state.activity)
-                        && goal && Math.trunc(Number(JSON.parse(goal.goalJson)?.nextReviewAt || 0)) <= timestamp;
-                }).sort((a, b) => goals.get(a.characterId).updatedAt - goals.get(b.characterId).updatedAt
-                    || a.updatedAt - b.updatedAt).slice(0, limit).map(state => state.characterId);
-                const actual = db.prepare(goalSql.replaceAll('${safeLimit}', String(limit))).all(timestamp);
-                assert.deepStrictEqual(actual.map(row => row.characterId), expected, 'goal due, eligibility, order and limit parity');
-                for (const row of actual) assert.strictEqual(row.currentGoalJson, goals.get(row.characterId).goalJson);
-            }
-            const items = db.prepare('SELECT * FROM warehouse_items').all();
-            for (const timestamp of [-1, 0, 250, 20000]) for (const cursor of [[0, 0], [1000, 32], [1040, 40], [99999, 999]]) {
-                for (const limit of [1, 8, 50]) {
-                    const expected = states.filter(state => state.phase === 'cold' && !state.partyId
-                        && !['traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting'].includes(state.activity)
-                        && Math.trunc(Number(JSON.parse(state.statsJson)?.marketSellRetryAfter) || 0) <= timestamp
-                        && (state.updatedAt > cursor[0] || (state.updatedAt === cursor[0] && state.characterId > cursor[1])))
-                        .sort((a, b) => a.updatedAt - b.updatedAt || a.characterId - b.characterId)
-                        .slice(0, limit).map(state => ({ ...state,
-                            currentGoalJson: goals.get(state.characterId)?.goalJson ?? null,
-                            currentGoalUpdatedAt: goals.get(state.characterId)?.updatedAt ?? null
-                        }));
-                    const actual = db.prepare(marketSql.replaceAll('${safeLimit}', String(limit)))
-                        .all(timestamp, cursor[0], cursor[0], cursor[1]);
-                    assert.deepStrictEqual(actual.map(row => ({ ...row })), expected,
-                        'market cooldown, cursor ties, order, eligibility and complete state/goal payload parity');
-                }
-            }
-
+            assert.deepStrictEqual(db.prepare('PRAGMA integrity_check').all().map(row => row.integrity_check), ['ok']);
+            for (const name of indexNames) assert(hasIndex(name), 'the migration must restore ' + name);
+            for (const name of droppedNames) assert(!hasIndex(name), 'migration 67 must drop ' + name);
         }
         verify();
         db.exec(`UPDATE bot_life_state SET phase = 'hot' WHERE characterId = 1;
@@ -134,15 +102,6 @@ if (process.argv[2] === '--bootstrap') {
             UPDATE bot_goal_state SET goalJson = '{}'; ROLLBACK;`);
         assert.deepStrictEqual(snapshot(), changed);
         verify();
-        const goalPlan = db.prepare('EXPLAIN QUERY PLAN ' + goalSql.replaceAll('${safeLimit}', '8')).all(250);
-        assert(goalPlan.some(row => row.detail.includes('bot_goal_state_review_queue')));
-        assert(goalPlan.some(row => row.detail.includes('bot_life_state_goal_review')));
-        const reviewPlan = db.prepare('EXPLAIN QUERY PLAN ' + marketSql.replaceAll('${safeLimit}', '8'))
-            .all(250, 0, 0, 0);
-        assert(reviewPlan.some(row => row.detail.includes('bot_life_state_market_page')),
-            'market cooldown filtering must use the compact eligible-state index');
-        assert(reviewPlan.some(row => row.detail.includes('MATERIALIZE candidates')),
-            'market selection must bound the candidate page before loading full state payloads');
         db.close();
         db = null;
         bootstrap();
@@ -155,7 +114,7 @@ if (process.argv[2] === '--bootstrap') {
         assert(!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_market_review'").get(),
             'the board drops the expression index every statsJson write maintained');
         verify();
-        console.log('Selection index migration, query parity, lifecycle transitions, and rollback checks passed');
+        console.log('Selection index migration, lifecycle transitions, and rollback checks passed');
     } finally {
         db?.close();
         fs.rmSync(directory, { recursive: true, force: true });

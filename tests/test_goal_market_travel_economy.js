@@ -9,9 +9,6 @@ const NeedsEvaluator = invoke('GameServer/Bot/Goals/NeedsEvaluator');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const ColdMarketService = invoke('GameServer/Bot/Economy/ColdMarketService');
 const AfkMarket = invoke('GameServer/Bot/Economy/BotAfkMarketService');
-const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
-const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const restore = [];
 function stub(target, name, value) {
     const old = target[name]; restore.push(() => { target[name] = old; }); target[name] = value;
@@ -43,17 +40,6 @@ function stub(target, name, value) {
     GoalExecutor.beginMarketTravel(state, goal, now);
     assert.equal(Object.hasOwn(seen[1], 'economy'), false, 'without an economy the service builds its own');
 
-    // The market goal reconcile plumbs the review economy into the trip.
-    const travelled = [];
-    stub(LifeState, 'marketGoalCandidates', () => Promise.resolve([state]));
-    stub(LifeState, 'cachedState', () => state);
-    stub(LifeState, 'upsertState', saved => Promise.resolve(saved));
-    stub(SpotProfiles, 'findForState', () => null);
-    stub(AfkMarket, 'reconcile', async current => ({ state: current, changed: false }));
-    stub(GoalService, 'reviewBatch', async () => [{ current: goal, economy }]);
-    stub(GoalExecutor, 'beginMarketTravel', (current, wanted, timestamp, options) => { travelled.push(options); return null; });
-    await PopulationService.reconcileMarketGoals();
-    assert.equal(travelled[0]?.economy, economy, 'reconcile passes the reviewed economy to the trip');
     console.log('PASS goal review economy reaches the market trip purchase check');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
     for (const undo of restore.reverse()) undo();

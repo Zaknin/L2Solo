@@ -1711,6 +1711,13 @@ function applySchemaMigrations() {
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
     migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
+    // The stale-goal and market-goal reconcile passes are gone (the worker
+    // decides goals); their indexes only cost every goal and state write.
+    migrations.push([67, () => connection.exec(`
+        DROP INDEX IF EXISTS bot_goal_state_review_queue;
+        DROP INDEX IF EXISTS bot_life_state_goal_review;
+        DROP INDEX IF EXISTS bot_life_state_market_page;
+    `)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
