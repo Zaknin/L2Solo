@@ -10,6 +10,7 @@
 const { isMainThread } = require('node:worker_threads');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+const RestartAdvisoryProbe = require('../Economy/RestartAdvisoryProbe');
 // Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
 let CraftInputReservations = null, PurchaseFunding = null, DecisionSections = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
@@ -387,10 +388,16 @@ function advisory(economy, state, activity = state.activity) {
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     // Acceptance belongs to the build's output, even before its caller has
     // published that packet. A later publication never restarts its delays.
-    return { card, fence, decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
+    const accepted = { card, fence, decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
         activityLeaf: packet ? Number(packet.activityLeaf || 0) : undefined,
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
         activity, mp: Number(state.vitals?.mp) };
+    if (diagnostic && RestartAdvisoryProbe.selected(state?.characterId)) {
+        // lazy: cycle EconomyContext constructs its accepted cards here.
+        const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+        RestartAdvisoryProbe.observe(accepted, Economy.decodeCalculationFence);
+    }
+    return accepted;
 }
 // The bot's own hunting/resting/travelling inside one decision is not an
 // event (L70). After a result the card is only restamped and published.
