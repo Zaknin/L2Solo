@@ -44,7 +44,7 @@ function tick(withRetention = false) {
     try {
         const result = drain();
         // The once-a-minute tick also carries this thread's heap.
-        const heap = withRetention ? { heap: heapRecord() } : null;
+        const heap = withRetention ? { v8Heap: heapRecord() } : null;
         // Also report a cursor that was reached before a restart: the main
         // thread then deletes outbox rows a crash left behind.
         if (result.upTo > reportedUpTo) {

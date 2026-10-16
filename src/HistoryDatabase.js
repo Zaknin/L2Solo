@@ -144,7 +144,7 @@ function spawn() {
     if (PopulationConfig.developerDiagnostics) counters.starts += 1;
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
-        if (message.heap && PopulationConfig.developerDiagnostics) workerHeap = message.heap;
+        if (message.v8Heap && PopulationConfig.developerDiagnostics) workerHeap = message.v8Heap;
         if (message.type === 'economy_diagnostics_ack') {
             if (!config?.diagnostics || !PopulationConfig.developerDiagnostics) return;
             Diagnostics.ack(message.id, message.written);
@@ -279,7 +279,7 @@ function one(sql, params = []) {
 
 function stats() {
     if (!PopulationConfig.developerDiagnostics) return { path: config?.historyPath || null, running: !!worker, upTo: counters.upTo, diagnostics: { enabled: false } };
-    return { path: config?.historyPath || null, running: !!worker, ...counters, heap: workerHeap,
+    return { path: config?.historyPath || null, running: !!worker, ...counters, v8Heap: workerHeap,
         ...(PopulationConfig.developerDiagnostics && PopulationConfig.economyDiagnostics ? { economyDiagnostics: { ...Diagnostics.stats(), writer: writerTelemetry } } : {}) };
 }
 

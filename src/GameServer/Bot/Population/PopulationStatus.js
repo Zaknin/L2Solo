@@ -18,7 +18,7 @@ const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobReg
 const DecisionEvents = require('../AI/DecisionEvents');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const NpcDecay = invoke('GameServer/World/Generics/NpcDecay');
-const { heapRecord } = require('./WorkerHeapTelemetry');
+const { heapRecord, heapsLine } = require('./WorkerHeapTelemetry');
 const ClanPlanningCoordinator = invoke('GameServer/Clan/ClanPlanningCoordinator');
 const HistoryDatabase = invoke('HistoryDatabase');
 const CheckpointCoordinator = invoke('DatabaseCheckpointCoordinator');
@@ -30,11 +30,6 @@ function isBotSession(session) {
     return session && session.accountId && String(session.accountId).startsWith('bot_');
 }
 // ColdCombatProfile.cacheStats() of one thread (L110); the fields are explained beside its stats.
-// heaps=<thread>:<used>/<total>/<external>,... in MB (WorkerHeapTelemetry.heapRecord); '-' for a thread
-// that has not reported yet. clan is as of its last plan, history its last minute tick, market its last answer.
-function heapsLine(heaps) {
-    return Object.entries(heaps).map(([name, heap]) => `${name}:${heap ? `${heap.used}/${heap.total}/${heap.external}` : '-'}`).join(',');
-}
 function gainStoreLine(g = {}) {
     return `${g.buildGains || 0}/${g.ownerBuilds || 0}/${g.ownerPreparations || 0}/${g.candidateIndex || 0}:${g.gainHits || 0}/${g.gainMisses || 0}/${g.limitMisses || 0}:${g.switches || 0}/${g.preparationSwitches || 0}/${g.clanSwitches || 0}/${g.filledDrops || 0}/${g.evictions || 0}`;
 }
@@ -76,12 +71,15 @@ const PopulationStatus = {
     },
 
     // The heap of every isolate of the server, each from the module that owns that thread (null: no report
-    // yet). coldWorker is ColdSimulationCoordinator.snapshot().worker, which both callers already read.
-    heaps(coldWorker) {
-        const heaps = { main: heapRecord(), cold: coldWorker?.heap || null, clan: ClanPlanningCoordinator.metrics().heap || null,
-            history: HistoryDatabase.stats().heap || null, checkpoint: CheckpointCoordinator.snapshot().heap || null,
-            market: MarketTradeOverviewReader.stats().heap || null };
-        (PathfindingWorkerPool.stats().heaps || []).forEach((heap, index) => { heaps[`path${index}`] = heap; });
+    // yet). The caller passes the records it already holds: coldWorker is
+    // ColdSimulationCoordinator.snapshot().worker, history and checkpoint are Database.stats().history and
+    // .checkpoint, pathWorkers is PathfindingWorkerPool.stats(); an omitted one is read from its owner.
+    heaps({ coldWorker, history = HistoryDatabase.stats(), checkpoint = CheckpointCoordinator.snapshot(),
+        pathWorkers = PathfindingWorkerPool.stats() } = {}) {
+        const heaps = { main: heapRecord(), cold: coldWorker?.v8Heap || null, clan: ClanPlanningCoordinator.metrics().v8Heap || null,
+            history: history.v8Heap || null, checkpoint: checkpoint.v8Heap || null,
+            market: MarketTradeOverviewReader.stats().v8Heap || null };
+        (pathWorkers.v8Heaps || []).forEach((heap, index) => { heaps[`path${index}`] = heap; });
         return heaps;
     },
 
@@ -292,7 +290,7 @@ const PopulationStatus = {
             .map(([stage, values]) => `${stage}:${values.p95Ms || 0}`).join('|') || 'none';
         const commitTriggers = Object.entries(commitQueue.flushReasons || {})
             .map(([reason, count]) => `${reason}:${count}`).join('|') || 'none';
-        summary.line += ` heaps=${heapsLine(PopulationStatus.heaps(worker))}`;
+        summary.line += ` heaps=${heapsLine(PopulationStatus.heaps({ coldWorker: worker, history: database.history, checkpoint, pathWorkers }))}`;
         summary.line += ` commitStages=${commitStages} commitTriggers=${commitTriggers} commitEarly=${commitQueue.earlyAttempts || 0}/${commitQueue.earlyDenied || 0}/${commitQueue.earlyEmpty || 0}`;
         summary.line += ` coldWorker=${coldWorker.ready ? 'ready' : coldWorker.started ? 'starting' : 'stopped'}/${coldWorker.heartbeatAgeMs ?? -1}ms workerState=${worker.paused ? 'paused' : 'running'}/${worker.stopping ? 'stopping' : 'active'}/${worker.heap || 0}h workerLimit=${worker.maxInFlight || 0} workerFlow=${worker.selected || 0}/${worker.claimed || 0}/${worker.resolved || 0}/${worker.proposals || 0} workerQueueHead=${workerQueueHead} workerFlight=${worker.claiming || 0}/${worker.inFlight || 0}/${worker.dirty || 0}/${worker.commanding || 0}:${Math.round(Number(worker.commandingAgeMs || 0) / 1000)}s workerPartyCapacity=${worker.partyCapacityBursts || 0}/${worker.partyCapacityDeferrals || 0} routeCapacityRejects=${coldWorker.routeCapacityRejects || 0} workerFlush=${worker.flushes || 0}/${worker.flushRows || 0}/${worker.lastFlushRows || 0}/${worker.maxFlushRows || 0}:${workerFlushReasons} workerRecovery=${worker.claimRecoveries || 0}/${worker.leaseRecoveries || 0}/${worker.orphanRecoveries || 0} workerRenewal=${worker.leaseRenewals || 0}/${worker.leaseRenewalMisses || 0} workerPayload=${worker.proposalCompactions || 0}/${worker.proposalOversize || 0}/${worker.proposalOversizeRejected || 0} workerLoop=${Math.round(Number(worker.eventLoopLagP95Ms || 0))}/${Math.round(Number(worker.eventLoopLagMaxMs || 0))}ms workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} workerHeap=${Math.round(Number(worker.heapUsed || 0) / 1024 / 1024)}MB workerHeapGc=${Math.round(Number(worker.heapAfterGc || 0) / 1024 / 1024)}/${Math.round(Number(worker.heapAfterGcMax10 || 0) / 1024 / 1024)}MB workerRestarts=${coldWorker.workerRestarts || 0} economyPlans=${coldWorker.economyPlans?.count || 0}/${Number(coldWorker.economyPlans?.p95Ms || 0).toFixed(2)}ms/${Number(coldWorker.economyPlans?.perCommit || 0).toFixed(3)}pc economyDecisions=${coldWorker.economyDecisions?.hits || 0}/${coldWorker.economyDecisions?.misses || 0}/${coldWorker.economyDecisions?.held || 0} ipc=${coldWorker.messagesIn || 0}/${coldWorker.messagesOut || 0}/${coldWorker.invalidMessages || 0}/${coldWorker.duplicateMessages || 0} ipcRejects=${invalidIpcReasons} commitQueue=${commitQueue.depth || 0}/${commitQueue.p0 || 0}/${commitQueue.p1 || 0}/${commitQueue.p2 || 0} commitFlow=${commitQueue.committed || 0}/${commitQueue.stale || 0}/${commitQueue.rejected || 0} commitLag=${commitQueue.queueP95Ms || 0}/${commitQueue.oldestMs || 0}ms commitP95=${commitQueue.commitP95Ms || 0}ms commitBusy=${commitQueue.busy || 0}/${commitQueue.retries || 0}`;
         // workerCaches=m:<fingerprints>/<fingerprintChars>/<optionMaps>/<verdictEntries>/<spotStores>/<uniqueVerdicts>/<uniqueSpotResults>:<verdictHits>/<verdictMisses>:<spotHits>/<spotMisses>:<fingerprintHits>/<fingerprintMisses>:<evictions>/<sourceResets>/<verdictPoolClears>/<spotPoolClears>/<budgetEvictions>,s:<memo>/<best>/<income>/<bases>/<cells>:<memoHits>/<memoMisses>:<memoEvictions>/<incomeEvictions>/<baseEvictions>/<resets>:<bestHits>/<bestMisses>:<incomeHits>/<incomeMisses>,gs:<gain store entries>/<owners>/<preparations>/<candidates>:<gainHits>/<gainMisses>/<limitMisses>:<switches>/<preparationSwitches>/<clanSwitches>/<filledDrops>/<evictions>; counts since worker start

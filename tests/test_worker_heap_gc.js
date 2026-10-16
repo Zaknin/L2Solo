@@ -40,6 +40,9 @@ if (!process.argv.includes('--gc-child')) {
             try {
                 assert(Number.isFinite(message.payload.heapAfterGc));
                 assert(message.payload.heapAfterGcMax10 >= message.payload.heapAfterGc);
+                // The kernel's due-heap node count keeps its numeric key; the V8 record has its own.
+                assert.equal(typeof message.payload.heap, 'number');
+                for (const key of ['used', 'total', 'external', 'limit']) assert(Number.isFinite(message.payload.v8Heap?.[key]), key);
                 console.log('Actual cold-worker heartbeat carries major-GC heap and ten-minute maximum');
             } finally { clearTimeout(timer); worker.terminate(); }
         }

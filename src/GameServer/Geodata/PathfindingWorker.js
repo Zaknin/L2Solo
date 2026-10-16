@@ -47,7 +47,7 @@ parentPort.on('message', (message) => {
         );
         const result = request.townCorridor ? TownPathCorridor.build(path, checkBudget) : path;
         parentPort.postMessage({ id, ok: true, path: result, workerMs: timed ? performance.now() - startedAt : null,
-            ...(workerData?.developerDiagnostics === true ? { heap: heapRecord() } : {}) });
+            ...(workerData?.developerDiagnostics === true ? { v8Heap: heapRecord() } : {}) });
     } catch (error) {
         parentPort.postMessage({
             id,

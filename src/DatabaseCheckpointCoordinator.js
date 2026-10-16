@@ -112,7 +112,7 @@ function spawn() {
             return;
         }
         if (message.type !== 'result') return;
-        if (message.heap && DiagnosticConfig.developerDiagnostics) workerHeap = message.heap;
+        if (message.v8Heap && DiagnosticConfig.developerDiagnostics) workerHeap = message.v8Heap;
         const entry = pending.get(Number(message.id));
         if (!entry) return;
         pending.delete(Number(message.id));
@@ -235,7 +235,7 @@ function snapshot() {
         p50Ms: percentile(durations, 0.5),
         p95Ms: percentile(durations, 0.95),
         maxMs: durations.length ? Number(Math.max(...durations).toFixed(2)) : 0,
-        heap: workerHeap,
+        v8Heap: workerHeap,
         } : { diagnosticsEnabled: false }),
         last: last ? { ...last } : null,
         lastReset: lastReset ? { ...lastReset } : null

@@ -181,7 +181,7 @@ class BoundedPathfindingWorkerPool {
         const task = slot.task;
         if (!task || Number(message?.id) !== task.id) return;
         slot.task = null;
-        if (message.heap) slot.heap = message.heap;
+        if (message.v8Heap) slot.v8Heap = message.v8Heap;
         const workerMs = Math.max(0, Number(message.workerMs) || 0);
         DiagnosticConfig.developerDiagnostics && (this.metrics.workerMs += workerMs);
         if (task.request.townCorridor && task.priority < 100) this.townWorkMs += workerMs;
@@ -253,7 +253,7 @@ class BoundedPathfindingWorkerPool {
             companionQueue: this.queue.filter(isCompanion).length,
             inFlight: this.tasks.size,
             // Each worker's heap as of its last path answer (WorkerHeapTelemetry.heapRecord).
-            ...(DiagnosticConfig.developerDiagnostics ? { heaps: this.workers.map(slot => slot?.heap || null) } : {})
+            ...(DiagnosticConfig.developerDiagnostics ? { v8Heaps: this.workers.map(slot => slot?.v8Heap || null) } : {})
         };
     }
 

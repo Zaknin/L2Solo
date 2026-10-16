@@ -43,7 +43,7 @@ parentPort.on('message', (message = {}) => {
     if (message.type !== 'overview') return;
     try {
         parentPort.postMessage({ id: message.id, overview: overview(message.options), stats: { ...stats },
-            ...(workerData.developerDiagnostics ? { heap: heapRecord() } : {}) });
+            ...(workerData.developerDiagnostics ? { v8Heap: heapRecord() } : {}) });
     } catch (error) {
         parentPort.postMessage({ id: message.id, error: error?.message || String(error) });
     }

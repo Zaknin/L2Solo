@@ -94,6 +94,8 @@ class ClanPlanningCoordinator {
         const worker = new Worker(this.workerFile, { workerData: { developerDiagnostics: DiagnosticConfig.developerDiagnostics === true } });
         this.worker = worker;
         const epoch = ++this.epoch;
+        // A restarted worker has not reported yet (WorkerHeapTelemetry.heapRecord).
+        delete this.stats.v8Heap;
         DiagnosticConfig.developerDiagnostics && (this.stats.restarts++);
         worker.on('error', (error) => this.fail(worker, error));
         worker.on('exit', (code) => this.fail(worker, new Error(`clan planning worker exited: ${code}`)));
@@ -176,7 +178,7 @@ class ClanPlanningCoordinator {
         // The worker's ColdCombatProfile gain store after this run (L110).
         DiagnosticConfig.developerDiagnostics && result.gainStore && (this.stats.gainStore = result.gainStore);
         // The worker's heap after this run (WorkerHeapTelemetry.heapRecord).
-        DiagnosticConfig.developerDiagnostics && result.heap && (this.stats.heap = result.heap);
+        DiagnosticConfig.developerDiagnostics && result.v8Heap && (this.stats.v8Heap = result.v8Heap);
         return result.plan;
     }
 

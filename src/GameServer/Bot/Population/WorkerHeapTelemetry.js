@@ -27,13 +27,19 @@ class MajorGcHeap {
             ...(this.dropped ? { heapGcDropped: this.dropped } : {}) };
     }
 }
-// The heap of the calling isolate in MB: V8 heap used and reserved, and the
-// external memory V8 counts (Buffers, ArrayBuffers). Every thread sends this
+// The heap of the calling isolate in MB: V8 heap used and reserved, the
+// external memory V8 counts (Buffers, ArrayBuffers) and the isolate's own
+// heap cap (heap_size_limit; a worker without resourceLimits shows the default). Every thread sends this
 // one shape on a message it already sends; PopulationStatus.heaps() merges them.
 function heapRecord() {
     const stats = v8.getHeapStatistics();
     return { used: Math.round(stats.used_heap_size / MB), total: Math.round(stats.total_heap_size / MB),
-        external: Math.round(stats.external_memory / MB) };
+        external: Math.round(stats.external_memory / MB), limit: Math.round(stats.heap_size_limit / MB) };
+}
+// heaps=<thread>:<used>/<total>/<external>/<limit>,... in MB; '-' for a thread that has not reported yet.
+// clan is as of its last plan, history its last minute tick, market its last answer.
+function heapsLine(heaps) {
+    return Object.entries(heaps).map(([name, heap]) => `${name}:${heap ? `${heap.used}/${heap.total}/${heap.external}/${heap.limit}` : '-'}`).join(',');
 }
 function observe() {
     const window = new MajorGcHeap();
@@ -43,6 +49,6 @@ function observe() {
         }
     });
     observer.observe({ entryTypes: ['gc'] });
-    return { snapshot: at => ({ ...window.snapshot(at), heap: heapRecord() }), close: () => observer.disconnect() };
+    return { snapshot: at => ({ ...window.snapshot(at), v8Heap: heapRecord() }), close: () => observer.disconnect() };
 }
-module.exports = { MAX_SAMPLES, WINDOW_MS, MajorGcHeap, observe, heapRecord };
+module.exports = { MAX_SAMPLES, WINDOW_MS, MajorGcHeap, observe, heapRecord, heapsLine };

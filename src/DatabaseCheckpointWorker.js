@@ -73,7 +73,7 @@ function checkpoint(message = {}) {
 }
 
 function respond(id, result) {
-    parentPort.postMessage({ type: 'result', id, result, ...(workerData?.developerDiagnostics ? { heap: heapRecord() } : {}) });
+    parentPort.postMessage({ type: 'result', id, result, ...(workerData?.developerDiagnostics ? { v8Heap: heapRecord() } : {}) });
 }
 
 parentPort.on('message', (message = {}) => {

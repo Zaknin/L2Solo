@@ -45,7 +45,7 @@ function start(nextPath) {
         if (message.error) entry.reject(new Error(message.error));
         else {
             workerStats = message.stats || workerStats;
-            workerHeap = message.heap || workerHeap;
+            workerHeap = message.v8Heap || workerHeap;
             entry.resolve(message.overview);
         }
         if (!pending.size) instance.unref();
@@ -84,6 +84,6 @@ function read(nextPath, options = {}) {
 }
 
 // Counters of the worker's window reuse and its heap, as of its last answer.
-function stats() { return { ...workerStats, heap: workerHeap }; }
+function stats() { return { ...workerStats, v8Heap: workerHeap }; }
 
 module.exports = { read, stats };
