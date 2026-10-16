@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
 const HOUR_MS = 3600000;
 const REVIEW_MS = 5 * 60000;
 const MAX_SOLO_CHECKS = 12;
@@ -92,13 +93,12 @@ function soloRoute(state, spots, timestamp, peers = []) {
     // useful effects at the existing price with the unbuffed earning route.
     const Offer = invoke('GameServer/Bot/Economy/ColdBuffOffer');
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
-    const Policy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
     for (const provider of peers.slice(0, 9)) {
         if (!Offer.available(provider) || provider.spotId !== choice.spot.id || standalone.spotId !== choice.spot.id) continue;
         const buff = Offer.select(provider, standalone, timestamp);
         if (!buff) continue;
-        const price = Policy.priceFor({ provider, recipient: standalone, mp: buff.mpCost, count: buff.selected.length, town: false });
-        if (price > positive(state.adena) * 0.25 || price > Policy.incomeForTenMinutes(standalone) * 0.8) continue;
+        const price = BuffPolicy.priceFor({ provider, recipient: standalone, mp: buff.mpCost, count: buff.selected.length, town: false });
+        if (price > positive(state.adena) * 0.25 || price > BuffPolicy.incomeForTenMinutes(standalone) * 0.8) continue;
         const effects = Offer.effectsFor(buff.selected, timestamp);
         const duration = Math.min(...effects.map(effect => effect.durationMs)) / HOUR_MS;
         const boosted = withEffects(standalone, effects);
@@ -160,11 +160,13 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
     const spoilerIndex = members.findIndex(member => invoke('GameServer/Bot/AI/BotRoles').isSpoiler(member));
     const level = Math.max(...members.map(member => positive(member.level)));
     const Offer = invoke('GameServer/Bot/Economy/ColdBuffOffer');
-    const providers = members.filter(member => invoke('GameServer/Bot/Economy/BuffServicePolicy').serviceClass(member)).slice(0, 1);
+    // The seller's solo copy is the same for every recipient: built once per roster.
+    const providers = members.filter(member => BuffPolicy.serviceClass(member))
+        .slice(0, 1).map(soloState);
     const buffed = members.map(member => {
         const recipient = soloState(member);
         for (const provider of providers) {
-            const choice = Offer.select(soloState(provider), recipient, timestamp);
+            const choice = Offer.select(provider, recipient, timestamp);
             if (choice) return withEffects(member, Offer.effectsFor(choice.selected, timestamp));
         }
         return member;
