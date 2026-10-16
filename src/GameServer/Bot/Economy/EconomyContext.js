@@ -770,16 +770,31 @@ function gatePlanDiff(state, held, fresh, deps, evidence = null) {
     if (before.focus?.[0] !== fresh.network.focus?.[0]) return 'focus';
     if ((before.activity?.key ?? before.activity?.kind ?? null) !== (fresh.network.activity?.key ?? fresh.network.activity?.kind ?? null)) return 'leaf';
     const left = before.queue || [], right = fresh.network.queue || [];
+    const reprice = (queue, plan) => moneyQueue(queue, Funding.budget(state, deps.buyOrderEscrow),
+        plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
     for (let at = 0; at < Math.max(left.length, right.length); at++) {
         if (at >= left.length || at >= right.length || left[at].key !== right[at].key) {
-            if (evidence) Object.assign(evidence, { queueIndex: at, heldRoot: left[at]?.key, freshRoot: right[at]?.key });
+            if (!evidence) return 'queue';
+            // Which order readers the held queue would mislead (view() reprices
+            // it; TradeIntent reads the top items): none = an order-only miss.
+            // A wish born or gone (entered/left) with quiet events is a missing event.
+            const heldMoney = reprice(left, held.plan), freshMoney = reprice(right, fresh);
+            const heldRows = new Map(left.map(row => [row.key, row])), freshRows = new Map(right.map(row => [row.key, row]));
+            const funded = money => money.queue.filter(row => row.funded).map(row => row.key).sort().join();
+            const watch = list => (list || []).map(row => `${row.itemId}x${row.amount}`).join();
+            const drift = key => heldRows.get(key)?.ratio > 0 && freshRows.get(key)?.ratio > 0
+                ? Math.round((freshRows.get(key).ratio / heldRows.get(key).ratio - 1) * 1000) / 1000 : undefined;
+            let entered = 0;
+            for (const key of freshRows.keys()) if (!heldRows.has(key)) entered++;
+            const moved = [watch(held.plan.watchList) !== watch(fresh.watchList) && 'watch',
+                heldMoney.gap?.key !== freshMoney.gap?.key && 'gap', funded(heldMoney) !== funded(freshMoney) && 'funded'].filter(Boolean);
+            Object.assign(evidence, { queueIndex: at, heldRoot: left[at]?.key, freshRoot: right[at]?.key,
+                queueEntered: entered, queueLeft: heldRows.size - freshRows.size + entered, queueMoved: moved.join() || 'order',
+                heldRootDrift: drift(left[at]?.key), freshRootDrift: drift(right[at]?.key) });
             return 'queue';
         }
     }
-    const current = new Map(moneyQueue(left, Funding.budget(state, deps.buyOrderEscrow),
-        held.plan.survivalReserve, held.plan.hourAdena > 0 ? 1 / held.plan.hourAdena : 0).queue.map(row => [row.key, row.funded]));
-    const repriced = moneyQueue(right, Funding.budget(state, deps.buyOrderEscrow),
-        fresh.survivalReserve, fresh.hourAdena > 0 ? 1 / fresh.hourAdena : 0).queue;
+    const current = new Map(reprice(left, held.plan).queue.map(row => [row.key, row.funded])), repriced = reprice(right, fresh).queue;
     for (let at = 0; at < repriced.length; at++) {
         const row = repriced[at], heldFunded = current.get(row.key);
         if (heldFunded !== row.funded) {
@@ -2032,8 +2047,10 @@ function buildForState(state, deps) {
     if (mismatch) Diagnostics.push({ owner: state.characterId, phase: 'wish_context', gate, gateDiff,
         baselineAt: held.plan.statsPacket.wishSections.at, sequence: inputSequence, inputActivityLeaf,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
-        heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0],
-        heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key,
+        // A fresh focus/leaf equal to the held one is left out: a queue or
+        // funded witness has both equal, and its evidence needs the bytes.
+        heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0] === held.plan.network.focus?.[0] ? undefined : network.focus?.[0],
+        heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key === held.plan.network.activity?.key ? undefined : network.activity?.key,
         moved: movedText(movedParts || []), readset: readsetVerdict || 'none',
         reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
         ...(socialDiff ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),

@@ -118,15 +118,28 @@ for (const [capacity, ordinary] of [[4, 3], [64, 48], [256, 192]]) {
 }
 // The compact all-owner row fits without changing the existing byte limit.
 const maxText = 'x'.repeat(64), maxNumber = Number.MAX_SAFE_INTEGER;
-const compact = create({ config, now: () => maxNumber }), compactRows = [];
-compact.connect(batch => { compactRows.push(...batch.records.map(JSON.parse)); return true; });
-assert(compact.push({ ...mismatch, owner: maxNumber, gateDiff: 'funded', baselineAt: maxNumber,
+const compactRows = [];
+// One delivery per writer: each witness shape gets its own.
+const compactWriter = () => {
+    const writer = create({ config, now: () => maxNumber });
+    writer.connect(batch => { compactRows.push(...batch.records.map(JSON.parse)); return true; });
+    return writer;
+};
+const compact = compactWriter();
+// A focus/leaf witness carries both sides; a queue/funded one only the held
+// focus/leaf (equal by then) and its own evidence.
+const witnessBase = { ...mismatch, owner: maxNumber, baselineAt: maxNumber,
     sequence: maxNumber, inputActivityLeaf: 0xffffffff, decisionSeq: maxNumber, activityLeaf: 0xffffffff,
-    heldFocus: maxText, freshFocus: maxText, heldLeaf: maxText, freshLeaf: maxText,
-    moved: maxText, readset: 'market', reconsidered: 1, choiceEvent: maxText, social: 'helping:focus',
+    heldFocus: maxText, heldLeaf: maxText,
+    moved: maxText, readset: 'market', reconsidered: 1, choiceEvent: maxText, social: 'helping:focus' };
+assert(compact.push({ ...witnessBase, gateDiff: 'funded',
     queueIndex: 11, heldRoot: maxText, freshRoot: maxText, heldFunded: 1, freshFunded: 0 }));
-assert.equal(compactRows.length, 1);
-assert(Buffer.byteLength(JSON.stringify(compactRows[0])) + 1 <= LIMITS.recordBytes);
+assert(compactWriter().push({ ...witnessBase, gateDiff: 'queue', queueIndex: 11, heldRoot: maxText, freshRoot: maxText,
+    queueEntered: 64, queueLeft: 64, queueMoved: 'watch,gap,funded', heldRootDrift: -0.123, freshRootDrift: -12345.678 }));
+assert(compactWriter().push({ ...witnessBase, gateDiff: 'focus', freshFocus: maxText, freshLeaf: maxText }));
+assert.equal(compactRows.length, 3);
+for (const row of compactRows) assert(Buffer.byteLength(JSON.stringify(row)) + 1 <= LIMITS.recordBytes);
+assert.equal(compactRows[1].queueMoved, 'watch,gap,funded');
 assert.equal(compactRows[0].freshFunded, 0, 'a current-wallet unfunded witness survives serialization');
 assert.equal(compactRows[0].heldRoot, maxText);
 assert.equal(compact.stats().selected, 0);
@@ -140,25 +153,36 @@ assert.equal(compact.stats().selected, 0);
     let reprices = 0;
     const compare = require('node:vm').runInNewContext(`(${source.slice(start, source.indexOf('\n// Soft market', start))})`,
         { Funding, moneyQueue(...args) { reprices++; return moneyQueue(...args); } });
-    const wish = (key, price = 10) => ({ key, price, valueHours: 10 });
+    const wish = (key, price = 10, valueHours = 10) => ({ key, price, valueHours, ratio: valueHours / price });
     const network = queue => ({ focus: ['power:1'], activity: { key: 'leaf:1' }, queue });
-    const check = (left, right, kind, expected) => {
+    const check = (left, right, kind, expected, watch = [[], []]) => {
         const evidence = {}; reprices = 0;
-        assert.equal(compare({ adena: 15 }, { plan: { network: left, survivalReserve: 0, hourAdena: 100 } },
-            { network: right, survivalReserve: 0, hourAdena: 100 }, {}, evidence), kind);
+        assert.equal(compare({ adena: 15 }, { plan: { network: left, survivalReserve: 0, hourAdena: 100, watchList: watch[0] } },
+            { network: right, survivalReserve: 0, hourAdena: 100, watchList: watch[1] }, {}, evidence), kind);
         assert.deepEqual(evidence, expected);
-        assert.equal(reprices, ['same', 'funded'].includes(kind) ? 2 : 0, 'witness capture never adds repricing');
+        // Only a queue witness reprices beyond the funded compare (diagnostics only).
+        assert.equal(reprices, ['same', 'funded', 'queue'].includes(kind) ? 2 : 0, 'witness capture reprices once per side');
     };
+    const queueWitness = (fields, rest) => ({ queueEntered: 0, queueLeft: 0, queueMoved: 'order',
+        heldRootDrift: undefined, freshRootDrift: undefined, ...fields, ...rest });
     check(network([wish('a')]), { ...network([wish('b')]), focus: ['power:2'], activity: { key: 'leaf:2' } }, 'focus', {});
     check(network([wish('a')]), { ...network([wish('b')]), activity: { key: 'leaf:2' } }, 'leaf', {});
+    // A wish set change at index 1: the gap moves from b to c (only a funds at adena 15).
     check(network([wish('a'), wish('b')]), network([wish('a'), wish('c')]), 'queue',
-        { queueIndex: 1, heldRoot: 'b', freshRoot: 'c' });
+        queueWitness({ queueIndex: 1, heldRoot: 'b', freshRoot: 'c' }, { queueEntered: 1, queueLeft: 1, queueMoved: 'gap' }));
     check(network([wish('a'), wish('b')]), network([wish('c')]), 'queue',
-        { queueIndex: 0, heldRoot: 'a', freshRoot: 'c' });
+        queueWitness({ queueIndex: 0, heldRoot: 'a', freshRoot: 'c' }, { queueEntered: 1, queueLeft: 2, queueMoved: 'gap,funded' }));
     check(network([wish('a')]), network([wish('a'), wish('b')]), 'queue',
-        { queueIndex: 1, heldRoot: undefined, freshRoot: 'b' });
+        queueWitness({ queueIndex: 1, heldRoot: undefined, freshRoot: 'b' }, { queueEntered: 1, queueMoved: 'gap' }));
     check(network([wish('a'), wish('b')]), network([wish('a')]), 'queue',
-        { queueIndex: 1, heldRoot: 'b', freshRoot: undefined });
+        queueWitness({ queueIndex: 1, heldRoot: 'b', freshRoot: undefined }, { queueLeft: 1, queueMoved: 'gap' }));
+    // The same wishes swapped by a small ratio drift, nothing a reader sees: an order-only miss.
+    check(network([wish('a', 5, 10), wish('b', 5, 9.9), wish('c', 20)]), network([wish('b', 5, 9.9), wish('a', 5, 9.8), wish('c', 20)]), 'queue',
+        queueWitness({ queueIndex: 0, heldRoot: 'a', freshRoot: 'b' }, { heldRootDrift: -0.02, freshRootDrift: 0 }));
+    // The same swap with another top watched item: TradeIntent's reader moved.
+    check(network([wish('a', 5, 10), wish('b', 5, 9.9)]), network([wish('b', 5, 9.9), wish('a', 5, 9.8)]), 'queue',
+        queueWitness({ queueIndex: 0, heldRoot: 'a', freshRoot: 'b' }, { queueMoved: 'watch', heldRootDrift: -0.02, freshRootDrift: 0 }),
+        [[{ itemId: 1 }, { itemId: 2 }], [{ itemId: 2 }, { itemId: 1 }]]);
     check(network([{ ...wish('a'), funded: false }]), network([{ ...wish('a', 20), funded: true }]), 'funded',
         { queueIndex: 0, heldRoot: 'a', freshRoot: 'a', heldFunded: 1, freshFunded: 0 });
     check(network([{ ...wish('a'), funded: false }]), network([{ ...wish('a'), funded: true }]), 'same', {});
