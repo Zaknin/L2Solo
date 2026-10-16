@@ -473,8 +473,12 @@ function bagHolds(state, plan, timestamp) {
     const safety = bagSafety(state, timestamp), heldSafety = plan.bagSafety;
     return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
 }
-// The item of one quantity proof row (WishNetwork createQuantityInputs layout).
-const quantityItem = row => row[0] === 'stock' || row[0] === 'stockPhysical' ? row[2] : row[1];
+// A quantity proof row (WishNetwork createQuantityInputs layout) of the
+// leaf's own progress: a stock row of its own root on its item, or a
+// scalar row of its item. Another root's stock row on that item is that
+// root's input (a wished material reaching its count).
+const ownQuantityRow = (row, rootKey, own) => row[0] === 'stock' || row[0] === 'stockPhysical'
+    ? row[1] === rootKey && row[2] === own : row[1] === own;
 // This proof is produced by the completed native build, shared by its cache
 // entry and compact execution card. It is never reconstructed from a later
 // publication. Market/occupancy reads retain their original soft deadline.
@@ -583,7 +587,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
     const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
-        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || quantityItem(row) !== own) };
+        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || !ownQuantityRow(row, leaf.rootKey, own)) };
     const stock = stockReader(state, key => roots.get(key));
     const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
         && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));

@@ -227,8 +227,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
 // Raw bag+incoming progress is not a proof of allocatable stock or craft readiness.
 {
     const build = Providers.build, enabled = Diagnostics.enabled, push = Diagnostics.push, restoreProof = proofScope();
-    const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`;
-    let summaries = [], targetClaimed = false, funding = false, targetAmount = 1;
+    const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`, secondId = 886, secondKey = `power:${secondId}:5`;
+    let summaries = [], targetClaimed = false, funding = false, targetAmount = 1, second = false;
     Providers.build = (current, context) => {
         const values = new Map([[itemId, 10], [targetId, 50]]);
         stubLiquidation(current, context, values);
@@ -243,8 +243,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             { key: `item:${targetId}`, price: 50, paths: [{ kind: 'craft', productCount: 1, costHours: .1,
                 requirements: [{ key: `item:${itemId}`, amount: 5 }] }] },
             { key: `item:${itemId}`, price: 10, paths: [{ kind: 'drop', activity: 'hunting', itemId,
-                funding, costHours: 1, executable: true }] }
-        ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
+                funding, costHours: 1, executable: true }] },
+            ...(second ? [{ key: secondKey, need: 'power', object: { itemId: secondId, slot: 5 }, valueHours: 10, price: 50,
+                paths: [{ requirements: [{ key: `item:${itemId}`, amount: 4 }] }] }] : [])
+        ], roots: second ? [rootKey, secondKey] : [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
     };
     Diagnostics.enabled = () => true;
     Diagnostics.push = row => {
@@ -324,6 +326,16 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         request({ ...none, stats: { ...none.stats, ...fromNone.statsPacket },
             inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
         if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a material hunt from none holds after its first drop');
+        // Another root's stock row on the hunted item stays its input: its
+        // material reaching that root's count is an event, not the hunt's progress.
+        Economy.reset(); second = true;
+        const shared = request(native);
+        assert.equal(shared.network.activity?.rootKey, rootKey);
+        assert.equal(shared.network.activity?.itemId, itemId);
+        request({ ...native, stats: { ...native.stats, ...shared.statsPacket },
+            inventory: { ...native.inventory, [itemId]: { ...native.inventory[itemId], amount: 4 } } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'], 'a second root on the hunted item reaching its count refuses');
+        second = false;
         Economy.reset();
         const original = request(native);
         const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
