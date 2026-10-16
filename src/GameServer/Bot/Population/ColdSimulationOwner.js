@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 
 const Database = invoke('Database');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
+const C4Unseal = invoke('GameServer/Items/C4Unseal');
 const BotErrands = require('./BotErrands');
 
 const OWNER_ID = 'cold_simulation_owner';
@@ -32,8 +33,7 @@ function eligibility(state = {}, options = {}) {
     if (options.hasWarehouseWorkflow === true) return { ok: false, reason: 'warehouse_state' };
     const stats = state.stats || {};
     if (stats.mammonReturn || (Number(stats.mammonRetryAt || 0) <= Date.now()
-        && Object.values(state.inventory || {}).some(item => Number(item.amount)>0
-            && invoke('GameServer/Items/C4Unseal').options(item.selfId).length))) return { ok:false, reason:'craft_state' };
+        && C4Unseal.sealedHeld(state.inventory))) return { ok:false, reason:'craft_state' };
     const busy = BotErrands.busyWith(state, BotErrands.COLD_CLAIM);
     if (busy) return { ok: false, reason: BotErrands.CLAIM_REASONS[busy] };
     if (stats.backgroundPartyId && options.allowParty !== true) return { ok: false, reason: 'background_party' };

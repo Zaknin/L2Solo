@@ -15,6 +15,7 @@ const ColdEconomyDecision = require('./ColdEconomyDecision');
 const BotErrands = require('./BotErrands');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
+const C4Unseal = require('../../Items/C4Unseal');
 
 class DueHeap {
     constructor() {
@@ -288,7 +289,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 
 // Resolved on first use, like the other lazy dependencies of the worker:
 // require() inside lifecycleKind ran per inventory item on every row.
-let C4Unseal, PartyMarketBreak, ClanPartyDuty, BotCrystallization;
+let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
 function lifecycleKind(state = {}, context = {}) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
@@ -329,8 +330,7 @@ function lifecycleKind(state = {}, context = {}) {
     // Actual crafting is routed by activity, shop/station and plan readiness.
     if (BotErrands.busyWith(state, BotErrands.COLD_CLAIM)) return 'command';
     if (stats.mammonReturn || (Number(stats.mammonRetryAt || 0) <= Date.now()
-        && Object.values(state.inventory || {}).some(item => Number(item.amount)>0
-            && (C4Unseal ||= invoke('GameServer/Items/C4Unseal')).options(item.selfId).length))) return 'command';
+        && C4Unseal.sealedHeld(state.inventory))) return 'command';
     if (String(plan.strategy || '') === 'craft') {
         if (state.activity !== 'hunting' || ['component_ready', 'ready_to_craft'].includes(String(plan.status || ''))) return 'command';
     }
