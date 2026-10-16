@@ -11,7 +11,10 @@ async function check(name, work) {
     try { await work(); console.log(`${name}: pass`); }
     catch (error) { failures.push(name); console.error(`${name}: FAIL ${error.stack}`); }
 }
-const born = 1000000, period = 1800000;
+// The fixture bots are not due inside the test: the worker loop ticks (idle
+// wakes at most 250 ms apart) and a due bot is classified, which reads its
+// inventory; the poison below guards the presence and repair paths.
+const born = Date.now(), period = 1800000;
 function full(id, revision = 1) {
     return { state: { characterId: id, phase: 'cold', activity: 'hunting', inventory: {}, stats: {},
         simulation: { ownerId: 'legacy_main', revision, leaseId: null, leaseUntil: 0 }, updatedAt: born,
