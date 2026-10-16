@@ -137,48 +137,51 @@ function unpackQuantityInputs(value) {
 }
 function createQuantityInputs() {
     const rows = [], seen = new Map();
-    let bytes = 23, invalid = false, finished = false, proof = null;
+    // invalid: '' or the first reason the proof is void (diagnostics name it).
+    let bytes = 23, invalid = '', finished = false, proof = null;
     const record = row => {
         if (invalid || finished) return;
         const key = row[0] === 'stock' || row[0] === 'stockPhysical'
             ? `${row[0]}:${row[1]}:${row[2]}` : `${row[0]}:${row[1]}`;
         const previous = seen.get(key);
         if (previous) {
-            for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid = true;
+            for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid ||= 'conflict';
             return;
         }
         const size = Buffer.byteLength(JSON.stringify(row)) + 1;
         if (rows.length >= QUANTITY_INPUT_LIMIT || bytes + size > QUANTITY_INPUT_BYTES) {
-            invalid = true; return;
+            invalid = rows.length >= QUANTITY_INPUT_LIMIT ? 'rows' : 'bytes'; return;
         }
         seen.set(key, row); rows.push(Object.freeze(row)); bytes += size;
     };
     const scalar = kind => (id, value) => {
-        if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid = true;
-        if (kind === 'incoming' && Number(value || 0) < 0) invalid = true;
+        if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
+        if (kind === 'incoming' && Number(value || 0) < 0) invalid ||= 'value';
         record([kind, Number(id), kind === 'present' || kind === 'freePresent' ? Number(nonnegative(value) > 0) : nonnegative(value)]);
         return value;
     };
     return {
         stock(id, rootKey, value) {
             if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
-                || !Number.isFinite(nonnegative(value?.owned)) || !Number.isFinite(nonnegative(value?.incoming))) invalid = true;
+                || !Number.isFinite(nonnegative(value?.owned)) || !Number.isFinite(nonnegative(value?.incoming))) invalid ||= 'value';
             record(['stock', String(rootKey), Number(id), nonnegative(value?.owned), nonnegative(value?.incoming)]);
             return value;
         },
         stockPhysical(rootKey, id, value) {
             if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
-                || !Number.isFinite(nonnegative(value))) invalid = true;
+                || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
             record(['stockPhysical', rootKey, Number(id), nonnegative(value)]);
             return value;
         },
         physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
         incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
-        unsupported() { invalid = true; },
+        unsupported() { invalid ||= 'unsupported'; },
         finish() {
             if (!finished) {
                 finished = true;
                 proof = invalid ? null : Object.freeze({ version: 1, rows: Object.freeze(rows) });
+                // Diagnostics: why a completed build has no quantity proof.
+                if (invalid && Diagnostics.active()) Diagnostics.count('context', 'quantity_invalid', invalid);
                 seen.clear();
             }
             return proof;

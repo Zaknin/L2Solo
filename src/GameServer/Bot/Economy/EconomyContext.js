@@ -648,32 +648,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
-    const checked = own === null ? leaf : { ...leaf, heldAtDecision: heldUnits };
-    if (leaf === null) {
-        // A completed native graph may choose no economic action. Execution
-        // keeps its ordinary hunt/rest/travel path after every shared check.
-    } else if (leaf.activity === 'shopping' || leaf.activity === 'selling') {
-        if (!acceptedActivityHolds(state, checked, deps, null, { liquidation: liquidation.candidates }))
-            return refuse('check_failed', ['sources', 'money']);
-    } else if (leaf.activity === 'hunting') {
-        if (ColdEconomyDecision.materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
-            return refuse('check_failed', ['sources']);
-    } else if (leaf.activity === 'pvp' || leaf.activity === 'helping') {
-        if (!Number.isSafeInteger(leaf.targetId) || leaf.targetId <= 0
-            || leaf.rootKey !== `${leaf.activity === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}`)
-            return refuse('check_failed', ['relations']);
-    } else if (leaf.activity === 'crafting') {
-        // This retains the chosen intention. The native executor still
-        // prepares its actual batch and checks MP, materials and payment.
-        if (!Number.isSafeInteger(leaf.recipeId) || leaf.recipeId <= 0
-            || !Recipes.resolveByRecipeId(leaf.recipeId))
-            return refuse('check_failed', ['sources']);
-    } else if (leaf.activity === 'improving') {
-        if (!leaf.improvement || typeof leaf.improvement !== 'object' || Array.isArray(leaf.improvement))
-            return refuse('check_failed', ['sources']);
-    } else if (!['resting', 'traveling'].includes(leaf.activity)) {
-        return refuse('unsupported_leaf', ['sources']);
-    }
+    const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
+    if (leafWhy) return refuse(leafWhy.reason, leafWhy.sections);
     if (!options.softPrefix && !(producerScopeHolds(proof, deps)
         && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []))
         && Sections.softDue(baseline, 'market', timestamp)) return refuse('market', ['sources', 'benefits']);
@@ -803,11 +779,18 @@ function gatePlanDiff(state, held, fresh, deps, evidence = null) {
     }
     return 'same';
 }
-// Soft market/crowd never excuses the held leaf's own offer, funding and
-// route: they are checked exactly through the existing authority.
-function ownLeafHolds(state, plan, deps) {
-    const leaf = plan.network?.activity;
-    return !leaf || acceptedActivityHolds(state, leaf, deps);
+// Soft market/crowd never excuses the held leaf's own check: the same
+// per-leaf check as the event verdict (heldLeafRefusal). Shadow first
+// (design-rules Recompute): a leaf this path rebuilt before the shared check
+// (pvp, helping, crafting, improving, resting, traveling) counts as
+// would-hold and still rebuilds until the sampled social rows read same.
+const LEGACY_LEAF_HOLDS = new Set(['hunting', 'shopping', 'selling']);
+function ownLeafHolds(state, held, deps) {
+    const leaf = held.plan.network?.activity;
+    if (heldLeafRefusal(state, leaf, deps, held.heldUnits)) return false;
+    if (!leaf || LEGACY_LEAF_HOLDS.has(leaf.activity)) return true;
+    if (Diagnostics.active()) Diagnostics.count('context', 'would_hold_own_leaf', leaf.activity);
+    return false;
 }
 function occupancyToken(deps, id) {
     const row = deps.occupancy?.get?.(id) || deps.occupancy?.[id];
@@ -1053,6 +1036,36 @@ function acceptedActivityHolds(state, leaf, deps = {}, current = null, prepared 
             .some(row => leaf.items.includes(Number(row.selfId)));
     }
     return false;
+}
+// The held leaf's own check, one copy for the event verdict, the legacy
+// soft-market hold and the legacy card: '' while it holds, else the
+// verdict's refusal (frozen: reason and touched section names). heldUnits:
+// the own item's bag+incoming at the decision (a held build's entry; a card
+// carries it on its leaf); current/prepared as acceptedActivityHolds.
+const leafRefused = (reason, ...sections) => Object.freeze({ reason, sections: Object.freeze(sections) });
+const LEAF_TRADE = leafRefused('check_failed', 'sources', 'money'), LEAF_SOURCES = leafRefused('check_failed', 'sources');
+const LEAF_RELATIONS = leafRefused('check_failed', 'relations'), LEAF_UNSUPPORTED = leafRefused('unsupported_leaf', 'sources');
+function heldLeafRefusal(state, leaf, deps, heldUnits, current = null, prepared = null) {
+    // A completed native graph may choose no economic action. Execution
+    // keeps its ordinary hunt/rest/travel path after every shared check.
+    if (!leaf) return '';
+    const checked = () => ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits)
+        ? { ...leaf, heldAtDecision: heldUnits } : leaf;
+    const kind = leaf.activity;
+    if (kind === 'shopping' || kind === 'selling')
+        return acceptedActivityHolds(state, checked(), deps, current, prepared) ? '' : LEAF_TRADE;
+    if (kind === 'hunting')
+        return ColdEconomyDecision.materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked(), state) <= 0 ? LEAF_SOURCES : '';
+    if (kind === 'pvp' || kind === 'helping')
+        return Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
+            && leaf.rootKey === `${kind === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}` ? '' : LEAF_RELATIONS;
+    // This retains the chosen intention. The native executor still
+    // prepares its actual batch and checks MP, materials and payment.
+    if (kind === 'crafting')
+        return Number.isSafeInteger(leaf.recipeId) && leaf.recipeId > 0 && Recipes.resolveByRecipeId(leaf.recipeId) ? '' : LEAF_SOURCES;
+    if (kind === 'improving')
+        return leaf.improvement && typeof leaf.improvement === 'object' && !Array.isArray(leaf.improvement) ? '' : LEAF_SOURCES;
+    return kind === 'resting' || kind === 'traveling' ? '' : LEAF_UNSUPPORTED;
 }
 // The market as an input of one bot: the board lines and the counter of each
 // item its review read, as tokens at the time of reading. The context stays
@@ -1572,7 +1585,7 @@ function buildForState(state, deps) {
         && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
-                && ownLeafHolds(state, held.plan, deps) && (deferred?.push('market'), true))) {
+                && (activeEvents || ownLeafHolds(state, held, deps)) && (deferred?.push('market'), true))) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
@@ -1640,10 +1653,12 @@ function buildForState(state, deps) {
         const refused = !held ? 'no_held' : why[0] || outerWhy;
         Diagnostics.count('context', 'hold_refused', refused);
         // The held leaf behind an own-leaf refusal (market or spots moved, not
-        // due). acceptedActivityHolds refuses an unknown route first, then holds
-        // only an npc/configured_store/afk buy and an NPC liquidation: those
-        // labels mean the leaf's own offer, funding or route moved, any other
-        // label a shape the check does not handle.
+        // due): heldLeafRefusal, the event verdict's per-leaf check, refused it. A
+        // shopping/selling label: its route, offer, funding or NPC liquidation
+        // moved (acceptedActivityHolds); hunting: its material order is done;
+        // pvp/helping, crafting, improving, resting, traveling: a malformed
+        // leaf or a shadow would-hold (context:would_hold_own_leaf); any
+        // other: an activity the check does not know.
         if (refused.endsWith('_own_leaf')) {
             const leaf = held.plan.network?.activity;
             Diagnostics.count('context', 'own_leaf_refused', `${leaf?.activity}:${leaf?.kind || '-'}:${leaf?.sourceType || '-'}`);
@@ -1987,7 +2002,7 @@ function buildForState(state, deps) {
         heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key,
         moved: movedText(movedParts || []), readset: readsetVerdict || 'none',
         reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
-        ...(['focus', 'queue'].includes(socialDiff) ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),
+        ...(socialDiff ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),
         ...gateEvidence });
     else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
@@ -1999,7 +2014,7 @@ function buildForState(state, deps) {
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
-        ...(['focus', 'queue'].includes(socialDiff) ? {
+        ...(socialDiff ? {
             social: `${deps.socialShadow.kind}:${socialDiff}`, baselineAt: deps.socialShadow.baseline.at,
             reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet'
         } : null),
@@ -2418,6 +2433,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, eventInputKey, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, eventInputKey, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, heldLeafRefusal, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

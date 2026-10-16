@@ -572,7 +572,8 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted.baseline) return 'no_sections';
     if (Diagnostics.active() && options.prepared && accepted.eventProof) options.prepared.eventCandidate = accepted;
     // lazy: cycle EconomyContext constructs and validates these cards.
-    const eventReuse = accepted.eventProof && invoke('GameServer/Bot/Economy/EconomyContext').eventReuseEnabled(deps);
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const eventReuse = accepted.eventProof && Economy.eventReuseEnabled(deps);
     // Keep rejected publications available to the shadow, without allowing a
     // later legacy fence match to revive their old execution permission.
     if (accepted.legacyRejected && !eventReuse) return 'no_card';
@@ -594,8 +595,7 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
             // Shadow only: the worker still rebuilds. The same decoded leaf
             // takes every later proof check, without granting social action.
             if (options.socialShadow && options.prepared && ['pvp', 'helping'].includes(kind)
-                && Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
-                && leaf.rootKey === `${kind === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}`) {
+                && !Economy.heldLeafRefusal(state, leaf, deps)) {
                 options.prepared.socialShadow = { kind, baseline: accepted.baseline, leaf,
                     holds: !leafRefusal(state, accepted, leaf, deps, current, options, true) };
             }
@@ -605,7 +605,7 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     return leafRefusal(state, accepted, leaf, deps, current, options);
 }
 // Shared continuation of the actual verdict and its diagnostic social
-// candidate. Only that candidate omits the unsupported native-action check.
+// candidate. Only that candidate leaves a soft market deferral uncounted.
 function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow = false) {
     if (state.incomingPending) return 'incoming';
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
@@ -629,8 +629,8 @@ function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow
         return `events:${why[0]}`;
     if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: !socialShadow, why }))
         return `fence:${why[0]}`;
-    if (socialShadow) return '';
-    return Economy.acceptedActivityHolds(state, leaf, deps, current) ? '' : 'accepted_leaf';
+    // The event verdict's per-leaf check (a social leaf: its target and root).
+    return Economy.heldLeafRefusal(state, leaf, deps, undefined, current) ? 'accepted_leaf' : '';
 }
 function canReuse(state, accepted, deps = {}, current = null, options = {}) {
     return !refusal(state, accepted, deps, current, options);

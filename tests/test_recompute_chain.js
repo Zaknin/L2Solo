@@ -17,6 +17,7 @@ const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const Network = invoke('GameServer/Bot/Economy/WishNetwork');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const Crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
 const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const Supplies = invoke('GameServer/Clan/ClanSupplyPolicy');
@@ -479,6 +480,25 @@ try {
         assert.equal(Network.quantityInputsHold(spareProof, Providers.quantityReaders(consumed)), false);
         board.remove(90); board.remove(166);
         console.log('PASS native crystal presence crossing / physical spare batch2->1 / no competing-root claim');
+    });
+
+    scenario('a void quantity proof names its first reason', () => {
+        const active = Diagnostics.active, count = Diagnostics.count, named = [];
+        Diagnostics.active = () => true;
+        Diagnostics.count = (layer, key, label) => { if (key === 'quantity_invalid') named.push(`${layer}:${label}`); };
+        try {
+            const overflow = Network.createQuantityInputs();
+            for (let id = 1; id <= Network.QUANTITY_INPUT_LIMIT + 1; id++) overflow.present(id, 0);
+            assert.equal(overflow.finish(), null, 'one row beyond the cap voids the proof, never a prefix');
+            const conflict = Network.createQuantityInputs();
+            conflict.physical(57, 10); conflict.physical(57, 11); conflict.unsupported();
+            assert.equal(conflict.finish(), null);
+            const complete = Network.createQuantityInputs();
+            complete.physical(57, 10); complete.physical(57, 10);
+            assert.equal(complete.finish().rows.length, 1);
+            assert.deepEqual(named, ['context:rows', 'context:conflict'], 'the first reason only, once per proof');
+        } finally { Diagnostics.active = active; Diagnostics.count = count; }
+        console.log('PASS void quantity proof reasons');
     });
 
     assert.equal(failures.length, 0, failures.map(({ name, error }) => `${name}: ${error.stack}`).join('\n'));
