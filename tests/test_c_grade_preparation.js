@@ -180,8 +180,10 @@ for (const level of [52, 60, 61, 78]) {
     assert.equal(Progression.assess(finished).required, false);
     assert(Planner.considerable(higherEar, finished));
     const next = review(finished, offers);
-    assert(next.projection.roots.some(key => key.startsWith(`power:${higherEar.selfId}:`)),
-        'delivery of the last C piece opens the B offer without another level-up');
+    assert.equal(Progression.acquisitionAssessment(finished).rank, 3);
+    assert(next.projection.roots.some(key => key.startsWith('power:')
+        && Index.find(Data.items, Number(key.split(':')[1]))?.etc.rank === 'b'),
+        'delivery of the last C piece opens B progression without another level-up');
     const bWorn = { ...finished, inventory: { ...delivered,
         [ear.selfId]: { ...delivered[ear.selfId], amount: 1, equippedCount: 1, equippedSlots: [1] },
         [higherEar.selfId]: { selfId: higherEar.selfId, amount: 1, equipped: true,

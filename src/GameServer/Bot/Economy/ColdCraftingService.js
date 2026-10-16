@@ -380,24 +380,31 @@ async function craft(state, random = Math.random) {
     }, 'cold_manufacture');
     const craftReturn = state.stats?.craftReturn;
     const timestamp = Date.now();
+    const needsUnseal = success && !componentCraft && Number(plan.unseal?.sourceId) === Number(recipe.productId);
     // Decide whether to remain at the station after inventory refresh.
     // The crafted output may unlock another component, but if its raw
     // inputs are exhausted the bot must resume farming instead of idling
     // forever in the high-priority crafting queue.
-    const refreshed = await refreshPhysicalInventory(!componentCraft && craftReturn?.loc
+    const refreshed = await refreshPhysicalInventory(!componentCraft && !needsUnseal && craftReturn?.loc
         ? returnTrip(state, state.loc || station.loc, craftReturn, 'equipment_craft_return', timestamp)
         : { ...state, activity: 'hunting',
-            stats: { ...(state.stats || {}), craftReturn: componentCraft ? craftReturn : null, travel: null } });
+            stats: { ...(state.stats || {}), craftReturn: componentCraft || needsUnseal ? craftReturn : null, travel: null } });
+    // The base receipt continues the same town errand. A party return ticket
+    // must not send it back to the field before its final native conversion.
+    const unsealTravel = needsUnseal
+        ? invoke('GameServer/Bot/AI/BotMammonUnseal').beginTravel(refreshed, timestamp, { fromCraft: true }) : null;
     const nextReadyRecipe = componentCraft ? readyRecipeFor(refreshed, finalRecipe) : null;
     const continueCrafting = componentCraft
         && !!nextReadyRecipe
         && !C4DualSwordCombinations.isCombination(nextReadyRecipe);
     const returnAfterComponent = componentCraft && !continueCrafting && craftReturn?.loc;
-    const settled = continueCrafting
+    const settled = unsealTravel || (continueCrafting
         ? { ...refreshed, activity: 'crafting' }
         : returnAfterComponent
             ? returnTrip(refreshed, state.loc || station.loc, craftReturn, 'component_craft_return', timestamp)
-            : refreshed;
+            : needsUnseal && craftReturn?.loc
+                ? returnTrip(refreshed, state.loc || station.loc, craftReturn, 'equipment_craft_return', timestamp)
+                : refreshed);
     return {
         state: settled,
         crafted: success,

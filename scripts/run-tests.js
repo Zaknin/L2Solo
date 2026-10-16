@@ -592,6 +592,7 @@ const tests = [
     'tests/test_craft_station_catalog.js',
     'tests/test_craft_station_saved_upgrade.js',
     'tests/test_b_grade_craft_progression.js',
+    'tests/test_b_grade_acquisition_policy.js',
     'tests/test_cold_worker_message_rejection.js',
     'tests/test_cold_commit_queue.js',
     'tests/test_cold_worker_isolation.js',

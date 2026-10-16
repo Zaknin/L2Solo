@@ -154,7 +154,7 @@ function goalStallAssessment(clan, previousGoal, candidates, options = {}) {
         return { stalled: false, reason: null };
     }
     const now = number(options.now, Date.now());
-    const goalUpdatedAt = number(previousGoal.updatedAt || previousGoal.createdAt);
+    const goalUpdatedAt = number(previousGoal.progressAt || previousGoal.createdAt || previousGoal.updatedAt);
     const ageMs = goalUpdatedAt > 0 ? Math.max(0, now - goalUpdatedAt) : 0;
     const current = candidates.find((candidate) => candidate.assessment.current) || null;
     if (current && !current.route.available) {

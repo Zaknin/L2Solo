@@ -118,6 +118,11 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
                 stats: { ...state.stats, equipmentPlan: undefined }
             }, plannerOptions);
         }
+        if (existing?.strategy === 'direct_drop' && ['b', 'a', 's'].includes(existing.grade)) {
+            const crafted = GearAcquisitionPlanner.planFor(state, { ...plannerOptions,
+                wishTargetId: number(existing.target?.selfId), wishSlot: number(existing.target?.slot) });
+            if (crafted?.strategy === 'craft' && Policy.isAcquisitionPlan(crafted)) return crafted;
+        }
         const rateProfileCurrent = !existing
             || Number(existing.rateModelVersion || 0) >= GearAcquisitionPlanner.RATE_MODEL_VERSION
                 && String(existing.rateProfileSignature || '') === GearAcquisitionPlanner.rateProfileSignature();

@@ -412,12 +412,19 @@ function reservedEquipmentAmounts(state, options = {}) {
     const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
     const combination = reservedCombinationAmounts(state, exchange);
     const upgrades = reservedUpgradeAmounts(state);
+    const unseal = exchange?.unseal;
+    if (unseal && Number(exchange.target?.selfId) === Number(unseal.productId)
+        && invoke('GameServer/Items/C4Unseal').resolve(unseal.sourceId, unseal.productId)
+        && ['active', 'component_ready', 'ready_to_craft', 'deferred'].includes(exchange.status))
+        upgrades[unseal.sourceId] = Math.max(Number(upgrades[unseal.sourceId] || 0), 1);
     for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const [id, amount] of Object.entries(retainedEquipmentAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
         for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
+    if (exchange?.status === 'active') for (const row of exchange.crystalPreparation?.materials || [])
+        upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
     for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const book of invoke('GameServer/Skills/SkillBookCatalog').requiredBooks(state)) {

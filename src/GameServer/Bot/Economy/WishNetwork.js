@@ -6,7 +6,9 @@ const { packetRowWishes } = require('./PurchaseFunding');
 const NEEDS = Object.freeze(['power', 'status', 'care', 'scores']);
 const MAX_NODES = 40;
 const MAX_ROOTS = 12;
-const MAX_DEPTH = 4;
+// B craft -> C crystals -> Luxury C item -> D crystals -> NPC D input.
+// The existing forty-node budget still bounds the complete graph.
+const MAX_DEPTH = 6;
 // One attempt of a chosen path keeps at most this many exact outcomes
 // (EconomicValuation.OUTCOME_LIMIT); a larger composition is unresolved.
 const MAX_BRANCHES = 8;
@@ -358,11 +360,13 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         // without cash, never a costlier step now.
         const completionHours = choice => choice.hours + (adenaToHours > 0
             ? Math.max(0, choice.price - Math.max(0, wallet - survivalReserve)) * adenaToHours : choice.price > wallet ? Infinity : 0);
-        choices.sort((a, b) => completionFirst
+        const acquisitionOrder = (a, b) => a.supported && a.resolved && b.supported && b.resolved
+            ? nonnegative(a.acquisitionOrder) - nonnegative(b.acquisitionOrder) : 0;
+        choices.sort((a, b) => acquisitionOrder(a, b) || (completionFirst
             ? Number(b.supported) - Number(a.supported) || completionHours(a) - completionHours(b) || a.effort - b.effort
             : planning
             ? a.effort - b.effort || Number(b.supported) - Number(a.supported) || Number(b.executable) - Number(a.executable) || a.price - b.price
-            : Number(b.executable) - Number(a.executable) || Number(b.supported) - Number(a.supported) || a.effort - b.effort || a.price - b.price);
+            : Number(b.executable) - Number(a.executable) || Number(b.supported) - Number(a.supported) || a.effort - b.effort || a.price - b.price));
         const best = choices[0] || null;
         if (allocation && best) {
             const transformation = choices.find(choice => choice.kind === 'craft');
@@ -595,7 +599,7 @@ class WishNetwork {
             demands.set(key, (demands.get(key) || 0) + value / amount);
             const plan = complete.execution || complete;
             const share = complete.execution ? Math.min(1, Number(plan.availableUnits) / amount) : 1;
-            const ready = !['craft', 'luxury_exchange', 'crystallize'].includes(plan.kind)
+            const ready = !['craft', 'luxury_exchange', 'crystallize', 'mammon_unseal'].includes(plan.kind)
                 || !plan.awaitingIncoming && !plan.requirements.length;
             const acquired = Math.min(amount, Number(plan.availableUnits ?? Infinity));
             if (plan.activity && plan.executable && ready && acquired > 0) {

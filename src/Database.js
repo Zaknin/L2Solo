@@ -2277,9 +2277,13 @@ function prepareCraftReservationsUnsafe(step, recipe) {
     const stats = jsonObject(step.row.statsJson), plan = stats.equipmentPlan;
     if (plan?.strategy !== 'craft' || plan.clanGoal?.clanId
         || !['active', 'component_ready', 'ready_to_craft'].includes(plan.status)) return;
+    const unsealSource = Number(plan.unseal?.sourceId) === Number(recipe.productId)
+        && Number(plan.target?.selfId) === Number(plan.unseal?.productId)
+        && invoke('GameServer/Items/C4Unseal').resolve(plan.unseal.sourceId, plan.unseal.productId);
     const final = Number(plan.recipeId) === Number(recipe.recipeId)
-        && Number(plan.target?.selfId) === Number(recipe.productId);
+        && (Number(plan.target?.selfId) === Number(recipe.productId) || !!unsealSource);
     const component = Number(recipe.productId) !== Number(plan.target?.selfId)
+        && !unsealSource
         && Number(plan.componentRecipes?.[recipe.productId]) === Number(recipe.recipeId);
     if (!final && !component) return;
     step.reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts({
@@ -8184,25 +8188,29 @@ const Database = {
                 const inputs = proposal.items || [{ selfId: proposal.sourceSelfId, amount: proposal.amount || 1 }];
                 if (!Array.isArray(inputs) || !inputs.length || inputs.length > Crystals.BATCH_LIMIT)
                     throw Error('improvement_source_changed');
-                const claimed = new Set(), selected = []; let total = 0;
+                const claimed = new Set(), selected = []; let total = 0, crystalId = null;
                 for (const input of inputs) {
                     const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id);
-                    if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !Crystals.reward(template)
+                    const reward = Crystals.reward(template);
+                    if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !reward
+                        || crystalId && crystalId !== reward.crystalId
+                        || self && Number(learned?.level || 0) < (template.etc.rank === 'c' ? 2 : 1)
                         || Crystals.free(source, id) < count || selected.length + count > Crystals.BATCH_LIMIT)
                         throw Error('improvement_source_changed');
+                    crystalId = reward.crystalId;
                     claimed.add(id);
                     const rows = physical.filter(row => row.selfId === id && !row.equipped && row.amount === 1).slice(0, count);
                     if (rows.length !== count) throw Error('improvement_source_changed');
                     for (const item of rows) { selected.push(item); total += Crystals.reward(template, item.enchant, self).net; }
                 }
-                const target = one('SELECT id,amount FROM items WHERE characterId=? AND selfId=1458 ORDER BY id LIMIT 1', [characterId]);
+                const target = one('SELECT id,amount FROM items WHERE characterId=? AND selfId=? ORDER BY id LIMIT 1', [characterId, crystalId]);
                 const amount = Number(target?.amount || 0) + total;
                 if (!Number.isSafeInteger(amount) || amount > 2147483647) throw Error('crystal stack is full');
                 for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
                 if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
-                else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(1458,?,?,0,0,?)',
-                    [ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, 1458).template.name, amount, characterId]);
-                changedIds.push(...claimed, 1458); result = 'crystallize';
+                else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,?,0,0,?)',
+                    [crystalId, ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, crystalId).template.name, amount, characterId]);
+                changedIds.push(...claimed, crystalId); result = 'crystallize';
             } else if (proposal.kind === 'luxury_exchange') {
                 const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
                 const recipe = Luxury.resolve(proposal);
@@ -8217,7 +8225,7 @@ const Database = {
                     source.inventory[id] = { ...protectedInventory[id], ...source.inventory[id] };
                 const position = state ? life : character;
                 const town = invoke('GameServer/World/TownRespawn').getClosestTown(position?.locX, position?.locY, position?.locZ);
-                if (!Luxury.eligible(source, recipe) || town?.name !== 'Giran'
+                if (!Luxury.eligible(source, recipe, proposal.forCrystals === true) || town?.name !== 'Giran'
                     || Math.hypot(Number(position.locX) - town.locX, Number(position.locY) - town.locY) > 7500)
                     throw Error('invalid_bot_luxury_exchange');
                 const blocker = Life.marketPurchaseBlocker(source, { selfId: recipe.itemId }, recipe.amount);
@@ -8235,7 +8243,7 @@ const Database = {
                     'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
                     [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
                 changedIds.push(recipe.itemId); result = 'luxury_exchange';
-                const equipped = state && equipColdPurchaseUnsafe(characterId, { row: life }, recipe.itemId, true);
+                const equipped = state && !proposal.forCrystals && equipColdPurchaseUnsafe(characterId, { row: life }, recipe.itemId, true);
                 if (equipped) { changedIds.push(...equipped.ids); equipmentPatch = equipped.patch; }
             } else if (proposal.kind === 'sa') {
                 const SA = invoke('GameServer/Items/C4WeaponSAExchange');

@@ -13,7 +13,7 @@ function personal(state = {}) {
 
 // A milestone describes a usable kit, not a particular shopping list. The
 // shared wish solver still compares buying, earning cash, drops and crafting.
-function assess(state = {}) {
+function assess(state = {}, minimumRank = null) {
     // Clan custody changes where surplus goes, not the member's need for a
     // working kit. Its own wallet and native sources still fund equipment.
     if (!adventurer(state)) return { required: false, gaps: new Map() };
@@ -24,7 +24,7 @@ function assess(state = {}) {
     const Compatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatibility');
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
-    const baseline = Gear.planFor({ classId, level: level < 20 ? 10 : level < 40 ? 20 : 40 });
+    const baseline = Gear.planFor({ classId, level: minimumRank === 3 ? 52 : level < 20 ? 10 : level < 40 ? 20 : 40 });
     const starters = require('../../Knowledge/StarterItemCatalog').ids(Data.newbieItems, true);
     const equipped = new Map();
     for (const row of Object.values(state.inventory || {})) {
@@ -34,7 +34,7 @@ function assess(state = {}) {
     }
     const weapon = equipped.get(7) || equipped.get(14);
     const twoHanded = !!equipped.get(14);
-    const rank = level >= 40 ? 2 : level >= 20 ? 1 : 0;
+    const rank = minimumRank ?? (level >= 40 ? 2 : level >= 20 ? 1 : 0);
     const gaps = new Map();
     for (const entry of baseline.items) {
         const slot = Number(entry.slot);
@@ -70,7 +70,15 @@ function assess(state = {}) {
     }
     // C helmets have no Luxury exchange. Keep the opportunity without
     // holding the working kit, earning routes or higher grades behind it.
-    return { required: [...gaps.values()].some(gap => gap.priority > 0), gaps, starters, role, classId };
+    return { required: [...gaps.values()].some(gap => gap.priority > 0), gaps, starters, role, classId, rank };
+}
+
+function acquisitionAssessment(state = {}) {
+    const current = assess(state);
+    return current.required || Number(state.level) < 52 ? current : assess(state, 3);
+}
+function marketOnly(state, item) {
+    return Number(item?.etc?.slot) > 0 && RANKS.indexOf(item.etc.rank) >= 4 && acquisitionAssessment(state).required;
 }
 
 function isCGradeHelmet(item) {
@@ -81,7 +89,8 @@ function isCGradeHelmet(item) {
 // usable C slot. Already worn higher-grade pieces also satisfy that milestone.
 function acquisitionRankFor(state = {}, assessment = null) {
     const rank = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').gradeForLevel(state.level);
-    return RANKS.indexOf(rank) > RANKS.indexOf('c') && (assessment || assess(state)).required ? 'c' : rank;
+    const current = assessment || assess(state);
+    return current.required && RANKS.indexOf(rank) > (current.rank || 2) ? RANKS[current.rank || 2] : rank;
 }
 
 function gapFor(slot, assessment) {
@@ -131,4 +140,4 @@ function preparedAmounts(state) {
     return reserved;
 }
 
-module.exports = { personal, adventurer, assess, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition, isCGradeHelmet };
+module.exports = { personal, adventurer, assess, acquisitionAssessment, marketOnly, acquisitionRankFor, gapFor, priority, preparation, preparedAmounts, allowsCGradeAcquisition, isCGradeHelmet };

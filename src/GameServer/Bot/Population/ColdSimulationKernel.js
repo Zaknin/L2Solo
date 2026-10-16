@@ -312,7 +312,7 @@ function lifecycleKind(state = {}, context = {}) {
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
     if (['shopping', 'crafting', 'merchant'].includes(state.activity)) return 'command';
-    if (plan.strategy === 'luxury_exchange' && require('../Economy/BotCrystallization').ready(state)) return 'command';
+    if (require('../Economy/BotCrystallization').ready(state)) return 'command';
     if (String(plan.strategy || '') === 'market') {
         const price = Math.max(0, Number(plan.market?.price || 0));
         const reserve = Math.max(0, Number(plan.market?.reserve || 0));

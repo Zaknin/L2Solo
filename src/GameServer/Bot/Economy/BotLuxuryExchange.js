@@ -27,12 +27,12 @@ function resolve(proposal) {
     return recipe && recipe.npcId === Number(proposal.npcId)
         && recipe.recipeIndex === Number(proposal.recipeIndex) ? recipe : null;
 }
-function eligible(state, recipe) {
+function eligible(state, recipe, forCrystals = false) {
     const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
     if (!recipe || !Progression.allowsCGradeAcquisition(state) || Number(state.level) < 20
         || Number(state.level) < 40 && Progression.assess(state).required) return false;
     const Data = invoke('GameServer/DataCache'), Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const item = require('../../Item/ItemTemplateIndex').find(Data.items, recipe.itemId);
-    return !!item && Planner.suitable(item, state, Planner.roleFor(state), 'c');
+    return !!item && (forCrystals && Number(state.level) >= 40 || Planner.suitable(item, state, Planner.roleFor(state), 'c'));
 }
 module.exports = { recipes, resolve, eligible, NPC_IDS, CRYSTAL_D };

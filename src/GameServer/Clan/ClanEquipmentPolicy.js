@@ -208,6 +208,18 @@ function buildGoal(clan, selection, previousGoal = null, timestamp = Date.now(),
         && number(previousGoal.target?.itemId) === itemId
         && number(previousGoal.target?.slot) === number(plan.target?.slot);
     const route = routeFor(plan);
+    const npcId = number(plan.next?.npcId);
+    const telemetry = member.stats?.targetCombat || {};
+    const combat = number(telemetry.targetNpcId) === npcId ? telemetry
+        : telemetry.populationTargets?.[String(npcId)] || {};
+    const materialIds = new Set([...(plan.materials || []).map(row => row.selfId),
+        ...Object.keys(plan.componentRecipes || {}), ...(plan.crystalPreparation?.materials || []).map(row => row.selfId)]);
+    const progressSnapshot = { npcId, kills: number(combat.targetKills),
+        materials: Object.fromEntries([...materialIds].map(id => [id, number(member.inventory?.[id]?.amount)])) };
+    const oldProgress = previousGoal?.progressSnapshot;
+    const progressed = sameTarget && oldProgress?.materials && (npcId > 0 && npcId === number(oldProgress.npcId)
+        && progressSnapshot.kills > number(oldProgress.kills)
+        || Object.entries(progressSnapshot.materials).some(([id, amount]) => amount > number(oldProgress.materials?.[id])));
     const status = plan.status === 'blocked'
         ? 'blocked'
         : ['active', 'ready_to_craft', 'component_ready'].includes(plan.status)
@@ -255,6 +267,9 @@ function buildGoal(clan, selection, previousGoal = null, timestamp = Date.now(),
         priorityScore: number(selection.priority),
         beneficiaryRole: String(options.roleFor?.(member) || member?.stats?.role || 'dps'),
         createdAt: sameTarget ? number(previousGoal.createdAt, timestamp) : timestamp,
+        progressAt: sameTarget && !progressed
+            ? number(previousGoal.progressAt || previousGoal.createdAt, timestamp) : timestamp,
+        progressSnapshot,
         updatedAt: timestamp
     };
 }

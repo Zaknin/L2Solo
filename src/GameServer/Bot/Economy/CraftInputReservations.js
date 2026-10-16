@@ -10,7 +10,7 @@ function selectedCraftAmounts(state, network) {
     function visit(node) {
         if (!node || visited.has(node)) return;
         visited.add(node);
-        if (node.kind === 'craft' || node.kind === 'luxury_exchange') for (const row of node.grossRequirements || node.requirements || []) {
+        if (['craft', 'luxury_exchange', 'mammon_unseal'].includes(node.kind)) for (const row of node.grossRequirements || node.requirements || []) {
             const id = Number(String(row.key).replace(/^item:/, ''));
             if (!id) continue;
             const count = Number(row.amount || 0) * (row.once ? 1 : Math.max(1, Number(node.batches || 1)));
