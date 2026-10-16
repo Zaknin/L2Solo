@@ -48,7 +48,9 @@ if (!process.argv.includes('--gc-child')) {
       parentPort.on('message', message=>{if(message.heapProbe){loaded.exports.forceHeapProbe();parentPort.postMessage({probeDone:true});}});`;
     const epoch = 'heap-gc-native';
     const worker = new Worker(wrapper, { eval: true, workerData: { workerPath, workerEpoch: epoch } });
-    let requested = false, probed = false;
+    let requested = false, probed = false, probes = 0;
+    // A forced GC whose sample comes late on a loaded runner is dropped, so probe again until one is accepted.
+    const probe = () => worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, `probe-${++probes}`), heapProbe: true });
     const timer = setTimeout(() => { console.error('native GC heartbeat timeout'); worker.terminate(); process.exitCode = 1; }, 20000);
     worker.on('error', error => { clearTimeout(timer); console.error(error); process.exitCode = 1; });
     worker.on('message', message => {
@@ -56,9 +58,10 @@ if (!process.argv.includes('--gc-child')) {
             worker.postMessage(Protocol.envelope('init', epoch, { config: { loopIntervalMs: 1000, developerDiagnostics: true } }, 'init'));
         }
         if (message.type === 'ready' && message.payload.phase === 'running' && !requested) {
-            requested = true; worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), heapProbe: true });
+            requested = true; probe();
         }
         if (message.probeDone) probed = true;
+        if (message.type === 'heartbeat' && probed && !(message.payload.heapAfterGc > 0)) probe();
         if (message.type === 'heartbeat' && probed && message.payload.heapAfterGc > 0) {
             try {
                 assert(Number.isFinite(message.payload.heapAfterGc));
