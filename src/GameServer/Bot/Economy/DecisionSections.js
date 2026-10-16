@@ -88,12 +88,12 @@ function capability(state, timestamp = Date.now()) {
         state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
 }
 // The slow part of the build fact: class, level, worn gear, hennas, skills,
-// the hot capture (ColdCombatProfile.holdEvents without its last two parts,
-// effects and night) and the craft. When the build fact moves and this does
-// not, only the fight condition moved. Its parts do not read the clock.
-function kit(state, timestamp = Date.now()) {
+// the hot capture (ColdCombatProfile.kitEvents: holdEvents without its fight
+// part, effects and night) and the craft. When the build fact moves and this
+// does not, only the fight condition moved. Its parts do not read the clock.
+function kit(state) {
     const stats = state.stats || {};
-    return hash([CombatProfile.holdEvents(state, timestamp).slice(0, -2),
+    return hash([CombatProfile.kitEvents(state),
         state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
 }
 function fundingMark(state, escrow = 0) {
@@ -250,7 +250,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
-        ...(facts || semanticFacts(state, context.timestamp)), kit: kit(state, context.timestamp), horizon: context.horizonHours,
+        ...(facts || semanticFacts(state, context.timestamp)), kit: kit(state), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };

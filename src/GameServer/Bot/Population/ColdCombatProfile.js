@@ -956,9 +956,16 @@ function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
 function computePowerKey(state, timestamp, canonicalSlots) {
     return powerParts(state, timestamp, canonicalSlots).join('|');
 }
-// The build inputs of a profile, one part per input event: class (saved,
-// current), level, worn gear, hennas, skills, the hot capture, active effects.
+// The build inputs of a profile, one part per input event: the kit parts
+// (kitParts) and the active effects (effectsPart).
 function powerParts(state, timestamp, canonicalSlots) {
+    const parts = kitParts(state, canonicalSlots);
+    parts.push(effectsPart(state, timestamp));
+    return parts;
+}
+// The slow build inputs, no clock: class (saved, current), level, worn gear,
+// hennas, skills, the hot capture.
+function kitParts(state, canonicalSlots) {
     const saved = state.stats?.coldCombat || {};
     const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'
@@ -966,13 +973,17 @@ function powerParts(state, timestamp, canonicalSlots) {
             row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
-    const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
-        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
     // Main publishes the current class in stats; worker hydration may also
     // carry its alias at the root. Both forms have the same native build.
     return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
-        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects];
+        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null])];
+}
+// The fight condition of a build at timestamp: its active effects.
+function effectsPart(state, timestamp) {
+    const saved = state.stats?.coldCombat || {};
+    return activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
+        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
@@ -990,17 +1001,24 @@ function buildInputKey(state = {}, timestamp = Date.now()) {
 // The combat profile hold (Hold.js place 'combat_profile'): the events of a
 // profile are its build inputs (powerParts, the parts DecisionSections' build
 // fact reads through buildInputKey) and the day/night flip, held as one small
-// hash each under HOLD_EVENTS. Not buildInputKey itself: its buildGainsFor
+// hash each under HOLD_EVENTS: the kit events (kitEvents, no clock) then the
+// fight events (effects, night). Not buildInputKey itself: its buildGainsFor
 // would register a fight state as the owner's economy build. HELD_FIELDS are
 // the computed numbers a held copy is compared on; cp regenerates with time
 // (not an event) and is the last held value, read as drift.
-const HOLD_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture', 'effects', 'night'];
+const KIT_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture'];
+const HOLD_EVENTS = [...KIT_EVENTS, 'effects', 'night'];
 const HELD_FIELDS = ['classId', 'level', 'maxHp', 'maxMp', 'maxCp', 'pAtk', 'mAtk', 'pDef', 'mDef', 'accur', 'evasion',
     'critical', 'mCritRate', 'atkSpd', 'castSpd', 'weaponMask', 'maxLoad'];
-function holdEvents(state = {}, timestamp = Date.now()) {
-    const parts = powerParts(state, timestamp, true);
+// The kit part of holdEvents: one hash per KIT_EVENTS name (DecisionSections.kit).
+function kitEvents(state = {}) {
+    const parts = kitParts(state, true);
     for (let index = 0; index < parts.length; index++) parts[index] = fnv1a32(String(parts[index]));
-    parts.push(GameTime.isNight(timestamp) ? 1 : 0);
+    return parts;
+}
+function holdEvents(state = {}, timestamp = Date.now()) {
+    const parts = kitEvents(state);
+    parts.push(fnv1a32(effectsPart(state, timestamp)), GameTime.isNight(timestamp) ? 1 : 0);
     return parts;
 }
 // The name of the first event between held and current holdEvents, or ''.
@@ -1141,7 +1159,7 @@ function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs,
-    fightSources, holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    fightSources, kitEvents, holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add
