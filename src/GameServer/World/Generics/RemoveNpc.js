@@ -20,7 +20,7 @@ function removeNpc(session, npc) {
         utils.infoWarn('NpcDecay', 'failed to calculate corpse time for NPC %d: %s', npcId, error.message);
     }
     // Register decay before any reward or quest side effect can fail. The
-    // reaper is a durable fallback for the one-shot timer below.
+    // corpse timer retries a failed removal itself (NpcDecay.expire).
     NpcDecay.schedule(this, session, npc, corpseDelay);
 
     SpawnNpcs.clearQuestSpawn(npc);

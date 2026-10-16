@@ -22,6 +22,16 @@ function clearTimer(npc) {
     npc.corpseDecayTimer = undefined;
 }
 
+// The one place a corpse is marked gone: no later timer, retry or batch
+// touches it again.
+function markRemoved(npc) {
+    npc.corpseDecayState = 'removed';
+    npc.corpseDecayAt = 0;
+    npc.corpseDecaySession = null;
+    npc.corpseDecayFailures = 0;
+    clearTimer(npc);
+}
+
 function numericDelay(delayMs) {
     const value = Number(delayMs);
     return Number.isFinite(value) ? Math.max(0, value) : 0;
@@ -84,6 +94,30 @@ function expire(world, npc) {
     return false;
 }
 
+// Takes one corpse out of the grid and the spawn list. Each step is best
+// effort: a failed grid step must not strand the corpse in the list or stop
+// the caller. Returns whether the corpse was in the list.
+function removeFromWorld(world, npc, label) {
+    try {
+        if (world.removeNpcFromGrid) world.removeNpcFromGrid(npc);
+    }
+    catch (error) {
+        logWarning(`grid removal failed for ${label}`, error);
+    }
+    // A corpse already taken out of the list (a spoil sweep, a summon death)
+    // is not there; nothing else needs a scan.
+    const index = world.npc.spawns.indexOf(npc);
+    if (index >= 0) world.npc.spawns.splice(index, 1);
+    if (!world.removeNpcFromGrid) {
+        try {
+            world.indexSpawnsInGrid?.();
+        } catch (error) {
+            logWarning(`grid rebuild failed for ${label}`, error);
+        }
+    }
+    return index >= 0;
+}
+
 function decay(world, npc) {
     if (!world?.npc?.spawns || !npc?.fetchId) return false;
     if (npc.corpseDecayState === 'removed') return false;
@@ -97,33 +131,11 @@ function decay(world, npc) {
         return false;
     }
     const sourceSession = npc.corpseDecaySession;
-    npc.corpseDecayState = 'removed';
-    npc.corpseDecayAt = 0;
-    npc.corpseDecaySession = null;
-    npc.corpseDecayFailures = 0;
-    clearTimer(npc);
+    markRemoved(npc);
 
     // Remove the server object first. Packet delivery is best effort and may
     // fail for a disconnected client; it must not leave a corpse in the grid.
-    try {
-        if (world.removeNpcFromGrid) world.removeNpcFromGrid(npc);
-    }
-    catch (error) {
-        // Grid maintenance is useful but must not prevent the client deletion
-        // packet or strand the corpse in the known-object view.
-        logWarning(`grid removal failed for NPC ${npcId}`, error);
-    }
-    // A corpse already taken out of the list (a spoil sweep, a summon death)
-    // is not there; nothing else needs a scan.
-    const spawnIndex = world.npc.spawns.indexOf(npc);
-    if (spawnIndex >= 0) world.npc.spawns.splice(spawnIndex, 1);
-    if (!world.removeNpcFromGrid) {
-        try {
-            world.indexSpawnsInGrid?.();
-        } catch (error) {
-            logWarning(`grid rebuild failed for NPC ${npcId}`, error);
-        }
-    }
+    removeFromWorld(world, npc, `NPC ${npcId}`);
 
     try {
         NpcVisibility.deleteKnownNpc(world, sourceSession, npcId);
@@ -146,11 +158,7 @@ function decayMany(world, npcs) {
             const npcId = npc.fetchId();
             removed.add(npc);
             notifications.push({ npcId, sourceSession: npc.corpseDecaySession });
-            npc.corpseDecayState = 'removed';
-            npc.corpseDecayAt = 0;
-            npc.corpseDecaySession = null;
-            npc.corpseDecayFailures = 0;
-            clearTimer(npc);
+            markRemoved(npc);
         }
         catch (error) {
             logWarning('failed to prepare NPC for batch decay', error);
@@ -187,28 +195,16 @@ function decayMany(world, npcs) {
     return removed.size;
 }
 
+// The last failed attempt: the corpse is marked gone first, so whatever the
+// world does next, no timer is armed for it again.
 function discardUnremovableNpc(world, npc, attempts) {
-    if (!world?.npc?.spawns || !npc) return false;
+    if (!npc) return false;
+    markRemoved(npc);
+    if (!world?.npc?.spawns) return false;
 
-    const previousLength = world.npc.spawns.length;
-    if (world.removeNpcFromGrid) world.removeNpcFromGrid(npc);
-    const index = world.npc.spawns.indexOf(npc);
-    if (index >= 0) world.npc.spawns.splice(index, 1);
-    if (!world.removeNpcFromGrid) {
-        try {
-            world.indexSpawnsInGrid?.();
-        } catch (error) {
-            logWarning('grid rebuild failed while discarding an unremovable NPC', error);
-        }
-    }
-    npc.corpseDecayState = 'removed';
-    npc.corpseDecayAt = 0;
-    npc.corpseDecaySession = null;
-    npc.corpseDecayFailures = 0;
-    clearTimer(npc);
-
+    const removed = removeFromWorld(world, npc, 'an unremovable NPC');
     logWarning(`discarded unremovable corpse after ${attempts} failed attempts`, 'NPC id unavailable');
-    return world.npc.spawns.length < previousLength;
+    return removed;
 }
 
 function stats() {

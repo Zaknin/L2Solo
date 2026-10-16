@@ -257,13 +257,12 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
         EconomyJournal.begin(operation);
         const candidateCheckpoint = connection?.isTransaction ? ClanReviewInputs.candidateCheckpoint() : null;
         if (!connection?.isTransaction) ClanReviewInputs.beginCandidateCommit();
+        let committed = false;
         try {
             const result = work();
             EconomyJournal.commit();
             if (!connection?.isTransaction) ClanReviewInputs.commitCandidateInputs();
-            // A committed job may have added history outbox rows (directly or
-            // by a trigger); the history thread sleeps until told.
-            if (!read && operation !== 'history:outbox-delete') History.wake();
+            committed = true;
             if (timed) record(operation, wait, now() - startedAt, read);
             return result;
         } catch (error) {
@@ -274,6 +273,10 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
             throw error;
         } finally {
             metrics.pending -= 1;
+            // A committed job may have added history outbox rows (directly or
+            // by a trigger); the history thread sleeps until told. Outside the
+            // try: nothing here can turn a committed job into a discard.
+            if (committed && !read && operation !== 'history:outbox-delete') History.wake();
             if (typeof onTiming === 'function') {
                 // Observability must never turn a committed operation into a failure.
                 try { onTiming(timed ? { waitMs: wait, runMs: now() - startedAt } : undefined); }

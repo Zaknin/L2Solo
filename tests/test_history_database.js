@@ -16,6 +16,8 @@ const Database = invoke('Database');
 const HistoryStore = invoke('HistoryStore');
 const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
+const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
+const History = invoke('HistoryDatabase');
 const SavedGames = require('../scripts/saved-games');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'history-database-'));
@@ -366,11 +368,53 @@ async function overviewWorker() {
     await Database.close();
 }
 
+// A world write wakes the history thread: its rows leave the outbox within a
+// transfer interval, with no flush, no history read and no 60 s retention tick
+// (the only other trigger).
+async function writeWakesHistoryThread() {
+    const transferMs = 50;
+    options.default.Database.historyTransferMs = transferMs;
+    const diagnostics = PopulationConfig.developerDiagnostics;
+    PopulationConfig.developerDiagnostics = true;
+    Database.init();
+    try {
+        const journalRow = (operation) => ({ rows: [{ hour: Math.floor(Date.now() / HOUR_MS), operation, store: 'inventory', selfId: 57, delta: 1, events: 1 }], conflicts: [] });
+        const emptyWithin = async (limitMs, message) => {
+            const deadline = Date.now() + limitMs;
+            while (await outboxRows() !== 0) {
+                assert.ok(Date.now() < deadline, message);
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+        };
+        // Let the start-up transfer pass: it is not the trigger under test.
+        await new Promise((resolve) => setTimeout(resolve, transferMs * 2));
+
+        await Database.recordHistory('journal', journalRow('test:wake-one'));
+        await emptyWithin(transferMs * 2 + 300, 'one write must reach the history file by its own wake');
+
+        const before = History.stats().wakesCoalesced;
+        await Promise.all([
+            Database.recordHistory('journal', journalRow('test:wake-two')),
+            Database.recordHistory('journal', journalRow('test:wake-three'))
+        ]);
+        assert.ok(History.stats().wakesCoalesced - before >= 1, 'a write during a pending wake is counted as coalesced');
+        await emptyWithin(transferMs * 2 + 300, 'back-to-back writes must both leave the outbox');
+        const moved = await Database.readHistory(["SELECT operation FROM economy_flow_hour WHERE operation LIKE 'test:wake-%' ORDER BY operation"]);
+        assert.deepStrictEqual(moved.map((row) => row.operation), ['test:wake-one', 'test:wake-three', 'test:wake-two']);
+    }
+    finally {
+        PopulationConfig.developerDiagnostics = diagnostics;
+        delete options.default.Database.historyTransferMs;
+        await Database.close();
+    }
+}
+
 (async () => {
     try {
         const ids = await tradeWritesWorldAndHistory();
         await finishedClanActions();
         await crashBetweenMoveAndDelete();
+        await writeWakesHistoryThread();
         retention();
         pvpActionsColumn();
         await saves();
