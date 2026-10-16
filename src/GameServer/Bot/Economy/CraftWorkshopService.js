@@ -1,6 +1,7 @@
 'use strict';
 const Profit = require('./CraftProfitPolicy');
 const Commit = require('./EconomyCommit');
+const Diagnostics = require('./EconomyDiagnostics');
 const recipes = () => invoke('GameServer/Items/C4RecipeItems');
 const life = () => invoke('GameServer/Bot/Population/BotLifeState');
 const byRecipe = new Map();
@@ -51,7 +52,13 @@ function watchedInputs() {
 let unsubscribe = null;
 let unsubscribeOwnership = null;
 
+// The state object each owner was last indexed from. Life states are replaced,
+// not mutated, so the same object registered again (the change and the market
+// review listeners both fire for one commit) rebuilds the same rows.
+const registeredStates = new Map();
+
 function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
+    registeredStates.delete(Number(id));
     const removedRecipes = owners.get(Number(id)) || [];
     for (const row of publicRecipeRows(id)) { togglePublicDigest(row, -1); publicCandidates.remove(`w:${Number(id)}:${row[1]}`); }
     if (publish) for (const recipeId of removedRecipes) invoke('GameServer/Bot/Population/ColdTableChannel').shared
@@ -74,6 +81,16 @@ function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
 }
 function register(state) {
     const id = Number(state?.characterId);
+    if (state && state.phase === 'cold' && registeredStates.get(id) === state) {
+        if (!crafters.has(id)) recipesChanged(id);
+        if (Diagnostics.active()) Diagnostics.count('workshop_register', 'skipped', 'same_state');
+        return;
+    }
+    if (Diagnostics.active()) Diagnostics.count('workshop_register', 'rebuilt');
+    indexState(id, state);
+    if (state?.phase === 'cold') registeredStates.set(id, state);
+}
+function indexState(id, state) {
     const previousRows = publicRecipeRows(id);
     remove(id, { recipes: state?.phase !== 'cold', publish: false });
     const publishRows = () => {
@@ -87,7 +104,11 @@ function register(state) {
     };
     if (!state || state.phase !== 'cold') { publishRows(); return; }
     invoke('GameServer/Bot/Economy/ShotMarketIndex').native().update(state);
-    const items = new Set([...watchedInputs()].filter(itemId => Number(state.inventory?.[itemId]?.amount || 0) > 0));
+    const watched = watchedInputs(), items = new Set();
+    for (const key in state.inventory || {}) {
+        const itemId = Number(key);
+        if (watched.has(itemId) && Number(state.inventory[key]?.amount || 0) > 0) items.add(itemId);
+    }
     if (state.stats?.shotDemand?.itemId) items.add(Number(state.stats.shotDemand.itemId));
     if (state.stats?.shotRecipeDemand?.itemId) items.add(Number(state.stats.shotRecipeDemand.itemId));
     for (const itemId of items) {
