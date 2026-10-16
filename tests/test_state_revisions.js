@@ -68,7 +68,8 @@ async function run() {
     assert(result.ok, `commit: ${result.reason}`);
     at = await revisions();
     assert.equal(at.inventoryRevision, before.inventoryRevision + 1, 'the commit moves the bag revision once (no trigger second write)');
-    const { acceptedIncoming, incomingPending, ...columns } = result.row;
+    const columns = { ...result.row };
+    delete columns.acceptedIncoming; delete columns.incomingPending;
     assert.deepEqual(columns, { ...at.row }, 'the built committed row equals the stored row, revisions included');
     state = Life.cachedState(id);
     assert.equal(DB.stateRevisions(state).inventoryRevision, at.inventoryRevision, 'the committed state carries the bag revision');
