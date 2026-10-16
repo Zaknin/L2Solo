@@ -754,14 +754,14 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
     if (plan.bidLimits?.length) await run(async () => {
         if (!stillPrepared()) throw Error('economy_plan_need_changed');
         if (!Array.isArray(plan.bidLimits) || plan.bidLimits.length > 5) throw Error('economy_plan_bid_cap');
-        const reprices = [], withdrawals = [], seen = new Set();
+        const reprices = [], withdrawals = [], seen = new Set(), ads = buyAds(ownerId);
         for (const row of plan.bidLimits) {
             if (!Array.isArray(row) || row.length !== 6 || !row.every(Number.isSafeInteger)
                 || row.slice(0, 5).some(value => value < 1) || row[5] < 0 || row[5] >= row[4] || seen.has(row[0]))
                 throw Error('economy_plan_bid_cap');
             seen.add(row[0]);
             const [lineId, recordId, revision, count, price, ceiling] = row;
-            const ad = buyAds(ownerId).find(record => record.id === recordId);
+            const ad = ads.find(record => record.id === recordId);
             const line = ad?.lines.find(candidate => candidate.id === lineId);
             if (!line?.pricing || ad.revision !== revision || line.count !== count || line.price !== price)
                 throw Error('afk_trade_shop_changed');
@@ -857,6 +857,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         if (Diagnostics.active()) Diagnostics.count('trader_context', 'card', 'plan_sell');
         // Listings come from MarketListingPolicy.evaluate: sale candidates
         // and classify already admitted their sources.
+        let ownSell = null; // read once: the map below writes nothing
         const listings = plan.sell.slice(0, 8).map(([selfId, count, price, town, plannedEnchant]) => {
             const item = ItemTemplateIndex.find(DataCache.items, selfId);
             let enchant = plannedEnchant;
@@ -864,7 +865,8 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 // Older prepared plans can only select a unique enchant.
                 const bag = state.inventory?.[selfId], copies = (bag?.instances || []).filter(row => !row.equipped && row.amount > 0);
                 const enchants = new Set([...copies.map(row => Number(row.enchant || 0)),
-                    ...AfkTrade.boardIndex().ownerLines(ownerId).filter(line => line.storeType === AfkTrade.SELL && line.selfId === Number(selfId))
+                    ...(ownSell ||= AfkTrade.boardIndex().ownerLines(ownerId).filter(line => line.storeType === AfkTrade.SELL))
+                        .filter(line => line.selfId === Number(selfId))
                         .map(line => Number(line.enchant || 0))]);
                 if (!enchants.size) enchants.add(Number(bag?.enchant || 0));
                 if (enchants.size !== 1) throw Error('economy_plan_ambiguous_copies');
@@ -902,14 +904,15 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
     const published = Object.hasOwn(plan, 'buyAds') ? await run(async () => {
         if (!stillPrepared()) throw Error('economy_plan_need_changed');
         if (filledAd()) return { state, buyPending: true };
-        const ads = buyAds(ownerId), existing = linesOf(ads);
+        // One read of the owner's records: nothing below writes before publishBuyAds.
+        const ads = buyAds(ownerId), existing = linesOf(ads), escrow = buyOrderEscrow(ownerId);
         if (Object.hasOwn(plan, 'buyCaps') && (!Array.isArray(plan.buyCaps) || plan.buyCaps.length !== plan.buyAds.length
             || plan.buyCaps.some((cap, at) => cap !== null && (!Number.isSafeInteger(cap) || cap < 1 || plan.buyAds[at][2] > cap))))
             throw Error('economy_plan_bid_cap');
         // Unenchanted bids: their pricing state needs no forecast (see plan.sell).
         const ctx = ListingPolicy.cardTraderContext(state);
         if (Diagnostics.active()) Diagnostics.count('trader_context', 'card', 'plan_buy');
-        let money = PurchaseFunding.budget(state, buyOrderEscrow(ownerId));
+        let money = PurchaseFunding.budget(state, escrow);
         // Planned bids come from BuyAdPolicy.linesFor: bidFor admitted each source.
         // A survival item's ad may spend its kit cost from the survival
         // reserve, as the meeting and the NPC restock do (each item once):
@@ -919,7 +922,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
             const intent = row.length === 9 ? require('./TradeIntent').decode(row) : null;
             const survivalCost = Math.max(0, Math.round(Number(plan.buyKit?.[at]) || 0));
             if (!(selfId > 0 && count > 0 && price > 0) || !intent && count * price > money
-                || count * price > PurchaseFunding.spendable(state, buyOrderEscrow(ownerId),
+                || count * price > PurchaseFunding.spendable(state, escrow,
                     { ...(intent ? { r: intent.valueRate } : { itemId: selfId }), survivalCost })) {
                 throw Error('economy_plan_bid_unfunded');
             }
@@ -934,7 +937,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         // A standing bid may have been repriced since worker preparation.
         // Bound its prepared quantity at the price reconciliation will keep;
         // this does not choose a new price or rebuild the worker's wishes.
-        const budgetState = { ...state, adena: PurchaseFunding.budget(state, buyOrderEscrow(ownerId)) };
+        const budgetState = { ...state, adena: PurchaseFunding.budget(state, escrow) };
         const owned = AfkTrade.boardIndex().ownerLines(ownerId);
         let town = buyAdTown(state, ads, wanted);
         for (let pass = 0; pass <= 3; pass++) {

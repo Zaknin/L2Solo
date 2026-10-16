@@ -749,7 +749,8 @@ const ColdMarketService = {
         const acceptedGoal = GoalState.snapshot(state.characterId)?.current;
         const diagnostics = require('./EconomyDiagnostics');
         const diagnosticGoalRevision = diagnostics.enabled(state.characterId) ? GoalState.snapshot(state.characterId)?.updatedAt : null;
-        if (acceptedGoal && JSON.stringify(acceptedGoal) !== JSON.stringify(goal)) {
+        // The caller usually passes the accepted goal object itself: no copy to compare.
+        if (acceptedGoal && acceptedGoal !== goal && JSON.stringify(acceptedGoal) !== JSON.stringify(goal)) {
             return Promise.resolve({ state, purchased: false, reason: 'stale_purchase_goal' });
         }
         if (goal.plan?.marketTown && String(goal.plan.marketTown) !== String(state.currentRegion)) {
