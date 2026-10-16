@@ -443,19 +443,14 @@ const EQUIPMENT_SLOTS = {
     14: 'two-handed weapon',
     15: 'full armor'
 };
-// The cold-state subscription lives while an observer polls: a state change
-// that finds the last poll older than this ends it, and the next poll resyncs.
-const PROJECTION_IDLE_MS = 120000;
 const projectionRuntime = {
     initialized: false,
     initializing: null,
     dynamicKeys: new Set(),
-    unsubscribe: null,
-    lastPollAt: 0
+    unsubscribe: null
 };
 // Read through worldStatus().runtime.developerDiagnostics.observer.
-const observerStats = { coldProjectionBinds: 0, coldProjectionUnbinds: 0, coldProjectionResyncs: 0,
-    clanContributionBuilds: 0, clanContributionReuses: 0 };
+const observerStats = { clanContributionBuilds: 0, clanContributionReuses: 0 };
 const PROJECTION_FIELDS = Object.freeze([
     'id', 'name', 'phase', 'mode', 'intent', 'role', 'level', 'classId', 'className',
     'raceId', 'exp', 'adena', 'equipmentValue', 'loc', 'area', 'region', 'online',
@@ -635,15 +630,17 @@ function clanOverviewQuery() {
     `, [], { read: true }], 'observer:clans');
 }
 
-// The ledger only gains rows, so its newest id says whether the per-clan sums
-// moved; the sums scan the whole history and are rebuilt only then (a clan or a
-// member deleted with its rows is picked up with the next contribution).
-const clanContributions = { tail: -1, rows: [] };
+// The newest id moves when a row is added and the row count when one leaves (a
+// deleted member or a dissolved clan takes its rows by cascade); the sums scan
+// the whole history and are rebuilt only when either moved.
+const clanContributions = { tail: -1, count: -1, rows: [] };
 async function clanContributionTotals() {
-    const [row] = await Database.execute(['SELECT COALESCE(MAX(id), 0) AS tail FROM clan_contributions', []],
+    const [row] = await Database.execute(
+        ['SELECT COALESCE(MAX(id), 0) AS tail, COUNT(*) AS n FROM clan_contributions', []],
         'observer:clan-contribution-tail');
     const tail = Number(row?.tail || 0);
-    if (tail === clanContributions.tail) {
+    const count = Number(row?.n || 0);
+    if (tail === clanContributions.tail && count === clanContributions.count) {
         observerStats.clanContributionReuses += 1;
         return clanContributions.rows;
     }
@@ -655,6 +652,7 @@ async function clanContributionTotals() {
     `, []], 'observer:clan-contributions');
     observerStats.clanContributionBuilds += 1;
     clanContributions.tail = tail;
+    clanContributions.count = count;
     clanContributions.rows = rows;
     return rows;
 }
@@ -2040,13 +2038,8 @@ function projectionRow(actor) {
 function bindColdProjection() {
     if (projectionRuntime.unsubscribe) return;
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    observerStats.coldProjectionBinds += 1;
     projectionRuntime.unsubscribe = LifeState.subscribeChanges((state) => {
         if (!projectionRuntime.initialized || !state?.characterId) return;
-        if (Date.now() - projectionRuntime.lastPollAt > PROJECTION_IDLE_MS) {
-            unbindColdProjection();
-            return;
-        }
         const BotManager = invoke('GameServer/Bot/BotManager');
         if (BotManager.findSessionById(Number(state.characterId))) return;
         const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
@@ -2055,43 +2048,15 @@ function bindColdProjection() {
     });
 }
 
-// The projection keeps its actors but stops following cold states; the next
-// poll finds no subscription and resyncs them (ensureWorldProjection).
-function unbindColdProjection() {
-    projectionRuntime.unsubscribe?.();
-    projectionRuntime.unsubscribe = null;
-    observerStats.coldProjectionUnbinds += 1;
-    PopulationConfig.developerDiagnostics && console.info(
-        'Observer :: cold projection unbound, no poll for %ds', Math.round(PROJECTION_IDLE_MS / 1000));
-}
-
-function projectionActors(bots, players) {
-    return [
-        ...bots.map((actor) => projectionActor(actor, 'bot')),
-        ...players.map((actor) => projectionActor(actor, 'player'))
-    ];
-}
-
-// Apply the difference between the projection and a fresh collection, so a
-// client one revision behind still gets what changed while nothing followed.
-function resyncProjection(actors) {
-    const fresh = new Set(actors.map((actor) => WorldProjection.keyFor(actor)));
-    const removals = WorldProjection.snapshot().actors
-        .filter((actor) => !fresh.has(WorldProjection.keyFor(actor)))
-        .map((actor) => ({ kind: actor.kind, id: actor.id }));
-    observerStats.coldProjectionResyncs += 1;
-    WorldProjection.apply({ upserts: actors, removals });
-    return WorldProjection.snapshot();
-}
-
 async function ensureWorldProjection() {
-    projectionRuntime.lastPollAt = Date.now();
-    if (projectionRuntime.initialized && projectionRuntime.unsubscribe) return WorldProjection.snapshot();
+    if (projectionRuntime.initialized) return WorldProjection.snapshot();
     if (projectionRuntime.initializing) return projectionRuntime.initializing;
-    const resync = projectionRuntime.initialized;
     projectionRuntime.initializing = collectWorldActors().then(({ bots, players }) => {
-        const actors = projectionActors(bots, players);
-        const result = resync ? resyncProjection(actors) : WorldProjection.reset(actors);
+        const actors = [
+            ...bots.map((actor) => projectionActor(actor, 'bot')),
+            ...players.map((actor) => projectionActor(actor, 'player'))
+        ];
+        const result = WorldProjection.reset(actors);
         projectionRuntime.dynamicKeys = new Set([
             ...bots.filter((actor) => actor.phase === 'hot').map((actor) => `bot:${Number(actor.id)}`),
             ...players.map((actor) => `player:${Number(actor.id)}`)

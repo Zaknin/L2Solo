@@ -59,8 +59,10 @@ function aggregate(all, since) {
     };
 }
 
-// The newest trade id: it moves exactly when a trade is added (the table only
-// grows inside the retention window), so it says whether windows can have changed.
+// The newest trade id: it moves when a trade is added, so it says whether windows
+// can have changed. A deleted character's trades leave at any age (HistoryStore)
+// without moving it; with the id unchanged the reused windows can over-count for
+// at most WINDOWS_MAX_MS (MarketTradeOverviewWorker.js).
 function tailId(all) {
     return Number(all('SELECT MAX(id) AS id FROM market_trades')[0]?.id || 0);
 }
