@@ -4192,38 +4192,29 @@ const BotLifeState = {
         return { ...marketGoalCursor };
     },
 
+    // Bots by phase and level, counted from the cache: it holds every row of
+    // the table and is written with it, so the director needs no table scan.
     levelHistogram() {
         if (!initialized) {
             return Promise.resolve({ levels: [], phases: {}, total: 0 });
         }
-
-        return Database.execute([
-            `SELECT phase, level, COUNT(*) AS count
-            FROM ${TABLE}
-            GROUP BY phase, level
-            ORDER BY level ASC`,
-            []
-        ]).then((rows) => {
-            const levels = [];
-            const phases = {};
-            let total = 0;
-
-            rows.forEach((row) => {
-                const phase = row.phase || 'cold';
-                const level = Number(row.level || 1);
-                const count = Number(row.count || 0);
-
-                levels.push({ phase, level, count });
-                if (!phases[phase]) phases[phase] = 0;
-                phases[phase] += count;
-                total += count;
-            });
-
-            return { levels, phases, total };
-        }).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to read level histogram: %s', err.message);
-            return { levels: [], phases: {}, total: 0 };
-        });
+        const counts = new Map();
+        for (const state of cache.values()) {
+            const phase = state.phase || 'cold';
+            const level = Number(state.level || 1);
+            const key = `${phase}\u0000${level}`;
+            const row = counts.get(key);
+            if (row) row.count += 1;
+            else counts.set(key, { phase, level, count: 1 });
+        }
+        const levels = [...counts.values()].sort((a, b) => a.level - b.level);
+        const phases = {};
+        let total = 0;
+        for (const row of levels) {
+            phases[row.phase] = (phases[row.phase] || 0) + row.count;
+            total += row.count;
+        }
+        return Promise.resolve({ levels, phases, total });
     }
 };
 
