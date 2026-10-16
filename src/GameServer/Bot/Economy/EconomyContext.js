@@ -215,8 +215,9 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
         stats.production, role, state.accountName])}` };
     const sourceStable = { ...stable, inventory: Object.fromEntries(Object.entries(inventory)
         .filter(([, row]) => row.equipped || row.equippedCount)), stats: { ...stable.stats, memoryRevision: 0 } };
-    const sourceKey = `${inputKey(sourceStable, { ...deps, memory: null })}|${build}|${Sections.hash([
-        calculationPlan, stats.craftStationId, stats.persona, state.marketTrades, stats.marketTrades,
+    const sourceParts = inputKeyParts(sourceStable, { ...deps, memory: null });
+    // One element per SOURCE_TAIL_PARTS name, in its order.
+    const sourceTail = [calculationPlan, stats.craftStationId, stats.persona, state.marketTrades, stats.marketTrades,
         role, state.accountName,
         // Source descriptors include route admission. Reuse only while the
         // native active exclusions are equal at this already scheduled review.
@@ -224,9 +225,19 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
         stats.huntEfficiency, stats.huntClock, stats.spotRisk,
         stats.money ? [stats.money[0], Number(stats.money[3]) > 0] : stats.wishFocus?.[2],
         stats.exp ?? state.exp,
-        Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0])}`;
-    return { build, sources: sourceKey };
+        Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0];
+    const sourceKey = `${sourceParts.join('|')}|${build}|${Sections.hash(sourceTail)}`;
+    // 'source_parts' (diagnostics only): the same key with its parts, to name the moved ones.
+    return part === 'source_parts' ? { build, sources: sourceKey, parts: sourceParts, tail: sourceTail } : { build, sources: sourceKey };
 }
+// Diagnostics only: the names of the source key's parts after the inputKey
+// parts and the capability, one per sourceTail element in its order.
+const SOURCE_TAIL_PARTS = Object.freeze(['equipment_plan', 'craft_station', 'persona', 'state_market_trades', 'stats_market_trades',
+    'role', 'account', 'excluded_spots', 'hunt_efficiency', 'hunt_clock', 'spot_risk', 'money', 'exp', 'crafter_mp']);
+// The digest of each source key part, named by [...INPUT_KEY_PARTS, 'build', ...SOURCE_TAIL_PARTS].
+const sourcePartHashes = keys => Uint32Array.from([...partHashes(keys.parts), fnv1a32(keys.build), ...keys.tail.map(part => fnv1a32(JSON.stringify(part) ?? ''))]);
+const sourcePartName = index => index < INPUT_KEY_PARTS.length ? INPUT_KEY_PARTS[index] : index === INPUT_KEY_PARTS.length ? 'build'
+    : SOURCE_TAIL_PARTS[index - INPUT_KEY_PARTS.length - 1] || `part_${index}`;
 // Diagnostics only (L115): the group name of each '|' segment of the
 // structural key above, in its order: the inputKey fields, then the
 // capability, then the JSON tail (equipment plan, persona, spot deaths,
@@ -1036,7 +1047,9 @@ function buildForState(state, deps) {
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
             fenceData: { reads: held.reads, spots: held.spotReads } });
     }
-    const sections = sectionKeys(state, { ...deps, timestamp }, [], 'sources');
+    // With diagnostics the same key also names its parts; they are not retained.
+    const { parts: sourceParts, tail: sourceTail, ...sections } = sectionKeys(state, { ...deps, timestamp }, [],
+        diagnostic ? 'source_parts' : 'sources');
     const started = diagnostic ? performance.now() : 0;
     // Identity replacement is the worker's technical safety backstop, not an
     // economic event. An input-key mismatch is named as a dependency change;
@@ -1078,8 +1091,19 @@ function buildForState(state, deps) {
             probe = !held ? 'no_held' : Number(stats.activityLeaf || 0) === Number(packet?.activityLeaf || 0)
                 && Number(stats.decisionSeq || 0) === Number(packet?.decisionSeq || 0) ? 'echo' : 'no_echo';
         }
+        // The source memo key since the actor's previous build: same, or which parts moved.
+        const sourceHash = fnv1a32(sections.sources), sourceHashes = sourcePartHashes({ ...sections, parts: sourceParts, tail: sourceTail });
+        Diagnostics.count('source_memo', 'shadow', !last?.sourceParts ? 'no_previous' : last.sourceHash === sourceHash ? 'same_key' : 'new_key');
+        if (last?.sourceParts?.length === sourceHashes.length && last.sourceHash !== sourceHash) {
+            let moved = 0;
+            for (let i = 0; i < sourceHashes.length; i++) if (sourceHashes[i] !== last.sourceParts[i]) {
+                moved++; Diagnostics.count('source_memo', 'key_part', sourcePartName(i));
+            }
+            Diagnostics.count('source_memo', 'key_parts', moved === 1 ? '1' : moved === 2 ? '2' : '3+');
+        }
         const kept = deps.rememberContext !== false;
-        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null };
+        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
+            sourceHash, sourceParts: sourceHashes };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1245,6 +1269,8 @@ function buildForState(state, deps) {
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = held?.sections?.sources === sections.sources
         ? held.sourceSections : null;
+    if (diagnostic) Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
+        : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'key');
     const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra] });
     context.projection = projection;
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,

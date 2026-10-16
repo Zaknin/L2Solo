@@ -1071,16 +1071,25 @@ function buildProjection(state, ctx, deps) {
         Diagnostics.count('provider', 'admission', 'round', admission.rounds);
         Diagnostics.count('provider', 'admission', 'gear_root', admittedGear.length);
         for (const row of admission.pending) Diagnostics.count('provider', 'admission_pending', row.reason);
+        // On a source memo hit: descriptors offered, kept by their input fence, and built anew.
+        if (deps.sourceSections) {
+            Diagnostics.count('source_memo', 'descriptors', 'offered', deps.sourceSections.nodes?.length || 0);
+            Diagnostics.count('source_memo', 'descriptors', 'kept', keptSources.length);
+            Diagnostics.count('source_memo', 'descriptors', 'built', descriptorInputs.size - keptSources.length);
+        }
     }
     const keptNodes = nodes.filter(node => cut.kept.has(node.key));
-    let sourceSections = null;
+    let sourceSections = null, sourceBytes = -1;
     // structuredClone rejects an extension that supplied a function/closure;
     // such an input falls back to calculation instead of retaining a caller.
     try {
         const candidate = { nodes: keptNodes.filter(node => node.key.startsWith('item:') && descriptorInputs.has(node.key))
             .map(node => ({ node, inputs: descriptorInputs.get(node.key) })) };
-        if (Buffer.byteLength(JSON.stringify(candidate)) <= 8192) sourceSections = structuredClone(candidate);
+        sourceBytes = Buffer.byteLength(JSON.stringify(candidate));
+        if (sourceBytes <= 8192) sourceSections = structuredClone(candidate);
     } catch (_) { /* An uncloneable candidate falls back to calculation. */ }
+    if (Diagnostics.active()) Diagnostics.count('source_memo', 'size', sourceBytes < 0 ? 'unmeasured'
+        : sourceBytes < 2048 ? 'lt2k' : sourceBytes < 4096 ? '2_4k' : sourceBytes <= 8192 ? '4_8k' : 'over8k');
     return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
 }
 // Only public recipe rows and a prepared route can prove a usable service.
