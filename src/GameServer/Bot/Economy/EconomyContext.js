@@ -480,19 +480,34 @@ function bagHolds(state, plan, timestamp) {
 // root's input (a wished material reaching its count).
 const ownQuantityRow = (row, rootKey, own) => row[0] === 'stock' || row[0] === 'stockPhysical'
     ? row[1] === rootKey && row[2] === own : row[1] === own;
+// The first input a completed build lacks for an event proof, '' if none.
+function eventProofMissing(state, deps, plan) {
+    if (!plan || plan.pending) return 'pending';
+    if (!plan.quantityInputs) return 'quantity_inputs';
+    if (!plan.liquidationInputs) return 'liquidation_inputs';
+    if (extensions.size) return 'extensions';
+    if (deps.nodes?.length) return 'nodes';
+    if (state.incomingPending) return 'incoming_pending';
+    if (!plan.statsPacket?.wishSections) return 'sections';
+    if (!Warehouse.contentIdentity(state)) return 'warehouse';
+    if (!ClanSupply.contentIdentity(state)) return 'clan_supply';
+    if (!RecomputeGeneration.current()) return 'generation';
+    if (!validProducerScope(deps.producerScope)) return 'producer_scope';
+    const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
+    if (leaf === null ? plan.pending !== false || plan.intentPending !== false || plan.statsPacket.activityLeaf !== 0
+        : !leaf?.activity) return 'leaf';
+    if (!Number.isFinite(baseline.at) || !Sections.observationBaselineValid(baseline)) return 'baseline';
+    return '';
+}
 // This proof is produced by the completed native build, shared by its cache
 // entry and compact execution card. It is never reconstructed from a later
 // publication. Market/occupancy reads retain their original soft deadline.
 function captureEventProof(state, deps = {}, options = {}) {
-    const plan = options.plan;
-    if (!plan || plan.pending || !plan.quantityInputs || !plan.liquidationInputs || extensions.size || deps.nodes?.length
-        || state.incomingPending || !plan.statsPacket?.wishSections
-        || !Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state) || !RecomputeGeneration.current()
-        || !validProducerScope(deps.producerScope)) return null;
+    const plan = options.plan, missing = eventProofMissing(state, deps, plan);
+    // Diagnostics: per completed build, captured or the first missing input.
+    Diagnostics.count('context', 'proof', missing || 'captured');
+    if (missing) return null;
     const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
-    if (leaf === null ? plan.pending !== false || plan.intentPending !== false || plan.statsPacket.activityLeaf !== 0
-        : !leaf?.activity) return null;
-    if (!Number.isFinite(baseline.at) || !Sections.observationBaselineValid(baseline)) return null;
     const actual = { ...state, stats: { ...state.stats, ...plan.statsPacket } };
     return Object.freeze({ version: 1, owner: Number(state.characterId), at: baseline.at,
         generation: RecomputeGeneration.current(),
