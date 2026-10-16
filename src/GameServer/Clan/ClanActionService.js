@@ -12,6 +12,7 @@ const OrderService = invoke('GameServer/Clan/ClanOrderService');
 const TitleService = invoke('GameServer/Clan/ClanTitleService');
 const StageMetrics = invoke('GameServer/Clan/ClanStageMetrics');
 const ReviewEvents = require('./ClanReviewEvents');
+const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
 const { randomUUID } = require('node:crypto');
 
 const ACTION_TYPES = Object.freeze({
@@ -221,18 +222,71 @@ async function resolveProduction(clan, options = {}) {
         ...(result.continuation ? { reason: 'clan_planning_deferred' } : {}) };
 }
 
+// A clan whose review met an action still leased by an earlier process: its
+// review waits for the lease end (`until`), the event that ends this wait,
+// instead of being raised again on every pass until the lease runs out.
+const leaseWaits = new Map();
+
+function releaseLeaseWaits(at = Date.now()) {
+    for (const [clanId, until] of leaseWaits) {
+        if (until > at) continue;
+        leaseWaits.delete(clanId);
+        ReviewEvents.changed(clanId, 'pending_review');
+    }
+}
+
+// The other end of the wait: this process resolved an action of the clan
+// before its lease ran out.
+function endLeaseWait(clanId) {
+    if (!leaseWaits.delete(number(clanId))) return;
+    Diagnostics.count('clan_review', 'lease_wait', 'resolved');
+    ReviewEvents.changed(number(clanId), 'pending_review');
+}
+
+// The open plan and supplies actions of the drained clans, one read per
+// drain. A pending action takes the change (it reads its input when it
+// runs); otherwise a running one, with its lease end.
+async function openReviewActions(clanIds) {
+    const types = [ACTION_TYPES.PLAN, ACTION_TYPES.SUPPLIES];
+    const rows = await Database.execute([`SELECT clanId, actionType, status, leaseUntil FROM clan_actions
+        WHERE clanId IN (${clanIds.map(() => '?').join(',')}) AND actionType IN (?, ?) AND status IN ('pending','running')`,
+    [...clanIds, ...types]], 'clan-review:active');
+    const open = new Map();
+    for (const row of rows) {
+        const key = `${number(row.clanId)}:${row.actionType}`;
+        if (open.get(key)?.status !== 'pending') open.set(key, row);
+    }
+    Diagnostics.count('clan_review', 'active_read', 'batched');
+    Diagnostics.count('clan_review', 'active_read', 'replaced', clanIds.length * types.length);
+    return open;
+}
+
 async function scheduleReviews() {
+    const at = Date.now();
+    releaseLeaseWaits(at);
     const events = await ReviewEvents.drain(Database);
+    if (!events.length) return;
+    let open;
+    try { open = await openReviewActions(events.map(event => event.clanId)); } catch (error) {
+        for (const event of events) for (const cause of event.causes) ReviewEvents.changed(event.clanId, cause);
+        throw error;
+    }
     for (let index = 0; index < events.length; index++) {
         const event = events[index];
         try {
             for (const actionType of [ACTION_TYPES.PLAN, ACTION_TYPES.SUPPLIES]) {
-                const [active] = await Database.execute([`SELECT id,status FROM clan_actions WHERE clanId=?
-                    AND actionType=? AND status IN ('pending','running') LIMIT 1`, [event.clanId, actionType]], 'clan-review:active');
+                const active = open.get(`${event.clanId}:${actionType}`);
                 // A running action owns its captured input. Keep the event for
-                // a later pass instead of discarding a concurrent change.
+                // a later pass instead of discarding a concurrent change: at
+                // its lease end, or at once when the lease has run out.
                 if (active) {
-                    if (active.status === 'running') ReviewEvents.changed(event.clanId, 'pending_review');
+                    if (active.status === 'running') {
+                        const until = number(active.leaseUntil);
+                        if (until > at) {
+                            leaseWaits.set(event.clanId, Math.max(leaseWaits.get(event.clanId) || 0, until));
+                            Diagnostics.count('clan_review', 'lease_wait', 'parked');
+                        } else ReviewEvents.changed(event.clanId, 'pending_review');
+                    }
                     continue;
                 }
                 await Database.enqueueClanAction({ clanId: event.clanId, actionType, priority: actionType === ACTION_TYPES.PLAN ? 75 : 40,
@@ -638,7 +692,7 @@ const ClanActionService = {
     actionTypes: ACTION_TYPES,
     bootstrap,
     startEvents(onWake) { return ReviewEvents.start(invoke('GameServer/Bot/Population/BotLifeState'), invoke('GameServer/AfkTrade/AfkTradeService'), onWake); },
-    stopEvents: ReviewEvents.stop,
+    stopEvents() { leaseWaits.clear(); ReviewEvents.stop(); },
     hasEvents: () => ReviewEvents.pending() > 0,
     scheduleReviews,
     scheduleTitleReview,
@@ -676,6 +730,7 @@ const ClanActionService = {
             // live queue to claim and release the same oldest action forever
             // whenever SQLite needed more than the 80ms idle budget.
             const deadlineAt = Date.now() + budgetMs;
+            let drained = false;
             while (summary.attempted < safeLimit) {
                 if (Date.now() >= deadlineAt) {
                     summary.budgetStopped = true;
@@ -690,7 +745,7 @@ const ClanActionService = {
                 });
                 DiagnosticConfig.developerDiagnostics && (metrics.leaseRecoveries += number(claim?.recovered));
                 const action = claim?.action || null;
-                if (!action) break;
+                if (!action) { drained = true; break; }
                 DiagnosticConfig.developerDiagnostics && (metrics.claimed += 1);
                 summary.claimed += 1;
                 DiagnosticConfig.developerDiagnostics && (metrics.queueAgeMs += Math.max(0, Date.now() - number(action.createdAt, Date.now())));
@@ -719,12 +774,19 @@ const ClanActionService = {
 
                 const resolvedBefore = metrics.resolved;
                 const result = await resolveAction(action, { deadlineAt });
+                endLeaseWait(action.clanId);
                 summary.attempted += 1;
                 if (result.status === 'succeeded') summary.succeeded += 1;
                 if (result.status === 'failed' || result.ok === false) summary.failed += 1;
                 if (metrics.resolved > resolvedBefore) summary.resolved += 1;
             }
-            const queue = await refreshQueueStats();
+            // The caller reads only queue.ready, and only to continue soon: a
+            // drained queue (no claimable action) has none ready, and a budget
+            // stop continues anyway. Read the stats when the batch limit
+            // stopped the loop, or for the diagnostics.
+            const readStats = DiagnosticConfig.developerDiagnostics || (!drained && !summary.budgetStopped);
+            Diagnostics.count('clan_actions', 'queue_stats', readStats ? 'read' : 'skipped');
+            const queue = readStats ? await refreshQueueStats() : { ready: 0 };
             summary.leftRunning = number(queue.running);
             summary.queue = queue;
             return summary;
