@@ -35,6 +35,10 @@ const GEAR_RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 const GEAR_ROOTS = 4;
 const GEAR_ROUNDS = 4;
 const SOLVER_LIMITS = new Set(['missing_wish_requirement', 'cyclic_wish_network', 'invalid_wish_node', 'wish_network_depth']);
+function nominationBasis(state) {
+    const focus = String(state.stats?.wishFocus?.[0] || '').match(/^power:(\d+):/);
+    return Object.freeze([Number(state.stats?.equipmentPlan?.target?.selfId || 0), Number(focus?.[1] || 0)]);
+}
 function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisitionAllowed = null, progression = null, exchanges = null) {
     const Data = invoke('GameServer/DataCache');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -45,8 +49,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
     const maxRank = GEAR_RANKS.indexOf(Progression.acquisitionRankFor(state, progression || undefined));
     const result = new Map();
     const budget = Math.max(0, Number(ctx?.wallet ?? Funding.budget(state)) - Number(ctx?.survivalReserve || 0));
-    const target = Number(state.stats?.equipmentPlan?.target?.selfId || 0);
-    const held = String(state.stats?.wishFocus?.[0] || '').match(/^power:(\d+):/);
+    const [target, held] = ctx?.nominationBasis || nominationBasis(state);
     const slotKits = new Map(kits);
     for (const [first, second] of [[1, 2], [4, 5]]) if (slotKits.has(first) && !slotKits.has(second)) slotKits.set(second, slotKits.get(first));
     for (const [slot, kit] of slotKits) {
@@ -71,7 +74,7 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
             ctx.budgetBoundary?.(price + Number(ctx.survivalReserve || 0));
             const score = kit.scoreAt(at);
             const row = { item, price, score, ratio: Math.max(0, score - before) / price };
-            if (Number(item.selfId) === target || Number(item.selfId) === Number(held?.[1])) retained = row;
+            if (Number(item.selfId) === target || Number(item.selfId) === held) retained = row;
             // A proxy can nominate a same-score SA/set alternative, but cannot
             // declare its true build benefit; gearGain does that below.
             if (score < before) continue;
@@ -1283,4 +1286,4 @@ function liquidationInputs(state, basis) {
     });
     return { proof, candidates };
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };

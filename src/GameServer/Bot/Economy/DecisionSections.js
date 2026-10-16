@@ -8,10 +8,45 @@ const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
 // Read through the module object at call time (tests replace buildInputKey).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
 let EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
+const SAMPLE_BYTES = 20;
+function sampleRows(value) {
+    if (typeof value === 'string') {
+        if (!value.startsWith('s1:') || value.length > 3 + Math.ceil(Hunt.MAX_SPOTS * SAMPLE_BYTES / 3) * 4) return null;
+        const encoded = value.slice(3), bytes = Buffer.from(encoded, 'base64');
+        if (!bytes.length || bytes.length % SAMPLE_BYTES || bytes.toString('base64') !== encoded) return null;
+        value = [];
+        for (let at = 0; at < bytes.length; at += SAMPLE_BYTES) {
+            value.push([bytes.readUInt32LE(at), bytes.readDoubleLE(at + 4), bytes.readDoubleLE(at + 12)]);
+        }
+    }
+    if (!Array.isArray(value) || value.length > Hunt.MAX_SPOTS) return null;
+    for (const row of value) {
+        if (!Array.isArray(row) || row.length !== 3 || !Number.isInteger(row[0]) || row[0] < 0 || row[0] > 0xffffffff
+            || !Number.isFinite(row[1]) || !Number.isFinite(row[2])) return null;
+    }
+    return value;
+}
+function packSample(rows) {
+    if (!Array.isArray(rows) || !sampleRows(rows)) return null;
+    if (!rows.length) return [];
+    const bytes = Buffer.allocUnsafe(rows.length * SAMPLE_BYTES);
+    rows.forEach((row, at) => {
+        const offset = at * SAMPLE_BYTES;
+        bytes.writeUInt32LE(row[0], offset); bytes.writeDoubleLE(row[1], offset + 4); bytes.writeDoubleLE(row[2], offset + 12);
+    });
+    return `s1:${bytes.toString('base64')}`;
+}
+function observationBaselineValid(baseline, rows) {
+    if (!baseline || typeof baseline !== 'object' || Array.isArray(baseline)) return false;
+    if (rows === undefined) rows = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
+    return rows !== null && (!Object.hasOwn(baseline, 'share') || Number.isFinite(baseline.share)
+        && baseline.share >= 0 && baseline.share <= 1);
+}
 // The decision sections in the order of their wishDirty bit (1 << at): one
 // table for the raise (DecisionEvents) and the names its readers count.
 const SECTIONS = Object.freeze(['build', 'combat', 'supply', 'benefits', 'sources', 'occupation', 'money', 'relations']);
@@ -93,6 +128,11 @@ function baselineIdentity(baseline) {
     };
     try {
         if (!baseline || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+        const rows = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
+        if (!observationBaselineValid(baseline, rows)) return null;
+        if (Object.hasOwn(baseline, 'sample')) {
+            baseline = { ...baseline, sample: rows };
+        }
         return createHash('sha256').update(JSON.stringify(canonical(baseline))).digest('hex');
     } catch (_) { return null; }
 }
@@ -115,7 +155,7 @@ function carrySectionBaseline(previous, current, updated) {
         }
     };
     carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
-    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'incomeError', 'expHour']);
+    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour']);
     carry(sectionBit('benefits'), ['horizon']);
     carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
     return carrySectionClocks(previous, current, updated);
@@ -136,22 +176,26 @@ function incomeError(state, persona) {
         .03, state.stats?.lifelongKills ?? state.stats?.fightsWon ?? 0, Learning.gradeOfLevel(state.level)) : 0;
 }
 function sample(state, timestamp = Date.now(), mode) {
-    const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const rows = Hunt.sampledRows(state, timestamp, mode);
     return rows.map(row => [hash(row.spotId), row.exp / row.cycleMs,
         (positive(row.adena) + positive(row.loot) - positive(row.costs)) / row.cycleMs]);
 }
-function learnedChange(current, previous, error) {
+function learnedChange(current, previous, error, share, previousShare) {
     if (current.length !== previous.length) return true;
     return current.some((row, at) => row[0] !== previous[at]?.[0] || row.slice(1).some((value, index) => {
-        const old = Number(previous[at]?.[index + 1]);
-        return !Number.isFinite(old) || Math.abs(value - old) > Math.abs(old) * error;
+        const old = Number(previous[at]?.[index + 1]) * previousShare;
+        return !Number.isFinite(old) || Math.abs(value * share - old) > Math.abs(old) * error;
     }));
 }
 function observationChanged(state, baseline, timestamp, mode) {
     if (!baseline) return true;
     const current = sample(state, timestamp, mode);
-    return learnedChange(current, baseline.sample || [], positive(baseline.incomeError));
+    const previous = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
+    const share = Hunt.onSpotShare(state), previousShare = baseline.share ?? 1;
+    const error = positive(baseline.incomeError);
+    return !observationBaselineValid(baseline, previous) || !Number.isFinite(share)
+        || Math.abs(share - previousShare) > previousShare * error
+        || learnedChange(current, previous, error, share, previousShare);
 }
 function observationEvent(state, baseline, timestamp, mode) {
     if (!baseline) return true;
@@ -175,12 +219,14 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     // budgetBounds tags the budget-aware schema. Its wallet/error use total
     // purchase funds; cashBounds still records physical fees. Old wallets are cash.
     const wallet = budgetTracked ? PurchaseFunding.budget(state, escrow) : positive(state.adena);
+    const share = Hunt.onSpotShare(state);
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...semanticFacts(state, context.timestamp), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
-        incomeError: incomeError(state, persona), sample: sample(state, context.timestamp, mode) };
+        incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
+        ...(share === 1 ? {} : { share }) };
 }
 function semanticFacts(state, timestamp) {
     const stats = state.stats || {};
@@ -247,4 +293,4 @@ function factEvents(previousFact, current, after, funding = false) {
     return [...sections];
 }
 module.exports = { SECTIONS, sectionBit, sectionMask, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };
+    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };

@@ -3,6 +3,7 @@
 // through at once; soft changes wait for their kind's wall-clock delay since
 // the last actual decision (docs/principles.md section 3 point 5).
 const assert = require('node:assert/strict');
+const { isDeepStrictEqual, inspect } = require('node:util');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l70-held-plan-'));
 process.env.L2NODE_CONFIG_FILE = path.join(dir, 'config.ini');
@@ -53,6 +54,147 @@ function decided(characterId, adena) {
 // inside its quantity band, one adena more.
 const ownResult = (state, activity = 'resting') => ({ ...state, activity, adena: state.adena + 1, inventory: bag(1),
     updatedAt: state.updatedAt + 1, vitals: { ...state.vitals, mp: state.vitals.mp - 1 }, stats: { ...state.stats } });
+
+function stateDifferences(actual, expected, field = 'state', result = []) {
+    if (Object.is(actual, expected) || result.length >= 8) return result;
+    if (!actual || !expected || typeof actual !== 'object' || typeof expected !== 'object') {
+        const show = value => inspect(value, { depth: 0, maxStringLength: 64, breakLength: Infinity });
+        result.push(`${field}: ${show(actual)} != ${show(expected)}`);
+    } else {
+        if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) result.push(`${field}: prototype identity differs`);
+        for (const key of new Set([...Object.keys(actual), ...Object.keys(expected)])) {
+            if (result.length >= 8) break;
+            if (Object.hasOwn(actual, key) !== Object.hasOwn(expected, key)) result.push(`${field}.${key}: own-property presence differs`);
+            else stateDifferences(actual[key], expected[key], `${field}.${key}`, result);
+        }
+    }
+    return result;
+}
+
+async function nullLifecycleParity() {
+    const nativeTime = 1791741600000, id = 990771;
+    const Gear = invoke('GameServer/Bot/AI/BotGear'), Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner'), Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
+    const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex'), Supplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+    const Memory = invoke('GameServer/Social/InteractionMemory'), Policy = invoke('GameServer/Social/InteractionMemoryPolicy');
+    const nativeBoard = new BoardIndex(), memory = new Memory(), inventory = {};
+    memory.accept(Policy.empty(id));
+    for (const row of Gear.planFor({ classId: 46, level: 20 }).items) {
+        if ([7, 14].includes(row.slot)) continue;
+        const held = inventory[row.selfId];
+        inventory[row.selfId] = { ...row, amount: Number(held?.amount || 0) + 1, equipped: true,
+            equippedCount: Number(held?.equippedCount || 0) + 1, equippedSlots: [...held?.equippedSlots || [], row.slot] };
+    }
+    inventory[86] = { selfId: 86, amount: 1, slot: 7, equipped: true, equippedCount: 1, equippedSlots: [7] };
+    inventory[1463] = { selfId: 1463, amount: 100000 }; inventory[1458] = { selfId: 1458, amount: 141 };
+    const crystal = { ...subject(id, 3632378), level: 49, clanId: 7, inventory, updatedAt: nativeTime,
+        stats: { classId: 46, exp: Data.experience[48] }, timing: { lastResolvedAt: nativeTime } };
+    crystal.stats.coldCombat = Profile.legacySnapshot(crystal, Profile.skillRecordsFromTree(46, 49), nativeTime);
+    for (const [item, price] of [[90, 1909712], [166, 206926]]) nativeBoard.put({ id: item, ownerId: 991000 + item,
+        storeType: 1, kind: 'shop', town: 'Giran', lines: [{ lineId: item, selfId: item, count: 1, enchant: 0, price }] });
+    const workshop = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
+    Warehouse.useRowSource(() => null, () => true);
+    const clanRow = Supplies.prepareRow([7, 1, [], 1]);
+    Supplies.useRowSource(clan => clan === 7 ? clanRow : undefined, () => true);
+    Economy.configure({ board: nativeBoard, memory: owner => memory.snapshot(owner), memoryIdentity: owner => memory.contentIdentity(owner),
+        sourceReady: true, workshop, spots: deps.spots });
+    const source = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'), 'utf8');
+    const helpers = source.slice(source.indexOf('function withIncomeRoute('), source.indexOf('function reviewMarket('));
+    const preparation = source.slice(source.indexOf('async function refreshCraftPacket('), source.indexOf('function cancelRoute('));
+    const callback = source.slice(source.indexOf('planLifecycle: async') + 'planLifecycle: '.length, source.indexOf(',\n        emit: send'));
+    const enabledOwner = Economy.eventReuseEnabled, diagnostic = Config.developerDiagnostics;
+    let enabled = true, fullCalls = 0;
+    const nativeOptions = { timestamp: nativeTime, board: nativeBoard, spots: deps.spots, workshop, buyOrderEscrow: 0 };
+    try {
+        Config.developerDiagnostics = false;
+        Economy.eventReuseEnabled = () => enabled;
+        const built = Economy.forState(crystal, nativeOptions);
+        assert.equal(built.network.activity, null, 'the real class46 crystal cohort completes with no native activity');
+        const published = { ...crystal, stats: { ...crystal.stats, ...built.statsPacket } };
+        const advice = Decisions.advisory(built, published, published.activity, nativeOptions);
+        assert(advice?.eventProof && advice.activityLeaf === 0 && advice.eventProof.activity === null);
+        advice.builtAt = nativeTime - 1000;
+        const originalBaseline = Sections.baselineIdentity(advice.baseline);
+        const states = new Map(), kernel = { states };
+        const adapter = { ...Economy, forState(...args) { fullCalls++; return Economy.forState(...args); } };
+        const run = require('node:vm').runInNewContext(`${helpers}\n${preparation}\n(${callback})`, {
+            invoke: name => name === 'GameServer/Bot/Economy/EconomyContext' ? adapter : invoke(name),
+            kernel, boardReady: () => nativeBoard, planningSpots: deps.spots,
+            currentPlanningOccupancy: () => invoke('GameServer/Bot/Population/SpotProfiles').occupancySnapshot(deps.spots, []),
+            planningNpcCatalog: { plannerOptions: {} },
+            occupationFor: async (_state, _at, _context, mode) => mode === 'wish' ? undefined : workshop,
+            EconomicTrip: require('../src/GameServer/Bot/Economy/EconomicTrip'), EconomyContext: Economy,
+            CraftEligibility: require('../src/GameServer/Bot/Economy/CraftEligibility'), ColdEconomyDecision: Decisions,
+            GearAcquisitionPlanner: Planner, GearPlanSelection: Selection, DecisionSections: Sections,
+            SpotRiskPolicy: invoke('GameServer/Bot/Population/SpotRiskPolicy'),
+            SpotProfiles: invoke('GameServer/Bot/Population/SpotProfiles'), SpotIndex: invoke('GameServer/Bot/AI/SpotIndex'),
+            PartyRequestPlanner: invoke('GameServer/Bot/Population/PartyRequestPlanner'),
+            PartyWaitFallback: invoke('GameServer/Bot/Population/PartyWaitFallback'), economyDiagnostics: Diagnostics,
+            beginHuntingTrip: require('../src/GameServer/Bot/Population/HuntingTravel').beginHuntingTrip
+        });
+        const active = { status: 'active', strategy: 'luxury_exchange', source: 'wish_network', target: { selfId: 90, slot: 7 },
+            next: null, materials: [], recoveryTargets: [], economyInputKey: 'legacy-saved-input' };
+        const recovery = { ...Selection.deferredWishPlan(active, {}), recoveryTargets: [{ targetId: 166,
+            reason: 'market_unavailable', until: nativeTime + MINUTE, failedAt: nativeTime - 1000 }] };
+        const failures = [];
+        for (const [name, previousPlan, route, fallback] of [
+            ['no plan', null, null, false], ['active wish', active, null, false], ['recovery', recovery, null, false],
+            ['native route', active, { needed: true, to: { locX: 81000, locY: 149000, locZ: -3500 }, spotId: 'null-parity', travelMs: 3000 }, false],
+            ['clan fallback', { ...active, clanGoal: { clanId: 7, goalKey: 'native-equipment' } }, null, true]
+        ]) {
+            try {
+                const state = { ...published, stats: { ...published.stats, equipmentPlan: previousPlan } };
+                const outcomes = [];
+                for (const useProof of [false, true]) {
+                    enabled = useProof; Economy.forgetContext(id); fullCalls = 0;
+                    const owner = { state, context: { route, wishAdvisory: advice } }; states.set(id, owner);
+                    const result = await run({ state, context: owner.context, timestamp: nativeTime });
+                    assert.equal(fullCalls, useProof && !fallback ? 0 : 1, `${name}: only the ordinary/clan path requests the full native graph`);
+                    assert.equal(result.activityPick, null, `${name}: completed null does not invent a native action`);
+                    if (useProof && !fallback) {
+                        if (route) {
+                            assert.equal(owner.context.wishAdvisory, null, `${name}: a new travel target drops the old proof after native finalization`);
+                            const why = [];
+                            assert.equal(Economy.eventProofHolds(result.plannedState, advice.eventProof, nativeOptions,
+                                { baseline: advice.baseline, activity: advice.activity, leaf: null, mp: advice.mp, timestamp: nativeTime, why }), false);
+                            assert.deepEqual(why, ['event_key'], `${name}: the actual travel target is a hard event`);
+                        } else {
+                            assert.equal(owner.context.wishAdvisory.builtAt, advice.builtAt, `${name}: checked null reuse keeps its original build stamp`);
+                            assert.strictEqual(owner.context.wishAdvisory.baseline, advice.baseline);
+                        }
+                        assert.strictEqual(result.plannedState.stats.wishSections, advice.baseline,
+                            `${name}: the published baseline remains the accepted original object`);
+                        assert.equal(Sections.baselineIdentity(advice.baseline), originalBaseline,
+                            `${name}: native finalization does not rewrite the accepted baseline`);
+                        assert.equal(result.economyDecision.key, Decisions.stateKey(result.plannedState), `${name}: card binds final native publication`);
+                    }
+                    outcomes.push(result);
+                }
+                for (const key of ['activityPick', 'acquisitionPlan', 'partyRequest', 'reusablePartyRequest', 'replanFailure', 'targetNpcId'])
+                    assert.deepEqual(outcomes[1][key], outcomes[0][key], `${name}: null reuse matches ordinary native ${key}`);
+                // The ordinary build hashes the current previousPlan into choices;
+                // reuse retains the accepted input signature from before that own
+                // publication. Every other baseline and native state field agrees.
+                // Both callbacks return VM DTO containers. Recreate those same
+                // three containers on both sides, preserving nested types.
+                const comparable = value => ({ ...value, stats: { ...value.stats, wishSections: { ...value.stats.wishSections,
+                    ...(!fallback ? { choices: advice.baseline.choices } : {}) } } });
+                const actualState = comparable(outcomes[1].plannedState), expectedState = comparable(outcomes[0].plannedState);
+                assert(isDeepStrictEqual(actualState, expectedState),
+                    `${name}: null reuse matches ordinary native plannedState\n${stateDifferences(actualState, expectedState).join('\n')}`);
+                assert.equal(outcomes[1].acquisitionPlan?.economyInputKey, undefined, `${name}: the shared native owner removes the legacy key`);
+                if (!fallback) assert.equal(Decisions.sameEconomicOutput(outcomes[0].economyDecision, outcomes[1].economyDecision), true,
+                    `${name}: null reuse preserves all packed non-action economics`);
+            } catch (error) { failures.push(error); }
+        }
+        assert.equal(failures.length, 0, failures.map(error => error.stack).join('\n\n'));
+    } finally {
+        Economy.eventReuseEnabled = enabledOwner; Config.developerDiagnostics = diagnostic;
+        Economy.configure(); Warehouse.useRowSource(null); Supplies.useRowSource(null);
+    }
+}
+
+async function main() {
 
 try {
     {
@@ -304,6 +446,100 @@ try {
         owner.forget(state.characterId);
         assert.equal(owner.size(), 0, 'actual retirement drops the retained advice');
         Warehouse.useRowSource(null);
+    }
+    // A legacy publication refusal removes execution permission, not the
+    // original native evidence needed by the next ordinary shadow rebuild.
+    {
+        const diagnostic = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
+        try {
+            const { state, accepted } = decided(93050);
+            assert(accepted.eventProof, 'the native completed build has an original event proof');
+            const owner = { state, context: {} }, states = new Map([[state.characterId, owner]]);
+            const source = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'), 'utf8');
+            const remember = require('node:vm').runInNewContext(source.slice(source.indexOf('function rememberWishAdvisory('),
+                source.indexOf('function reviewMarket(')) + ';rememberWishAdvisory', {
+                economyDiagnostics: Diagnostics, kernel: { states }, EconomyContext: Economy, ColdEconomyDecision: Decisions
+            });
+            const published = { ...state, stats: { ...state.stats,
+                equipmentPlan: invoke('GameServer/Bot/AI/GearPlanSelection').deferredWishPlan({
+                    target: { selfId: 626, name: 'Bronze Shield', slot: 8 } }, {}) } };
+            const check = { baseline: accepted.baseline, activity: accepted.activity, leaf: accepted.card.activity,
+                timestamp: T, mp: accepted.mp };
+            assert.equal(Economy.calculationHolds(published, accepted.fence, deps, check), false,
+                'native own plan publication changes the strict legacy fence');
+            assert.equal(Economy.calculationHolds(state, accepted.fence, deps, check), true,
+                'the original input still matches that same legacy fence');
+            accepted.builtAt = T;
+            remember(owner, accepted, published, deps);
+            const retained = owner.context.wishAdvisory;
+            assert(retained?.legacyRejected, 'the existing native owner retains a shadow-only rejected publication');
+            for (const key of ['card', 'eventProof', 'baseline', 'mp', 'saved']) assert.strictEqual(retained[key], accepted[key]);
+            assert.equal(Object.hasOwn(retained, 'builtAt'), false, 'a rejected publication has no accepted fresh-build stamp');
+            const prepared = {}, before = builds;
+            assert.equal(Decisions.refusal(state, retained, deps, null, { prepared }), 'no_card',
+                'a later legacy fence match cannot revive the rejected execution permission');
+            assert.strictEqual(prepared.eventCandidate, retained, 'the diagnostic receives the candidate before off-mode refusal');
+            assert.equal(builds, before, 'retaining diagnostic evidence does not run a solver');
+            const wire = Decisions.receiveAdvisory(structuredClone(Decisions.wireAdvisory(retained)));
+            assert.equal(wire.legacyRejected, true, 'ownership transfer preserves the execution rejection');
+            const active = Economy.eventProofHolds(state, retained.eventProof, { ...deps, eventReuse: true }, check);
+            assert.equal(active, true, 'the native fixture still passes the complete shared event verdict');
+            const resumed = Decisions.refreshAdvisory(state, retained, { ...deps, eventReuse: true });
+            assert(resumed, 'only an enabled successful shared verdict can use the retained candidate');
+            assert.equal(resumed.advisory.legacyRejected, true);
+            assert.strictEqual(resumed.advisory.baseline, retained.baseline);
+            assert.equal(Decisions.refusal(state, resumed.advisory, deps), 'no_card', 'returning to off mode remains conservative');
+            Economy.forgetContext(state.characterId);
+            const next = Economy.forState(state, { ...at(T + 1), eventCandidate: prepared.eventCandidate });
+            assert.equal(builds, before + 1, 'cache eviction takes exactly the ordinary rebuild');
+            assert.strictEqual(next.eventShadow?.accepted, retained, 'the original candidate survives cache eviction into the native shadow');
+            const shadowCount = () => ['would_hold', 'refused'].reduce((sum, name) =>
+                sum + Number(Diagnostics.metrics().counts?.[`card:event_gate:${name}`] || 0), 0);
+            const compared = shadowCount();
+            const fresh = Decisions.advisory(next, { ...state, stats: { ...state.stats, ...next.statsPacket } });
+            assert.equal(shadowCount(), compared + 1, 'the ordinary completed build contributes one real card-shadow verdict');
+            assert.equal(builds, before + 1, 'diagnostic comparison adds no second solver');
+            const proofless = { ...accepted, eventProof: null };
+            remember(owner, proofless, published, deps);
+            assert.equal(owner.context.wishAdvisory, null, 'a proofless legacy rejection still drops the old advice');
+            const reused = { ...accepted, builtAt: T - 1 };
+            remember(owner, reused, state, { ...deps, timestamp: T + 1000 }, false);
+            assert.strictEqual(owner.context.wishAdvisory, reused);
+            assert.equal(reused.builtAt, T - 1, 'a checked reused publication keeps its actual build stamp');
+            const newer = { ...retained, baseline: { ...retained.baseline, at: T + 1000 } };
+            owner.context.wishAdvisory = newer;
+            remember(owner, accepted, published, deps);
+            assert.strictEqual(owner.context.wishAdvisory, newer, 'an older publication cannot replace newer owner advice');
+            assert.equal(fresh.legacyRejected, undefined, 'an actual fresh advisory replaces the old rejection state');
+        } finally { Config.developerDiagnostics = diagnostic; Warehouse.useRowSource(null); }
+    }
+    // Binary transport distinguishes a completed explicit null from a missing
+    // or truncated activity. Native completed-build eligibility is tested by
+    // the real recipe scenario in test_recompute_chain.js.
+    {
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
+        try {
+            const { state, accepted } = decided(93052);
+            assert(accepted.eventProof);
+            const card = Decisions.compact({ key: accepted.card.key, updatedAt: T, inputHash: accepted.card.inputHash, activity: null });
+            const original = Decisions.wireAdvisory(accepted);
+            const wire = { ...original, activityLeaf: 0, card: { key: card.key, data: Buffer.from(card.data).toString('base64') },
+                eventProof: { ...original.eventProof, activity: null,
+                    decision: [accepted.decisionSeq, 0, accepted.focus] } };
+            const received = Decisions.receiveAdvisory(structuredClone(wire));
+            assert(received);
+            assert.equal(received.card.activity, null, 'an explicit completed null survives binary ownership transfer');
+            assert.equal(Decisions.refusal({ ...state, stats: { ...state.stats, activityLeaf: 0 } }, received, deps), 'leaf_kind',
+                'off mode keeps the ordinary unsupported-activity refusal');
+            for (const value of [{ ...wire, activityLeaf: undefined }, { ...wire, activityLeaf: 1 },
+                { ...wire, eventProof: { ...wire.eventProof, activity: accepted.eventProof.activity } },
+                { ...wire, card: { ...wire.card, data: Buffer.from(card.data).subarray(0, 27).toString('base64') } }])
+                assert.equal(Decisions.receiveAdvisory(value), null, 'missing tuple, foreign proof or truncated card is not a completed null');
+        } finally { Warehouse.useRowSource(null); }
     }
     // Social leaves are calculated intentions, not native attack/help commands.
     // The shadow joins the exact accepted build to its ordinary rebuild only.
@@ -768,8 +1004,12 @@ try {
         assert(Sections.softDue(wishSections, 'observation', T + 5 * MINUTE));
         assert.equal(Sections.softDue(wishSections, 'market', T + 9 * MINUTE), false);
     }
+    await nullLifecycleParity();
     console.log('PASS L70 held plan: own result reuse and restamp, own-spot trip, shot use below target, hard events, soft market delay, reconcile kept, shared money verdict');
 } finally {
     Providers.build = originalBuild;
     fs.rmSync(dir, { recursive: true, force: true });
 }
+
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

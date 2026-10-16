@@ -2145,6 +2145,10 @@ function worldStatus() {
     const diagnostics = PopulationConfig.developerDiagnostics === true;
     const memory = diagnostics ? process.memoryUsage() : null;
     const cold = diagnostics ? ColdSimulationCoordinator.snapshot() : null;
+    // Coordinator retains the last worker packet across a restart. A new
+    // ready/catalog handoff must finish before those stage fields are usable.
+    const worker = cold?.ready === true && cold.snapshotsLoaded === true ? cold.worker : null;
+    const commitQueue = worker ? cold.queue : null;
     return {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
@@ -2159,6 +2163,42 @@ function worldStatus() {
         runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
+            // The existing heartbeat's heap head excludes claimed work;
+            // dirty proposals are already included in inFlight. Native age
+            // readings are retained; generatedAt also dates this cached view.
+            coldWorker: cold ? {
+                epoch: cold.epoch ?? null,
+                ready: cold.ready ?? null,
+                snapshotsLoaded: cold.snapshotsLoaded ?? null,
+                heartbeatAgeMs: cold.heartbeatAgeMs ?? null,
+                lastLoopAt: worker?.lastLoopAt ?? null,
+                states: worker?.states ?? null,
+                heap: worker?.heap ?? null,
+                queueHead: worker?.queueHead ? {
+                    kind: worker.queueHead.kind ?? null,
+                    alarmKind: worker.queueHead.alarmKind ?? null,
+                    dueAt: worker.queueHead.dueAt ?? null,
+                    overdue: worker.queueHead.overdue ?? null,
+                    ageMs: worker.queueHead.ageMs ?? null,
+                    current: worker.queueHead.current ?? null
+                } : null,
+                claiming: worker?.claiming ?? null,
+                inFlight: worker?.inFlight ?? null,
+                dirty: worker?.dirty ?? null,
+                dirtyAgeMs: worker?.dirtyAgeMs ?? null,
+                commanding: worker?.commanding ?? null,
+                commandingAgeMs: worker?.commandingAgeMs ?? null,
+                maxInFlight: worker?.maxInFlight ?? null,
+                paused: worker?.paused ?? null,
+                stopping: worker?.stopping ?? null,
+                commitQueue: commitQueue ? {
+                    depth: commitQueue.depth ?? null,
+                    oldestMs: commitQueue.oldestMs ?? null,
+                    p0: commitQueue.p0 ?? null,
+                    p1: commitQueue.p1 ?? null,
+                    p2: commitQueue.p2 ?? null
+                } : null
+            } : null,
             heap: PopulationStatus.heaps({ coldWorker: cold.worker }),
             developerDiagnostics: {
                 main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),

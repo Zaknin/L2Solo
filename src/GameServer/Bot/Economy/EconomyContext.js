@@ -201,6 +201,15 @@ function activityIdentity(leaf) {
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
 }
+function validProducerScope(value) {
+    return Array.isArray(value) && value.length === 2
+        && typeof value[0] === 'string' && /^recipe-production:[0-9]$/.test(value[0])
+        && typeof value[1] === 'string' && /^[a-f0-9]{64}$/.test(value[1]);
+}
+function producerScopeHolds(proof, deps) {
+    return validProducerScope(proof.producerScope) && validProducerScope(deps.producerScope)
+        && proof.producerScope[0] === deps.producerScope[0] && proof.producerScope[1] === deps.producerScope[1];
+}
 function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null) {
     const current = fieldActivity(state, activity, leaf), stats = current.stats || {};
     const facts = Sections.semanticFacts(current, timestamp), trip = Trip.frame(current);
@@ -479,9 +488,12 @@ function captureEventProof(state, deps = {}, options = {}) {
     const plan = options.plan;
     if (!plan || plan.pending || !plan.quantityInputs || !plan.liquidationInputs || extensions.size || deps.nodes?.length
         || state.incomingPending || !plan.statsPacket?.wishSections
-        || !Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state) || !RecomputeGeneration.current()) return null;
+        || !Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state) || !RecomputeGeneration.current()
+        || !validProducerScope(deps.producerScope)) return null;
     const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
-    if (!leaf || !Number.isFinite(baseline.at)) return null;
+    if (leaf === null ? plan.pending !== false || plan.intentPending !== false || plan.statsPacket.activityLeaf !== 0
+        : !leaf?.activity) return null;
+    if (!Number.isFinite(baseline.at) || !Sections.observationBaselineValid(baseline)) return null;
     const actual = { ...state, stats: { ...state.stats, ...plan.statsPacket } };
     return Object.freeze({ version: 1, owner: Number(state.characterId), at: baseline.at,
         generation: RecomputeGeneration.current(),
@@ -490,6 +502,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         activity: activityIdentity(leaf),
         hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
+        producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
         bands: plan.quantityBands || [], safety: plan.bagSafety, hourAdena: plan.hourAdena,
         market: options.reads, spots: options.spots,
@@ -510,7 +523,9 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         || !proof.stockRoots.every(row => Array.isArray(row) && row.length === 2
             && typeof row[0] === 'string' && Number.isSafeInteger(row[1]) && row[1] > 0)
         || typeof proof.hard !== 'string' || !/^[a-f0-9]{64}$/.test(proof.hard)
-        || typeof proof.activity !== 'string' || !options.leaf?.activity
+        || !(proof.activity === null ? options.leaf === null && proof.decision[1] === 0
+            : typeof proof.activity === 'string' && !!options.leaf?.activity)
+        || !validProducerScope(proof.producerScope)
         || !Array.isArray(proof.bands) || !Array.isArray(proof.liquidation?.rows)
         || proof.liquidation.rows.length > 8 || !proof.liquidation.rows.every(row => Array.isArray(row)
             && row.length === 2 && Number.isSafeInteger(row[0]) && row[0] > 0 && Number.isFinite(row[1]) && row[1] > 0)
@@ -518,7 +533,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             || typeof proof.spots?.[Symbol.iterator] !== 'function')
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
     const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
-    if (!baseline || !Number.isFinite(proof.at) || proof.at !== baseline.at || timestamp < proof.at)
+    if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at) || proof.at !== baseline.at || timestamp < proof.at)
         return refuse('baseline');
     if (options.softPrefix && (!proof.restartable || !proof.generation
         || !Number.isFinite(Sections.softDeadline(baseline, 'market'))
@@ -585,12 +600,15 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (options.rebuildBasis) {
         // Reusing slow valuation facts is not permission to execute the old
         // activity with the new wallet. Admission and the network run again.
-        if (!(marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || [])))
+        if (!(producerScopeHolds(proof, deps) && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || [])))
             return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
     const leaf = options.leaf;
-    if (leaf.activity === 'shopping' || leaf.activity === 'selling') {
+    if (leaf === null) {
+        // A completed native graph may choose no economic action. Execution
+        // keeps its ordinary hunt/rest/travel path after every shared check.
+    } else if (leaf.activity === 'shopping' || leaf.activity === 'selling') {
         if (!acceptedActivityHolds(state, leaf, deps, null, { liquidation: liquidation.candidates }))
             return refuse('check_failed', ['sources', 'money']);
     } else if (leaf.activity === 'hunting') {
@@ -612,7 +630,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     } else if (!['resting', 'traveling'].includes(leaf.activity)) {
         return refuse('unsupported_leaf', ['sources']);
     }
-    if (!options.softPrefix && !(marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []))
+    if (!options.softPrefix && !(producerScopeHolds(proof, deps)
+        && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []))
         && Sections.softDue(baseline, 'market', timestamp)) return refuse('market', ['sources', 'benefits']);
     return { valid: true, reason: '', touchedSections: 0 };
 }
@@ -625,21 +644,23 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 1 || proof.restartable !== true || !accepted?.card
         || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity', 'hard',
-            'quantities', 'liquidation', 'stockRoots', 'bands', 'safety', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
+            'quantities', 'liquidation', 'producerScope', 'stockRoots', 'bands', 'safety', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
+        || !validProducerScope(proof.producerScope)
         || !RecomputeGeneration.current() || proof.generation !== RecomputeGeneration.current()
         || !/^[a-f0-9]{64}$/.test(proof.generation) || !/^[a-f0-9]{64}$/.test(proof.hard)
         || proof.owner !== accepted.characterId || proof.at !== accepted.baseline?.at
         || !Array.isArray(proof.decision) || proof.decision.length !== 3
         || proof.decision[0] !== accepted.decisionSeq || proof.decision[1] !== accepted.activityLeaf
-        || proof.decision[2] !== accepted.focus || proof.activity !== activityIdentity(accepted.card.activity)) return null;
+        || proof.decision[2] !== accepted.focus || proof.activity !== activityIdentity(accepted.card.activity)
+        || proof.activity === null && (accepted.card.activity !== null || proof.decision[1] !== 0)) return null;
     const quantities = packQuantityInputs(proof.quantities);
     if (!quantities) return null;
     try {
-        const metadata = Buffer.from(JSON.stringify([proof.liquidation, proof.stockRoots, proof.bands, proof.safety, proof.hourAdena]));
+        const metadata = Buffer.from(JSON.stringify([proof.liquidation, proof.stockRoots, proof.bands, proof.safety, proof.hourAdena, proof.producerScope]));
         const size = 35 + metadata.length + quantities.byteLength;
         if (metadata.length > 65535 || size > FENCE_RAW_BYTES) return null;
         const bytes = Buffer.allocUnsafe(size);
-        bytes[0] = 2; bytes.writeUInt16LE(metadata.length, 1);
+        bytes[0] = 3; bytes.writeUInt16LE(metadata.length, 1);
         // The domain-separated hard digest already commits to generation.
         Buffer.from(proof.hard, 'hex').copy(bytes, 3);
         metadata.copy(bytes, 35); Buffer.from(quantities).copy(bytes, 35 + metadata.length);
@@ -652,21 +673,23 @@ function restoreEventProof(prefix, accepted) {
         || prefix.byteLength > FENCE_RAW_BYTES || !accepted?.card) return null;
     try {
         const bytes = Buffer.from(prefix);
-        if (bytes[0] !== 2) return null;
+        if (bytes[0] !== 3) return null;
         const metadataSize = bytes.readUInt16LE(1), raw = bytes.subarray(35, 35 + metadataSize), text = raw.toString('utf8');
         if (35 + metadataSize >= bytes.length || !Buffer.from(text, 'utf8').equals(raw)) return null;
         const row = JSON.parse(text), quantities = unpackQuantityInputs(bytes.subarray(35 + metadataSize));
-        if (!Array.isArray(row) || row.length !== 5 || !quantities || !Number.isSafeInteger(accepted.characterId)
+        if (!Array.isArray(row) || row.length !== 6 || !validProducerScope(row[5]) || !quantities || !Number.isSafeInteger(accepted.characterId)
+            || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
         return Object.freeze({ version: 1, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
             hard: bytes.subarray(3, 35).toString('hex'), quantities, liquidation: row[0], stockRoots: row[1],
-            bands: row[2], safety: row[3], hourAdena: row[4] });
+            bands: row[2], safety: row[3], hourAdena: row[4], producerScope: Object.freeze(row[5]) });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
-    if (!proof || proof.version !== 1 || !proof.market || !proof.spots) return null;
+    if (!proof || proof.version !== 1 || !proof.market || !proof.spots || !validProducerScope(proof.producerScope)
+        || (proof.activity === null ? proof.decision?.[1] !== 0 : typeof proof.activity !== 'string')) return null;
     try {
         const market = [...proof.market], spots = [...proof.spots];
         if (market.length > FENCE_SPOTS || spots.length > FENCE_SPOTS) return null;
@@ -1031,7 +1054,7 @@ function watchedBoard(board, watch, watchList) {
 function defaultProducerSource(state, board) {
     const index = invoke('GameServer/Bot/Population/ColdOccupationSources').recipeIndex(board);
     const level = invoke('GameServer/Bot/Economy/CraftEligibility').craftLevelFor(state), scope = index.scopeFor(level);
-    return { recipes: index.rowsFor(level), scope, revision: index.revision(scope) };
+    return { recipes: index.rowsFor(level), scope, revision: index.revision(scope), identity: index.contentIdentity(scope) };
 }
 function resolved(state, deps, production = true) {
     deps = { ...runtime, ...deps };
@@ -1052,6 +1075,7 @@ function resolved(state, deps, production = true) {
             const source = deps.producerSource(state, deps.board);
             deps.producerRecipes = source?.recipes;
             deps.producerRevision = source?.revision;
+            deps.producerScope = [source?.scope, source?.identity];
             if (source?.scope != null) deps.onSourceScope?.(source.scope);
         }
         if (isMainThread && !Object.hasOwn(deps, 'workshop')) deps.workshop = craftIncome(state);
@@ -1654,6 +1678,7 @@ function buildForState(state, deps) {
     const quantityInputs = createQuantityInputs();
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         quantityInputs,
+        nominationBasis: basis?.nominationBasis ?? Providers.nominationBasis(state),
         ...(basis ? { horizonHours: basis.horizonHours } : {}),
         touchedSections: Number(state.stats?.wishDirty || 0) | Number(deps.eventVerdict?.touchedSections || 0)
             | Number(eventVerdict.touchedSections || 0),
@@ -2035,7 +2060,7 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
         network: compactNetwork(context.network), moneyPrice: context.moneyPrice, gapHorizonHours: context.gapHorizonHours,
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
-        quantityInputs: projection ? context.quantityInputs?.finish() : null,
+        quantityInputs: projection ? context.quantityInputs?.finish() : null, nominationBasis: context.nominationBasis,
         liquidationInputs: context.liquidationInputs,
         prices: planPrices(prices, base.kit, context), gearPlanMemo: undefined };
 }

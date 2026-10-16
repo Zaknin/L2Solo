@@ -30,6 +30,12 @@ const InteractionMemory = require('../src/GameServer/Social/InteractionMemory');
 const MemoryPolicy = require('../src/GameServer/Social/InteractionMemoryPolicy');
 const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
 const Restart = require('../src/GameServer/Bot/Population/EconomyRestartDecision');
+const ProductionIndex = require('../src/GameServer/Bot/Economy/RecipeProductionIndex');
+const RecipeCatalog = require('../src/GameServer/Knowledge/RecipeCatalog');
+const Recipes = require('../src/GameServer/Items/C4RecipeItems');
+const Sources = require('../src/GameServer/Items/ItemAcquisitionCatalog');
+const CraftEligibility = require('../src/GameServer/Bot/Economy/CraftEligibility');
+const OccupationSources = require('../src/GameServer/Bot/Population/ColdOccupationSources');
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 Config.developerDiagnostics = false;
 const T = 1791741600000;
@@ -156,6 +162,10 @@ try {
     const forwards = clock; clock = T - 1;
     assert.equal(verdict(published, accepted).reason, 'baseline', 'runtime clock reversal refuses the same proof');
     clock = forwards;
+    for (const invalid of [{ sample: null }, { sample: 's1:bad' }, { share: undefined }, { share: 2 }]) {
+        assert.equal(verdict(published, { ...accepted, baseline: { ...accepted.baseline, ...invalid } }).reason, 'baseline',
+            'a malformed accepted observation refuses before any soft deadline');
+    }
     console.log('PASS native unknown-owner / backward-clock refusal');
 
     scenario('native generation events', () => {
@@ -166,6 +176,97 @@ try {
         Generation.configure(generationA);
         assert.equal(verdict(published, accepted).valid, true);
         console.log('PASS native generation A->B / unavailable / original A restored');
+    });
+    scenario('native ordered production scope', () => {
+        const recipes = RecipeCatalog.recipeItemRows(Recipes).filter(recipe => recipe.type === 'dwarven'
+            && recipe.level > 0 && recipe.level <= 9 && Sources.allowsRecipe(recipe));
+        const variants = new Map();
+        for (const recipe of recipes) variants.set(recipe.productId, (variants.get(recipe.productId) || 0) + 1);
+        const [firstRecipe, secondRecipe] = recipes.filter(recipe => variants.get(recipe.productId) === 1);
+        assert(firstRecipe && secondRecipe, 'the native catalog supplies two distinct production products');
+        const nativeBoard = new BoardIndex(), index = ProductionIndex.forBoard(nativeBoard), scope = index.scopeFor(9);
+        const empty = index.contentIdentity(scope);
+        const put = (book, recipe, price = 100) => book.put({ id: recipe.productId, ownerId: 998001,
+            storeType: 3, kind: 'shop', town: 'Giran', lines: [{ lineId: recipe.productId,
+                selfId: recipe.productId, count: 100, enchant: 0, price }] });
+        put(nativeBoard, firstRecipe); index.update(firstRecipe.productId);
+        put(nativeBoard, secondRecipe); index.update(secondRecipe.productId);
+        const ordered = index.contentIdentity(scope), revision = index.revision(scope);
+        assert.notEqual(ordered, empty);
+        put(nativeBoard, firstRecipe, 200); index.update(firstRecipe.productId);
+        assert.equal(index.contentIdentity(scope), ordered, 'prices stay an item dependency, not membership');
+        assert.equal(index.revision(scope), revision);
+        const copiedBoard = new BoardIndex(); put(copiedBoard, firstRecipe); put(copiedBoard, secondRecipe);
+        const copied = ProductionIndex.forBoard(copiedBoard);
+        assert.equal(copied.contentIdentity(scope), ordered, 'fresh owner content identity survives different revision history');
+        assert.notEqual(copied.revision(scope), revision);
+        nativeBoard.remove(firstRecipe.productId); index.update(firstRecipe.productId);
+        put(nativeBoard, firstRecipe); index.update(firstRecipe.productId);
+        assert.notEqual(index.contentIdentity(scope), ordered, 'native insertion order is part of admission identity');
+        index.reset();
+        assert.equal(index.contentIdentity(scope), empty);
+        assert.equal(index.contentIdentity('unknown'), null);
+        console.log('PASS native production membership / ordered identity / reset / stable restart content');
+    });
+    scenario('native retained nomination basis', () => {
+        // This is a public native selector fixture, not a claim that the
+        // complete armed graph selected either of these power roots.
+        const context = Economy.basics(input, options());
+        const slot = [...Providers.gearCandidates(published, context)].find(([, rows]) => rows.length > 1);
+        assert(slot, 'the native kit and prices supply two admitted finalists in one slot');
+        const [previousId, selectedId] = slot[1].slice(0, 2).map(item => item.selfId);
+        const before = { ...published, stats: { ...published.stats, equipmentPlan: null,
+            wishFocus: [`power:${previousId}:${slot[0]}`, ...published.stats.wishFocus.slice(1)] } };
+        const after = { ...before, stats: { ...before.stats,
+            wishFocus: [`power:${selectedId}:${slot[0]}`, ...before.stats.wishFocus.slice(1)] } };
+        const rows = (state, extra = {}) => [...Providers.gearCandidates(state, { ...context, ...extra })]
+            .map(([key, items]) => [key, items.map(item => item.selfId)]);
+        const original = rows(before), republished = rows(after), basis = Providers.nominationBasis(before);
+        assert.notDeepEqual(republished, original, 'changing only the focus changes native retained nomination order');
+        assert.deepEqual(rows(after, { nominationBasis: basis }), original,
+            'the captured two native IDs retain exactly the old selector rows and order');
+        assert.deepEqual(basis, [0, previousId]);
+        assert(Object.isFrozen(basis));
+        console.log(`PASS native selector focus ${previousId}->${selectedId} / original basis equality (not a whole-graph choice proof)`);
+    });
+    scenario('native production discovery soft dependency', () => {
+        Economy.reset(); clock = T;
+        // The existing producer preparation fixture reaches native Create
+        // Item first at Dwarven Fighter level5, before the Artisan's wider
+        // recipe domain. Keep its complete native proof, including zeroes.
+        const beginner = actor(9803, 53, 5), level = CraftEligibility.craftLevelFor(beginner);
+        assert(level > 0, 'the native beginner has learned Create Item');
+        const nativeIndex = OccupationSources.recipeIndex(board), scope = nativeIndex.scopeFor(level);
+        const build = Economy.forState(beginner, options()), card = Decisions.advisory(build, beginner, beginner.activity, options());
+        assert(card?.eventProof, JSON.stringify({ blocked: 'native beginner has no complete proof',
+            quantityRows: build.plan.quantityInputs?.rows.length ?? null, leaf: build.network.activity }));
+        const state = publish(beginner, build), members = new Set([...nativeIndex.rowsFor(level)].map(recipe => recipe.recipeId));
+        const read = new Set([...card.eventProof.market].map(row => row[0]));
+        const added = RecipeCatalog.recipeItemRows(Recipes).find(recipe => recipe.type === 'dwarven'
+            && recipe.level > 0 && recipe.level <= level && Sources.allowsRecipe(recipe)
+            && !members.has(recipe.recipeId) && !read.has(recipe.productId));
+        assert(added, 'a native product outside the completed item read set can open production');
+        const recordId = 998003;
+        try {
+            assert.deepEqual(card.eventProof.producerScope, [scope, nativeIndex.contentIdentity(scope)]);
+            const hard = Economy.eventInputKey(state, options(), clock, card.activity, card.card.activity);
+            board.put({ id: recordId, ownerId: 998004, storeType: 3, kind: 'shop', town: 'Giran',
+                lines: [{ lineId: recordId, selfId: added.productId, count: 100, enchant: 0, price: 1000 }] });
+            nativeIndex.update(added.productId);
+            assert([...nativeIndex.rowsFor(level)].some(recipe => recipe.recipeId === added.recipeId));
+            assert.notEqual(nativeIndex.contentIdentity(scope), card.eventProof.producerScope[1]);
+            assert.equal(Economy.eventInputKey(state, options(), clock, card.activity, card.card.activity), hard,
+                'public discovery is a soft source dependency, not a hard market fingerprint');
+            const deadline = Sections.softDeadline(card.baseline, 'market');
+            clock = deadline - 1;
+            assert.equal(verdict(state, card).valid, true, JSON.stringify(verdict(state, card)));
+            clock = deadline;
+            const rejected = verdict(state, card);
+            assert.equal(rejected.reason, 'market', JSON.stringify(rejected));
+            assert.equal(rejected.touchedSections, Sections.sectionMask(['sources', 'benefits']));
+            assert.equal(Sections.softDeadline(card.baseline, 'market'), deadline, 'checking never renews the original deadline');
+        } finally { board.remove(recordId); nativeIndex.update(added.productId); }
+        console.log('PASS native previously unread producer / original soft market deadline / touched sections');
     });
     scenario('native money crossing and clocks', () => {
         // A real monetary crossing may rebuild money/sources, but never restarts
@@ -208,6 +309,11 @@ try {
             focus: restartBuild.network.focus, leaf: restartBuild.network.activity,
             quantities: restartBuild.plan.quantityInputs?.rows.length ?? null }));
         const restartPrefix = Economy.restartEventProof(restartCard.eventProof, restartCard);
+        assert(restartPrefix);
+        const restoredProof = Economy.restoreEventProof(restartPrefix, restartCard);
+        assert.deepEqual(restoredProof.producerScope, restartCard.eventProof.producerScope);
+        const oldPrefix = restartPrefix.slice(); oldPrefix[0] = 2;
+        assert.equal(Economy.restoreEventProof(oldPrefix, restartCard), null, 'a prefix without source membership proof fails closed');
         if (!restartCard.saved) {
             const artifact = path.join(os.tmpdir(), 'l2-recompute-chain-restart-blocker.json');
             fs.writeFileSync(artifact, JSON.stringify({ input: restartInput, state: publish(restartInput, restartBuild),
@@ -297,13 +403,40 @@ try {
         assert.equal(Network.quantityInputsHold(quantities, readers(crystal)), true);
         assert.equal(competing.size, 0, 'this cohort did not consume allocation stock1458; it cannot prove competing-root changes');
         assert.equal(build.network.activity, null);
-        assert.equal(build.eventProof(), null, 'no executable leaf correctly abstains from accepted-decision proof');
+        assert.equal(build.plan.pending, false);
+        assert.equal(build.intentPending, false);
+        assert.equal(build.network.activityLeaf, 0);
+        const acceptedNull = Decisions.advisory(build, crystal, crystal.activity, options());
+        assert(acceptedNull?.eventProof, 'a completed native graph without an economic action has a complete proof');
+        assert.strictEqual(acceptedNull.eventProof.activity, null);
+        assert.strictEqual(Economy.wireEventProof(acceptedNull.eventProof).activity, null);
+        const nullPrefix = Economy.restartEventProof(acceptedNull.eventProof, acceptedNull);
+        assert(nullPrefix, 'the complete native null proof has a lossless prefix');
+        assert.strictEqual(Economy.restoreEventProof(nullPrefix, acceptedNull).activity, null);
+        assert.equal(Economy.restoreEventProof(nullPrefix, { ...acceptedNull, activityLeaf: 1 }), null);
+        const publishedNull = publish(crystal, build);
+        assert.equal(verdict(publishedNull, acceptedNull).valid, true, JSON.stringify(verdict(publishedNull, acceptedNull)));
+        assert.equal(Decisions.refusal(publishedNull, acceptedNull, options()), '');
+        assert.strictEqual(Economy.forState(publishedNull, options()).plan, build.plan);
+        const capture = plan => Economy.captureEventProof(crystal, {
+            producerSource: null, producerScope: acceptedNull.eventProof.producerScope
+        }, { plan, reads: acceptedNull.eventProof.market, spots: acceptedNull.eventProof.spots });
+        assert.equal(capture({ ...build.plan, pending: true }), null, 'pending null is not a completed intention');
+        assert.equal(capture({ ...build.plan, intentPending: true }), null, 'unknown native intent cannot become accepted empty');
+        assert.equal(capture({ ...build.plan, quantityInputs: null }), null, 'missing quantity proof does not become accepted empty');
+        assert.equal(capture({ ...build.plan, network: { ...build.plan.network, activity: undefined } }), null,
+            'missing activity is distinct from explicit native null');
         const loss = { ...crystal, inventory: { ...inventory, 1458: { ...inventory[1458], amount: 140 } } };
         assert.equal(Network.quantityInputsHold(quantities, readers(loss)), true,
             'native presence questions tolerate a decrement that keeps the same positive answer');
         const exhausted = { ...crystal, inventory: { ...inventory, 1458: { ...inventory[1458], amount: 0 } } };
         assert.equal(Network.quantityInputsHold(quantities, readers(exhausted)), false,
             'the actual native presence predicate crosses when physical crystals are exhausted');
+        const exhaustedPublished = { ...publishedNull, inventory: exhausted.inventory };
+        assert.equal(verdict(exhaustedPublished, acceptedNull).valid, false,
+            'completed null retains all native quantity and structural event checks');
+        assert.equal(verdict(publishedNull, acceptedNull, {}, { leaf: undefined }).valid, false);
+        assert.equal(verdict(publishedNull, { ...acceptedNull, eventProof: null }).valid, false);
 
         const held = { ...crystal, inventory: { ...inventory, 166: { selfId: 166, amount: 2, equipped: false } } };
         const station = { known: true, hours: 0, fees: 0 }, reads = Network.createQuantityInputs();

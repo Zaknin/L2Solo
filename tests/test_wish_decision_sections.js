@@ -40,7 +40,7 @@ try {
     const acceptedFocus = state.stats.wishFocus, acceptedLeaf = state.stats.activityLeaf;
     assert(Buffer.byteLength(JSON.stringify(state.stats.wishSections)) < 1024);
     assert.equal(typeof state.stats.wishSections.funding, 'number');
-    assert(state.stats.wishSections.sample.every(row => row.every(Number.isFinite)));
+    assert(Sections.sampleRows(state.stats.wishSections.sample).every(row => row.every(Number.isFinite)));
     const beforeBuilds = builds, beforeRolls = rolls;
     for (let at = 0; at < 5; at++) {
         state = { ...state, adena: state.adena + 1, sp: state.sp + 1, updatedAt: state.updatedAt + 1,
@@ -165,8 +165,55 @@ try {
     const laterDeath = { ...mainReplay, activity: 'dead', stats: { ...mainReplay.stats } };
     assert(Events.reconcile(state, laterDeath, deps.timestamp).includes('combat'), 'an adopted packet cannot swallow a subsequent real death');
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+    const exactSamples = Array.from({ length: Hunt.MAX_SPOTS }, (_, at) => [at ? 0xffffffff - at : 0,
+        at ? (at + 1) * 1.234567890123456e290 : -0, at ? -(at + 1) * 1.234567890123456e-290 : 0]);
+    const packedSamples = Sections.packSample(exactSamples);
+    assert.deepEqual(Sections.sampleRows(packedSamples), exactSamples);
+    assert.deepEqual(Sections.sampleRows(exactSamples), exactSamples);
+    assert.equal(Sections.baselineIdentity({ sample: exactSamples }), Sections.baselineIdentity({ sample: packedSamples }));
+    for (const malformed of [null, new Array(1), packedSamples.slice(0, -1), packedSamples + 'AAAA', 's2:AA==', 's1:',
+        's1:' + Buffer.alloc(21).toString('base64'), [[-1, 0, 0]], [[0, Infinity, 0]], [[0, 1]]]) {
+        assert.equal(Sections.sampleRows(malformed), null);
+        assert.equal(Sections.observationBaselineValid({ sample: malformed }), false);
+        assert.equal(Sections.baselineIdentity({ sample: malformed }), null);
+        assert.equal(Sections.observationChanged(state, { sample: malformed }, deps.timestamp), true);
+    }
+    assert.equal(Sections.packSample(new Array(1)), null);
+    const nonfinite = Buffer.alloc(20); nonfinite.writeDoubleLE(NaN, 4);
+    assert.equal(Sections.sampleRows('s1:' + nonfinite.toString('base64')), null);
+    for (const measured of [false, true]) {
+        const observed = { ...state, stats: { ...state.stats, huntEfficiency: [],
+            huntClock: { onSpot: 80, total: 100 } } };
+        if (measured) observed.stats.huntEfficiency = [{ spotId: 'share', signature: Hunt.signature(observed),
+            at: deps.timestamp, samples: 3, exp: 100, adena: 20, loot: 10, costs: 0, cycleMs: 1000 }];
+        const baseline = { ...Sections.snapshot(observed, first, [-1, null]), incomeError: .1 };
+        assert.equal(baseline.share, .8);
+        const drift = onSpot => ({ ...observed, stats: { ...observed.stats, huntClock: { onSpot, total: 100 } } });
+        assert.equal(Sections.observationEvent(drift(79), baseline, deps.timestamp + Sections.SOFT_DELAY.observation), false,
+            'ordinary hunt-time drift stays below the accepted income error');
+        assert.equal(Sections.observationEvent(drift(60), baseline, deps.timestamp + Sections.SOFT_DELAY.observation - 1), false,
+            'hunt-time share keeps the original observation delay');
+        assert.equal(Sections.observationEvent(drift(60), baseline, deps.timestamp + Sections.SOFT_DELAY.observation), true,
+            `meaningful hunt-time change is observed with ${measured ? 'native samples' : 'table estimates'}`);
+        const carried = Sections.carrySectionBaseline(baseline,
+            Sections.snapshot(drift(60), { ...first, timestamp: deps.timestamp + 1000 }, [-1, null]), Sections.sectionBit('money'));
+        assert.equal(carried.share, .8);
+        assert.equal(Sections.softDeadline(carried, 'observation'), Sections.softDeadline(baseline, 'observation'));
+        assert.equal(Sections.baselineIdentity({ ...baseline, share: 2 }), null);
+        assert.equal(Sections.baselineIdentity({ ...baseline, share: NaN }), null);
+        assert.equal(Sections.observationBaselineValid({ ...baseline, share: undefined }), false);
+        assert.equal(Sections.observationBaselineValid({ ...baseline, share: null }), false);
+        assert.equal(Sections.observationChanged(drift('invalid'), baseline, deps.timestamp), true);
+        if (measured) {
+            const combined = drift(76);
+            combined.stats.huntEfficiency = observed.stats.huntEfficiency.map(row => ({ ...row, exp: 94 }));
+            assert.equal(Sections.observationChanged(combined, baseline, deps.timestamp), true,
+                'sample and hunt-time changes combine in the effective hourly rate');
+        }
+    }
     const huge = 1.2345678901234567e+300;
-    const wide = { ...state, stats: { ...state.stats, huntEfficiency: Array.from({ length: Hunt.MAX_SPOTS }, (_, id) => ({
+    const wide = { ...state, stats: { ...state.stats, huntClock: { onSpot: 1234567890123456, total: 1e16 },
+        huntEfficiency: Array.from({ length: Hunt.MAX_SPOTS }, (_, id) => ({
         spotId: `worst:${id}`, signature: Hunt.signature(state), at: deps.timestamp, samples: 3,
         exp: huge, adena: huge, loot: huge, costs: 0, cycleMs: 1 })) } };
     const worst = Sections.snapshot(wide, { ...first, horizonHours: huge, hunt: { ...first.hunt, expPerHour: huge } },
@@ -174,7 +221,7 @@ try {
         { buyOrderEscrow: huge, budgetBounds: [Number.MAX_SAFE_INTEGER, huge] });
     worst.choices = 0xffffffff;
     worst.bagValue = huge;
-    assert.equal(worst.sample.length, Hunt.MAX_SPOTS);
+    assert.equal(Sections.sampleRows(worst.sample).length, Hunt.MAX_SPOTS);
     const sectionBytes = Buffer.byteLength(JSON.stringify({ wishSections: worst, wishDirty: 255 }));
     assert(sectionBytes <= 1024,
         `the complete saved section delta remains bounded with all eight observation rows (${sectionBytes} bytes)`);

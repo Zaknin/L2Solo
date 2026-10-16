@@ -817,9 +817,9 @@ function countTransitRebuild(state, plannedState, previousPlan) {
             : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip' : 'same';
     economyDiagnostics.count('lifecycle', 'transit_rebuild', `${state.activity}:${moved}`);
 }
-// L115: a card lost on remember is counted by its first failing check, so the
-// next call's no_card refusal has a cause.
-function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
+// L115: legacy execution rejected on remember is counted by its first failing
+// check. A complete event proof remains at the same owner for shadow coverage.
+function rememberWishAdvisory(owner, advisory, seen = null, deps = null, actualBuild = true) {
     const diagnostic = economyDiagnostics.active();
     if (!owner?.context || !Object.isExtensible(owner.context)) {
         if (diagnostic && advisory) economyDiagnostics.count('card', 'drop', 'remember_no_context');
@@ -830,6 +830,8 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
         if (diagnostic && advisory) economyDiagnostics.count('card', 'drop', owner.context.wishAdvisory ? 'remember_stale_kept' : 'remember_stale');
         return;
     }
+    if (advisory?.eventProof && seen
+        && !ColdEconomyDecision.advisoryPublicationHolds(seen, advisory, current.context.wishAdvisory)) return;
     // Validate this publication against the original build's proof. The legacy
     // fence remains the shadow baseline; neither path renews soft clocks.
     const why = diagnostic ? [] : undefined;
@@ -841,14 +843,18 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
         ? Economy.eventProofHolds(seen, advisory.eventProof, deps, options)
         : Economy.calculationHolds(seen, advisory.fence, deps, options)))) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
-        advisory = null;
+        if (advisory.eventProof && !EconomyContext.eventReuseEnabled(deps || {})) {
+            advisory = { ...advisory, legacyRejected: true };
+            delete advisory.builtAt;
+        } else advisory = null;
     }
     // Diagnostics only: the step that built this card (a reuse passes no seen
     // state and keeps its stamp), read by the result site's edge_fresh count.
     // A result-site build is stamped with its own step too, but the result
     // site reads the stamp before it writes one, so only the same step's
     // lifecycle build can match.
-    if (diagnostic && advisory && seen && deps?.timestamp) advisory.builtAt = Number(deps.timestamp);
+    if (diagnostic && actualBuild && advisory && !advisory.legacyRejected && seen && deps?.timestamp)
+        advisory.builtAt = Number(deps.timestamp);
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
     });
@@ -1256,10 +1262,14 @@ function startKernel(config = {}) {
             let refreshed = solo && nativeHolds && planHolds()
                 ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared, socialShadow: true }) : null;
             if (refreshed) refreshed = await refreshCraftPacket(state, timestamp, context, refreshed, deps);
+            // Compact advice has no full money queue for clan acquisition.
+            // A null intention takes its ordinary native selection there.
+            if (refreshed?.economy.network.activity === null && GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) refreshed = null;
+            const nullReuse = refreshed?.economy.network.activity === null;
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
-            if (refreshed && SpotRiskPolicy.activitySpotAllowed(state, refreshed.economy.network.activity, timestamp)) {
+            if (refreshed && !nullReuse && SpotRiskPolicy.activitySpotAllowed(state, refreshed.economy.network.activity, timestamp)) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
@@ -1283,8 +1293,13 @@ function startKernel(config = {}) {
                 : why[0] || (!solo ? 'party' : !planHolds() ? 'plan_changed'
                     : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : eventDeps;
             const candidateDeps = socialShadowDeps(state, refusalDeps, prepared, timestamp, () => nativeHolds && planHolds());
-            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(candidateDeps, prepared.basics));
-            const selectedAcquisition = GearPlanSelection
+            const preparedEconomy = nullReuse ? refreshed.economy
+                : Economy.forState(preparationState, withIncomeRoute(candidateDeps, prepared.basics));
+            const selectedAcquisition = nullReuse ? {
+                acquisitionPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan),
+                replanContext: nativeReplan, reusablePartyRequest: false,
+                excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy: preparedEconomy
+            } : GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
                     planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
@@ -1319,15 +1334,20 @@ function startKernel(config = {}) {
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
+            const heldDecision = nullReuse ? ColdEconomyDecision.compact({ data: refreshed.decision.data.slice(0),
+                updatedAt: Number(seen.updatedAt || 0), key: ColdEconomyDecision.stateKey(seen), flags: 0 }) : null;
             rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
-                ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps), seen, deps);
+                nullReuse ? { ...refreshed.advisory, card: heldDecision }
+                    : ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps), seen, deps, !nullReuse);
+            if (nullReuse && economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
             if (economyDiagnostics.active()) countTransitRebuild(state, routedState, previousPlan);
             return {
-                ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
+                ...(showcase?.economyPlan || nullReuse && refreshed?.economyPlan
+                    ? { economyPlan: showcase?.economyPlan || refreshed.economyPlan } : {}),
                 statsPacket: economy.statsPacket,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,
-                economyDecision: ColdEconomyDecision.capture({ ...economy, workshop }, routedState),
+                economyDecision: heldDecision || ColdEconomyDecision.capture({ ...economy, workshop }, routedState),
                 previousPlan,
                 acquisitionPlan,
                 partyRequest,
@@ -1417,7 +1437,7 @@ function startKernel(config = {}) {
             const index = OccupationSources.recipeIndex(board);
             const level = invoke('GameServer/Bot/Economy/CraftShopService').craftLevelFor(state);
             const scope = index.scopeFor(level);
-            return { recipes: index.rowsFor(level), scope, revision: index.revision(scope) };
+            return { recipes: index.rowsFor(level), scope, revision: index.revision(scope), identity: index.contentIdentity(scope) };
         },
         workshops: workshopsFor,
         workshopRevision: id => workshopRevisions.get(Number(id)) || 0,

@@ -19,6 +19,7 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_recompute_chain.js',
     'tests/test_native_board.js',
     'tests/test_c4_import_integration.js',
     'tests/test_generated_cold_loadout.js',

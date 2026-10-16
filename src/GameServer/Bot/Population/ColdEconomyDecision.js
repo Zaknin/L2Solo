@@ -465,7 +465,7 @@ function restoreAdvisory(state, timestamp = Date.now()) {
     if (!card) return null;
     // lazy: cycle the native owner rehydrates its opaque saved proof.
     const eventProof = invoke('GameServer/Bot/Economy/EconomyContext').restoreEventProof(accepted.eventProof, { ...accepted, card });
-    if (!eventProof) return null;
+    if (!eventProof || card.activity === null && (accepted.activityLeaf !== 0 || eventProof.activity !== null)) return null;
     if (Diagnostics.active()) Diagnostics.count('card', 'restart', 'candidate');
     return { ...accepted, eventProof, card, preparedMp: accepted.mp, fence: null };
 }
@@ -491,8 +491,9 @@ function readAdvisoryCard(record) {
         const data = record.data instanceof ArrayBuffer ? record.data : RestartDecision.cardData(record.data, MAX_BYTES);
         if (!data || data.byteLength < 28 || data.byteLength > MAX_BYTES) return null;
         const card = compact({ key: record.key, data });
+        const activity = card.activity;
         if (card.counts & ~131071 || (card.counts & 63) > 40 || ((card.counts >>> 8) & 15) > 8
-            || card.flags || !card.activity?.activity) return null;
+            || card.flags || activity !== null && !activity?.activity) return null;
         // Validate all binary ranges before this becomes retained native data.
         void card.usefulness; void card.watch; void card.materials; void card.workshop; void card.feasibility; void card.shot;
         return card;
@@ -516,7 +517,8 @@ function receiveAdvisory(value) {
         || !Number.isSafeInteger(value.decisionSeq) || value.decisionSeq < 0
         || !Number.isSafeInteger(value.activityLeaf) || value.activityLeaf < 0 || value.activityLeaf > 0xffffffff
         || value.focus !== null && typeof value.focus !== 'string' || !Number.isFinite(value.baseline?.at)
-        || !Number.isFinite(value.mp) || typeof value.activity !== 'string') return null;
+        || !Number.isFinite(value.mp) || typeof value.activity !== 'string'
+        || card.activity === null && (value.activityLeaf !== 0 || value.eventProof?.activity !== null)) return null;
     let fence = value.fence;
     if (typeof fence === 'string') {
         if (fence.length > Math.ceil(MAX_ADVISORY_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(fence)) return null;
@@ -551,6 +553,11 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (accepted.characterId !== undefined && accepted.characterId !== Number(state.characterId)) return 'no_card';
     if (!accepted.baseline) return 'no_sections';
     if (Diagnostics.active() && options.prepared && accepted.eventProof) options.prepared.eventCandidate = accepted;
+    // lazy: cycle EconomyContext constructs and validates these cards.
+    const eventReuse = accepted.eventProof && invoke('GameServer/Bot/Economy/EconomyContext').eventReuseEnabled(deps);
+    // Keep rejected publications available to the shadow, without allowing a
+    // later legacy fence match to revive their old execution permission.
+    if (accepted.legacyRejected && !eventReuse) return 'no_card';
     if (state.stats?.wishDirty) return 'wish_dirty';
     // lazy: cycle keep the section and card modules loadable in either order.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
@@ -560,9 +567,8 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
-    // lazy: cycle EconomyContext constructs and validates these cards.
-    const eventReuse = accepted.eventProof && invoke('GameServer/Bot/Economy/EconomyContext').eventReuseEnabled(deps);
-    if (!leaf || !eventReuse && !['hunting', 'shopping', 'selling'].includes(leaf.activity)) {
+    const completedNull = eventReuse && leaf === null && accepted.activityLeaf === 0 && accepted.eventProof.activity === null;
+    if (!leaf && !completedNull || !eventReuse && !['hunting', 'shopping', 'selling'].includes(leaf?.activity)) {
         if (Diagnostics.active()) {
             const kind = leaf?.activity;
             const subtype = !kind ? 'none' : ['crafting', 'improving', 'helping', 'pvp'].includes(kind) ? kind : 'other';

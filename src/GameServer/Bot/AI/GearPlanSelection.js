@@ -11,6 +11,7 @@ const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
 function deferredWishPlan(previousPlan, replanContext) {
     const plan = { ...previousPlan, status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus' };
+    delete plan.economyInputKey;
     // Consume the native recovery wake/expiry once, retaining the inactive
     // target and its historical stamps for a later acquisition decision.
     if (previousPlan?.recoveryTargets || replanContext.recoveryTargets?.length) plan.recoveryTargets = replanContext.recoveryTargets;

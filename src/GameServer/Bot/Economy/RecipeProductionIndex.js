@@ -1,6 +1,7 @@
 'use strict';
 const Sources = require('../../Items/ItemAcquisitionCatalog');
 const RecipeCatalog = require('../../Knowledge/RecipeCatalog');
+const { createHash } = require('node:crypto');
 
 // Public candidate admission only. Prices, ownership, funds and executable
 // demand are still evaluated through the existing per-item quote readers.
@@ -31,12 +32,26 @@ class RecipeProductionIndex {
         this.catalog = recipeCatalog();
         this.rows = Array.from({ length: 10 }, () => new Set());
         this.revisions = new Uint32Array(10);
-        for (const recipe of this.catalog.rows) this.refresh(recipe);
+        const emptyIdentity = createHash('sha256').update('[]').digest('hex');
+        this.identities = Array(10).fill(emptyIdentity);
+        const changed = new Set();
+        for (const recipe of this.catalog.rows) this.refresh(recipe, changed);
+        this.publishIdentities(changed);
     }
     scopeFor(level) { return `recipe-production:${Math.max(0, Math.min(9, Math.floor(Number(level) || 0)))}`; }
     revision(scope) {
         const match = /^recipe-production:([0-9])$/.exec(String(scope));
         return match ? this.revisions[Number(match[1])] : 0;
+    }
+    contentIdentity(scope) {
+        const match = /^recipe-production:([0-9])$/.exec(String(scope));
+        return match ? this.identities[Number(match[1])] : null;
+    }
+    publishIdentities(levels) {
+        // Recipe data belongs to the code generation already bound by the
+        // decision proof. This owner publishes membership in native order.
+        for (const level of levels) this.identities[level] = createHash('sha256')
+            .update(JSON.stringify([...this.rows[level]].map(recipe => Number(recipe.recipeId)))).digest('hex');
     }
     rowsFor(level) { return this.rows[Math.max(0, Math.min(9, Math.floor(Number(level) || 0)))].values(); }
     refresh(recipe, changed = new Set()) {
@@ -53,12 +68,13 @@ class RecipeProductionIndex {
     update(id) {
         const changed = new Set();
         for (const recipe of this.catalog.reverse.get(Number(id)) || []) this.refresh(recipe, changed);
+        this.publishIdentities(changed);
         const scopes = [];
         for (const level of changed) { this.revisions[level]++; scopes.push(this.scopeFor(level)); }
         return scopes;
     }
     reset() {
-        const changed = [];
+        const changed = [], levels = [];
         for (let level = 1; level <= 9; level++) {
             if (!this.rows[level].size) continue;
             // Snapshot replacement clears public bids, while enabled authored
@@ -66,8 +82,10 @@ class RecipeProductionIndex {
             const rows = this.rows[level]; rows.clear();
             for (const recipe of this.catalog.rows) if (recipe.level <= level && this.accept(recipe) && this.fixedBuyer(recipe)) rows.add(recipe);
             this.revisions[level]++;
+            levels.push(level);
             changed.push(this.scopeFor(level));
         }
+        this.publishIdentities(levels);
         return changed;
     }
 }
