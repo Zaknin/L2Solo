@@ -1,6 +1,7 @@
 const { SELL } = require('../../AfkTrade/BoardIndex');
 const Funding = require('../Economy/PurchaseFunding');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+const Sections = require('../Economy/DecisionSections');
 const { fnv1a32 } = require('../Fnv1a');
 const MAX_BYTES = 768;
 const MAX_SHOT_BYTES = 128;
@@ -36,6 +37,46 @@ function edges(before, after, context = {}, timestamp = Date.now(), options = {}
     if (Number(after.level) > Number(before?.level)) bits |= 16;
     if (after.activity === 'dead' && before?.activity !== 'dead') bits |= 32;
     return bits;
+}
+// The edges() bits by name; bit 8 by its trigger.
+const EDGE_NAMES = Object.freeze([[1, 'new_item'], [2, 'stock_keep'], [4, 'money_reached'], [8, 'review'], [16, 'level'], [32, 'death']]);
+function goalDue(before, context, timestamp) {
+    const goalAt = Number(context?.goalReviewAt);
+    return goalAt > Number(before?.timing?.lastResolvedAt || 0) && goalAt <= timestamp;
+}
+const arrived = (before, after) => after.activity === 'shopping' && before?.activity === 'traveling';
+const rested = (before, after) => after.activity === 'hunting' && before?.activity === 'resting';
+// A goal deadline that passed during a rest or a trip is named as the goal
+// review, so the rest review counts only rests (L115C).
+function reviewTrigger(before, after, context, timestamp) {
+    if (goalDue(before, context, timestamp)) return 'review_goal';
+    if (arrived(before, after)) return 'review_arrival';
+    return rested(before, after) ? 'review_after_rest' : 'review_goal';
+}
+function edgeNames(bits, before, after, context, timestamp) {
+    const names = [];
+    for (const [bit, name] of EDGE_NAMES) if (bits & bit) names.push(bit === 8 ? reviewTrigger(before, after, context, timestamp) : name);
+    return names;
+}
+// Place 'edges' (Hold.js): the fired edges that still drop a card its verdict
+// kept, by name ([] when none). An edge is an event for its own sections: the
+// money, level and death bits are the verdict's facts (fundingMark,
+// capability, dead), new loot, a stock crossing and an arrival feed the
+// action plan (prepare), which still runs on them. Two review triggers stay:
+// - the goal review, unless the goal revision the card was built on
+//   (accepted.goalRevision) equals main's current one (context.goalRevision;
+//   either missing: the old rule);
+// - the review after a rest, when a decision fact moved against the build's
+//   baseline (DecisionSections.events: death, build, relations, spot, risk,
+//   supply, money). No decision reads hp or mp but death (and a crafter's MP,
+//   which holds at the step gate).
+function heldEdges(bits, before, after, context = {}, timestamp = Date.now(), heldGoalRevision) {
+    const why = [];
+    if (!(bits & 8)) return why;
+    if (goalDue(before, context, timestamp) && !(Number.isFinite(context.goalRevision)
+        && context.goalRevision === heldGoalRevision)) why.push('review_goal');
+    if (rested(before, after) && Sections.events(before, after, timestamp, context.buyOrderEscrow).length) why.push('review_after_rest');
+    return why;
 }
 
 // Same native sale/bid policies as a town/remote review, with the worker's
@@ -234,4 +275,4 @@ function decideShot(state, economy, options = {}) {
     // a recipe/gear/quote scan by falling through this publication adapter.
     return { unknown: true };
 }
-module.exports = { edges, decide, prepare, buyBatch, decideShot, MAX_BYTES, MAX_SHOT_BYTES, MAX_PLAN_PAYLOAD_BYTES, MAX_SHOT_PAYLOAD_BYTES };
+module.exports = { edges, edgeNames, heldEdges, decide, prepare, buyBatch, decideShot, MAX_BYTES, MAX_SHOT_BYTES, MAX_PLAN_PAYLOAD_BYTES, MAX_SHOT_PAYLOAD_BYTES };

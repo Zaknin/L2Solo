@@ -100,6 +100,7 @@ const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
+const ColdEconomyPlan = require('./ColdEconomyPlan');
 const RecomputeGeneration = require('./RecomputeGeneration');
 const PersonalWarehouseIndex = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const ClanSupplyPolicy = invoke('GameServer/Clan/ClanSupplyPolicy');
@@ -773,16 +774,14 @@ function advisoryRefusal(deps, site, reason) {
     if (name === 'party' || name === 'no_card') return deps;
     return { ...deps, advisoryRefusal: name.startsWith('fence:structural:') ? 'fence:structural' : name };
 }
-// ColdEconomyPlan.edges bits, named for the L115 counters.
-const EDGE_NAMES = [[1, 'new_item'], [2, 'stock_keep'], [4, 'money_reached'], [8, 'review'], [16, 'level'], [32, 'death']];
-// Bit 8 has three triggers in ColdEconomyPlan.edges. A goal deadline that
-// passed during a rest or a trip is named as the goal review, so the rest
-// review counts only rests (L115C).
-function reviewTrigger(state, projected, context, timestamp) {
-    const goalAt = Number(context?.goalReviewAt);
-    if (goalAt > Number(state?.timing?.lastResolvedAt || 0) && goalAt <= timestamp) return 'review_goal';
-    if (projected.activity === 'shopping' && state.activity === 'traveling') return 'review_arrival';
-    return projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal';
+// The sampled same/new of a card a Hold.js place kept in shadow while the
+// step rebuilt (held: { place, why, card, startedAt }, set by the place's
+// verdict: 'card_leaf' in ColdEconomyDecision.refusal, 'edges' below): the
+// rebuild's card against the held one.
+function compareHeldCard(held, state, card) {
+    if (!held) return;
+    Hold.compare(held.place, state, held.why, () => !card ? 'no_card'
+        : ColdEconomyDecision.sameEconomicOutput(held.card, card) ? '' : 'card', performance.now() - held.startedAt);
 }
 // Two plan-like stats values hold the same data (undefined reads as null).
 function samePlanJson(a, b) {
@@ -1180,7 +1179,7 @@ function startKernel(config = {}) {
         }),
         projectResolve: async (state, result, timestamp) => {
             const owner = kernel.states.get(Number(state.characterId));
-            let economy = null, seenKey = null, refreshed = null, observedDeps = null, economyEdges = null;
+            let economy = null, seenKey = null, refreshed = null, observedDeps = null, economyEdges = null, heldCard = null;
             const resolved = await LifeStateProjector.prepareResolve(state, result, {
                 persist: false,
                 timestamp,
@@ -1193,7 +1192,7 @@ function startKernel(config = {}) {
                     const workshop = await occupationFor(projected, timestamp,
                         { ...context, routeRows, routeKey: EconomicTrip.key(projected) });
                     return { spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
-                        board: boardReady(), buyOrderEscrow: context.buyOrderEscrow };
+                        board: boardReady(), buyOrderEscrow: context.buyOrderEscrow, goalRevision: context.goalRevision };
                 },
                 economyFor: async (projected, deps) => {
                     observedDeps = deps;
@@ -1209,30 +1208,37 @@ function startKernel(config = {}) {
                     // built at the first gate read (edges skips resting,
                     // travelling and party bots, which read none).
                     let stock = refreshed?.economy || prepared.basics || null;
-                    economyEdges = invoke('GameServer/Bot/Population/ColdEconomyPlan')
-                        .edges(state, projected, owner?.context || {}, timestamp,
-                            { stockFor: (_state, kind) => (stock ||= prepared.basics = Economy.basics(projected, deps)).stock(kind) });
-                    if (economyEdges && refreshed) {
+                    const edgeContext = owner?.context || {};
+                    economyEdges = ColdEconomyPlan.edges(state, projected, edgeContext, timestamp,
+                        { stockFor: (_state, kind) => (stock ||= prepared.basics = Economy.basics(projected, deps)).stock(kind) });
+                    // Place 'edges': an edge drops a card its verdict kept only
+                    // for the edge's own sections (ColdEconomyPlan.heldEdges).
+                    let edgeWhy = null;
+                    if (economyEdges && refreshed && Hold.asked('edges', deps)) {
+                        edgeWhy = ColdEconomyPlan.heldEdges(economyEdges, state, projected, edgeContext, timestamp, refreshed.advisory.goalRevision);
+                        if (Hold.check('edges', edgeWhy, deps)) edgeWhy = null;
+                    }
+                    if (economyEdges && refreshed && (edgeWhy || !Hold.on('edges', deps))) {
+                        if (edgeWhy) heldCard = { place: 'edges', why: edgeWhy, card: refreshed.decision, startedAt: performance.now() };
                         refreshed = null;
                         // L115: which native gate dropped a card that held its fence.
                         // L115C: the refusal is named by a lone review trigger
                         // (else 'other'), so its rebuild's refusal_plan
                         // same/new count shows whether that edge changes the plan.
                         if (economyDiagnostics.active()) {
-                            const review = economyEdges & 8 ? reviewTrigger(state, projected, owner?.context, timestamp) : null;
-                            for (const [bit, name] of EDGE_NAMES) {
-                                if (economyEdges & bit) economyDiagnostics.count('advisory', 'edge', bit === 8 ? review : name);
-                            }
-                            why.push(`economy_edges:${economyEdges === 8 ? review : 'other'}`);
+                            const names = ColdEconomyPlan.edgeNames(economyEdges, state, projected, edgeContext, timestamp);
+                            for (const name of names) economyDiagnostics.count('advisory', 'edge', name);
+                            why.push(`economy_edges:${economyEdges === 8 ? names[0] : 'other'}`);
                             // A lone review edge on a card this step's own
                             // lifecycle built: the refusal's rebuild also
                             // counts as refusal_plan_fresh (EconomyContext).
                             fresh = economyEdges === 8 && owner?.context?.wishAdvisory?.builtAt === timestamp;
-                            if (fresh) economyDiagnostics.count('advisory', 'edge_fresh', review);
+                            if (fresh) economyDiagnostics.count('advisory', 'edge_fresh', names[0]);
                         } else why.push('economy_edges');
                     }
                     if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, owner?.context || {}, refreshed, deps);
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
+                    heldCard ||= prepared.held || null;
                     const eventDeps = prepared.eventVerdict || prepared.eventCandidate ? { ...deps,
                         eventVerdict: prepared.eventVerdict, eventCandidate: prepared.eventCandidate } : deps;
                     const refusalDeps = advisoryRefusal(fresh ? { ...eventDeps, advisoryFresh: true } : eventDeps, 'result', why[0] || 'party');
@@ -1246,8 +1252,9 @@ function startKernel(config = {}) {
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
-                    rememberWishAdvisory(owner, refreshed?.advisory || ColdEconomyDecision.advisory(built, seen, undefined, observedDeps),
-                        refreshed ? null : seen, observedDeps);
+                    const advice = refreshed?.advisory || ColdEconomyDecision.advisory(built, seen, undefined, observedDeps);
+                    if (!refreshed) compareHeldCard(heldCard, seen, advice?.card);
+                    rememberWishAdvisory(owner, advice, refreshed ? null : seen, observedDeps);
                 }
             });
             const projected = resolved;
@@ -1312,7 +1319,7 @@ function startKernel(config = {}) {
                 { ...context, routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
             const deps = { spots, occupancy, timestamp, board: boardReady(),
-                buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
+                buyOrderEscrow: context?.buyOrderEscrow, goalRevision: context?.goalRevision, workshop, routeRows };
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
@@ -1427,9 +1434,10 @@ function startKernel(config = {}) {
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
             const heldDecision = nullReuse ? ColdEconomyDecision.compact({ data: refreshed.decision.data.slice(0),
                 updatedAt: Number(seen.updatedAt || 0), key: ColdEconomyDecision.stateKey(seen), flags: 0 }) : null;
-            rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
-                nullReuse ? { ...refreshed.advisory, card: heldDecision }
-                    : ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps), seen, deps, !nullReuse);
+            const advice = nullReuse ? { ...refreshed.advisory, card: heldDecision }
+                : ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps);
+            if (!nullReuse) compareHeldCard(prepared.held, seen, advice?.card);
+            rememberWishAdvisory(kernel.states.get(Number(state.characterId)), advice, seen, deps, !nullReuse);
             if (nullReuse && economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
             compareTransit(transit, state, routedState, economy.statsPacket, previousPlan);
             return {

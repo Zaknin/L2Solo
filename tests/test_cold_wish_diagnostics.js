@@ -17,6 +17,7 @@ new Function('require', 'invoke', 'module', fs.readFileSync(path.resolve(__dirna
     if (name.endsWith('BoardIndex')) return { SELL: 1 };
     if (name.endsWith('PurchaseFunding')) return native;
     if (name.endsWith('EconomyDiagnostics')) return Diagnostics;
+    if (name.endsWith('DecisionSections')) return {}; // read only by heldEdges, not exercised here
     if (name.endsWith('Fnv1a')) return { fnv1a32 };
     if (name.endsWith('ColdEconomyDecision')) return require('../src/GameServer/Bot/Population/ColdEconomyDecision');
     if (name.endsWith('MarketListingPolicy')) return {

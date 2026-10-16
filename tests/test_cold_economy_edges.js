@@ -40,4 +40,22 @@ for (const blocked of [{ activity: 'resting' }, { activity: 'traveling' }, { par
     after = { ...clone(), level: 31, ...blocked }; after.inventory[1871] = { selfId: 1871, amount: 1 };
     assert.equal(Plan.edges(before, after, { goalReviewAt: 150 }, 200, options), 0);
 }
+// Place 'edges': a goal review drops a kept card only when the goal revision
+// moved (or is unknown); an arrival, loot or money edge never does.
+after = clone();
+assert.deepEqual(Plan.heldEdges(8, before, after, { goalReviewAt: 150 }, 200), ['review_goal'], 'no revision: the old rule');
+assert.deepEqual(Plan.heldEdges(8, before, after, { goalReviewAt: 150, goalRevision: 7 }, 200, 7), [], 'same goal revision holds');
+assert.deepEqual(Plan.heldEdges(8, before, after, { goalReviewAt: 150, goalRevision: 8 }, 200, 7), ['review_goal']);
+assert.deepEqual(Plan.heldEdges(8, { ...before, activity: 'traveling' }, { ...after, activity: 'shopping' }, {}, 200), []);
+assert.deepEqual(Plan.heldEdges(1 | 2 | 4 | 16, before, after, {}, 200), []);
+// After a rest: only a moved decision fact (DecisionSections.events), not hp/mp.
+const Sections = require('../src/GameServer/Bot/Economy/DecisionSections');
+const resting = { ...clone(), activity: 'resting', vitals: { hp: 50, mp: 10 } };
+resting.stats.wishSections = { at: 150, funding: Sections.fundingMark(resting),
+    ...Sections.semanticFacts({ ...resting, activity: 'hunting' }, 150) };
+const recovered = { ...structuredClone(resting), activity: 'hunting', vitals: { hp: 100, mp: 40 } };
+assert.deepEqual(Plan.heldEdges(8, resting, recovered, {}, 200), [], 'a rest that only refilled hp/mp holds');
+recovered.stats.clanId = 5;
+assert.deepEqual(Plan.heldEdges(8, resting, recovered, {}, 200), ['review_after_rest'], 'a moved relation drops the card');
+assert.deepEqual(Plan.edgeNames(8 | 16, { ...before, activity: 'resting' }, after, {}, 200), ['review_after_rest', 'level']);
 console.log('Cold economy edges passed');
