@@ -2886,8 +2886,12 @@ const BotLifeState = {
 
             return profileReady.then((profiledState) => {
                 if (options.persist === false) {
+                    // reconcileEquipmentInventory already settled the plan on
+                    // this same object; only a refreshed profile needs a recheck.
+                    const settled = profiledState === equippedProgressedState;
+                    if (Diagnostics.active()) Diagnostics.count('resolve_plan_reconcile', settled ? 'skipped' : 'rebuilt');
                     return {
-                        ...reconcileFulfilledEquipmentPlan(profiledState),
+                        ...(settled ? profiledState : reconcileFulfilledEquipmentPlan(profiledState)),
                         updatedAt: timestamp
                     };
                 }
