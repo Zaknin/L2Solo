@@ -574,9 +574,16 @@ async function checkPhantomActions(session, summon, summonSkillId) {
     const massCubicSkill = buildSkill(1328, 1);
     const massCubicSession = sessionFor(massCubicBackpack, massCubicSkill);
     const massCubicCompanion = sessionFor(new Backpack({ paperdoll: Array.from({ length: 16 }, () => ({})), items: [] }), massCubicSkill);
+    massCubicCompanion.actor.fetchId = () => 2000093;
     massCubicCompanion.followPlayerSession = massCubicSession;
     massCubicCompanion.partyCompanion = true;
-    World.user = { sessions: [massCubicSession, massCubicCompanion] };
+    // Party members come from the world's party group, which only canonical
+    // registration fills; a bare sessions array has no party membership.
+    World.user = { sessions: [], revision: 0 };
+    for (const member of [massCubicSession, massCubicCompanion]) {
+        member.fetchAccountId = () => `mass_cubic_fixture_${member.actor.fetchId()}`;
+        World.insertUser(member);
+    }
     SkillEffects.execute(massCubicSession, massCubicSession.actor, massCubicSession.actor, massCubicSkill);
     assert.strictEqual(massCubicSession.actor.cubics.get(1).sourceId, massCubicSession.actor.fetchId(), 'Mass Storm Cubic should retain the caster as cubic source');
     assert.strictEqual(massCubicCompanion.actor.cubics.get(1).sourceId, massCubicSession.actor.fetchId(), 'Mass Storm Cubic should apply the cubic to each active party companion');
