@@ -148,6 +148,8 @@ let planningNpcOfferRows = [];
 const tables = new TableMirror({ actorProjectorRole: workerProjectorRole });
 // Planning producers import this same collector; its worker cap is64 rows.
 const economyDiagnostics = require('../Economy/EconomyDiagnostics');
+// The one hold scheme: the mode, counter and compare of a held answer.
+const Hold = require('../Economy/Hold');
 // The board's offers, built from the main thread's 'board' table as it changes.
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
 const boardIndex = new BoardIndex({ groupOf: MarketCounters.counterOf });
@@ -814,7 +816,7 @@ function compareTransit(transit, state, plannedState, statsPacket, previousPlan)
     // A packet writes only the fields it carries.
     const stats = state.stats || {}, planned = plannedState.stats || {};
     const moves = (key, value) => key in statsPacket && value(statsPacket[key]) !== value(stats[key]);
-    invoke('GameServer/Bot/Economy/Hold').compare('transit', state, transit.why, () =>
+    Hold.compare('transit', state, transit.why, () =>
         !samePlanJson(planned.equipmentPlan, previousPlan) ? 'plan'
             : !samePlanJson(planned.partyRequest, stats.partyRequest) ? 'party_request'
                 : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip'
@@ -834,7 +836,6 @@ function compareTransit(transit, state, plannedState, statsPacket, previousPlan)
 // and resolves its incoming state. Null outside the place, else
 // { why, held, startedAt }.
 function transitHold(state, previousPlan, nativeReplan, context, timestamp) {
-    const Hold = invoke('GameServer/Bot/Economy/Hold');
     if (!Hold.asked('transit', context)) return null;
     const travel = state.activity === 'traveling' && BackgroundResolver.travelRecord(state.stats?.travel);
     if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return null;

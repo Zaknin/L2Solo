@@ -32,7 +32,7 @@ const helperSource = `${slice('function samePlanJson(', 'function nativePlanHold
     + `${slice('// Diagnostics only: a lifecycle rebuild', 'function rememberWishAdvisory(')}\n`;
 let economy = invoke('GameServer/Bot/Economy/EconomyContext'), reads = 0;
 const persona = { archetype: 'test' };
-const context = (extra = {}) => ({ invoke, performance, BotPersona: { of: () => persona },
+const context = (extra = {}) => ({ invoke, performance, Hold, BotPersona: { of: () => persona },
     EconomyContext: { heldEventsQuiet: (...args) => economy.heldEventsQuiet(...args) },
     BackgroundResolver: { travelRecord: travel => { reads++; return Resolver.travelRecord(travel); } }, ...extra });
 const { transitHold, compareTransit } = vm.runInNewContext(`${helperSource}({ transitHold, compareTransit })`, context());
