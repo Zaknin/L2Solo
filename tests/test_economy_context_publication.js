@@ -51,7 +51,7 @@ function mainPublication() {
     assert.strictEqual(Economy.forGroup({ id: 'publication-a', adena: 200 }, [published, members[1]], deps), group,
         'a republished member with unchanged inputs keeps the group');
     assert.strictEqual(Economy.forGroup({ id: 'publication-b', adena: 200 }, members.slice(2), deps), unaffected);
-    assert.equal(kernel.upsert({ state: { ...published, adena: 300 }, context: { route: null } }), true);
+    assert.equal(kernel.upsert({ state: { ...published, level: 21 }, context: { route: null } }), true);
     const moved = kernel.states.get(911).state;
     const regrouped = Economy.forGroup({ id: 'publication-a', adena: 200 }, [moved, members[1]], deps);
     assert.notStrictEqual(regrouped, group, 'a member whose inputs changed misses the group by key');

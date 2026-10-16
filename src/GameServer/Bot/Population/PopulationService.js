@@ -461,7 +461,7 @@ function requiresClanEquipmentParty(state) {
 async function jointPartyGoals(party, members, timestamp, options = {}) {
     const Policy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
     if (!members.some(member => member.phase === 'cold'))
-        return Policy.joint(party, members, { context: Policy.groupContext(party, members, { timestamp }) });
+        return Policy.joint(party, members, { context: Policy.groupContext(party, members, { timestamp }), timestamp });
     const result = await ColdSimulationCoordinator.requestPartyGoals(party, members, { timestamp,
         onWorkerWait: ms => { options.workerWaitMs = Number(options.workerWaitMs || 0) + ms; } });
     // Two other parties hold the worker's goal slots: keep the current
