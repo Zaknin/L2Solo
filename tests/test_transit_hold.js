@@ -120,7 +120,12 @@ assert.equal(same.reason, 'held'); assert.equal(same.outcome, 'same');
 assert.equal(same.moved, undefined);
 assert(Number.isFinite(same.durationMs));
 for (const [moved, planned, packet] of [
-    ['plan', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, reason: 'other' } } }, {}],
+    ['plan:reason', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, reason: 'other' } } }, {}],
+    ['plan:next', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, next: { npcId: 7 } } } }, {}],
+    ['plan', { ...state, stats: { ...state.stats, equipmentPlan: { reason: plan.reason, ...plan } } }, {}],
+    ['plan:next', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, next: undefined } } }, {}],
+    ['plan:startedAt', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, startedAt: T } } }, {}],
+    ['plan:reason', { ...state, stats: { ...state.stats, equipmentPlan: { ...plan, reason: 'other', startedAt: T } } }, {}],
     ['party_request', { ...state, stats: { ...state.stats, partyRequest: { spotId: 1 } } }, {}],
     ['trip', { ...state, activity: 'traveling' }, {}],
     ['trip', { ...state, spotId: 9 }, {}],

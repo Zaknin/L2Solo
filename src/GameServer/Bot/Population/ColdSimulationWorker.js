@@ -816,13 +816,20 @@ function compareTransit(transit, state, plannedState, statsPacket, previousPlan)
     // A packet writes only the fields it carries.
     const stats = state.stats || {}, planned = plannedState.stats || {};
     const moves = (key, value) => key in statsPacket && value(statsPacket[key]) !== value(stats[key]);
-    Hold.compare('transit', state, transit.why, () =>
-        !samePlanJson(planned.equipmentPlan, previousPlan) ? 'plan'
-            : !samePlanJson(planned.partyRequest, stats.partyRequest) ? 'party_request'
-                : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip'
-                    : moves('wishFocus', focus => focus?.[0] ?? null) ? 'focus'
-                        : moves('decisionSeq', seq => Number(seq || 0)) ? 'decision_seq'
-                            : moves('activityLeaf', leaf => Number(leaf || 0)) ? 'activity_leaf' : '',
+    // plan:<the first top-level field that moved>, or plan (one side null,
+    // or the same fields in another order).
+    const planMove = (next, last) => {
+        if (samePlanJson(next, last)) return '';
+        const field = next && last && Object.keys({ ...next, ...last })
+            .find(key => JSON.stringify(next[key]) !== JSON.stringify(last[key]));
+        return field ? `plan:${field}` : 'plan';
+    };
+    Hold.compare('transit', state, transit.why, () => planMove(planned.equipmentPlan, previousPlan)
+        || (!samePlanJson(planned.partyRequest, stats.partyRequest) ? 'party_request'
+            : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip'
+                : moves('wishFocus', focus => focus?.[0] ?? null) ? 'focus'
+                    : moves('decisionSeq', seq => Number(seq || 0)) ? 'decision_seq'
+                        : moves('activityLeaf', leaf => Number(leaf || 0)) ? 'activity_leaf' : ''),
     performance.now() - transit.startedAt, () => {
         for (const key of ['money', 'wishFocus', 'dormantWishes', 'stockTargets'])
             if (key in statsPacket && !samePlanJson(statsPacket[key], stats[key])) return `packet:${key}`;
