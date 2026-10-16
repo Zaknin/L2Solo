@@ -221,6 +221,8 @@ async function createProbe(index) {
         assert.deepStrictEqual(acceptedIncoming, {}, `row ${result.characterId} has no accepted trade custody`);
         assert.strictEqual(incomingPending, undefined);
         assert.deepStrictEqual(columns, { ...stored }, `committed row ${result.characterId} equals the stored row`);
+        if (result.committedStats) assert.deepStrictEqual(result.committedStats, JSON.parse(stored.statsJson),
+            `the stats handed back for ${result.characterId} are the stored stats`);
     }
     const byId = new Map(results.map((result) => [Number(result.characterId), result]));
     assert.strictEqual(byId.get(states[0].characterId).ok, true);
