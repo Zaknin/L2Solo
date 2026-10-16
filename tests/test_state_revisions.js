@@ -21,7 +21,7 @@ async function revisions() {
 
 async function run() {
     await DB.init();
-    assert.deepEqual(DB.stateRevisions(undefined), { inventoryRevision: 0, skillsRevision: 0, hennaRevision: 0 },
+    assert.deepEqual(DB.stateRevisions(undefined), { bagRevision: 0, skillsRevision: 0, hennaRevision: 0 },
         'a row without the columns reads as unknown (0)');
     await Native.character(DB, id, 'RevisionBot', 'bot_revision', loc);
     await DB.execute(['UPDATE characters SET level=20,classId=0,race=0 WHERE id=?', [id]]);
@@ -30,7 +30,7 @@ async function run() {
         currentRegion,locX,locY,locZ,statsJson,inventorySummary) VALUES(?, 'bot_revision','RevisionBot',20,'cold','hunting','Giran',?,?,?,?,'{}')`,
     [id, loc.locX, loc.locY, loc.locZ, JSON.stringify(stats)]]);
     let at = await revisions();
-    assert.deepEqual([at.inventoryRevision, at.skillsRevision, at.hennaRevision], [0, 0, 0], 'a new row starts at 0');
+    assert.deepEqual([at.bagRevision, at.skillsRevision, at.hennaRevision], [0, 0, 0], 'a new row starts at 0');
 
     // Skills: a new row, a same-level upsert (no move), a level, a delete.
     await DB.execute(['INSERT INTO skills (selfId, name, passive, level, characterId) VALUES (3, \'Power Strike\', 0, 1, ?)', [id]]);
@@ -50,9 +50,9 @@ async function run() {
 
     // The stored bag summary: any writer moves it, an equal write does not.
     await DB.execute(['UPDATE bot_life_state SET inventorySummary = ? WHERE characterId = ?', ['{"57":{"selfId":57,"amount":5}}', id]]);
-    assert.equal((await revisions()).inventoryRevision, 1, 'a changed summary moves inventoryRevision');
+    assert.equal((await revisions()).bagRevision, 1, 'a changed summary moves inventoryRevision');
     await DB.execute(['UPDATE bot_life_state SET inventorySummary = ? WHERE characterId = ?', ['{"57":{"selfId":57,"amount":5}}', id]]);
-    assert.equal((await revisions()).inventoryRevision, 1, 'an equal summary does not');
+    assert.equal((await revisions()).bagRevision, 1, 'an equal summary does not');
 
     // The cold commit: one bag revision step, the built row equals the stored
     // row, the committed state carries the revisions, the kit gets the stamp.
@@ -67,12 +67,12 @@ async function run() {
         proposal: { baseState: leased }, options: { allowLifecycle: true } }]);
     assert(result.ok, `commit: ${result.reason}`);
     at = await revisions();
-    assert.equal(at.inventoryRevision, before.inventoryRevision + 1, 'the commit moves the bag revision once (no trigger second write)');
+    assert.equal(at.bagRevision, before.bagRevision + 1, 'the commit moves the bag revision once (no trigger second write)');
     const columns = { ...result.row };
     delete columns.acceptedIncoming; delete columns.incomingPending;
     assert.deepEqual(columns, { ...at.row }, 'the built committed row equals the stored row, revisions included');
     state = Life.cachedState(id);
-    assert.equal(DB.stateRevisions(state).inventoryRevision, at.inventoryRevision, 'the committed state carries the bag revision');
+    assert.equal(DB.stateRevisions(state).bagRevision, at.bagRevision, 'the committed state carries the bag revision');
     assert.equal(DB.stateRevisions(state).skillsRevision, at.skillsRevision, 'and the skills revision');
     const kit = JSON.parse(at.row.statsJson).coldCombat;
     assert.equal(kit.skillsRevision, at.skillsRevision, 'the checked kit carries the skills revision it was checked against');

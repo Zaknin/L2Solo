@@ -1758,7 +1758,7 @@ function applySchemaMigrations() {
             BEGIN ${bump('hennaRevision', 'OLD.characterId')} END;
         `);
     }]);
-    const applied =new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
+    const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
         connection.exec('BEGIN IMMEDIATE');
@@ -2574,10 +2574,12 @@ const COLD_SIMULATION_PATCH_COLUMNS = new Set([
 const STATE_REVISION_COLUMNS = Object.freeze(['inventoryRevision', 'skillsRevision', 'hennaRevision']);
 
 // The one reader of the revisions on a bot_life_state row (or a state that
-// copied them): 0 when absent, which means unknown, so recompute.
+// copied them): 0 when absent, which means unknown, so recompute. The bag
+// column is inventoryRevision; on a state it is bagRevision, since the hot
+// Backpack already has an in-memory inventoryRevision with another meaning.
 function stateRevisions(row) {
     return {
-        inventoryRevision: Math.max(0, Number(row?.inventoryRevision) || 0),
+        bagRevision: Math.max(0, Number(row?.bagRevision ?? row?.inventoryRevision) || 0),
         skillsRevision: Math.max(0, Number(row?.skillsRevision) || 0),
         hennaRevision: Math.max(0, Number(row?.hennaRevision) || 0)
     };
@@ -2995,8 +2997,7 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
     // skillsRevision (the trigger).
     const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
     return { drops: dropped?.drops || [],
-        rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0,
-        skillsWritten: physical.skills?.length > 0 };
+        rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
 }
 
 function dropPkDeathItemsUnsafe(characterId) {
@@ -5996,7 +5997,7 @@ const Database = {
             parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
-            const { drops: pkDrops, rewrote, skillsWritten } = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : { drops: [], rewrote: false };
+            const { drops: pkDrops, rewrote } = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : { drops: [], rewrote: false };
             parts?.lap('physical');
             // What deals and closed records left for the bot on the board while
             // the worker held it reaches its bag with this save.
@@ -6017,11 +6018,7 @@ const Database = {
                 ...row, ...Object.fromEntries(entries), simulationOwner: LEGACY_SIMULATION_OWNER,
                 simulationRevision: revision, simulationLeaseId: null, simulationLeaseUntil: 0
             });
-            // Written skill rows may have moved the revision under the built row.
-            if (skillsWritten && !settled && !rewritten) {
-                committedRow.skillsRevision = Number(one('SELECT skillsRevision FROM bot_life_state WHERE characterId = ?', [characterId])?.skillsRevision) || 0;
-            }
-            parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : skillsWritten ? 'built_skills' : 'built');
+            parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : 'built');
             parts && Diagnostics.count('commit_stats', statsParsed && !rewritten ? 'handed' : 'reparsed');
             parts && skills !== undefined && Diagnostics.count('commit_skills', skills);
             parts?.lap('reread');
