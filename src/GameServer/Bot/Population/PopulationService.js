@@ -2503,6 +2503,7 @@ const PopulationService = {
     async applyWorkerPartyRequirements(party, resolution) {
         if (party.status !== 'active') {
             this.partyRequirementRefreshDue.delete(String(party.partyId));
+            this.partyRequirementVerdicts.delete(String(party.partyId));
             return [];
         }
         let changed = false;
