@@ -17,6 +17,9 @@ const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {
     capacity = Math.min(thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, Math.max(1, capacity));
+    // Reserve final build evidence inside the existing budgets. Detailed
+    // alternatives emitted first must not consume every summary slot.
+    const summaryReserve = Math.max(1, Math.ceil(capacity * LIMITS.owners / LIMITS.perSecond));
     let rows = null, bytes = 0, selected = null, explicit = null, selectionKey = null;
     let counters = null, durations = null, transport = null, inFlight = null;
     let selectionListener = null;
@@ -126,7 +129,8 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         offered++;
         const timestamp = now(), bucket = Math.floor(timestamp / 1000);
         if (second !== bucket) { second = bucket; rate = 0; }
-        if (rate >= LIMITS.perSecond) { lose('rate'); return false; }
+        const summary = input.phase === 'wish_context' && typeof input.gate === 'string';
+        if (rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
         // Forward the event's original time and thread, never a late main snapshot.
         const record = { v: 1, at: Number.isFinite(input.at) ? input.at : timestamp,
             thread: imported && ['main', 'worker'].includes(input.thread) ? input.thread : thread, owner: Number(input.owner) };
@@ -136,7 +140,8 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
             .map(row => ({ town: String(row.action || row.town || '').slice(0, 32), hours: Number.isFinite(row.value) ? row.value : null }));
         const row = JSON.stringify(record), size = Buffer.byteLength(row);
         if (size + 1 > LIMITS.recordBytes) { lose('size'); return false; }
-        if ((rows?.length || 0) >= capacity || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
+        if ((rows?.length || 0) >= (summary ? capacity : capacity - summaryReserve)
+            || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
         // Every transition is eligible; minute-based owner/phase dedup broke correlation.
         rate++; rows ||= []; rows.push(row); bytes += size; pump(); return true;
     }

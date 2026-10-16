@@ -1181,8 +1181,8 @@ function buildForState(state, deps) {
         if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
         Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(state, held, sourceBoard, deps, timestamp));
         if (!held) Diagnostics.count('context', 'not_retained', deps.rememberContext === false ? 'unkept_caller' : last?.released || 'first');
-        if (quietSections && !state.stats?.wishDirty && last?.parts?.length === hashes.length) {
-            for (const at of EVENT_KEY_INDEXES) if (last.parts[at] !== hashes[at]) Diagnostics.count('context', 'silent', INPUT_KEY_PARTS[at]);
+        if (quietSections && !state.stats?.wishDirty && last?.heldParts?.length === hashes.length) {
+            for (const at of EVENT_KEY_INDEXES) if (last.heldParts[at] !== hashes[at]) Diagnostics.count('context', 'silent', INPUT_KEY_PARTS[at]);
         }
         shadowSame = same; previousPlan = last?.plan ?? null; previousRows = last?.rows ?? null;
         previousProjection = last?.projection ?? null;
@@ -1199,7 +1199,7 @@ function buildForState(state, deps) {
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
-            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined };
+            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined, heldParts: held ? last?.heldParts : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1512,7 +1512,10 @@ function buildForState(state, deps) {
             activity: state.activity, bandHash: fnv1a32(bandStructural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
-        if (shadowEntry) shadowEntry.heldEventHash = shadowEntry.eventHash;
+        if (shadowEntry) {
+            shadowEntry.heldEventHash = shadowEntry.eventHash;
+            shadowEntry.heldParts = shadowEntry.parts;
+        }
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
             while (sourceHolders.size > SOURCE_MEMO_LIMIT) {

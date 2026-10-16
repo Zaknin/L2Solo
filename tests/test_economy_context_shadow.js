@@ -116,6 +116,22 @@ before = shadow();
 Economy.forState(state(), deps);
 assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 });
 
+// A temporary caller's predecessor is not the held decision's baseline.
+{
+    const counts = () => Diagnostics.metrics().counts || {};
+    const ownWorkshop = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
+    const changedWorkshop = { ...ownWorkshop, recipeId: 7 };
+    for (const [id, currentWorkshop, expected] of [[910, undefined, 0], [911, changedWorkshop, 1]]) {
+        const native = { ...state(), characterId: id };
+        Economy.forState(native, { ...deps, workshop: ownWorkshop });
+        Economy.forState(native, { ...deps, workshop: changedWorkshop, rememberContext: false });
+        const before = counts()['context:silent:workshop_recipe'] || 0;
+        Economy.forState({ ...native, adena: native.adena + 1 }, { ...deps, workshop: currentWorkshop || ownWorkshop });
+        assert.equal((counts()['context:silent:workshop_recipe'] || 0) - before, expected,
+            'silent event parts compare against the actual held build, not the temporary predecessor');
+    }
+}
+
 // The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
