@@ -340,7 +340,7 @@ function buildProjection(state, ctx, deps) {
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);
     const sourceTrips = new Map(), farmFacts = new Map();
-    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, occupancy: deps.occupancy });
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, occupancy: deps.occupancy, matchupProfiles: deps.soloProfiles });
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);

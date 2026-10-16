@@ -41,6 +41,7 @@ const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
 const BotTargetScorer = invoke('GameServer/Bot/AI/BotTargetScorer');
+const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
@@ -2075,6 +2076,8 @@ function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expected
 }
 // A source is executable only on ground the solo route executor admits.
 // Share profiles and spot verdicts for one projection, then discard them.
+// options.matchupProfiles: the state's solo profiles at this timestamp, when
+// the caller already read them (the build's income route).
 function sourceRouteReader(state, options = {}) {
     const allowed = new WeakMap();
     const timestamp = options.timestamp ?? Date.now();
@@ -2087,7 +2090,7 @@ function sourceRouteReader(state, options = {}) {
         if (!allowed.has(spot)) {
             const soloOptions = { timestamp, occupancy: options.occupancy,
                 mode: 'solo', capacityStates: [state] };
-            profiles ||= invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(state, soloOptions);
+            profiles ||= options.matchupProfiles || BotTargetMatchup.stateProfiles(state, soloOptions);
             allowed.set(spot, spot.raidBoss !== true && !excluded.has(String(spot.id))
                 && LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })
                 && (Spots.isSuitable(spot, Number(state.level || 1), soloOptions)

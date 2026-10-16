@@ -1204,7 +1204,10 @@ function buildForState(state, deps) {
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
     const { price, prices, beliefs, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
-    const base = foundation(state, deps, persona, timestamp, price);
+    // The income route record of this build (its own search or the basics'
+    // one): its solo matchup profiles serve the providers' source route reader.
+    let incomeRecord = null;
+    const base = foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
     const own = Hunt.sampledRows(state, timestamp, deps.mode);
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,
@@ -1294,7 +1297,8 @@ function buildForState(state, deps) {
             : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'key');
         Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
     }
-    const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra] });
+    const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra],
+        soloProfiles: incomeRecord?.route?.matchupProfiles });
     context.projection = projection;
     // Sampled owners only: the hash and the size walk the whole projection (0.4-1.7 ms live), so an
     // unsampled bot keeps projection null. Would the provider's output repeat the actor's previous one,
