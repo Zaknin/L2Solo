@@ -16,7 +16,15 @@ const leaderBySpawnDefinition = new WeakMap();
 const MINION_MAINTENANCE_INTERVAL_MS = 5000;
 // C4/Lisvus Config.RAID_MINION_RESPAWN_TIME defaults to five minutes.
 const MINION_RESPAWN_DELAY_MS = 300000;
+// Raid groups short of minions, group -> boss: a minion death adds its group
+// and the tick visits only these. The full pass over the raid bosses runs once
+// per respawn delay as the safety for a minion that left the world without
+// dying (safetyShort counts the groups it finds that no death announced).
+const refillDue = new Map();
 const telemetry = {
+    refills: 0,
+    safetyPasses: 0,
+    safetyShort: 0,
     engagements: 0,
     minionsAlerted: 0,
     lastEngagementAt: 0,
@@ -198,6 +206,7 @@ function onMinionDeath(world, minion) {
     const group = minion?.minionGroup;
     if (!boss?.minionState || !group) return false;
     if (!group.respawnAt) group.respawnAt = Date.now() + MINION_RESPAWN_DELAY_MS;
+    refillDue.set(group, boss);
     return true;
 }
 
@@ -234,25 +243,54 @@ function stats() {
     return { ...telemetry };
 }
 
+function bossAlive(boss) {
+    return boss.state?.fetchDead?.() !== true && boss.isDead?.() !== true;
+}
+
+// One group of a live boss: refill it when its respawn time came. Returns the
+// minions spawned; leaves the group in refillDue while it waits.
+function maintainGroup(world, boss, group, now) {
+    const alive = aliveMinions(world, group).length;
+    if (alive >= group.desired) {
+        group.respawnAt = 0;
+        refillDue.delete(group);
+        return 0;
+    }
+    if (!group.respawnAt) group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
+    if (!refillDue.has(group)) {
+        refillDue.set(group, boss);
+        DiagnosticConfig.developerDiagnostics && (telemetry.safetyShort += 1);
+    }
+    if (now < group.respawnAt) return 0;
+    const before = group.members.length;
+    fillGroup(world, boss, group);
+    group.respawnAt = 0;
+    // A spawn that failed keeps the group due: the next tick starts its wait.
+    if (aliveMinions(world, group).length >= group.desired) refillDue.delete(group);
+    DiagnosticConfig.developerDiagnostics && (telemetry.refills += 1);
+    return Math.max(0, group.members.length - before);
+}
+
 function maintain(world, now = Date.now()) {
     if (!world?.npc?.spawns) return 0;
     let spawned = 0;
+    for (const [group, boss] of refillDue) {
+        // A boss that died, left the world or lost the group drops it: its
+        // death removed the minions, and its return attaches a fresh group.
+        if (!bossAlive(boss) || !liveNpc(world, boss) || boss.minionState?.groups?.includes(group) !== true) {
+            refillDue.delete(group);
+            continue;
+        }
+        spawned += maintainGroup(world, boss, group, now);
+    }
+    if (now < Number(world.npc.raidBossMinionSafetyAt || 0)) return spawned;
+    world.npc.raidBossMinionSafetyAt = now + MINION_RESPAWN_DELAY_MS;
+    DiagnosticConfig.developerDiagnostics && (telemetry.safetyPasses += 1);
     RaidEntityIndex.bosses(world).forEach((boss) => {
-        if (boss.state?.fetchDead?.() === true || boss.isDead?.() === true) return;
+        if (!bossAlive(boss)) return;
         const state = boss.minionState || attachBoss(world, boss);
         state?.groups?.forEach((group) => {
-            const alive = aliveMinions(world, group).length;
-            if (alive >= group.desired) {
-                group.respawnAt = 0;
-                return;
-            }
-            if (!group.respawnAt) group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
-            if (now >= group.respawnAt) {
-                const before = group.members.length;
-                fillGroup(world, boss, group);
-                spawned += Math.max(0, group.members.length - before);
-                group.respawnAt = 0;
-            }
+            spawned += maintainGroup(world, boss, group, now);
         });
     });
     return spawned;
@@ -270,6 +308,7 @@ function stop(world) {
     if (!world?.npc?.raidBossMinionTicker) return;
     clearInterval(world.npc.raidBossMinionTicker);
     world.npc.raidBossMinionTicker = undefined;
+    world.npc.raidBossMinionSafetyAt = 0;
 }
 
 module.exports = {
