@@ -33,6 +33,7 @@ const ProductionIndex = require('./RecipeProductionIndex');
 const Bytes = require('./CompactBytes');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const Diagnostics = require('./EconomyDiagnostics');
+const Hold = require('./Hold');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
@@ -780,17 +781,27 @@ function gatePlanDiff(state, held, fresh, deps, evidence = null) {
     return 'same';
 }
 // Soft market/crowd never excuses the held leaf's own check: the same
-// per-leaf check as the event verdict (heldLeafRefusal). Shadow first
-// (design-rules Recompute): a leaf this path rebuilt before the shared check
-// (pvp, helping, crafting, improving, resting, traveling) counts as
-// would-hold and still rebuilds until the sampled social rows read same.
-const LEGACY_LEAF_HOLDS = new Set(['hunting', 'shopping', 'selling']);
+// per-leaf check as the event verdict (heldLeafRefusal). It holds live only
+// where the answer before that check held too; a hold only the new check
+// gives (a pvp/helping/crafting/improving/resting/traveling leaf, a partial
+// buy funded for its rest) is Hold place economy_leaf: in shadow it counts
+// and rebuilds. true: hold; false: rebuild; null: a shadow would-hold that
+// rebuilds (the caller's sampled compare).
 function ownLeafHolds(state, held, deps) {
     const leaf = held.plan.network?.activity;
     if (heldLeafRefusal(state, leaf, deps, held.heldUnits)) return false;
-    if (!leaf || LEGACY_LEAF_HOLDS.has(leaf.activity)) return true;
-    if (Diagnostics.active()) Diagnostics.count('context', 'would_hold_own_leaf', leaf.activity);
-    return false;
+    if (legacyLeafHeld(state, leaf, held.heldUnits, deps)) return true;
+    return Hold.asked('economy_leaf', deps) ? Hold.check('economy_leaf', [], deps) || null : false;
+}
+// The answer before the shared check, for a leaf the shared check holds: no
+// leaf and a hunt held; a buy or a liquidation took acceptedActivityHolds on
+// the raw leaf, which for a liquidation and for a buy whose item did not grow
+// since the decision is the shared check's own call; anything else rebuilt.
+function legacyLeafHeld(state, leaf, heldUnits, deps) {
+    if (!leaf || leaf.activity === 'hunting' || leaf.activity === 'selling') return true;
+    if (leaf.activity !== 'shopping') return false;
+    return !Number.isFinite(heldUnits) || ColdEconomyDecision.heldFor(state, leaf.itemId) <= heldUnits
+        || acceptedActivityHolds(state, leaf, deps);
 }
 function occupancyToken(deps, id) {
     const row = deps.occupancy?.get?.(id) || deps.occupancy?.[id];
@@ -1581,11 +1592,14 @@ function buildForState(state, deps) {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
         mp: held?.mp, timestamp, currentKey: key }) : null;
+    // ownLeafHolds' answer when the hit clause asked it; null: a shadow
+    // would-hold (economy_leaf) this build compares on sampled owners.
+    let leafHold;
     if ((activeEvents ? eventVerdict.valid : replay || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
         && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
-                && (activeEvents || ownLeafHolds(state, held, deps)) && (deferred?.push('market'), true))) {
+                && (activeEvents || (leafHold = ownLeafHolds(state, held, deps))) && (deferred?.push('market'), true))) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
@@ -1657,8 +1671,8 @@ function buildForState(state, deps) {
         // shopping/selling label: its route, offer, funding or NPC liquidation
         // moved (acceptedActivityHolds); hunting: its material order is done;
         // pvp/helping, crafting, improving, resting, traveling: a malformed
-        // leaf or a shadow would-hold (context:would_hold_own_leaf); any
-        // other: an activity the check does not know.
+        // leaf or a shadow would-hold (hold:economy_leaf:held); any other:
+        // an activity the check does not know.
         if (refused.endsWith('_own_leaf')) {
             const leaf = held.plan.network?.activity;
             Diagnostics.count('context', 'own_leaf_refused', `${leaf?.activity}:${leaf?.kind || '-'}:${leaf?.sourceType || '-'}`);
@@ -1985,6 +1999,14 @@ function buildForState(state, deps) {
                 Diagnostics.count('context', 'gate_focus_fresh', focusKind(network.focus?.[0]));
             }
             Diagnostics.count('context', 'gate_ms', 'would_hold', Math.round(elapsed));
+        }
+        // The shadow economy_leaf hold: would the skipped rebuild give another plan?
+        if (leafHold === null) {
+            const kind = held.plan.network.activity.activity;
+            Hold.compare('economy_leaf', state, [], () => {
+                const diff = comparison ?? gatePlanDiff(state, held, context, deps);
+                return diff === 'same' ? '' : `${kind}:${diff}`;
+            }, Math.round(elapsed * 100) / 100);
         }
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;

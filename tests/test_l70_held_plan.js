@@ -20,6 +20,7 @@ const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
 const RestartDecision = require('../src/GameServer/Bot/Population/EconomyRestartDecision');
 const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
@@ -603,7 +604,7 @@ try {
                     if (enabled) assert.equal(prepared.socialShadow?.holds, true, 'all later card checks hold');
                     else assert.equal(prepared.socialShadow, undefined, 'off creates no candidate');
                     const before = builds, same = count(`card:social_plan:${kind}:same`);
-                    const wouldHold = count(`context:would_hold_own_leaf:${kind}`);
+                    const wouldHold = count('hold:economy_leaf:held');
                     const candidate = socialShadowDeps(next, current, prepared, T + 1000, () => true);
                     const fresh = Economy.forState(next, candidate);
                     // Shadow first: the shared leaf check (heldLeafRefusal) would hold
@@ -612,7 +613,7 @@ try {
                     if (enabled) {
                         assert.equal(count(`card:social_plan:${kind}:same`) - same, 1,
                             'the matching accepted baseline compares its existing fresh build');
-                        assert.equal(count(`context:would_hold_own_leaf:${kind}`) - wouldHold, 1, 'the would-hold is counted');
+                        assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
                     }
                     return { built, accepted, next, current, fresh };
                 };
@@ -959,26 +960,65 @@ try {
         assert(builds > before);
     }
     // (f2) the legacy soft market hold runs the event verdict's per-leaf
-    // check; shadow first: a pvp leaf it would hold still rebuilds.
+    // check; shadow first: a pvp leaf it would hold counts on Hold place
+    // economy_leaf and still rebuilds.
     {
-        let state = subject(93011, 1e6);
-        const economy = Economy.forState(state, at(T));
-        state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
-        const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
-        assert(wished, 'fixture: a wished item the review read');
-        const pvp = { activity: 'pvp', targetId: 4242, rootKey: 'scores:4242' };
-        economy.plan.network.activity = pvp;
-        assert.equal(Economy.heldLeafRefusal(state, pvp, at(T + MINUTE)), '', 'a well-formed pvp leaf holds');
-        assert.equal(Economy.heldLeafRefusal(state, { ...pvp, rootKey: 'care:4242' }, at(T + MINUTE)).reason, 'check_failed',
-            'a pvp leaf on a foreign root refuses');
-        assert.equal(Economy.acceptedActivityHolds(state, pvp, at(T + MINUTE)), false,
-            'fixture: the trade check alone never held a social leaf');
-        board.put({ id: 9301101, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
-        const before = builds;
-        assert.notStrictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan,
-            'a moved market token rebuilds the pvp plan until the shadow reads same');
-        assert(builds > before);
-        board.remove(9301101);
+        const diagnostic = Config.developerDiagnostics, detail = Config.economyDiagnostics;
+        const owners = Config.economyDiagnosticsBotIds;
+        const count = key => Diagnostics.metrics().counts?.[key] || 0;
+        // The bot is a sampled owner: its compare row reaches the transport.
+        const rows = [];
+        let batch = null;
+        const drain = () => { while (batch) { const sent = batch; batch = null; Diagnostics.ack(sent.id, sent.records.length); } };
+        try {
+            Config.developerDiagnostics = true; Economy.reset();
+            Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '93011';
+            assert(Diagnostics.connect(message => { rows.push(...message.records.map(JSON.parse)); batch = message; return true; }));
+            drain();
+            let state = subject(93011, 1e6);
+            const economy = Economy.forState(state, at(T));
+            state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+            const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
+            assert(wished, 'fixture: a wished item the review read');
+            const pvp = { activity: 'pvp', targetId: 4242, rootKey: 'scores:4242' };
+            economy.plan.network.activity = pvp;
+            assert.equal(Economy.heldLeafRefusal(state, pvp, at(T + MINUTE)), '', 'a well-formed pvp leaf holds');
+            assert.equal(Economy.heldLeafRefusal(state, { ...pvp, rootKey: 'care:4242' }, at(T + MINUTE)).reason, 'check_failed',
+                'a pvp leaf on a foreign root refuses');
+            assert.equal(Economy.acceptedActivityHolds(state, pvp, at(T + MINUTE)), false,
+                'fixture: the trade check alone never held a social leaf');
+            board.put({ id: 9301101, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
+            // The place switched on (the test override) serves the held pvp plan.
+            let before = builds, wouldHold = count('hold:economy_leaf:held');
+            assert.strictEqual(Economy.forState(state, { ...at(T + MINUTE), hold: { economy_leaf: true } }).plan, economy.plan,
+                'economy_leaf on: the soft market move keeps the pvp plan');
+            assert.equal(builds, before);
+            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the hold is counted on its hold place');
+            before = builds; wouldHold = count('hold:economy_leaf:held');
+            const ownLeaf = count('context:hold_refused:market_own_leaf');
+            drain(); rows.length = 0;
+            // A sampled rebuild offers ~42 rows of its own; the compare row comes
+            // last, inside the 48 non-summary rows a second (Diagnostics LIMITS):
+            // start in a fresh second so earlier builds' rows do not crowd it out.
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1001 - Date.now() % 1000);
+            assert.notStrictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan,
+                'a moved market token rebuilds the pvp plan until the shadow reads same');
+            assert(builds > before);
+            assert.equal(count('context:hold_refused:market_own_leaf') - ownLeaf, 1,
+                'the rebuild is the soft market own-leaf refusal, not an earlier clause');
+            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
+            drain();
+            const compared = rows.filter(row => row.phase === 'hold' && row.layer === 'economy_leaf');
+            assert.equal(compared.length, 1, 'the sampled owner gets one compare row');
+            assert(['same', 'new'].includes(compared[0].outcome));
+            assert.equal(compared[0].moved === undefined, compared[0].outcome === 'same', 'a new row names <activity>:<diff>');
+            if (compared[0].moved !== undefined) assert.match(compared[0].moved, /^pvp:(focus|leaf|queue|funded)$/);
+            board.remove(9301101);
+        } finally {
+            Diagnostics.disconnect();
+            Config.developerDiagnostics = diagnostic; Config.economyDiagnostics = detail;
+            Config.economyDiagnosticsBotIds = owners; Economy.reset();
+        }
     }
     // (f3) a material hunt whose gap reached the bag since the decision is
     // done: the shared check refuses it for the held build (heldUnits) and
@@ -992,6 +1032,50 @@ try {
             'the card leaf refuses the same way');
         assert.equal(Economy.heldLeafRefusal(state, hunt, at(T)), '', 'no decision baseline: the full amount remains');
         assert.equal(Economy.heldLeafRefusal(state, { ...hunt, funding: true }, at(T), 3), '', 'a funding hunt has no own item');
+    }
+    // (f4) a partial buy: the shared check funds only the rest after the
+    // part delivered since the decision (heldUnits), the raw leaf the whole
+    // amount. That hold is new, so it is a shadow on Hold place economy_leaf.
+    {
+        const diagnostic = Config.developerDiagnostics;
+        const count = key => Diagnostics.metrics().counts?.[key] || 0;
+        const tripCost = Object.assign(() => 0, { details: () => ({ known: true, hours: .1, fees: 0 }) });
+        const tdeps = timestamp => ({ ...deps, tripCost, timestamp });
+        try {
+            Config.developerDiagnostics = true; Economy.reset();
+            // A bare bag buys its shots: the held build records 0 own units.
+            // The fixture's leaf buys 1864 instead, whose 3 units in the bag
+            // stand for the part delivered since that decision (a delivery
+            // itself moves the structural key, an earlier refusal).
+            let state = { ...subject(93013, 1e6), inventory: Life.inventorySummaryFromItems([
+                { id: 1, selfId: 1, amount: 1, equipped: 1, slot: 7 }, { id: 2, selfId: 1864, amount: 3, equipped: 0, slot: 0 }]) };
+            const economy = Economy.forState(state, tdeps(T));
+            state = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+            const natural = economy.plan.network.activity;
+            assert.equal(natural?.activity, 'shopping', 'fixture: the held build buys');
+            assert.equal(Decisions.heldFor(state, natural.itemId), 0, 'fixture: heldUnits 0');
+            const terms = { activity: 'shopping', kind: 'buy', itemId: 1864, amount: 5, sourceType: 'afk', town: 'Giran',
+                valueHours: natural.valueHours };
+            const unitPrice = Math.floor(Funding.spendable(state, 0, Funding.nativeTerms(terms, 1864)) / 3);
+            assert(unitPrice > 0, 'fixture: the leaf has a budget');
+            const leaf = { ...terms, unitPrice };
+            board.put({ id: 9301301, kind: 'shop', storeType: SELL, ownerId: 7, town: 'Giran',
+                lines: [{ lineId: 1, selfId: 1864, count: 5, price: unitPrice }] });
+            assert.equal(Economy.acceptedActivityHolds(state, leaf, tdeps(T + MINUTE)), false,
+                'the raw leaf needs funding for all 5 units');
+            assert.equal(Economy.heldLeafRefusal(state, leaf, tdeps(T + MINUTE), 0), '', 'the checked leaf funds the 2 left');
+            economy.plan.network.activity = leaf;
+            const wished = economy.network.queue.map(wish => Number(wish.object?.itemId)).find(Boolean);
+            board.put({ id: 9301302, kind: 'shop', storeType: SELL, ownerId: 7, lines: [{ lineId: 1, selfId: wished, count: 1, price: 10 }] });
+            const before = builds, wouldHold = count('hold:economy_leaf:held');
+            const ownLeaf = count('context:hold_refused:market_own_leaf');
+            assert.notStrictEqual(Economy.forState(state, tdeps(T + MINUTE)).plan, economy.plan,
+                'a moved market token rebuilds the partial buy until the shadow reads same');
+            assert(builds > before);
+            assert.equal(count('context:hold_refused:market_own_leaf') - ownLeaf, 1, 'through the soft market own-leaf hold');
+            assert.equal(count('hold:economy_leaf:held') - wouldHold, 1, 'the would-hold is counted on its hold place');
+            board.remove(9301301); board.remove(9301302);
+        } finally { Config.developerDiagnostics = diagnostic; Economy.reset(); }
     }
     // (g) a resting crafter's MP is a resource: the card is refused (critic 2a).
     {

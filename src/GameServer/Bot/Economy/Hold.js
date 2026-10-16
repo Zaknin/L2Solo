@@ -7,7 +7,7 @@ const Diagnostics = require('./EconomyDiagnostics');
 
 // place -> 'off' | 'shadow' (the verdict runs for the counter, the place still
 // recomputes) | 'on' (a quiet verdict skips the recompute).
-const MODE = Object.freeze({ transit: 'shadow' });
+const MODE = Object.freeze({ transit: 'shadow', economy_leaf: 'shadow' });
 
 // The test override, as deps.eventReuse: deps.hold = { <place>: true }.
 function on(place, deps = null) { return MODE[place] === 'on' || deps?.hold?.[place] === true; }
