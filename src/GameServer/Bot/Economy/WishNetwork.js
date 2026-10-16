@@ -521,7 +521,7 @@ class WishNetwork {
     // never retains (RETAIN_ACTORS).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
-        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false, completionKey = null }) {
+        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false, completionKey = null, reconsider = true }) {
         const diagnostic = Diagnostics.active();
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
@@ -535,7 +535,7 @@ class WishNetwork {
         const retain = remembered && RETAIN_ACTORS;
         const cached = retain ? this.cache.get(actorKey) : null;
         if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf
-            && cached.completionKey === completionKey) {
+            && cached.completionKey === completionKey && cached.reconsider === reconsider) {
             if (diagnostic) Diagnostics.count('network', 'hit', 'same_inputs');
             return remember(this.cache, actorKey, cached).result;
         }
@@ -698,7 +698,9 @@ class WishNetwork {
         // A cheap intermediate material cannot claim the whole upgrade's
         // benefit as an instantaneous income. Use the complete chosen path.
         const heldLeaf = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
-        const heldActivity = heldLeaf && loyal(heldLeaf, candidates) ? heldLeaf : null;
+        // Only an event (reconsider: the caller's raised sections) weighs the held
+        // step against the others; an ordinary rebuild keeps it while it is a candidate.
+        const heldActivity = heldLeaf && (!reconsider || loyal(heldLeaf, candidates)) ? heldLeaf : null;
         if (individual && activityLeaf && !heldActivity && decisionSeq === inputDecisionSeq) {
             // A completed, impossible or outscored step is a real reconsideration;
             // rebuilding the same valid step is not another tendency roll.
@@ -727,7 +729,7 @@ class WishNetwork {
         if (retain) {
             if (diagnostic && !this.cache.has(actorKey) && this.cache.size >= ACTOR_LIMIT)
                 Diagnostics.count('network', 'eviction', 'capacity');
-            remember(this.cache, actorKey, { inputKey, completionKey, decisionSeq: inputDecisionSeq,
+            remember(this.cache, actorKey, { inputKey, completionKey, reconsider, decisionSeq: inputDecisionSeq,
                 activityLeaf: inputActivityLeaf, result });
         }
         return result;

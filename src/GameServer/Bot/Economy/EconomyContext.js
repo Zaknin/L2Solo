@@ -1338,6 +1338,8 @@ function buildForState(state, deps) {
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0 && unchangedChoice,
+        // A raised section is the event that weighs the held activity again (DecisionEvents).
+        reconsider: !!state.stats?.wishDirty,
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,

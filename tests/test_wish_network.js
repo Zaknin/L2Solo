@@ -128,7 +128,19 @@ for (let decisionSeq = 2; decisionSeq <= 30; decisionSeq++) {
     outscoredPicks.add(outscored.activity.rootKey);
 }
 assert(outscoredPicks.has('right'), 'the better step can win the roll');
-console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf');
+// Without an event (reconsider false) the held step stays while it is still
+// a candidate, however much better another became: no new seed, no roll.
+for (let decisionSeq = 2; decisionSeq <= 30; decisionSeq++) {
+    const kept = network.build({ ...valued(3), decisionSeq, activityLeaf: leftLeaf, remembered: false, reconsider: false });
+    assert.equal(kept.activityLeaf, leftLeaf, 'an ordinary rebuild keeps the held step');
+    assert.equal(kept.decisionSeq, decisionSeq, 'an ordinary rebuild does not reseed the roll');
+}
+const goneWithoutEvent = network.build({ ...eventInput, inputKey: 'leaf-gone-quiet', activityLeaf: eventFirst.activityLeaf,
+    previous: { focus: ['replacement', 0, 0] }, roots: ['replacement'], nodes: [{ key: 'replacement', need: 'power', valueHours: 1,
+        paths: [{ activity: 'crafting', costHours: 1 }] }], remembered: false, reconsider: false });
+assert.equal(goneWithoutEvent.activity.activity, 'crafting', 'a held step that is no longer a candidate is replaced without an event');
+assert.equal(goneWithoutEvent.decisionSeq, eventInput.decisionSeq + 1);
+console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf / quiet rebuild keeps the leaf');
 
 const liquidationInput = { actorKey: 'finite-sale', inputKey: 'bag', remembered: false,
     wallet: 10, hourAdena: 0, roots: ['upgrade'], nodes: [{ key: 'upgrade', need: 'power',
