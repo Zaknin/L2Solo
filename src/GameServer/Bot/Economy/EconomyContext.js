@@ -575,11 +575,13 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // A held craft's reserved inputs may only grow before it runs: a stock
     // row holds while its owned+incoming does not fall (its own delivery
     // moves incoming into the bag), a physical row while its count does not.
+    // Every root needing the input carries the same physical row: unlike the
+    // own item, the tolerance is not scoped to the leaf's root.
     // A loss below what the decision reserved stays a quantity event.
     const reserved = leaf?.activity === 'crafting' && Array.isArray(craftReservations) ? craftReservations : null;
     const isReserved = id => reserved?.some(row => row[0] === id) === true;
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
-        if (kind === 'stockPhysical' && isReserved(id) && key === leaf.rootKey && currentOwned >= originalOwned) return originalOwned;
+        if (kind === 'stockPhysical' && isReserved(id) && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
@@ -594,7 +596,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || !ownQuantityRow(row, leaf.rootKey, own)) };
     const stock = stockReader(state, key => roots.get(key));
     const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
-        && row[1] === leaf.rootKey && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
+        && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
     const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
         const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
         return row && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
