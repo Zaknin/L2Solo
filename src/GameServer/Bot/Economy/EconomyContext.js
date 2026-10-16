@@ -447,12 +447,14 @@ function indexTokens(pairs) {
     }
     return { tokens, slots };
 }
-function calculationFence(state, reads, spots, deps, bands = [], safety = null) {
+// structural: the build's own band-aware structure of these state, deps and
+// bands, when it already made it (its bandHash); otherwise made here.
+function calculationFence(state, reads, spots, deps, bands = [], safety = null, structural = null) {
     if (extensions.size || deps.nodes?.length || deps.workshops && !deps.workshopRevision && !deps.inputKey) return null;
     const { tokens, slots } = indexTokens(reads), items = [];
     let i = 0;
     for (const id of reads.keys()) items.push(id, slots[i++]);
-    return encodeCalculationFence([sectionKeys(state, deps, bands).structural,
+    return encodeCalculationFence([structural ?? sectionKeys(state, deps, bands).structural,
         [tokens, items], [...spots], bands, safety], !isMainThread);
 }
 // Grid ids and occupancy versions stay exact. Canonical coordinates share
@@ -1396,7 +1398,12 @@ function buildForState(state, deps) {
     // or a group closure must never retain a second copy outside that cap.
     const retainedSourceMemo = projection.sourceSections;
     projection.sourceSections = null;
+    // The band-aware structure, made once: the held entry keeps its hash and
+    // this build's own fence its text. The fence reads it at the caller's
+    // deps.timestamp, so it is shared only when that is the build's timestamp.
+    let bandStructural = null;
     if (deps.rememberContext !== false) {
+        bandStructural = sectionKeys(state, { ...deps, timestamp }, choiceBands).structural;
         if (diagnostic && !cache.has(actorKey) && cache.size >= RETAIN_LIMIT) {
             Diagnostics.count('context', 'eviction', 'capacity');
             noteRelease(cache.keys().next().value, 'capacity');
@@ -1411,7 +1418,7 @@ function buildForState(state, deps) {
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
         remember(cache, actorKey, { key, reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
-            activity: state.activity, bandHash: fnv1a32(sectionKeys(state, { ...deps, timestamp }, choiceBands).structural),
+            activity: state.activity, bandHash: fnv1a32(bandStructural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
         if (retainedSourceMemo) {
@@ -1423,7 +1430,8 @@ function buildForState(state, deps) {
         }
     }
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
-        fenceData: { reads: heldReads || reads, spots: heldSpots || spotReads } });
+        fenceData: { reads: heldReads || reads, spots: heldSpots || spotReads,
+            structural: deps.timestamp === timestamp ? bandStructural : null } });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -1578,7 +1586,7 @@ function view(state, plan, deps, built = {}) {
     let fence;
     Object.defineProperty(context, 'calculationFence', { get: () => fence === undefined
         ? (fence = built.fenceData ? calculationFence(state, built.fenceData.reads, built.fenceData.spots, deps,
-            plan.quantityBands, plan.bagSafety) : null) : fence });
+            plan.quantityBands, plan.bagSafety, built.fenceData.structural) : null) : fence });
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
