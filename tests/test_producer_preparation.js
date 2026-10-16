@@ -76,6 +76,8 @@ const invokeAdapter = name => { assert(name in adapters, name); return adapters[
 const valuation = load('EconomicValuation.js', () => { throw Error('unexpected require'); }, invokeAdapter);
 const tendency = { MIN: 0.02, roll: () => 0.5 };
 const network = load('WishNetwork.js', name => {
+    // WishNetwork reads the thread kind (c3a6771d); this fixture is the main thread.
+    if (name === 'node:worker_threads') return require('node:worker_threads');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     if (name === './EconomicValuation') return valuation;
