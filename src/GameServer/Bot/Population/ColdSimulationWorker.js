@@ -798,9 +798,11 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
         advisory = null;
     }
-    // Diagnostics only: the step that built this card (a lifecycle build;
-    // result-site deps carry no timestamp, a reuse passes no seen state and
-    // keeps its stamp), read by the result site's edge_fresh count.
+    // Diagnostics only: the step that built this card (a reuse passes no seen
+    // state and keeps its stamp), read by the result site's edge_fresh count.
+    // A result-site build is stamped with its own step too, but the result
+    // site reads the stamp before it writes one, so only the same step's
+    // lifecycle build can match.
     if (diagnostic && advisory && seen && deps?.timestamp) advisory.builtAt = Number(deps.timestamp);
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
@@ -1169,8 +1171,7 @@ function startKernel(config = {}) {
             // An active current plan: before, finalizePlan re-finalized it on
             // every such step. Its steps count as plan_holds finalized (paid)
             // + skipped (saved).
-            const routeHeld = previousPlan?.status === 'active' && nativeReplan.routeCurrent
-                && !nativeReplan.failure && !nativeReplan.invalidSource;
+            const routeHeld = previousPlan?.status === 'active' && nativeReplan.routeCurrent && nativeHolds;
             // Asked only by the card path of a solo bot whose native facts
             // hold (and by the diagnostics refusal name): finalizePlan is
             // pure, so the re-finalized plan and its JSON compare give the
