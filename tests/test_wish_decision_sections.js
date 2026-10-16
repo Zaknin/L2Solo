@@ -257,7 +257,8 @@ try {
         Providers.build = (subject, context, options) => {
             const projection = originalBuild(subject, context, options);
             context.price(1); // an actual watched source input
-            const better = quoteMove > 0 || Number(subject.inventory[1869]?.amount) > 1;
+            const better = quoteMove > 0 || Number(subject.inventory[1869]?.amount) > 1
+                || Number(subject.stats.huntEfficiency?.[0]?.exp) > 1000;
             return { ...projection, roots: ['held', 'challenger'], nodes: [
                 { key: 'item:1869', price: 1, object: { itemId: 1869, amount: 1 }, paths: [{ activity: 'hunting', costHours: 1 }] },
                 { key: 'held', need: 'power', valueHours: 1, paths: [{ activity: 'hunting', costHours: 1 }] },
@@ -265,11 +266,15 @@ try {
                     paths: [{ activity: 'hunting', costHours: 1, requirements: [{ key: 'item:1869', amount: 2 }] }] }] };
         };
         Tendency.roll = (...args) => args.at(-1) === 'focus' ? .99 : heldRoll(...args);
-        for (const [at, event] of ['quote', 'material'].entries()) {
+        for (const [at, event] of ['quote', 'material', 'observation'].entries()) {
             quoteMove = 0;
             let subject = { ...state, characterId: 92961 + at,
                 inventory: { ...state.inventory, 1869: { selfId: 1869, amount: 1 } },
                 stats: { ...state.stats, wishFocus: ['held', 0, 0], activityLeaf: 0, wishSections: undefined } };
+            // The observation case's own sample row, learned before the decision.
+            const row = { spotId: 'obs', signature: Hunt.signature(state), at: deps.timestamp, samples: 3,
+                exp: 100, adena: 0, loot: 0, costs: 0, cycleMs: 1000 };
+            if (event === 'observation') subject.stats.huntEfficiency = [row];
             const options = { ...deps, board: sourceBoard };
             const chosen = Economy.forState(subject, options);
             subject = { ...subject, stats: { ...subject.stats, ...chosen.statsPacket } };
@@ -279,11 +284,15 @@ try {
             assert.equal(restored.network.focus[0], 'held', 'technical eviction retains the accepted focus');
             assert.equal(restored.statsPacket.decisionSeq, chosen.statsPacket.decisionSeq);
             if (event === 'quote') quoteMove++;
-            else subject = { ...subject, inventory: { ...subject.inventory, 1869: { selfId: 1869, amount: 2 } } };
+            else if (event === 'material') subject = { ...subject, inventory: { ...subject.inventory, 1869: { selfId: 1869, amount: 2 } } };
+            else subject = { ...subject, stats: { ...subject.stats, huntEfficiency: [{ ...row, at: row.at + 1, exp: row.exp * 20 }] } };
             // L70: a read quote is a soft market change, re-examined only
             // after its 10 min delay since the last actual decision.
             if (event === 'quote') assert.equal(Economy.forState(subject, options).network.focus[0], 'held',
                 'a moved quote waits for the market delay');
+            else if (event === 'observation') assert.equal(Economy.forState(subject,
+                { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY.observation - 1 }).network.focus[0], 'held',
+                'a moved sample waits for the observation delay');
             else {
                 // A required material's count is a bag row, not an event: the
                 // held focus stays until a raised section re-weighs it.
@@ -291,8 +300,9 @@ try {
                     'a quiet material move keeps the held focus');
                 invoke('GameServer/Bot/AI/DecisionEvents').raiseDecision({ coldLifeState: subject }, 'bag');
             }
-            const changed = Economy.forState(subject, event === 'quote'
-                ? { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY.market } : options);
+            const due = { quote: 'market', observation: 'observation' }[event];
+            const changed = Economy.forState(subject, due
+                ? { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY[due] } : options);
             assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
         }
     } finally { Providers.build = nativeProviders; Tendency.roll = heldRoll; }

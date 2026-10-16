@@ -13,7 +13,11 @@ const hash = value => fnv1a32(JSON.stringify(value));
 // The decision sections in the order of their wishDirty bit (1 << at): one
 // table for the raise (DecisionEvents) and the names its readers count.
 const SECTIONS = Object.freeze(['build', 'combat', 'supply', 'benefits', 'sources', 'occupation', 'money', 'relations']);
-const sectionBit = name => 1 << SECTIONS.indexOf(name);
+function sectionBit(name) {
+    const at = SECTIONS.indexOf(name);
+    if (at < 0) throw new Error(`decision section: unknown ${name}`);
+    return 1 << at;
+}
 // The names of the sections raised in wishDirty bits, in table order.
 function sectionNames(bits) {
     const names = [];
