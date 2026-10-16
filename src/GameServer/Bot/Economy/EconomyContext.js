@@ -199,7 +199,14 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
 // parts and this request's ('none' when only the digest differs).
 function movedKeyPart(parts, heldParts) {
     const at = parts.findIndex((part, i) => JSON.stringify(part) !== heldParts[i]);
-    return KEY_PART_NAMES[at] || 'none';
+    if (at < 0) return 'none';
+    // An object part (facts, trip) names its first moved field: facts.build, trip.stats.travel.
+    return KEY_PART_NAMES[at] + movedField(parts[at], JSON.parse(heldParts[at] || 'null'), 2);
+}
+function movedField(part, held, depth) {
+    if (depth === 0 || !part || typeof part !== 'object' || Array.isArray(part)) return '';
+    const key = Object.keys(part).find(name => JSON.stringify(part[name]) !== JSON.stringify(held?.[name]));
+    return key === undefined ? '' : `.${key}${movedField(part[key], held?.[key], depth - 1)}`;
 }
 
 // The fields of the section keys (sectionKeys: the source memo and the
