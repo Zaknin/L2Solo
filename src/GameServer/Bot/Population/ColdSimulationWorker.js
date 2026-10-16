@@ -96,6 +96,7 @@ const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanne
 const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
@@ -1189,7 +1190,7 @@ function startKernel(config = {}) {
                 // native stamps: the current advisory fence below is (its
                 // build holds the level and worn kit). A wake/expiry still
                 // goes through the native planner.
-                if (!previousPlan || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan) || wishHolds) {
+                if (!previousPlan || DecisionSections.isEmptyWishPlan(previousPlan) || wishHolds) {
                     return (planHoldsAnswer = true);
                 }
                 if (!routeHeld) return (planHoldsAnswer = false);
