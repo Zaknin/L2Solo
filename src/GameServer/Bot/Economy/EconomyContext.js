@@ -564,11 +564,14 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
-    // A held craft's reserved inputs may only grow before it runs; a loss
-    // below what the decision reserved stays a quantity event.
+    // A held craft's reserved inputs may only grow before it runs: a stock
+    // row holds while its owned+incoming does not fall (its own delivery
+    // moves incoming into the bag), a physical row while its count does not.
+    // A loss below what the decision reserved stays a quantity event.
     const reserved = leaf?.activity === 'crafting' && Array.isArray(options.craftReservations) ? options.craftReservations : null;
+    const isReserved = id => reserved?.some(row => row[0] === id) === true;
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
-        if (reserved?.some(row => row[0] === id) && currentOwned >= originalOwned) return originalOwned;
+        if (kind === 'stockPhysical' && isReserved(id) && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
@@ -581,8 +584,15 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
     const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
         : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || quantityItem(row) !== own) };
-    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state),
-        stockFor: stockReader(state, key => roots.get(key)) }, stockAmount)) return refuse('quantity', ['sources', 'money']);
+    const stock = stockReader(state, key => roots.get(key));
+    const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
+        && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
+    const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
+        const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
+        return row && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
+    };
+    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount))
+        return refuse('quantity', ['sources', 'money']);
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
