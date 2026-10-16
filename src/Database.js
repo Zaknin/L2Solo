@@ -6627,6 +6627,12 @@ const Database = {
         return metrics.pending;
     },
 
+    // The physical checkpoint state (inFlight, last, lastReset) without the
+    // operation counters stats() copies.
+    checkpointSnapshot() {
+        return CheckpointCoordinator.snapshot();
+    },
+
     checkpoint(options = {}) {
         if (shuttingDown) return Promise.reject(new Error('SQLite shutdown is in progress (maintenance:checkpoint)'));
         if (!connection) return Promise.reject(new Error('SQLite is not initialized (maintenance:checkpoint)'));

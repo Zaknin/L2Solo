@@ -152,13 +152,11 @@ async function run() {
     stub(Population, 'resolving', false); stub(Population, 'partyFormationRunning', false);
     stub(Population, 'partyRequestCleanupRunning', false);
     stub(Config, 'enabled', true); stub(Config, 'backgroundPartyEnabled', true);
-    stub(Database, 'stats', () => ({ pending: 1 }));
     stub(Database, 'pending', () => 1);
     stub(Coordinator, 'snapshot', () => ({ ready: true, snapshotsLoaded: true, queue: {} }));
     stub(Metrics, 'currentEventLoopLag', () => 0);
     Help.request(1, 11, now); await Population.helpClanParty(now);
     assert.strictEqual(reads, 0, 'player protection defers lookup while DB is busy');
-    Database.stats = () => ({ pending: 0 });
     Database.pending = () => 0;
     stub(Help, 'processOne', async () => {
         assert(Population.partyFormationRunning, 'membership lock held throughout help transaction');

@@ -2024,10 +2024,9 @@ const PopulationService = {
         const Help = invoke('GameServer/Bot/Population/ClanPartyHelp');
         if (!Help.hasPending() || Config.enabled === false || Config.backgroundPartyEnabled === false
             || this.partyFormationRunning || this.resolving || this.partyRequestCleanupRunning) return null;
-        const database = Database.stats();
         const cold = ColdSimulationCoordinator.snapshot();
         if (Number(Metrics.currentEventLoopLag()) >= Number(Config.protectedPartyFormationLagAbortMs || 40)
-            || Number(database.pending || 0) > 0 || database.checkpoint?.inFlight
+            || Number(Database.pending() || 0) > 0 || Database.checkpointSnapshot()?.inFlight
             || !cold.ready || !cold.snapshotsLoaded || Number(cold.queue?.depth || 0) > 0
             || cold.queue?.flushing) return null;
         this.partyFormationRunning = true;
@@ -2047,11 +2046,10 @@ const PopulationService = {
 
         const lagMs = Math.max(0, Number(Metrics.currentEventLoopLag()) || 0);
         const lagLimit = Math.max(1, Number(Config.protectedPartyFormationLagAbortMs) || 40);
-        const database = Database.stats();
         const cold = ColdSimulationCoordinator.snapshot();
         if (lagMs >= lagLimit
-            || Number(database.pending || 0) > 0
-            || database.checkpoint?.inFlight
+            || Number(Database.pending() || 0) > 0
+            || Database.checkpointSnapshot()?.inFlight
             || !cold.ready
             || !cold.snapshotsLoaded
             || Number(cold.queue?.depth || 0) > 0
@@ -2105,11 +2103,10 @@ const PopulationService = {
                     return [];
                 }
                 const currentLagMs = Math.max(0, Number(Metrics.currentEventLoopLag()) || 0);
-                const currentDatabase = Database.stats();
                 const currentCold = ColdSimulationCoordinator.snapshot();
                 if (currentLagMs >= lagLimit
-                    || Number(currentDatabase.pending || 0) > 0
-                    || currentDatabase.checkpoint?.inFlight
+                    || Number(Database.pending() || 0) > 0
+                    || Database.checkpointSnapshot()?.inFlight
                     || Number(currentCold.queue?.depth || 0) > 0
                     || currentCold.queue?.flushing) {
                     retrySoon = true;
@@ -2768,8 +2765,7 @@ const PopulationService = {
     },
 
     checkpointPressure() {
-        const database = Database.stats();
-        const checkpoint = database.checkpoint || {};
+        const checkpoint = Database.checkpointSnapshot() || {};
         const last = checkpoint.last || {};
         const lastReset = checkpoint.lastReset || {};
         const walBytes = Math.max(0, Number(last.afterBytes || last.beforeBytes || 0));
@@ -2781,7 +2777,6 @@ const PopulationService = {
             && walBytes >= resetWalBytes
             && (!lastReset.at || growthBytes >= resetGrowthBytes);
         return {
-            database,
             checkpoint,
             last,
             lastReset,
@@ -2805,8 +2800,8 @@ const PopulationService = {
         }
 
         const pressure = this.checkpointPressure();
-        const { database, checkpoint, last, lastReset, walBytes, growthBytes, resetGrowthBytes } = pressure;
-        if (walBytes < resetWalBytes || Number(database.pending || 0) > 0 || checkpoint.inFlight) {
+        const { checkpoint, last, lastReset, walBytes, growthBytes, resetGrowthBytes } = pressure;
+        if (walBytes < resetWalBytes || Number(Database.pending() || 0) > 0 || checkpoint.inFlight) {
             return Promise.resolve(null);
         }
         if (lastReset.at && growthBytes < resetGrowthBytes) return Promise.resolve(null);

@@ -58,7 +58,7 @@ async function main() {
     });
     replace(Metrics, 'currentEventLoopLag', () => lag);
     replace(Metrics, 'schedulerState', { mode: 'idle', realPlayers: 0, lagMs: 0 });
-    replace(Database, 'stats', () => ({ pending: dbPending }));
+    replace(Database, 'pending', () => dbPending);
     replace(World, 'user', Object.defineProperty({}, 'sessions', {
         get() { throw new Error('hot admission must not scan World sessions'); }
     }));

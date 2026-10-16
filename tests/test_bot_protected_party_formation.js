@@ -86,7 +86,7 @@ assert.strictEqual(RequiredPartyFormation.proposalFromStates([...crowded, player
 const originals = {
     activity: PopulationService.playerActivityProfile,
     lag: Metrics.currentEventLoopLag,
-    stats: Database.stats,
+    checkpointSnapshot: Database.checkpointSnapshot,
     pending: Database.pending,
     ready: Database.isReady,
     statesByIds: LifeState.statesByIds,
@@ -106,8 +106,8 @@ const originals = {
     Config.protectedPartyFormationMainBudgetMs = 1000;
     PopulationService.playerActivityProfile = () => ({ protected: true, realPlayers: 1, mode: 'player' });
     Metrics.currentEventLoopLag = () => 0;
-    Database.stats = () => ({ pending: 0, checkpoint: { inFlight: false } });
     Database.pending = () => 0;
+    Database.checkpointSnapshot = () => ({ inFlight: false });
     Database.isReady = () => true;
     PartyState.counts = () => ({ active: 0 });
     ColdCoordinator.snapshot = () => ({ ready: true, snapshotsLoaded: true, queue: { depth: 0, flushing: false } });
@@ -139,7 +139,6 @@ const originals = {
 
     let requests = 0;
     ColdCoordinator.requestRequiredPartyFormation = async () => { requests += 1; return { ok: true, candidates: [] }; };
-    Database.stats = () => ({ pending: 1, checkpoint: { inFlight: false } });
     Database.pending = () => 1;
     PopulationService.nextProtectedPartyFormationAt = 0;
     PopulationService.protectedPartyFormationFailures = 0;
@@ -148,7 +147,6 @@ const originals = {
     assert.strictEqual(PopulationService.protectedPartyFormationFailures, 0,
         'transient pressure must poll again without escalating failure backoff');
 
-    Database.stats = () => ({ pending: 0, checkpoint: { inFlight: false } });
     Database.pending = () => 0;
     Config.protectedPartyFormationMainBudgetMs = 1;
     ColdCoordinator.requestRequiredPartyFormation = () => new Promise((resolve) => setTimeout(() => resolve({
@@ -169,7 +167,7 @@ const originals = {
 }).finally(() => {
     PopulationService.playerActivityProfile = originals.activity;
     Metrics.currentEventLoopLag = originals.lag;
-    Database.stats = originals.stats;
+    Database.checkpointSnapshot = originals.checkpointSnapshot;
     Database.pending = originals.pending;
     Database.isReady = originals.ready;
     LifeState.statesByIds = originals.statesByIds;
