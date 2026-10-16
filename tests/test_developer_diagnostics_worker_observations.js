@@ -46,9 +46,12 @@ worker.on('message', async message => {
             const metrics = message.payload.developerDiagnostics;
             assert.equal(metrics.thread, 'worker');
             assert.equal(metrics.counts['network:request:unknown'], 2);
-            assert.equal(metrics.counts['network:build:unknown'], 1);
-            assert.equal(metrics.counts['network:hit:same_inputs'], 1);
-            assert.equal(metrics.durations.network.count, 1);
+            // The worker keeps no per-actor result copy (c3a6771d: the held
+            // plan holds it), so the repeated identical build builds again.
+            assert.equal(metrics.counts['network:build:unknown'], 2);
+            assert.equal(metrics.counts['network:miss:held_plan_only'], 2);
+            assert.equal(metrics.counts['network:hit:same_inputs'], undefined);
+            assert.equal(metrics.durations.network.count, 2);
             assert(nativeRows.some(row => row.owner === 17 && row.phase === 'wish_activity' && row.thread === 'worker'),
                 'real wish records reach the native worker transport');
             assert.equal(metrics.detail.acceptedByMain, nativeRows.length);
