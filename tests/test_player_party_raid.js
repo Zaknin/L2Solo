@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 require('../src/Global');
 
 const World = invoke('GameServer/World/World');
+const { insertSession, registerSessions } = require('./helpers/worldSessions');
 const Manager = invoke('GameServer/Bot/BotManager');
 const Raid = invoke('GameServer/Bot/AI/PlayerPartyRaid');
 const Safety = invoke('GameServer/Bot/AI/BotRaidSafety');
@@ -73,7 +74,7 @@ function fixture(playerClass = 12) {
     const field = actor(899); field.npc = true; field.x = 80;
     owner.actor.destId = boss.fetchId();
     const sessions = [owner, tank, damage, healer];
-    World.user = { sessions }; Manager.sessions = sessions.slice(1);
+    registerSessions(sessions); Manager.sessions = sessions.slice(1);
     World.npc = { spawns: [boss, add, second, field] };
     World.fetchNpcsInRadius = () => World.npc.spawns;
     const attacks = [], casts = [];
@@ -99,7 +100,7 @@ try {
         const music = new Skill({ selfId: skillId, level: 1, passive: false, mp: 60, distance: 1000 });
         musician.actor.skills = [music];
         musician.actor.hitting = true;
-        f.sessions.push(musician);
+        f.sessions.push(insertSession(musician));
         Manager.sessions.push(musician);
         f.boss.destId = f.tank.actor.fetchId();
         let missing = true;
@@ -227,7 +228,7 @@ try {
         f.owner.actor.skills = [aggression];
         const spare = session(actor(5, 5), f.owner);
         spare.actor.skills = [aggression]; spare.actor.x = 200;
-        f.sessions.push(spare); Manager.sessions.push(spare);
+        f.sessions.push(insertSession(spare)); Manager.sessions.push(spare);
         f.boss.destId = f.tank.actor.fetchId();
         f.add.destId = f.healer.actor.fetchId();
         f.tick(spare);
@@ -362,7 +363,7 @@ try {
         f.boss.destId = f.tank.actor.fetchId(); f.tick(f.damage);
         f.tank.actor.dead = true;
         const spare = session(actor(5, 5), f.owner);
-        f.sessions.push(spare); Manager.sessions.push(spare);
+        f.sessions.push(insertSession(spare)); Manager.sessions.push(spare);
         f.boss.destId = spare.actor.fetchId();
         f.tick(f.healer);
         assert.equal(f.owner.partyRaidEngagement.phase, 'combat', 'a secondary tank already holding the boss can preserve the encounter');
