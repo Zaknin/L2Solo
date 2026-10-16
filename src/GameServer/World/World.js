@@ -1,6 +1,5 @@
 const ServerResponse = invoke('GameServer/Network/Response');
 const ConsoleText    = invoke('GameServer/ConsoleText');
-const NpcDecay       = invoke('GameServer/World/Generics/NpcDecay');
 const GameTime       = invoke('GameServer/World/GameTime');
 const DayNightSpawnManager = invoke('GameServer/World/DayNightSpawnManager');
 const RaidBossState = invoke('GameServer/World/RaidBossState');
@@ -336,7 +335,6 @@ const World = {
     isBotSession,
 
     async init() {
-        NpcDecay.stop(this);
         RaidBossMinionManager.stop(this);
         DayNightSpawnManager.stop(this);
         this.user  = { sessions : [], revision: 0 };
@@ -356,7 +354,6 @@ const World = {
         World.spawnNpcs();
         RaidBossMinionManager.start(this);
         this.indexSpawnsInGrid();
-        NpcDecay.start(this);
         DayNightSpawnManager.start(this);
         invoke('GameServer/Npc/NpcAggro').startAggroTicker(this);
         return this;

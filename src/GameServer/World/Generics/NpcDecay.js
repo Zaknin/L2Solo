@@ -1,7 +1,13 @@
+const DiagnosticConfig = require('../../Bot/Population/PopulationConfig');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
 
-const DEFAULT_REAPER_INTERVAL_MS = 1000;
-const MAX_SWEEP_FAILURES = 3;
+// A corpse leaves the world when its own timer fires (set in schedule()). A
+// failed removal is retried by re-arming that timer, and a corpse that cannot
+// be removed after MAX_DECAY_FAILURES tries is discarded.
+const RETRY_DELAY_MS = 1000;
+const MAX_DECAY_FAILURES = 3;
+
+const telemetry = { scheduled: 0, expired: 0, retries: 0, discarded: 0 };
 
 function logWarning(message, error) {
     const detail = error?.message || error || 'unknown error';
@@ -21,30 +27,61 @@ function numericDelay(delayMs) {
     return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
+function armTimer(world, npc, delayMs) {
+    clearTimer(npc);
+    npc.corpseDecayTimer = setTimeout(() => expire(world, npc), delayMs);
+    // A corpse timer must never keep a test process or a graceful server
+    // shutdown alive on its own.
+    npc.corpseDecayTimer.unref?.();
+}
+
 function schedule(world, sourceSession, npc, delayMs) {
     if (!world?.npc?.spawns || !npc?.fetchId) return false;
     if (npc.corpseDecayState === 'removed') return false;
 
-    clearTimer(npc);
     const delay = numericDelay(delayMs);
     npc.corpseDecayState = 'scheduled';
     npc.corpseDecaySession = sourceSession || null;
     npc.corpseDecayAt = Date.now() + delay;
-    npc.corpseDecaySweepFailures = 0;
-    npc.corpseDecayTimer = setTimeout(() => {
+    npc.corpseDecayFailures = 0;
+    armTimer(world, npc, delay);
+    DiagnosticConfig.developerDiagnostics && (telemetry.scheduled += 1);
+    return true;
+}
+
+// The corpse timer: removes the corpse, or on a failure retries it a second
+// later and discards it after MAX_DECAY_FAILURES failures.
+function expire(world, npc) {
+    if (npc.corpseDecayState === 'removed') return false;
+    DiagnosticConfig.developerDiagnostics && (telemetry.expired += 1);
+    let failed;
+    try {
+        failed = !decay(world, npc);
+    }
+    catch (error) {
+        logWarning('timer failed', error);
+        failed = true;
+    }
+    if (!failed || npc.corpseDecayState === 'removed') return !failed;
+
+    const attempts = Number(npc.corpseDecayFailures || 0) + 1;
+    npc.corpseDecayFailures = attempts;
+    if (attempts >= MAX_DECAY_FAILURES) {
         try {
-            decay(world, npc);
+            if (discardUnremovableNpc(world, npc, attempts)) {
+                DiagnosticConfig.developerDiagnostics && (telemetry.discarded += 1);
+                return true;
+            }
         }
         catch (error) {
-            // Leave the scheduled state intact so the reaper can retry an
-            // unexpected failure on the next pass.
-            logWarning('timer failed', error);
+            logWarning('discard failed', error);
         }
-    }, delay);
-    // A corpse timer must never keep a test process or a graceful server
-    // shutdown alive on its own. The reaper remains the durable fallback.
-    npc.corpseDecayTimer.unref?.();
-    return true;
+        // Marked removed even when it was already out of the list: no retry.
+        if (npc.corpseDecayState === 'removed') return true;
+    }
+    DiagnosticConfig.developerDiagnostics && (telemetry.retries += 1);
+    armTimer(world, npc, RETRY_DELAY_MS);
+    return false;
 }
 
 function decay(world, npc) {
@@ -63,7 +100,7 @@ function decay(world, npc) {
     npc.corpseDecayState = 'removed';
     npc.corpseDecayAt = 0;
     npc.corpseDecaySession = null;
-    npc.corpseDecaySweepFailures = 0;
+    npc.corpseDecayFailures = 0;
     clearTimer(npc);
 
     // Remove the server object first. Packet delivery is best effort and may
@@ -76,20 +113,10 @@ function decay(world, npc) {
         // packet or strand the corpse in the known-object view.
         logWarning(`grid removal failed for NPC ${npcId}`, error);
     }
+    // A corpse already taken out of the list (a spoil sweep, a summon death)
+    // is not there; nothing else needs a scan.
     const spawnIndex = world.npc.spawns.indexOf(npc);
-    if (spawnIndex >= 0) {
-        world.npc.spawns.splice(spawnIndex, 1);
-    } else {
-        world.npc.spawns = world.npc.spawns.filter((entry) => {
-            try {
-                return entry?.fetchId?.() !== npcId;
-            }
-            catch (error) {
-                logWarning('failed to read a neighboring NPC id during decay', error);
-                return true;
-            }
-        });
-    }
+    if (spawnIndex >= 0) world.npc.spawns.splice(spawnIndex, 1);
     if (!world.removeNpcFromGrid) {
         try {
             world.indexSpawnsInGrid?.();
@@ -122,7 +149,7 @@ function decayMany(world, npcs) {
             npc.corpseDecayState = 'removed';
             npc.corpseDecayAt = 0;
             npc.corpseDecaySession = null;
-            npc.corpseDecaySweepFailures = 0;
+            npc.corpseDecayFailures = 0;
             clearTimer(npc);
         }
         catch (error) {
@@ -177,76 +204,22 @@ function discardUnremovableNpc(world, npc, attempts) {
     npc.corpseDecayState = 'removed';
     npc.corpseDecayAt = 0;
     npc.corpseDecaySession = null;
-    npc.corpseDecaySweepFailures = 0;
+    npc.corpseDecayFailures = 0;
     clearTimer(npc);
 
     logWarning(`discarded unremovable corpse after ${attempts} failed attempts`, 'NPC id unavailable');
     return world.npc.spawns.length < previousLength;
 }
 
-function sweepExpired(world, now = Date.now()) {
-    if (!world?.npc?.spawns) return 0;
-
-    let removed = 0;
-    [...world.npc.spawns].forEach((npc) => {
-        let failed = false;
-        try {
-            if (
-                npc?.corpseDecayState !== 'removed' &&
-                Number(npc?.corpseDecayAt || 0) > 0 &&
-                Number(npc.corpseDecayAt) <= Number(now)
-            ) {
-                if (decay(world, npc)) removed += 1;
-                else failed = true;
-            }
-        }
-        catch (error) {
-            // One malformed corpse must not block every later corpse in the
-            // same sweep. Keep it scheduled for a future retry.
-            logWarning('individual sweep failed', error);
-            failed = true;
-        }
-
-        if (failed) {
-            const attempts = Number(npc?.corpseDecaySweepFailures || 0) + 1;
-            npc.corpseDecaySweepFailures = attempts;
-            if (attempts >= MAX_SWEEP_FAILURES && discardUnremovableNpc(world, npc, attempts)) {
-                removed += 1;
-            }
-        }
-    });
-    return removed;
-}
-
-function start(world, intervalMs = DEFAULT_REAPER_INTERVAL_MS) {
-    stop(world);
-    if (!world?.npc) return null;
-
-    const interval = Math.max(50, Number(intervalMs) || DEFAULT_REAPER_INTERVAL_MS);
-    world.npc.corpseDecayReaper = setInterval(() => {
-        try {
-            sweepExpired(world);
-        }
-        catch (error) {
-            // One malformed NPC must not stop future corpse cleanup.
-            logWarning('reaper failed', error);
-        }
-    }, interval);
-    world.npc.corpseDecayReaper.unref?.();
-    return world.npc.corpseDecayReaper;
-}
-
-function stop(world) {
-    if (!world?.npc?.corpseDecayReaper) return;
-    clearInterval(world.npc.corpseDecayReaper);
-    world.npc.corpseDecayReaper = undefined;
+function stats() {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
+    return { ...telemetry };
 }
 
 module.exports = {
     schedule,
+    expire,
     decay,
     decayMany,
-    sweepExpired,
-    start,
-    stop
+    stats
 };
