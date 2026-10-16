@@ -75,11 +75,12 @@ function cardTraderContext(state, options = {}) {
     // lazy: worker the coordinator's accepted decisions live on main only
     const prepared = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided?.(state);
     const worth = id => ColdEconomyDecision.preparedCardWorth(prepared,
-        id, state, Number(packet?.[1]), persona.understanding, KnowledgeLearning.knowledgeEnabled());
+        id, state, Number(packet?.[1]), persona?.understanding, KnowledgeLearning.knowledgeEnabled());
     return MarketPricing.traderContext(state, {
-        board: invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(), // lazy: worker main-only board
         npcOffersFor: selfId => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId), // lazy: worker main-only NPC shops
-        ...options, persona, preparedWorth: worth, preparedBuffer: prepared?.data,
+        ...options,
+        board: Object.hasOwn(options, 'board') ? options.board : invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(), // lazy: worker main-only board
+        persona, preparedWorth: worth, preparedBuffer: prepared?.data,
         economy: { persona, hourAdena: Number(packet?.[0]), moneyPrice: Number(packet?.[1]), gapHorizonHours: NaN, worth } });
 }
 

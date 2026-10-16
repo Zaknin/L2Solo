@@ -360,7 +360,9 @@ function equipmentCompletionSignal(state = {}) {
 // Equipment-advance keys this process has seen enqueued. A clan action key
 // stays taken for good, live or finished (Database.enqueueClanAction), so a
 // repeat of the same signal on every commit or save would only re-read it.
-// A restart or the bound below costs one idempotent read per key.
+// A restart or the bound below costs one idempotent read per key. A world
+// load is always a process restart (the launcher loads saves only while the
+// server is stopped), so a key here never outlives its database.
 const ENQUEUED_ADVANCE_LIMIT = 4096;
 const enqueuedAdvanceKeys = new Set();
 
