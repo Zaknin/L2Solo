@@ -420,7 +420,14 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
-    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)) return 'leaf_kind';
+    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)) {
+        if (Diagnostics.active()) {
+            const kind = leaf?.activity;
+            const subtype = !kind ? 'none' : ['crafting', 'improving', 'helping', 'pvp'].includes(kind) ? kind : 'other';
+            Diagnostics.count('card', 'leaf_kind_check', subtype);
+        }
+        return 'leaf_kind';
+    }
     if (state.incomingPending) return 'incoming';
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;

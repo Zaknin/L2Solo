@@ -461,6 +461,14 @@ function shadowQuantityEvidence(state, held, last) {
         after: Number(positive(state.inventory?.[last.heldTargetItem]?.amount) > 0) });
     return out;
 }
+const FOCUS_KINDS = new Set(['power', 'stock', 'resale', 'level', 'care', 'scores', 'status', 'book', 'enchant', 'sa', 'henna']);
+function focusKind(key) {
+    if (key == null || key === '') return 'none';
+    if (typeof key !== 'string') return 'other';
+    const end = key.indexOf(':');
+    const kind = end < 0 ? key : key.slice(0, end);
+    return FOCUS_KINDS.has(kind) ? kind : 'other';
+}
 // Compare funded flags only after both plans see the request's current wallet.
 function gatePlanDiff(state, held, fresh, deps) {
     const before = held.plan.network;
@@ -1523,6 +1531,11 @@ function buildForState(state, deps) {
         if (gate === 'would_hold') {
             gateDiff = gatePlanDiff(state, held, context, deps);
             Diagnostics.count('context', 'gate_plan', gateDiff);
+            if (gateDiff === 'focus') {
+                // Each marginal shares the focus denominator; these are not paired transitions.
+                Diagnostics.count('context', 'gate_focus_held', focusKind(held.plan.network.focus?.[0]));
+                Diagnostics.count('context', 'gate_focus_fresh', focusKind(network.focus?.[0]));
+            }
             Diagnostics.count('context', 'gate_ms', 'would_hold', Math.round(elapsed));
         }
         const plan = planHash(network);
