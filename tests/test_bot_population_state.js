@@ -341,13 +341,11 @@ try {
             assert(due.sql.includes("json_extract(statsJson, '$.equipmentPlan.next.spotId')"), 'due cold states must prioritize active gear plans whose source spot differs from the saved spot');
             assert(due.sql.includes("startup_craft_wait_recovery"), 'startup craft recovery must immediately replan before the ordinary hunting backlog');
             assert(due.sql.includes('COALESCE(nextResolveAt, 0) ASC'), 'due cold states must remain fair by schedule within each lifecycle bucket');
-            return Promise.resolve().then(() => {
-                return BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match').then((deferred) => {
-                    const deferUpdate = statements.at(-1);
-                    assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
-                    assert(deferUpdate.sql.includes("'$.partyRequest.lastReason'"), 'unformable party cleanup must persist its reason');
-                    assert.strictEqual(deferUpdate.params[3], 'no_compatible_level_match', 'unformable party cleanup must persist the classification');
-                });
+            return BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match').then((deferred) => {
+                const deferUpdate = statements.at(-1);
+                assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
+                assert(deferUpdate.sql.includes("'$.partyRequest.lastReason'"), 'unformable party cleanup must persist its reason');
+                assert.strictEqual(deferUpdate.params[3], 'no_compatible_level_match', 'unformable party cleanup must persist the classification');
             }).then(() => BotLifeState.assignParty({
                 characterId: 43,
                 name: 'PartyWaitAssignmentProbe',
@@ -549,7 +547,33 @@ try {
         }, 'summary_probe').then(() => {
             const summary = BotLifeState.coldDueSummary(1000);
             assert(summary.due >= 1, 'cold due telemetry must include stale hunting plans before their persisted deadline');
-        })).then(() => {
+        })).then(() => BotLifeState.upsertState({
+            characterId: 72,
+            name: 'LevelLessHistogramProbe',
+            phase: 'cold',
+            activity: 'hunting',
+            timing: { nextResolveAt: 999999 },
+            stats: {},
+            vitals: {},
+            inventory: {}
+        }, 'histogram_probe')).then(() => Promise.all([
+            BotLifeState.levelHistogram(),
+            // The query the histogram replaced; its NULL level and phase merge
+            // into level 1 and the cold phase.
+            originalExecute(['SELECT phase, level, COUNT(*) AS count FROM bot_life_state GROUP BY phase, level', []])
+        ])).then(([histogram, rows]) => {
+            const expected = new Map();
+            for (const row of rows) {
+                const key = `${row.phase || 'cold'}:${Number(row.level || 1)}`;
+                expected.set(key, (expected.get(key) || 0) + Number(row.count));
+            }
+            const counted = new Map(histogram.levels.map((row) => [`${row.phase}:${row.level}`, row.count]));
+            assert.deepStrictEqual([...counted].sort(), [...expected].sort(), 'the cache histogram must count what the table groups');
+            assert.strictEqual(histogram.total, [...expected.values()].reduce((sum, count) => sum + count, 0));
+            assert(counted.get('cold:1') >= 1, 'a state without a level must count as level 1');
+            assert.deepStrictEqual(histogram.levels.map((row) => row.level), histogram.levels.map((row) => row.level).sort((x, y) => x - y),
+                'levels must come ascending');
+        }).then(() => {
             console.log('Bot population state checks passed');
         });
     }).catch((err) => {
