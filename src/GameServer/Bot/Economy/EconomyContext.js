@@ -220,10 +220,13 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
     // Position and scroll quantity drift inside one route. Native route and
     // physical-fee checks still run before the held action is permitted.
     delete trip.loc; delete trip.inventory;
-    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57)
+    // The leaf's own item is its progress, not an input: its first unit
+    // (a new bag row) is no event. Capture and verdict pass the same leaf.
+    const own = ColdEconomyDecision.ownItem(leaf);
+    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57 && Number(row.selfId) !== own)
         .map(row => rowKey({ ...row, amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
             instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
-    return proofDigest(['recompute_event_inputs_v2', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+    return proofDigest(['recompute_event_inputs_v3', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), current.party || Number(current.partyId || 0),
         stats.visitEvery, stats.karma, stats.race, stats.generatedCold, stats.persona,
         stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
@@ -495,7 +498,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
-        bands: plan.quantityBands || [], safety: plan.bagSafety, hourAdena: plan.hourAdena,
+        bands: plan.quantityBands || [], safety: eventBagSafety(plan.bagSafety, state, leaf), hourAdena: plan.hourAdena,
         market: options.reads, spots: options.spots,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
@@ -555,7 +558,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
                 : reason === 'money' ? ['money'] : ['sources']);
     }
     if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
-    const safety = bagSafety(state, timestamp);
+    const safety = eventBagSafety(bagSafety(state, timestamp), state, options.leaf);
     if (!Array.isArray(proof.safety) || proof.safety.length !== safety.length
         || safety.some((value, at) => value !== proof.safety[at]))
         return refuse('bag', ['supply', 'sources']);
@@ -841,6 +844,14 @@ function bagSafety(state, timestamp) {
     const bag = Floor.stateInventory(state, DataCache.items);
     const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
     return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
+}
+// The event proof's bag safety: the held leaf's own item stack is its
+// progress, not a slot input (its first unit is no event). Its weight stays
+// in the load: a weight tier crossing still is one. Capture and verdict only.
+function eventBagSafety(safety, state, leaf) {
+    const own = ColdEconomyDecision.ownItem(leaf), row = own === null ? null : state.inventory?.[own];
+    if (!row || !Array.isArray(safety)) return safety;
+    return [safety[0] - Floor.stateInventory({ inventory: { [own]: row } }, DataCache.items).slots, safety[1], safety[2]];
 }
 // Each distinct token once, in first-seen order, and per [id, token] pair
 // the slot of its token in that list (the read sets and the fence share it).

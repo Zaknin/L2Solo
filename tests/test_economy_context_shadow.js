@@ -315,6 +315,15 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
         if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a new target stack moves the event key');
         funding = false; targetAmount = 1;
+        // A material hunt from none: its first drop is a new bag row of its
+        // own item, its progress, not an input event.
+        Economy.reset();
+        const none = { ...native, inventory: state().inventory };
+        const fromNone = request(none);
+        assert.equal(fromNone.network.activity?.amount, 5);
+        request({ ...none, stats: { ...none.stats, ...fromNone.statsPacket },
+            inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a material hunt from none holds after its first drop');
         Economy.reset();
         const original = request(native);
         const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
