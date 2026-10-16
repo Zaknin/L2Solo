@@ -11,6 +11,7 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 // party does not wait.
 function waiting(state, plan, partyRequest) {
     if (state?.party?.partyId) return false;
+    if (partyRequest?.materialParty && partyRequest.suspendedFor) return false;
     if (partyRequest?.priority === 'required') return true;
     return partyRequest?.status === 'deferred'
         && (plan?.partyNeed === 'required' || plan?.requiresParty === true);

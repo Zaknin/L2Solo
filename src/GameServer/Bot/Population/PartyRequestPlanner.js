@@ -100,16 +100,22 @@ function clanPartyObjectiveForState(state) {
 
 function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) {
     const previous = state?.stats?.partyRequest;
+    const Material = require('./CraftMaterialParty');
+    const supplyPause = Material.supplyPause(state, plan, { ...options, timestamp });
+    if (supplyPause) return supplyPause;
     // Travel and recovery are part of returning to solo hunting. Neither may
     // erase the recruitment cooldown before the bot gets its first fight.
-    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)) return previous;
+    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)) {
+        if (!previous.suspendedFor) return previous;
+        const { suspendedFor, ...held } = previous;
+        return held;
+    }
     if (plan?.levelingRecovery) return null;
     if (!partyRequestEligible(state)) return null;
     const sharedTarget = previous?.reason === 'shared_target' && ['open', 'deferred'].includes(previous.status)
         && plan?.status === 'active' && previous.spotId === plan.next?.spotId
         && Number(previous.npcId) === Number(plan.next?.npcId || plan.targetNpcId)
         ? { ...previous, status: 'open' } : null;
-    const Material = require('./CraftMaterialParty');
     let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan)
         || Material.request(state, plan, { ...options, timestamp }) || sharedTarget;
     if (objective?.priority === 'required' && objective.itemId && !objective.clanGoalKey && !objective.helpDeal) {

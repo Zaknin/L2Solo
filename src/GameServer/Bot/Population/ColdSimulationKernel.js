@@ -694,6 +694,17 @@ class ColdSimulationKernel {
         }
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
+        const retainedState = current && incomingRevision < currentRevision ? current.state : state;
+        const membership = retainedState.party?.partyId || retainedState.partyId;
+        // A departure snapshot can be prepared before the old party dissolves.
+        // Its catalog context must not turn the now-solo former leader back
+        // into a party writer and strand a paid town trip behind old members.
+        if (entry.context?.isPartyLeader && (!membership
+            || String(membership) !== String(entry.context.party?.partyId || ''))) {
+            entry = { ...entry, context: { ...entry.context, isPartyLeader: false,
+                party: null, partyMembers: [], requirementRefresh: false, targetNpcId: null,
+                raidOwner: null, route: entry.context.route?.mode === 'party' ? null : entry.context.route } };
+        }
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic

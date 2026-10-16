@@ -2018,7 +2018,11 @@ class ColdSimulationCoordinator {
         };
         const committedPartyRow = committed.partyRow || committed.raidPartyRow;
         await this.step('partyCache', id, () => {
-            if (committedPartyRow && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
+            // Every member receives the shared row, but only the group's
+            // publisher owns it. Its postcommit review may already dissolve
+            // the party; a later follower receipt must not resurrect the cache.
+            if (committedPartyRow && entry.proposal.partyResolution?.partyId === committedPartyRow.partyId
+                && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
                 < Number(committedPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committedPartyRow);
         });
         await this.step('raidCache', id, () => {

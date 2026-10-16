@@ -107,6 +107,56 @@ try {
     index = bIndex;
     Funding.spendable = () => 1000000;
     const funded = Request.partyRequestForPlan(retained, plan, timestamp, { spots, economy });
+    const fallback = require('../src/GameServer/Bot/Population/PartyWaitFallback');
+    const cooldown = { ...funded, status: 'deferred', attempts: 3,
+        deferredUntil: timestamp + 60000, expiredAt: timestamp - 1 };
+    let resupplying = { ...retained, stats: { ...retained.stats, partyRequest: cooldown } };
+    const checksBeforeSupplies = [inspected, routeChecks];
+    for (const [offset, activity, focus] of [[100, 'hunting', 'stock:shots'], [1000, 'traveling', 'stock:scrolls'],
+        [2000, 'shopping', 'stock:shots'], [61000, 'resting', 'stock:shots']]) {
+        const stockEconomy = { ...economy, network: { ...economy.network, focus: [focus] } };
+        const parked = Request.partyRequestForPlan({ ...resupplying, activity }, plan, timestamp + offset,
+            { spots, economy: stockEconomy });
+        assert.equal(parked.status, 'deferred', 'supply priority never reopens the material request');
+        assert.equal(parked.attempts, 3);
+        assert.equal(parked.deferredUntil, cooldown.deferredUntil, 'supply work does not extend or erase the pause');
+        assert.equal(parked.suspendedFor, focus);
+        assert.equal(fallback.waiting(resupplying, plan, parked), false, 'a parked request cannot override the supply route');
+        resupplying = { ...resupplying, stats: { ...resupplying.stats, partyRequest: parked } };
+        assert.equal(Request.partyObjectiveForState(resupplying), null, 'parked requests cannot recruit');
+    }
+    assert.deepEqual([inspected, routeChecks], checksBeforeSupplies, 'restocking performs no source or combat checks');
+    const resumed = Request.partyRequestForPlan(resupplying, plan, timestamp + 62000, { spots, economy });
+    assert.equal(resumed.status, 'open');
+    assert.equal(resumed.attempts, 3, 'the same material operation resumes with its assembly history');
+    assert.equal(resumed.suspendedFor, undefined);
+    const earlyReturn = Request.partyRequestForPlan({ ...resupplying, stats: { ...resupplying.stats,
+        partyRequest: { ...resupplying.stats.partyRequest, deferredUntil: timestamp + 120000 } } },
+    plan, timestamp + 62000, { spots, economy });
+    assert.equal(earlyReturn.status, 'deferred', 'returning to the weapon cannot bypass a still-live pause');
+    assert.equal(earlyReturn.deferredUntil, timestamp + 120000);
+    const assemblyReturn = Request.partyRequestForPlan({ ...resupplying, stats: { ...resupplying.stats,
+        partyRequest: { ...resupplying.stats.partyRequest, deferReason: 'party_material_route_unavailable',
+            deferredUntil: timestamp + 120000 } } }, plan, timestamp + 62000, { spots, economy });
+    assert.equal(assemblyReturn.status, 'deferred');
+    assert.equal(assemblyReturn.attempts, 3);
+    assert.equal(assemblyReturn.suspendedFor, undefined, 'returning from supplies restores the ordinary safe waiting route');
+    const stockEconomy = { ...economy, network: { ...economy.network, focus: ['stock:shots'] } };
+    for (const [label, next, nextPlan, context] of [
+        ['target complete', resupplying, { ...plan, status: 'complete' }, stockEconomy],
+        ['changed target', resupplying, { ...plan, target: { selfId: 5730, slot: 12 } }, stockEconomy],
+        ['materials collected', { ...resupplying, inventory: { 4097: { amount: 12 } } }, plan, stockEconomy],
+        ['item received', { ...resupplying, inventory: { 5726: { amount: 1 } } }, plan, stockEconomy],
+        ['materials incoming', resupplying, plan, { ...stockEconomy, stockFor: () => ({ incoming: 12 }) }],
+        ['clan owns plan', resupplying, { ...plan, clanGoal: { clanId: 1 } }, stockEconomy]
+    ]) {
+        assert.equal(Request.partyRequestForPlan(next, nextPlan, timestamp + 62000, { spots, economy: context }), null,
+            `${label}: an obsolete need is removed during restocking`);
+    }
+    const pausedOpen = Request.partyRequestForPlan({ ...retained, stats: { ...retained.stats,
+        partyRequest: { ...funded, attempts: 2 } } }, plan, timestamp + 100, { spots, economy: stockEconomy });
+    assert.equal(pausedOpen.status, 'deferred');
+    assert.equal(pausedOpen.attempts, 2, 'supply priority is not another failed assembly');
     assert.equal(funded.helpDeal.count, 12, 'the helper contract covers the complete missing component quantity');
     assert.equal(funded.helpDeal.fee, 1200);
     const partial = { ...retained, inventory: { 4097: { selfId: 4097, amount: 4 } } };

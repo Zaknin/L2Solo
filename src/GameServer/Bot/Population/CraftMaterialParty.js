@@ -92,7 +92,7 @@ function request(state, plan, { spots = [], economy, timestamp = Date.now() } = 
         && Number(heldRequest?.itemId) === Number(material.selfId) ? heldRequest : null;
     if (previous?.materialLevel === state.level && previous.materialClass === (state.stats?.classId ?? state.classId)
         && timestamp < Number(previous.materialReviewedAt || 0) + REVIEW_MS) {
-        const { helpDeal, ...held } = previous;
+        const { helpDeal, suspendedFor, ...held } = previous;
         return { ...held, status: 'open', amount, requiredTotal, materialCash, materialSoloHours };
     }
     const memoKey = `${state.level}:${state.stats?.classId ?? state.classId}:${plan.target.selfId}:${material.selfId}:${amount}`;
@@ -128,6 +128,23 @@ function remaining(state, goal, inventory = state.inventory) {
         || positive(inventory?.[goal.targetId]?.amount) > 0 || positive(inventory?.[plan.unseal?.sourceId]?.amount) > 0) return 0;
     const physical = Math.max(0, positive(goal.requiredTotal) - positive(inventory?.[goal.itemId]?.amount));
     return Math.min(physical, goal.quota === undefined ? Infinity : Math.max(0, goal.quota - positive(goal.collected)));
+}
+
+// Restocking changes the current occupation, not the unfinished craft. Keep
+// its one request parked even after the formation cooldown ends; only the
+// renewed material decision may reopen it. No source search is needed here.
+function supplyPause(state, plan, { economy, timestamp = Date.now() } = {}) {
+    const held = requestOf(state);
+    const focus = economy?.network?.focus?.[0] || state.stats?.wishFocus?.[0] || '';
+    if (!held || !['open', 'deferred'].includes(held.status) || !focus.startsWith('stock:')
+        || state.partyId || state.party?.partyId || state.activity === 'dead'
+        || !plan?.recipeId || plan.clanGoal || plan.levelingRecovery
+        || !['active', 'deferred', 'blocked'].includes(plan.status)
+        || remaining({ ...state, stats: { ...state.stats, equipmentPlan: plan } }, held) <= 0) return null;
+    const incoming = positive(economy?.stockFor?.(held.itemId, `power:${held.targetId}:${plan.target.slot}`)?.incoming);
+    if (incoming >= positive(held.requiredTotal) - positive(state.inventory?.[held.itemId]?.amount)) return null;
+    return { ...held, status: 'deferred', suspendedFor: focus,
+        deferredUntil: Number(held.deferredUntil || 0) || timestamp };
 }
 
 function needs(members, objective, agreement) {
@@ -218,5 +235,5 @@ function selectMembers(candidates, { minSize = 2, maxSize = MAX_MEMBERS, levelRa
     return members.length >= minSize ? members : [];
 }
 
-module.exports = { request, requestOf, isObjective, needs, remaining, selectMembers, agreement, departureRequest, joint, target, campsFor, partySpoiler,
+module.exports = { request, requestOf, isObjective, needs, remaining, supplyPause, selectMembers, agreement, departureRequest, joint, target, campsFor, partySpoiler,
     MAX_SOURCE_CHECKS, MAX_CAMPS, MAX_CORE, MAX_MEMBERS, REVIEW_MS };
