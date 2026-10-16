@@ -682,7 +682,8 @@ function restartEventProof(proof, accepted) {
 }
 function restoreEventProof(prefix, accepted) {
     const generation = RecomputeGeneration.current();
-    if (!generation || !(prefix instanceof Uint8Array) || prefix.byteLength < 35
+    // No minimum length: every short read below throws and refuses the whole prefix.
+    if (!generation || !(prefix instanceof Uint8Array)
         || prefix.byteLength > FENCE_RAW_BYTES || !accepted?.card) return null;
     try {
         const read = Bytes.reader(prefix);
