@@ -782,9 +782,8 @@ function advisoryRefusal(deps, site, reason) {
     return { ...deps, advisoryRefusal: name };
 }
 // The sampled same/new of a card a Hold.js place kept in shadow while the
-// step rebuilt (held: { place, why, card, startedAt }, set by the place's
-// verdict: 'card_leaf' in ColdEconomyDecision.refusal, 'edges' below): the
-// rebuild's card against the held one.
+// step rebuilt (held: { place, why, card, startedAt }, set by the 'edges'
+// verdict below): the rebuild's card against the held one.
 function compareHeldCard(held, state, card) {
     if (!held) return;
     Hold.compare(held.place, state, held.why, () => !card ? 'no_card'
@@ -794,8 +793,8 @@ function compareHeldCard(held, state, card) {
 function samePlanJson(a, b) {
     return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
-// The existing native plan verdict, shared with the diagnostic result-site
-// candidate. It grants no economy command or social interaction.
+// The existing native plan verdict. It grants no economy command or social
+// interaction.
 function nativePlanHolds(state, previousPlan, nativeReplan, timestamp, onFinalize = null) {
     const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
         && previousPlan.next == null && previousPlan.reason === 'wish_focus';
@@ -807,16 +806,6 @@ function nativePlanHolds(state, previousPlan, nativeReplan, timestamp, onFinaliz
         || nativeReplan.failure || nativeReplan.invalidSource || nativeReplan.levelingRecovery) return false;
     onFinalize?.();
     return samePlanJson(GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp), previousPlan);
-}
-// Only a proved candidate reaches the ordinary build's transient deps. All
-// checks stay diagnostic; the actual card refusal and retention are unchanged.
-function socialShadowDeps(state, deps, prepared, timestamp, nativeHolds, edges = 0) {
-    const social = prepared.socialShadow;
-    if (!social) return deps;
-    const holds = social.holds && !edges && !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
-        && SpotRiskPolicy.activitySpotAllowed(state, social.leaf, timestamp) && nativeHolds();
-    economyDiagnostics.count('card', 'social_check', `${social.kind}:${holds ? 'would_hold' : 'refused'}`);
-    return holds ? { ...deps, socialShadow: social } : deps;
 }
 // Diagnostics only: a lifecycle rebuild of a transit step (transitHold
 // below) names, on sampled owners, the decision it changed against the state
@@ -1202,13 +1191,13 @@ function startKernel(config = {}) {
                     let fresh = false;
                     refreshed = !projected.party?.partyId && !projected.partyId
                         ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps,
-                            { afterResult: true, why, prepared, socialShadow: true }) : null;
+                            { afterResult: true, why, prepared }) : null;
                     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
                     // Both native stock gates read one prepared foundation;
                     // the same edges also drive the action after projection.
-                    // L116: a refusal's own basics when it built them, else
-                    // built at the first gate read (edges skips resting,
-                    // travelling and party bots, which read none).
+                    // L116: a reuse's own basics, else built at the first
+                    // gate read (edges skips resting, travelling and party
+                    // bots, which read none).
                     let stock = refreshed?.economy || prepared.basics || null;
                     const edgeContext = owner?.context || {};
                     economyEdges = ColdEconomyPlan.edges(state, projected, edgeContext, timestamp,
@@ -1223,7 +1212,7 @@ function startKernel(config = {}) {
                     if (economyEdges && refreshed && (edgeWhy || !Hold.on('edges', deps))) {
                         if (edgeWhy) heldCard = { place: 'edges', why: edgeWhy, card: refreshed.decision, startedAt: performance.now() };
                         refreshed = null;
-                        // L115: which native gate dropped a card that held its fence.
+                        // L115: which native gate dropped a card its event proof held.
                         // L115C: the refusal is named by a lone review trigger
                         // (else 'other').
                         if (economyDiagnostics.active()) {
@@ -1238,17 +1227,10 @@ function startKernel(config = {}) {
                     }
                     if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, owner?.context || {}, refreshed, deps);
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                    heldCard ||= prepared.held || null;
                     const eventDeps = prepared.eventVerdict || prepared.eventCandidate ? { ...deps,
                         eventVerdict: prepared.eventVerdict, eventCandidate: prepared.eventCandidate } : deps;
                     const refusalDeps = advisoryRefusal(eventDeps, 'result', why[0] || 'party');
-                    const candidateDeps = socialShadowDeps(projected, refusalDeps, prepared, timestamp, () => {
-                        const plan = projected.stats?.equipmentPlan || null;
-                        const replan = GearAcquisitionPlanner.replanContextFor(projected, plan, timestamp);
-                        return !replan.failure && !replan.invalidSource && !replan.levelingRecovery
-                            && nativePlanHolds(projected, plan, replan, timestamp);
-                    }, economyEdges);
-                    return Economy.forState(projected, withIncomeRoute(candidateDeps, prepared.basics));
+                    return Economy.forState(projected, withIncomeRoute(refusalDeps, prepared.basics));
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
@@ -1357,7 +1339,7 @@ function startKernel(config = {}) {
             // the existing planner; no new choice is made from a thin card.
             const why = [], prepared = {};
             let refreshed = solo && nativeHolds && planHolds()
-                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared, socialShadow: true }) : null;
+                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared }) : null;
             if (refreshed) refreshed = await refreshCraftPacket(state, timestamp, context, refreshed, deps);
             // Compact advice has no full money queue for clan acquisition.
             // A null intention takes its ordinary native selection there.
@@ -1390,9 +1372,8 @@ function startKernel(config = {}) {
             const refusalDeps = economyDiagnostics.active() ? advisoryRefusal(eventDeps, 'lifecycle', refreshed ? 'excluded_spot'
                 : why[0] || (!solo ? 'party' : !planHolds() ? 'plan_changed'
                     : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : eventDeps;
-            const candidateDeps = socialShadowDeps(state, refusalDeps, prepared, timestamp, () => nativeHolds && planHolds());
             const preparedEconomy = nullReuse ? refreshed.economy
-                : Economy.forState(preparationState, withIncomeRoute(candidateDeps, prepared.basics));
+                : Economy.forState(preparationState, withIncomeRoute(refusalDeps, prepared.basics));
             const selectedAcquisition = nullReuse ? {
                 acquisitionPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan),
                 replanContext: nativeReplan, reusablePartyRequest: false,
@@ -1436,7 +1417,6 @@ function startKernel(config = {}) {
                 updatedAt: Number(seen.updatedAt || 0), key: ColdEconomyDecision.stateKey(seen), flags: 0 }) : null;
             const advice = nullReuse ? { ...refreshed.advisory, card: heldDecision }
                 : ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps);
-            if (!nullReuse) compareHeldCard(prepared.held, seen, advice?.card);
             rememberWishAdvisory(kernel.states.get(Number(state.characterId)), advice, seen, deps, !nullReuse);
             if (nullReuse && economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
             compareTransit(transit, state, routedState, economy.statsPacket, previousPlan);

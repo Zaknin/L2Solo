@@ -502,7 +502,7 @@ try {
             assert.strictEqual(retained, accepted, 'a publication the proof holds keeps the advice');
             for (const key of ['card', 'eventProof', 'baseline', 'mp', 'saved']) assert.strictEqual(retained[key], accepted[key]);
             const prepared = {}, before = builds;
-            assert.equal(Decisions.refusal(state, retained, deps, null, { prepared }), '', 'the card holds by its event proof');
+            assert.equal(Decisions.refusal(state, retained, deps, { prepared }), '', 'the card holds by its event proof');
             assert.strictEqual(prepared.eventCandidate, retained, 'the diagnostic receives the candidate');
             assert.equal(builds, before, 'the card verdict runs no solver');
             Economy.forgetContext(state.characterId);

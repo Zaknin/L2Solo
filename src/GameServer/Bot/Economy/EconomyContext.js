@@ -1193,14 +1193,7 @@ function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kin
 // The build reads the bot's own combat profile several times at one
 // timestamp; one build of it serves them (ColdCombatProfile.withProfileScope).
 function forState(state = {}, deps = {}) {
-    const social = Diagnostics.active() ? deps.socialShadow : null;
-    if (social) social.outcome = 'unavailable';
-    try { return CombatProfile.withProfileScope(state, () => buildForState(state, deps)); }
-    finally {
-        // One outcome per eligible candidate, including hits, missing held
-        // builds and unfinished incoming projections. None prove equality.
-        if (social) Diagnostics.count('card', 'social_plan', `${social.kind}:${social.outcome || 'unavailable'}`);
-    }
+    return CombatProfile.withProfileScope(state, () => buildForState(state, deps));
 }
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
@@ -1292,7 +1285,7 @@ function buildForState(state, deps) {
         : deps.withNodes && !held.projection ? 'nodes_needed'
         : activeEvents ? 'market' : 'hold_off';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let elapsed = 0, gate = null, gateDiff = null, gateSoft = null, socialDiff = null, gateEvidence = null;
+    let elapsed = 0, gate = null, gateDiff = null, gateSoft = null, gateEvidence = null;
     if (diagnostic) {
         gate = held?.plan.eventProof ? eventVerdict.valid ? 'would_hold' : eventVerdict.reason
             : held ? 'unproved' : 'no_held';
@@ -1544,17 +1537,9 @@ function buildForState(state, deps) {
         elapsed = performance.now() - started;
         Diagnostics.duration('context', elapsed);
         Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
-        const social = deps.socialShadow, socialLeaf = held?.plan.network?.activity;
-        // Tuple equality alone cannot bind a card to this retained graph:
-        // temporary/unkept builds can publish the same tuple from another build.
-        const sameSocialBuild = social && held?.plan.statsPacket.wishSections === social.baseline
-            && socialLeaf?.activity === social.kind && socialLeaf.rootKey === social.leaf.rootKey
-            && socialLeaf.targetId === social.leaf.targetId;
-        if (gate === 'would_hold') gateEvidence = {};
-        const comparison = sameSocialBuild || gate === 'would_hold' ? gatePlanDiff(state, held, context, deps, gateEvidence) : null;
-        if (sameSocialBuild) { social.outcome = comparison; socialDiff = comparison; }
         if (gate === 'would_hold') {
-            gateDiff = comparison;
+            gateEvidence = {};
+            gateDiff = gatePlanDiff(state, held, context, deps, gateEvidence);
             // A diff while the held proof's own soft sources moved inside their
             // delay is by design (<diff>_soft); the bare <diff> read them intact.
             gateSoft = gateDiff === 'same' ? null : Number(!softSourcesHold(held.plan.eventProof, deps));
@@ -1577,7 +1562,6 @@ function buildForState(state, deps) {
         heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0] === held.plan.network.focus?.[0] ? undefined : network.focus?.[0],
         heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key === held.plan.network.activity?.key ? undefined : network.activity?.key,
         reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
-        ...(socialDiff ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),
         soft: gateSoft, ...gateEvidence });
     else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
@@ -1589,10 +1573,6 @@ function buildForState(state, deps) {
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
-        ...(socialDiff ? {
-            social: `${deps.socialShadow.kind}:${socialDiff}`, baselineAt: deps.socialShadow.baseline.at,
-            reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet'
-        } : null),
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;

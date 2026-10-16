@@ -561,7 +561,7 @@ function advisoryPublicationHolds(state, advice, previous = null) {
 // through to a fight there, so it takes the rebuild.
 // refusal: the first failing check's name, '' when the card holds (L114
 // diagnostics read it; canReuse is its boolean).
-function refusal(state, accepted, deps = {}, current = null, options = {}) {
+function refusal(state, accepted, deps = {}, options = {}) {
     if (!accepted || !accepted.card) return 'no_card';
     if (accepted.characterId !== undefined && accepted.characterId !== Number(state.characterId)) return 'no_card';
     if (!accepted.baseline) return 'no_sections';
@@ -576,99 +576,42 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     const echo = Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
     if (echo) return echo;
-    // The ordinary fight path resumes hunting even when its accepted next
-    // economic step is a purchase or liquidation. Commands still prepare via
-    // their native owner; unknown/completed/impossible leaves never reuse.
-    const leaf = accepted.card.activity, kind = leaf?.activity;
-    const completedNull = eventReuse && leaf === null && accepted.activityLeaf === 0 && accepted.eventProof.activity === null;
-    if (!leaf && !completedNull || !eventReuse && !['hunting', 'shopping', 'selling'].includes(leaf?.activity)) {
-        if (Diagnostics.active()) {
-            const subtype = !kind ? 'none' : ['crafting', 'improving', 'helping', 'pvp'].includes(kind) ? kind : 'other';
-            Diagnostics.count('card', 'leaf_kind_check', subtype);
-            // Shadow only: the worker still rebuilds. The same decoded leaf
-            // takes every later proof check, without granting social action.
-            if (options.socialShadow && options.prepared && ['pvp', 'helping'].includes(kind)
-                && !Economy.heldLeafRefusal(state, leaf, deps)) {
-                options.prepared.socialShadow = { kind, baseline: accepted.baseline, leaf,
-                    holds: !leafRefusal(state, accepted, leaf, deps, current, options, true) };
-            }
-        }
-        // Place 'card_leaf': a crafting or empty card refused for its kind
-        // alone takes the rest of the verdict; the build still runs and
-        // the worker compares its card on sampled owners (options.prepared.held).
-        if (!eventReuse && (!kind || kind === 'crafting') && Hold.asked('card_leaf', deps)) {
-            const refused = leafRefusal(state, accepted, leaf, deps, current, options, true);
-            const why = refused ? [holdReason(refused)] : [];
-            if (Hold.check('card_leaf', why, deps)) return '';
-            if (options.prepared) options.prepared.held = { place: 'card_leaf', why, card: accepted.card, startedAt: performance.now() };
-        }
+    // A card without a leaf reuses only as a completed (null) activity its
+    // proof names; any other leaf takes the native checks and the event
+    // verdict. Commands still prepare via their native owner.
+    const leaf = accepted.card.activity;
+    const completedNull = leaf === null && accepted.activityLeaf === 0 && accepted.eventProof.activity === null;
+    if (!leaf && !completedNull) {
+        if (Diagnostics.active()) Diagnostics.count('card', 'leaf_kind_check', 'none');
         return 'leaf_kind';
     }
-    return leafRefusal(state, accepted, leaf, deps, current, options);
-}
-// Shared continuation of the actual verdict and its diagnostic social
-// candidate. Only that candidate leaves a soft market deferral uncounted.
-function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow = false) {
     if (state.incomingPending) return 'incoming';
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
     if (!options.afterResult && state.activity === 'traveling'
         && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record'; // lazy: as canReuse before L114 (load order unchecked)
-    const timestamp = Number(deps.timestamp || Date.now());
-    const baseline = accepted.baseline;
-    const Sections = DecisionSections;
-    if (accepted.eventProof && Economy.eventReuseEnabled(deps)) {
-        const why = [], verdict = {};
-        const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
-            baseline, mp: accepted.mp, timestamp, softPrefix: accepted.softPrefix === true, why, verdict });
-        if (options.prepared) options.prepared.eventVerdict = verdict;
-        return holds ? '' : `events:${why[0] || 'unproved'}`;
-    }
-    if (Sections.capability(state, timestamp) !== baseline.build) {
-        // Place 'card_kit' (shadow, counter only): would the card stand if
-        // only the fight condition (effects, night) moved? held: the kit is
-        // the baseline's; build: the kit moved; unproved: no kit in the
-        // baseline. The card is still refused; the social and card_leaf
-        // shadows (socialShadow) are not counted.
-        if (!socialShadow && Hold.asked('card_kit', deps)) {
-            Hold.check('card_kit', baseline.kit === undefined ? ['unproved']
-                : Sections.kit(state) === baseline.kit ? [] : ['build'], deps);
-        }
-        return 'capability';
-    }
-    // The same event verdict as the cache entry (L70), incl. a crafter's MP.
-    const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
-    if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, why))
-        return `events:${why[0]}`;
-    // The event verdict's per-leaf check (a social leaf: its target and root).
-    return Economy.heldLeafRefusal(state, leaf, deps, undefined, current) ? 'accepted_leaf' : '';
+    const why = [], verdict = {};
+    const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
+        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()),
+        softPrefix: accepted.softPrefix === true, why, verdict });
+    if (options.prepared) options.prepared.eventVerdict = verdict;
+    return holds ? '' : `events:${why[0] || 'unproved'}`;
 }
-// A card refusal by the shared hold reason names (hold-scheme.md §3).
-const CARD_REASONS = Object.freeze({ not_field: 'not_field', capability: 'sections', incoming: 'bag',
-    travel_record: 'native', accepted_leaf: 'native' });
-function holdReason(refused) {
-    const [head, tail] = refused.split(':');
-    if (head === 'events') return tail || 'unproved';
-    return CARD_REASONS[head] || 'unproved';
-}
-function canReuse(state, accepted, deps = {}, current = null, options = {}) {
-    return !refusal(state, accepted, deps, current, options);
+function canReuse(state, accepted, deps = {}, options = {}) {
+    return !refusal(state, accepted, deps, options);
 }
 // options.why: an array that receives the refusal's name; options.prepared:
-// an object that receives the basics it built (L116; also on reuse, L120), so
-// the caller does not build them or their income route again for the same
-// state and deps.
+// an object that receives the basics a reuse built (L120), so the caller does
+// not build them or their income route again for the same state and deps.
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
-    let base;
-    const current = () => base || (base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps));
-    const refused = refusal(state, accepted, deps, current, options);
-    if (refused) { options.why?.push(refused); if (base && options.prepared) options.prepared.basics = base; return null; }
-    if (options.prepared) options.prepared.basics = current();
+    const refused = refusal(state, accepted, deps, options);
+    if (refused) { options.why?.push(refused); return null; }
+    const base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, deps); // lazy: cycle EconomyContext constructs and validates these cards
+    if (options.prepared) options.prepared.basics = base;
     // This new result is fenced to the actual publication, wallet and MP;
     // never relax ColdEconomyDecisions.matches or any native write guard.
     const decision = compact({ data: accepted.card.data.slice(0), updatedAt: Number(state.updatedAt || 0),
         key: stateKey(state), flags: 0 });
-    const economy = view(state, decision, deps, current());
+    const economy = view(state, decision, deps, base);
     economy.inputKey = String(decision.inputHash);
     economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
