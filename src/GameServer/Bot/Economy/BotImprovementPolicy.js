@@ -1,5 +1,6 @@
 'use strict';
 const Sources = require('../../Items/ItemAcquisitionCatalog');
+const Rules = invoke('GameServer/Items/C4EnchantRules');
 const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Tendency = require('../AI/TendencyRoll');
@@ -22,7 +23,7 @@ function adapter(item) {
 // The same ordered native targets feed admission and its diagnostic input
 // mark. Market interest, benefit, costs and tendency belong to opportunities.
 function targets(state) {
-    const Rules = invoke('GameServer/Items/C4EnchantRules'), result = [];
+    const result = [];
     for (const item of instances(state)) {
         if (!Sources.hasSource(item.selfId)) continue;
         const a = adapter(item), category = Rules.categoryOf(a);
@@ -63,7 +64,6 @@ function gainBetween(a, b, caster) {
 // Expected attempts to the COMPLETE target. A normal failure ends the chain;
 // blessed failures return to zero. Affine recurrence solves that renewal.
 function enchantCost(item, from, to, scroll, config) {
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const a = adapter(item), category = Rules.categoryOf(a);
     let reach = 1, count = 0;
     if (scroll.scrollType !== 'blessed') {
@@ -100,7 +100,6 @@ function stuckCost(state, item, ctx, before = null) {
     return remainingIncome > 0 ? replacement + lostPerHour * replacement / remainingIncome : Infinity;
 }
 function opportunities(state, ctx) {
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const scrolls = invoke('GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS;
     const Henna = invoke('GameServer/Henna/HennaRules');
     const SA = invoke('GameServer/Items/C4WeaponSAExchange');
@@ -191,7 +190,6 @@ function opportunities(state, ctx) {
 function enchantedPrice(item, level, ctx) {
     const base = positive(ctx.price(item.selfId));
     if (!level) return base;
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const config = Rules.configWith(globalThis.options?.default?.Enchant);
     const costs = Object.entries(invoke('GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS)
         .filter(([,rule]) => rule.scrollType === 'normal' && Rules.validTarget(adapter(item),rule))
