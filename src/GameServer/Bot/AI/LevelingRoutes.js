@@ -2,6 +2,7 @@ const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const ClassPolicy = invoke('GameServer/Bot/AI/BotClassPolicy');
 const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 // Resolved on first use; invoke() re-resolves the path on every call inside spot scans.
 let SpotRiskPolicy;
 const spotRiskPolicy = () => SpotRiskPolicy || (SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy'));
@@ -222,14 +223,23 @@ function textForSpot(spot = {}) {
     ].join(' ').toLowerCase();
 }
 
-// Tags derive from a spot's static id, name, mob names and level bounds, but
-// route checks ask for them on every candidate of every search.
-const spotTags = new WeakMap();
+// What depends only on one spot object (game data: id, names, mob names,
+// level bounds, center) is derived on the first question and shared by every
+// candidate of every search: its tags, starter regions and peace zone.
+const spotFacts = new WeakMap();
+
+function factsFor(spot) {
+    let facts = spotFacts.get(spot);
+    if (!facts) {
+        spotFacts.set(spot, facts = { tags: deriveTags(spot), starterRegions: null, peace: null });
+        Diagnostics.count('spot_facts', 'built', 'tags');
+    }
+    return facts;
+}
 
 function tagsForSpot(spot = {}) {
     if (!spot || typeof spot !== 'object') return deriveTags(spot);
-    if (!spotTags.has(spot)) spotTags.set(spot, deriveTags(spot));
-    return [...spotTags.get(spot)];
+    return [...factsFor(spot).tags];
 }
 
 function deriveTags(spot) {
@@ -271,7 +281,15 @@ function crowdPenaltyForSpot(spot, occupancy) {
     return 60 + Math.pow(ratio - 1, 2) * 120;
 }
 
+// Read-only result: shared by every search of the spot.
 function starterRegionsFor(spot = {}) {
+    if (!spot || typeof spot !== 'object') return deriveStarterRegions(spot);
+    const facts = factsFor(spot);
+    if (!facts.starterRegions) facts.starterRegions = deriveStarterRegions(spot);
+    return facts.starterRegions;
+}
+
+function deriveStarterRegions(spot = {}) {
     const x = Number(spot.center?.locX);
     const y = Number(spot.center?.locY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
@@ -339,10 +357,18 @@ function scoreRoute(route, spot, context, tags) {
     return 70 + modeBonus + roleBonus + requiredTagBonus + narrowRoleBonus + preferredTagCount * 22 - levelGap * 12 - routeGap * 1.5;
 }
 
+function inPeaceZone(spot) {
+    if (typeof utils?.isInPeaceZone !== 'function') return false;
+    if (!spot || typeof spot !== 'object') return Boolean(utils.isInPeaceZone(spot?.center?.locX, spot?.center?.locY));
+    const facts = factsFor(spot);
+    if (facts.peace === null) facts.peace = Boolean(utils.isInPeaceZone(spot.center?.locX, spot.center?.locY));
+    return facts.peace;
+}
+
 function baseScore(spot, context) {
     const levelGap = Math.abs(Number(spot.avgLevel || spot.minLevel || 1) - context.level);
     const density = Math.min(12, Number(spot.density || 1));
-    const peacePenalty = utils.isInPeaceZone?.(spot.center?.locX, spot.center?.locY) ? 40 : 0;
+    const peacePenalty = inPeaceZone(spot) ? 40 : 0;
     return density * 3 - levelGap * 18 - peacePenalty;
 }
 
