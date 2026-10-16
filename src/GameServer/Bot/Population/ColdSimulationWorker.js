@@ -336,7 +336,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
                 buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
-                caller: 'economy_refresh', trigger: 'native_own_action' });
+                rememberContext: false, caller: 'economy_refresh', trigger: 'native_own_action' });
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
             input.state = { ...input.state, stats: { ...input.state.stats, ...input.economy.statsPacket } };
@@ -1210,7 +1210,7 @@ function startKernel(config = {}) {
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
-            if (refreshed && !SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp).has(String(refreshed.economy.network.activity?.spotId))) {
+            if (refreshed && SpotRiskPolicy.activitySpotAllowed(state, refreshed.economy.network.activity, timestamp)) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);

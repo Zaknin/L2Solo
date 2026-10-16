@@ -200,6 +200,60 @@ async function run() {
     assert.equal(typeof context.statsPacket.activityLeaf, 'number');
     assert(context.statsPacket.activityLeaf !== 0);
     assert.equal(Economy.forState(base).plan, context.plan, 'unchanged own inputs reuse the complete context');
+    // Native membership representations normalize to the same event part.
+    const member = { ...base, stats: { ...base.stats, clanId: 9 }, partyId: 17 };
+    assert.equal(Economy.inputKey(member), Economy.inputKey({ ...member, clanId: 9, party: { partyId: 17 } }));
+    assert.notEqual(Economy.inputKey(member), Economy.inputKey({ ...member, clanId: 0 }));
+    assert.notEqual(Economy.inputKey(member), Economy.inputKey({ ...member, partyId: 18 }));
+    assert.equal(Economy.forState(base, { rememberContext: false }).plan, context.plan,
+        'an unkept caller can read an existing valid decision');
+    const temporary = Economy.forState({ ...base, adena: base.adena + 1000 }, { rememberContext: false });
+    assert.notEqual(temporary.plan, context.plan);
+    assert.equal(Economy.forState(base).plan, context.plan, 'an unkept build never replaces the held decision');
+    {
+        const T = Date.now(), native = { ...base, characterId: 990021 }, spotId = 'event-gate-fixture';
+        const held = Economy.forState(native, { timestamp: T });
+        held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId };
+        const excluded = { ...native, stats: { ...native.stats, capacityBackoffs: [{ spotId, until: T + 60000 }] } };
+        assert.equal(Economy.inputKey(excluded), Economy.inputKey(native), 'risk exclusion is an unkeyed native fact');
+        assert.notEqual(Economy.forState(excluded, { timestamp: T }).plan, held.plan, 'a new exclusion refuses a same-key hunting decision');
+    }
+    {
+        const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute'), select = Route.select;
+        const T = Date.now(), native = { ...base, characterId: 990022 }, occupancy = { fixture: { count: 1 } };
+        const deps = { timestamp: T, occupancy, keepIncomeRoute: true };
+        try {
+            Route.select = (_state, input) => { void input.occupancy.fixture; return null; };
+            const preparedIncomeRoute = Economy.basics(native, deps).preparedIncomeRoute;
+            const held = Economy.forState(native, { ...deps, preparedIncomeRoute });
+            held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId: 'fixture' };
+            const fields = Economy.decodeCalculationFence(held.calculationFence);
+            assert(fields[2].some(([id]) => id === 'fixture'), 'a replayed income route retains its occupancy reads');
+            occupancy.fixture.count++;
+            assert.equal(Economy.forState(native, deps).plan, held.plan, 'income crowd waits for its market delay');
+            assert.notEqual(Economy.forState(native, { ...deps, timestamp: T + 600000 }).plan, held.plan,
+                'income crowd refuses a held build once its market delay is due');
+        } finally { Route.select = select; }
+    }
+    {
+        const Providers = invoke('GameServer/Bot/Economy/WishProviders'), build = Providers.build;
+        const localBoard = new Board(), T = Date.now(), native = { ...base, characterId: 990023 }, sources = [];
+        const deps = { board: localBoard, timestamp: T, onSourceRead: id => sources.push(id) };
+        try {
+            Providers.build = (state, ctx, options) => { [...ctx.board.itemIds(3)]; return build(state, ctx, options); };
+            const held = Economy.forState(native, deps);
+            held.plan.network.activity = { key: 'hunt:fixture', activity: 'hunting', spotId: 'fixture' };
+            const fields = Economy.decodeCalculationFence(held.calculationFence);
+            assert(fields[1][1].includes(-3), 'the whole buy-side list is a valid retained fence token');
+            assert.equal(Economy.decodeCalculationFence(Economy.encodeCalculationFence(['key', [['x'], [-9, 0]], [], [], null])), null,
+                'an unknown negative item token is rejected');
+            localBoard.put({ id: 990023, ownerId: 99, storeType: 3, lines: [{ lineId: 1, selfId: 990099, count: 1, price: 1 }] });
+            assert.equal(Economy.forState(native, deps).plan, held.plan, 'a new board item waits for the market delay');
+            assert(sources.every(id => id > 0), 'list pseudo ids never escape through item source callbacks');
+            assert.notEqual(Economy.forState(native, { ...deps, timestamp: T + 600000 }).plan, held.plan,
+                'a new ad for a previously unseen item invalidates the list after its delay');
+        } finally { Providers.build = build; }
+    }
     // MVP-6 Bounds: a gear candidate's reads wait in its scope; only a kept
     // scope becomes an input, so a rejected candidate's market cannot rebuild.
     const ScopedProviders = invoke('GameServer/Bot/Economy/WishProviders');

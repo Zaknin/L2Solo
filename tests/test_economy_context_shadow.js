@@ -105,14 +105,13 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:input_dependency_cha
 Economy.forState({ ...republished, adena: 5000 }, deps);
 
 // An unkept build stays unkept even when an older kept context of the actor is released later.
-Economy.forState(state(), { ...deps, rememberContext: false });
+Economy.forState({ ...state(), adena: 5001 }, { ...deps, rememberContext: false });
 Economy.forgetContext(901, 'explicit_invalidation');
 before = shadow(); clock += 200000;
 Economy.forState(state(), deps);
 changed = delta(before, shadow());
-assert.deepEqual(changed, { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:ge120s': 1,
-    'context:shadow_released:unkept': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:same_key:'))) });
-assert.strictEqual(Object.keys(changed).filter(key => key.startsWith('context:shadow_plan:same_key:')).length, 1, 'a same key compares its plan with the previous build');
+assert.deepEqual(changed, { 'context:shadow:not_retained:new_key': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:new_key:'))) });
+assert.strictEqual(Object.keys(changed).filter(key => key.startsWith('context:shadow_plan:new_key:')).length, 1, 'a new key compares its plan with the previous build');
 
 // The LRU capacity names its own release.
 Economy.forState(state(), deps);
@@ -123,11 +122,11 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
     'context:shadow_released:capacity': 1, 'context:shadow_plan:same_key:same_plan': 1 });
 
 // L134 probes: the shadow plan per miss reason (context:same_key_<plan>:<reason>),
-// the clause that refused a same-key request (context:same_key_refused), the
+// the clause that refused a same-key request (context:hold_refused), the
 // activity_leaf echo (context:leaf_echo) and the trip rows (context:trip_rows).
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => /^context:(same_key_|leaf_echo:|trip_rows:)/.test(key)));
+        .filter(([key]) => /^context:(hold_refused:|same_key_|leaf_echo:|trip_rows:)/.test(key)));
     const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
     const actor = (loc, stats = {}) => ({ ...state(), characterId: 902, loc: { locX: 80000 + loc, locY: 148000, locZ: -3500 },
         stats: { ...state().stats, ...stats } });
@@ -180,14 +179,14 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
         assert.deepEqual(keys.map(key => on.deltas[name][key]), [1], `${name}: one ${pattern} in ${JSON.stringify(on.deltas[name])}`);
         return keys[0];
     };
-    assert.deepEqual(on.deltas.first, {}, 'a first build has no previous build to compare');
+    assert.deepEqual(on.deltas.first, { 'context:hold_refused:no_held': 1 }, 'a first build has no held decision');
     one('trip_same', /^context:trip_rows:same:/);
     one('trip_moved', /^context:trip_rows:moved:/);
     one('echo', /^context:leaf_echo:echo:/);
     one('leaf_no_held', /^context:leaf_echo:no_held:/);
-    assert.strictEqual(one('market', /^context:same_key_refused:/), 'context:same_key_refused:market_due');
-    one('market', /^context:same_key_(same|new)_plan:used_market_changed$/);
-    assert.strictEqual(one('decision', /^context:same_key_refused:/), 'context:same_key_refused:decision_seq');
+    assert.strictEqual(one('market', /^context:hold_refused:/), 'context:hold_refused:market_due');
+    one('market', /^context:same_key_(same|new)_plan:market_due$/);
+    assert.strictEqual(one('decision', /^context:hold_refused:/), 'context:hold_refused:decision_seq');
     one('decision', /^context:same_key_(same|new)_plan:input_dependency_changed$/);
 }
 

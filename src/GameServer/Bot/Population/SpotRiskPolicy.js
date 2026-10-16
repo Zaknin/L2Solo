@@ -190,6 +190,12 @@ function excludedSpotIdsForStates(states = [], timestamp = Date.now()) {
     return excluded;
 }
 
+// Both held economy stores refuse a hunting leaf on newly excluded ground.
+function activitySpotAllowed(state, activity, timestamp = Date.now()) {
+    return activity?.activity !== 'hunting'
+        || !excludedSpotIdsForStates([state], timestamp).has(String(activity.spotId));
+}
+
 function withCapacityBackoff(state, spotId, timestamp = Date.now()) {
     // Each refusal renews the spots refused earlier in the same chain: with
     // one hold between retries a bot can still pass up to MAX_BACKOFFS full
@@ -266,5 +272,6 @@ module.exports = {
     activeBackoffs,
     backoffForStates,
     excludedSpotIdsForStates,
+    activitySpotAllowed,
     withBackoff
 };

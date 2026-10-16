@@ -163,7 +163,7 @@ const heldRowKey = row => {
 const INPUT_KEY_PARTS = Object.freeze(['level', 'class_id', 'craft_level', 'items', 'adena', 'decision_seq', 'activity_leaf',
     'visit_every_0', 'visit_every_1', 'workshop_recipe', 'workshop_product', 'workshop_income', 'workshop_cycle',
     'recipe_ids', 'producer_revision', 'shot_recipe_demand', 'mp', 'buy_order_escrow',
-    'frustration', 'karma', 'stats_clan', 'state_clan', 'party_party_id', 'party_id',
+    'frustration', 'karma', 'clan', 'party',
     'generated_cold', 'race', 'market_sell_retry_after', 'market_sell_retry_active', 'reservation', 'clan_material_demand',
     'warehouse_version', 'spot_id', 'gear_threat', 'hunt_efficiency_at', 'memory_revision',
     'deps_input_key', 'mode', 'incoming_pending', 'accepted_incoming', 'trip', 'route', 'pk', 'soul_crystal_quest', 'hennas',
@@ -188,7 +188,7 @@ function inputKeyParts(state, deps = {}) {
         Number(stats.shotRecipeDemand?.at) + 30 * 60 * 1000 > Number(deps.timestamp || Date.now())
             ? Number(stats.shotRecipeDemand.itemId) : 0,
         Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
-        Math.floor(positive(stats.frustration) * 10), stats.karma, stats.clanId, state.clanId, state.party?.partyId, state.partyId,
+        Math.floor(positive(stats.frustration) * 10), stats.karma, Number(state.clanId ?? stats.clanId ?? 0), Number(state.party?.partyId || state.partyId || 0),
         stats.generatedCold, stats.race, stats.marketSellRetryAfter,
         Number(stats.marketSellRetryAfter || 0) > Number(deps.timestamp || Date.now()),
         invoke('GameServer/Bot/Economy/ItemDisposition').reservationInputKey(state), JSON.stringify(stats.clanMaterialDemand || null),
@@ -293,10 +293,11 @@ const sourcePartHashes = (parts, build, tail) => Uint32Array.from([...partHashes
 const STRUCTURAL_SEGMENTS = [
     'progress', 'progress', 'progress', 'loot', 'other', 'other', 'other', 'other', 'other',
     'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'workshop', 'time', 'other', 'other',
-    'frustration', 'other', 'other', 'other', 'other', 'other', 'other', 'other',
-    'time', 'time', 'clan_loot', 'clan_loot', 'clan_loot', 'spot_id', 'gear_threat', 'other', 'memory',
-    'other', 'other', 'other', 'other', 'trip_key', 'route_ready', 'other', 'other', 'other', 'progress', 'other',
-    'workshop', 'progress', 'progress', 'build'];
+    'frustration', 'other', 'other', 'other', 'other', 'other', 'time', 'time', 'clan_loot',
+    'clan_loot', 'clan_loot', 'spot_id', 'gear_threat', 'other', 'memory', 'other', 'other', 'other',
+    'other', 'trip_key', 'route_ready', 'other', 'other', 'other', 'progress', 'other', 'workshop',
+    'progress', 'progress', 'build'];
+
 // held/current: the two structural keys, to name the Trip.key field.
 function structuralSegment(index, held = null, current = null) {
     const name = index < STRUCTURAL_SEGMENTS.length ? STRUCTURAL_SEGMENTS[index] : 'plan_tail';
@@ -412,6 +413,7 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, null, why)) return why[0];
     if (!bandsHold(state, held.plan.quantityBands, held.plan.network?.activity)) return 'bands';
     if (!bagHolds(state, held.plan, timestamp)) return 'bag';
+    if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'market';
     if (!(marketHolds(board, held.reads, deps) && spotsHold(deps, held.spotReads))
         && (Sections.softDue(held.plan.statsPacket.wishSections, 'market', timestamp) || !ownLeafHolds(state, held.plan, deps))) return 'market';
     if (deps.withNodes && !held.projection || deps.nodes?.length || extensions.size) return 'nodes_needed';
@@ -592,7 +594,7 @@ function decodeCalculationFence(fence) {
     const [tokens, items] = fields[1];
     const itemIds = new Set();
     for (let at = 0; at < items.length; at += 2) {
-        if (!Number.isSafeInteger(items[at]) || items[at] < 0 || itemIds.has(items[at])
+        if (!Number.isSafeInteger(items[at]) || items[at] < 0 && ![1, 3].includes(-items[at]) || itemIds.has(items[at])
             || !Number.isSafeInteger(items[at + 1]) || items[at + 1] < 0 || items[at + 1] >= tokens.length) return null;
         itemIds.add(items[at]);
     }
@@ -667,6 +669,8 @@ function acceptedActivityHolds(state, leaf, deps = {}, current = null) {
 // the all-counter average a counter without its own move falls back to
 // (MarketCounters.moveOf) and PriceBelief's hourly demand cache.
 function marketToken(board, id, deps = {}) {
+    // Reserved negative ids name a whole board-side list (1 sell, 3 buy).
+    if (id < 0) return board?.itemIdsFingerprint?.(-id) ?? JSON.stringify([...(board?.itemIds?.(-id) || [])]);
     const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
     return `${board?.itemRevision ? board.itemRevision(id) : '-'}|${Counters.revisionOf(Counters.counterOf(id))}|${deps.workshopRevision?.(id) || 0}`;
 }
@@ -721,11 +725,12 @@ function marketKey(reads) {
 // item it looked at is remembered with its token. Later readers of
 // context.board (a market look, a sale) do not widen what the review
 // depends on.
-function watchedBoard(board, watch) {
+function watchedBoard(board, watch, watchList) {
     if (!board) return board;
     return Object.assign(Object.create(board), {
         first: (selfId, ...rest) => { watch(selfId); return board.first(selfId, ...rest); },
         list: (selfId, ...rest) => { watch(selfId); return board.list(selfId, ...rest); },
+        ...(board.itemIds ? { itemIds: (storeType, ...rest) => { watchList(-Number(storeType)); return board.itemIds(storeType, ...rest); } } : {}),
         ...(board.heads ? { heads: (selfId, ...rest) => { watch(selfId); return board.heads(selfId, ...rest); } } : {})
     });
 }
@@ -887,7 +892,7 @@ function kitReader(data, price, scrollUseHours) {
 // search would, and a price that came out different searches afresh. The
 // record travels only by deps (the cold worker passes its basics' record);
 // select returns plain data (no closure over price).
-function incomeRouteFor(state, deps, timestamp, price, keep) {
+function incomeRouteFor(state, deps, timestamp, price, keep, watchSpot) {
     const required = GearProgression.assess(state).required;
     const prepared = deps.preparedIncomeRoute;
     if (prepared && prepared.state === state && prepared.timestamp === timestamp && prepared.spots === deps.spots
@@ -897,22 +902,33 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
         for (let i = 0; i < prepared.reads.length; i += 2) {
             if (!Object.is(price(prepared.reads[i]), prepared.reads[i + 1])) same = false;
         }
-        if (same) { keep?.(prepared); return prepared.route; }
+        if (same) {
+            for (const id of prepared.spotIds) watchSpot?.(id);
+            keep?.(prepared); return prepared.route;
+        }
     }
-    const reads = keep ? [] : null;
-    const route = IncomeRoute.select(state, { ...deps, timestamp, required,
+    const reads = keep ? [] : null, spotIds = keep ? new Set() : null;
+    const noteSpot = id => { spotIds?.add(id); watchSpot?.(id); };
+    const occupancy = keep || watchSpot ? new Proxy(deps.occupancy || {}, {
+        get: (target, id) => {
+            if (id === 'get') return key => { noteSpot(key); return target.get?.(key); };
+            if (typeof id === 'string') noteSpot(id);
+            return Reflect.get(target, id, target);
+        }
+    }) : deps.occupancy;
+    const route = IncomeRoute.select(state, { ...deps, timestamp, required, occupancy,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
     keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
-        maxChecks: deps.maxChecks, required, reads, route });
+        maxChecks: deps.maxChecks, required, reads, spotIds: [...spotIds], route });
     return route;
 }
-function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
+function foundation(state, deps, persona, timestamp, price, keepRoute = null, watchSpot = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const role = state.party?.role || state.stats?.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(state.stats?.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
     let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
-    const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
+    const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute, watchSpot);
     if (incomeRoute) {
         const row = incomeRoute.row;
         hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
@@ -1033,8 +1049,9 @@ function countShadowPlan(deps, sameKey, samePlan, singlePart = null, reason = nu
 // Diagnostics only: the outer hit clauses (EC buildForState) a same-key
 // rebuild failed once its held entry passed the key or decisionHolds. Token
 // compares only, no hash; ownLeafHolds is named by elimination.
-function outerRefusal(held, board, deps, timestamp) {
+function outerRefusal(state, held, board, deps, timestamp) {
     if (deps.withNodes && !held.projection) return 'nodes_needed';
+    if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'excluded_spot';
     const market = marketHolds(board, held.reads, deps);
     if (market && spotsHold(deps, held.spotReads)) return 'unknown';
     return `${market ? 'spots' : 'market'}_${Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) ? 'due' : 'own_leaf'}`;
@@ -1108,7 +1125,7 @@ function buildForState(state, deps) {
     const timestamp = Number(deps.timestamp || Date.now());
     const actorKey = deps.actorKey || `character:${Number(state.characterId || 0)}`;
     const sourceBoard = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
-    const held = deps.rememberContext === false ? null : cache.get(actorKey);
+    const held = cache.get(actorKey);
     // A valid completed card survives planner-slot reuse or card eviction;
     // the same route is repriced with the current hour value, never a wallet.
     if (!deps.routeRows && held?.plan.routeKey === Trip.key(state)) deps.routeRows = held.plan.routeRows;
@@ -1129,10 +1146,11 @@ function buildForState(state, deps) {
     let readsHeld = null;
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
     if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
+        && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
                 && ownLeafHolds(state, held.plan, deps) && (deferred?.push('market'), true))) {
-        if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
+        if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
             if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_hit', deps.advisoryRefusal);
@@ -1146,9 +1164,11 @@ function buildForState(state, deps) {
                 reason: held.key === key ? 'hit_same_inputs' : 'hit_own_result', outcome: 'held', moved: deferred.join(','),
                 revision: state.simulation?.revision, wallet: positive(state.adena) });
         }
-        held.gearThreat = gearThreat;
-        held.stateRef = new WeakRef(state);
-        remember(cache, actorKey, held, RETAIN_LIMIT);
+        if (deps.rememberContext !== false) {
+            held.gearThreat = gearThreat;
+            held.stateRef = new WeakRef(state);
+            remember(cache, actorKey, held, RETAIN_LIMIT);
+        }
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
             held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
@@ -1162,9 +1182,11 @@ function buildForState(state, deps) {
     // Identity replacement is the worker's technical safety backstop, not an
     // economic event. An input-key mismatch is named as a dependency change;
     // it does not claim which historical event caused it.
-    const diagnosticReason = !diagnostic ? null : !held ? 'not_retained' : held.key !== key
-        ? 'input_dependency_changed' : !isMainThread && held.stateRef.deref() !== state ? 'state_publication'
-        : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
+    const outerWhy = diagnostic && held ? outerRefusal(state, held, sourceBoard, deps, timestamp) : null;
+    const diagnosticReason = !diagnostic ? null : !held ? deps.rememberContext === false ? 'unkept_caller' : 'not_retained'
+        : held.key !== key ? 'input_dependency_changed'
+        : outerWhy !== 'unknown' ? outerWhy
+        : !isMainThread && held.stateRef.deref() !== state ? 'state_publication' : 'unknown';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
@@ -1177,7 +1199,7 @@ function buildForState(state, deps) {
         gate = shadowGate(state, held, last, eventHash, timestamp, deps, sourceBoard, quietSections);
         Diagnostics.count('context', 'gate', gate);
         if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
-        Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(held, sourceBoard, deps, timestamp));
+        Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(state, held, sourceBoard, deps, timestamp));
         if (!held) Diagnostics.count('context', 'not_retained', deps.rememberContext === false ? 'unkept_caller' : last?.released || 'first');
         if (quietSections && !state.stats?.wishDirty && last?.parts?.length === hashes.length) {
             for (const at of EVENT_KEY_INDEXES) if (last.parts[at] !== hashes[at]) Diagnostics.count('context', 'silent', INPUT_KEY_PARTS[at]);
@@ -1283,14 +1305,15 @@ function buildForState(state, deps) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const persona = personaOf(state, deps);
     const cash = Sections.bounds(positive(state.adena));
-    const board = watchedBoard(sourceBoard, watch);
+    const board = watchedBoard(sourceBoard, watch, id => { if (building) reads.set(id, tokenOf(id)); });
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
     const { price, prices, beliefs, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
     // The income route record of this build (its own search or the basics'
     // one): its solo matchup profiles serve the providers' source route reader.
     let incomeRecord = null;
-    const base = foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
+    const base = foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; },
+        id => spotReads.set(id, spotTokenOf(id)));
     const own = Hunt.sampledRows(state, timestamp, deps.mode);
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,

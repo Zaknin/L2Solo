@@ -135,6 +135,7 @@ class BoardIndex {
         this.epoch = 0;
         this.itemChanges = new Map();
         this.itemFingerprints = new Map();
+        this.itemIdFingerprints = new Map();
         this.groupFingerprints = new Map();
         // storeType -> itemId -> { all: [line], towns: Map(town -> [line]) }
         this.sides = new Map([[SELL, new Map()], [BUY, new Map()]]);
@@ -157,6 +158,7 @@ class BoardIndex {
         else this.epoch++;
         this.itemChanges.clear();
         this.itemFingerprints.clear();
+        this.itemIdFingerprints.clear();
         this.groupFingerprints.clear();
         this.sides.forEach((items) => items.clear());
         this.townItems.forEach((towns) => towns.clear());
@@ -177,6 +179,12 @@ class BoardIndex {
     // Updated beside the existing index; a preparation reads no line list.
     itemFingerprint(selfId) {
         return (this.itemFingerprints.get(Number(selfId)) || [0, 0, 0]).join('.');
+    }
+
+    // The complete ordered itemIds list, by side. Membership changes only;
+    // another line or price for an already listed item keeps this token.
+    itemIdsFingerprint(storeType) {
+        return (this.itemIdFingerprints.get(Number(storeType)) || [0, 0, 0]).join('.');
     }
 
     groupFingerprint(scope) {
@@ -248,8 +256,13 @@ class BoardIndex {
             towns.set(town, ids = []);
         }
         const at = itemPosition(ids, selfId);
-        if (present && ids[at] !== selfId) ids.splice(at, 0, selfId);
-        else if (!present && ids[at] === selfId) ids.splice(at, 1);
+        if (present && ids[at] !== selfId) {
+            ids.splice(at, 0, selfId);
+            if (town === '*') this.changeFingerprint(this.itemIdFingerprints, storeType, fnv1a32(String(selfId)), 1);
+        } else if (!present && ids[at] === selfId) {
+            ids.splice(at, 1);
+            if (town === '*') this.changeFingerprint(this.itemIdFingerprints, storeType, fnv1a32(String(selfId)), -1);
+        }
         if (!ids.length) towns.delete(town);
     }
 

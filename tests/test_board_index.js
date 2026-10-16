@@ -9,6 +9,28 @@ const record = (id, fields, lines) => ({ id, kind: 'shop', storeType: SELL, owne
     botOwned: true, ...fields, lines: lines.map((line, at) => ({ lineId: id * 100 + at, enchant: 0, count: 1, ...line })) });
 const ids = (lines) => lines.map((line) => `${line.recordId}/${line.lineId}`);
 
+// A list token follows membership, including replacement and index rebuilds.
+{
+    const board = new BoardIndex(), empty = board.itemIdsFingerprint(BUY);
+    board.put(record(1, { storeType: BUY }, [{ selfId: 7, price: 1 }]));
+    const one = board.itemIdsFingerprint(BUY);
+    assert.notStrictEqual(one, empty);
+    assert.strictEqual(board.itemIdsFingerprint(SELL), empty, 'sides have independent lists');
+    board.put(record(2, { storeType: BUY, town: 'Dion' }, [{ selfId: 7, price: 2 }]));
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'another advertisement does not add a list member');
+    board.put(record(1, { storeType: BUY }, [{ selfId: 7, price: 3 }]));
+    board.remove(2);
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'replacement and removal of a duplicate keep membership');
+    board.put(record(1, { storeType: BUY }, [{ selfId: 8, price: 3 }]));
+    assert.notStrictEqual(board.itemIdsFingerprint(BUY), one, 'a replaced last line moves list membership');
+    board.clear();
+    assert.strictEqual(board.itemIdsFingerprint(BUY), empty, 'clear resets the token');
+    board.put(recordOf(rowOf(record(3, { storeType: BUY }, [{ selfId: 7, price: 9 }]))));
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'loading identical membership restores the same token');
+    board.remove(3);
+    assert.strictEqual(board.itemIdsFingerprint(BUY), empty, 'the last ad removes the member');
+}
+
 // Sell lines: cheaper first, a player before a bot, then record and line id.
 index.put(record(3, {}, [{ selfId: 7, price: 50 }]));
 index.put(record(1, {}, [{ selfId: 7, price: 50 }, { selfId: 7, price: 40, enchant: 3 }]));
