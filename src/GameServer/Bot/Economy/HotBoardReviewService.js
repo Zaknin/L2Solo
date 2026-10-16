@@ -117,11 +117,12 @@ class HotBoardReviewService {
             // Only a hot owner is reviewed here; drain defers any other. A cold
             // owner's commit or claim carries nothing for it, and its move to
             // hot is a phase change that raises this event with the hot row.
-            // The pump still retries a pressure-denied drain of hot owners.
+            // Forgetting readies nothing, so no pump: the registry tick
+            // (PopulationService.startHotBoardReviews) retries a pressure-denied
+            // drain of hot owners instead of every cold commit.
             this.forgetLook(id);
             this.events.forget(id);
             if (Diagnostics.active()) Diagnostics.count('hot_board_review', 'skip', 'not_hot');
-            this.pump();
             return;
         }
         if (!this.events.ownerStatus(id).priced) this.forgetLook(id);
