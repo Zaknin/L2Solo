@@ -100,6 +100,34 @@ const originalExecute = Database.execute;
     for (let index = 0; index < 10000; index++) assert.equal(BackgroundPartyState.admitted().length, 72);
     const perCallMs = (performance.now() - started) / 10000;
     assert.ok(perCallMs <= .05, `72-party admission took ${perCallMs} ms/call`);
+    // The active-party indexes answer as the active() scan they replace: same
+    // parties, same order, across a re-accept, a leader/objective change and a dissolve.
+    const indexed = (partyId, leaderId, clanId, goalKey, extra = {}) => BackgroundPartyState.acceptRow({ partyId,
+        leaderId, memberIdsJson: JSON.stringify([leaderId, leaderId + 1]), status: 'active', updatedAt: 20,
+        statsJson: JSON.stringify({ objective: { clanId, clanGoalKey: goalKey }, ...extra }) });
+    const scan = test => BackgroundPartyState.active().filter(test).map(party => party.partyId);
+    const same = (label) => {
+        for (const clanId of [7, 8]) assert.deepEqual(BackgroundPartyState.activeByObjectiveClan(clanId).map(p => p.partyId),
+            scan(p => Number(p.stats?.objective?.clanId) === clanId), `${label}: clan ${clanId}`);
+        for (const key of ['g1', 'g2']) assert.deepEqual(BackgroundPartyState.activeByGoalKey(key).map(p => p.partyId),
+            scan(p => p.stats?.objective?.clanGoalKey === key), `${label}: goal ${key}`);
+        const leaders = new Set([501, 511, 521]);
+        assert.deepEqual(BackgroundPartyState.activeByLeaders(leaders).map(p => p.partyId),
+            scan(p => leaders.has(p.leaderId)), `${label}: leaders`);
+        const ids = ['bgp_ix_c', 'bgp_ix_a', 'bgp_ix_missing'];
+        assert.deepEqual(BackgroundPartyState.activeByIds(ids).map(p => p.partyId),
+            scan(p => ids.includes(p.partyId)), `${label}: ids`);
+    };
+    indexed('bgp_ix_a', 501, 7, 'g1'); indexed('bgp_ix_b', 511, 7, 'g2'); indexed('bgp_ix_c', 521, 8, 'g1');
+    same('first accept');
+    indexed('bgp_ix_a', 501, 7, 'g1', { moved: 1 });
+    same('re-accept moves to the end');
+    indexed('bgp_ix_b', 531, 8, 'g1');
+    same('leader and objective change');
+    BackgroundPartyState.acceptRow({ partyId: 'bgp_ix_c', memberIdsJson: '[521,522]', status: 'dissolved' });
+    same('dissolve');
+    for (const id of ['bgp_ix_a', 'bgp_ix_b']) BackgroundPartyState.acceptRow({ partyId: id, memberIdsJson: '[1,2]', status: 'dissolved' });
+    assert.deepEqual(BackgroundPartyState.activeByObjectiveClan(7), []);
     console.log(`Background party membership/store checks passed: admission ${perCallMs.toFixed(4)} ms/call`);
 })().catch((error) => {
     console.error(error);

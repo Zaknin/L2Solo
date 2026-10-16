@@ -77,6 +77,11 @@ async function run() {
     });
     stub(Life, 'statesForParty', async id => rows.filter(row => row.party?.partyId === id));
     stub(Parties, 'active', () => parties);
+    // The leader read goes through the party index; here it filters the stubbed active().
+    stub(Parties, 'activeByLeaders', leaders => {
+        const ids = new Set([...leaders].map(Number));
+        return parties.filter(party => ids.has(Number(party.leaderId)));
+    });
     stub(Parties, 'find', id => parties.find(p => p.partyId === id));
     stub(Spots, 'findById', id => id ? { id, minLevel: id === 'danger' ? 40 : 15, maxLevel: 25 } : null);
     stub(Risk, 'backoffForStates', (members, spot) => members.some(m => m.stats.badSpot === spot));

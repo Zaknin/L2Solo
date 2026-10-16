@@ -1,5 +1,5 @@
 const { fnv1a32 } = require('../Fnv1a');
-const ClanMembershipPolicy = require('../../Clan/ClanMembershipPolicy');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const Database = invoke('Database');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -10,6 +10,68 @@ const acceptedStamps = new Map();
 const byStatus = new Map([['active', new Set()], ['hot', new Set()]]);
 let cacheGeneration = 0;
 const publicationListeners = new Set();
+// Active-party indexes kept by the one writer (acceptedParty): by leader, by
+// the objective's clan, by the objective's clan goal. `indexed` holds each
+// active party's keys and its place in active() (the generation of its last
+// change, the order byStatus keeps), so an index read keeps active() order.
+const byLeader = new Map();
+const byObjectiveClan = new Map();
+const byGoalKey = new Map();
+const indexed = new Map();
+
+function addKey(index, key, partyId) {
+    if (!key) return;
+    let ids = index.get(key);
+    if (!ids) index.set(key, ids = new Set());
+    ids.add(partyId);
+}
+
+function dropKey(index, key, partyId) {
+    const ids = index.get(key);
+    if (!ids) return;
+    ids.delete(partyId);
+    if (!ids.size) index.delete(key);
+}
+
+function unindex(partyId) {
+    const keys = indexed.get(partyId);
+    if (!keys) return;
+    dropKey(byLeader, keys.leaderId, partyId);
+    dropKey(byObjectiveClan, keys.clanId, partyId);
+    dropKey(byGoalKey, keys.goalKey, partyId);
+    indexed.delete(partyId);
+}
+
+function index(snapshot) {
+    unindex(snapshot.partyId);
+    if (snapshot.status !== 'active') return;
+    const objective = snapshot.stats?.objective;
+    const keys = { leaderId: Number(snapshot.leaderId) || 0, clanId: Number(objective?.clanId) || 0,
+        goalKey: String(objective?.clanGoalKey || ''), order: cacheGeneration };
+    addKey(byLeader, keys.leaderId, snapshot.partyId);
+    addKey(byObjectiveClan, keys.clanId, snapshot.partyId);
+    addKey(byGoalKey, keys.goalKey, snapshot.partyId);
+    indexed.set(snapshot.partyId, keys);
+}
+
+function clearIndexes() {
+    byLeader.clear(); byObjectiveClan.clear(); byGoalKey.clear(); indexed.clear();
+}
+
+// The active parties under one index key, in active() order. `reader` names
+// the caller for the counter: one hit and the active() scan it replaced.
+function activeIn(index, key, reader) {
+    return activeOf(index.get(key) || [], reader);
+}
+
+function activeOf(ids, reader) {
+    Diagnostics.count('party_index', 'hit', reader);
+    Diagnostics.count('party_index', 'scan_avoided', reader, byStatus.get('active').size);
+    const parties = [];
+    for (const id of ids) if (indexed.has(id)) parties.push(cache.get(id));
+    if (parties.length > 1) parties.sort((a, b) => indexed.get(a.partyId).order - indexed.get(b.partyId).order);
+    return parties;
+}
 
 function acceptedParty(snapshot) {
     const current = cache.get(snapshot.partyId);
@@ -22,6 +84,7 @@ function acceptedParty(snapshot) {
     for (const ids of byStatus.values()) ids.delete(snapshot.partyId);
     byStatus.get(snapshot.status)?.add(snapshot.partyId);
     cacheGeneration++;
+    index(snapshot);
     for (const listener of publicationListeners) {
         try { listener(snapshot, current || null); }
         catch (error) { utils.infoWarn('BotParty', 'publication listener failed: %s', error?.message || error); }
@@ -128,8 +191,6 @@ function rowFromParty(party) {
             acquisitionGoal: current.acquisitionGoal, lastRequirementRefreshAt: current.lastRequirementRefreshAt,
             clanGoalInvalidationVersion: current.clanGoalInvalidationVersion } };
     }
-    const leader = BotLifeState.cachedState?.(Number(party.leaderId));
-    party = ClanMembershipPolicy.reconcileParty(party, leader?.stats?.clanId);
     const timestamp = now();
     const membership = normalizeMembership(party);
     return {
@@ -224,6 +285,7 @@ const BackgroundPartyState = {
                 cache.clear();
                 acceptedStamps.clear();
                 for (const ids of byStatus.values()) ids.clear();
+                clearIndexes();
                 cacheGeneration++;
             }
             next.forEach(acceptedParty);
@@ -330,6 +392,26 @@ const BackgroundPartyState = {
 
     admitted() {
         return [...byStatus.get('active'), ...byStatus.get('hot')].map(id => cache.get(id));
+    },
+
+    // Index reads of active(): same parties, same order, without the scan.
+    activeByLeaders(leaderIds, reader = 'unknown') {
+        const ids = new Set();
+        for (const leaderId of leaderIds || []) for (const id of byLeader.get(Number(leaderId) || 0) || []) ids.add(id);
+        return activeOf(ids, reader);
+    },
+
+    activeByObjectiveClan(clanId, reader = 'unknown') {
+        return activeIn(byObjectiveClan, Number(clanId) || 0, reader);
+    },
+
+    activeByGoalKey(goalKey, reader = 'unknown') {
+        return activeIn(byGoalKey, String(goalKey || ''), reader);
+    },
+
+    // The active parties among these ids (each once), in active() order.
+    activeByIds(partyIds, reader = 'unknown') {
+        return activeOf(new Set((partyIds || []).map(String)), reader);
     },
 
     due(limit = 10, at = now()) {

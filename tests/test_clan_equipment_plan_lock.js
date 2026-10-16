@@ -46,6 +46,10 @@ async function main() {
     const originalStatesForParties = LifeState.cachedStatesForParties;
     const originalReleaseDissolvedPartyMembers = LifeState.releaseDissolvedPartyMembers;
     const originalActiveParties = PartyState.active;
+    // The clan read goes through the party index; here it filters the mocked active().
+    const originalActiveByClan = PartyState.activeByObjectiveClan;
+    PartyState.activeByObjectiveClan = clanId => PartyState.active()
+        .filter(party => Number(party?.stats?.objective?.clanId) === Number(clanId));
     const originalSetPartyStatus = PartyState.setStatus;
     const originalCreateOrUpdate = PartyState.createOrUpdate;
     const originalSpotEnsure = SpotProfiles.ensure;
@@ -529,6 +533,7 @@ async function main() {
         LifeState.cachedStatesForParties = originalStatesForParties;
         LifeState.releaseDissolvedPartyMembers = originalReleaseDissolvedPartyMembers;
         PartyState.active = originalActiveParties;
+        PartyState.activeByObjectiveClan = originalActiveByClan;
         PartyState.setStatus = originalSetPartyStatus;
         PartyState.createOrUpdate = originalCreateOrUpdate;
         SpotProfiles.ensure = originalSpotEnsure;

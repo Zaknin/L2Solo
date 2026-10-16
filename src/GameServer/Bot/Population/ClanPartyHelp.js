@@ -85,8 +85,7 @@ async function processOne({ commit, create, release }, now = Date.now()) {
         invoke('GameServer/Bot/AI/BotClanChat').onPartyHelp(helper, requester, party, entry.clanId);
         return party;
     };
-    const parties = Parties.active().filter(party => ids.has(Number(party.leaderId))
-        && party.memberIds.length < Number(Config.partyMaxSize || 5)
+    const parties = Parties.activeByLeaders(ids, 'clan_party_help').filter(party => party.memberIds.length < Number(Config.partyMaxSize || 5)
         && party.memberIds.every(id => ids.has(Number(id)))
         && !party.stats?.objective?.clanGoalKey && !party.stats?.travel
         && !party.stats?.acquisitionGoal?.clanGoal).slice(0, 8);

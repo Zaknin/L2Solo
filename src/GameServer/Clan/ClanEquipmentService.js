@@ -159,7 +159,7 @@ function activeRaidPartyForClan(clanId) {
     const id = number(clanId);
     if (!id) return null;
     const partyPolicy = require('../Bot/Population/ClanEquipmentPartyPolicy');
-    return BackgroundPartyState.active().find((party) => {
+    return BackgroundPartyState.activeByObjectiveClan(id, 'clan_raid_party').find((party) => {
         const objective = party?.stats?.objective;
         const started = ['preparing', 'ready'].includes(party?.stats?.raidPreparation?.status)
             || party?.stats?.raidEncounter?.status === 'active';
@@ -311,9 +311,7 @@ async function releasePreviousBeneficiary(clan, previousGoal, nextGoal) {
         return { changed: false, releasedMembers: 0 };
     }
     const previousGoalKey = String(previousGoal?.goalKey || '');
-    const parties = BackgroundPartyState.active().filter((party) => (
-        String(party?.stats?.objective?.clanGoalKey || '') === previousGoalKey
-    ));
+    const parties = BackgroundPartyState.activeByGoalKey(previousGoalKey, 'clan_beneficiary');
     let releasedMembers = 0;
     for (const party of parties) {
         const dissolved = await BackgroundPartyState.setStatus(party.partyId, 'dissolved');
@@ -344,9 +342,11 @@ async function releaseConflictingRosterParties(assignedMemberIds, goal, expected
     const roster = new Set((assignedMemberIds || []).map(number).filter(Boolean));
     if (!roster.size) return { parties: 0, releasedMembers: 0 };
     const goalKey = String(goal?.goalKey || '');
-    const parties = BackgroundPartyState.active().filter((party) => {
+    const candidates = options.partyIds
+        ? BackgroundPartyState.activeByIds(options.partyIds, 'clan_roster_reform')
+        : BackgroundPartyState.active();
+    const parties = candidates.filter((party) => {
         if (startedRaidParty(party)) return false;
-        if (options.partyIds && !options.partyIds.includes(party.partyId)) return false;
         const memberIds = (party.memberIds || []).map(number).filter(Boolean);
         if (!memberIds.some((id) => roster.has(id))) return false;
         const partyObjective = party?.stats?.objective || null;
@@ -378,8 +378,7 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
     const key = String(goal.goalKey);
     const priorKey = String(previousGoal?.goalKey || key);
     const ownedKeys = new Set([key, priorKey]);
-    const oldParties = BackgroundPartyState.active().filter(party => !startedRaidParty(party)
-        && number(party.stats?.objective?.clanId) === number(clan.id)
+    const oldParties = BackgroundPartyState.activeByObjectiveClan(clan.id, 'clan_goal_suspend').filter(party => !startedRaidParty(party)
         && ownedKeys.has(String(party.stats?.objective?.clanGoalKey || '')));
     const ids = [...new Set([...(clan.members || []).map(memberId), ...(previousGoal?.assignedMemberIds || [])])].slice(0, 40);
     const reformed = await releaseConflictingRosterParties(ids, goal, null, { partyIds: oldParties.map(party => party.partyId) });
