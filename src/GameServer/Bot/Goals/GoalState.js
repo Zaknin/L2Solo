@@ -1,7 +1,11 @@
 const Database = invoke('Database');
+const { fnv1a32 } = require('../Fnv1a');
 
 const TABLE = 'bot_goal_state';
 const cache = new Map();
+// Snapshot -> content revision. Snapshots are replaced, never mutated, so a
+// revision is computed once per snapshot, on its first ask.
+const revisions = new WeakMap();
 let initialized = false;
 let initPromise = null;
 
@@ -99,6 +103,21 @@ const GoalState = {
 
     snapshot(characterId) {
         return cache.get(Number(characterId)) || null;
+    },
+
+    // The goal's content without its review clock: equal while a 60 s review
+    // keeps the same goal, so a reader can tell a due review from a new goal.
+    // 0 = no goal. A 32-bit digest: stable across restarts, not a save field.
+    revision(characterId) {
+        const snapshot = cache.get(Number(characterId));
+        if (!snapshot?.current) return 0;
+        let revision = revisions.get(snapshot);
+        if (revision === undefined) {
+            const content = { ...snapshot.current, createdAt: 0, reviewedAt: 0, nextReviewAt: 0 };
+            revision = fnv1a32(JSON.stringify(content)) || 1;
+            revisions.set(snapshot, revision);
+        }
+        return revision;
     },
 
     prime(characterId, goalJson, updatedAt = now()) {

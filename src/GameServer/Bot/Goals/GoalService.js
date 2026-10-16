@@ -71,6 +71,10 @@ const GoalService = {
         return GoalState.snapshot(characterId);
     },
 
+    revision(characterId) {
+        return GoalState.revision(characterId);
+    },
+
     current(characterId) {
         const cached = GoalState.snapshot(characterId);
         return cached ? Promise.resolve(cached) : GoalState.load(characterId);

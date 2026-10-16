@@ -38,6 +38,14 @@ try {
         assert.strictEqual(stored.inputHash, undefined);
         assert.strictEqual(stored.plan.economyInputKey, undefined);
         assert.strictEqual(GoalState.prime(78, insert.params[1]).inputHash, undefined, 'restart replans once');
+        // The goal revision ignores the review clock and moves with the content.
+        const revision = GoalState.revision(78);
+        assert(revision > 0 && GoalState.revision(79) === 0);
+        const clocked = { ...stored, reviewedAt: stored.reviewedAt + 60000, nextReviewAt: stored.nextReviewAt + 60000 };
+        assert.strictEqual(GoalState.prime(78, JSON.stringify(clocked)) && GoalState.revision(78), revision,
+            'a re-review of the same goal keeps its revision');
+        assert.notStrictEqual(GoalState.prime(78, JSON.stringify({ ...stored, priority: 50 })) && GoalState.revision(78), revision,
+            'a changed goal moves its revision');
         const Service = invoke('GameServer/Bot/Goals/GoalService');
         const Needs = invoke('GameServer/Bot/Goals/NeedsEvaluator');
         const Chat = invoke('GameServer/Bot/AI/BotClanChat');
