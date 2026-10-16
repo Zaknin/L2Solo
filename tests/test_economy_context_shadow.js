@@ -7,7 +7,8 @@ delete process.env.L2NODE_SHARED_CONFIG_FILE;
 process.env.L2NODE_CONFIG_FILE = path.join(directory, 'default.ini');
 fs.writeFileSync(process.env.L2NODE_CONFIG_FILE, `[Database]\npath=${directory}/world.sqlite\nhistoryPath=${directory}/history.sqlite\n`);
 require('../src/Global');
-invoke('GameServer/DataCache').init();
+const DataCache = invoke('GameServer/DataCache');
+DataCache.init();
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
@@ -17,6 +18,8 @@ const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
 const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
+const InventoryLimits = invoke('GameServer/Inventory/InventoryLimits');
+const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const deps = { board: new BoardIndex(), spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure(), timestamp: 1e12 };
 const state = () => ({ characterId: 901, updatedAt: 1, level: 20, phase: 'cold', activity: 'resting', adena: 100,
     stats: { classId: 1 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } }, currentRegion: 'Giran',
@@ -323,9 +326,42 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const none = { ...native, inventory: state().inventory };
         const fromNone = request(none);
         assert.equal(fromNone.network.activity?.amount, 5);
-        request({ ...none, stats: { ...none.stats, ...fromNone.statsPacket },
-            inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
+        const firstDrop = { ...none, stats: { ...none.stats, ...fromNone.statsPacket },
+            inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } };
+        request(firstDrop, { rememberContext: false });
         if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a material hunt from none holds after its first drop');
+        if (diagnostic) {
+            // The card path passes only the leaf: its heldAtDecision stands in
+            // for the held entry's heldUnits. The options mirror the entry.
+            const proof = fromNone.plan.eventProof, leaf = fromNone.network.activity;
+            assert.ok(proof, 'a held material hunt carries its event proof');
+            const card = cardLeaf => {
+                const verdict = {};
+                Economy.eventProofHolds(firstDrop, proof, { ...deps }, { baseline: fromNone.plan.statsPacket.wishSections,
+                    activity: none.activity, leaf: cardLeaf, mp: Number(none.vitals.mp), timestamp: deps.timestamp, verdict });
+                return verdict;
+            };
+            assert.deepEqual([card({ ...leaf, heldAtDecision: 0 }).valid, card({ ...leaf, heldAtDecision: 0 }).reason], [true, ''],
+                'a card from none holds after its first drop with the heldAtDecision on its leaf');
+            assert.equal(card(leaf).reason, 'quantity', 'a card leaf without heldAtDecision reads its own drop as a quantity event');
+        }
+        // The same first drop into the last free slot fills the bag: a full
+        // bag is an event even when the new row is the hunt's own progress.
+        // With two free slots the same filler and drop still hold.
+        const limit = InventoryLimits.forState(none), fillerId = 1869;
+        for (const [free, gate] of [[2, 'would_hold'], [1, 'bag']]) {
+            Economy.reset();
+            const filled = { ...none, inventory: { ...none.inventory,
+                [fillerId]: { selfId: fillerId, amount: limit - free - 1, stackable: false } } };
+            assert.equal(Floor.stateInventory(filled, DataCache.items).slots, limit - free, 'free slots before the drop');
+            const held = request(filled);
+            assert.deepEqual([held.network.activity?.rootKey, held.network.activity?.itemId, held.network.activity?.amount],
+                [rootKey, itemId, 5], 'a filled bag keeps the same material hunt');
+            request({ ...filled, stats: { ...filled.stats, ...held.statsPacket },
+                inventory: { ...filled.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
+            if (diagnostic) assert.deepEqual(verdicts.at(-1), [`context:gate:${gate}`],
+                `a first drop with ${free} free slot(s) ${gate === 'bag' ? 'fills the bag and refuses' : 'holds'}`);
+        }
         // Another root's stock row on the hunted item stays its input: its
         // material reaching that root's count is an event, not the hunt's progress.
         Economy.reset(); second = true;
@@ -524,10 +560,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
     const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
-    const Data = invoke('GameServer/DataCache');
     const Sources = invoke('GameServer/Items/ItemAcquisitionCatalog');
-    const weapon = Data.items.find(row => String(row.etc?.rank).toLowerCase() === 'c'
+    const weapon = DataCache.items.find(row => String(row.etc?.rank).toLowerCase() === 'c'
         && Number(row.etc?.cristals) > 0 && row.template?.kind?.startsWith('Weapon.') && Sources.hasSource(row.selfId));
     assert(weapon, 'a source-admitted native C4 weapon exists');
     const originalBuild = Providers.build, targetId = weapon.selfId, restoreProof = proofScope();
@@ -536,7 +570,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     board.put({ id: 9801, kind: 'shop', storeType: 1, ownerId: 7, town: 'Giran',
         lines: [{ lineId: 1, selfId: targetId, count: 1, price: 5e6 }] });
     const input = { ...state(), characterId: 9801, level: 35, adena: 1e8,
-        stats: { classId: 1, exp: Data.experience[34] },
+        stats: { classId: 1, exp: DataCache.experience[34] },
         inventory: Life.inventorySummaryFromItems([
             { id: 1, selfId: 1, amount: 1, equipped: true, slot: 7 },
             { id: 98010, selfId: targetId, amount: 1, equipped: false, enchant: 0, slot: 0 },
@@ -562,7 +596,7 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         [targetId]: { ...input.inventory[targetId], instances: [{ ...item, id: oldId + 100000 }] } } };
     assert.deepEqual(Sections.semanticFacts(changed, clock), Sections.semanticFacts(input, clock),
         'old semantic facts cannot see the unequipped physical target ID');
-    assert.deepEqual(Floor.stateInventory(changed, Data.items), Floor.stateInventory(input, Data.items));
+    assert.deepEqual(Floor.stateInventory(changed, DataCache.items), Floor.stateInventory(input, DataCache.items));
     assert.equal(changed.inventory[targetId].amount, input.inventory[targetId].amount);
     assert.notDeepEqual(Policy.targetInputs(input), Policy.targetInputs(changed), 'native target inputs include physical identity');
     assert.deepEqual(Policy.targetInputs(input).find(row => row[1] === oldId), [targetId, oldId, 0, false, 0, 1]);
