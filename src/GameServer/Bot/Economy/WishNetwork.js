@@ -24,6 +24,27 @@ function remainingQuantity({ required = 0, freePhysical = 0, acceptedIncoming = 
     const free = nonnegative(required) - nonnegative(freePhysical);
     return { toOrder: Math.max(0, free - nonnegative(acceptedIncoming)), toExecute: Math.max(0, free) };
 }
+// A one-way diagnostic loss event for the retained craft's own batch.
+// 'unchanged' covers only these necessary inputs, never allocation readiness.
+// The caller supplies the same native stock reader as the held allocation.
+function craftMaterialLoss(proof, stockFor) {
+    if (!proof || typeof stockFor !== 'function' || typeof proof.rootKey !== 'string'
+        || !Array.isArray(proof.output) || proof.output.length !== 3
+        || !Array.isArray(proof.inputs) || !proof.inputs.length || proof.inputs.length > MAX_NODES) return 'unknown';
+    const [itemId, owned, incoming] = proof.output;
+    if (!Number.isSafeInteger(itemId) || itemId <= 0 || !Number.isFinite(owned) || owned < 0
+        || !Number.isFinite(incoming) || incoming < 0) return 'unknown';
+    const output = stockFor(itemId, proof.rootKey) || {};
+    if (nonnegative(output.owned) !== owned || nonnegative(output.incoming) !== incoming) return 'unknown';
+    for (const row of proof.inputs) {
+        if (!Array.isArray(row) || row.length !== 2 || !Number.isSafeInteger(row[0]) || row[0] <= 0
+            || !Number.isSafeInteger(row[1]) || row[1] <= 0) return 'unknown';
+        const stock = stockFor(row[0], proof.rootKey) || {};
+        const remaining = remainingQuantity({ required: row[1], freePhysical: stock.owned, acceptedIncoming: stock.incoming });
+        if (remaining.toExecute) return 'loss';
+    }
+    return 'unchanged';
+}
 // Independent identical batches merged by success count: a multiset of k
 // outcomes out of B kinds, C(B + k - 1, k). Two kinds give k + 1.
 function mergedBranches(kinds, batches) {
@@ -138,7 +159,7 @@ function sameResult(before, after) {
 // use the same path facts, quantity reader and root valuation (MVP-6); its
 // scratch maps die with the caller's build.
 function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, wallet = 0, survivalReserve = 0,
-    diagnostic = false, detail = false, trace = null }) {
+    diagnostic = false, detail = false, trace = null, captureReadyCraft = false }) {
     const byKey = new Map();
     for (const node of nodes) {
         if (typeof node?.key !== 'string' || !node.key || byKey.has(node.key)
@@ -148,6 +169,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         byKey.set(node.key, node);
     }
     const plans = new Map(), ordinaryPlans = new Map(), visiting = new Set();
+    const proofPlans = captureReadyCraft ? [] : null;
     // A finite trial may plan a future purchase before a seller appears.
     // Its source choice cannot overwrite ordinary executable-first item
     // plans. This scratch map has at most the same 40 graph-node keys;
@@ -200,7 +222,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         repeatables.set(key, result);
         return result;
     };
-    const solve = (key, depth = 0, requested = 1, allocation = null, planning = false, completionFirst = false) => {
+    const solve = (key, depth = 0, requested = 1, allocation = null, planning = false, completionFirst = false, stockFacts = null) => {
         if (visiting.has(key)) throw new TypeError('cyclic_wish_network');
         const node = byKey.get(key);
         if (!node) throw new TypeError('missing_wish_requirement');
@@ -214,13 +236,17 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         }
         visiting.add(key);
         const itemId = key.startsWith('item:') ? Number(key.slice(5)) : 0;
-        let amount = requested, ownValue = 0, incomingHeld = 0;
+        let amount = requested, ownValue = 0, incomingHeld = 0, outputStock = null;
         if (allocation && itemId) {
             const stock = stockFor(itemId, allocation.rootKey) || {};
             const prior = allocation.used.get(itemId) || 0;
             const remaining = remainingQuantity({ required: requested,
                 freePhysical: Math.max(0, nonnegative(stock.owned) - prior),
                 acceptedIncoming: Math.max(0, nonnegative(stock.incoming) - Math.max(0, prior - nonnegative(stock.owned))) });
+            // Optional diagnostic facts come from this exact native subtraction,
+            // before an owned child disappears from the selected requirements.
+            if (stockFacts) stockFacts.push([itemId, requested, prior, remaining.toOrder, remaining.toExecute]);
+            if (captureReadyCraft && depth === 1) outputStock = [itemId, nonnegative(stock.owned), nonnegative(stock.incoming)];
             const owned = requested - remaining.toExecute;
             incomingHeld = remaining.toExecute - remaining.toOrder;
             amount = remaining.toOrder;
@@ -290,6 +316,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                     hours = nonnegative(valuation.cycleHours);
                 }
                 const requirements = [];
+                const inputFacts = captureReadyCraft && allocation && depth === 1 && path.kind === 'craft' && !command ? [] : null;
                 // Exact once-per-path inputs (a recipe scroll) are paid once,
                 // never per attempt; consumed inputs of one attempt are the rest.
                 const untilSuccess = !planning && path.kind === 'craft' && successProbability > 0 && successProbability < 1
@@ -297,7 +324,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 for (const requirement of inputs) {
                     const amount = nonnegative(requirement.amount ?? 1) * (allocation ? requirement.once ? 1 : units : 1);
                     if (!Number.isSafeInteger(amount) || amount <= 0) { available = false; break; }
-                    const child = solve(requirement.key, depth + 1, amount, local, planning, completionFirst);
+                    const child = solve(requirement.key, depth + 1, amount, local, planning, completionFirst, inputFacts);
                     if (!child || !amount) { available = false; break; }
                     if (!child.executable || Number(child.availableUnits ?? Infinity) < amount) executable = false;
                     supported &&= child.supported !== false;
@@ -342,11 +369,21 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 const basePrice = price, baseEffort = effort, baseHours = hours;
                 price += tripValue(tripEntries, 'fees'); effort += tripEffort(tripEntries); hours += tripValue(tripEntries, 'hours');
                 if (local && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
-                if (available) return { ...path, executable, supported, resolved, branches, quoted, tripEntries,
-                    successProbability: probability, attemptProbability: successProbability, untilSuccess,
-                    ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
-                    basePrice, baseEffort, baseHours, price, effort, hours, requirements, height };
-                else if (diagnostic) Diagnostics.count('network', 'path_refused', 'missing_requirement');
+                if (available) {
+                    const result = { ...path, executable, supported, resolved, branches, quoted, tripEntries,
+                        successProbability: probability, attemptProbability: successProbability, untilSuccess,
+                        ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
+                        basePrice, baseEffort, baseHours, price, effort, hours, requirements, height };
+                    if (inputFacts?.length && inputFacts.length === inputs.length && outputStock
+                        && executable && !awaitingIncoming && !requirements.length
+                        && inputFacts.every(([, , , toOrder, toExecute]) => toOrder === 0 && toExecute === 0)
+                        && new Set(inputFacts.map(row => row[0])).size === inputFacts.length) {
+                        Object.defineProperty(result, 'readyCraftProof', { configurable: true, value: { output: outputStock,
+                            inputs: inputFacts.map(([id, required]) => [id, required]) } });
+                        proofPlans.push(result);
+                    }
+                    return result;
+                } else if (diagnostic) Diagnostics.count('network', 'path_refused', 'missing_requirement');
                 return null;
             };
             const choice = evaluate(units);
@@ -463,7 +500,16 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         plans.set(wish.key, plan);
         return allocation.used;
     };
-    return { byKey, plans, finiteProduction, tripValue, tripEffort, rootWish, allocate };
+    const takeReadyCraftProof = !captureReadyCraft ? null : (rootKey, nodeKey) => {
+        const requirements = plans.get(rootKey)?.requirements;
+        const proof = requirements?.length === 1 && requirements[0].key === nodeKey
+            ? requirements[0].plan?.readyCraftProof || null : null;
+        // No diagnostic properties survive in the returned network or card.
+        for (const plan of proofPlans || []) delete plan.readyCraftProof;
+        if (proofPlans) proofPlans.length = 0;
+        return proof;
+    };
+    return { byKey, plans, finiteProduction, tripValue, tripEffort, rootWish, allocate, takeReadyCraftProof };
 }
 // MVP-6: roots in the caller's rank order while the union of their reachable
 // nodes stays within the bound. A root that does not fit is pending (not
@@ -522,8 +568,9 @@ class WishNetwork {
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
         caller = 'wish_network', trigger = 'request', stockFor = null, completionKey = null, reconsider = true,
-        reconsiderReasons = null }) {
+        reconsiderReasons = null, onReadyCraftProof = null }) {
         const diagnostic = Diagnostics.active();
+        const captureReadyCraft = typeof onReadyCraftProof === 'function';
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
             || !Array.isArray(nodes) || nodes.length > MAX_NODES || !Array.isArray(roots) || roots.length > MAX_ROOTS
@@ -537,6 +584,7 @@ class WishNetwork {
         const cached = retain ? this.cache.get(actorKey) : null;
         if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf
             && cached.completionKey === completionKey && cached.reconsider === reconsider) {
+            if (captureReadyCraft) onReadyCraftProof(null);
             if (diagnostic) Diagnostics.count('network', 'hit', 'same_inputs');
             return remember(this.cache, actorKey, cached).result;
         }
@@ -548,7 +596,7 @@ class WishNetwork {
         // ARCH-NOTE: group and clan decisions retain their existing event-key seed.
         const roll = kind => individual ? Tendency.roll(characterId, decisionSeq, kind)
             : Tendency.roll(actorKey, inputKey, kind);
-        const solver = createSolver({ nodes, hourAdena, riskWeight, stockFor, wallet, survivalReserve, diagnostic, detail, trace });
+        const solver = createSolver({ nodes, hourAdena, riskWeight, stockFor, wallet, survivalReserve, diagnostic, detail, trace, captureReadyCraft });
         const { byKey, plans, finiteProduction, tripValue, tripEffort } = solver;
         const kept = wish => wish.valueHours > 0 && wish.plan
             && (!finiteProduction(wish.key) || wish.valueHours > wish.effort);
@@ -713,6 +761,16 @@ class WishNetwork {
             quantityPrepared: !!stockFor,
             focus, dormant, activity, demands, plans, decisionSeq,
             activityLeaf: individual && activity ? fnv1a32(activity.key) : 0 };
+        const selectedProof = captureReadyCraft ? solver.takeReadyCraftProof(activity?.rootKey, activity?.nodeKey) : null;
+        let readyCraftProof = null;
+        if (selectedProof && activity?.kind === 'craft' && activity.activity === 'crafting' && !activity.funding) {
+            const root = byKey.get(activity.rootKey), paths = root?.paths, inputs = paths?.[0]?.grossRequirements || paths?.[0]?.requirements;
+            // Only the root's direct output: an upstream stock change can alter
+            // a nested craft's batch count before that upstream goal completes.
+            if (paths?.length === 1 && inputs?.length === 1 && inputs[0].key === activity.nodeKey)
+                readyCraftProof = { rootKey: activity.rootKey, nodeKey: activity.nodeKey, ...selectedProof };
+        }
+        if (captureReadyCraft) onReadyCraftProof(readyCraftProof);
         if (diagnostic) {
             Diagnostics.count('network', 'build');
             const outcome = completion ? 'completion' : heldActivity ? 'held'
@@ -741,4 +799,4 @@ class WishNetwork {
     }
 }
 
-module.exports = { WishNetwork, createSolver, admitRoots, moneyQueue, remainingQuantity, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT };
+module.exports = { WishNetwork, createSolver, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT };
