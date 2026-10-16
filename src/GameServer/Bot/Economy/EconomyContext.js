@@ -933,6 +933,7 @@ function countShadowPlan(deps, sameKey, samePlan, singlePart = null, reason = nu
     const plan = samePlan ? 'same_plan' : 'new_plan';
     Diagnostics.count('context', 'shadow_plan', `${sameKey ? 'same_key' : 'new_key'}:${plan}`);
     if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_plan', `${deps.advisoryRefusal}:${plan}`);
+    if (deps.advisoryRefusal && deps.advisoryFresh) Diagnostics.count('advisory', 'refusal_plan_fresh', `${deps.advisoryRefusal}:${plan}`);
     if (singlePart !== null) Diagnostics.count('context', 'key_single', `${singlePart}:${plan}`);
     if (sameKey) Diagnostics.count('context', `same_key_${plan}`, reason);
     if (probe !== null) Diagnostics.count('context', singlePart === 'trip' ? 'trip_rows' : 'leaf_echo', `${probe}:${plan}`);

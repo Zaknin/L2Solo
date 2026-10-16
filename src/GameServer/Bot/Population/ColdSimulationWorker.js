@@ -755,22 +755,22 @@ function reviewTrigger(state, projected, context, timestamp) {
     if (projected.activity === 'shopping' && state.activity === 'traveling') return 'review_arrival';
     return projected.activity === 'hunting' && state.activity === 'resting' ? 'review_after_rest' : 'review_goal';
 }
-// Diagnostics only: the card a lifecycle rebuild remembered, by the step
-// timestamp that built it. A lone review edge at the result site of that
-// same step names its refusal '<trigger>_fresh', so refusal_plan shows
-// whether the review rebuild after a decision of this very step repeats it.
-const freshLifecycleCards = new WeakMap();
+// Two plan-like stats values hold the same data (undefined reads as null).
+function samePlanJson(a, b) {
+    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
 // Diagnostics only: a lifecycle rebuild before a finite travel, death or
 // rest step (resolveTravel, resolveDeathRecovery and resolveRest read none
 // of its pick) names what it changed that the step still carries into the
 // next state: the gear plan, the party request, a started trip or a spot.
-// 'same' counts the rebuilds whose skip would give the same next state.
+// 'same' counts the rebuilds that kept the same plan, request and trip; the
+// statsPacket fields the rebuild also writes into the state are not compared.
 function countTransitRebuild(state, plannedState, previousPlan) {
     const travel = state.activity === 'traveling' && BackgroundResolver.travelRecord(state.stats?.travel);
     if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return;
     const stats = plannedState.stats || {};
-    const moved = JSON.stringify(stats.equipmentPlan ?? null) !== JSON.stringify(previousPlan ?? null) ? 'plan'
-        : JSON.stringify(stats.partyRequest ?? null) !== JSON.stringify(state.stats?.partyRequest ?? null) ? 'party_request'
+    const moved = !samePlanJson(stats.equipmentPlan, previousPlan) ? 'plan'
+        : !samePlanJson(stats.partyRequest, state.stats?.partyRequest) ? 'party_request'
             : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip' : 'same';
     economyDiagnostics.count('lifecycle', 'transit_rebuild', `${state.activity}:${moved}`);
 }
@@ -797,6 +797,10 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
         advisory = null;
     }
+    // Diagnostics only: the step that built this card (a lifecycle build;
+    // result-site deps carry no timestamp, a reuse passes no seen state and
+    // keeps its stamp), read by the result site's edge_fresh count.
+    if (diagnostic && advisory && seen && deps?.timestamp) advisory.builtAt = Number(deps.timestamp);
     Reflect.defineProperty(owner.context, 'wishAdvisory', {
         value: advisory, writable: true, configurable: true, enumerable: false
     });
@@ -1053,6 +1057,7 @@ function startKernel(config = {}) {
                 economyFor: (projected, deps) => {
                     observedDeps = deps;
                     const why = [], prepared = {};
+                    let fresh = false;
                     refreshed = !projected.party?.partyId && !projected.partyId
                         ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true, why, prepared }) : null;
                     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
@@ -1076,12 +1081,17 @@ function startKernel(config = {}) {
                             for (const [bit, name] of EDGE_NAMES) {
                                 if (economyEdges & bit) economyDiagnostics.count('advisory', 'edge', bit === 8 ? review : name);
                             }
-                            const fresh = freshLifecycleCards.get(owner?.context?.wishAdvisory) === timestamp ? '_fresh' : '';
-                            why.push(`economy_edges:${economyEdges === 8 ? review + fresh : 'other'}`);
+                            why.push(`economy_edges:${economyEdges === 8 ? review : 'other'}`);
+                            // A lone review edge on a card this step's own
+                            // lifecycle built: the refusal's rebuild also
+                            // counts as refusal_plan_fresh (EconomyContext).
+                            fresh = economyEdges === 8 && owner?.context?.wishAdvisory?.builtAt === timestamp;
+                            if (fresh) economyDiagnostics.count('advisory', 'edge_fresh', review);
                         } else why.push('economy_edges');
                     }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                    return Economy.forState(projected, withIncomeRoute(advisoryRefusal(deps, 'result', why[0] || 'party'), prepared.basics));
+                    return Economy.forState(projected, withIncomeRoute(advisoryRefusal(fresh ? { ...deps, advisoryFresh: true } : deps,
+                        'result', why[0] || 'party'), prepared.basics));
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
@@ -1155,14 +1165,23 @@ function startKernel(config = {}) {
                 && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
             const nativeHolds = !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery;
+            // An active current plan: before, finalizePlan re-finalized it on
+            // every such step. Its steps count as plan_holds finalized (paid)
+            // + skipped (saved).
+            const routeHeld = previousPlan?.status === 'active' && nativeReplan.routeCurrent
+                && !nativeReplan.failure && !nativeReplan.invalidSource;
             // Asked only by the card path of a solo bot whose native facts
             // hold (and by the diagnostics refusal name): finalizePlan is
-            // pure, so the re-finalized active plan and its JSON compare give
-            // the same answer whenever they run; a party bot or a failed
-            // route no longer pays for them every step.
-            let planHoldsAnswer;
-            const planHolds = () => planHoldsAnswer ??= !previousPlan
-                || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
+            // pure, so the re-finalized plan and its JSON compare give the
+            // same answer whenever they run. The new skip is a party bot (or
+            // one with a pending party request) holding an active current
+            // plan, and a plan the clauses before it already hold. A failed
+            // route never paid: routeHeld excludes it and routeCurrent
+            // implies no leveling recovery, so the diagnostics ask for a solo
+            // bot whose native facts fail never reaches the finalize.
+            let planHoldsAnswer, finalized = false;
+            const planHolds = () => {
+                if (planHoldsAnswer !== undefined) return planHoldsAnswer;
                 // Native wish_focus retains inactive target/history fields,
                 // not a current route/quote. A wish-network route
                 // (WishProviders.personalCraftPlan) never passes finalizePlan,
@@ -1170,17 +1189,25 @@ function startKernel(config = {}) {
                 // native stamps: the current advisory fence below is (its
                 // build holds the level and worn kit). A wake/expiry still
                 // goes through the native planner.
-                || wishHolds
-                || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
-                    && JSON.stringify(GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp))
-                        === JSON.stringify(previousPlan);
+                if (!previousPlan || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan) || wishHolds) {
+                    return (planHoldsAnswer = true);
+                }
+                if (!routeHeld) return (planHoldsAnswer = false);
+                // The paid fixed point: finalizePlan and two stringify.
+                finalized = true;
+                if (economyDiagnostics.active()) economyDiagnostics.count('lifecycle', 'plan_holds', 'finalized');
+                return (planHoldsAnswer = samePlanJson(
+                    GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp), previousPlan));
+            };
             // A proved ordinary solo round keeps its accepted native plan.
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             const why = [], prepared = {};
             const refreshed = solo && nativeHolds && planHolds()
                 ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared }) : null;
-            if (economyDiagnostics.active()) economyDiagnostics.count('lifecycle', 'plan_holds', planHoldsAnswer === undefined ? 'skipped' : 'asked');
+            // No later ask reaches the finalize: a solo bot under routeHeld
+            // has its native facts holding, so the card path asked above.
+            if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
             if (refreshed && !SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp).has(String(refreshed.economy.network.activity?.spotId))) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
@@ -1239,11 +1266,7 @@ function startKernel(config = {}) {
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
             rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
                 ColdEconomyDecision.advisory(economy, seen, preparationState.activity), seen, deps);
-            if (economyDiagnostics.active()) {
-                const card = kernel.states.get(Number(state.characterId))?.context?.wishAdvisory;
-                if (card) freshLifecycleCards.set(card, timestamp);
-                countTransitRebuild(state, routedState, previousPlan);
-            }
+            if (economyDiagnostics.active()) countTransitRebuild(state, routedState, previousPlan);
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
                 statsPacket: economy.statsPacket,
