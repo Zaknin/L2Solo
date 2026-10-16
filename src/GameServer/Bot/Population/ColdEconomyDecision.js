@@ -253,6 +253,16 @@ function remainingToOrder(leaf, state, decided = state, itemId = leaf?.itemId) {
     const id = Number(itemId), baseline = Number(leaf?.heldAtDecision ?? heldFor(decided, id));
     return Math.max(0, Math.ceil(Number(leaf?.amount) || 0) - Math.max(0, heldFor(state, id) - baseline));
 }
+function materialHunt(leaf) {
+    return leaf?.activity === 'hunting' && leaf.funding !== true
+        && Number.isSafeInteger(leaf.itemId) && leaf.itemId > 0 && Number.isFinite(leaf.amount) && leaf.amount > 0;
+}
+// The item a leaf itself brings in (a purchase, a material hunt): its bag
+// and incoming count is the leaf's own progress, measured from the decision
+// (heldAtDecision on the card, heldUnits on the held build).
+function ownItem(leaf) {
+    return leaf?.activity === 'shopping' || materialHunt(leaf) ? leaf.itemId : null;
+}
 
 // economy: the network built on `seen` (the state before the projection's
 // last changes); state: the projected state main will commit.
@@ -290,11 +300,12 @@ function capture(economy, state, seen = state) {
     if (economy?.network?.quantityPrepared) for (const row of queue) visit(row.plan);
     const activity = leaf ? new CompactActivity(leaf) : null;
     if (activity) {
-        const rows = CraftInputReservations.selectedCraftRows(seen, economy?.network);
+        const rows = CraftInputReservations.heldCraftRows(seen, economy?.network?.craftNeeds);
         if (rows.length) activity.craftReservations = rows;
     }
+    const own = ownItem(activity);
+    if (own !== null) activity.heldAtDecision = heldFor(seen, own);
     if (activity?.activity === 'shopping') {
-        activity.heldAtDecision = heldFor(seen, activity.itemId);
         const r = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).rootRatio(wish);
         if (r > 0) activity.r = r;
     }
@@ -806,5 +817,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

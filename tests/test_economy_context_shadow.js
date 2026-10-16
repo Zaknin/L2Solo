@@ -227,8 +227,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
 // Raw bag+incoming progress is not a proof of allocatable stock or craft readiness.
 {
     const build = Providers.build, enabled = Diagnostics.enabled, push = Diagnostics.push, restoreProof = proofScope();
-    const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`;
-    let summaries = [], targetClaimed = false, funding = false, targetAmount = 1;
+    const itemId = 1864, targetId = 885, rootKey = `power:${targetId}:4`, secondId = 886, secondKey = `power:${secondId}:5`;
+    let summaries = [], targetClaimed = false, funding = false, targetAmount = 1, second = false;
     Providers.build = (current, context) => {
         const values = new Map([[itemId, 10], [targetId, 50]]);
         stubLiquidation(current, context, values);
@@ -243,8 +243,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             { key: `item:${targetId}`, price: 50, paths: [{ kind: 'craft', productCount: 1, costHours: .1,
                 requirements: [{ key: `item:${itemId}`, amount: 5 }] }] },
             { key: `item:${itemId}`, price: 10, paths: [{ kind: 'drop', activity: 'hunting', itemId,
-                funding, costHours: 1, executable: true }] }
-        ], roots: [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
+                funding, costHours: 1, executable: true }] },
+            ...(second ? [{ key: secondKey, need: 'power', object: { itemId: secondId, slot: 5 }, valueHours: 10, price: 50,
+                paths: [{ requirements: [{ key: `item:${itemId}`, amount: 4 }] }] }] : [])
+        ], roots: second ? [rootKey, secondKey] : [rootKey], values, moneyPaths: [], horizon: 1, sourceSections: null };
     };
     Diagnostics.enabled = () => true;
     Diagnostics.push = row => {
@@ -315,6 +317,25 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
         if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:event_key'], 'a new target stack moves the event key');
         funding = false; targetAmount = 1;
+        // A material hunt from none: its first drop is a new bag row of its
+        // own item, its progress, not an input event.
+        Economy.reset();
+        const none = { ...native, inventory: state().inventory };
+        const fromNone = request(none);
+        assert.equal(fromNone.network.activity?.amount, 5);
+        request({ ...none, stats: { ...none.stats, ...fromNone.statsPacket },
+            inventory: { ...none.inventory, [itemId]: { selfId: itemId, amount: 1, stackable: true } } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:would_hold'], 'a material hunt from none holds after its first drop');
+        // Another root's stock row on the hunted item stays its input: its
+        // material reaching that root's count is an event, not the hunt's progress.
+        Economy.reset(); second = true;
+        const shared = request(native);
+        assert.equal(shared.network.activity?.rootKey, rootKey);
+        assert.equal(shared.network.activity?.itemId, itemId);
+        request({ ...native, stats: { ...native.stats, ...shared.statsPacket },
+            inventory: { ...native.inventory, [itemId]: { ...native.inventory[itemId], amount: 4 } } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['context:gate:quantity'], 'a second root on the hunted item reaching its count refuses');
+        second = false;
         Economy.reset();
         const original = request(native);
         const renewed = request({ ...native, stats: { ...native.stats, ...original.statsPacket }, acceptedIncoming: { [itemId]: 1 } });
@@ -354,7 +375,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
         const board = new BoardIndex(); board.itemRevision = id => board.itemFingerprint(id);
         const options = { ...deps, board };
         const native = { ...state(), characterId: 915, adena: 100000,
-            inventory: { ...state().inventory, [materialId]: { selfId: materialId, amount: 30, stackable: true } } };
+            inventory: { ...state().inventory, [materialId]: { selfId: materialId, amount: 30, stackable: true } },
+            ...(mode === 'delivery' ? { acceptedIncoming: { [materialId]: 5 } } : {}) };
         const first = Economy.forState(native, options);
         assert.equal(first.network.activity?.activity, 'crafting', 'the native solver chooses the ready craft');
         const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
@@ -362,22 +384,25 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
             inventory: { ...accepted.inventory, [materialId]: { ...accepted.inventory[materialId], amount: 29 } } },
         { ...options, rememberContext: false });
         if (mode === 'pending') Economy.forState({ ...accepted, incomingPending: true }, options);
-        const amount = mode === 'same' || mode === 'unkept' || mode === 'pending' ? 31 : 29;
+        const amount = mode === 'delivery' ? 35 : mode === 'same' || mode === 'unkept' || mode === 'pending' ? 31 : 29;
         const changed = { ...accepted,
             inventory: { ...accepted.inventory, [materialId]: { ...accepted.inventory[materialId], amount } },
-            ...(mode === 'incoming' ? { acceptedIncoming: { [materialId]: 1 } } : {}) };
+            acceptedIncoming: mode === 'incoming' ? { [materialId]: 1 } : {} };
         const before = counters(), next = Economy.forState(changed, options);
         return { first, next, counts: delta(before, counters()) };
     };
     try {
-        for (const mode of ['same', 'loss', 'incoming', 'unkept', 'pending']) {
+        for (const mode of ['same', 'loss', 'incoming', 'delivery', 'unkept', 'pending']) {
             const off = scenario(false, mode), on = scenario(true, mode);
             assert.deepEqual(on.first.network, off.first.network, `${mode}: the first network is unchanged`);
             assert.deepEqual(on.next.network, off.next.network, `${mode}: material evidence never changes the new network`);
             assert.deepEqual(on.next.statsPacket, off.next.statsPacket, `${mode}: the new packet is unchanged`);
-            const lost = mode === 'loss' || mode === 'incoming';
+            // A reserved input holds while its owned+incoming does not fall: one unit
+            // out of the bag with one accepted incoming, or the network's own
+            // delivery (incoming into the bag), is no loss.
+            const lost = mode === 'loss';
             assert.equal(on.counts[`context:gate:${lost ? 'quantity' : 'would_hold'}`], 1,
-                `${mode}: material loss is an event; unkept and pending builds preserve the original proof`);
+                `${mode}: material loss is an event; its own delivery, unkept and pending builds preserve the original proof`);
         }
     } finally { Providers.build = build; restoreProof(); Config.developerDiagnostics = true; Economy.reset(); }
 }

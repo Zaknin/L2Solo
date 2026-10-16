@@ -213,16 +213,20 @@ function producerScopeHolds(proof, deps) {
     return validProducerScope(proof.producerScope) && validProducerScope(deps.producerScope)
         && proof.producerScope[0] === deps.producerScope[0] && proof.producerScope[1] === deps.producerScope[1];
 }
-function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null) {
-    const current = fieldActivity(state, activity, leaf), stats = current.stats || {};
-    const facts = Sections.semanticFacts(current, timestamp), trip = Trip.frame(current);
+// facts: semanticFacts of the same state and timestamp when the caller already has them.
+function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
+    const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
+    facts ||= Sections.semanticFacts(current, timestamp);
     // Position and scroll quantity drift inside one route. Native route and
     // physical-fee checks still run before the held action is permitted.
     delete trip.loc; delete trip.inventory;
-    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57)
+    // The leaf's own item is its progress, not an input: its first unit
+    // (a new bag row) is no event. Capture and verdict pass the same leaf.
+    const own = ColdEconomyDecision.ownItem(leaf);
+    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57 && Number(row.selfId) !== own)
         .map(row => rowKey({ ...row, amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
             instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
-    return proofDigest(['recompute_event_inputs_v2', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+    return proofDigest(['recompute_event_inputs_v3', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), current.party || Number(current.partyId || 0),
         stats.visitEvery, stats.karma, stats.race, stats.generatedCold, stats.persona,
         stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
@@ -469,19 +473,12 @@ function bagHolds(state, plan, timestamp) {
     const safety = bagSafety(state, timestamp), heldSafety = plan.bagSafety;
     return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
 }
-// Pure diagnostic verdict. The live fingerprint and decisionHolds stay in
-// charge until the event crossings and shadow plan comparisons are complete.
-function materialHunt(leaf) {
-    return leaf?.activity === 'hunting' && leaf.funding !== true
-        && Number.isSafeInteger(leaf.itemId) && leaf.itemId > 0 && Number.isFinite(leaf.amount) && leaf.amount > 0;
-}
-// The item a held leaf itself brings in (a buy, a material hunt): its bag and
-// incoming count is the leaf's own progress, measured from the decision.
-function ownItem(leaf) {
-    return leaf?.activity === 'shopping' && leaf.kind === 'buy' || materialHunt(leaf) ? leaf.itemId : null;
-}
-// The item of one quantity proof row (WishNetwork createQuantityInputs layout).
-const quantityItem = row => row[0] === 'stock' || row[0] === 'stockPhysical' ? row[2] : row[1];
+// A quantity proof row (WishNetwork createQuantityInputs layout) of the
+// leaf's own progress: a stock row of its own root on its item, or a
+// scalar row of its item. Another root's stock row on that item is that
+// root's input (a wished material reaching its count).
+const ownQuantityRow = (row, rootKey, own) => row[0] === 'stock' || row[0] === 'stockPhysical'
+    ? row[1] === rootKey && row[2] === own : row[1] === own;
 // This proof is produced by the completed native build, shared by its cache
 // entry and compact execution card. It is never reconstructed from a later
 // publication. Market/occupancy reads retain their original soft deadline.
@@ -501,11 +498,11 @@ function captureEventProof(state, deps = {}, options = {}) {
         decision: Object.freeze([Number(plan.statsPacket.decisionSeq || 0),
             Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
         activity: activityIdentity(leaf),
-        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf),
+        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf, options.facts),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
-        bands: plan.quantityBands || [], safety: plan.bagSafety, hourAdena: plan.hourAdena,
+        bands: plan.quantityBands || [], safety: eventBagSafety(plan.bagSafety, state, leaf), hourAdena: plan.hourAdena,
         market: options.reads, spots: options.spots,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
@@ -565,17 +562,20 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
                 : reason === 'money' ? ['money'] : ['sources']);
     }
     if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
-    const safety = bagSafety(state, timestamp);
+    const safety = eventBagSafety(bagSafety(state, timestamp), state, options.leaf);
     if (!Array.isArray(proof.safety) || proof.safety.length !== safety.length
         || safety.some((value, at) => value !== proof.safety[at]))
         return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
-    // A held craft's reserved inputs may only grow before it runs; a loss
-    // below what the decision reserved stays a quantity event.
+    // A held craft's reserved inputs may only grow before it runs: a stock
+    // row holds while its owned+incoming does not fall (its own delivery
+    // moves incoming into the bag), a physical row while its count does not.
+    // A loss below what the decision reserved stays a quantity event.
     const reserved = leaf?.activity === 'crafting' && Array.isArray(options.craftReservations) ? options.craftReservations : null;
+    const isReserved = id => reserved?.some(row => row[0] === id) === true;
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
-        if (reserved?.some(row => row[0] === id) && currentOwned >= originalOwned) return originalOwned;
+        if (kind === 'stockPhysical' && isReserved(id) && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
@@ -584,12 +584,19 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // Own outputs are not inputs: the leaf's own item moves with its progress.
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
-    const own = ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
+    const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
     const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
-        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || quantityItem(row) !== own) };
-    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state),
-        stockFor: stockReader(state, key => roots.get(key)) }, stockAmount)) return refuse('quantity', ['sources', 'money']);
+        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || !ownQuantityRow(row, leaf.rootKey, own)) };
+    const stock = stockReader(state, key => roots.get(key));
+    const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
+        && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
+    const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
+        const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
+        return row && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
+    };
+    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount))
+        return refuse('quantity', ['sources', 'money']);
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -628,7 +635,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         if (!acceptedActivityHolds(state, checked, deps, null, { liquidation: liquidation.candidates }))
             return refuse('check_failed', ['sources', 'money']);
     } else if (leaf.activity === 'hunting') {
-        if (materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
+        if (ColdEconomyDecision.materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
             return refuse('check_failed', ['sources']);
     } else if (leaf.activity === 'pvp' || leaf.activity === 'helping') {
         if (!Number.isSafeInteger(leaf.targetId) || leaf.targetId <= 0
@@ -733,7 +740,7 @@ function wireEventProof(proof) {
 // not allocatable craft stock.
 function shadowQuantityEvidence(state, held) {
     const leaf = held?.plan.network?.activity;
-    if (!materialHunt(leaf)) return null;
+    if (!ColdEconomyDecision.materialHunt(leaf)) return null;
     return { item: leaf.itemId, requested: leaf.amount, before: held.heldUnits,
         owned: positive(state.inventory?.[leaf.itemId]?.amount), actual: positive(state.acceptedIncoming?.[leaf.itemId]),
         remaining: Number.isFinite(held.heldUnits)
@@ -852,6 +859,14 @@ function bagSafety(state, timestamp) {
     const bag = Floor.stateInventory(state, DataCache.items);
     const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
     return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
+}
+// The event proof's bag safety: the held leaf's own item stack is its
+// progress, not a slot input (its first unit is no event). Its weight stays
+// in the load: a weight tier crossing still is one. Capture and verdict only.
+function eventBagSafety(safety, state, leaf) {
+    const own = ColdEconomyDecision.ownItem(leaf), row = own === null ? null : state.inventory?.[own];
+    if (!row || !Array.isArray(safety)) return safety;
+    return [safety[0] - Floor.stateInventory({ inventory: { [own]: row } }, DataCache.items).slots, safety[1], safety[2]];
 }
 // Each distinct token once, in first-seen order, and per [id, token] pair
 // the slot of its token in that list (the read sets and the fence share it).
@@ -1888,8 +1903,10 @@ function buildForState(state, deps) {
     const belief = beliefs.get(watchedItem) || (basis && watchedItem > 0 ? beliefFor(watchedItem) : null);
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
+    // One read of the build's semantic facts: its observation baseline and its event key.
+    const facts = Sections.semanticFacts(state, timestamp);
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
-        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result });
+        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, facts);
     // The trigger is not the calculation basis. Only the proven money path
     // kept the original valuation inputs; a fresh fallback adopted all of
     // them and must publish matching baselines, including downstream money.
@@ -1981,14 +1998,14 @@ function buildForState(state, deps) {
         // The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
-        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots });
+        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots, facts });
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
-        const leaf = plan.network?.activity, own = ownItem(leaf);
+        const leaf = plan.network?.activity, own = ColdEconomyDecision.ownItem(leaf);
         remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
-            craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.selectedCraftRows(state, network) : undefined,
+            craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
             activity: state.activity, bandHash: fnv1a32(bandStructural),
@@ -2053,6 +2070,8 @@ function planTrimmer(unresolved = new Set()) {
 // keeps the item plans (TradeIntent.npcOwnsPurchase asks by `item:<id>`) and
 // the plans of requirement rows that have none. A selected crystal operation
 // also keeps its one root: owned inputs can remove it from the money queue.
+// craftNeeds: the selected craft's inputs, walked once on the full network
+// for the card and the held verdict (absent when the root is no craft).
 function compactNetwork(network) {
     const unresolved = new Set(), trim = planTrimmer(unresolved);
     const row = wish => ({ key: wish.key, need: wish.need, object: wish.object, price: wish.price, reserved: wish.reserved,
@@ -2070,9 +2089,11 @@ function compactNetwork(network) {
     if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange'].includes(leaf.kind)
         && all.has(leaf.rootKey)) plans.set(leaf.rootKey, trim(all.get(leaf.rootKey)));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
+    const craftNeeds = CraftInputReservations.selectedCraftNeeds(network);
     // The network's input key is the plan's key with its market (~2 KB of
     // text per bot, L104): view() gives it back from them, in its place.
-    return { ...network, inputKey: undefined, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
+    return { ...network, inputKey: undefined, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans,
+        ...(craftNeeds.length ? { craftNeeds } : {}) };
 }
 // The build's prices of what the plan's own numbers were made from (the
 // kit, the queue, the watch list): a later view starts from them, so its
