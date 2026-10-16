@@ -36,6 +36,12 @@ async function rotate({ handoffOk, oldPartyMembers }) {
         stats: { objective: { sourceKind: 'drop', clanGoalKey: 'old', clanId: 7 } } };
     const events = [];
     replace(Parties, 'active', () => party.status === 'dissolved' ? [] : [party]);
+    // The service reads the active-party indexes; here they filter the stubbed active().
+    replace(Parties, 'activeByGoalKey', key => Parties.active()
+        .filter(row => String(row.stats?.objective?.clanGoalKey || '') === String(key || '')));
+    replace(Parties, 'activeByObjectiveClan', clanId => Parties.active()
+        .filter(row => Number(row.stats?.objective?.clanId) === Number(clanId)));
+    replace(Parties, 'activeByIds', ids => Parties.active().filter(row => ids.includes(row.partyId)));
     replace(Parties, 'setStatus', async (_, status) => { party.status = status; events.push('dissolve'); return true; });
     replace(LifeState, 'init', async () => {});
     replace(LifeState, 'findByCharacterId', async id => states.get(id));
