@@ -1196,7 +1196,6 @@ function buildForState(state, deps) {
     };
     const watch = id => { if (building) read(id); };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
-    const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const persona = personaOf(state, deps);
     const cash = Sections.bounds(positive(state.adena));
     const board = watchedBoard(sourceBoard, watch);
@@ -1205,12 +1204,7 @@ function buildForState(state, deps) {
     const { price, prices, beliefs, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
     const base = foundation(state, deps, persona, timestamp, price);
     const own = Hunt.sampledRows(state, timestamp, deps.mode);
-    const calibrations = own.flatMap(row => {
-        const value = Table.value(row.spotId, base.tableRole, state.level, true);
-        return value?.exp > 0 ? [Math.max(0, row.exp) / row.cycleMs * 3600000 / value.exp] : [];
-    });
-    const calibration = calibrations.length ? calibrations.reduce((sum, value) => sum + value, 0) / calibrations.length : 1;
-    const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback, calibration,
+    const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
@@ -1260,6 +1254,8 @@ function buildForState(state, deps) {
             : previousRows === shadowEntry.rows ? 'same' : 'moved';
     }
     const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
+    // The own-sample calibration is the spot reader's (the same samples over the same table).
+    context.calibration = readSpot.calibration;
     context.spotValue = (spot, ...args) => { context.sourceSpot(spot.id); return readSpot(spot, ...args); };
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
