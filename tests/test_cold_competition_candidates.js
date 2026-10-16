@@ -226,3 +226,22 @@ console.log('PASS byte-omitted forecast leaves no policy cooldown and retains in
     assert.equal(sizing.offer(events[0]), false, 'the event cap stays 160');
     console.log('PASS160 event frame sizing: one heartbeat build, bounded bytes and linear serializations');
 }
+
+// One roll per spot and window: every review of a spot in one 30 s window
+// passes the same elapsed time, the gap since the first review of the window
+// before (capped at one window), however often commits review the spot.
+{
+    const { kernel, candidates, monitor } = setup();
+    const seen = [];
+    const sampleSpot = monitor.sampleSpot.bind(monitor);
+    monitor.sampleSpot = (entries, memory, at, options) => { seen.push(options.elapsed); return sampleSpot(entries, memory, at, options); };
+    const roomy = { id: 'roomy', capacity: 20, npcEntries: [{ selfId: 10, count: 1 }] };
+    kernel.upsertMany([row(1, 'roomy', {}, { spot: roomy }), row(2, 'roomy', {}, { spot: roomy })]);
+    const review = (at) => { replace(kernel, 1, {}, { reviewAt: at }); assert.equal(candidates.reviewBatch(at), null); };
+    candidates.reviewBatch(base);
+    for (const offset of [1000, 5000, 20000]) review(base + INTERVAL_MS + offset);
+    review(base + 2 * INTERVAL_MS + 500);
+    assert.deepEqual(seen, [0, INTERVAL_MS, INTERVAL_MS, INTERVAL_MS, INTERVAL_MS - 500],
+        'reviews in one window share its roll; the next window covers the time since the first of them');
+    console.log('PASS window roll: one chance per spot and window, independent of the review pace');
+}

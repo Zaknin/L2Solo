@@ -2,6 +2,7 @@ const Config = require('./PopulationConfig');
 const { seeded, INTERVAL_MS } = require('./ColdCompetitionMonitor');
 const PartyTarget = require('./PartyHuntingTarget');
 const { StableOwnerMap } = require('./StableOwnerSet');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const metaKey = Symbol('coldCompetitionCandidate');
 const partyOf = state => state?.party?.partyId || state?.partyId || null;
 const unitOf = state => partyOf(state) || `solo:${state?.characterId}`;
@@ -125,7 +126,7 @@ class ColdCompetitionCandidates {
         record[metaKey] = meta;
         add(this.units, meta.unit, record); add(this.clans, meta.clan, record);
         if (meta.hunter) {
-            if (!this.spots.has(meta.spot)) this.spots.set(meta.spot, { records: new Set(), lastAt: null, pairOffset: 0 });
+            if (!this.spots.has(meta.spot)) this.spots.set(meta.spot, { records: new Set(), rollAt: null, rollWindow: null, rollElapsed: 0, pairOffset: 0 });
             this.spots.get(meta.spot).records.add(record); this.activeHunters++;
             if (meta.party) add(this.partyHunters, meta.party, record);
             this.queueSpot(meta.spot);
@@ -213,6 +214,24 @@ class ColdCompetitionCandidates {
         return first ? PartyTarget.competitionNpcId(party, this.packets(Number(party.leaderId))?.state,
             this.packets(first.id)?.context.spot) : 0;
     }
+    // One encounter roll per spot and 30 s window, its decision point. The
+    // monitor seeds a group's rolls by the window, so every review of the spot
+    // in one window (another hunter's commit, a pair continuation) must pass
+    // the same chance: the time since the first review of the window before,
+    // capped at one window. Over any commit pace the chances then cover the
+    // elapsed time once, as with one review per window.
+    windowElapsed(spot, at) {
+        const window = Math.floor(at / INTERVAL_MS);
+        if (spot.rollWindow === window) {
+            Diagnostics.count('competition_roll', 'window', 'repeat');
+            return spot.rollElapsed;
+        }
+        spot.rollElapsed = spot.rollAt === null ? 0 : Math.max(0, Math.min(INTERVAL_MS, at - spot.rollAt));
+        spot.rollWindow = window;
+        spot.rollAt = at;
+        Diagnostics.count('competition_roll', 'window', 'first');
+        return spot.rollElapsed;
+    }
     takeKeys(queue, limit) {
         const selected = [];
         for (const [key, generation] of queue) {
@@ -254,14 +273,13 @@ class ColdCompetitionCandidates {
             if (pairs >= 32) { this.pendingSpots.set(key, ++this.nextInput); continue; }
             const entries = [...spot.records].sort((a, b) => a[metaKey].sequence - b[metaKey].sequence)
                 .map(record => this.packets(record.id)).filter(Boolean);
-            const elapsed = spot.lastAt === null ? 0 : Math.max(0, Math.min(INTERVAL_MS, at - spot.lastAt));
+            const elapsed = this.windowElapsed(spot, at);
             const report = this.monitor.sampleSpot(entries, this.memory, at, { elapsed, maxPairs: 32 - pairs, pairOffset: spot.pairOffset,
                 states: { get: id => this.packets(id)?.state }, parties: { get: key => this.currentParty(key) },
                 targetForParty: key => this.targetForParty(key), acceptEvent: offer });
             pairs += report.sampledPairs;
             spot.pairOffset = report.overflow ? spot.pairOffset : report.nextPairOffset;
             if (report.overflow || spot.pairOffset) this.pendingSpots.set(key, ++this.nextInput);
-            if (!report.overflow) spot.lastAt = at;
         }
         const selected = actors.map(({ key }) => this.packets(key)).filter(Boolean);
         const revengeEvents = this.monitor.revenge.sampleActors(selected, id => this.packets(id), this.memory, at,
