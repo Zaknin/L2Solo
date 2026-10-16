@@ -412,6 +412,7 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted || !accepted.card) return 'no_card';
     if (!accepted.baseline) return 'no_sections';
     if (state.stats?.wishDirty) return 'wish_dirty';
+    // lazy: cycle keep the section and card modules loadable in either order.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     const echo = Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
     if (echo) return echo;

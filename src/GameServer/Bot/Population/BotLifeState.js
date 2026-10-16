@@ -12,6 +12,7 @@ const DataCache = invoke('GameServer/DataCache');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Consumption = require('../Economy/ConsumptionDiagnostics');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+const DecisionEvents = require('../AI/DecisionEvents');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
@@ -2814,7 +2815,7 @@ const BotLifeState = {
                 // lazy: worker the native market owner is main-thread only; workers receive their mirrored escrow.
                 escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
             }
-            invoke('GameServer/Bot/AI/DecisionEvents').reconcile(state, nextState, timestamp, escrow);
+            DecisionEvents.reconcile(state, nextState, timestamp, escrow);
         }
         if (!isMainThread && !state.stats?.tradeMeeting) {
             const economyDeps = typeof options.economyDepsFor === 'function'
