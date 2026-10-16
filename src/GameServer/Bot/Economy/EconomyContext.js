@@ -7,6 +7,7 @@ const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Providers = require('./WishProviders');
 const Sections = require('./DecisionSections');
+const Funding = require('./PurchaseFunding');
 // Read through the module object at call time (tests replace withProfileScope).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
@@ -345,7 +346,7 @@ const miss = (why, reason) => { why?.push(reason); return false; };
 // held: as in heldEventsQuiet (its mp is not read).
 function softEvent(state, held, timestamp, deps = {}) {
     const baseline = held.baseline;
-    if (Sections.moneyEvent(state, baseline, timestamp)) return 'money';
+    if (Sections.moneyEvent(state, baseline, timestamp, deps.buyOrderEscrow)) return 'money';
     if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return 'observation';
     if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return 'horizon';
     return null;
@@ -363,7 +364,7 @@ function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why
     if (seen) { seen.at = Number(baseline?.at); seen.kind = soft; }
     if (soft) return miss(why, soft);
     if (deferred) {
-        if (Sections.meaningfulMoney(state, baseline)) deferred.push('money');
+        if (Sections.meaningfulMoney(state, baseline, deps.buyOrderEscrow)) deferred.push('money');
         if (Sections.observationChanged(state, baseline, timestamp, deps.mode)) deferred.push('observation');
         if (Sections.horizonChanged(state, baseline, held.expPerHour, held.persona)) deferred.push('horizon');
     }
@@ -463,9 +464,9 @@ function gatePlanDiff(state, held, fresh, deps) {
     if ((before.activity?.key ?? before.activity?.kind ?? null) !== (fresh.network.activity?.key ?? fresh.network.activity?.kind ?? null)) return 'leaf';
     const left = before.queue || [], right = fresh.network.queue || [];
     if (left.length !== right.length || left.some((row, at) => row.key !== right[at].key)) return 'queue';
-    const current = new Map(moneyQueue(left, positive(state.adena) + positive(deps.buyOrderEscrow),
+    const current = new Map(moneyQueue(left, Funding.budget(state, deps.buyOrderEscrow),
         held.plan.survivalReserve, held.plan.hourAdena > 0 ? 1 / held.plan.hourAdena : 0).queue.map(row => [row.key, row.funded]));
-    const repriced = moneyQueue(right, positive(state.adena) + positive(deps.buyOrderEscrow),
+    const repriced = moneyQueue(right, Funding.budget(state, deps.buyOrderEscrow),
         fresh.survivalReserve, fresh.hourAdena > 0 ? 1 / fresh.hourAdena : 0).queue;
     return repriced.some(row => current.get(row.key) !== row.funded) ? 'funded' : 'same';
 }
@@ -689,7 +690,6 @@ function acceptedActivityHolds(state, leaf, deps = {}, current = null) {
         const offer = require('./WishPurchaseEvidence').reader(state, { board: deps.board, trip }, deps)(leaf.itemId);
         if (!offer || offer.sourceType !== leaf.sourceType || offer.town !== leaf.town
             || offer.unitPrice !== leaf.unitPrice || offer.availableUnits < remaining) return false;
-        const Funding = require('./PurchaseFunding');
         return Funding.spendable(state, deps.buyOrderEscrow, Funding.nativeTerms(leaf, leaf.itemId)) >= remaining * offer.unitPrice + route.fees;
     }
     if (leaf.activity === 'selling' && leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
@@ -803,6 +803,10 @@ function resolved(state, deps, production = true) {
         if (isMainThread && !Object.hasOwn(deps, 'knownRecipes')) {
             const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
             if (Workshops.bookFor(state.characterId) !== null) deps.knownRecipes = Workshops.cachedRecipes(state.characterId);
+        }
+        if (isMainThread && !Object.hasOwn(deps, 'buyOrderEscrow')) {
+            // lazy: worker native market records live on main; workers receive their existing context mirror.
+            deps.buyOrderEscrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
         }
         if (typeof deps.buyOrderEscrow === 'function') deps.buyOrderEscrow = deps.buyOrderEscrow(state.characterId);
     }
@@ -1319,6 +1323,7 @@ function buildForState(state, deps) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const persona = personaOf(state, deps);
     const cash = Sections.bounds(positive(state.adena));
+    const budget = Sections.bounds(Funding.budget(state, deps.buyOrderEscrow));
     const board = watchedBoard(sourceBoard, watch, id => { if (building) reads.set(id, tokenOf(id)); });
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
@@ -1334,6 +1339,7 @@ function buildForState(state, deps) {
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
+        budgetBoundary: budget.watch,
         // Every evaluated source participates in admission/ranking, including a losing candidate.
         sourceSpot: id => { const token = spotTokenOf(id);
             (heldSpots || spotReads).set(id, token);
@@ -1402,7 +1408,7 @@ function buildForState(state, deps) {
     }
     // One stock reader for the provider's gear witnesses and the network
     // build; the projection is read lazily once it exists (stock roots).
-    context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
+    context.wallet = Funding.budget(state, deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
     context.completionKey = invoke('GameServer/Bot/Economy/BotCrystallization').completionKey(state);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
@@ -1487,17 +1493,17 @@ function buildForState(state, deps) {
     context.watchList = invoke('GameServer/Bot/Economy/TradeIntent').project(state, network, projection, id => context.worth(id) ?? price(id));
     context.intentPending = context.watchList === null;
     context.watchList ||= [];
-    const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
     context.statsPacket = { wishFocus: network.focus, dormantWishes: network.dormant,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
         money: Funding.packetFor(network, context.hourAdena, base.survivalReserve), stockTargets: stockTargets(base), wishDirty: 0 };
     let cumulative = base.survivalReserve;
-    for (const wish of network.queue) { cumulative += cashCharge(wish); cash.watch(cumulative); }
+    for (const wish of network.queue) { cumulative += cashCharge(wish); budget.watch(cumulative); }
     const watchedWish = network.gap || network.queue.find(wish => wish.key === network.focus?.[0]);
     const belief = beliefs.get(Number(watchedWish?.object?.itemId));
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
-    context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode);
+    context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
+        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result });
     building = false; endTokens();
 
     if (diagnostic) {
@@ -1686,7 +1692,6 @@ function valueReaders(state, network, values, persona, knowledgeEnabled, kitCost
     const itemUsefulness = id => invoke('GameServer/Bot/Population/ColdEconomyDecision').personalUsefulness(
         network.demands.get(`item:${id}`) || values.get(Number(id)) || 0,
         state, persona.understanding, knowledgeEnabled, id);
-    const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
     return { itemUsefulness,
         worth: id => network.moneyPrice > 0 ? itemUsefulness(id) / network.moneyPrice : null,
         purchaseBudget: id => {
@@ -1715,12 +1720,12 @@ function view(state, plan, deps, built = {}) {
         () => plan.kit.scrollHours ??= scrollHoursFor(state, deps.spots, plan.bestSpotId));
     // Reprice funding against this physical wallet. Reuse of benefit/source
     // calculations is never a retained permission to spend an old balance.
-    const funding = moneyQueue(plan.network.queue, positive(state.adena) + positive(deps.buyOrderEscrow),
+    const funding = moneyQueue(plan.network.queue, Funding.budget(state, deps.buyOrderEscrow),
         plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
     const inputKey = plan.market === null ? plan.key : `${plan.key}#${plan.market}`;
     const network = { ...plan.network, inputKey, ...funding };
     const statsPacket = plan.pending ? plan.statsPacket : { ...plan.statsPacket,
-        money: invoke('GameServer/Bot/Economy/PurchaseFunding').packetFor(network, plan.hourAdena, plan.survivalReserve) };
+        money: Funding.packetFor(network, plan.hourAdena, plan.survivalReserve) };
     const context = { inputKey, actorKey: plan.actorKey, state,
         timestamp: plan.timestamp, gearThreatMask: plan.gearThreatMask, persona: plan.persona, board: built.board, hunt: plan.hunt,
         price, buyback, riskWeight: plan.riskWeight, bestSpotId: plan.bestSpotId,
@@ -1744,7 +1749,7 @@ function view(state, plan, deps, built = {}) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
         return context;
     }
-    context.wallet = positive(state.adena) + positive(deps.buyOrderEscrow);
+    context.wallet = Funding.budget(state, deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => plan.stockRoots.get(rootKey));
     // A later view has the usefulness values only; a group solve that needs
     // the members' nodes rebuilds them (forGroup).

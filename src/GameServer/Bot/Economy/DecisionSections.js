@@ -4,10 +4,11 @@
 // things. Only these compact boundaries belong to the saved decision; graphs
 // stay in EconomyContext's existing bounded working cache.
 const { fnv1a32 } = require('../Fnv1a');
+const PurchaseFunding = require('./PurchaseFunding');
 // Read through the module object at call time (tests replace buildInputKey).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
-let PurchaseFunding = null, EconomicValuation = null;
+let EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
 // The decision sections in the order of their wishDirty bit (1 << at): one
@@ -29,23 +30,34 @@ function capability(state, timestamp = Date.now()) {
     return hash([CombatProfile.buildInputKey(state, timestamp),
         state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
 }
-function fundingMark(state) {
+function fundingMark(state, escrow = 0) {
     const packet = state.stats?.money;
     if (!Array.isArray(packet)) return 0;
-    const wallet = positive(state.adena) - positive(packet[2]);
+    const wallet = PurchaseFunding.budget(state, escrow) - positive(packet[2]);
     const funded = [];
     for (let at = 5; at < packet.length; at += 3) funded.push(wallet >= positive(packet[at]));
-    return hash([wallet >= 0, ...funded, (PurchaseFunding ||= require('./PurchaseFunding')).moneyReached(state)]);
+    return hash([wallet >= 0, ...funded, PurchaseFunding.moneyReached(state, escrow)]);
 }
-function crosses(wallet, baseline) {
-    const [low, high] = baseline?.cashBounds || [-1, null];
-    return wallet < low || high !== null && high !== undefined && wallet >= high;
+function reachesUpper(wallet, bounds) {
+    const high = bounds?.[1];
+    return high !== null && high !== undefined && wallet >= high;
 }
-function meaningfulMoney(state, baseline = state.stats?.wishSections) {
+function moneyChanged(state, baseline, escrow, allowSoft) {
     if (!baseline) return false;
-    const wallet = positive(state.adena);
-    return crosses(wallet, baseline) || baseline.funding !== fundingMark(state)
-        || Number(baseline.moneyError) >= 0 && Math.abs(wallet - baseline.wallet) > baseline.moneyError;
+    const physicalWallet = positive(state.adena), budgetTracked = Array.isArray(baseline.budgetBounds);
+    const decisionBudget = budgetTracked ? PurchaseFunding.budget(state, escrow) : physicalWallet;
+    // Old saved decisions recorded both kinds of edge in physical cash. Keep
+    // that conservative comparison until an actual build supplies both bounds.
+    if (physicalWallet < Number(baseline.cashBounds?.[0] ?? -1)
+        || budgetTracked && decisionBudget < Number(baseline.budgetBounds[0])
+        || baseline.funding !== fundingMark(state, budgetTracked ? escrow : 0)) return true;
+    return allowSoft && (reachesUpper(physicalWallet, baseline.cashBounds)
+        || budgetTracked && reachesUpper(decisionBudget, baseline.budgetBounds)
+        || Number(baseline.moneyError) >= 0
+            && Math.abs(decisionBudget - baseline.wallet) > baseline.moneyError);
+}
+function meaningfulMoney(state, baseline = state.stats?.wishSections, escrow = 0) {
+    return moneyChanged(state, baseline, escrow, true);
 }
 // L70 event priorities (docs/principles.md section 3 point 5): a soft change
 // is re-examined at the bot's own next decision point once its kind's delay
@@ -60,14 +72,8 @@ function softDue(baseline, kind, timestamp = Date.now()) {
 }
 // Hard: the held option became unaffordable or its funding/obligation mark
 // moved. Soft: a newly payable next wish or a drift beyond the bot's error.
-function moneyEvent(state, baseline = state.stats?.wishSections, timestamp = Date.now()) {
-    if (!baseline) return false;
-    const wallet = positive(state.adena);
-    const [low, high] = baseline.cashBounds || [-1, null];
-    if (wallet < low || baseline.funding !== fundingMark(state)) return true;
-    const soft = high !== null && high !== undefined && wallet >= high
-        || Number(baseline.moneyError) >= 0 && Math.abs(wallet - baseline.wallet) > baseline.moneyError;
-    return soft && softDue(baseline, 'money', timestamp);
+function moneyEvent(state, baseline = state.stats?.wishSections, timestamp = Date.now(), escrow = 0) {
+    return moneyChanged(state, baseline, escrow, softDue(baseline, 'money', timestamp));
 }
 function incomeError(state, persona) {
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
@@ -105,12 +111,17 @@ function bounds(wallet) {
         else result[1] = result[1] === null ? price : Math.min(result[1], price);
     } };
 }
-function snapshot(state, context, cashBounds, moneyError = -1, mode) {
+function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
     const profileKey = CombatProfile.buildInputKey(state, context.timestamp);
     const night = profileKey.endsWith('|n') ? 1 : profileKey.endsWith('|d') ? 0 : -1;
-    return { at: Number(context.timestamp), wallet: positive(state.adena), cashBounds, funding: fundingMark(actual), moneyError, night,
+    const budgetTracked = Array.isArray(money?.budgetBounds), escrow = budgetTracked ? money.buyOrderEscrow : 0;
+    // budgetBounds tags the budget-aware schema. Its wallet/error use total
+    // purchase funds; cashBounds still records physical fees. Old wallets are cash.
+    const wallet = budgetTracked ? PurchaseFunding.budget(state, escrow) : positive(state.adena);
+    return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
+        ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...semanticFacts(state, context.timestamp), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
@@ -142,7 +153,7 @@ function isEmptyWishPlan(plan) {
         && plan.next == null && plan.reason === 'wish_focus'
         && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
 }
-function events(before, after, timestamp = Date.now()) {
+function events(before, after, timestamp = Date.now(), escrow = 0) {
     // Main may replay a validated worker packet that already describes this
     // same round. Compare its actual baselines, not sequence alone; a packet
     // preceding a new death/level/resource event still raises that event.
@@ -153,7 +164,7 @@ function events(before, after, timestamp = Date.now()) {
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before,
         Number(before.timing?.lastResolvedAt || before.updatedAt || timestamp)))[key];
     const current = semanticFacts(after, timestamp);
-    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp)
+    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
         || !previous.funding && fundingMark(before) !== fundingMark(after));
 }
 // One semantic comparison for state publication and the diagnostic event gate.

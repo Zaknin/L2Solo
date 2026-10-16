@@ -2808,7 +2808,13 @@ const BotLifeState = {
             // A round records its rewards/resources/sample immediately. It
             // renews the decision only for a meaningful dependent event; a
             // retry derives that one event from the same accepted input.
-            invoke('GameServer/Bot/AI/DecisionEvents').reconcile(state, nextState, timestamp);
+            let escrow = typeof options.moneyEscrowFor === 'function' ? options.moneyEscrowFor(nextState)
+                : options.economyDeps?.buyOrderEscrow || 0;
+            if (isMainThread && typeof options.moneyEscrowFor !== 'function') {
+                // lazy: worker the native market owner is main-thread only; workers receive their mirrored escrow.
+                escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
+            }
+            invoke('GameServer/Bot/AI/DecisionEvents').reconcile(state, nextState, timestamp, escrow);
         }
         if (!isMainThread && !state.stats?.tradeMeeting) {
             const economyDeps = typeof options.economyDepsFor === 'function'

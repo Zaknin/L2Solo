@@ -25,7 +25,8 @@ function edges(before, after, context = {}, timestamp = Date.now(), options = {}
         if (!(id > 0) || !(keep > 0)) continue;
         if ((Number(oldBag[id]?.amount || 0) >= keep) !== (Number(bag[id]?.amount || 0) >= keep)) bits |= 2;
     }
-    if (!Funding.moneyReached(before) && Funding.moneyReached(after)) bits |= 4;
+    if (!Funding.moneyReached(before, context.buyOrderEscrow)
+        && Funding.moneyReached(after, context.buyOrderEscrow)) bits |= 4;
     if (Number(context.goalReviewAt) > Number(before?.timing?.lastResolvedAt || 0)
         && Number(context.goalReviewAt) <= timestamp) bits |= 8;
     if (after.activity === 'shopping' && before?.activity === 'traveling') bits |= 8;

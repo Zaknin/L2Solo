@@ -31,6 +31,8 @@ function marksFor(session, actor) {
     const stats = session.coldLifeState?.stats || session.heldEconomy?.statsPacket || statsFor(session);
     const wallet = actor.backpack?.fetchTotalAdena?.() ?? actor.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() ?? 0;
     const physical = { adena: wallet, stats };
+    // lazy: worker this module also handles cold projections, whose escrow is supplied by their caller.
+    const escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(actor.fetchId?.());
     // Inventory mutations often mean ordinary loot. Inspect the bounded bag
     // only on that native revision; compare worn facts, not the revision itself.
     if (session.decisionBagRevision !== actor.backpack?.inventoryRevision || !session.decisionEquipmentMark) {
@@ -58,7 +60,8 @@ function marksFor(session, actor) {
         Object.values(actor.effects || {}).filter(effect => !effect.expiresAt || effect.expiresAt > timestamp)
             .map(effect => [effect.id, effect.key, effect.stats]), stats.recipes, stats.workshop]);
     return { level, weight: bag.weight, bag: bag.full,
-        build, horizon, money: Sections.fundingMark(physical), meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp),
+        build, horizon, money: Sections.fundingMark(physical, escrow),
+        meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp, escrow),
         relations: Sections.hash([stats.memoryRevision, stats.relations, session.hotBackgroundPartyId, stats.clanId]) };
 }
 function observe(session, actor) {
@@ -108,8 +111,8 @@ function hold(session, actor, context) {
     }
     return session.heldEconomy;
 }
-function reconcile(before, after, timestamp) {
-    const changed = Sections.events(before, after, timestamp);
+function reconcile(before, after, timestamp, escrow = 0) {
+    const changed = Sections.events(before, after, timestamp, escrow);
     if (!changed.length) return [];
     const stats = after.stats ||= {};
     stats.decisionSeq = Math.max(Number(before.stats?.decisionSeq) || 0, Number(stats.decisionSeq) || 0) + 1;

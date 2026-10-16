@@ -1048,6 +1048,7 @@ function startKernel(config = {}) {
                 persist: false,
                 timestamp,
                 projectClassProgression: true,
+                moneyEscrowFor: () => kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow || 0,
                 // Spot crowding, as main gave the same leaf before (L25).
                 economyDepsFor: async projected => {
                     const context = kernel.states.get(Number(state.characterId))?.context || {};

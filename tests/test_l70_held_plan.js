@@ -200,8 +200,8 @@ try {
     // (b) hard events rebuild at once.
     {
         const { state, economy } = decided(93002, 1e6);
-        const [low] = state.stats.wishSections.cashBounds;
-        assert(low >= 0, 'fixture: a protected spending bound below the wallet');
+        const [low] = state.stats.wishSections.budgetBounds;
+        assert(low > 0, 'fixture: a protected spending bound below the budget');
         let before = builds;
         const newItem = { ...ownResult(state), inventory: { ...bag(1), ...Life.inventorySummaryFromItems([
             { id: 4, selfId: 1870, amount: 1, equipped: 0, slot: 0 }]) } };
@@ -220,7 +220,7 @@ try {
         const poor = decided(93004, 1e6);
         before = builds;
         Economy.forState({ ...ownResult(poor.state), adena: low - 1 }, at(T + 1000));
-        assert(builds > before, 'adena below the lower cash bound is an event');
+        assert(builds > before, 'adena below the lower budget bound is an event');
         assert.equal(Decisions.refreshAdvisory({ ...ownResult(poor.state), adena: low - 1 }, poor.accepted, at(T + 1000),
             { afterResult: true }), null, 'the card refuses the same hard money event');
     }

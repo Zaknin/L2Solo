@@ -170,12 +170,14 @@ try {
         spotId: `worst:${id}`, signature: Hunt.signature(state), at: deps.timestamp, samples: 3,
         exp: huge, adena: huge, loot: huge, costs: 0, cycleMs: 1 })) } };
     const worst = Sections.snapshot(wide, { ...first, horizonHours: huge, hunt: { ...first.hunt, expPerHour: huge } },
-        [Number.MAX_SAFE_INTEGER, huge], huge);
+        [Number.MAX_SAFE_INTEGER, huge], huge, undefined,
+        { buyOrderEscrow: huge, budgetBounds: [Number.MAX_SAFE_INTEGER, huge] });
     worst.choices = 0xffffffff;
     worst.bagValue = huge;
     assert.equal(worst.sample.length, Hunt.MAX_SPOTS);
-    assert(Buffer.byteLength(JSON.stringify({ wishSections: worst, wishDirty: 255 })) <= 1024,
-        'the complete saved section delta remains bounded with all eight observation rows');
+    const sectionBytes = Buffer.byteLength(JSON.stringify({ wishSections: worst, wishDirty: 255 }));
+    assert(sectionBytes <= 1024,
+        `the complete saved section delta remains bounded with all eight observation rows (${sectionBytes} bytes)`);
     const packet = [100, .1, 10, 100, .2, 20, 1];
     const baselineState = { ...state, adena: 50, stats: { ...state.stats, money: packet } };
     const boundary = { wallet: 50, cashBounds: [30, 130], funding: Sections.fundingMark(baselineState), moneyError: 10 };
@@ -183,6 +185,50 @@ try {
     assert.equal(Sections.meaningfulMoney({ ...baselineState, adena: 61 }, boundary), true, 'small gains accumulate against the decision');
     assert.equal(Sections.meaningfulMoney({ ...baselineState, adena: 29 }, boundary), true, 'loss below protected spending is immediate');
     assert.equal(Sections.meaningfulMoney({ ...baselineState, adena: 130 }, boundary), true, 'a newly payable next step is immediate');
+    const cashState = { ...state, adena: 100, stats: { ...state.stats, money: [100, .1, 0, 200, .2, 100, 1] } };
+    const cashContext = { ...first, statsPacket: { ...first.statsPacket, money: cashState.stats.money } };
+    const funded = Sections.snapshot(cashState, cashContext, [25, null], 0, undefined,
+        { buyOrderEscrow: 100, budgetBounds: [150, null] });
+    cashState.stats.wishSections = funded;
+    assert.equal(funded.wallet, 200, 'a budgetBounds-tagged wallet records the complete funding budget');
+    assert.deepEqual(funded.cashBounds, [25, null], 'physical fee bounds retain their own units');
+    const moved = { ...cashState, adena: 50, stats: { ...cashState.stats } };
+    assert.equal(Sections.meaningfulMoney(moved, funded, 150), false);
+    assert.deepEqual(Events.reconcile(cashState, moved, deps.timestamp, 150), [],
+        'a cash-to-escrow transfer does not renew the cold funding decision');
+    const refunded = { ...cashState, adena: 150, stats: { ...cashState.stats } };
+    assert.deepEqual(Events.reconcile(cashState, refunded, deps.timestamp, 50), [],
+        'a cancellation refund does not renew the cold funding decision');
+    const budgetLoss = { ...moved, stats: { ...moved.stats } };
+    assert(Events.reconcile(cashState, budgetLoss, deps.timestamp, 99).includes('funding'),
+        'a real loss below a used budget boundary is hard even before the soft delay');
+    const feeLoss = { ...cashState, adena: 24, stats: { ...cashState.stats } };
+    assert.equal(Sections.moneyEvent(feeLoss, funded, deps.timestamp, 176), true,
+        'unchanged total budget cannot pay a physical travel or improvement fee');
+    const gapReached = { ...cashState, adena: 50, stats: { ...cashState.stats } };
+    assert.equal(Sections.moneyEvent(gapReached, funded, deps.timestamp, 250), true,
+        'native escrow reaching the funded prefix plus gap is a hard event');
+    const softPacket = [100, .1, 0, 1000];
+    const softState = { ...cashState, stats: { ...cashState.stats, money: softPacket } };
+    const softBaseline = { ...funded, budgetBounds: [-1, null], moneyError: 10,
+        funding: Sections.fundingMark(softState, 100) };
+    assert.equal(Sections.moneyEvent(softState, softBaseline, deps.timestamp + 1, 111), false);
+    assert.equal(Sections.moneyEvent(softState, softBaseline, deps.timestamp + Sections.SOFT_DELAY.money, 111), true,
+        'real budget drift keeps the existing soft delay');
+    assert.equal(Sections.moneyEvent(baselineState, boundary, deps.timestamp, 1000), false,
+        'a legacy baseline keeps its physical comparison until a real build replaces it');
+    // Native nominees use the same total wallet as the economic boundary.
+    // Travel fees are a separate physical check, exercised above.
+    const ItemIndex = invoke('GameServer/Item/ItemTemplateIndex');
+    const fundedGear = { ...state, adena: 2000000 };
+    const escrowGear = { ...fundedGear, adena: 100 };
+    const quoteView = { survivalReserve: 0, price: id => Number(ItemIndex.find(Data.items, id)?.template.price || 0) };
+    const cashNominees = Providers.gearCandidates(fundedGear, { ...quoteView, wallet: Funding.budget(fundedGear) });
+    const escrowNominees = Providers.gearCandidates(escrowGear, { ...quoteView, wallet: Funding.budget(escrowGear, 1999900) });
+    assert.deepEqual(escrowNominees, cashNominees,
+        'moving cash into a refundable buy order preserves every native gear nominee and its order');
+    assert.notDeepEqual(Providers.gearCandidates(escrowGear, quoteView), cashNominees,
+        'fixture: changing the actual funding budget changes a native affordable nominee');
     const after = structuredClone(state);
     Events.reconcile(state, after, deps.timestamp);
     assert.equal(after.stats.decisionSeq, state.stats.decisionSeq, 'ordinary round keeps the decision');
@@ -388,7 +434,7 @@ try {
     }
     Economy.forget(state.characterId);
     assert.equal(Profile.size().ownerBuilds >= 0, true);
-    console.log('PASS money/XP/combat reuse, fresh funding, source sections, publication/eviction, accumulation/loss, coalesced level/death and untouched expiry');
+    console.log(`PASS money/XP/combat reuse, fresh funding, source sections, publication/eviction, accumulation/loss, coalesced level/death and untouched expiry; worst saved delta ${sectionBytes} bytes`);
 } finally {
     Providers.build = originalBuild; Tendency.roll = originalRoll;
     Economy.reset(); fs.rmSync(dir, { recursive: true, force: true });

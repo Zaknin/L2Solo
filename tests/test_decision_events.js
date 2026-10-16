@@ -22,6 +22,8 @@ const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const money = [100000, 0.001, 15000, 1200000, .002, 20000, 1463];
 assert.equal(Funding.moneyReached({ adena: 1234999, stats: { money } }), false);
 assert.equal(Funding.moneyReached({ adena: 1235000, stats: { money } }), true);
+assert.equal(Funding.moneyReached({ adena: 35000, stats: { money } }, 1200000), true,
+    'the funding threshold includes native buy-order escrow');
 assert.equal(Funding.moneyReached({ adena: 9999999, stats: {} }), false);
 assert.equal(Funding.moneyReached({ adena: 9999999, stats: { money: [1, 1, 1, 0] } }), false);
 
@@ -38,7 +40,8 @@ const actor = { fetchId: () => 701, fetchLevel: () => level, fetchClassId: () =>
     fetchRace: () => 0, fetchMaxLoad: () => 1000, fetchKarma: () => 0,
     fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0,
     fetchHp: () => 100, fetchMaxHp: () => 100, fetchMp: () => 100, fetchMaxMp: () => 100,
-    backpack: { fetchItems: () => items, fetchTotalLoad: () => load, fetchTotalAdena: () => wallet },
+    backpack: { fetchItems: () => items, fetchTotalLoad: () => load, fetchTotalAdena: () => wallet,
+        fetchItemFromSelfId: id => id === 57 ? items[0] : null },
     state: { fetchDead: () => false, fetchTowards: () => false, fetchHits: () => false,
         fetchCasts: () => false, fetchSeated: () => false }, unselect() {}, automation: { abortAll() {} } };
 const session = { accountId: 'bot_events', actor, plan: 'hunting', coldLifeState: {
@@ -48,6 +51,7 @@ const network = new WishNetwork();
 const build = WishNetwork.prototype.build;
 let builds = 0;
 WishNetwork.prototype.build = function(input) { builds++; return build.call(this, input); };
+const nativeEconomyForActor = Economy.forActor;
 Economy.forActor = (bot, current) => {
     const stats = Events.statsFor(current);
     const result = network.build({ actorKey: `character:${bot.fetchId()}`, characterId: bot.fetchId(),
@@ -161,6 +165,41 @@ assert.equal(failedTrip.decisionStats.activityLeaf, 77, 'a finished town visit k
 Events.raiseDecision(failedTrip, 'town', { impossible: true });
 assert.equal(failedTrip.decisionStats.activityLeaf, 0, 'a failed trip drops the held step');
 assert.equal(failedTrip.decisionStats.decisionSeq, 5);
+// The hot event reader uses the market owner, not a copied life-state balance.
+const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
+const nativeEscrow = Market.buyOrderEscrow, savedWallet = wallet;
+let escrow = 100;
+Market.buyOrderEscrow = () => escrow;
+try {
+    wallet = 100;
+    const packet = [100, .1, 0, 1000];
+    const moneyState = { adena: wallet, stats: { money: packet } };
+    const budgetSession = { actor, plan: 'hunting', coldLifeState: { stats: { money: packet,
+        wishSections: { at: Date.now() - Sections.SOFT_DELAY.money, wallet: 200, cashBounds: [25, null],
+            budgetBounds: [150, null], moneyError: 0,
+            funding: Sections.fundingMark(moneyState, escrow) } } } };
+    const economyDeps = { spots: [], tripCost: () => 0, knowledgeEnabled: false };
+    const nativeBudget = nativeEconomyForActor(actor, budgetSession, economyDeps);
+    assert.equal(nativeBudget.wallet, 200, 'omitted hot economy escrow reads the native market owner');
+    assert.equal(nativeBudget.statsPacket.wishSections.wallet, 200,
+        'the accepted hot baseline uses the same total funds as its event reader');
+    assert.equal(nativeEconomyForActor(actor, budgetSession, { ...economyDeps, buyOrderEscrow: 0 }).wallet, 100,
+        'explicit caller escrow is authoritative, including zero');
+    Events.observe(budgetSession, actor);
+    const seq = Number(budgetSession.coldLifeState.stats.decisionSeq || 0);
+    wallet = 50; escrow = 150;
+    Events.observe(budgetSession, actor);
+    assert.equal(Number(budgetSession.coldLifeState.stats.decisionSeq || 0), seq,
+        'moving cash into a buy order preserves the hot funding decision');
+    wallet = 150; escrow = 50;
+    Events.observe(budgetSession, actor);
+    assert.equal(Number(budgetSession.coldLifeState.stats.decisionSeq || 0), seq,
+        'a cancellation refund preserves the hot funding decision');
+    escrow = 0;
+    Events.observe(budgetSession, actor);
+    assert.equal(budgetSession.coldLifeState.stats.decisionSeq, seq + 1,
+        'a real loss of escrow beyond the budget error raises one hot money event');
+} finally { Market.buyOrderEscrow = nativeEscrow; wallet = savedWallet; }
 assert(Events.summary(1, Date.now() + 60000).total >= 6);
 DiagnosticConfig.developerDiagnostics = false;
 const observedClock = Date.now;
