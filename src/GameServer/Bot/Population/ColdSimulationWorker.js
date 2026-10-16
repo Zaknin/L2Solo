@@ -168,7 +168,12 @@ const buyerWaiters = new MarketBuyerWaiters({
     wake: (id, timestamp) => kernel?.wakeBuyer(id, timestamp) === true
 });
 const boardFollower = boardIndex.follower();
-let boardReplacing = false;
+// A whole 'board' or 'market' table is being replaced: set by its reset, cleared
+// by the table_page whose piece ends the full copy (TableMirror ready), which
+// then rechecks the occupation slots against the whole new copy once. A gap
+// during the copy asks for it again (table_resync); that copy's reset keeps
+// the flag and its last piece ends the wait.
+let boardReplacing = false, marketReplacing = false;
 const routeRequests = new Map();
 let nativeRouteSequence = 0;
 const publicWorkshopIndex = new (require('../Economy/PublicWorkshopIndex').PublicWorkshopIndex)();
@@ -586,7 +591,7 @@ boardIndex.setOwnerChangeObserver((previous, next, board) => {
     }
 });
 tables.watch('board', {
-    reset: () => { publicWorkshopIndex.clear(); publicWorkshopKeys.clear(); workshopRevisions.clear(); workshopDigests.clear(); workshopScopeDigests.clear(); boardReplacing = true; boardFollower.reset(); OccupationSources.recipeIndex(boardIndex).reset(); kernel?.lookSeen.clear(); occupationPlanner.resetSources(); },
+    reset: () => { publicWorkshopIndex.clear(); publicWorkshopKeys.clear(); workshopRevisions.clear(); workshopDigests.clear(); workshopScopeDigests.clear(); boardReplacing = true; boardFollower.reset(); OccupationSources.recipeIndex(boardIndex).reset(); kernel?.lookSeen.clear(); },
     put: (key, row) => {
         if (String(key).startsWith('w:')) { changeWorkshop(key, row.length === 9 ? row.slice(1) : row); return; }
         const previous = boardIndex.records.get(Number(key)) || [];
@@ -609,8 +614,9 @@ tables.watch('board', {
 MarketCounters.useTable(() => tables.rows('market'));
 MarketCounters.useSpots(() => planningSpots);
 tables.watch('market', {
-    reset: () => { occupationPlanner.resetSources(); kernel?.lookSeen.clear(); },
+    reset: () => { marketReplacing = true; MarketCounters.movesChanged(); kernel?.lookSeen.clear(); },
     put: key => {
+        if (String(key).startsWith('c:')) MarketCounters.movesChanged();
         if (String(key).startsWith('h:')) {
             const id = Number(String(key).slice(2));
             for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
@@ -620,6 +626,7 @@ tables.watch('market', {
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     },
     remove: key => {
+        if (String(key).startsWith('c:')) MarketCounters.movesChanged();
         if (String(key).startsWith('h:')) {
             const id = Number(String(key).slice(2));
             for (const scope of OccupationSources.recipeIndex(boardIndex).update(id)) occupationPlanner.scopeChanged(scope);
@@ -1689,7 +1696,12 @@ async function handle(message) {
     case 'table_page': {
         const resync = tables.apply(payload.tables.filter(table => table.name !== 'actors'));
         if (resync.length) send('table_resync', { names: resync });
-        if (tables.ready('board')) boardReplacing = false;
+        // A replaced table rechecks the slots that read it once its copy is
+        // whole (both in one page: one recheck).
+        let replaced = false;
+        if (boardReplacing && tables.ready('board')) { boardReplacing = false; replaced = true; }
+        if (marketReplacing && tables.ready('market')) { marketReplacing = false; replaced = true; }
+        if (replaced) occupationPlanner.recheckSources();
         break;
     }
     case 'economy_route_request':
