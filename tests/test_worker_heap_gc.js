@@ -15,7 +15,8 @@ if (!process.argv.includes('--gc-child')) {
     window.record(300, 0); window.record(100, 1000); window.record(200, 2000);
     assert.deepEqual(window.snapshot(5000), { heapAfterGc: 200, heapAfterGcMax10: 300 });
     assert.deepEqual(window.snapshot(Telemetry.WINDOW_MS + 1), { heapAfterGc: 200, heapAfterGcMax10: 200 });
-    assert.deepEqual(window.snapshot(Telemetry.WINDOW_MS + 2001), { heapAfterGc: 200, heapAfterGcMax10: 0 });
+    // No record left in the window: afterGc goes to 0 together with afterGcMax.
+    assert.deepEqual(window.snapshot(Telemetry.WINDOW_MS + 2001), { heapAfterGc: 0, heapAfterGcMax10: 0 });
     // heapRecord() has no after-GC fields until this isolate's observer runs, then carries the window in MB.
     assert.deepEqual(Object.keys(Telemetry.heapRecord()), ['used', 'total', 'external', 'limit']);
     const observed = Telemetry.observe();
@@ -25,6 +26,19 @@ if (!process.argv.includes('--gc-child')) {
     assert.deepEqual([Telemetry.heapRecord().afterGc, Telemetry.heapRecord().afterGcMax], [100, 300]);
     observed.close();
     assert.equal(Telemetry.heapRecord().afterGc, undefined);
+    // A GC whose observer callback runs later than LATE_MS after the GC's end (the task after it was long) is dropped and counted.
+    (async () => {
+        const lateWindow = Telemetry.observe();
+        global.gc();
+        for (const start = performance.now(); performance.now() - start < Telemetry.LATE_MS + 15;);
+        for (let i = 0; i < 20 && !lateWindow.window.late; i++) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(lateWindow.window.late, 1);
+        assert.deepEqual(lateWindow.snapshot(performance.now()).heapGcLate, 1);
+        assert.equal(lateWindow.snapshot(performance.now()).v8Heap.late, 1);
+        assert.deepEqual([lateWindow.window.snapshot().heapAfterGc, lateWindow.window.snapshot().heapAfterGcMax10], [0, 0]);
+        lateWindow.close();
+        console.log('A major-GC sample that arrives later than LATE_MS is dropped and counted');
+    })();
     const workerPath = path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js');
     const wrapper = `const fs=require('node:fs'),path=require('node:path'),Module=require('node:module');
       const {parentPort,workerData}=require('node:worker_threads');
