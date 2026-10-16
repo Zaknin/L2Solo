@@ -95,6 +95,7 @@ const GearPlanSelection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
+const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
@@ -1125,10 +1126,6 @@ function startKernel(config = {}) {
             const deps = { spots, occupancy, timestamp, board: boardReady(),
                 buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
             const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
-            const retainedPlan = previousPlan?.status === 'active' && nativeReplan.routeCurrent
-                && !nativeReplan.failure && !nativeReplan.invalidSource
-                ? GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp)
-                : previousPlan;
             // Failure counters and recovery deadlines are live native facts,
             // even when the expensive wish calculation still holds.
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
@@ -1136,7 +1133,15 @@ function startKernel(config = {}) {
             const wishHolds = (wishFocus || previousPlan?.source === 'wish_network')
                 && !previousPlan.levelingRecovery
                 && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
-            const planHolds = !previousPlan
+            const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
+            const nativeHolds = !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery;
+            // Asked only by the card path of a solo bot whose native facts
+            // hold (and by the diagnostics refusal name): finalizePlan is
+            // pure, so the re-finalized active plan and its JSON compare give
+            // the same answer whenever they run; a party bot or a failed
+            // route no longer pays for them every step.
+            let planHoldsAnswer;
+            const planHolds = () => planHoldsAnswer ??= !previousPlan
                 || invoke('GameServer/Bot/Economy/DecisionSections').isEmptyWishPlan(previousPlan)
                 // Native wish_focus retains inactive target/history fields,
                 // not a current route/quote. A wish-network route
@@ -1147,16 +1152,16 @@ function startKernel(config = {}) {
                 // goes through the native planner.
                 || wishHolds
                 || previousPlan.status === 'active' && nativeReplan.routeCurrent && !nativeReplan.failure && !nativeReplan.invalidSource
-                    && JSON.stringify(retainedPlan) === JSON.stringify(previousPlan);
+                    && JSON.stringify(GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp))
+                        === JSON.stringify(previousPlan);
             // A proved ordinary solo round keeps its accepted native plan.
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
-            const excluded = invoke('GameServer/Bot/Population/SpotRiskPolicy').excludedSpotIdsForStates([state], timestamp);
             const why = [], prepared = {};
-            const refreshed = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
-                && planHolds && !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery
+            const refreshed = solo && nativeHolds && planHolds()
                 ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared }) : null;
-            if (refreshed && !excluded.has(String(refreshed.economy.network.activity?.spotId))) {
+            if (economyDiagnostics.active()) economyDiagnostics.count('lifecycle', 'plan_holds', planHoldsAnswer === undefined ? 'skipped' : 'asked');
+            if (refreshed && !SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp).has(String(refreshed.economy.network.activity?.spotId))) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
@@ -1172,9 +1177,11 @@ function startKernel(config = {}) {
             const preparationState = wishFocus
                 ? { ...state, stats: { ...state.stats,
                     equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
-            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
-                : why[0] || (state.party?.partyId || state.partyId || state.stats?.partyRequest ? 'party' : !planHolds ? 'plan_changed'
-                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')), prepared.basics));
+            // The refusal name is read only by the diagnostics counters.
+            const refusalDeps = economyDiagnostics.active() ? advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
+                : why[0] || (!solo ? 'party' : !planHolds() ? 'plan_changed'
+                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : deps;
+            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(refusalDeps, prepared.basics));
             const selectedAcquisition = GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
