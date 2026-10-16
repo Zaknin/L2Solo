@@ -848,8 +848,24 @@ try {
             'shots below the target have a consumption band ' + JSON.stringify(band));
         const used = shots => ({ ...state, inventory: shotBag(shots), updatedAt: state.updatedAt + 1, stats: { ...state.stats } });
         const before = builds;
-        assert.strictEqual(Economy.forState(used(amount - 1), at(T + 1000)).plan, economy.plan, 'one shot used inside the band');
+        const hit = Economy.forState(used(amount - 1), at(T + 1000));
+        assert.strictEqual(hit.plan, economy.plan, 'one shot used inside the band');
         assert.equal(builds, before);
+        // The own-result check made the band structure of this very state at
+        // the request's timestamp: the hit's fence reuses it (no second
+        // capability read). Another activity reshapes the state: made again.
+        const capability = Sections.capability;
+        let capabilityReads = 0;
+        Sections.capability = (...args) => { capabilityReads++; return capability(...args); };
+        try {
+            assert(hit.calculationFence, 'fixture: the hit has a fence');
+            assert.equal(capabilityReads, 0, 'the hit fence shares the own-result structure');
+            const resting = Economy.forState({ ...used(amount - 1), activity: 'resting' }, at(T + 1000));
+            assert.strictEqual(resting.plan, economy.plan, 'fixture: a resting own result holds');
+            capabilityReads = 0;
+            assert(resting.calculationFence, 'fixture: the resting hit has a fence');
+            assert.equal(capabilityReads, 1, 'a reshaped state makes its own fence structure');
+        } finally { Sections.capability = capability; }
         Economy.forgetContext(state.characterId);
         assert(Decisions.refreshAdvisory(used(amount - 1), accepted, at(T + 1000), { afterResult: true }), 'the card holds too');
         assert(Decisions.refreshAdvisory(used(band[1]), accepted, at(T + 1000), { afterResult: true }), 'the band edge holds');

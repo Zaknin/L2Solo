@@ -531,6 +531,12 @@ function captureEventProof(state, deps = {}, options = {}) {
             && deps.sourceReady === true });
 }
 
+// The held proof's soft sources still read the same with these resolved
+// deps: its producer scope, the market items and the spot crowd it read.
+// A failure inside the market delay is soft (the held build may stand).
+function softSourcesHold(proof, deps) {
+    return producerScopeHolds(proof, deps) && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []);
+}
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const refuse = (reason, names) => ({ valid: false, reason,
         touchedSections: names ? Sections.sectionMask(names) : 0 });
@@ -649,14 +655,12 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (options.rebuildBasis) {
         // Reusing slow valuation facts is not permission to execute the old
         // activity with the new wallet. Admission and the network run again.
-        if (!(producerScopeHolds(proof, deps) && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || [])))
-            return refuse('market', ['sources', 'benefits']);
+        if (!softSourcesHold(proof, deps)) return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
     const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
     if (leafWhy) return refuse(leafWhy.reason, leafWhy.sections);
-    if (!options.softPrefix && !(producerScopeHolds(proof, deps)
-        && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []))
+    if (!options.softPrefix && !softSourcesHold(proof, deps)
         && Sections.softDue(baseline, 'market', timestamp)) return refuse('market', ['sources', 'benefits']);
     return { valid: true, reason: '', touchedSections: 0 };
 }
@@ -1702,7 +1706,7 @@ function buildForState(state, deps) {
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
-    let gate = null, gateDiff = null, socialDiff = null, gateEvidence = null;
+    let gate = null, gateDiff = null, gateSoft = null, socialDiff = null, gateEvidence = null;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey);
         const same = last?.hash === hash, hashes = partHashes(keyParts);
@@ -2040,7 +2044,10 @@ function buildForState(state, deps) {
         if (sameSocialBuild) { social.outcome = comparison; socialDiff = comparison; }
         if (gate === 'would_hold') {
             gateDiff = comparison;
-            Diagnostics.count('context', 'gate_plan', gateDiff);
+            // A diff while the held proof's own soft sources moved inside their
+            // delay is by design (<diff>_soft); the bare <diff> read them intact.
+            gateSoft = gateDiff === 'same' ? null : Number(!softSourcesHold(held.plan.eventProof, deps));
+            Diagnostics.count('context', 'gate_plan', gateSoft ? `${gateDiff}_soft` : gateDiff);
             if (gateDiff === 'focus') {
                 // Each marginal shares the focus denominator; these are not paired transitions.
                 Diagnostics.count('context', 'gate_focus_held', focusKind(held.plan.network.focus?.[0]));
@@ -2075,7 +2082,7 @@ function buildForState(state, deps) {
         moved: movedText(movedParts || []), readset: readsetVerdict || 'none',
         reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
         ...(socialDiff ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),
-        ...gateEvidence });
+        soft: gateSoft, ...gateEvidence });
     else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
