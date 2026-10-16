@@ -359,10 +359,9 @@ function decisionHolds(state, held, timestamp, deps, deferred = null, why = null
     if (extensions.size) return miss(why, 'extensions');
     if (deps.nodes?.length) return miss(why, 'nodes');
     if (deps.withNodes && !held.projection) return miss(why, 'nodes_needed');
-    const stats = state.stats || {};
-    const sameDecision = Number(stats.decisionSeq || 0) === Number(held.plan.statsPacket.decisionSeq || 0)
-        || held.key === inputKey(state, { ...deps, timestamp });
-    if (!sameDecision) return miss(why, 'decision_seq');
+    // The only caller reaches here when the held key missed this build's own
+    // key, so the decision sequence alone tells the same decision.
+    if (Number(state.stats?.decisionSeq || 0) !== Number(held.plan.statsPacket.decisionSeq || 0)) return miss(why, 'decision_seq');
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred, why)) return false;
     const bands = held.plan.quantityBands || [];
