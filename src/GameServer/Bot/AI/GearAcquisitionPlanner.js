@@ -40,6 +40,7 @@ let SpotEconomics = null;
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const BotTargetScorer = invoke('GameServer/Bot/AI/BotTargetScorer');
 const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
@@ -2128,6 +2129,47 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const ordinals = prepared ? rules.eligible : null;
     const buckets = prepared && counts ? rules.staticBuckets : [];
     const length = prepared ? ordinals.length : entries.length;
+    // Only the wish's synchronous drain may batch the count updates between
+    // yields. Other generators retain their incremental counts and work order.
+    let boundNeedsReadiness = !!(bestForWish && prepared && rules.rejection);
+    if (boundNeedsReadiness && !rules.rejection[1]) {
+        // A Spoil-only list without learned Spoil never read combat readiness.
+        if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
+        boundNeedsReadiness = !!spoiler;
+    }
+    if (boundNeedsReadiness) {
+        readinessScoped = readinessRecord(state);
+        readiness = readinessScoped ? readinessScoped.readiness : computeCombatReadiness(state);
+        if (!soloSafeAtLevel(readinessScoped, readiness, rules.rejection[0])) {
+            // The old prepared loop processes one entry or static bucket per
+            // turn. Keep its source tags/count even though no entry is visited.
+            for (let processed = 0; processed < length + buckets.length; processed += SOURCE_FACT_STEP) yield 'source';
+            if (Diagnostics.active()) {
+                Diagnostics.count('source_bound', 'skip', 'lists');
+                Diagnostics.count('source_bound', 'skip', 'records', length);
+            }
+            if (counts) {
+                let at = 0, next = 0;
+                const [, drops, firstDrop, spoils, firstSpoil] = rules.rejection;
+                const eligibleBuckets = [];
+                if (drops) eligibleBuckets.push({ kind: 'drop', count: drops, firstOrdinal: firstDrop });
+                if (spoils) eligibleBuckets.push({ kind: 'spoil', count: spoils, firstOrdinal: firstSpoil });
+                eligibleBuckets.sort((a, b) => a.firstOrdinal - b.firstOrdinal);
+                while (at < buckets.length || next < eligibleBuckets.length) {
+                    const live = next < eligibleBuckets.length
+                        && (at === buckets.length || eligibleBuckets[next].firstOrdinal < buckets[at].firstOrdinal);
+                    const bucket = live ? eligibleBuckets[next++] : buckets[at++];
+                    let reason = live ? 'party_needed' : FACT_RULE_REASONS[bucket.rule];
+                    if (bucket.rule !== FACT_RULE_RAID && bucket.kind === 'spoil') {
+                        if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
+                        if (!spoiler) reason = 'spoil_skill';
+                    }
+                    counts.set(reason, (counts.get(reason) || 0) + bucket.count);
+                }
+            }
+            return facts;
+        }
+    }
     let cursor = 0, bucketCursor = 0, processed = 0;
     while (cursor < length || bucketCursor < buckets.length) {
         if (processed++ % SOURCE_FACT_STEP === 0) yield 'source';
@@ -2258,7 +2300,7 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
     const eligible = retain ? new Uint32Array(entries.length) : null;
     const staticBuckets = [], bucketsByRuleKind = new Map();
-    let eligibleCount = 0;
+    let eligibleCount = 0, minimum = Infinity, drops = 0, spoils = 0, firstDrop = -1, firstSpoil = -1;
     // This shared rule row already has the resolved economic band. Do not
     // re-enter the actor's wish policy (and resolve its module) per record.
     const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
@@ -2274,7 +2316,12 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
                 : killerLevel && npcLevel && npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
         if (!retain) continue;
         const rule = reasons[ordinal];
-        if (!rule) eligible[eligibleCount++] = ordinal;
+        if (!rule) {
+            eligible[eligibleCount++] = ordinal;
+            minimum = Math.min(minimum, sourceRecordTargetLevel(entry));
+            if (entry.kind === 'spoil') { if (!spoils++) firstSpoil = ordinal; }
+            else { if (!drops++) firstDrop = ordinal; }
+        }
         else {
             const bucketKey = rule * 2 + Number(entry.kind === 'spoil');
             let bucket = bucketsByRuleKind.get(bucketKey);
@@ -2287,6 +2334,11 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
         }
     }
     rules = { entries, expected, reasons, eligible: eligible ? eligible.subarray(0, eligibleCount) : null, staticBuckets };
+    // At most 4096 such summaries under the existing 262144-cell bound.
+    // Small rows add no objects; malformed levels keep the ordinary walk.
+    if (eligibleCount >= SOURCE_FACT_STEP && Number.isFinite(minimum)) {
+        rules.rejection = [minimum, drops, firstDrop, spoils, firstSpoil];
+    }
     if (retain) {
         sourceIndexCache.factRuleCells += entries.length;
         cache.set(key, rules);

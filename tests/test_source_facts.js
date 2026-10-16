@@ -259,6 +259,83 @@ try {
         && keys.indexOf('party_needed') > keys.indexOf('occupied'), `party_needed after ready and occupied: ${keys}`);
     assert.equal(ordered.counts.get('party_needed'), ordered.all.filter(row => row.reason === 'party_needed').length);
     assert(ordered.counts.get('party_needed') >= 4, 'party_needed records on both sides of a later ready spot');
+
+    // A wholly impossible long source list can skip its eligible records in
+    // the wish's synchronous drain. Generic generators keep incremental work.
+    const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+    const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+    const diagnosticsBefore = Config.developerDiagnostics;
+    Config.developerDiagnostics = true;
+    try {
+        const skipped = () => Diagnostics.metrics().counts?.['source_bound:skip:lists'] || 0;
+        const below = Math.floor(effective) + 1;
+        const longSpots = [...mixedSpots.slice(0, 4),
+            ...Array.from({ length: 40 }, (unused, index) => ({ ...mixedSpots[4], id: `bound-${index}` })),
+            ...mixedSpots.slice(5)];
+        const replaceLevels = (target, malformed = false) => {
+            Data.npcs = [...saved.npcs, ...mixedNpcs.map(npc => [99011, 99014].includes(npc.selfId)
+                ? { ...npc, template: { ...npc.template, level: malformed ? 0 : target } } : npc)];
+            return malformed ? longSpots.map(spot => spot.npcSelfIds.includes(99011) || spot.npcSelfIds.includes(99014)
+                ? { ...spot, avgLevel: 'not-a-level' } : spot) : longSpots;
+        };
+        const checkBound = (state, selectedSpots, shouldSkip, extra = {}) => {
+            const { bestForWish = {}, ...readerExtra } = extra;
+            const common = { spots: selectedSpots, timestamp: 1,
+                trip: { details: () => ({ known: true, hours: 0, fees: 0 }) },
+                routeAllowed: () => true, spotValue, ...readerExtra };
+            const full = drain(Planner.sourceFacts(state, 99101, 50, common)).value;
+            const expectedCounts = new Map([['existing', 7]]);
+            for (const row of full) {
+                const key = row.status === 'ready' ? 'ready' : row.reason;
+                expectedCounts.set(key, (expectedCounts.get(key) || 0) + 1);
+            }
+            const genericCounts = new Map([['existing', 7]]);
+            const generic = drain(Planner.sourceFacts(state, 99101, 50, { ...common, counts: genericCounts }));
+            assert.deepEqual([...genericCounts], [...expectedCounts]);
+            let routes = 0, values = 0;
+            const counts = new Map([['existing', 7]]), before = skipped();
+            const fast = drain(Planner.sourceFacts(state, 99101, 50, { ...common, counts,
+                routeAllowed: () => { routes++; return true; },
+                spotValue: spot => { values++; return spotValue(spot); },
+                bestForWish: { hourAdena: 100, ...bestForWish } }));
+            assert.equal(skipped() - before, Number(shouldSkip), 'only a valid long minimum rejects the whole list');
+            assert.deepEqual([...counts], [...expectedCounts], 'same reason totals and first-key order');
+            assert.deepEqual(fast.stages, generic.stages, 'same source yield tags and count');
+            if (shouldSkip) {
+                assert.deepEqual(fast.value, []);
+                assert.equal(routes, 0, 'a wholly refused list reads no native route');
+                assert.equal(values, 0, 'a wholly refused list reads no spot value');
+            } else {
+                const ready = generic.value;
+                const best = ready.reduce((winner, row) => !winner || row.costHours < winner.costHours ? row : winner, null);
+                assert.deepEqual(fast.value, best ? [best] : []);
+            }
+        };
+        for (const order of [mixedRewards, mixedRewards.slice().reverse()]) {
+            Data.npcRewards = order;
+            for (const rate of ['x1', 'x50']) {
+                process.env.L2NODE_PROGRESSION_RATE = rate;
+                const selected = replaceLevels(below);
+                for (const state of [warsmith, noSpoil, { ...warsmith, inventory: {} }, healer, buffer])
+                    checkBound(state, selected, true);
+                checkBound(noSpoil, selected, true, { bestForWish: { spoilOnly: true } });
+            }
+        }
+        // The same cache row follows replaced NPC/spot/rate inputs. The exact
+        // native boundary permits an armed bot, while NaN bounds abstain.
+        Data.npcRewards = mixedRewards;
+        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        checkBound(warsmith, replaceLevels(effective), false);
+        checkBound(warsmith, replaceLevels(below), true);
+        checkBound({ ...warsmith, inventory: {} }, replaceLevels(below, true), false);
+        const short = replaceLevels(below).slice(0, 4);
+        checkBound(warsmith, short, false);
+        Data.npcRewards = mixedRewards.map(reward => ({ ...reward, rewards: [] }));
+        const noGearRead = { ...noSpoil };
+        Object.defineProperty(noGearRead, 'inventory', { get() { throw new Error('Spoil refusal must not read equipment'); } });
+        const spoilSpots = replaceLevels(below);
+        checkBound(noGearRead, [...spoilSpots, ...spoilSpots.map(spot => ({ ...spot, id: `${spot.id}-spoil` }))], false);
+    } finally { Config.developerDiagnostics = diagnosticsBefore; }
     console.log('test_source_facts: ok');
 } finally {
     Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards;
