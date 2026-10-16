@@ -2,6 +2,7 @@
 const Sources = require('../../Items/ItemAcquisitionCatalog');
 const RecipeCatalog = require('../../Knowledge/RecipeCatalog');
 const { createHash } = require('node:crypto');
+const EMPTY_CONTENT_IDENTITY = createHash('sha256').update('[]').digest('hex');
 
 // Public candidate admission only. Prices, ownership, funds and executable
 // demand are still evaluated through the existing per-item quote readers.
@@ -32,8 +33,7 @@ class RecipeProductionIndex {
         this.catalog = recipeCatalog();
         this.rows = Array.from({ length: 10 }, () => new Set());
         this.revisions = new Uint32Array(10);
-        const emptyIdentity = createHash('sha256').update('[]').digest('hex');
-        this.identities = Array(10).fill(emptyIdentity);
+        this.identities = Array(10).fill(EMPTY_CONTENT_IDENTITY);
         const changed = new Set();
         for (const recipe of this.catalog.rows) this.refresh(recipe, changed);
         this.publishIdentities(changed);
@@ -94,4 +94,23 @@ function forBoard(board, options) {
     if (!index) { index = new RecipeProductionIndex(board, options); boards.set(board, index); }
     return index;
 }
-module.exports = { forBoard };
+// Lossless transport of the captured content, independent of the current
+// board: one byte with the level, +16 and the raw digest after it unless the
+// digest is exactly the canonical empty content.
+function packScopeIdentity(value, write) {
+    if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== 'string'
+        || typeof value[1] !== 'string' || !/^[a-f0-9]{64}$/.test(value[1])) return false;
+    const match = /^recipe-production:([0-9])$/.exec(value[0]);
+    if (!match) return false;
+    if (value[1] === EMPTY_CONTENT_IDENTITY) write.byte(Number(match[1]));
+    else { write.byte(16 + Number(match[1])); write.raw(Buffer.from(value[1], 'hex')); }
+    return true;
+}
+function unpackScopeIdentity(read) {
+    const tag = read.byte(), level = tag % 16;
+    if (tag >= 32 || level > 9) return null;
+    const identity = tag < 16 ? EMPTY_CONTENT_IDENTITY : read.raw(32).toString('hex');
+    if (tag >= 16 && identity === EMPTY_CONTENT_IDENTITY) return null;
+    return Object.freeze([`recipe-production:${level}`, identity]);
+}
+module.exports = { forBoard, packScopeIdentity, unpackScopeIdentity };

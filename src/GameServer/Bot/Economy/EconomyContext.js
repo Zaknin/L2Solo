@@ -27,6 +27,8 @@ const RecomputeGeneration = require('../Population/RecomputeGeneration');
 const Warehouse = require('./PersonalWarehouseIndex');
 const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Recipes = require('../../Items/C4RecipeItems');
+const ProductionIndex = require('./RecipeProductionIndex');
+const Bytes = require('./CompactBytes');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
@@ -656,15 +658,26 @@ function restartEventProof(proof, accepted) {
     const quantities = packQuantityInputs(proof.quantities);
     if (!quantities) return null;
     try {
-        const metadata = Buffer.from(JSON.stringify([proof.liquidation, proof.stockRoots, proof.bands, proof.safety, proof.hourAdena, proof.producerScope]));
-        const size = 35 + metadata.length + quantities.byteLength;
-        if (metadata.length > 65535 || size > FENCE_RAW_BYTES) return null;
-        const bytes = Buffer.allocUnsafe(size);
-        bytes[0] = 3; bytes.writeUInt16LE(metadata.length, 1);
-        // The domain-separated hard digest already commits to generation.
-        Buffer.from(proof.hard, 'hex').copy(bytes, 3);
-        metadata.copy(bytes, 35); Buffer.from(quantities).copy(bytes, 35 + metadata.length);
-        return Uint8Array.from(bytes);
+        // Version, the domain-separated hard digest (it already commits to
+        // generation), the soft facts in the shared exact byte form, then the
+        // quantity owner's opaque bytes to the end.
+        const write = Bytes.writer();
+        write.byte(4); write.raw(Buffer.from(proof.hard, 'hex'));
+        if (!Providers.packLiquidationInputs(proof.liquidation, write)) return null;
+        write.list(proof.stockRoots, row => {
+            if (!Array.isArray(row) || row.length !== 2) throw Error('restart stock root');
+            write.text(row[0]); write.uint(row[1]);
+        });
+        write.list(proof.bands, row => {
+            if (!Array.isArray(row) || row.length !== 4) throw Error('restart band');
+            write.uint(row[0]); write.number(row[1]); write.number(row[2], true); write.number(row[3]);
+        });
+        write.list(proof.safety, value => write.number(value));
+        write.number(proof.hourAdena);
+        if (!ProductionIndex.packScopeIdentity(proof.producerScope, write)) return null;
+        write.raw(quantities);
+        const bytes = write.finish();
+        return bytes.byteLength <= FENCE_RAW_BYTES ? bytes : null;
     } catch (_) { return null; }
 }
 function restoreEventProof(prefix, accepted) {
@@ -672,19 +685,21 @@ function restoreEventProof(prefix, accepted) {
     if (!generation || !(prefix instanceof Uint8Array) || prefix.byteLength < 35
         || prefix.byteLength > FENCE_RAW_BYTES || !accepted?.card) return null;
     try {
-        const bytes = Buffer.from(prefix);
-        if (bytes[0] !== 3) return null;
-        const metadataSize = bytes.readUInt16LE(1), raw = bytes.subarray(35, 35 + metadataSize), text = raw.toString('utf8');
-        if (35 + metadataSize >= bytes.length || !Buffer.from(text, 'utf8').equals(raw)) return null;
-        const row = JSON.parse(text), quantities = unpackQuantityInputs(bytes.subarray(35 + metadataSize));
-        if (!Array.isArray(row) || row.length !== 6 || !validProducerScope(row[5]) || !quantities || !Number.isSafeInteger(accepted.characterId)
+        const read = Bytes.reader(prefix);
+        if (read.byte() !== 4) return null;
+        const hard = read.raw(32).toString('hex'), liquidation = Providers.unpackLiquidationInputs(read);
+        const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
+        const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
+        const safety = Object.freeze(read.list(() => read.number()));
+        const hourAdena = read.number(), producerScope = ProductionIndex.unpackScopeIdentity(read);
+        const quantities = producerScope ? unpackQuantityInputs(read.rest()) : null;
+        if (!quantities || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
         return Object.freeze({ version: 1, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
-            hard: bytes.subarray(3, 35).toString('hex'), quantities, liquidation: row[0], stockRoots: row[1],
-            bands: row[2], safety: row[3], hourAdena: row[4], producerScope: Object.freeze(row[5]) });
+            hard, quantities, liquidation, stockRoots, bands, safety, hourAdena, producerScope });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
