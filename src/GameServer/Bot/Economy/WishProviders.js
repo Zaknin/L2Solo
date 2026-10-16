@@ -1089,7 +1089,8 @@ function buildProjection(state, ctx, deps) {
         if (sourceBytes <= 8192) sourceSections = structuredClone(candidate);
     } catch (_) { /* An uncloneable candidate falls back to calculation. */ }
     if (Diagnostics.active()) Diagnostics.count('source_memo', 'size', sourceBytes < 0 ? 'unmeasured'
-        : sourceBytes < 2048 ? 'lt2k' : sourceBytes < 4096 ? '2_4k' : sourceBytes <= 8192 ? '4_8k' : 'over8k');
+        : sourceBytes > 8192 ? 'over8k' : !sourceSections ? 'uncloneable'
+        : sourceBytes < 2048 ? 'lt2k' : sourceBytes < 4096 ? '2_4k' : '4_8k');
     return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
 }
 // Only public recipe rows and a prepared route can prove a usable service.

@@ -174,6 +174,17 @@ const inputKey = (state, deps = {}) => inputKeyParts(state, deps).join('|');
 // A part's digest as join() writes it (null and undefined are empty), so a
 // part counts as moved exactly when its text in the key moved.
 const partHashes = parts => Uint32Array.from(parts, part => fnv1a32(part == null ? '' : String(part)));
+// Diagnostics only: counts and returns the names of the parts whose digest moved.
+function countMovedParts(layer, previous, current, names) {
+    const moved = [];
+    for (let i = 0; i < current.length; i++) if (current[i] !== previous[i]) {
+        const name = names[i] || `part_${i}`;
+        moved.push(name);
+        Diagnostics.count(layer, 'key_part', name);
+    }
+    if (moved.length) Diagnostics.count(layer, 'key_parts', moved.length === 1 ? '1' : moved.length === 2 ? '2' : '3+');
+    return moved;
+}
 // Every section keeps only its used inputs. Current combat resources and
 // financial facts do not invalidate a sword's benefit or its source graph.
 // A caller reads one part: the build compares only its source sections, the
@@ -234,10 +245,11 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
 // parts and the capability, one per sourceTail element in its order.
 const SOURCE_TAIL_PARTS = Object.freeze(['equipment_plan', 'craft_station', 'persona', 'state_market_trades', 'stats_market_trades',
     'role', 'account', 'excluded_spots', 'hunt_efficiency', 'hunt_clock', 'spot_risk', 'money', 'exp', 'crafter_mp']);
-// The digest of each source key part, named by [...INPUT_KEY_PARTS, 'build', ...SOURCE_TAIL_PARTS].
-const sourcePartHashes = keys => Uint32Array.from([...partHashes(keys.parts), fnv1a32(keys.build), ...keys.tail.map(part => fnv1a32(JSON.stringify(part) ?? ''))]);
-const sourcePartName = index => index < INPUT_KEY_PARTS.length ? INPUT_KEY_PARTS[index] : index === INPUT_KEY_PARTS.length ? 'build'
-    : SOURCE_TAIL_PARTS[index - INPUT_KEY_PARTS.length - 1] || `part_${index}`;
+const SOURCE_PART_NAMES = Object.freeze([...INPUT_KEY_PARTS, 'build', ...SOURCE_TAIL_PARTS]);
+// The digest of each source key part, named by SOURCE_PART_NAMES. A tail part
+// is hashed as Sections.hash writes it (undefined as null).
+const sourcePartHashes = (parts, build, tail) => Uint32Array.from([...partHashes(parts), fnv1a32(build),
+    ...tail.map(part => fnv1a32(JSON.stringify(part === undefined ? null : part) ?? ''))]);
 // Diagnostics only (L115): the group name of each '|' segment of the
 // structural key above, in its order: the inputKey fields, then the
 // capability, then the JSON tail (equipment plan, persona, spot deaths,
@@ -1068,13 +1080,8 @@ function buildForState(state, deps) {
         Diagnostics.count('context', 'shadow', `${diagnosticReason}:${same ? 'same_key' : 'new_key'}`);
         // Which parts moved since the actor's previous build (none known without one).
         if (!same && last?.parts?.length === hashes.length) {
-            let moved = 0, name = null;
-            for (let i = 0; i < hashes.length; i++) if (hashes[i] !== last.parts[i]) {
-                moved++; name = INPUT_KEY_PARTS[i] || `part_${i}`; movedParts.push(name);
-                Diagnostics.count('context', 'key_part', name);
-            }
-            if (moved > 0) Diagnostics.count('context', 'key_parts', moved === 1 ? '1' : moved === 2 ? '2' : '3+');
-            if (moved === 1) singlePart = name;
+            movedParts = countMovedParts('context', last.parts, hashes, INPUT_KEY_PARTS);
+            if (movedParts.length === 1) singlePart = movedParts[0];
         }
         if (same) {
             Diagnostics.count('context', 'shadow_gap', gapBucket(Math.max(0, at - last.at)));
@@ -1092,15 +1099,10 @@ function buildForState(state, deps) {
                 && Number(stats.decisionSeq || 0) === Number(packet?.decisionSeq || 0) ? 'echo' : 'no_echo';
         }
         // The source memo key since the actor's previous build: same, or which parts moved.
-        const sourceHash = fnv1a32(sections.sources), sourceHashes = sourcePartHashes({ ...sections, parts: sourceParts, tail: sourceTail });
+        const sourceHash = fnv1a32(sections.sources), sourceHashes = sourcePartHashes(sourceParts, sections.build, sourceTail);
         Diagnostics.count('source_memo', 'shadow', !last?.sourceParts ? 'no_previous' : last.sourceHash === sourceHash ? 'same_key' : 'new_key');
-        if (last?.sourceParts?.length === sourceHashes.length && last.sourceHash !== sourceHash) {
-            let moved = 0;
-            for (let i = 0; i < sourceHashes.length; i++) if (sourceHashes[i] !== last.sourceParts[i]) {
-                moved++; Diagnostics.count('source_memo', 'key_part', sourcePartName(i));
-            }
-            Diagnostics.count('source_memo', 'key_parts', moved === 1 ? '1' : moved === 2 ? '2' : '3+');
-        }
+        if (last?.sourceParts?.length === sourceHashes.length && last.sourceHash !== sourceHash)
+            countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
             sourceHash, sourceParts: sourceHashes };
