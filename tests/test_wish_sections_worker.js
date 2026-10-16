@@ -448,7 +448,11 @@ module.exports.wishSectionsProbe = async id => {
         } finally { Selection.selectAcquisitionPlan = nativeSelection; }
         // L70: own observed income is a soft change, re-examined at the
         // bot's next decision point 5 min after the last actual decision.
-        state = { ...state, stats: { ...state.stats, wishSections: { ...state.stats.wishSections, at: clock - 5 * 60 * 1000 } } };
+        // Advance the clock against the accepted build's own baseline;
+        // replacing a publication's snapshot cannot age an older card.
+        assert.equal(accepted.baseline.sample.length, 0, 'two native samples are not usable own knowledge yet');
+        clock = Math.max(clock, accepted.baseline.at + DecisionSections.SOFT_DELAY.observation);
+        assert(DecisionSections.softDue(accepted.baseline, 'observation', clock), 'the accepted observation delay has actually elapsed');
         Economy.forgetContext(id); // the held plan of that older decision is evicted as in a cold population
         kernel.states.set(id, { ...kernel.states.get(id), state, context: { wishAdvisory: accepted } });
         const beforeLearning = builds;
@@ -459,6 +463,8 @@ module.exports.wishSectionsProbe = async id => {
         }, ++clock);
         state = learned.state;
         assert(state.stats.wishSections.sample.length > 0, 'the third native sample creates usable own knowledge');
+        assert(DecisionSections.observationEvent(state, accepted.baseline, clock),
+            'the third native sample is a real observation event against the accepted build');
         assert(builds > beforeLearning, 'new usable income knowledge remains a real calculation trigger');
         kernel.states.set(id, { ...kernel.states.get(id), state });
         const currentSeq = state.stats.decisionSeq;
