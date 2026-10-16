@@ -13,6 +13,7 @@ const { createKnowledgeBaseService } = require('./KnowledgeBaseService');
 const { createExportedCatalogue } = require('../GameServer/Knowledge/ExportedCatalogueAdapter');
 const GameCatalogue = require('../GameServer/Knowledge/GameDataCatalogue');
 const { createJsonResponseCache, sendCachedJson } = require('./JsonResponseCache');
+const { createAgeCache } = require('./AgeCache');
 const marketJson = createJsonResponseCache(() => marketSnapshot());
 const ActorEconomy = require('./ActorEconomyProjection');
 const { createActorCollections } = require('./ActorCollections');
@@ -437,12 +438,18 @@ const EQUIPMENT_SLOTS = {
     14: 'two-handed weapon',
     15: 'full armor'
 };
+// The cold-state subscription lives while an observer polls: a state change
+// that finds the last poll older than this ends it, and the next poll resyncs.
+const PROJECTION_IDLE_MS = 120000;
 const projectionRuntime = {
     initialized: false,
     initializing: null,
     dynamicKeys: new Set(),
-    unsubscribe: null
+    unsubscribe: null,
+    lastPollAt: 0
 };
+// Read through worldStatus().runtime.developerDiagnostics.observer.
+const observerStats = { coldProjectionBinds: 0, coldProjectionUnbinds: 0, coldProjectionResyncs: 0 };
 const PROJECTION_FIELDS = Object.freeze([
     'id', 'name', 'phase', 'mode', 'intent', 'role', 'level', 'classId', 'className',
     'raceId', 'exp', 'adena', 'equipmentValue', 'loc', 'area', 'region', 'online',
@@ -766,6 +773,12 @@ async function clanSnapshot() {
     return { generatedAt: Date.now(), total: clans.length, totals, clans };
 }
 
+// The directory is shared by every open tab's 10 s poll and by each clan card
+// (clanDetail reads its overview from it); nothing orders clan changes into one
+// revision, so tabs share a build for a short age.
+const CLAN_DIRECTORY_CACHE_MS = 5000;
+const cachedClanSnapshot = createAgeCache(clanSnapshot, CLAN_DIRECTORY_CACHE_MS);
+
 function clanMemberQuery(clanId) {
     return Database.execute([`
         SELECT c.id, c.name, c.title, c.classId, c.race, c.level, c.exp, c.sp, c.clanId,
@@ -916,7 +929,7 @@ async function clanDetail(clanId) {
     const id = Number(clanId);
     if (!Number.isSafeInteger(id) || id <= 0) return null;
     const [directory, members, events, warehouse, contributions, demands, operation, actions, orders] = await Promise.all([
-        clanSnapshot(),
+        cachedClanSnapshot(),
         clanMemberQuery(id),
         Database.fetchClanGoalEvents(id, 24),
         Database.fetchClanWarehouseItems(id),
@@ -937,8 +950,10 @@ async function clanDetail(clanId) {
         , Database.fetchClanActions({ clanId: id, limit: 24 }),
         Database.fetchPlayerManagedClanOrders({ clanId: id, limit: 12 })
     ]);
-    const overview = directory.clans.find((clan) => clan.id === id);
-    if (!overview) return null;
+    const listed = directory.clans.find((clan) => clan.id === id);
+    if (!listed) return null;
+    // The directory is shared between callers; the goal rewrites below are this card's own.
+    const overview = { ...listed };
     const row = await Database.execute([`
         SELECT clans.leaderId, simulated.stateJson
         FROM clans
@@ -2000,8 +2015,13 @@ function projectionRow(actor) {
 function bindColdProjection() {
     if (projectionRuntime.unsubscribe) return;
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    observerStats.coldProjectionBinds += 1;
     projectionRuntime.unsubscribe = LifeState.subscribeChanges((state) => {
         if (!projectionRuntime.initialized || !state?.characterId) return;
+        if (Date.now() - projectionRuntime.lastPollAt > PROJECTION_IDLE_MS) {
+            unbindColdProjection();
+            return;
+        }
         const BotManager = invoke('GameServer/Bot/BotManager');
         if (BotManager.findSessionById(Number(state.characterId))) return;
         const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
@@ -2010,15 +2030,43 @@ function bindColdProjection() {
     });
 }
 
+// The projection keeps its actors but stops following cold states; the next
+// poll finds no subscription and resyncs them (ensureWorldProjection).
+function unbindColdProjection() {
+    projectionRuntime.unsubscribe?.();
+    projectionRuntime.unsubscribe = null;
+    observerStats.coldProjectionUnbinds += 1;
+    PopulationConfig.developerDiagnostics && console.info(
+        'Observer :: cold projection unbound, no poll for %ds', Math.round(PROJECTION_IDLE_MS / 1000));
+}
+
+function projectionActors(bots, players) {
+    return [
+        ...bots.map((actor) => projectionActor(actor, 'bot')),
+        ...players.map((actor) => projectionActor(actor, 'player'))
+    ];
+}
+
+// Apply the difference between the projection and a fresh collection, so a
+// client one revision behind still gets what changed while nothing followed.
+function resyncProjection(actors) {
+    const fresh = new Set(actors.map((actor) => WorldProjection.keyFor(actor)));
+    const removals = WorldProjection.snapshot().actors
+        .filter((actor) => !fresh.has(WorldProjection.keyFor(actor)))
+        .map((actor) => ({ kind: actor.kind, id: actor.id }));
+    observerStats.coldProjectionResyncs += 1;
+    WorldProjection.apply({ upserts: actors, removals });
+    return WorldProjection.snapshot();
+}
+
 async function ensureWorldProjection() {
-    if (projectionRuntime.initialized) return WorldProjection.snapshot();
+    projectionRuntime.lastPollAt = Date.now();
+    if (projectionRuntime.initialized && projectionRuntime.unsubscribe) return WorldProjection.snapshot();
     if (projectionRuntime.initializing) return projectionRuntime.initializing;
+    const resync = projectionRuntime.initialized;
     projectionRuntime.initializing = collectWorldActors().then(({ bots, players }) => {
-        const actors = [
-            ...bots.map((actor) => projectionActor(actor, 'bot')),
-            ...players.map((actor) => projectionActor(actor, 'player'))
-        ];
-        const result = WorldProjection.reset(actors);
+        const actors = projectionActors(bots, players);
+        const result = resync ? resyncProjection(actors) : WorldProjection.reset(actors);
         projectionRuntime.dynamicKeys = new Set([
             ...bots.filter((actor) => actor.phase === 'hot').map((actor) => `bot:${Number(actor.id)}`),
             ...players.map((actor) => `player:${Number(actor.id)}`)
@@ -2085,7 +2133,7 @@ async function worldBootstrap() {
     await refreshDynamicProjection();
     const projection = WorldProjection.snapshot();
     const actors = projection.actors;
-    const status = worldStatus();
+    const status = cachedWorldStatus();
     return {
         ...status,
         epoch: WORLD_EPOCH,
@@ -2104,25 +2152,28 @@ async function worldBootstrap() {
 
 function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
-    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
+    const diagnostics = PopulationConfig.developerDiagnostics === true;
+    const memory = diagnostics ? process.memoryUsage() : null;
+    const cold = diagnostics ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot() : null;
     return {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
         uptimeMs: Math.round(process.uptime() * 1000),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
-        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
-        hotCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
-        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
-        clanSocial: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
+        coldCompetition: cold ? cold.worker?.competition || null : null,
+        coldCompetitionActions: cold ? cold.competitionActions || null : null,
+        hotCompetitionActions: diagnostics ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
+        partyReviews: cold ? cold.partyReviews || null : null,
+        clanSocial: diagnostics ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
         runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
             developerDiagnostics: {
                 main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
-                worker: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.developerDiagnostics || null,
-                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false }
+                worker: cold.worker?.developerDiagnostics || null,
+                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false },
+                observer: observerDiagnostics()
             },
             townNavigation: {
                 paths: invoke('GameServer/Bot/AI/TownNavigation').forPool(invoke('GameServer/Geodata/PathfindingWorkerPool')).stats(),
@@ -2130,6 +2181,20 @@ function worldStatus() {
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
         } : null
+    };
+}
+
+// The status panel polls every 30 s per tab and reads the population counts
+// (three passes over the life states, the market summary); tabs and the
+// bootstrap that precedes the first poll share one build.
+const WORLD_STATUS_CACHE_MS = 15000;
+const cachedWorldStatus = createAgeCache(worldStatus, WORLD_STATUS_CACHE_MS);
+
+function observerDiagnostics() {
+    return {
+        ...observerStats,
+        worldStatusCache: cachedWorldStatus.stats(),
+        clanDirectoryCache: cachedClanSnapshot.stats()
     };
 }
 
@@ -2569,7 +2634,7 @@ function serveWorldReads(request, response, url) {
     }
     if (url.pathname === '/observer/api/world/status') {
         try {
-            sendJson(response, worldStatus());
+            sendJson(response, cachedWorldStatus());
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
@@ -2701,7 +2766,7 @@ function serveChangesAndClanReads(request, response, url) {
     }
 
     if (url.pathname === '/observer/api/clans') {
-        clanSnapshot()
+        cachedClanSnapshot()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
         return true;
