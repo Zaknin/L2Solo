@@ -74,6 +74,35 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     assert.equal(response.payload.joint.memberGoals.length, 2);
     assert.deepEqual(response.payload.sources, Calculation.sources(members));
     assert(!messages.some(message => message.type === 'fault'), 'native worker loads no forbidden dependency');
+    const materialMembers = members.map((member, index) => ({ ...member, updatedAt: timestamp + 1,
+        stats: { ...member.stats, equipmentPlan: { target: { selfId: 5726 + index } },
+            partyRequest: { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-camp',
+                npcId: 600 + index, itemId: 4097 + index, amount: 12, requiredTotal: 12, targetId: 5726 + index } } }));
+    const materialObjective = materialMembers[0].stats.partyRequest;
+    const materialAgreement = require('../src/GameServer/Bot/Population/CraftMaterialParty').agreement(materialMembers, materialObjective);
+    post('party_goal_request', { ...request, members: materialMembers, party: { ...party, startedAt: timestamp,
+        stats: { objective: materialObjective, agreement: materialAgreement } }, replyBy: Date.now() + 5000 }, 'material-goals');
+    const materialReply = await wait(message => message.type === 'party_goal_result' && message.msgId === 'material-goals');
+    assert.equal(materialReply.payload.ok, true, materialReply.payload.reason);
+    assert.equal(materialReply.payload.joint.memberGoals.filter(goal => goal.amount === 12).length, 2);
+    assert(Protocol.validateEnvelope(materialReply, 'worker').ok, 'native material goal advice crosses the worker boundary');
+    post('party_goal_request', { ...request, members: materialMembers, party: { ...party, startedAt: timestamp,
+        stats: { objective: materialObjective, agreement: materialAgreement, materialFormation: true } },
+        replyBy: Date.now() + 5000 }, 'material-admission');
+    const admission = await wait(message => message.type === 'party_goal_result' && message.msgId === 'material-admission');
+    assert.equal(admission.payload.ok, true, admission.payload.reason);
+    assert.equal(admission.payload.joint.incomeReviews.length, 2);
+    assert(admission.payload.joint.incomeReviews.every(review => !review.accept), 'a missing camp forecast refuses unsafe formation in the worker');
+    assert(Protocol.validateEnvelope(admission, 'worker').ok, 'material admission uses the bounded existing review packet');
+    post('party_goal_request', { ...request, members: materialMembers, party: { ...party,
+        stats: { objective: materialObjective, agreement: materialAgreement, recruitmentReview: true } },
+        replyBy: Date.now() + 5000 }, 'material-recruitment');
+    const recruited = await wait(message => message.type === 'party_goal_result' && message.msgId === 'material-recruitment');
+    assert.equal(recruited.payload.ok, true, recruited.payload.reason);
+    assert.equal(recruited.payload.joint.memberGoals.filter(goal => goal.amount === 12).length, 2);
+    assert.equal(recruited.payload.joint.incomeReviews.length, 2);
+    assert(recruited.payload.joint.incomeReviews.every(review => !review.accept));
+    assert(Protocol.validateEnvelope(recruited, 'worker').ok, 'native worker recruitment checks the complete prospective roster');
     worker.postMessage({ queryProbe: 'canonical' });
     const prepared = await wait(message => message.probe === 'canonical');
     assert.equal(prepared.slots.filter(row => row.id > 0).length, 2);

@@ -186,7 +186,7 @@ function itemHours(state, spot, kills, goal, members, agreement) {
     if (!reward || !npc) return null;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const next = state.stats?.equipmentPlan?.next;
-    const spoil = goal.strategy === 'spoil' || Number(next?.itemId) === itemId && next.kind === 'spoil';
+    const spoil = goal.sourceKind === 'spoil' || goal.strategy === 'spoil' || Number(next?.itemId) === itemId && next.kind === 'spoil';
     if (spoil && !invoke('GameServer/Bot/AI/BotRoles').isSpoiler(state)) return null;
     const killerLevel = Math.max(...members.map(member => Number(member.level)));
     const expected = Planner.itemDropYield(reward, itemId, spoil ? 'spoil' : 'drop',
@@ -196,7 +196,13 @@ function itemHours(state, spot, kills, goal, members, agreement) {
     // required requests and a proposed 'need' agreement get the random share.
     const reserved = agreement?.help?.status === 'funded' && Number(agreement.help.payerId) === Number(state.characterId)
         && Number(agreement.help.itemId) === itemId;
-    const ownerShare = spoil || reserved ? 1 : 1 / members.length;
+    const Material = require('./CraftMaterialParty');
+    const owners = agreement?.materialNeeds ? Material.needs(members, { spotId: spot.id }, agreement)
+        .filter(row => Number(row.itemId) === itemId) : [];
+    // Forecast completing the shared need, with no helper loot dilution.
+    const totalNeed = owners.reduce((sum, row) => sum + row.amount, 0);
+    const ownNeed = owners.find(row => row.characterId === Number(state.characterId));
+    const ownerShare = ownNeed && totalNeed > 0 ? ownNeed.amount / totalNeed : spoil || reserved ? 1 : 1 / members.length;
     const perHour = kills * expected * (total > 0 ? count / total : 0) * ownerShare;
     const amount = goal.amount || (Number(next?.itemId) === itemId ? next.amount : 1);
     return perHour > 0 ? Math.max(1, positive(amount)) / perHour : null;
@@ -234,8 +240,14 @@ function compare(state, peers, options = {}) {
     }
     const party = prepared.rows.get(state.characterId) || null;
     const focus = state.stats?.wishFocus;
-    const goal = state.stats?.partyRequest || state.stats?.equipmentPlan?.next || options.objective;
-    const cash = positive(focus?.[2]) || null;
+    const Material = require('./CraftMaterialParty');
+    const materialParty = Material.isObjective(options.objective);
+    const agreement = materialParty ? options.party?.stats?.agreement || Material.agreement(members, options.objective)
+        : options.party?.stats?.agreement;
+    const materialGoal = materialParty ? Material.needs(members, options.objective, agreement)
+        .find(row => row.characterId === Number(state.characterId)) : null;
+    const goal = materialGoal || state.stats?.partyRequest || state.stats?.equipmentPlan?.next || options.objective;
+    const cash = materialParty ? materialGoal?.materialCash ?? null : positive(focus?.[2]) || null;
     const spendable = Math.max(0, positive(state.adena) - positive(state.stats?.money?.[2]));
     const help = options.party?.stats?.agreement?.help || options.objective?.helpDeal;
     const payer = Number(help?.payerId) === Number(state.characterId);
@@ -243,9 +255,10 @@ function compare(state, peers, options = {}) {
     // A recipe/component delivery is not the completion of the final gear
     // purchase. Only compare direct item time for the focused equipment.
     const focusedItem = String(focus?.[0] || '').match(/^power:(\d+):/);
-    const finalItem = Number(goal?.itemId) > 0 && (!focusedItem || Number(focusedItem[1]) === Number(goal.itemId));
+    const finalItem = materialParty ? !!materialGoal
+        : Number(goal?.itemId) > 0 && (!focusedItem || Number(focusedItem[1]) === Number(goal.itemId));
     const partyItemHours = finalItem
-        ? itemHours(state, prepared.spot, party?.kills, goal, members, options.party?.stats?.agreement) : null;
+        ? itemHours(state, prepared.spot, party?.kills, goal, members, agreement) : null;
     // The direct solo drop may be at a different camp from the best cash
     // route. Check just that known camp, without searching the source atlas.
     const held = soloChoices.get(state);
@@ -254,13 +267,20 @@ function compare(state, peers, options = {}) {
         held.goalKey = goalKey;
         held.itemHours = finalItem ? soloItemRouteHours(state, prepared.spots, goal, prepared.timestamp) : null;
     }
-    const soloItemHours = finalItem ? (held ? held.itemHours : soloItemRouteHours(state,
-        prepared.spots, goal, prepared.timestamp)) ?? null : null;
+    const soloItemHours = materialGoal?.materialSoloHours ?? (finalItem ? (held ? held.itemHours : soloItemRouteHours(state,
+        prepared.spots, goal, prepared.timestamp)) ?? null : null);
     const payerState = members.find(member => Number(member.characterId) === Number(help?.payerId));
-    const deliveryHours = payerState ? itemHours(payerState, prepared.spot, party?.kills, options.objective,
-        members, options.party?.stats?.agreement) : null;
+    const deliveryGoal = materialParty ? Material.needs(members, options.objective, agreement)
+        .find(row => row.characterId === Number(help?.payerId)) : options.objective;
+    const deliveryHours = payerState ? itemHours(payerState, prepared.spot, party?.kills, deliveryGoal,
+        members, agreement) : null;
+    const helpers = help?.status === 'funded' && Array.isArray(help.helperIds)
+        ? help.helperIds.filter(id => members.some(member => Number(member.characterId) === Number(id))) : null;
+    // Joining an existing hunt does not add a recipient to its funded escrow.
+    const rewardFee = !payer && (!helpers || helpers.some(id => Number(id) === Number(state.characterId)))
+        ? positive(helpers ? help.remaining ?? help.fee : help?.fee) / Math.max(1, helpers?.length ?? peers.length) : 0;
     const answer = evaluate({ solo, party, cash, spendable, fee, soloItemHours, partyItemHours, deliveryHours,
-        rewardFee: !payer ? positive(help?.fee) / Math.max(1, peers.length) : 0,
+        rewardFee,
         assemblyHours: options.party ? 0 : positive(party?.travelHours) + 45000 / HOUR_MS });
     return { ...answer, at: prepared.timestamp, soloSource: solo?.source || null, partySource: party?.source || null };
 }

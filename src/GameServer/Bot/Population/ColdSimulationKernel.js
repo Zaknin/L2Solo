@@ -1823,10 +1823,14 @@ class ColdSimulationKernel {
                 nextResolveAt: resolution.nextResolveAt
             };
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
-            const memoryGroup = raid || paidHelp || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
+            const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
+            // Collection quotas and their physical receipts share the same
+            // commit, including completion with no funded helper contract.
+            const atomicParty = raid || paidHelp || materialHunt || resolvedParty.status === 'dissolved';
+            const memoryGroup = atomicParty || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
                 ? { id: `hunt:${run.grants.get(Number(run.party.leaderId))?.leaseId}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
-            if (raid || paidHelp || resolvedParty.status === 'dissolved') {
+            if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
                     expectedUpdatedAt: run.party.updatedAt, updatedAt: resolvedParty.updatedAt,
@@ -1846,7 +1850,7 @@ class ColdSimulationKernel {
             }
             let requirementMs = 0, lastRequirementPlanMs = 0;
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            if (!meetingPending && run.requirementRefresh && !requirementProgress) {
+            if (!meetingPending && run.requirementRefresh && !requirementProgress && !materialHunt) {
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
             }
@@ -1867,6 +1871,7 @@ class ColdSimulationKernel {
                     );
                 }
                 if (!meetingPending && run.requirementRefresh && this.planPartyRequirement && projectedState
+                    && !materialHunt
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
@@ -1918,7 +1923,7 @@ class ColdSimulationKernel {
                 };
                 proposals.push(proposal);
             }
-            if (!meetingPending && run.requirementRefresh) {
+            if (!meetingPending && run.requirementRefresh && !materialHunt) {
                 const leader = proposals.find(proposal => proposal.partyResolution);
                 if (leader) {
                     leader.partyResolution.memberPlans = memberPlans;

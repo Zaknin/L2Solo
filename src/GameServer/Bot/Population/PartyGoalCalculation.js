@@ -40,6 +40,15 @@ function validMembers(party, members, partial = false) {
 }
 
 async function calculate(party, members, prepare, timestamp, current = () => true, { spots } = {}) {
+    if (party.stats?.recruitmentReview) {
+        if (!current()) throw new Error('party_goal_expired');
+        return require('./PartyGoalPolicy').recruitment(party, members, { timestamp, spots });
+    }
+    // Declared material needs do not require personal or group wish rebuilds.
+    if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
+        if (!current()) throw new Error('party_goal_expired');
+        return require('./PartyGoalPolicy').joint(party, members, { timestamp, spots });
+    }
     const contexts = [];
     for (const member of members) {
         if (!current()) throw new Error('party_goal_expired');

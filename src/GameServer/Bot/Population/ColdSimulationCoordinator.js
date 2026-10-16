@@ -1189,13 +1189,8 @@ class ColdSimulationCoordinator {
         if (String(selected.id) === String(currentId || '') && !repairingPartyPosition
             && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
 
-        // Coordinate repair may include teammates whose reservation is still
-        // on another spot. Only bypass admission when every member is counted;
-        // reserveCapacity adds missing members without counting existing ones twice.
-        const reservedKeys = index.occupancy?.[selected.id]?.reservedKeys;
-        const repairAlreadyReserved = repairingPartyPosition && reservedKeys instanceof Set
-            && routedMembers.every(member => reservedKeys.has(String(member.characterId)));
-        const reserved = repairAlreadyReserved || SpotProfiles.reserveCapacity(index.occupancy, selected, routedMembers, {
+        const reserved = partyRoute ? SpotProfiles.reservePartyCapacity(index.occupancy, selected, routedMembers)
+            : SpotProfiles.reserveCapacity(index.occupancy, selected, routedMembers, {
             maxOverflowUnits: unsafeSoloGround ? 1 : 0
         });
         if (!reserved) return null;

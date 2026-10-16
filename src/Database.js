@@ -5416,6 +5416,16 @@ const Database = {
                     return { ok: false, reason: 'party_review_membership_changed' };
                 }
             }
+            if (expectedPhase === 'cold' && !review && expectedPartyUpdatedAt !== null) {
+                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
+                const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
+                if (existing?.status !== 'active' || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                    || ids.some(id => !characterIds.includes(id)) || declared.length !== characterIds.length
+                    || declared.some(id => !characterIds.includes(id)) || !declared.includes(Number(party.leaderId))
+                    || batch.some(entry => Boolean(entry.expectedPartyId) !== ids.includes(Number(entry.row.characterId))))
+                    return { ok: false, reason: 'party_recruitment_changed' };
+            }
             const placeholders = characterIds.map(() => '?').join(', ');
             const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);

@@ -55,6 +55,14 @@ const party = { partyId: 'goal-calculation', memberIds: [701, 702], leaderId: 70
         { ok: true, sources: Calculation.sources(members), joint }), 'worker');
     assert(resultCheck(incomeJoint).ok, 'native income reviews survive the worker wire admission');
     assert(!resultCheck({ ...incomeJoint, incomeReviews: incomeJoint.incomeReviews.slice(0, 1) }).ok);
+    let recruitmentPreparations = 0;
+    const recruitment = await Calculation.calculate({ ...party, stats: { recruitmentReview: true } }, members,
+        async () => { recruitmentPreparations++; throw Error('recruitment rebuilt wishes'); }, timestamp);
+    assert.equal(recruitmentPreparations, 0, 'ordinary recruitment prepares neither personal nor group wish graphs');
+    assert.equal(recruitment.incomeReviews.length, members.length);
+    assert(resultCheck(recruitment).ok, 'recruitment reuses the validated income review packet');
+    await assert.rejects(Calculation.calculate({ ...party, stats: { recruitmentReview: true } }, members,
+        async () => { throw Error('not called'); }, timestamp, () => false), /party_goal_expired/);
     const invalidReview = change => ({ ...incomeJoint,
         incomeReviews: [{ ...incomeJoint.incomeReviews[0], ...change }, incomeJoint.incomeReviews[1]] });
     for (const bad of [{ characterId: 999 }, { soloIncome: Infinity }, { partyHours: -1 },

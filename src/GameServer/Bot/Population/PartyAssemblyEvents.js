@@ -1,5 +1,6 @@
 'use strict';
 const DiagnosticConfig = require('./PopulationConfig');
+const Material = require('./CraftMaterialParty');
 
 const SAFETY_INTERVAL_MS = 30 * 60000;
 
@@ -12,6 +13,7 @@ class PartyAssemblyEvents {
             retryMs, onRepair, onError });
         this.records = new Map();
         this.groups = new Map();
+        this.supports = new Map();
         this.dirty = new Set();
         this.deadlines = new Set();
         this.running = false;
@@ -55,7 +57,7 @@ class PartyAssemblyEvents {
         this.active = false; this.generation++;
         this.unsubscribeLife?.(); this.unsubscribeParty?.(); this.unsubscribeTick?.();
         for (const key of this.deadlines) this.registry.cancelDeadline(key);
-        this.deadlines.clear(); this.records.clear(); this.groups.clear(); this.dirty.clear();
+        this.deadlines.clear(); this.records.clear(); this.groups.clear(); this.supports.clear(); this.dirty.clear();
         this.cycle = null; this.helpPending = false;
     }
 
@@ -72,7 +74,7 @@ class PartyAssemblyEvents {
         if (packet.kind === 'reset') {
             for (const record of this.records.values()) this.cancel(record);
             for (const group of this.groups.values()) this.cancel(group);
-            this.records.clear(); this.groups.clear(); this.dirty.clear();
+            this.records.clear(); this.groups.clear(); this.supports.clear(); this.dirty.clear();
             return false;
         }
         const id = Number(packet.characterId), state = this.life.cachedState(id);
@@ -80,6 +82,11 @@ class PartyAssemblyEvents {
         if (packet.state && packet.state !== state) return false;
         const input = state && this.classify(state, this.now());
         const previous = this.records.get(id);
+        if (previous?.supportKey && previous.supportKey !== input?.supportKey) {
+            const pool = this.supports.get(previous.supportKey);
+            pool?.delete(id);
+            if (!pool?.size) this.supports.delete(previous.supportKey);
+        }
         const moved = previous?.key !== input?.key;
         const changed = moved || !previous || !input || previous.stamp.some((field, index) => field !== input.stamp[index]);
         const wake = moved || !previous || !input || previous.stamp[4] !== input.stamp[4];
@@ -97,6 +104,11 @@ class PartyAssemblyEvents {
         const record = previous && !moved ? previous : { id, key: input.key, stamp: input.stamp, state };
         record.stamp = input.stamp;
         record.state = state;
+        record.supportKey = input.supportKey;
+        if (input.supportKey) {
+            if (!this.supports.has(input.supportKey)) this.supports.set(input.supportKey, new Map());
+            this.supports.get(input.supportKey).set(id, record);
+        }
         if (!this.groups.has(input.key)) this.groups.set(input.key, { key: input.key, members: new Map(), revision: 0, handled: 0 });
         const group = this.groups.get(input.key);
         group.members.set(id, record);
@@ -191,6 +203,22 @@ class PartyAssemblyEvents {
                 if (this.life.cachedState(id) === record.state) candidates.push(record.state);
             }
             group.remaining = Math.max(0, Number(group.remaining || count) - count);
+        }
+        const materialCore = candidates.find(state => Material.isObjective(state.stats?.partyRequest));
+        if (materialCore) {
+            const used = new Set(candidates.map(state => state.characterId));
+            let inspected = 0, added = 0;
+            for (const gap of [0, -1, 1, -2, 2, -3, 3, -4, 4]) for (const role of ['healer', 'buffer', 'tank']) {
+                if (inspected >= 24 || added >= 12) break;
+                const pool = this.supports.get(`${Number(materialCore.level) + gap}:${role}`);
+                if (!pool?.size) continue;
+                const [id, record] = pool.entries().next().value;
+                pool.delete(id); pool.set(id, record); inspected++;
+                const state = this.life.cachedState(id);
+                if (state !== record.state || used.has(id) || state.simulation?.leaseId
+                    || state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main') continue;
+                candidates.push(state); used.add(id); added++;
+            }
         }
         const generation = this.generation, revision = group?.revision;
         this.running = true; DiagnosticConfig.developerDiagnostics && (this.metrics.attempts++);

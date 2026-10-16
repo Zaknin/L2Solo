@@ -48,6 +48,7 @@ const originals = {
     record: LifeEvents.record,
     handoffToMain: ColdSimulationOwner.handoffToMain,
     acceptColdState: ColdSimulationCoordinator.acceptColdState,
+    requestPartyGoals: ColdSimulationCoordinator.requestPartyGoals,
     partyMinSize: Config.partyMinSize,
     partyMaxSize: Config.partyMaxSize,
     maxBackgroundParties: Config.maxBackgroundParties,
@@ -203,6 +204,9 @@ async function run() {
     // Native physical preparation ends here; the original ownership checks
     // below use mocked assignments, not persisted cold-life membership rows.
     await Database.close();
+    ColdSimulationCoordinator.requestPartyGoals = async (party, selected, options) => ({ ok: true,
+        sources: require('../src/GameServer/Bot/Population/PartyGoalCalculation').sources(selected),
+        joint: require('../src/GameServer/Bot/Population/PartyGoalPolicy').recruitment(party, selected, { timestamp: options.timestamp }) });
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);
@@ -657,6 +661,7 @@ run().catch((err) => {
     LifeEvents.record = originals.record;
     ColdSimulationOwner.handoffToMain = originals.handoffToMain;
     ColdSimulationCoordinator.acceptColdState = originals.acceptColdState;
+    ColdSimulationCoordinator.requestPartyGoals = originals.requestPartyGoals;
     Config.partyMinSize = originals.partyMinSize;
     Config.partyMaxSize = originals.partyMaxSize;
     Config.maxBackgroundParties = originals.maxBackgroundParties;

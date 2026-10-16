@@ -1108,7 +1108,7 @@ function startKernel(config = {}) {
                 ? SpotIndex.spotById(spots, acquisitionPlan.next.spotId)
                 : null;
             if (reservedSpot) SpotProfiles.reserveCapacity(occupancy, reservedSpot, [state]);
-            const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp);
+            const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp, { spots, economy });
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp })

@@ -103,6 +103,11 @@ const tests = [
     'tests/test_bot_crystallization_fallback.js',
     'tests/test_bot_henna_snapshot.js',
     'tests/test_party_income_comparison.js',
+    'tests/test_craft_material_party.js',
+    'tests/test_craft_material_party_economy.js',
+    'tests/test_craft_material_party_events.js',
+    'tests/test_craft_material_recruitment.js',
+    'tests/test_party_destination_reservations.js',
     'tests/test_spot_value_table.js',
     'tests/test_spot_income_band_cache.js',
     'tests/test_cold_startup_repair_checkpoint.js',
@@ -1328,6 +1333,11 @@ const optionalGeodataTests = new Set([
 const geodataOnly = process.argv.includes('--geodata');
 // Disposable recovery and market fixtures use the default configuration.
 const defaultConfigTests = new Set([
+    'tests/test_craft_material_recruitment.js',
+    'tests/test_party_destination_reservations.js',
+    'tests/test_craft_material_party.js',
+    'tests/test_craft_material_party_economy.js',
+    'tests/test_craft_material_party_events.js',
     'tests/test_pk_drop_pickup_enchant.js',
     'tests/test_delete_character_trade_meetings.js',
     'tests/test_bot_source_assessment_scope.js',
