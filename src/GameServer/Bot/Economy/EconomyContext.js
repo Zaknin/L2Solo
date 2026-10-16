@@ -18,6 +18,9 @@ const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 const IncomeRoute = require('./EquipmentIncomeRoute');
+const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
+const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
+const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const FENCE_BYTES = 4096;
 const FENCE_RAW_BYTES = 65536, FENCE_SPOTS = 4096;
@@ -734,17 +737,29 @@ function pricing(state, persona, board, timestamp, deps, read = () => {}, prices
 // Price future carried scroll uses only if a review needs extra stock.
 // Resolve the known hunt through the existing catalogue index; a merchant
 // location during a town visit is never a future hunting origin.
+// Below karma that closes towns the saving reads only the origin, the static
+// town and gatekeeper tables and the travel mode (ColdTrip.honest), so a hunt
+// spot's answer is kept on its catalogue object per travel mode: the two
+// route solves run once per spot, not in every build.
+const spotScrollHours = new WeakMap();
 function scrollHoursFor(state, spots, bestSpotId) {
     if (invoke('GameServer/Karma').closesTowns(state.stats?.karma)) return 0;
-    const origin = invoke('GameServer/Bot/AI/SpotIndex').spotById(spots, bestSpotId)?.center
-        || state.stats?.marketReturn?.loc || (state.activity === 'hunting' ? state.loc : null);
+    const spot = SpotIndex.spotById(spots, bestSpotId);
+    if (!spot?.center) return scrollSavingHours(state, state.stats?.marketReturn?.loc || (state.activity === 'hunting' ? state.loc : null));
+    const honest = ColdTrip.honest();
+    const held = spotScrollHours.get(spot);
+    if (held?.honest === honest) return held.hours;
+    const hours = scrollSavingHours(state, spot.center);
+    spotScrollHours.set(spot, { honest, hours });
+    return hours;
+}
+function scrollSavingHours(state, origin) {
     if (!origin || ![origin.locX, origin.locY, origin.locZ].every(Number.isFinite)
         || origin.locX === 0 && origin.locY === 0) return 0;
-    const Trip = invoke('GameServer/Bot/Population/ColdTrip'), Routes = invoke('GameServer/Bot/Travel/TravelRoutes');
-    const destination = Routes.landingTown(origin);
+    const destination = TravelRoutes.landingTown(origin);
     const routeState = { ...state, loc: origin, inventory: { 736: { amount: 0 } } };
-    const walking = Trip.townPlan(routeState, destination);
-    const recall = Trip.townPlan({ ...routeState, inventory: { 736: { amount: 1 } } }, destination);
+    const walking = ColdTrip.townPlan(routeState, destination);
+    const recall = ColdTrip.townPlan({ ...routeState, inventory: { 736: { amount: 1 } } }, destination);
     return walking && recall && recall.scroll ? Math.max(0, walking.durationMs - recall.durationMs) / 3600000 : 0;
 }
 // stock(kind) and kitCost(id) over the kit data of one review: the build and
