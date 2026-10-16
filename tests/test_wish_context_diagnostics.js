@@ -81,7 +81,8 @@ assert.equal(metrics.counts['provider:build:context_miss'], 1, 'publication does
 assert.equal(metrics.durations.network.count, 1);
 assert.equal(metrics.durations.provider.count, 1);
 workerContext.exports.forgetContext(901, 'state_publication');
-assert.equal(Diagnostics.metrics().counts['context:eviction:state_publication'], 1);
+assert.equal(Diagnostics.metrics().counts['context:eviction:state_publication'], undefined);
+assert.equal(workerContext.exports.forState(clone, deps).plan, published.plan, 'publication preserves the held worker decision');
 Config.developerDiagnostics = false; Diagnostics.push = original.push; Diagnostics.stop(); Economy.reset();
 assert.equal(invoke('Database').isReady(), false);
 fs.rmSync(directory, { recursive: true, force: true });

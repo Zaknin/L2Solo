@@ -50,11 +50,8 @@ const sourceHolders = new Set(); // actor keys whose held entry keeps sourceSect
 // a proposed composition (`proposal:` party id) is built and not kept.
 const groups = new Map();
 const GROUP_LIMIT = 256;
-// Shadow count (perf item 1, diagnostics only): per actor the hash of its last
-// input key, when that build ran and what released its context since, to count
-// rebuilds whose inputs equal the bot's previous request (a retained context
-// would have served them), how long after it, and what dropped the context
-// (perf B1: only a short gap is reachable within the worker's memory budget).
+// Diagnostics only: the actor's preceding build key and release reason.
+// These observations never decide whether the live context can be served.
 // The entry also keeps the hash of the plan that build produced (focus, queue
 // with funding, activity, dormant), so a rebuild is counted by whether its
 // inputs and its plan repeated the actor's previous build: how many rebuilds
@@ -1141,9 +1138,6 @@ function buildForState(state, deps) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
             if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_hit', deps.advisoryRefusal);
             for (const kind of deferred) Diagnostics.count('context', 'soft_deferred', kind);
-            // The gap is measured from the last use, as the cache keeps by last use.
-            const last = lastKeyHashes.get(actorKey);
-            if (last) last.at = Date.now();
             // The timeline sees the served request too (tools/timeline): what held, what was deferred.
             if (Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
                 caller: deps.caller || 'economy_context', trigger: deps.trigger || 'request', phase: 'wish_context',
@@ -1178,7 +1172,7 @@ function buildForState(state, deps) {
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     let gate = null, gateDiff = null;
     if (diagnostic) {
-        const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
+        const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey);
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         const eventHash = eventKeyHash(hashes), baseline = held?.plan.statsPacket.wishSections;
         const quietSections = !!baseline && Sections.factEvents(name => baseline[name], Sections.semanticFacts(state, timestamp), state).length === 0;
@@ -1204,7 +1198,7 @@ function buildForState(state, deps) {
         if (last?.sourceParts?.length === sourceHashes.length && last.sourceHash !== sourceHash)
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
-        shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
+        shadowEntry = { hash, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
             sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
