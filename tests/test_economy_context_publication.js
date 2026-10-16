@@ -13,6 +13,11 @@ const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+// A context holds only by its event proof, which needs the warehouse rows
+// and a recompute generation; without them every request builds anew.
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const timestamp = 1e12;
 const deps = { board: new BoardIndex(), spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure(), timestamp };
 function state(id) {
@@ -30,7 +35,8 @@ function visible(context) {
 function mainPublication() {
     Economy.reset();
     const original = state(901), first = Economy.forState(original, deps);
-    const cloned = structuredClone(original); cloned.updatedAt++;
+    // The bot publishes the build's decision; a later snapshot carries it.
+    const cloned = structuredClone({ ...original, stats: { ...original.stats, ...first.statsPacket } }); cloned.updatedAt++;
     const replaced = Economy.forState(cloned, deps);
     assert.strictEqual(replaced.plan, first.plan, 'main actor snapshots retain their existing economic input cache contract');
     assert.deepEqual(visible(replaced), visible(first), 'same economic facts retain exactly the native decision');
@@ -61,11 +67,16 @@ function mainPublication() {
     const current = kernel.states.get(911).state;
     const rebuilt = Economy.forState(current, deps);
     assert.strictEqual(rebuilt.state, current); assert.notStrictEqual(rebuilt, group);
-    kernel.upsert({ state: current, context: { fresh: true } });
-    assert.strictEqual(Economy.forState(current, deps).plan, rebuilt.plan, 'context-only routing changes preserve the same state cache');
-    const stale = { ...current, simulation: { ...current.simulation, revision: 1 } };
+    // The bot publishes the rebuilt decision; the published state holds it.
+    assert.equal(kernel.upsert({ state: { ...current, stats: { ...current.stats, ...rebuilt.statsPacket } },
+        context: { route: null } }), true);
+    const decided = kernel.states.get(911).state;
+    assert.strictEqual(Economy.forState(decided, deps).plan, rebuilt.plan, 'the published decision holds');
+    kernel.upsert({ state: decided, context: { fresh: true } });
+    assert.strictEqual(Economy.forState(decided, deps).plan, rebuilt.plan, 'context-only routing changes preserve the same state cache');
+    const stale = { ...decided, simulation: { ...decided.simulation, revision: 1 } };
     assert.equal(kernel.upsert({ state: stale, context: { stalePage: true } }), false);
-    assert.strictEqual(Economy.forState(current, deps).plan, rebuilt.plan, 'rejected old snapshots do not evict the canonical context');
+    assert.strictEqual(Economy.forState(decided, deps).plan, rebuilt.plan, 'rejected old snapshots do not evict the canonical context');
     kernel.remove(913);
     assert.equal(Economy.size().groups, 1, 'member removal releases its group even without party fields in its state');
     assert.equal(Profile.size().ownerBuilds, before - 1, 'actual removal still releases its build owner');
@@ -81,10 +92,12 @@ module.exports.publicationProbe = async stage => {
     const Economy = require('../Economy/EconomyContext'), Profile = require('./ColdCombatProfile');
     const Runtime = require('../../World/CharacterLocationRuntime');
     const current = kernel.states.get(911)?.state;
-    const options = { timestamp: 1e12 };
+    // As the worker's own callers: the ready board names the producer scope of the proof.
+    const options = { timestamp: 1e12, board: boardReady() };
     if (stage === 'prepare') {
         const members = [911,912].map(id => kernel.states.get(id).state);
-        const first = Economy.forState(current,options),clone = structuredClone(current);
+        // The bot publishes the build's decision; a later snapshot carries it.
+        const first = Economy.forState(current,options),clone = structuredClone({...current,stats:{...current.stats,...first.statsPacket}});
         clone.updatedAt++;
         const fresh = Economy.forState(clone,options);
         assert.strictEqual(fresh.plan,first.plan,'worker fact replacement reuses a validated data-only plan');
@@ -100,9 +113,9 @@ module.exports.publicationProbe = async stage => {
         assert.strictEqual(privateContext.state,clone);
         assert.deepEqual(privateContext.statsPacket,first.statsPacket);
         assert.deepEqual(Economy.size(),retained,'private preparation retains neither context nor engine result');
-        const canonical = Economy.forState(current,options);
+        const canonical = Economy.forState(current,options),decided = {...current,stats:{...current.stats,...canonical.statsPacket}};
         Economy.forState(clone,{...options,rememberContext:false});
-        assert.strictEqual(Economy.forState(current,options).plan,canonical.plan,'private preparation preserves the canonical card');
+        assert.strictEqual(Economy.forState(decided,options).plan,canonical.plan,'private preparation preserves the canonical card');
         const group = Economy.forGroup({id:'worker-publication',adena:200},members,options);
         assert.equal(Economy.size().groups,1);
         module.exports.previous = group.state;
@@ -181,9 +194,13 @@ async function workerPublication() {
     }
     try {
         await wait(message => message.type === 'ready' && message.payload.phase === 'loaded');
-        worker.postMessage(Protocol.envelope('init', epoch, { config: { pvpAggression: 0 } }, 'init'));
+        // A context holds only by its event proof: a recompute generation and a ready warehouse table.
+        worker.postMessage(Protocol.envelope('init', epoch, { config: { pvpAggression: 0 },
+            recomputeGeneration: { code: '1'.repeat(40), config: '2'.repeat(64) } }, 'init'));
         await wait(message => message.type === 'ready' && message.payload.phase === 'running');
         worker.postMessage(Protocol.envelope('pause', epoch, {}, 'pause'));
+        worker.postMessage(Protocol.envelope('table_page', epoch, { tables: ['board', 'personal_warehouse'].map(name =>
+            ({ name, from: null, to: 0, full: true, rows: [], removed: [], last: true })) }, 'tables'));
         const members = [state(911), state(912)];
         worker.postMessage(Protocol.envelope('snapshot_page', epoch, { rows: members.map(bot => ({state:bot,context:{route:null}})),
             initial: true, done: true, ack: true }, 'initial'));
