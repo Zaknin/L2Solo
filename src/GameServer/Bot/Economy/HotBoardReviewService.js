@@ -1,5 +1,6 @@
 const { performance } = require('perf_hooks');
 const BoardReviewEvents = require('./BoardReviewEvents');
+const Diagnostics = require('./EconomyDiagnostics');
 
 function authorityOf(state) {
     return { ownerId: state.simulation?.ownerId || 'legacy_main',
@@ -112,8 +113,19 @@ class HotBoardReviewService {
     ownerChanged(id, reason = 'owner', revision = null) {
         if (!this.running) return;
         id = Number(id);
-        if (!this.life.hotRow(id) || !this.events.ownerStatus(id).priced) this.forgetLook(id);
-        this.events.ownerChanged(Number(id), reason, revision);
+        if (!this.life.hotRow(id)) {
+            // Only a hot owner is reviewed here; drain defers any other. A cold
+            // owner's commit or claim carries nothing for it, and its move to
+            // hot is a phase change that raises this event with the hot row.
+            // The pump still retries a pressure-denied drain of hot owners.
+            this.forgetLook(id);
+            this.events.forget(id);
+            if (Diagnostics.active()) Diagnostics.count('hot_board_review', 'skip', 'not_hot');
+            this.pump();
+            return;
+        }
+        if (!this.events.ownerStatus(id).priced) this.forgetLook(id);
+        this.events.ownerChanged(id, reason, revision);
         this.pump();
     }
 
