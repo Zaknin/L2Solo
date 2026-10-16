@@ -802,20 +802,53 @@ function socialShadowDeps(state, deps, prepared, timestamp, nativeHolds, edges =
     economyDiagnostics.count('card', 'social_check', `${social.kind}:${holds ? 'would_hold' : 'refused'}`);
     return holds ? { ...deps, socialShadow: social } : deps;
 }
-// Diagnostics only: a lifecycle rebuild before a finite travel, death or
-// rest step (resolveTravel, resolveDeathRecovery and resolveRest read none
-// of its pick) names what it changed that the step still carries into the
-// next state: the gear plan, the party request, a started trip or a spot.
-// 'same' counts the rebuilds that kept the same plan, request and trip; the
-// statsPacket fields the rebuild also writes into the state are not compared.
-function countTransitRebuild(state, plannedState, previousPlan) {
+// Diagnostics only: a lifecycle rebuild of a transit step (transitHold
+// below) names, on sampled owners, the decision it changed against the state
+// a held step keeps: the gear plan, the party request, a started trip or
+// spot, the wish focus, decision seq or chosen leaf ('' when none). Its own
+// outputs that drift with wallet, prices and clock (money packet, focus
+// price and hours, dormant wishes, stock targets) are named as drift of a
+// same row; wishSections is the build's own baseline, wishDirty its reset.
+function compareTransit(transit, state, plannedState, statsPacket, previousPlan) {
+    if (!transit) return;
+    // A packet writes only the fields it carries.
+    const stats = state.stats || {}, planned = plannedState.stats || {};
+    const moves = (key, value) => key in statsPacket && value(statsPacket[key]) !== value(stats[key]);
+    invoke('GameServer/Bot/Economy/Hold').compare('transit', state, transit.why, () =>
+        !samePlanJson(planned.equipmentPlan, previousPlan) ? 'plan'
+            : !samePlanJson(planned.partyRequest, stats.partyRequest) ? 'party_request'
+                : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip'
+                    : moves('wishFocus', focus => focus?.[0] ?? null) ? 'focus'
+                        : moves('decisionSeq', seq => Number(seq || 0)) ? 'decision_seq'
+                            : moves('activityLeaf', leaf => Number(leaf || 0)) ? 'activity_leaf' : '',
+    performance.now() - transit.startedAt, () => {
+        for (const key of ['money', 'wishFocus', 'dormantWishes', 'stockTargets'])
+            if (key in statsPacket && !samePlanJson(statsPacket[key], stats[key])) return `packet:${key}`;
+        return '';
+    });
+}
+// The transit hold (Hold.js place 'transit'): a finite travel, death or rest
+// step (resolveTravel, resolveDeathRecovery and resolveRest read none of the
+// lifecycle pick) of a solo bot whose last build's decision events stay
+// quiet skips the whole lifecycle result (plan, stats packet, card, advisory)
+// and resolves its incoming state. Null outside the place, else
+// { why, held, startedAt }.
+function transitHold(state, previousPlan, nativeReplan, context, timestamp) {
+    const Hold = invoke('GameServer/Bot/Economy/Hold');
+    if (!Hold.asked('transit', context)) return null;
     const travel = state.activity === 'traveling' && BackgroundResolver.travelRecord(state.stats?.travel);
-    if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return;
-    const stats = plannedState.stats || {};
-    const moved = !samePlanJson(stats.equipmentPlan, previousPlan) ? 'plan'
-        : !samePlanJson(stats.partyRequest, state.stats?.partyRequest) ? 'party_request'
-            : plannedState.activity !== state.activity || plannedState.spotId !== state.spotId ? 'trip' : 'same';
-    economyDiagnostics.count('lifecycle', 'transit_rebuild', `${state.activity}:${moved}`);
+    if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return null;
+    // A party bot's rebuild gives a resting waiter its fallback spot.
+    if (state.party?.partyId || state.partyId || state.stats?.partyRequest) return null;
+    const why = [], baseline = state.stats?.wishSections;
+    if (!previousPlan) why.push('unproved');
+    else if (!baseline) why.push('sections');
+    // Failure counters and recovery deadlines are the rebuild's to act on.
+    else if (nativeReplan.failure || nativeReplan.invalidSource || nativeReplan.levelingRecovery) why.push('native');
+    // No held MP (wishSections keeps none): a crafter refuses on crafter_mp.
+    else EconomyContext.heldEventsQuiet(state, { baseline, expPerHour: baseline.expHour, persona: BotPersona.of(state) },
+        timestamp, { buyOrderEscrow: context?.buyOrderEscrow }, null, why);
+    return { why, held: Hold.check('transit', why, context), startedAt: performance.now() };
 }
 // L115: legacy execution rejected on remember is counted by its first failing
 // check. A complete event proof remains at the same owner for shadow coverage.
@@ -1210,6 +1243,13 @@ function startKernel(config = {}) {
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
             if (karmaPlan) return karmaPlan;
             const previousPlan = state.stats?.equipmentPlan || null;
+            // Failure counters and recovery deadlines are live native facts,
+            // even when the expensive wish calculation still holds.
+            const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
+            // A held transit step resolves its incoming state, as a trade
+            // meeting does: the kernel takes the state when there is no plan.
+            const transit = transitHold(state, previousPlan, nativeReplan, context, timestamp);
+            if (transit?.held) return null;
             const spots = planningSpots;
             const occupancy = currentPlanningOccupancy(timestamp);
             // GearPlanSelection uses EconomyContext's same prepared occupation
@@ -1220,9 +1260,6 @@ function startKernel(config = {}) {
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
             const deps = { spots, occupancy, timestamp, board: boardReady(),
                 buyOrderEscrow: context?.buyOrderEscrow, workshop, routeRows };
-            const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
-            // Failure counters and recovery deadlines are live native facts,
-            // even when the expensive wish calculation still holds.
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
@@ -1274,6 +1311,7 @@ function startKernel(config = {}) {
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
                 const leaf = refreshed.economy.network.activity;
+                compareTransit(transit, state, routedState, refreshed.economy.statsPacket, previousPlan);
                 return { statsPacket: refreshed.economy.statsPacket,
                     ...(refreshed.economyPlan ? { economyPlan: refreshed.economyPlan } : {}),
                     activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
@@ -1340,7 +1378,7 @@ function startKernel(config = {}) {
                 nullReuse ? { ...refreshed.advisory, card: heldDecision }
                     : ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps), seen, deps, !nullReuse);
             if (nullReuse && economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
-            if (economyDiagnostics.active()) countTransitRebuild(state, routedState, previousPlan);
+            compareTransit(transit, state, routedState, economy.statsPacket, previousPlan);
             return {
                 ...(showcase?.economyPlan || nullReuse && refreshed?.economyPlan
                     ? { economyPlan: showcase?.economyPlan || refreshed.economyPlan } : {}),
