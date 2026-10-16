@@ -11,6 +11,7 @@ const Metrics  = invoke('GameServer/Bot/Population/PopulationMetrics');
 const DataCache = invoke('GameServer/DataCache');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Consumption = require('../Economy/ConsumptionDiagnostics');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
@@ -356,17 +357,35 @@ function equipmentCompletionSignal(state = {}) {
     };
 }
 
+// Equipment-advance keys this process has seen enqueued. A clan action key
+// stays taken for good, live or finished (Database.enqueueClanAction), so a
+// repeat of the same signal on every commit or save would only re-read it.
+// A restart or the bound below costs one idempotent read per key.
+const ENQUEUED_ADVANCE_LIMIT = 4096;
+const enqueuedAdvanceKeys = new Set();
+
 function enqueueEquipmentGoalAdvance(signal) {
     if (!signal?.clanId || !signal.goalKey) return Promise.resolve(null);
+    const actionKey = `clan:${signal.clanId}:equipment-advance:${signal.goalKey}`;
+    if (enqueuedAdvanceKeys.has(actionKey)) {
+        if (Diagnostics.active()) Diagnostics.count('clan_action', 'skip', 'equipment_advance_enqueued');
+        return Promise.resolve(null);
+    }
     return Database.enqueueClanAction({
         clanId: signal.clanId,
-        actionKey: `clan:${signal.clanId}:equipment-advance:${signal.goalKey}`,
+        actionKey,
         actionType: 'goal_plan',
         priority: 100,
         payload: {
             reason: 'equipment_goal_completed',
             goalKey: signal.goalKey
         }
+    }).then((result) => {
+        if (result?.ok) {
+            if (enqueuedAdvanceKeys.size >= ENQUEUED_ADVANCE_LIMIT) enqueuedAdvanceKeys.clear();
+            enqueuedAdvanceKeys.add(actionKey);
+        }
+        return result;
     }).catch((error) => {
         utils.infoWarn('BotLife', 'failed to enqueue clan equipment advance for %s: %s', signal.goalKey, error.message || error);
         return null;
