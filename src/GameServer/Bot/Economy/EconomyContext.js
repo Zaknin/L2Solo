@@ -5,6 +5,7 @@ const Roles = require('../AI/BotRoles');
 const Knowledge = require('../AI/KnowledgeLearning');
 const Crystallization = require('./BotCrystallization');
 const Floor = require('../Population/SurvivalFloor');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
 
 const GearThreat = require('./GearThreat');
 const Improvement = require('./BotImprovementPolicy');
@@ -568,14 +569,17 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
+    // A held build passes its entry's fields; a card carries them on its leaf.
+    const heldUnits = options.heldUnits ?? leaf?.heldAtDecision;
+    const craftReservations = options.craftReservations ?? leaf?.craftReservations;
     // A held craft's reserved inputs may only grow before it runs: a stock
     // row holds while its owned+incoming does not fall (its own delivery
     // moves incoming into the bag), a physical row while its count does not.
     // A loss below what the decision reserved stays a quantity event.
-    const reserved = leaf?.activity === 'crafting' && Array.isArray(options.craftReservations) ? options.craftReservations : null;
+    const reserved = leaf?.activity === 'crafting' && Array.isArray(craftReservations) ? craftReservations : null;
     const isReserved = id => reserved?.some(row => row[0] === id) === true;
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
-        if (kind === 'stockPhysical' && isReserved(id) && currentOwned >= originalOwned) return originalOwned;
+        if (kind === 'stockPhysical' && isReserved(id) && key === leaf.rootKey && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
@@ -584,13 +588,13 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // Own outputs are not inputs: the leaf's own item moves with its progress.
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
-    const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
-    if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
+    const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) return refuse('quantity', ['sources', 'money']);
     const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
         : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || !ownQuantityRow(row, leaf.rootKey, own)) };
     const stock = stockReader(state, key => roots.get(key));
     const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
-        && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
+        && row[1] === leaf.rootKey && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
     const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
         const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
         return row && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
@@ -600,7 +604,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
-    const sale = own === null && !reserved ? null : row => row[0] !== own && !reserved?.some(input => input[0] === row[0]);
+    const sale = own === null && !reserved ? null : row => row[0] !== own && !isReserved(row[0]);
     const originalSales = sale ? proof.liquidation.rows.filter(sale) : proof.liquidation.rows;
     const currentSales = liquidation.proof && (sale ? liquidation.proof.rows.filter(sale) : liquidation.proof.rows);
     let changedLoot = false;
@@ -627,7 +631,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
-    const checked = own === null ? leaf : { ...leaf, heldAtDecision: options.heldUnits };
+    const checked = own === null ? leaf : { ...leaf, heldAtDecision: heldUnits };
     if (leaf === null) {
         // A completed native graph may choose no economic action. Execution
         // keeps its ordinary hunt/rest/travel path after every shared check.
@@ -861,11 +865,12 @@ function bagSafety(state, timestamp) {
     return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
 }
 // The event proof's bag safety: the held leaf's own item stack is its
-// progress, not a slot input (its first unit is no event). Its weight stays
-// in the load: a weight tier crossing still is one. Capture and verdict only.
+// progress, not a slot input (its first unit is no event) while the bag is
+// below its limit: a full bag is one. Its weight stays in the load: a weight
+// tier crossing still is one. Capture and verdict only.
 function eventBagSafety(safety, state, leaf) {
     const own = ColdEconomyDecision.ownItem(leaf), row = own === null ? null : state.inventory?.[own];
-    if (!row || !Array.isArray(safety)) return safety;
+    if (!row || !Array.isArray(safety) || safety[0] >= InventoryLimits.forState(state)) return safety;
     return [safety[0] - Floor.stateInventory({ inventory: { [own]: row } }, DataCache.items).slots, safety[1], safety[2]];
 }
 // Each distinct token once, in first-seen order, and per [id, token] pair
@@ -1585,7 +1590,6 @@ function buildForState(state, deps) {
     const eventShadow = candidate ? { accepted: candidate,
         verdict: heldBuildVerdict(state, candidate.eventProof, deps, {
             baseline: candidate.baseline, activity: candidate.activity, leaf: candidate.card?.activity,
-            heldUnits: candidate.card?.activity?.heldAtDecision, craftReservations: candidate.card?.activity?.craftReservations,
             mp: candidate.mp, timestamp, softPrefix: candidate.softPrefix === true }) } : null;
     const basis = activeEvents && eventVerdict.reason === 'money' && heldBuildVerdict(state, held.plan.eventProof, deps, {
         baseline: held.plan.statsPacket.wishSections, activity: held.activity, leaf: held.plan.network?.activity,
