@@ -9,6 +9,7 @@ const Equipment = require('../AI/BotEquipmentCompatibility');
 const Network = require('./WishNetwork');
 const Progression = require('../AI/PersonalGearProgression');
 const SoulCrystals = require('../../Items/SoulCrystalProgression');
+const DualSwords = require('../../Items/C4DualSwordCombinations');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -530,8 +531,9 @@ function buildProjection(state, ctx, deps) {
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
         const recipes = Recipes.resolveVariantsByProductId(id);
-        const alternatives = recipes.length ? recipes : invoke('GameServer/Items/C4DualSwordCombinations').loadRecipes()
-            .filter(row => Number(row.productId) === Number(id));
+        // A dual sword has one combination per product: the owner's index, not a filter per node.
+        const combination = recipes.length ? null : DualSwords.resolveByProductId(id);
+        const alternatives = recipes.length ? recipes : combination ? [combination] : [];
         for (const recipe of alternatives) {
             const craft = craftPath(recipe, id, depth);
             if (craft) paths.push(craft);
@@ -1196,7 +1198,7 @@ function personalCraftPlan(state, context) {
     // the spending queue. Route the native selected leaf to the equipment
     // owner; it cannot be executed by the dwarf workshop/production owner.
     const dual = leaf.kind === 'craft' && leaf.activity === 'crafting' && leaf.executable && !leaf.funding
-        ? invoke('GameServer/Items/C4DualSwordCombinations').resolveByRecipeId(leaf.recipeId) : null;
+        ? DualSwords.resolveByRecipeId(leaf.recipeId) : null;
     if (dual?.productId === targetId && dual.materials.every(row =>
         Number(state.inventory?.[row.selfId]?.amount || 0) >= row.amount)) return {
         strategy: 'craft', status: 'ready_to_craft', next: null,
