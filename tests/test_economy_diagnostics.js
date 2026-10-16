@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { create, LIMITS } = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
+const { create, LIMITS, isPlanMismatch } = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
 const { EconomyDiagnosticWriter, FILES, AGE } = require('../src/EconomyDiagnosticWriter');
 let timestamp = 1000000;
 const disabled = create({ config: { developerDiagnostics: false, economyDiagnostics: true }, now: () => { throw Error('off samples time'); } });
@@ -50,11 +50,44 @@ for (const imported of [false, true]) {
     for (let i = 0; i < 48; i++) assert(send({ owner: 64, phase: 'wish_alternative', reason: String(i) }));
     assert.equal(send({ owner: 64, phase: 'wish_context', reason: 'hit_same_inputs' }), false,
         'a cheap hit cannot consume a reserved build-summary slot');
-    for (let i = 0; i < 16; i++) assert(send({ owner: 64, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }));
+    for (let i = 0; i < 16; i++) assert(send({ owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }));
     assert.equal(admission.stats().queued, LIMITS.perSecond);
-    assert.equal(send({ owner: 64, phase: 'wish_context', gate: 'would_hold' }), false, 'the original total rate cap still holds');
+    assert.equal(send({ owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }), false,
+        'an unselected mismatch still obeys the original total rate cap');
     assert.equal(admission.stats().drops.rate, 2);
 }
+// Exact completed mismatches bypass owner selection only, on both hops.
+const mismatch = { owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'queue' };
+for (const imported of [false, true]) {
+    const admission = create({ config, thread: imported ? 'main' : 'worker', now: () => timestamp });
+    assert.equal(admission.ownerIds(), '64,128');
+    const send = row => imported ? admission.accept([JSON.stringify(row)]) === 1 : admission.push(row);
+    for (const gateDiff of ['focus', 'leaf', 'queue', 'funded']) assert(send({ ...mismatch, gateDiff }));
+    for (const invalid of [{ owner: 0 }, { owner: -1 }, { owner: 1.5 }, { owner: '192' }, { owner: Number.MAX_SAFE_INTEGER + 1 },
+        { phase: 'wish_alternative' }, { gate: 'check_failed' }, { gateDiff: 'same' }, { gateDiff: 'other' }]) {
+        assert.equal(isPlanMismatch({ ...mismatch, ...invalid }), false);
+        assert.equal(send({ ...mismatch, ...invalid }), false, 'the mismatch path is not a generic force-record escape');
+    }
+    assert.equal(admission.ownerIds(), '64,128', 'the witness does not enroll an owner for detail');
+    assert.equal(send({ owner: 192, phase: 'wish_alternative' }), false);
+    assert.equal(admission.stats().selected, 2);
+    const received = []; admission.connect(batch => { received.push(...batch.records.map(JSON.parse)); return true; });
+    assert.equal(received.length, 4);
+    assert(received.every(row => row.owner === 192));
+}
+const automatic = create({ config: { developerDiagnostics: true, economyDiagnostics: true }, now: () => timestamp });
+assert(automatic.push(mismatch));
+assert.equal(automatic.stats().selected, 0, 'a hash-eligible witness never calls the automatic selector');
+assert.equal(automatic.ownerIds(), '0');
+assert.equal(automatic.push({ ...mismatch, gateDiff: 'same', owner: 193 }), false);
+const noDetail = create({ config: { developerDiagnostics: true, economyDiagnostics: false }, now: () => { throw Error('detail off samples time'); } });
+assert.equal(noDetail.push(mismatch), false);
+const oversizeWitness = { ...mismatch };
+for (const field of ['trigger', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey',
+    'proposalId', 'moved', 'readset', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot'])
+    oversizeWitness[field] = 'x'.repeat(96);
+assert.equal(automatic.push(oversizeWitness), false);
+assert.equal(automatic.stats().drops.size, 1, 'mismatch admission never bypasses the record byte cap');
 // Backlogged queues preserve summary space across seconds, including tiny test capacities.
 for (const [capacity, ordinary] of [[4, 3], [64, 48], [256, 192]]) {
     let at = timestamp;
@@ -63,12 +96,59 @@ for (const [capacity, ordinary] of [[4, 3], [64, 48], [256, 192]]) {
     at += 1000;
     assert.equal(admission.push({ owner: 64, phase: 'wish_context', reason: 'hit_same_inputs' }), false);
     for (let i = ordinary; i < capacity; i++) {
-        at += 1000; assert(admission.push({ owner: 64, phase: 'wish_context', gate: 'event_key' }));
+        at += 1000; assert(admission.push(mismatch));
     }
     at += 1000;
-    assert.equal(admission.push({ owner: 64, phase: 'wish_context', gate: 'event_key' }), false);
+    assert.equal(admission.push(mismatch), false);
     assert.equal(admission.stats().queued, capacity);
     assert.equal(admission.stats().drops.queue, 2);
+}
+// The compact all-owner row fits without changing the existing byte limit.
+const maxText = 'x'.repeat(64), maxNumber = Number.MAX_SAFE_INTEGER;
+const compact = create({ config, now: () => maxNumber }), compactRows = [];
+compact.connect(batch => { compactRows.push(...batch.records.map(JSON.parse)); return true; });
+assert(compact.push({ ...mismatch, owner: maxNumber, gateDiff: 'funded', baselineAt: maxNumber,
+    sequence: maxNumber, inputActivityLeaf: 0xffffffff, decisionSeq: maxNumber, activityLeaf: 0xffffffff,
+    heldFocus: maxText, freshFocus: maxText, heldLeaf: maxText, freshLeaf: maxText,
+    moved: maxText, readset: 'market', reconsidered: 1, choiceEvent: maxText, social: 'helping:focus',
+    queueIndex: 11, heldRoot: maxText, freshRoot: maxText, heldFunded: 1, freshFunded: 0 }));
+assert.equal(compactRows.length, 1);
+assert(Buffer.byteLength(JSON.stringify(compactRows[0])) + 1 <= LIMITS.recordBytes);
+assert.equal(compactRows[0].freshFunded, 0, 'a current-wallet unfunded witness survives serialization');
+assert.equal(compactRows[0].heldRoot, maxText);
+assert.equal(compact.stats().selected, 0);
+
+// Exercise the actual comparator against the native current-wallet owner.
+{
+    const { moneyQueue } = require('../src/GameServer/Bot/Economy/WishNetwork');
+    const Funding = require('../src/GameServer/Bot/Economy/PurchaseFunding');
+    const source = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Economy/EconomyContext.js'), 'utf8');
+    const start = source.indexOf('function gatePlanDiff(');
+    let reprices = 0;
+    const compare = require('node:vm').runInNewContext(`(${source.slice(start, source.indexOf('\n// Soft market', start))})`,
+        { Funding, moneyQueue(...args) { reprices++; return moneyQueue(...args); } });
+    const wish = (key, price = 10) => ({ key, price, valueHours: 10 });
+    const network = queue => ({ focus: ['power:1'], activity: { key: 'leaf:1' }, queue });
+    const check = (left, right, kind, expected) => {
+        const evidence = {}; reprices = 0;
+        assert.equal(compare({ adena: 15 }, { plan: { network: left, survivalReserve: 0, hourAdena: 100 } },
+            { network: right, survivalReserve: 0, hourAdena: 100 }, {}, evidence), kind);
+        assert.deepEqual(evidence, expected);
+        assert.equal(reprices, ['same', 'funded'].includes(kind) ? 2 : 0, 'witness capture never adds repricing');
+    };
+    check(network([wish('a')]), { ...network([wish('b')]), focus: ['power:2'], activity: { key: 'leaf:2' } }, 'focus', {});
+    check(network([wish('a')]), { ...network([wish('b')]), activity: { key: 'leaf:2' } }, 'leaf', {});
+    check(network([wish('a'), wish('b')]), network([wish('a'), wish('c')]), 'queue',
+        { queueIndex: 1, heldRoot: 'b', freshRoot: 'c' });
+    check(network([wish('a'), wish('b')]), network([wish('c')]), 'queue',
+        { queueIndex: 0, heldRoot: 'a', freshRoot: 'c' });
+    check(network([wish('a')]), network([wish('a'), wish('b')]), 'queue',
+        { queueIndex: 1, heldRoot: undefined, freshRoot: 'b' });
+    check(network([wish('a'), wish('b')]), network([wish('a')]), 'queue',
+        { queueIndex: 1, heldRoot: 'b', freshRoot: undefined });
+    check(network([{ ...wish('a'), funded: false }]), network([{ ...wish('a', 20), funded: true }]), 'funded',
+        { queueIndex: 0, heldRoot: 'a', freshRoot: 'a', heldFunded: 1, freshFunded: 0 });
+    check(network([{ ...wish('a'), funded: false }]), network([{ ...wish('a'), funded: true }]), 'same', {});
 }
 const sample = create({ config: { developerDiagnostics: true, economyDiagnostics: true }, now: () => timestamp });
 for (let id = 1; id <= 5000; id++) sample.enabled(id);

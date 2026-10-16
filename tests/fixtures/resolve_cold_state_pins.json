@@ -660,13 +660,13 @@
    "0 craft.planEvents(#501:crafting@old_ground n=- st=travel t=in, undefined, undefined)",
    "0 craft(#501:crafting@old_ground n=- st=equipmentPlan,travel t=in)",
    "0 <returned promise>",
-   "1 upsertState(#501:hunting@old_ground n=1700000030001 st=equipmentPlan,travel t=in>wait, \"cold_craft_wait\")",
+   "1 upsertState(#501:hunting@old_ground n=1700000030001 st=activityLeaf,decisionSeq,equipmentPlan,travel,wishDirty t=in>wait, \"cold_craft_wait\")",
    "6 M.duration(2)"
   ],
   "saves": [
-   "upsertState | cold_craft_wait | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000,\"nextResolveAt\":1700000030001},\"stats\":{\"travel\":null},\"tag\":\"in>wait\"}"
+   "upsertState | cold_craft_wait | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000,\"nextResolveAt\":1700000030001},\"stats\":{\"travel\":null,\"decisionSeq\":1,\"activityLeaf\":0,\"wishDirty\":16},\"tag\":\"in>wait\"}"
   ],
-  "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000,\"nextResolveAt\":1700000030001},\"stats\":{\"travel\":null},\"tag\":\"in>wait\"},\"debug\":{\"reason\":\"materials_changed\",\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"crafting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"old\":1}},\"tag\":\"in>wait\"}}}",
+  "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000,\"nextResolveAt\":1700000030001},\"stats\":{\"travel\":null,\"decisionSeq\":1,\"activityLeaf\":0,\"wishDirty\":16},\"tag\":\"in>wait\"},\"debug\":{\"reason\":\"materials_changed\",\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"crafting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"old\":1}},\"tag\":\"in>wait\"}}}",
   "settledTick": 9,
   "planDeferred": 1,
   "dateNowCalls": 3

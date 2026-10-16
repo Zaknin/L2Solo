@@ -720,17 +720,32 @@ function focusKind(key) {
     return FOCUS_KINDS.has(kind) ? kind : 'other';
 }
 // Compare funded flags only after both plans see the request's current wallet.
-function gatePlanDiff(state, held, fresh, deps) {
+function gatePlanDiff(state, held, fresh, deps, evidence = null) {
     const before = held.plan.network;
     if (before.focus?.[0] !== fresh.network.focus?.[0]) return 'focus';
     if ((before.activity?.key ?? before.activity?.kind ?? null) !== (fresh.network.activity?.key ?? fresh.network.activity?.kind ?? null)) return 'leaf';
     const left = before.queue || [], right = fresh.network.queue || [];
-    if (left.length !== right.length || left.some((row, at) => row.key !== right[at].key)) return 'queue';
+    for (let at = 0; at < Math.max(left.length, right.length); at++) {
+        if (at >= left.length || at >= right.length || left[at].key !== right[at].key) {
+            if (evidence) Object.assign(evidence, { queueIndex: at, heldRoot: left[at]?.key, freshRoot: right[at]?.key });
+            return 'queue';
+        }
+    }
     const current = new Map(moneyQueue(left, Funding.budget(state, deps.buyOrderEscrow),
         held.plan.survivalReserve, held.plan.hourAdena > 0 ? 1 / held.plan.hourAdena : 0).queue.map(row => [row.key, row.funded]));
     const repriced = moneyQueue(right, Funding.budget(state, deps.buyOrderEscrow),
         fresh.survivalReserve, fresh.hourAdena > 0 ? 1 / fresh.hourAdena : 0).queue;
-    return repriced.some(row => current.get(row.key) !== row.funded) ? 'funded' : 'same';
+    for (let at = 0; at < repriced.length; at++) {
+        const row = repriced[at], heldFunded = current.get(row.key);
+        if (heldFunded !== row.funded) {
+            // Flags and index belong to the already-repriced current-wallet
+            // queue. Stored flags are never a queue-mismatch witness.
+            if (evidence) Object.assign(evidence, { queueIndex: at, heldRoot: row.key, freshRoot: row.key,
+                heldFunded: Number(heldFunded), freshFunded: Number(row.funded) });
+            return 'funded';
+        }
+    }
+    return 'same';
 }
 // Soft market/crowd never excuses the held leaf's own offer, funding and
 // route: they are checked exactly through the existing authority.
@@ -1544,7 +1559,7 @@ function buildForState(state, deps) {
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
-    let gate = null, gateDiff = null, socialDiff = null;
+    let gate = null, gateDiff = null, socialDiff = null, gateEvidence = null;
     let improvementMark;
     if (diagnostic) {
         // Only a diagnostic miss scans native targets. A hit performs none;
@@ -1873,7 +1888,8 @@ function buildForState(state, deps) {
         const sameSocialBuild = social && held?.plan.statsPacket.wishSections === social.baseline
             && socialLeaf?.activity === social.kind && socialLeaf.rootKey === social.leaf.rootKey
             && socialLeaf.targetId === social.leaf.targetId;
-        const comparison = sameSocialBuild || gate === 'would_hold' ? gatePlanDiff(state, held, context, deps) : null;
+        if (gate === 'would_hold') gateEvidence = {};
+        const comparison = sameSocialBuild || gate === 'would_hold' ? gatePlanDiff(state, held, context, deps, gateEvidence) : null;
         if (sameSocialBuild) { social.outcome = comparison; socialDiff = comparison; }
         if (gate === 'would_hold') {
             gateDiff = comparison;
@@ -1893,7 +1909,17 @@ function buildForState(state, deps) {
     }
     // The build's record carries its cause (tools/timeline): the miss reason, the key parts that moved since
     // the actor's previous build, whether the plan repeated, the read-set verdict and the time it took.
-    if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
+    const mismatch = gateDiff !== null && Diagnostics.isPlanMismatch({ owner: state.characterId, phase: 'wish_context', gate, gateDiff });
+    if (mismatch) Diagnostics.push({ owner: state.characterId, phase: 'wish_context', gate, gateDiff,
+        baselineAt: held.plan.statsPacket.wishSections.at, sequence: inputSequence, inputActivityLeaf,
+        decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
+        heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0],
+        heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key,
+        moved: movedText(movedParts || []), readset: readsetVerdict || 'none',
+        reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
+        ...(['focus', 'queue'].includes(socialDiff) ? { social: `${deps.socialShadow.kind}:${socialDiff}` } : null),
+        ...gateEvidence });
+    else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
         outcome: planOutcome, moved: movedText(movedParts || []), readset: readsetVerdict || 'none', durationMs: Math.round(elapsed * 100) / 100,

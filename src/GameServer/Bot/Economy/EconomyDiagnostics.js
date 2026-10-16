@@ -10,9 +10,18 @@ const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 're
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
     'errandAt', 'receiptUnits', 'receiptSpent', 'decisionSeq', 'activityLeaf', 'inputActivityLeaf', 'inputHash', 'target', 'owned', 'missing', 'requested', 'planned',
     'wallet', 'available', 'budget', 'reserve', 'priorityReserve', 'escrow', 'unitPrice', 'valueHours',
-    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'baselineAt', 'reconsidered'];
+    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'baselineAt', 'reconsidered',
+    'queueIndex', 'heldFunded', 'freshFunded'];
 const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
-    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent'];
+    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot'];
+
+// A completed native comparison is useful even outside the owner detail
+// sample. It still shares every record/rate/queue/transport limit below.
+function isPlanMismatch(input) {
+    return Number.isSafeInteger(input?.owner) && input.owner > 0
+        && input.phase === 'wish_context' && input.gate === 'would_hold'
+        && ['focus', 'leaf', 'queue', 'funded'].includes(input.gateDiff);
+}
 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {
@@ -122,10 +131,13 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     }
     function enqueue(input, imported = false) {
         if (!detail()) return false;
-        if (imported) {
-            refreshSelection();
-            if (!(explicit || selected).has(Number(input?.owner))) return false;
-        } else if (!enabled(input?.owner)) return false;
+        // A mismatch never enrolls its owner for alternatives or later detail.
+        if (!isPlanMismatch(input)) {
+            if (imported) {
+                refreshSelection();
+                if (!(explicit || selected).has(Number(input?.owner))) return false;
+            } else if (!enabled(input?.owner)) return false;
+        }
         offered++;
         const timestamp = now(), bucket = Math.floor(timestamp / 1000);
         if (second !== bucket) { second = bucket; rate = 0; }
@@ -195,4 +207,4 @@ function sizeBucket(bytes) {
     return bytes < 2048 ? 'lt2k' : bytes < 4096 ? '2_4k' : bytes <= 8192 ? '4_8k' : bytes <= 16384 ? '8_16k'
         : bytes <= 32768 ? '16_32k' : 'over32k';
 }
-module.exports = { ...create(), create, LIMITS, sizeBucket };
+module.exports = { ...create(), create, LIMITS, sizeBucket, isPlanMismatch };

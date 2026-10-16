@@ -728,7 +728,8 @@ class ColdEconomyDecisions {
     }
     fence(id) {
         const card = this.byId.get(Number(id));
-        if (card) { card.held = false; card.stale = true; }
+        if (!card?.advisory) { this.forget(id); return; }
+        card.held = false; card.stale = true;
     }
 
     // The worker's decision made on exactly this state, or held for a command.

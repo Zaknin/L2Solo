@@ -713,9 +713,12 @@ async function run() {
     }
     const EXPECTED = require('./fixtures/resolve_cold_state_pins.json');
     assert.deepStrictEqual(Object.keys(actual), Object.keys(EXPECTED), 'case list changed');
+    const differences = [];
     for (const name of Object.keys(EXPECTED)) {
-        assert.deepStrictEqual(actual[name], EXPECTED[name], `resolveColdState pin "${name}" changed`);
+        try { assert.deepStrictEqual(actual[name], EXPECTED[name], `resolveColdState pin "${name}" changed`); }
+        catch (error) { differences.push(error.message); }
     }
+    assert.strictEqual(differences.length, 0, differences.join('\n\n'));
     // Spot checks that the recorded pins mean what they say.
     assert.match(actual.sync_throw_on_atlas.trace.at(-1), /<returned throw:atlas_unavailable>/);
     assert.match(actual.hall_visit_value_passthrough.trace.at(-1), /<returned value>/);
@@ -725,6 +728,8 @@ async function run() {
     assert.match(actual.main_shopping_hot_fence_refusal.outcome, /^rejected:.*hot_handoff_fenced/);
     assert.strictEqual(actual.main_hunt_default.planDeferred, 1);
     assert.strictEqual(actual.worker_plan_retarget.planDeferred, 0);
+    const rejectedCraft = JSON.parse(actual.craft_wait_recovers_hunting.outcome).state.stats;
+    assert.deepStrictEqual([rejectedCraft.decisionSeq, rejectedCraft.activityLeaf, rejectedCraft.wishDirty], [1, 0, 16]);
     console.log(`resolveColdState pins passed (${Object.keys(actual).length} cases)`);
 }
 
