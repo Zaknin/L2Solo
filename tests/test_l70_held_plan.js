@@ -16,6 +16,8 @@ const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 const Events = invoke('GameServer/Bot/AI/DecisionEvents');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const { BoardIndex, SELL } = invoke('GameServer/AfkTrade/BoardIndex');
@@ -52,6 +54,41 @@ const ownResult = (state, activity = 'resting') => ({ ...state, activity, adena:
 try {
     assert.equal(Sections.capability(subject(1), T), Sections.capability(subject(1), T + 11 * MINUTE),
         'fixture: the game day/night build mark does not move inside the test window');
+    // A retained build accepts its exact unpublished input or its own output,
+    // never another leaf/focus that merely shares the decision sequence.
+    {
+        const diagnostic = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        const input = subject(93014), economy = Economy.forState(input, deps);
+        const before = builds;
+        assert.strictEqual(Economy.forState(input, deps).plan, economy.plan, 'exact prepublication input replay remains valid');
+        assert.equal(builds, before);
+        const published = { ...input, stats: { ...input.stats, ...economy.statsPacket } };
+        const accepted = Decisions.advisory(economy, input);
+        assert.equal(accepted.decisionSeq, economy.statsPacket.decisionSeq, 'acceptance uses build output before publication');
+        assert.equal(accepted.activityLeaf, economy.statsPacket.activityLeaf);
+        assert.equal(accepted.focus, economy.statsPacket.wishFocus?.[0] ?? null);
+        assert.strictEqual(accepted.baseline, economy.statsPacket.wishSections);
+        const foreignLeaf = { ...published, stats: { ...published.stats, activityLeaf: published.stats.activityLeaf + 1 } };
+        const foreignFocus = { ...published, stats: { ...published.stats, wishFocus: ['foreign:focus', 0, 0] } };
+        for (const [foreign, reason] of [[foreignLeaf, 'activity_leaf'], [foreignFocus, 'wish_focus']]) {
+            assert.equal(Decisions.refusal(foreign, accepted, deps), reason);
+            const refused = Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0;
+            assert.notStrictEqual(Economy.forState(foreign, { ...deps, rememberContext: false }).plan, economy.plan,
+                'a foreign output tuple cannot reuse the cache entry');
+            assert.equal((Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0) - refused, 1,
+                'shadow coverage refuses the same foreign output instead of counting would_hold');
+        }
+        const foreignInput = { ...input, stats: { ...input.stats, wishFocus: ['foreign:input', 0, 0] } };
+        assert.equal(Economy.inputKey(foreignInput, deps), Economy.inputKey(input, deps), 'the old raw key omits focus');
+        assert.notStrictEqual(Economy.forState(foreignInput, { ...deps, rememberContext: false }).plan, economy.plan,
+            'an equal raw key still requires the original input tuple');
+        assert.equal(Decisions.refusal(published, { ...accepted, baseline: undefined }, deps), 'no_sections',
+            'legacy accepted metadata takes one conservative rebuild');
+        assert.equal(Decisions.refusal(published, { ...accepted, focus: undefined }, deps), 'wish_focus',
+            'legacy missing focus cannot bless an otherwise equal tuple');
+        Config.developerDiagnostics = diagnostic;
+    }
     // (a) after-result own result only: no new build, the card is restamped.
     {
         const { state, economy, accepted } = decided(93001);
@@ -234,6 +271,22 @@ try {
         assert.strictEqual(Economy.forState(state, at(T + MINUTE)).plan, economy.plan, 'a moved market token waits');
         assert.equal(builds, before);
         assert(Decisions.refreshAdvisory(state, accepted, at(T + MINUTE)), 'the card waits on the same soft market');
+        const newer = { ...state, stats: { ...state.stats,
+            wishSections: { ...state.stats.wishSections, at: T + 9 * MINUTE } } };
+        const sameOutput = Decisions.advisory(economy, newer);
+        assert.strictEqual(sameOutput.baseline, accepted.baseline, 'publication cannot restamp an older build baseline');
+        const refreshed = Decisions.refreshAdvisory(newer, accepted, at(T + MINUTE));
+        assert(refreshed);
+        assert.strictEqual(refreshed.advisory.baseline, accepted.baseline);
+        assert.strictEqual(refreshed.economy.statsPacket.wishSections, accepted.baseline,
+            'a refreshed packet republishes its accepted baseline, not a foreign newer snapshot');
+        assert.equal(Decisions.refreshAdvisory(newer, refreshed.advisory, at(T + 11 * MINUTE)), null,
+            'equal outputs with a foreign newer baseline cannot extend the original market delay');
+        const changedCapability = { ...newer, level: newer.level + 1 };
+        changedCapability.stats = { ...newer.stats, wishSections: { ...newer.stats.wishSections,
+            build: Sections.capability(changedCapability, T + MINUTE) } };
+        assert.equal(Decisions.refusal(changedCapability, accepted, at(T + MINUTE)), 'capability',
+            'a foreign snapshot cannot bless a capability change against an older card');
         assert.equal(Economy.calculationHolds(state, accepted.fence, at(T + MINUTE)), false,
             'without the card options the proof stays exact');
         assert.equal(Decisions.refreshAdvisory(state, accepted, at(T + 11 * MINUTE)), null, 'after 10 min the card is re-examined');

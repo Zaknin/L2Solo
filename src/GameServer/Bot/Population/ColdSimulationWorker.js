@@ -793,7 +793,7 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
     // market token already deferred by the reused plan stays soft (L70).
     const why = diagnostic ? [] : undefined;
     if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
-        .calculationHolds(seen, advisory.fence, deps, { baseline: seen.stats?.wishSections, activity: advisory.activity,
+        .calculationHolds(seen, advisory.fence, deps, { baseline: advisory.baseline, activity: advisory.activity,
             leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()), why }))) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
         advisory = null;

@@ -374,6 +374,7 @@ function economyFor(state, deps = {}) {
 function advisory(economy, state, activity = state.activity) {
     const card = capture(economy, state);
     const fence = economy?.calculationFence;
+    const packet = economy?.statsPacket;
     const diagnostic = Diagnostics.active();
     if (!(fence instanceof Uint8Array)) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_fence'); return null; }
     if (diagnostic) {
@@ -384,8 +385,12 @@ function advisory(economy, state, activity = state.activity) {
         else if (total > MAX_ADVISORY_BYTES) Diagnostics.count('card', 'drop', 'oversize_total');
     }
     if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
-    return { card, fence, decisionSeq: Number(state.stats?.decisionSeq || 0),
-        activityLeaf: Number(state.stats?.activityLeaf || 0), activity, mp: Number(state.vitals?.mp) };
+    // Acceptance belongs to the build's output, even before its caller has
+    // published that packet. A later publication never restarts its delays.
+    return { card, fence, decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
+        activityLeaf: packet ? Number(packet.activityLeaf || 0) : undefined,
+        focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
+        activity, mp: Number(state.vitals?.mp) };
 }
 // The bot's own hunting/resting/travelling inside one decision is not an
 // event (L70). After a result the card is only restamped and published.
@@ -398,10 +403,11 @@ function advisory(economy, state, activity = state.activity) {
 // diagnostics read it; canReuse is its boolean).
 function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted || !accepted.card) return 'no_card';
-    if (!state.stats?.wishSections) return 'no_sections';
-    if (state.stats.wishDirty) return 'wish_dirty';
-    if (Number(state.stats.decisionSeq || 0) !== accepted.decisionSeq) return 'decision_seq';
-    if (Number(state.stats.activityLeaf || 0) !== accepted.activityLeaf) return 'activity_leaf';
+    if (!accepted.baseline) return 'no_sections';
+    if (state.stats?.wishDirty) return 'wish_dirty';
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
+    const echo = Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
+    if (echo) return echo;
     // The ordinary fight path resumes hunting even when its accepted next
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
@@ -412,8 +418,8 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
     if (!options.afterResult && state.activity === 'traveling'
         && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record'; // lazy: as canReuse before L114 (load order unchecked)
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections'), timestamp = Number(deps.timestamp || Date.now());
-    const baseline = state.stats.wishSections;
+    const timestamp = Number(deps.timestamp || Date.now());
+    const baseline = accepted.baseline;
     if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
@@ -445,7 +451,7 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
-        stockTargets: state.stats.stockTargets, wishSections: state.stats.wishSections, wishDirty: 0 };
+        stockTargets: state.stats.stockTargets, wishSections: accepted.baseline, wishDirty: 0 };
     Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
     Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });

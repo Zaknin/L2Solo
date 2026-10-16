@@ -381,9 +381,10 @@ function decisionHolds(state, held, timestamp, deps, deferred = null, why = null
     if (extensions.size) return miss(why, 'extensions');
     if (deps.nodes?.length) return miss(why, 'nodes');
     if (deps.withNodes && !held.projection) return miss(why, 'nodes_needed');
-    // The only caller reaches here when the held key missed this build's own
-    // key, so the decision sequence alone tells the same decision.
-    if (Number(state.stats?.decisionSeq || 0) !== Number(held.plan.statsPacket.decisionSeq || 0)) return miss(why, 'decision_seq');
+    const packet = held.plan.statsPacket;
+    const echo = Sections.decisionRefusal(state, Number(packet.decisionSeq || 0),
+        Number(packet.activityLeaf || 0), packet.wishFocus?.[0] ?? null);
+    if (echo) return miss(why, echo);
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred, why, seen)) return false;
     const bands = held.plan.quantityBands || [];
@@ -415,7 +416,10 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
     if (!held) return 'no_held';
     if (last?.heldEventHash !== eventHash) return 'event_key';
     if (state.stats?.wishDirty) return 'wish_dirty';
-    if (Number(state.stats?.decisionSeq || 0) !== Number(held.plan.statsPacket.decisionSeq || 0)) return 'silent_seq';
+    const packet = held.plan.statsPacket;
+    const echo = Sections.decisionRefusal(state, Number(packet.decisionSeq || 0),
+        Number(packet.activityLeaf || 0), packet.wishFocus?.[0] ?? null);
+    if (echo) return echo === 'decision_seq' ? 'silent_seq' : 'check_failed';
     if (!quietSections) return 'sections';
     const why = [];
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
@@ -1140,8 +1144,9 @@ function countReadSet(sameKey, samePlan, previous, current, movedParts, rowsMove
 const movedText = parts => parts.length <= 4 ? parts.join(',') : `${parts.slice(0, 4).join(',')}+${parts.length - 4}`;
 function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
-    const inputSequence = diagnostic ? Number(state.stats?.decisionSeq || 0) : undefined;
-    const inputActivityLeaf = diagnostic ? Number(state.stats?.activityLeaf || 0) : undefined;
+    const inputSequence = Number(state.stats?.decisionSeq || 0);
+    const inputActivityLeaf = Number(state.stats?.activityLeaf || 0);
+    const inputFocus = state.stats?.wishFocus?.[0] ?? null;
     if (diagnostic) Diagnostics.count('context', 'request');
     if (diagnostic && isMainThread && state.phase === 'cold') {
         const caller = deps.caller || 'other';
@@ -1176,7 +1181,9 @@ function buildForState(state, deps) {
     // The held build's market items and spot crowd still read the same: read once per request.
     let readsHeld = null;
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
-    if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
+    const input = held?.inputDecision;
+    const replay = held?.key === key && input && !Sections.decisionRefusal(state, input[0], input[1], input[2]);
+    if ((replay || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
         && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
@@ -1562,7 +1569,8 @@ function buildForState(state, deps) {
         // The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
-        remember(cache, actorKey, { key, reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
+        remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
+            reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
             activity: state.activity, bandHash: fnv1a32(bandStructural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),

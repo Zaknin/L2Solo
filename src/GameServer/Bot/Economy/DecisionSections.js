@@ -148,6 +148,16 @@ function horizonEvent(state, baseline, expPerHour, persona, timestamp) {
     if (!baseline) return true;
     return softDue(baseline, 'horizon', timestamp) && horizonChanged(state, baseline, expPerHour, persona);
 }
+// A retained calculation accepts its own decision output, not a foreign
+// leaf or focus that happens to share the same sequence. Scalars also let
+// the cache compare its original unpublished input without another object.
+function decisionRefusal(state, decisionSeq, activityLeaf, focus) {
+    const stats = state.stats || {};
+    if (Number(stats.decisionSeq || 0) !== decisionSeq) return 'decision_seq';
+    if (Number(stats.activityLeaf || 0) !== activityLeaf) return 'activity_leaf';
+    if ((stats.wishFocus?.[0] ?? null) !== focus) return 'wish_focus';
+    return '';
+}
 function isEmptyWishPlan(plan) {
     return plan?.status === 'deferred' && plan.strategy === 'none'
         && plan.next == null && plan.reason === 'wish_focus'
@@ -182,4 +192,4 @@ function factEvents(previousFact, current, after, funding = false) {
     return [...sections];
 }
 module.exports = { SECTIONS, sectionBit, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan };
+    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };
