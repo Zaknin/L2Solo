@@ -504,8 +504,8 @@ function eventProofMissing(state, deps, plan) {
 // publication. Market/occupancy reads retain their original soft deadline.
 function captureEventProof(state, deps = {}, options = {}) {
     const plan = options.plan, missing = eventProofMissing(state, deps, plan);
-    // Diagnostics: per completed build, captured or the first missing input.
-    Diagnostics.count('context', 'proof', missing || 'captured');
+    // Diagnostics: per retained build, captured or the first missing input.
+    if (Diagnostics.active()) Diagnostics.count('context', 'proof', missing || 'captured');
     if (missing) return null;
     const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
     const actual = { ...state, stats: { ...state.stats, ...plan.statsPacket } };
@@ -1637,7 +1637,17 @@ function buildForState(state, deps) {
             : held ? 'unproved' : 'no_held';
         Diagnostics.count('context', 'gate', gate);
         if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
-        Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(state, held, sourceBoard, deps, timestamp));
+        const refused = !held ? 'no_held' : why[0] || outerWhy;
+        Diagnostics.count('context', 'hold_refused', refused);
+        // The held leaf behind an own-leaf refusal (market or spots moved, not
+        // due). acceptedActivityHolds refuses an unknown route first, then holds
+        // only an npc/configured_store/afk buy and an NPC liquidation: those
+        // labels mean the leaf's own offer, funding or route moved, any other
+        // label a shape the check does not handle.
+        if (refused.endsWith('_own_leaf')) {
+            const leaf = held.plan.network?.activity;
+            Diagnostics.count('context', 'own_leaf_refused', `${leaf?.activity}:${leaf?.kind || '-'}:${leaf?.sourceType || '-'}`);
+        }
         if (!held) Diagnostics.count('context', 'not_retained', deps.rememberContext === false ? 'unkept_caller' : last?.released || 'first');
         if (quietSections && !state.stats?.wishDirty && last?.heldParts?.length === hashes.length) {
             for (const at of EVENT_KEY_INDEXES) if (last.heldParts[at] !== hashes[at]) Diagnostics.count('context', 'silent', INPUT_KEY_PARTS[at]);
