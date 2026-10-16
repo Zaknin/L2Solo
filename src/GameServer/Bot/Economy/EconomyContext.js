@@ -1576,6 +1576,11 @@ function buildForState(state, deps) {
                 Diagnostics.count('context', 'gate_focus_fresh', focusKind(network.focus?.[0]));
             }
             Diagnostics.count('context', 'gate_ms', 'would_hold', Math.round(elapsed));
+        } else if (held && Diagnostics.enabled(state.characterId)) {
+            // Sampled owners: did the build the verdict refused change the plan?
+            // same per refusal reason is the waste the reason's rule costs.
+            gateDiff = gatePlanDiff(state, held, context, deps);
+            Diagnostics.count('context', 'refused_plan', `${gate}:${gateDiff === 'same' ? 'same' : 'new'}`);
         }
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
@@ -1598,6 +1603,7 @@ function buildForState(state, deps) {
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
         ...(keyMoved ? { moved: keyMoved } : {}),
+        ...(gateDiff ? { outcome: gateDiff === 'same' ? 'same_plan' : 'new_plan' } : {}),
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
