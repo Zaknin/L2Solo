@@ -11,6 +11,13 @@ const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+// A context holds only by its event proof, which needs the warehouse rows
+// and a recompute generation; without them every request builds anew.
+const generation = Generation.metadata();
+Warehouse.useRowSource(() => null, () => true);
+Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const board = new BoardIndex(), spots = [];
 const deps = { spots, timestamp: 1e12, board };
 const fresh = { status: 'active', strategy: 'market', target: { selfId: 2, slot: 7 }, market: { price: 1 } };
@@ -29,9 +36,11 @@ try {
         shouldFinishPreviousPlan: () => false, finalizePlan: (_state, _previous, raw) => raw,
         withMaterialFarmEffort: plan => plan });
     for (let id = 1; id <= 50; id++) {
-        const state = { characterId: id, level: 30, adena: 1000, phase: 'cold', activity: 'hunting',
+        const base = { characterId: id, level: 30, adena: 1000, phase: 'cold', activity: 'hunting',
             stats: { classId: 0 }, inventory: {}, loc: { locX: 0, locY: 0 }, timing: {} };
-        const context = Economy.forState(state, deps);
+        const context = Economy.forState(base, deps);
+        // The bot publishes the build's decision; a later review of that state holds it.
+        const state = { ...base, stats: { ...base.stats, ...context.statsPacket } };
         const options = { spots, timestamp: deps.timestamp, planningOptions: { board } };
         const first = Selection.selectAcquisitionPlan(state, null, { ...options, preparedEconomy: preparedEconomyFor(state) });
         const memo = context.gearPlanMemo;
@@ -75,5 +84,8 @@ try {
     assert.equal(invoke('GameServer/Bot/Economy/ItemDisposition').retainedEquipmentAmounts(transported)[1458], 12,
         'the C input ownership survives saved state serialization');
     console.log('test_gear_plan_memo: ok');
-} finally { Object.assign(Planner, original); fs.rmSync(directory, { recursive: true, force: true }); }
+} finally {
+    Object.assign(Planner, original); Warehouse.useRowSource(null);
+    if (generation) Generation.configure(generation);
+    fs.rmSync(directory, { recursive: true, force: true }); }
 process.exit(0);
