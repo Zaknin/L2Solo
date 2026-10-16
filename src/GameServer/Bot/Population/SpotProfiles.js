@@ -6,6 +6,7 @@ const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const { stateKey, occupiedSpotId, farmIntentSpotId } = require('./SpotOccupancyIndex');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 
 let occupancyCache = null;
 let occupancyCachedAt = 0;
@@ -239,10 +240,24 @@ function hasCapacityForStates(spot, states = [], occupancy = {}, options = {}) {
     return capacityCount(entry) + capacityUnitsFor(states, entry) <= Math.max(1, capacity) + maxOverflowUnits;
 }
 
+// Entries indexedOccupancy hands out are shared by every snapshot until their
+// spot changes; reserveCapacity, the only writer of an entry, copies one first.
+const sharedEntries = new WeakSet();
+function ownEntry(entry) {
+    if (!sharedEntries.has(entry)) return entry;
+    Diagnostics.count('occupancy', 'entry', 'copied');
+    return { ...entry,
+        retained: new Set(entry.retained),
+        reservedKeys: new Set(entry.reservedKeys),
+        reservationKeys: new Set(entry.reservationKeys),
+        retainedReservationKeys: new Set(entry.retainedReservationKeys) };
+}
+
 function reserveCapacity(occupancy, spot, states = [], options = {}) {
     if (spot?.raidBoss === true) return true;
     if (!occupancy || !spot?.id) return false;
-    const entry = occupancy[spot.id] || {
+    const current = occupancy[spot.id];
+    const entry = current ? ownEntry(current) : {
         count: 0,
         reservedCount: 0,
         capacity: LevelingRoutes.capacityForSpot(spot),
@@ -334,8 +349,9 @@ function spotsNearLevel(profiles, targetLevel) {
 // occupancySnapshot of the states a SpotOccupancyIndex holds, minus
 // excludedKeys. A spot is recomputed only when its members changed or the
 // caller's catalog has another profile for it; other spots reuse their entry.
-// Every call hands out copies: callers reserve places in the snapshot they
-// were given (reserveCapacity), and that must not reach the next snapshot.
+// Every call hands out a new snapshot object with the shared entries:
+// callers reserve places in the snapshot they were given (reserveCapacity
+// copies the entry first), and that must not reach the next snapshot.
 const indexedViews = new WeakMap();
 function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
     // occupancySnapshot judges capacity backoffs at wall-clock time.
@@ -355,6 +371,7 @@ function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
         .filter(([key]) => !view.excludedKeys.has(key))
         .map(([, state]) => state);
     const snapshot = {};
+    let shared = 0;
     const byId = SpotIndex.tableFor(catalog);
     for (const spotId of new Set([...index.physical.keys(), ...index.reserved.keys()])) {
         const key = String(spotId);
@@ -369,15 +386,14 @@ function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
             const claimers = counted(spotId, 'reserved');
             cached = { profile, entry: spotMembers.length || claimers.length
                 ? occupancyEntry(key, profile, spotMembers, claimers) : null };
+            if (cached.entry) sharedEntries.add(cached.entry);
             view.entries.set(spotId, cached);
         }
         if (!cached.entry) continue;
-        snapshot[spotId] = { ...cached.entry,
-            retained: new Set(cached.entry.retained),
-            reservedKeys: new Set(cached.entry.reservedKeys),
-            reservationKeys: new Set(cached.entry.reservationKeys),
-            retainedReservationKeys: new Set(cached.entry.retainedReservationKeys) };
+        snapshot[spotId] = cached.entry;
+        shared++;
     }
+    Diagnostics.count('occupancy', 'entry', 'shared', shared);
     for (const spotId of view.entries.keys()) {
         if (!index.physical.has(spotId) && !index.reserved.has(spotId)) view.entries.delete(spotId);
     }

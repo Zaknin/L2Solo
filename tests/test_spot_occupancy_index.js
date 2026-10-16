@@ -66,6 +66,9 @@ for (let step = 0; step < 4000; step++) {
         const spot = profiles[0];
         SpotProfiles.reserveCapacity(snapshot, spot, [{ characterId: 999 }], { maxOverflowUnits: 1000 });
         assert(snapshot[spot.id].reservedKeys.has('999'));
+        // The entries are shared between snapshots: the reservation copied its own.
+        assert(!SpotProfiles.indexedOccupancy(kernel.occupancy, profiles)[spot.id]?.reservedKeys.has('999'),
+            `a reservation reaches the next snapshot, step ${step}`);
     }
 }
 
