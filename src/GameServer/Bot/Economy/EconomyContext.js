@@ -470,17 +470,6 @@ function bagHolds(state, plan, timestamp) {
     const safety = bagSafety(state, timestamp), heldSafety = plan.bagSafety;
     return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
 }
-// Pure diagnostic verdict. The live fingerprint and decisionHolds stay in
-// charge until the event crossings and shadow plan comparisons are complete.
-function materialHunt(leaf) {
-    return leaf?.activity === 'hunting' && leaf.funding !== true
-        && Number.isSafeInteger(leaf.itemId) && leaf.itemId > 0 && Number.isFinite(leaf.amount) && leaf.amount > 0;
-}
-// The item a held leaf itself brings in (a buy, a material hunt): its bag and
-// incoming count is the leaf's own progress, measured from the decision.
-function ownItem(leaf) {
-    return leaf?.activity === 'shopping' && leaf.kind === 'buy' || materialHunt(leaf) ? leaf.itemId : null;
-}
 // The item of one quantity proof row (WishNetwork createQuantityInputs layout).
 const quantityItem = row => row[0] === 'stock' || row[0] === 'stockPhysical' ? row[2] : row[1];
 // This proof is produced by the completed native build, shared by its cache
@@ -585,7 +574,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // Own outputs are not inputs: the leaf's own item moves with its progress.
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
-    const own = ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
+    const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(options.heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < options.heldUnits) return refuse('quantity', ['sources', 'money']);
     const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
         : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || quantityItem(row) !== own) };
@@ -629,7 +618,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         if (!acceptedActivityHolds(state, checked, deps, null, { liquidation: liquidation.candidates }))
             return refuse('check_failed', ['sources', 'money']);
     } else if (leaf.activity === 'hunting') {
-        if (materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
+        if (ColdEconomyDecision.materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked, state) <= 0)
             return refuse('check_failed', ['sources']);
     } else if (leaf.activity === 'pvp' || leaf.activity === 'helping') {
         if (!Number.isSafeInteger(leaf.targetId) || leaf.targetId <= 0
@@ -733,7 +722,7 @@ function wireEventProof(proof) {
 // not allocatable craft stock.
 function shadowQuantityEvidence(state, held) {
     const leaf = held?.plan.network?.activity;
-    if (!materialHunt(leaf)) return null;
+    if (!ColdEconomyDecision.materialHunt(leaf)) return null;
     return { item: leaf.itemId, requested: leaf.amount, before: held.heldUnits,
         owned: positive(state.inventory?.[leaf.itemId]?.amount), actual: positive(state.acceptedIncoming?.[leaf.itemId]),
         remaining: Number.isFinite(held.heldUnits)
@@ -1987,7 +1976,7 @@ function buildForState(state, deps) {
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
-        const leaf = plan.network?.activity, own = ownItem(leaf);
+        const leaf = plan.network?.activity, own = ColdEconomyDecision.ownItem(leaf);
         remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
