@@ -1,5 +1,6 @@
 const { recipes } = require('../../../data/Items/c4_unseal.json');
 const bySource = new Map();
+const byProduct = new Map();
 const productIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['productId'], rows => {
     const products = new Map();
     for (const row of rows) if (!products.has(row.productId)) products.set(row.productId, row);
@@ -8,6 +9,7 @@ const productIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['p
 for (const recipe of recipes) {
     if (!bySource.has(recipe.sourceId)) bySource.set(recipe.sourceId, []);
     bySource.get(recipe.sourceId).push(recipe);
+    byProduct.set(recipe.productId, recipe);
 }
 function resolve(source, product) {
     const rows = bySource.get(Number(source)) || [];
@@ -21,6 +23,7 @@ function resolve(source, product) {
 }
 module.exports = {
     recipes,
+    forProduct: id => byProduct.get(Number(id)) || null,
     options: id => bySource.get(Number(id)) || [],
     resolve
 };

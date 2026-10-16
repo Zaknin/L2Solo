@@ -116,6 +116,14 @@ async function main() {
 
         const second = await ClanGoalService.resolveBatch(4, { budgetMs: 1000 });
         assert.strictEqual(second.changed, 0, 'the warehouse handoff must not churn the durable clan goal');
+        const [afterHandoff] = await Database.execute(['SELECT stateJson FROM clan_simulation_clans WHERE clanId = ?', [created.clanId]]);
+        const progress = JSON.parse(afterHandoff.stateJson).goal;
+        assert.strictEqual(progress.progressSnapshot.materials[1864], 5, 'real warehouse delivery persists progress without replacing the goal');
+        assert.strictEqual(progress.goalKey, goal.goalKey);
+        await ClanGoalService.resolveBatch(4, { budgetMs: 1000 });
+        const [afterReview] = await Database.execute(['SELECT stateJson FROM clan_simulation_clans WHERE clanId = ?', [created.clanId]]);
+        assert.strictEqual(JSON.parse(afterReview.stateJson).goal.progressAt, progress.progressAt,
+            'a later routine review preserves the persisted progress clock');
         const [ledger] = await Database.execute(["SELECT COUNT(*) AS count FROM clan_warehouse_ledger WHERE clanId = ? AND operation = 'withdraw'", [created.clanId]]);
         assert.strictEqual(Number(ledger.count), 1);
         console.log('Clan equipment warehouse checks passed');

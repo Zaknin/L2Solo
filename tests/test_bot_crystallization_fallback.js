@@ -97,6 +97,21 @@ async function run() {
             workshop: { known: true, recipeId: 0, incomePerHour: 0 } });
         assert.equal(retail.network.activity.itemId, 626, 'an empty player market can source dismantling gear from an actual NPC quote');
         assert.equal(retail.network.activity.sourceType, 'npc');
+        const scarce = new BoardIndex();
+        scarce.put({ id: 2, ownerId: 9801, storeType: 1, kind: 'shop', town: 'Dion',
+            lines: [{ lineId: 3, selfId: 1458, count: 1, enchant: 0, price: 1 },
+                { lineId: 4, selfId: 166, count: 1, enchant: 0, price: 1 }] });
+        const reliable = Economy.forState(inputBuyer, { board: scarce, spots: [], rememberContext: false,
+            npcOffersFor: id => id === 626 ? [{ selfId: 626, price: 100, count: Infinity, town: 'Giran', sourceType: 'npc' }] : [],
+            routeRows: require('../src/GameServer/Bot/Economy/EconomicTrip').towns.map(() => [true, 0, 0]),
+            workshop: { known: true, recipeId: 0, incomePerHour: 0 } });
+        assert.equal(reliable.network.activity.sourceType, 'npc', 'a finite cheap crystal/input lot cannot displace the reliable NPC chain');
+        assert.equal(reliable.network.activity.itemId, 626);
+        assert.equal(reliable.network.activity.town, 'Giran', 'buying, service and exchange share one town');
+        const needs = invoke('GameServer/Bot/Goals/NeedsEvaluator').evaluate({ ...inputBuyer,
+            inventory: { ...inputBuyer.inventory, 1463: { selfId: 1463, amount: 1000 } } }, { economy: reliable });
+        assert.equal(needs[0].type, 'buy_craft_material', 'dismantling copies use the material basket, not a single equipped-gear purchase');
+        assert(needs[0].target.amount > 1, 'the native goal buys the selected bounded batch together');
         const crystalPath = context.projection.nodes.find(row => row.key === 'item:1458').paths.find(row => row.kind === 'crystallize');
         assert.equal(crystalPath.improvement.npcId, Crystals.npcId);
         const selectedPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(inputBuyer, context);
@@ -107,6 +122,15 @@ async function run() {
             workshop: { known: true, recipeId: 0, incomePerHour: 0 } });
         assert.equal(afterReceipt.network.activity.kind, 'crystallize',
             'the selected exchange may consume its own reserved inputs immediately after physical delivery');
+        const pausedReceipt = { ...received, stats: { ...received.stats,
+            equipmentPlan: { ...selectedPlan, strategy: 'none', status: 'deferred', reason: 'wish_focus' } } };
+        const resumed = Economy.forState(pausedReceipt, { board, spots: [], rememberContext: false, npcOffersFor: () => [],
+            routeRows: require('../src/GameServer/Bot/Economy/EconomicTrip').towns.map(() => [true, 0, 0]),
+            workshop: { known: true, recipeId: 0, incomePerHour: 0 } });
+        assert.equal(resumed.network.activity?.kind, 'crystallize',
+            'a stock detour resumes the received D inputs instead of listing them and buying a different type');
+        assert.equal(invoke('GameServer/Bot/Economy/ItemDisposition').saleCandidates(pausedReceipt)
+            .some(row => row.selfId === 626), false, 'paused inputs remain protected from sale');
         const selfContext = Economy.forState({ ...buyer, stats: { ...buyer.stats, coldCombat: {
             ...buyer.stats.coldCombat, skills: Profile.skillSnapshotsFromRecords([{ selfId: 248, level: 1 }]) } } },
             { board, spots: [], rememberContext: false, npcOffersFor: () => [],
@@ -125,6 +149,8 @@ async function run() {
             const plan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(complete, beforeBreak);
             assert(plan, 'a crystal goal with all physical inputs survives its absent money-queue row');
             complete = await Life.upsertState({ ...complete, stats: { ...complete.stats, equipmentPlan: plan } }, 'selected_crystal_goal');
+            assert.equal(Crystals.completionKey(complete), `power:${plan.target.selfId}:${plan.target.slot}`,
+                'physically received D inputs hold their selected C acquisition before crystallization');
             const brokenGoal = await apply(complete, beforeBreak.network.activity.improvement);
             assert(brokenGoal.changed);
             complete = brokenGoal.state;
@@ -133,6 +159,7 @@ async function run() {
                 equipmentPlan: { ...plan, strategy: 'none', status: 'deferred', reason: 'wish_focus' } } };
             assert.equal(Crystals.completionKey(paused), Crystals.completionKey(complete),
                 'a survival restock pauses the exchange without losing its ready continuation');
+            assert(Crystals.ready(paused), 'ready crystals stay command-ready across a stock detour');
             const afterBreak = review(complete);
             assert.equal(afterBreak.network.activity.kind, 'luxury_exchange', 'the actual wish review finishes its own crystallization goal');
             assert.equal(afterBreak.network.activity.itemId, plan.target.selfId);
@@ -141,6 +168,58 @@ async function run() {
             assert((await DB.fetchItems(id)).some(row => row.selfId === plan.target.selfId && row.equipped),
                 'the selected native chain ends with its C weapon physically equipped');
         }
+        const shopping = { ...buyer, activity: 'shopping', currentRegion: 'Dion',
+            loc: { locX: 15670, locY: 142983, locZ: -2705 },
+            stats: { ...buyer.stats, townVisit: { completed: true }, marketReturn: { loc: field, spotId: 'field', regionName: 'Field' } } };
+        const nextTown = Service.acquisitionTravel(shopping, { activity: 'improving',
+            improvement: { kind: 'luxury_exchange', ...Luxury.recipes().get(883) } });
+        assert(nextTown, 'a completed shopping visit continues directly to the exchange town');
+        assert.equal(nextTown.stats.travel.townName, 'Giran');
+        assert.deepEqual(nextTown.stats.marketReturn, shopping.stats.marketReturn, 'continuation preserves the original hunting return');
+        let nativeBuyer = await seed(9756, false, false, 626, 0);
+        const sources = invoke('GameServer/Bot/Population/ColdOccupationSources'); sources.initialise();
+        const nativeReview = state => Economy.forState(state, { board: scarce, spots: [], rememberContext: false,
+            npcOffersFor: sources.npcOffersFor, tripCost: invoke('GameServer/Bot/Economy/EconomicTrip').reader(state,
+                { hourAdena: Number(state.stats.money?.[0]) || 0 }), workshop: null, knownRecipes: [], workshops: () => [] });
+        const order = nativeReview(nativeBuyer), input = order.network.activity;
+        assert.equal(input.sourceType, 'npc');
+        assert.equal(template(input.itemId).etc.rank, 'd');
+        const paidPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(nativeBuyer, order);
+        assert(paidPlan?.exchange);
+        nativeBuyer = await Life.upsertState({ ...nativeBuyer, activity: 'shopping', stats: { ...nativeBuyer.stats,
+            ...order.statsPacket, equipmentPlan: paidPlan } }, 'npc_chain_order');
+        const wallet = nativeBuyer.adena;
+        const Market = invoke('GameServer/Bot/Economy/ColdMarketService');
+        const afk = invoke('GameServer/AfkTrade/AfkTradeService'), originalBoard = afk.boardIndex;
+        const rival = new BoardIndex();
+        rival.put({ id: 3, ownerId: 9802, storeType: 1, kind: 'shop', town: 'Giran',
+            lines: [{ lineId: 5, selfId: input.itemId, count: 1, price: 1, enchant: 0 }] });
+        let purchase;
+        afk.boardIndex = () => rival;
+        try { purchase = Market.planPurchase(nativeBuyer, input.itemId, input.amount, {
+            npcOnly: true, towns: ['Giran'], money: wallet,
+            r: invoke('GameServer/Bot/Economy/PurchaseFunding').leafRatio(input,
+                order.network.queue.find(wish => wish.key === input.rootKey)) }); }
+        finally { afk.boardIndex = originalBoard; }
+        assert.equal(purchase.lines.length, 0, 'arrival keeps the selected NPC supplier despite a cheaper single public copy');
+        const receipt = await Market.buyHere(nativeBuyer, purchase);
+        assert.equal(receipt.units, input.amount, 'one native NPC receipt delivers the whole selected input batch');
+        assert.equal(receipt.state.adena, wallet - input.amount * input.unitPrice);
+        assert.equal(receipt.state.inventory[input.itemId].equippedCount, 0, 'dismantling inputs are never worn');
+        const pausedBuyer = await Life.upsertState({ ...receipt.state, stats: { ...receipt.state.stats,
+            equipmentPlan: { ...paidPlan, strategy: 'none', status: 'deferred', reason: 'wish_focus' } } }, 'stock_detour_complete');
+        assert(Crystals.ready(pausedBuyer), 'the full paid batch stays command-ready after a stock detour');
+        const breakCard = nativeReview(pausedBuyer);
+        assert.equal(breakCard.network.activity.kind, 'crystallize');
+        const crystals = await apply(pausedBuyer, breakCard.network.activity.improvement);
+        assert(crystals.changed);
+        const exchangeCard = nativeReview(crystals.state);
+        assert.equal(exchangeCard.network.activity.kind, 'luxury_exchange');
+        assert.equal(exchangeCard.network.activity.itemId, paidPlan.target.selfId);
+        const equipped = await apply(crystals.state, exchangeCard.network.activity.improvement);
+        assert(equipped.changed);
+        assert((await DB.fetchItems(nativeBuyer.characterId)).some(row => row.selfId === paidPlan.target.selfId && row.equipped),
+            'the real NPC purchase -> service -> Luxury chain ends in physical C equipment');
         console.log('PASS empty crystal market -> input purchase / own skill or Giran service -> native crystals -> equipped C gear');
     } finally { await DB.close(); fs.rmSync(fixture.directory, { recursive: true, force: true }); }
 }

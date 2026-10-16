@@ -33,6 +33,8 @@ let writes = 0, announcements = 0, queries = 0, membershipWrites = 0;
 const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, locZ: 1 } };
 
 (async () => {
+    let clock = timestamp;
+    stub(Date, 'now', () => clock);
     stub(Config, 'enabled', true); stub(Config, 'backgroundPartyEnabled', true);
     stub(Config, 'partyMinSize', 2); stub(Config, 'partyMaxSize', 5);
     stub(Config, 'maxBackgroundParties', 10); stub(Config, 'protectedPartyFormationMainBudgetMs', 50);
@@ -59,6 +61,7 @@ const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, l
         queries++;
         const started = Date.now();
         await new Promise(resolve => setTimeout(resolve, 120));
+        clock += 120;
         options.onWorkerWait?.(Date.now() - started);
         return { ok: true, sources: Calculation.sources(selected), joint: Policy.joint(party, selected,
             { context: { network: { activity: { activity: 'hunting', spotId: 'goal-spot', npcId: 123, nodeKey: '0:goal' } } } }) };
@@ -144,6 +147,34 @@ const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, l
     assert.deepEqual(retainedParty.memberIds, [902, 903]);
     assert.deepEqual(retainedParty.stats.agreement.memberIds, [902, 903]);
     assert(retainedParty.memberIds.includes(retainedParty.leaderId), 'the retained party has an attached leader');
+    const materialMembers = members.map((member, index) => ({ ...member, level: 65,
+        stats: { ...member.stats, equipmentPlan: { target: { selfId: 5726 + index } },
+            partyRequest: { ...member.stats.partyRequest, materialParty: true, reason: 'craft_material',
+                itemId: 4097 + index, targetId: 5726 + index, requiredTotal: 12, amount: 12 } } }));
+    Formation.proposalFromStates = () => ({ candidates: materialMembers,
+        spotId: spot.id, minSize: 2, maxSize: 5, levelRange: 4, materialParty: true });
+    Database.commitBackgroundPartyMembership = undefined;
+    Life.cachedState = id => materialMembers.find(member => member.characterId === Number(id));
+    Parties.createOrUpdate = async party => { writes++; return party; };
+    stub(Income, 'prepare', () => { throw Error('main must never forecast a cold material roster'); });
+    let materialCalls = 0;
+    Coordinator.requestPartyGoals = async (party, selected) => {
+        materialCalls++;
+        assert.equal(party.stats.materialFormation, true);
+        return { ok: true, sources: Calculation.sources(selected), joint: { objective: party.stats.objective,
+            memberGoals: selected.map(Policy.declaration), lastIncomeReviewAt: timestamp,
+            incomeReviews: selected.map(member => ({ characterId: member.characterId, accept: true })) } };
+    };
+    Population.nextProtectedPartyFormationAt = 0;
+    const materialFormed = await Population.formProtectedRequiredParty(Date.now(), materialMembers);
+    assert.equal(materialFormed.length, 1, 'worker-admitted material roster commits without main economic computation');
+    assert.equal(materialCalls, 1);
+    assert.equal(materialFormed[0].stats.materialFormation, undefined, 'formation advice is not retained as an active hunt flag');
+    const writesBeforeBusy = writes;
+    Coordinator.requestPartyGoals = async () => ({ ok: false, reason: 'party_goal_busy' });
+    Population.nextProtectedPartyFormationAt = 0;
+    assert.deepEqual(await Population.formProtectedRequiredParty(Date.now(), materialMembers), []);
+    assert.equal(writes, writesBeforeBusy, 'a busy worker cannot bypass material admission');
     console.log('PASS all three cold group readers: no main network, delayed formation, budget, lifecycle CAS, stale rejection');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
     for (const undo of restore.reverse()) undo();

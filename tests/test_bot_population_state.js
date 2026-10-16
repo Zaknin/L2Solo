@@ -46,7 +46,6 @@ const originalRecoverStartupLeases = ColdSimulationOwner.recoverStartupLeases;
 const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 const statements = [];
 const classUpdates = [];
-let stalePartyRows = [];
 let marketCandidateRows = [];
 
 try {
@@ -63,8 +62,8 @@ try {
         if (String(sql).startsWith('SELECT id, classId, level, exp, sp FROM characters')) {
             return Promise.resolve([{ id: 42, classId: 31, level: 42, exp: 0, sp: 0 }]);
         }
-        if (String(sql).startsWith('SELECT characterId, statsJson FROM bot_life_state')) {
-            return Promise.resolve(stalePartyRows);
+        if (String(sql).startsWith('SELECT characterId FROM bot_life_state') || /\bRETURNING\b/i.test(sql)) {
+            return originalExecute([sql, params, queryOptions]);
         }
         if (String(sql).startsWith('UPDATE bot_life_state')) {
             if (String(sql).includes("'$.partyRequest.lastReason'")) return Promise.resolve({ affectedRows: 1 });
@@ -307,20 +306,9 @@ try {
             assert(save.sql.includes('lastResolvedAt = excluded.lastResolvedAt'), 'persisted cold resolve history must survive an upsert');
             assert(save.sql.includes('inventorySummary = excluded.inventorySummary'), 'background drop rewards must persist after an upsert');
             assert(save.sql.includes("WHERE bot_life_state.simulationOwner = 'legacy_main'"), 'legacy saves must not overwrite a cold owner lease');
-            stalePartyRows = [{
-                characterId: 42,
-                statsJson: JSON.stringify({
-                    partyRequest: {
-                        status: 'open',
-                        priority: 'required',
-                        requestedAt: Date.now() - 60 * 60 * 1000,
-                        objectiveKey: 'farm:probe:99'
-                    }
-                })
-            }];
             const cleanupStart = statements.length;
             return BotLifeState.expireStalePartyRequests(100).then((expired) => {
-                assert.strictEqual(expired, 2, 'TTL cleanup should report the affected rows');
+                assert.strictEqual(expired, 1, 'TTL cleanup should report the physical row it changed');
                 const cleanupUpdate = statements.slice(cleanupStart).find((entry) => entry.sql.startsWith('UPDATE bot_life_state'));
                 assert(cleanupUpdate, 'periodic TTL cleanup must execute its update');
                 assert.strictEqual(cleanupUpdate.params.length, 6, 'bounded TTL cleanup must bind only the predicates present in its subquery');
@@ -372,7 +360,12 @@ try {
                 assert(staleGoals.sql.includes('INNER JOIN bot_goal_state goals'), 'goal metadata review must read persisted goal rows');
                 assert(staleGoals.sql.includes("'$.nextReviewAt'"), 'goal metadata review must select rows whose review deadline is due');
                 assert.deepStrictEqual(staleGoals.params, [123456], 'goal metadata review must bind the current review cutoff');
-                return BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match').then((deferred) => {
+                const current = BotLifeState.cachedState(42);
+                return BotLifeState.upsertState({ ...current,
+                    stats: { ...current.stats, partyRequest: { ...current.stats.partyRequest, status: 'open' } }
+                }, 'reopened_party_request').then(() =>
+                    BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match')
+                ).then((deferred) => {
                     const deferUpdate = statements.at(-1);
                     assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
                     assert(deferUpdate.sql.includes("'$.partyRequest.lastReason'"), 'unformable party cleanup must persist its reason');

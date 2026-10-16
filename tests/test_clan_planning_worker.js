@@ -154,6 +154,8 @@ async function parityAndIntegration() {
             assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(swordMember).required, false,
                 'held B sword market controls start after the full usable C kit');
             const swordContext = await Runtime.context();
+            assert(swordContext.npcOffers.some(row => Number(row.selfId) === 2132 && row.town === 'Giran'
+                && Number(row.price) > 0), 'the clan worker sees actual NPC B-gemstone supply, not only its price floor');
             const unfunded = planForMember(swordMember);
             assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,
                 'an unaffordable listing must release a retained clan market goal');

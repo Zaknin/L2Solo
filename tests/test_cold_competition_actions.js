@@ -106,6 +106,21 @@ async function run() {
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 4]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [4]]))[0]);
     const joinStates = [Life.cachedState(7), Life.cachedState(3)];
+    const materialRequest = { materialParty: true, status: 'open', spotId: 'test', itemId: 4097, amount: 12 };
+    const materialSolo = { ...joinStates[0], stats: { ...joinStates[0].stats, partyRequest: materialRequest } };
+    const untouchedParty = Party.find('competition-party');
+    const noMaterialCommit = () => { throw Error('competition bypassed material contract and worker review'); };
+    assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: [materialSolo, joinStates[1]],
+        event: join, commit: noMaterialCommit })).rejected, 'material_party_requires_review');
+    assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,
+        parties: { find: () => ({ ...untouchedParty, stats: { objective: materialRequest } }) },
+        commit: noMaterialCommit })).rejected, 'material_party_requires_review');
+    assert.strictEqual((await invoke('GameServer/Bot/Population/PopulationService').formCompetitionParty(
+        [materialSolo, Life.cachedState(8)], event(7, 8, 'offer_party'))).rejected, 'material_party_requires_review',
+    'a new shared-target pair cannot clear an outstanding material request either');
+    assert.strictEqual(Party.find('competition-party'), untouchedParty);
+    assert.strictEqual(materialSolo.stats.partyRequest, materialRequest);
+    assert(!Life.cachedState(7).party?.partyId);
     assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,
         participantAllowed: id => id !== 4 })).rejected, 'party_member_busy', 'a fenced retained member blocks the entire invitation');
     assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,

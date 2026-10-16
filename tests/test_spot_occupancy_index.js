@@ -38,6 +38,7 @@ function randomState(characterId) {
     if (random() < 0.4) {
         stats.capacityBackoffs = [{ spotId: intentSpot, until: clock + Math.floor(random() * 3000) - 1000 }];
     }
+    if (random() < 0.3) stats.backgroundPartySpotId = pick(spotIds);
     return { characterId, activity, spotId: pick(spotIds), updatedAt: clock - Math.floor(random() * 50),
         party: random() < 0.3 ? { partyId: pick(['p1', 'p2', 'p3']) } : {}, stats };
 }

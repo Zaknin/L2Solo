@@ -19,12 +19,16 @@ function acquisitionTravel(state, leaf, timestamp = Date.now()) {
         || selfCrystallization(leaf.improvement)
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)
         || state.party?.partyId || state.partyId || state.stats?.pveEncounter || state.stats?.pvpEncounter
-        || !['hunting', 'resting', 'party_wait'].includes(state.activity)
+        || !['hunting', 'resting', 'party_wait', 'shopping'].includes(state.activity)
+        || state.activity === 'shopping' && state.stats?.townVisit && state.stats.townVisit.completed !== true
         || state.currentRegion === 'Giran' && inTown(state)) return null;
-    return invoke('GameServer/Bot/Goals/GoalExecutor').beginMarketTravel(state, {
+    const travel = invoke('GameServer/Bot/Goals/GoalExecutor').beginMarketTravel(
+        state.activity === 'shopping' ? { ...state, activity: 'hunting' } : state, {
         type: 'improving', target: { improvement: leaf.improvement },
         plan: { marketTown: 'Giran', expectedBenefit: 'improvement' }
     }, timestamp);
+    if (travel && state.stats?.marketReturn) travel.stats.marketReturn = state.stats.marketReturn;
+    return travel;
 }
 // options.decide(): the worker's decision made on exactly this state, or null
 // (L25); without one the wish network is built here.

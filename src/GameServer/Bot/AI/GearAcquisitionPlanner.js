@@ -324,13 +324,15 @@ function considerable(item, state = {}, role = roleFor(state), acquisitionRank =
 
 function acquisitionTargetAllowed(state = {}, plan = {}) {
     const target = catalogItem(plan?.combine?.resultId || plan?.target?.selfId);
+    if (target && invoke('GameServer/Bot/AI/PersonalGearProgression').marketOnly(state, target)
+        && (plan.strategy !== 'market' || !(Number(plan.market?.price) > 0)
+            || Number(plan.market.price) > PurchaseFunding.budget(state))) return false;
     return !target || rankIndex(target.etc?.rank) <= rankIndex(invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionRankFor(state));
 }
 
-function missingPairedCSlot(state, item, progression) {
+function missingPairedMilestoneSlot(state, item, progression) {
     const slot = Number(item?.etc?.slot || 0);
-    if (!progression.required || rankIndex(gradeForLevel(state.level)) <= rankIndex('c')
-        || item.etc?.rank !== 'c' || !PAIRED_SLOTS[slot]) return 0;
+    if (!progression.required || rankIndex(item.etc?.rank) < (progression.rank || 2) || !PAIRED_SLOTS[slot]) return 0;
     const worn = equippedSlotsFor(state.inventory?.[item.selfId], slot);
     return pairedSlots(slot).find(side => progression.gaps.has(side) && !worn.includes(side)) || 0;
 }
@@ -636,7 +638,7 @@ function preferredTarget(state = {}, options = {}) {
     const role = roleFor(state);
     const classId = classIdFor(state);
     const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
-    const progression = Progression.assess(state);
+    const progression = Progression.acquisitionAssessment(state);
     const missingDualSword = missingRequiredDualSword(state, role, classId);
     const owned = inventoryMap(state.inventory);
     const ownedItems = inventoryItems(state.inventory);
@@ -653,11 +655,27 @@ function preferredTarget(state = {}, options = {}) {
         : null;
     const recipesByProduct = new Map(recipes.map((recipe) => [Number(recipe.productId), recipe]));
     const excluded = excludedTargetIds(options);
+    if (!options.recipeId && !options.wishTargetId && progression.required && progression.rank === 3
+        && rankIndex(gradeForLevel(state.level)) >= 4) {
+        const ready = BotGear.currentRankRows(DataCache.items, gradeForLevel(state.level))
+            .filter(item => !excluded.has(Number(item.selfId)) && suitable(item, state, role, gradeForLevel(state.level))
+                && Progression.priority(item, Number(item.etc?.slot), progression) > 0
+                && isSlotUpgrade(item, ownedItems, role, classId))
+            .map(item => ({ item, offer: marketOfferForTarget(item, state,
+                { ...options, maxMarketPrice: PurchaseFunding.budget(state) }) }))
+            .filter(row => row.offer && Number(row.offer.price) <= PurchaseFunding.budget(state))
+            .sort((left, right) => Number(left.offer.price) - Number(right.offer.price));
+        if (ready.length) return { item: ready[0].item, slot: Number(ready[0].item.etc?.slot), recipe: null };
+    }
     const excludedMaterials = new Set((options.excludedMaterialIds || []).map(Number));
     const acquisitionState = options.wishTargetId ? Progression.preparation(state, progression) || state : state;
-    const acquisitionRank = Progression.acquisitionRankFor(acquisitionState, acquisitionState === state ? progression : undefined);
+    const selectedItem = options.wishTargetId && catalogItem(options.wishTargetId);
+    const readyHigher = selectedItem && Progression.marketOnly(state, selectedItem)
+        && marketOfferForTarget(selectedItem, state, { ...options, maxMarketPrice: PurchaseFunding.budget(state) });
+    const acquisitionRank = readyHigher ? gradeForLevel(state.level)
+        : Progression.acquisitionRankFor(acquisitionState, acquisitionState === state ? progression : undefined);
     const closesC = progression.required && rankIndex(gradeForLevel(state.level)) > rankIndex('c');
-    const targetSlotFor = item => Number(options.wishSlot || missingPairedCSlot(state, item, progression) || item.etc?.slot || 0);
+    const targetSlotFor = item => Number(options.wishSlot || missingPairedMilestoneSlot(state, item, progression) || item.etc?.slot || 0);
     const allCandidates = (options.wishTargetId ? [catalogItem(options.wishTargetId)].filter(Boolean) : BotGear.currentRankRows(DataCache.items, recipeRank || acquisitionRank))
         .filter(item => Sources.hasSource(item.selfId))
         .filter((item) => rankIndex(item.etc?.rank) <= rankIndex(acquisitionRank))
@@ -666,16 +684,17 @@ function preferredTarget(state = {}, options = {}) {
         .filter((item) => !closesC || Progression.priority(item, targetSlotFor(item), progression) > 0)
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter(item => !options.wishTargetId || Number(item.selfId) === Number(options.wishTargetId))
-        .map((item) => ({ item, slot: targetSlotFor(item), recipe: recipesByProduct.get(Number(item.selfId)) || null }))
+        .map((item) => ({ item, slot: targetSlotFor(item), recipe: Progression.marketOnly(state, item)
+            ? null : recipesByProduct.get(Number(item.selfId)) || null }))
         .filter(({ item, recipe }) => !recipeNeedsExcludedMaterial(recipe, state, excludedMaterials)
             || !!marketOfferForTarget(item, state, options))
         .filter(({ recipe }) => !options.recipeId || Number(recipe?.recipeId) === Number(options.recipeId))
         .filter(({ item }) => Number(owned.get(Number(item.selfId)) || 0) < 1
-            || missingPairedCSlot(state, item, progression)
+            || missingPairedMilestoneSlot(state, item, progression)
             || options.wishTargetId && PAIRED_SLOTS[options.wishSlot]
                 && !equippedSlotsFor(state.inventory?.[item.selfId], item.etc?.slot).includes(Number(options.wishSlot)))
         .filter(({ item }) => options.wishTargetId && PAIRED_SLOTS[options.wishSlot]
-            || missingPairedCSlot(state, item, progression)
+            || missingPairedMilestoneSlot(state, item, progression)
             || (missingDualSword && item.template?.kind === 'Weapon.Dual')
             || isSlotUpgrade(item, ownedItems, role, classId));
     const requiredRank = recipeRank || acquisitionRank;
@@ -1129,7 +1148,7 @@ function marketPlanForTarget(state = {}, targetId, options = {}) {
     const ownedItems = inventoryItems(state.inventory);
     const acquisitionState = invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state;
     if (!target || !considerable(target, acquisitionState, role)) return null;
-    const pairedSlot = missingPairedCSlot(state, target, invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state));
+    const pairedSlot = missingPairedMilestoneSlot(state, target, invoke('GameServer/Bot/AI/PersonalGearProgression').acquisitionAssessment(state));
     if (!pairedSlot && !isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
     const offer = marketOfferForTarget(target, state, options);
     return offer ? marketPlan(state, target, offer, { buyOrderEscrow: options.buyOrderEscrow, targetSlot: pairedSlot }) : null;
@@ -1944,6 +1963,8 @@ function materializeSource(entry, itemId, killerLevel, ratesKey) {
 }
 
 function sourceForItem(itemId, spots = [], state = {}, options = {}) {
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').marketOnly(state, catalogItem(itemId))) return [];
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').isCGradeHelmet(catalogItem(itemId))) return [];
     const sourceCache = options.sourceCache;
     const spoilCapable = options.spoilCapable === true || roleFor(state) === 'spoiler';
     const allowRaidSources = options.allowRaidSources === true;
@@ -2299,8 +2320,66 @@ function stationRecipeIds() {
     return CraftShopService.publishedStationRecipes().ids;
 }
 
+// This is route evidence for the clan planner; the shared wish graph owns
+// the purchases and both physical crystallizations. Only authored NPC stock
+// and Luxury exchanges can establish this renewable material source.
+function crystalSupplyForMaterial(state, requiredAmount, options) {
+    if (Number(state.level) < 52) return null;
+    const Crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
+    const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
+    let inputs = options.sourceCache?.get('crystal_supply_inputs');
+    if (inputs === undefined) {
+        // The quote's native trip cost is charged once below. Executable
+        // leaves still require the worker's prepared trip to Giran.
+        const trip = { known: true, hours: 0, fees: 0 };
+        const offers = new Map();
+        const purchase = id => {
+            if (!offers.has(id)) offers.set(id, npcOfferForTarget(catalogItem(id), state, options));
+            const offer = offers.get(id);
+            return offer?.town === 'Giran' && Number(offer.price) > 0
+                ? { ...offer, availableUnits: Infinity, tripHours: 0, tripFees: 0 } : null;
+        };
+        const d = Crystals.choices(state, purchase, trip).find(row => row.selfId && purchase(row.selfId));
+        const dOffer = d && offers.get(d.selfId);
+        const choices = d ? Crystals.choices(state, id => {
+            const exchange = Luxury.recipes().get(id);
+            return exchange ? { price: exchange.materials[0].amount * dOffer.price / d.net,
+                sourceType: 'luxury', availableUnits: Infinity, tripHours: 0, tripFees: 0 } : null;
+        }, trip, 0, 'c') : [];
+        inputs = d ? { d, dOffer, choices } : null;
+        options.sourceCache?.set('crystal_supply_inputs', inputs);
+    }
+    if (!inputs) return null;
+    const { d, dOffer, choices } = inputs;
+    const costs = choices.filter(row => row.selfId).map(row => {
+        const exchange = Luxury.recipes().get(row.selfId);
+        if (!exchange) return Infinity;
+        const batches = Math.ceil(requiredAmount / row.net);
+        const needD = Math.max(0, exchange.materials[0].amount * batches - Number(state.inventory?.[1458]?.amount || 0));
+        return Math.ceil(needD / d.net) * Number(dOffer?.price || 0);
+    });
+    const price = Math.min(...costs);
+    if (!Number.isFinite(price)) return null;
+    return { kind: 'crystal_supply', itemId: 1459, requiredAmount,
+        requiredTotal: requiredAmount + Number(state.inventory?.[1459]?.amount || 0),
+        effort: 16 + (price <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true })
+            ? 4 : marketEffort({ ...dOffer, price }, state)) };
+}
+
 function farmSourceForMaterial(itemId, state, spots, allowedRecipeIds, requiredAmount = 1, visited = new Set(), options = {}) {
     if (visited.has(Number(itemId))) return null;
+    if (Number(itemId) === 1459) {
+        const supply = crystalSupplyForMaterial(state, requiredAmount, options);
+        if (supply) return supply;
+    }
+    const purchase = marketOfferForTarget(catalogItem(itemId), state, options);
+    if (purchase && Number(purchase.price) > 0 && (purchase.sourceType === 'npc'
+        || Number(purchase.count ?? purchase.amount) >= requiredAmount)) return {
+        kind: 'material_market', itemId: Number(itemId), requiredAmount,
+        requiredTotal: requiredAmount + Number(state.inventory?.[itemId]?.amount || 0),
+        effort: Number(purchase.price) * requiredAmount <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true })
+            ? 4 : marketEffort({ ...purchase, price: Number(purchase.price) * requiredAmount }, state)
+    };
     const direct = bestSourceForState(sourceForItem(itemId, spots, state, options), state, options);
     const directRoute = direct ? { ...direct, itemId: Number(itemId), requiredAmount,
         requiredTotal: requiredAmount + Number(state.inventory?.[itemId]?.amount || 0),
@@ -2321,7 +2400,7 @@ function farmSourceForMaterial(itemId, state, spots, allowedRecipeIds, requiredA
     }
     const effort = 8 + routes.reduce((sum, route) => sum + route.effort, 0);
     if (directRoute && directRoute.effort <= effort) return directRoute;
-    const next = routes.filter((route) => route.spotId).sort((left, right) => right.effort - left.effort)[0];
+    const next = routes.slice().sort((left, right) => right.effort - left.effort)[0];
     return { ...(next || { itemId: Number(itemId), requiredAmount }), effort };
 }
 
@@ -2559,11 +2638,12 @@ function rawPlanFor(state = {}, options = {}) {
         ? missingMaterialPlans.reduce((sum, material) => sum + (material.source?.effort ?? Infinity), 0)
         : Infinity;
     const offer = marketOfferForTarget(target.item, state, planningOptions);
-    const buy = offer && marketEffort(offer, state) <= Math.min(directEffort, craftKills);
+    const craftFirst = rankIndex(target.item.etc?.rank) >= 3 && target.recipe && Number.isFinite(craftKills);
+    const buy = offer && !craftFirst && marketEffort(offer, state) <= Math.min(directEffort, craftKills);
     const directAssessment = direct ? partyNeedAssessmentForSource(state, direct) : null;
     const soloSafe = direct && directAssessment.need === 'solo_ok';
     const strategy = buy ? 'market'
-        : direct && (!target.recipe || !Number.isFinite(craftKills) || soloSafe && directEffort <= craftKills * 0.8) ? 'direct_drop'
+        : direct && (!target.recipe || !Number.isFinite(craftKills) || !craftFirst && soloSafe && directEffort <= craftKills * 0.8) ? 'direct_drop'
             : target.recipe ? 'craft' : 'blocked';
     const next = strategy === 'direct_drop'
         ? direct && { ...direct, itemId: Number(target.item.selfId) }
@@ -2579,7 +2659,7 @@ function rawPlanFor(state = {}, options = {}) {
     // A ready final recipe or component is a station action, not a request to
     // fight at the next (possibly unsafe) material source.  Let it leave the
     // party gate and finish the prepared manufacture first.
-    const nextAssessment = !readyToCraft && !componentReady && next
+    const nextAssessment = !readyToCraft && !componentReady && next?.spotId
         ? partyNeedAssessmentForSource(state, next)
         : { need: 'solo_ok', reason: 'solo_ready' };
     const partyNeed = nextAssessment.need;

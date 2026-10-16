@@ -45,7 +45,7 @@ function beginHuntingTrip(state = {}, route = null, timestamp = Date.now()) {
         durationMs: Number(route.travelMs) || HUNTING_TRAVEL_MS,
         // A party travels as one: every member arrives at the party's time.
         sharedMs: isPartyRoute ? Number(route.travelMs) || 0 : 0,
-        extraStats: { pveEncounter: null }
+        extraStats: { pveEncounter: null, ...(isPartyRoute ? { backgroundPartySpotId: route.spotId } : {}) }
     });
 }
 

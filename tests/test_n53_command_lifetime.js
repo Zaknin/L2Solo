@@ -222,14 +222,15 @@ invoke('GameServer/Bot/Population/BackgroundResolver').resolveSolo = ({ timestam
         assert.equal(h.kernel.completeCommand(receipt(request)), true);
     });
     await check('same checkpoint context and mutable lease deadline preserve queued origin', async () => {
-        const h = fixture({ hold: true }); h.kernel.upsert(state(7)); h.kernel.tick(); await h.entered.promise;
+        const h = fixture({ hold: true });
+        h.kernel.upsert({ state: { ...state(7), activity: 'hunting' }, context: { clanHallServices: {} } });
+        h.kernel.tick(); await h.entered.promise;
         const active = h.kernel.commandStartedAt.get(7), current = h.kernel.states.get(7).state;
         h.kernel.upsert({ state: { ...current, simulation: { ...current.simulation, leaseUntil: now + 30000 } },
-            context: { source: 'refreshed' } });
+            context: { source: 'refreshed', clanHallServices: {} } });
         assert.equal(h.kernel.commandStartedAt.get(7), active);
         const beforeVersion = h.kernel.states.get(7).version;
-        h.kernel.upsert({ state: h.kernel.states.get(7).state,
-            context: { source: 'refreshed', isPartyLeader: true, party: { nextResolveAt: now + 20000 } } });
+        h.kernel.upsert({ state: h.kernel.states.get(7).state, context: { source: 'refreshed' } });
         assert(h.kernel.states.get(7).version > beforeVersion, 'actual context changes scheduling version');
         assert.equal(h.kernel.commandStartedAt.get(7), active, 'same CP retains original attempt object');
         h.gate.resolve(result()); await h.kernel.resolveChain;

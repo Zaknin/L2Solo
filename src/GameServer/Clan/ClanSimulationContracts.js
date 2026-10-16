@@ -111,6 +111,8 @@ function normalizeGoal(goal, timestamp = Date.now()) {
         status: GOAL_STATUSES.includes(goal.status) ? goal.status : 'planned',
         reasonCodes: reasonCodes(goal.reasonCodes),
         createdAt: Number(goal.createdAt) || timestamp,
+        progressAt: Number(goal.progressAt || goal.createdAt) || timestamp,
+        progressSnapshot: object(goal.progressSnapshot),
         updatedAt: Number(goal.updatedAt) || timestamp
     };
 }

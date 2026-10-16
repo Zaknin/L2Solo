@@ -5,17 +5,19 @@ const Query = require('./OfferQuery');
 const Production = require('./ProductionPolicy');
 const FixedShots = require('./FixedShotOffers');
 const unlimited = offer => offer.sourceType === 'npc' || offer.sourceType === 'configured_store';
-function reader(state, ctx, deps) {
+function reader(state, ctx, deps, { npcOnly = false, town = null } = {}) {
     // Preparation belongs to the existing worker. A reader cannot synchronously
     // expand geometry or treat an unprepared trip as free.
     const cost = deps.tripCost || ctx.trip;
     return id => {
         if (typeof cost !== 'function' || typeof cost.details !== 'function') return null;
-        const others = Production.allowsNpcShot(id) ? (deps.npcOffersFor?.(id) || []).slice(0, 17) : [];
-        if (Production.allowsFixedShot(id)) others.push(...FixedShots.offers(id));
+        const others = Production.allowsNpcShot(id) ? (deps.npcOffersFor?.(id) || [])
+            .filter(offer => (!npcOnly || offer.sourceType === 'npc') && (!town || offer.town === town)).slice(0, 17) : [];
+        if (!npcOnly && Production.allowsFixedShot(id)) others.push(...FixedShots.offers(id));
         // The context's watched board records an absent item as an input too.
-        const board = ctx.board || deps.board;
+        const board = npcOnly ? null : ctx.board || deps.board;
         const offer = Query.bestSellOffer(board?.heads ? board : null, id, {
+            ...(town ? { towns: [town] } : {}),
             excludeOwner: state.characterId, maxInspected: 20, cost, others,
             accept: row => Number(row.price) > 0 && !Number(row.enchant || 0)
                 && (unlimited(row) || Number.isSafeInteger(Number(row.count)) && Number(row.count) > 0)

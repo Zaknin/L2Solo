@@ -40,7 +40,9 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
             try {
                 Database.execute = async ([sql, params = []]) => {
                     const statement = db.prepare(sql);
-                    if (/^\s*(SELECT|PRAGMA)\b/i.test(sql)) return statement.all(...params.map(v => v ?? null));
+                    if (/^\s*(SELECT|PRAGMA)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
+                        return statement.all(...params.map(v => v ?? null));
+                    }
                     if (sql.includes("'$.pvpEnemies'")) writes++;
                     const result = statement.run(...params.map(v => v ?? null));
                     return { affectedRows: Number(result.changes) };

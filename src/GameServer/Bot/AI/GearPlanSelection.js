@@ -46,8 +46,13 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
     });
     const preparedAcquisition = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, economy);
-    if (preparedAcquisition?.strategy === 'luxury_exchange' || preparedAcquisition?.combine?.type === 'dual_sword') return {
-        acquisitionPlan: preparedAcquisition, replanContext: {}, reusablePartyRequest: false,
+    const preparedB = preparedAcquisition?.strategy === 'craft'
+        && ['b', 'a', 's'].includes(invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items,
+            preparedAcquisition.target?.selfId)?.etc?.rank);
+    if (preparedAcquisition?.strategy === 'luxury_exchange' || preparedB || preparedAcquisition?.combine?.type === 'dual_sword') return {
+        acquisitionPlan: { ...preparedAcquisition,
+            ...(previousPlan?.clanGoal && Number(previousPlan.target?.selfId) === Number(preparedAcquisition.target?.selfId)
+                ? { clanGoal: previousPlan.clanGoal } : {}) }, replanContext: {}, reusablePartyRequest: false,
         excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
     const chosen = economy.network.queue.find(wish => wish.key === economy.network.activity?.rootKey)
         || economy.network.queue.find(wish => wish.key === economy.network.focus?.[0]);
@@ -160,7 +165,11 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         ? previousPlan
         : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
     const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
-    const acquisitionPlan = withBridgeInputPreparation(state, previousPlan, {
+    const retainedInputs = previousPlan?.crystalPreparation && ['complete', 'blocked'].includes(costedPlan.status)
+        && !GearAcquisitionPlanner.equipmentTargetFulfilled(state, previousPlan)
+        && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previousPlan)
+        && (previousPlan.materials || []).some(row => Number(state.inventory?.[row.selfId]?.amount || 0) > 0);
+    const acquisitionPlan = retainedInputs ? deferredWishPlan(previousPlan, replanContext) : withBridgeInputPreparation(state, previousPlan, {
         ...costedPlan,
         ...(costedPlan.target?.selfId === wishTargetId ? { target: { ...costedPlan.target, slot: Number(chosen.object.slot) } } : {}),
         marketFallback: finalizedPlan.status === 'active' && finalizedPlan.strategy === 'craft'

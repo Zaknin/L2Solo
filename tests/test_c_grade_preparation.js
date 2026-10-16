@@ -79,6 +79,28 @@ assert.equal(Progression.allowsCGradeAcquisition({ ...source, clanId: 1 }), fals
 assert.equal(Progression.allowsCGradeAcquisition({ ...source, level: 40,
     stats: { ...source.stats, craftStationId: 1 } }), false, 'stationary services are outside equipment acquisition');
 
+for (const level of [52, 61]) {
+    const missingHelmet = { ...bot(54, level), inventory: kit(54, 40) };
+    const helmet = Object.values(missingHelmet.inventory).find(row => row.equippedSlots.includes(6));
+    delete missingHelmet.inventory[helmet.selfId];
+    const assessment = Progression.assess(missingHelmet);
+    assert(assessment.gaps.has(6), 'a missing helmet remains an equipment opportunity');
+    assert.equal(assessment.required, false, 'a C helmet cannot hold higher-grade progression');
+    assert.equal(Progression.acquisitionRankFor(missingHelmet), Planner.gradeForLevel(level));
+    const candidate = Data.items.find(item => item.selfId === 500);
+    assert.equal(Progression.priority(candidate, 6, assessment), 0, 'helmet shopping stays optional');
+    assert.equal(Planner.marketPlanForTarget(missingHelmet, candidate.selfId,
+        { findMarketOffer: () => ({ price: 100, town: 'Giran', count: 1 }) })?.target.selfId,
+    candidate.selfId, 'an available C helmet remains a valid purchase above level 52');
+    const received = Planner.equipInventoryUpgrades(missingHelmet, { ...missingHelmet.inventory,
+        [helmet.selfId]: { ...helmet, equipped: false, equippedCount: 0, equippedSlots: [] } });
+    assert(received[helmet.selfId].equipped, 'a suitable received helmet is still worn');
+    const profiles = [{ id: 'helmet-field', avgLevel: 46,
+        npcEntries: [{ selfId: 222, name: 'Krator', count: 4 }] }];
+    assert(Planner.sourceIndexFor(profiles).has(candidate.selfId), 'the helmet has a real authored drop source');
+    assert.deepEqual(Planner.sourceForItem(candidate.selfId, profiles, missingHelmet), [], 'optional C helmets are bought or crafted');
+}
+
 // The last paired C slot must win over a cheap B offer and a persisted B goal.
 // Completing that slot immediately opens higher-grade planning on the same bot.
 const Index = invoke('GameServer/Item/ItemTemplateIndex');
@@ -158,8 +180,10 @@ for (const level of [52, 60, 61, 78]) {
     assert.equal(Progression.assess(finished).required, false);
     assert(Planner.considerable(higherEar, finished));
     const next = review(finished, offers);
-    assert(next.projection.roots.some(key => key.startsWith(`power:${higherEar.selfId}:`)),
-        'delivery of the last C piece opens the B offer without another level-up');
+    assert.equal(Progression.acquisitionAssessment(finished).rank, 3);
+    assert(next.projection.roots.some(key => key.startsWith('power:')
+        && Index.find(Data.items, Number(key.split(':')[1]))?.etc.rank === 'b'),
+        'delivery of the last C piece opens B progression without another level-up');
     const bWorn = { ...finished, inventory: { ...delivered,
         [ear.selfId]: { ...delivered[ear.selfId], amount: 1, equippedCount: 1, equippedSlots: [1] },
         [higherEar.selfId]: { selfId: higherEar.selfId, amount: 1, equipped: true,

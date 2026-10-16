@@ -98,21 +98,29 @@ function clanPartyObjectiveForState(state) {
     return objective && ['open', 'deferred'].includes(objective.status) ? objective : null;
 }
 
-function partyRequestForPlan(state, plan, timestamp = Date.now()) {
+function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) {
     const previous = state?.stats?.partyRequest;
+    const Material = require('./CraftMaterialParty');
+    const supplyPause = Material.supplyPause(state, plan, { ...options, timestamp });
+    if (supplyPause) return supplyPause;
     // Travel and recovery are part of returning to solo hunting. Neither may
     // erase the recruitment cooldown before the bot gets its first fight.
-    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)) return previous;
+    if (invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)) {
+        if (!previous.suspendedFor) return previous;
+        const { suspendedFor, ...held } = previous;
+        return held;
+    }
     if (plan?.levelingRecovery) return null;
     if (!partyRequestEligible(state)) return null;
     const sharedTarget = previous?.reason === 'shared_target' && ['open', 'deferred'].includes(previous.status)
         && plan?.status === 'active' && previous.spotId === plan.next?.spotId
         && Number(previous.npcId) === Number(plan.next?.npcId || plan.targetNpcId)
         ? { ...previous, status: 'open' } : null;
-    let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan) || sharedTarget;
+    let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan)
+        || Material.request(state, plan, { ...options, timestamp }) || sharedTarget;
     if (objective?.priority === 'required' && objective.itemId && !objective.clanGoalKey && !objective.helpDeal) {
-        const context = invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state);
-        const amount = Math.max(1, Math.floor(Number(plan?.next?.amount || 1)));
+        const context = options.economy || invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state);
+        const amount = Math.max(1, Math.floor(Number(objective.materialParty ? objective.amount : plan?.next?.amount || 1)));
         // ARCH-NOTE: party value is pending; the help fee buys progress on its requested item.
         const fee = Math.floor(Math.min(invoke('GameServer/Bot/Economy/PurchaseFunding').spendable(state, 0, { itemId: objective.itemId }),
             Math.max(0, Number(context.worth(objective.itemId)) || 0) * amount));
@@ -124,10 +132,15 @@ function partyRequestForPlan(state, plan, timestamp = Date.now()) {
         && previous.objectiveKey === objective.objectiveKey
         && Number(previous.itemId || 0) === Number(objective.itemId || 0)
         && Number(previous.targetId || 0) === Number(objective.targetId || 0);
+    // Camp changes restart the waiting window, but retain this material
+    // operation's failed assemblies so every bounded alternative is visited.
+    const sameMaterialNeed = Material.isObjective(previous) && Material.isObjective(objective)
+        && Number(previous.itemId) === Number(objective.itemId)
+        && Number(previous.targetId) === Number(objective.targetId);
     const previousRequestedAt = sameRequest ? Number(previous.requestedAt || timestamp) : timestamp;
-    const previousAttempts = sameRequest ? Number(previous.attempts || 0) : 0;
+    const previousAttempts = sameRequest || sameMaterialNeed ? Number(previous.attempts || 0) : 0;
 
-    if (sameRequest && previous.status === 'deferred' && Number(previous.deferredUntil || 0) > timestamp) {
+    if ((sameRequest || sameMaterialNeed) && previous.status === 'deferred' && Number(previous.deferredUntil || 0) > timestamp) {
         return {
             ...objective,
             status: 'deferred',
@@ -156,7 +169,7 @@ function partyRequestForPlan(state, plan, timestamp = Date.now()) {
         status: 'open',
         requestedAt: sameRequest && previous.status === 'open' ? previousRequestedAt : timestamp,
         reviewAt: timestamp + Math.max(30000, Number(Config.partyWaitReplanMs) || 5 * 60 * 1000),
-        attempts: sameRequest ? previousAttempts : 0,
+        attempts: previousAttempts,
         lastMatchedAt: sameRequest ? previous.lastMatchedAt || null : null
     };
 }

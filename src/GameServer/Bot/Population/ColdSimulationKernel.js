@@ -255,6 +255,16 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
         id: `party:${party.partyId}:${timestamp}:${activity}`,
         memberIds: memberStates.map((state) => Number(state.characterId)).filter(Boolean)
     };
+    // Material travel changes the collection contract, and evacuation returns
+    // funded help. Fence that party row in the same transaction as every leg.
+    if (require('./CraftMaterialParty').isObjective(run.party.stats?.objective)
+        && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
+        party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
+        atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
+            expectedUpdatedAt: run.party.updatedAt, updatedAt: party.updatedAt,
+            nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
+            cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
+    }
     return memberStates.map((state) => {
         const id = Number(state.characterId);
         const events = event && id === resolutionMemberId
@@ -312,7 +322,7 @@ function lifecycleKind(state = {}, context = {}) {
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
     if (['shopping', 'crafting', 'merchant'].includes(state.activity)) return 'command';
-    if (plan.strategy === 'luxury_exchange' && require('../Economy/BotCrystallization').ready(state)) return 'command';
+    if (require('../Economy/BotCrystallization').ready(state)) return 'command';
     if (String(plan.strategy || '') === 'market') {
         const price = Math.max(0, Number(plan.market?.price || 0));
         const reserve = Math.max(0, Number(plan.market?.reserve || 0));
@@ -684,6 +694,17 @@ class ColdSimulationKernel {
         }
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
+        const retainedState = current && incomingRevision < currentRevision ? current.state : state;
+        const membership = retainedState.party?.partyId || retainedState.partyId;
+        // A departure snapshot can be prepared before the old party dissolves.
+        // Its catalog context must not turn the now-solo former leader back
+        // into a party writer and strand a paid town trip behind old members.
+        if (entry.context?.isPartyLeader && (!membership
+            || String(membership) !== String(entry.context.party?.partyId || ''))) {
+            entry = { ...entry, context: { ...entry.context, isPartyLeader: false,
+                party: null, partyMembers: [], requirementRefresh: false, targetNpcId: null,
+                raidOwner: null, route: entry.context.route?.mode === 'party' ? null : entry.context.route } };
+        }
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
@@ -1665,7 +1686,8 @@ class ColdSimulationKernel {
             const rescuing = run.members.some(s => s.vitals?.hp <= 0);
             const equipmentBridgeReview = !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
-            if (!meetingPending && !rescuing && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
+            if (!meetingPending && !rescuing && !require('./CraftMaterialPartyRoute').evacuating(run.party)
+                && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
                 || require('./ClanEquipmentPartyPolicy').needsReview(run.party, run.members, startedAt)
                 || equipmentBridgeReview)) {
                 const review = BackgroundPartyLifecycle.review(run.party, run.members, startedAt, {
@@ -1720,7 +1742,7 @@ class ColdSimulationKernel {
                         timing: { ...(state.timing || {}), nextResolveAt: startedAt + 1000 }
                     }
                 ));
-                const arrivedParty = {
+                let arrivedParty = {
                     ...run.party,
                     nextResolveAt: startedAt + 1000,
                     stats: {
@@ -1729,6 +1751,11 @@ class ColdSimulationKernel {
                         travel: null
                     }
                 };
+                const materialArrival = require('./CraftMaterialPartyRoute').arrived(run.party, arrivedMembers, startedAt);
+                if (materialArrival) {
+                    arrivedMembers.splice(0, arrivedMembers.length, ...materialArrival.members);
+                    arrivedParty = materialArrival.party;
+                }
                 const proposals = partyTransitionProposals(
                     run,
                     arrivedMembers,
@@ -1763,14 +1790,17 @@ class ColdSimulationKernel {
                     spotId: run.route.spotId,
                     nextResolveAt: arrivalAt,
                     stats: {
-                        ...(require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt).stats || {}),
+                        ...(require('./CraftMaterialPartyRoute').retarget(
+                            require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt),
+                            run.route.materialSources).stats || {}),
                         pveEncounter: null,
                         travel: {
                             reason: 'party_spot_replan',
                             regionName: run.route.regionName,
                             spotId: run.route.spotId,
                             startedAt,
-                            arrivalAt
+                            arrivalAt,
+                            ...(run.route.materialEvacuation ? { materialEvacuation: true } : {})
                         }
                     }
                 };
@@ -1823,10 +1853,14 @@ class ColdSimulationKernel {
                 nextResolveAt: resolution.nextResolveAt
             };
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
-            const memoryGroup = raid || paidHelp || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
+            const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
+            // Collection quotas and their physical receipts share the same
+            // commit, including completion with no funded helper contract.
+            const atomicParty = raid || paidHelp || materialHunt || resolvedParty.status === 'dissolved';
+            const memoryGroup = atomicParty || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
                 ? { id: `hunt:${run.grants.get(Number(run.party.leaderId))?.leaseId}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
-            if (raid || paidHelp || resolvedParty.status === 'dissolved') {
+            if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
                     expectedUpdatedAt: run.party.updatedAt, updatedAt: resolvedParty.updatedAt,
@@ -1846,7 +1880,7 @@ class ColdSimulationKernel {
             }
             let requirementMs = 0, lastRequirementPlanMs = 0;
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            if (!meetingPending && run.requirementRefresh && !requirementProgress) {
+            if (!meetingPending && run.requirementRefresh && !requirementProgress && !materialHunt) {
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
             }
@@ -1867,6 +1901,7 @@ class ColdSimulationKernel {
                     );
                 }
                 if (!meetingPending && run.requirementRefresh && this.planPartyRequirement && projectedState
+                    && !materialHunt
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
@@ -1918,7 +1953,7 @@ class ColdSimulationKernel {
                 };
                 proposals.push(proposal);
             }
-            if (!meetingPending && run.requirementRefresh) {
+            if (!meetingPending && run.requirementRefresh && !materialHunt) {
                 const leader = proposals.find(proposal => proposal.partyResolution);
                 if (leader) {
                     leader.partyResolution.memberPlans = memberPlans;

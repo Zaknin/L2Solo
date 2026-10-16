@@ -68,10 +68,12 @@ async function main() {
     // goal with no solo route; the economic policy has its own native tests.
     const Income = require('../src/GameServer/Bot/Population/PartyIncomeComparison');
     const originalIncome = Income.compare;
-    Income.compare = () => Income.evaluate({ solo: null, party: { income: 1000 }, cash: 5000 });
+    Income.compare = (_state, _peers, options) => ({ ...Income.evaluate({ solo: null, party: { income: 1000 }, cash: 5000 }),
+        at: options.prepared.timestamp, soloSource: null, partySource: null });
     disposers.push(() => { Income.compare = originalIncome; });
     Coordinator.requestPartyGoals = async (party, selected) => ({ ok: true,
-        sources: GoalCalculation.sources(selected), joint: GoalPolicy.joint(party, selected) });
+        sources: GoalCalculation.sources(selected), joint: party.stats?.recruitmentReview
+            ? GoalPolicy.recruitment(party, selected) : GoalPolicy.joint(party, selected) });
     const clock = { now: Date.now() }, jobs = registry(clock);
     const driver = new PartyAssemblyEvents({ registry: jobs, life: Life, parties: Parties,
         classify: state => Population.partyAssemblyInput(state),
@@ -85,7 +87,56 @@ async function main() {
     assert.equal(joinedA.party.partyId, joinedB.party.partyId);
     const [nativeParty] = await DB.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [joinedA.party.partyId]]);
     assert.deepEqual(JSON.parse(nativeParty.memberIdsJson).sort((x, y) => x - y), [a.characterId, b.characterId]);
-    driver.stop(); Population.started = false; Population.playerActivityProfile = savedProfile;
+    driver.stop();
+    Config.partyMaxSize = 3;
+    const material = { ...request, reason: 'craft_material', materialParty: true, strategy: 'craft',
+        objectiveKey: 'craft-material:event-fixture', itemId: 4097, amount: 12, requiredTotal: 12, targetId: 5726 };
+    const owners = [await seed({ classId: 8, role: 'dps', equipmentPlan: { target: { selfId: 5726 } }, partyRequest: material }),
+        await seed({ classId: 8, role: 'dps', equipmentPlan: { target: { selfId: 5730 } },
+            partyRequest: { ...material, itemId: 4098, npcId: 20004, targetId: 5730 } })];
+    const support = await seed({ classId: 16, role: 'healer', persona: { traits: { sociability: 0 } } });
+    const materialStates = [];
+    for (const [index, member] of [...owners, support].entries()) {
+        await DB.execute(['UPDATE characters SET level=65 WHERE id=?', [member.characterId]]);
+        materialStates.push(await Life.upsertState({ ...member, level: 65, clanId: index + 1,
+            activity: member === support ? 'hunting' : 'party_wait',
+            spotId: member === support ? 'remote-support-camp' : 'event-fixture' }, 'material_assembly_fixture'));
+    }
+    const made = await Population.formBackgroundParties(materialStates);
+    assert.equal(made.length, 1);
+    const materialParty = made[0];
+    assert.deepEqual(new Set(materialParty.memberIds), new Set(materialStates.map(member => member.characterId)),
+        'native formation commits different material owners and a remote support to one mixed party');
+    assert.equal(materialParty.stats.agreement.mode, 'need');
+    assert.deepEqual(materialParty.stats.agreement.materialNeeds.map(goal => goal.itemId).sort(), [4097, 4098]);
+    const [storedMaterial] = await DB.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [materialParty.partyId]]);
+    assert.deepEqual(JSON.parse(storedMaterial.statsJson).agreement.materialNeeds.map(goal => goal.quota), [12, 12]);
+    for (const member of materialStates) assert.equal(Life.cachedState(member.characterId).party.partyId, materialParty.partyId);
+    console.log('PASS native material membership commit with two needs, different clans and a remote support');
+    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
+    const savedCapacity = { cache: Profiles.cache, occupancy: Profiles.currentOccupancy };
+    const limited = [];
+    for (const stats of [
+        { classId: 8, role: 'dps', equipmentPlan: { target: { selfId: 5726 } }, partyRequest: material },
+        { classId: 8, role: 'dps', equipmentPlan: { target: { selfId: 5726 } }, partyRequest: material },
+        { classId: 16, role: 'healer' }
+    ]) {
+        const member = await seed(stats);
+        limited.push(await Life.upsertState({ ...member, level: 65,
+            activity: 'hunting', spotId: 'event-fixture' }, 'limited_material_fixture'));
+    }
+    const coreIds = limited.slice(0, 2).map(member => String(member.characterId));
+    Profiles.cache = [{ id: 'event-fixture', capacity: 2, center: { locX: 0, locY: 0, locZ: 0 } }];
+    Profiles.currentOccupancy = () => ({ 'event-fixture': { count: 0, reservedCount: 2, capacity: 2,
+        reservedKeys: new Set(coreIds), retained: new Set(coreIds) } });
+    try {
+        const fitted = await Population.formBackgroundParties(limited);
+        assert.equal(fitted.length, 1);
+        assert.deepEqual(new Set(fitted[0].memberIds), new Set(limited.slice(0, 2).map(member => member.characterId)),
+            'formation keeps the material core and reviews the smaller roster when a support cannot fit');
+        assert(!Life.cachedState(limited[2].characterId).party?.partyId);
+    } finally { Profiles.cache = savedCapacity.cache; Profiles.currentOccupancy = savedCapacity.occupancy; }
+    Population.started = false; Population.playerActivityProfile = savedProfile;
     Coordinator.requestPartyGoals = originalPartyGoals;
     Income.compare = originalIncome;
     Config.partyMinSize = originalMin; Config.partyMaxSize = originalMax;

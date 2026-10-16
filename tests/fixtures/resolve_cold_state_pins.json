@@ -749,6 +749,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -762,7 +763,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"direct_drop\",\"next\":{\"spotId\":\"old_ground\",\"npcId\":42},\"retargeted\":\"src_b\"}},\"tag\":\"in\"} | {}"
@@ -770,7 +771,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"direct_drop\",\"next\":{\"spotId\":\"old_ground\",\"npcId\":42},\"retargeted\":\"src_b\"}},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 0,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "worker_plan_replace": {
   "trace": [
@@ -823,6 +824,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -836,7 +838,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan,partyRequest t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"partyRequest\":{\"objective\":\"boss\"},\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"craft\",\"replaces\":\"craft\",\"finalized\":true}},\"tag\":\"in\"} | {}"
@@ -844,7 +846,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"partyRequest\":{\"objective\":\"boss\"},\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"craft\",\"replaces\":\"craft\",\"finalized\":true}},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 0,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "worker_plan_locked": {
   "trace": [
@@ -895,6 +897,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -908,7 +911,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"direct_drop\",\"next\":{\"spotId\":\"new_ground\",\"npcId\":5}}},\"tag\":\"in\"} | {}"
@@ -916,7 +919,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"equipmentPlan\":{\"status\":\"active\",\"strategy\":\"direct_drop\",\"next\":{\"spotId\":\"new_ground\",\"npcId\":5}}},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 0,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "craft_travel": {
   "trace": [
@@ -1110,6 +1113,7 @@
    "19 market.finishTownErrands(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:null})",
@@ -1123,7 +1127,7 @@
    "36 reviewTraining(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"traveling\",\"level\":40,\"adena\":1000,\"spotId\":\"new_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"spotId\":\"new_ground\",\"mode\":\"solo\",\"arrivalAt\":1700000005000}},\"tag\":\"in>huntTrip\"} | {}"
@@ -1131,7 +1135,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"new_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"spotId\":\"new_ground\",\"mode\":\"solo\",\"arrivalAt\":1700000005000}},\"tag\":\"in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "party_wait_fallback": {
   "trace": [
@@ -1183,6 +1187,7 @@
    "19 market.finishTownErrands(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:null})",
@@ -1196,7 +1201,7 @@
    "36 reviewTraining(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@new_ground n=- st=equipmentPlan,travel t=in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"traveling\",\"level\":40,\"adena\":1000,\"spotId\":\"new_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"spotId\":\"new_ground\",\"mode\":\"solo\",\"arrivalAt\":1700000005000}},\"tag\":\"in>huntTrip\"} | {}"
@@ -1204,7 +1209,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"new_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"travel\":{\"spotId\":\"new_ground\",\"mode\":\"solo\",\"arrivalAt\":1700000005000}},\"tag\":\"in>huntTrip>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "party_wait_without_fallback": {
   "trace": [
@@ -1249,6 +1254,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:null})",
@@ -1262,7 +1268,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -1270,7 +1276,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "worker_command_spot": {
   "trace": [
@@ -1316,6 +1322,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"new_ground\",name:\"New Ground\",center:{locX:9000,locY:9000,locZ:30}}})",
@@ -1329,7 +1336,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -1337,7 +1344,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":2,\"wins\":2}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_hunt_default": {
   "trace": [
@@ -1386,6 +1393,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -1399,7 +1407,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -1407,7 +1415,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_stale_shopping": {
   "trace": [
@@ -1454,6 +1462,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -1467,7 +1476,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -1475,7 +1484,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_apply_failed": {
   "trace": [
@@ -1595,6 +1604,7 @@
    "19 market.finishTownErrands(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:null})",
@@ -1608,7 +1618,7 @@
    "36 reviewTraining(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:shopping@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -1616,7 +1626,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":2,\"wins\":2}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_shopping_economy_plan": {
   "trace": [
@@ -1663,6 +1673,7 @@
    "21 market.finishTownErrands(#501:shopping@- n=- st= t=cachedCold>listing>purchase)",
    "22 hotRow(501)",
    "22 hasPreparation(501)",
+   "22 decisions.activity(#501:shopping@- n=- st= t=cachedCold>listing>purchase>errands)",
    "22 finishMarketVisit(#501:shopping@- n=- st= t=cachedCold>listing>purchase>errands)",
    "22 upsertState(#501:traveling@- n=- st= t=visitDone, \"market_visit_complete\")",
    "27 hasPreparation(501)",
@@ -1678,7 +1689,7 @@
    "41 improvement.reviewCold(#501:shopping@- n=- st= t=cachedCold>trained)",
    "42 reviewPurchaseLimits(#501:shopping@- n=- st= t=cachedCold>trained>improve)",
    "45 decisions.release(501)",
-   "45 M.duration(2)"
+   "45 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Giran\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {\"statsPacket\":{\"packet\":4}}",
@@ -1687,7 +1698,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"phase\":\"cold\",\"activity\":\"shopping\",\"tag\":\"cachedCold>trained>improve>limits\"},\"debug\":{\"fights\":2,\"wins\":2}}",
   "settledTick": 48,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_shopping_stale_worker_refusal": {
   "trace": [
@@ -1854,6 +1865,7 @@
    "21 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase)",
    "22 hotRow(501)",
    "22 hasPreparation(501)",
+   "22 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands)",
    "22 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands)",
    "25 hasPreparation(501)",
    "25 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -1867,15 +1879,15 @@
    "38 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands>reconcile)",
    "39 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands>reconcile>trained)",
    "40 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands>reconcile>trained>improve)",
-   "43 M.duration(2)"
+   "43 M.duration(3)"
   ],
   "saves": [
-   "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Giran\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
+   "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Giran\",\"loc\":{\"locX\":83396,\"locY\":147904,\"locZ\":-3400},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
   ],
-  "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Giran\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":2,\"wins\":2}}",
+  "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Giran\",\"loc\":{\"locX\":83396,\"locY\":147904,\"locZ\":-3400},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>warehouse>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":2,\"wins\":2}}",
   "settledTick": 46,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_crafting_after_apply": {
   "trace": [
@@ -2295,6 +2307,7 @@
    "19 market.finishTownErrands(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands)",
    "20 finishMarketVisit(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -2308,7 +2321,7 @@
    "36 reviewTraining(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands>reconcile)",
    "37 improvement.reviewCold(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:shopping@old_ground n=- st=equipmentPlan,forcedMarketCleanup t=cleanupBag>opened>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -2316,7 +2329,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"shopping\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"forcedMarketCleanup\":null},\"tag\":\"cleanupBag>opened>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_listing_pending": {
   "trace": [
@@ -2435,6 +2448,7 @@
    "20 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile)",
    "21 hotRow(501)",
    "21 hasPreparation(501)",
+   "21 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands)",
    "21 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands)",
    "24 hasPreparation(501)",
    "24 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -2448,7 +2462,7 @@
    "37 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands>reconcile)",
    "38 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands>reconcile>trained)",
    "39 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands>reconcile>trained>improve)",
-   "42 M.duration(2)"
+   "42 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -2456,7 +2470,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>reconcile>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 45,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_trip_edge_market_travel": {
   "trace": [
@@ -2505,11 +2519,12 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
    "25 reconcile(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {type:\"hunt\"}, [{type:\"hunt\"}])",
-   "26 beginMarketTravel(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile, {type:\"hunt\"}, 1700000000002, {economy:null})",
+   "26 beginMarketTravel(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile, {type:\"hunt\"}, 1700000000003, {economy:null})",
    "26 upsertState(#501:traveling@old_ground n=- st=equipmentPlan,marketReturn,travel t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>marketTravel, \"goal_market_travel\")",
    "32 craft.progressEvents(#501:hunting@old_ground n=- st= t=in, undefined, #501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits)",
    "32 events.recordMany(501, [{type:\"fight\"},{type:\"progress\"}])",
@@ -2519,7 +2534,7 @@
    "38 reviewTraining(#501:traveling@old_ground n=- st=equipmentPlan,marketReturn,travel t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>marketTravel)",
    "39 improvement.reviewCold(#501:traveling@old_ground n=- st=equipmentPlan,marketReturn,travel t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>marketTravel>trained)",
    "40 reviewPurchaseLimits(#501:traveling@old_ground n=- st=equipmentPlan,marketReturn,travel t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>marketTravel>trained>improve)",
-   "43 M.duration(3)"
+   "43 M.duration(4)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}",
@@ -2528,7 +2543,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"traveling\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{\"marketReturn\":{\"spotId\":\"old_ground\"},\"travel\":{\"to\":\"town\",\"arrivalAt\":1700000009000}},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>marketTravel>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 46,
   "planDeferred": 1,
-  "dateNowCalls": 4
+  "dateNowCalls": 5
  },
  "main_survival_unload_travel": {
   "trace": [
@@ -2577,12 +2592,13 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
    "25 reconcile(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {type:\"hunt\"}, [{type:\"hunt\"}])",
    "26 survival.forState(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
-   "26 beginMarketTravel(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile, {type:\"hunt\"}, 1700000000002, {economy:null})",
+   "26 beginMarketTravel(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile, {type:\"hunt\"}, 1700000000003, {economy:null})",
    "26 upsertState(#501:traveling@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>unloadTrip, \"goal_market_travel\")",
    "32 craft.progressEvents(#501:hunting@old_ground n=- st= t=in, undefined, #501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits)",
    "32 events.recordMany(501, [{type:\"fight\"},{type:\"progress\"}])",
@@ -2592,7 +2608,7 @@
    "38 reviewTraining(#501:traveling@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>unloadTrip)",
    "39 improvement.reviewCold(#501:traveling@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>unloadTrip>trained)",
    "40 reviewPurchaseLimits(#501:traveling@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>unloadTrip>trained>improve)",
-   "43 M.duration(3)"
+   "43 M.duration(4)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}",
@@ -2601,7 +2617,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"traveling\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>unloadTrip>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 46,
   "planDeferred": 1,
-  "dateNowCalls": 4
+  "dateNowCalls": 5
  },
  "main_goal_review_fails": {
   "trace": [
@@ -2650,6 +2666,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -2664,7 +2681,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -2672,7 +2689,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_preparation_at_review": {
   "trace": [
@@ -2721,6 +2738,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "25 craft.progressEvents(#501:hunting@old_ground n=- st= t=in, undefined, #501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits)",
@@ -2728,7 +2746,7 @@
    "28 chat.maybeAnnounce(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, [{type:\"fight\"}])",
    "31 hasPreparation(501)",
    "31 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
-   "34 M.duration(2)"
+   "34 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -2736,7 +2754,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 37,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_preparation_after_errands": {
   "trace": [
@@ -2848,6 +2866,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st= t=cachedCommit>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st= t=cachedCommit>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st= t=cachedCommit>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st= t=cachedCommit>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -2861,7 +2880,7 @@
    "36 reviewTraining(#501:hunting@old_ground n=- st= t=cachedCommit)",
    "37 improvement.reviewCold(#501:hunting@old_ground n=- st= t=cachedCommit>trained)",
    "38 reviewPurchaseLimits(#501:hunting@old_ground n=- st= t=cachedCommit>trained>improve)",
-   "41 M.duration(2)"
+   "41 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {}"
@@ -2869,7 +2888,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"cachedCommit>trained>improve>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 44,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "main_worker_admission": {
   "trace": [
@@ -2918,6 +2937,7 @@
    "19 market.finishTownErrands(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase)",
    "20 hotRow(501)",
    "20 hasPreparation(501)",
+   "20 decisions.activity(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "20 finishMarketVisit(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands)",
    "23 hasPreparation(501)",
    "23 goal.review(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands, {spot:{id:\"old_ground\",name:\"Old Ground\",center:{locX:10,locY:20,locZ:30}}})",
@@ -2927,7 +2947,7 @@
    "30 events.recordMany(501, [{type:\"fight\"},{type:\"progress\"}])",
    "33 chat.maybeAnnounce(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile, [{type:\"fight\"}])",
    "36 reviewPurchaseLimits(#501:hunting@old_ground n=- st=equipmentPlan t=in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile)",
-   "39 M.duration(2)"
+   "39 M.duration(3)"
   ],
   "saves": [
    "applyResolve | {\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in\"} | {\"workerAdmission\":{\"owner\":1}}"
@@ -2935,7 +2955,7 @@
   "outcome": "{\"ok\":true,\"state\":{\"characterId\":501,\"name\":\"Pin501\",\"phase\":\"cold\",\"activity\":\"hunting\",\"level\":40,\"adena\":1000,\"spotId\":\"old_ground\",\"currentRegion\":\"Old Ground\",\"loc\":{\"locX\":10,\"locY\":20,\"locZ\":30},\"inventory\":{},\"timing\":{\"lastResolvedAt\":1699999970000},\"stats\":{},\"tag\":\"in>apply>limits>workshop>shots>wealth>listing>purchase>errands>reconcile>limits\"},\"debug\":{\"fights\":1,\"wins\":1}}",
   "settledTick": 42,
   "planDeferred": 1,
-  "dateNowCalls": 3
+  "dateNowCalls": 4
  },
  "sync_throw_on_atlas": {
   "trace": [
