@@ -48,14 +48,21 @@ let timed = false;
 let recordMs = 0;
 let recordRows = 0;
 
-function closeTiming(outcome) {
-    if (recordRows > 0) {
-        Diagnostics.duration('journal_record', recordMs);
-        Diagnostics.count('journal', outcome, 'rows', recordRows);
-    }
+// Ends the job's timing; foldMs is the commit's fold time, null if none.
+// The job's SQL has already run: a failing diagnostics sink must never turn
+// it into a failure, so the state resets first and the reports are best effort.
+function closeTiming(outcome, foldMs = null) {
+    const ms = recordMs, rows = recordRows;
     timed = false;
     recordMs = 0;
     recordRows = 0;
+    try {
+        if (foldMs !== null) Diagnostics.duration('journal_fold', foldMs);
+        if (rows > 0) {
+            Diagnostics.duration('journal_record', ms);
+            Diagnostics.count('journal', outcome, 'rows', rows);
+        }
+    } catch (_) { /* Timing delivery is best effort. */ }
 }
 
 function label() {
@@ -105,8 +112,7 @@ function commit(at = Date.now()) {
             }
         });
     }
-    if (foldClock !== null) Diagnostics.duration('journal_fold', performance.now() - foldClock);
-    closeTiming('commit');
+    closeTiming('commit', foldClock === null ? null : performance.now() - foldClock);
     operation = null;
     operationDetail = null;
     pending = null;
