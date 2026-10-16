@@ -130,7 +130,15 @@ const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
 if (forbiddenLoaded.length) throw new Error(`cold worker loaded forbidden modules: ${forbiddenLoaded.join(', ')}`);
 
 let kernel = null;
+// The scheduler wakes at kernel.nextWakeAt() (one timer on the nearest
+// deadline). false restores the fixed loopIntervalMs poll.
+const LOOP_ALARM = true;
+// Longest idle sleep: the bound on a wake missed by a path that adds work
+// without a re-arm (a resolve finishing between messages).
+const LOOP_IDLE_CAP_MS = 250;
 let loopTimer = null;
+let loopIntervalMs = 20;
+let loopArmedAt = 0;
 let flushTimer = null;
 let heartbeatTimer = null;
 let shuttingDown = false;
@@ -1087,12 +1095,49 @@ function send(type, payload = {}, msgId = null, payloadBytes = null) {
 }
 
 function stopTimers() {
-    if (loopTimer) clearInterval(loopTimer);
+    if (loopTimer) clearTimeout(loopTimer);
     if (flushTimer) clearInterval(flushTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     loopTimer = null;
     flushTimer = null;
     heartbeatTimer = null;
+}
+
+// When the scheduler should run next, counted from `from` (the start of the
+// last tick, as setInterval did): due work keeps the loopIntervalMs cadence (a
+// tick that could not take it, held by capacity or a pause, waits for an ack
+// the same as before); otherwise 1 ms past the nearest deadline (a timer may
+// fire up to 1 ms early), at most LOOP_IDLE_CAP_MS away.
+function loopWakeAt(from, next = kernel.nextWakeAt()) {
+    return next <= from ? from + loopIntervalMs : from + Math.min(next - from + 1, LOOP_IDLE_CAP_MS);
+}
+
+function armLoop(from = Date.now()) {
+    const next = kernel.nextWakeAt();
+    loopArmedAt = loopWakeAt(from, next);
+    Config.developerDiagnostics && economyDiagnostics.count('worker_wake', 'armed',
+        next <= from ? 'pending' : next - from >= LOOP_IDLE_CAP_MS ? 'cap' : 'due');
+    loopTimer = setTimeout(runLoop, Math.max(0, loopArmedAt - Date.now()));
+    loopTimer.unref?.();
+}
+
+function runLoop() {
+    const startedAt = Date.now();
+    try {
+        if (leaseProbe && (shuttingDown || startedAt >= leaseProbe.replyBy)) leaseProbe = null;
+        kernel.tick();
+    } finally {
+        if (loopTimer && !shuttingDown) armLoop(startedAt);
+    }
+}
+
+// Every path that can add earlier work (a message, the heartbeat's competition
+// review arming a decision deadline) calls this: the timer moves only sooner.
+function wakeLoopIfSooner() {
+    if (!LOOP_ALARM || !loopTimer || shuttingDown || loopWakeAt(Date.now()) >= loopArmedAt) return;
+    clearTimeout(loopTimer);
+    Config.developerDiagnostics && economyDiagnostics.count('worker_wake', 'rearmed', 'sooner');
+    armLoop();
 }
 
 function startKernel(config = {}) {
@@ -1502,10 +1547,12 @@ function startKernel(config = {}) {
         nativeCraftContinuation: true
     });
     OccupationSources.initialise();
-    loopTimer = setInterval(() => {
+    loopIntervalMs = Math.max(5, Number(config.loopIntervalMs) || 20);
+    if (LOOP_ALARM) armLoop();
+    else loopTimer = setInterval(() => {
         if (leaseProbe && (shuttingDown || Date.now() >= leaseProbe.replyBy)) leaseProbe = null;
         kernel.tick();
-    }, Math.max(5, Number(config.loopIntervalMs) || 20));
+    }, loopIntervalMs);
     if (Config.coldCompetitionObserveEnabled) {
         const allowed = new Set((DataCache.npcs || []).filter(npc => npc.template?.kind === 'Monster'
             && !invoke('GameServer/Bot/AI/BotRaidSafety').isProtectedRaidEntity(npc)).map(npc => Number(npc.selfId)));
@@ -1555,6 +1602,7 @@ function startKernel(config = {}) {
             const started = Config.developerDiagnostics ? performance.now() : 0;
             competitionCandidates.reviewBatch(Date.now());
             if (Config.developerDiagnostics) competition.report.lastSampleMs = performance.now() - started;
+            wakeLoopIfSooner();
         }
         const elu = Config.developerDiagnostics ? performance.eventLoopUtilization(previousElu) : null;
         if (Config.developerDiagnostics) previousElu = performance.eventLoopUtilization();
@@ -1783,7 +1831,10 @@ parentPort.on('message', (message) => {
     }
     Promise.resolve(handle(message)).catch((error) => {
         send('fault', { reason: error?.message || 'worker_message_error', stack: error?.stack || null, msgId: message?.msgId || null });
-    });
+    }).finally(wakeLoopIfSooner);
+    // A message that changed the schedule synchronously (an ack, a snapshot,
+    // a buyer wake) moves the loop timer now; an awaited one at its finally.
+    wakeLoopIfSooner();
 });
 
 send('ready', {

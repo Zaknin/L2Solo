@@ -64,6 +64,14 @@ const SNAPSHOT_SLICE_MS = 50;
 // resolve 30-130 s apart (live 2026-10-14: 649 of 650 within 130 s), and the
 // route waits in the context until that resolve.
 const PENDING_ROUTE_MAX_MS = 180000;
+// Expired-lease recovery wakes at the nearest lease expiry on the shared
+// background deadline heap. false restores the fixed recovery poll.
+const LEASE_RECOVERY_ALARM = true;
+const LEASE_RECOVERY_KEY = Symbol('cold-lease-recovery');
+
+function leaseRecoveryIntervalMs() {
+    return Math.max(1000, Number(Config.coldOwnerRecoveryIntervalMs) || 5000);
+}
 
 function snapshotRefreshMs() {
     return Math.max(2000, Number(Config.coldWorkerSnapshotRefreshMs) || 10000);
@@ -204,6 +212,12 @@ class ColdSimulationCoordinator {
         this.reconcileTimer = null;
         this.snapshotContinuationTimer = null;
         this.recoveryTimer = null;
+        // Ids this coordinator granted a lease since the last recovery wake
+        // (pruned there: at most one lease period of grants) and when the one
+        // recovery deadline fires; null registry: the fixed poll runs.
+        this.leaseHolders = new Set();
+        this.leaseRecoveryAt = Infinity;
+        this.leaseRecoveryRegistry = null;
         this.renewalTimer = null;
         this.leaseRenewalRound = null;
         this.leaseRenewalInFlight = null;
@@ -398,9 +412,10 @@ class ColdSimulationCoordinator {
                 this.tableChannel.flush();
                 this.sendSnapshots(false).catch((error) => this.recordError(error));
             }, snapshotRefreshMs());
-            this.recoveryTimer = setInterval(() => {
+            this.leaseRecoveryRegistry = LEASE_RECOVERY_ALARM ? this.population?.backgroundJobRegistry || null : null;
+            if (!this.leaseRecoveryRegistry) this.recoveryTimer = setInterval(() => {
                 ColdSimulationOwner.recoverExpiredLeases().catch((error) => this.recordError(error));
-            }, Math.max(1000, Number(Config.coldOwnerRecoveryIntervalMs) || 5000));
+            }, leaseRecoveryIntervalMs());
             this.renewalTimer = setInterval(() => {
                 this.beginLeaseRenewalRound();
             }, Math.max(1000, Number(Config.coldOwnerRenewalIntervalMs) || 5000));
@@ -414,7 +429,7 @@ class ColdSimulationCoordinator {
             }, Math.max(30000, Number(Config.partyHistoryCleanupIntervalMs) || 60 * 60 * 1000));
             this.watchdogTimer.unref?.();
             this.reconcileTimer.unref?.();
-            this.recoveryTimer.unref?.();
+            this.recoveryTimer?.unref?.();
             this.renewalTimer.unref?.();
             this.historyCleanupTimer.unref?.();
             return true;
@@ -1899,6 +1914,7 @@ class ColdSimulationCoordinator {
         const claimed = await ColdSimulationOwner.claimBatch(candidates, {
             leaseMs: Math.max(2000, Number(Config.coldOwnerLeaseMs) || 30000)
         });
+        this.noteLeaseGrants(claimed.grants || []);
         const index = this.contextIndex({ compactPartyMembers: true });
         const rebaseIds = [...new Set((claimed.rejected || [])
             .filter((result) => OWNERSHIP_REBASE_REASONS.has(String(result.reason || '')))
@@ -2597,6 +2613,50 @@ class ColdSimulationCoordinator {
         // replacement worker must not overlap the old character flush/SQL.
     }
 
+    // Every cold lease is granted here (claimBatch); each grant may lower the
+    // one recovery deadline. Renewals only raise an expiry, so they need none.
+    noteLeaseGrants(grants) {
+        if (!this.leaseRecoveryRegistry || !grants.length) return;
+        let earliest = Infinity;
+        for (const grant of grants) {
+            this.leaseHolders.add(Number(grant.characterId));
+            earliest = Math.min(earliest, Number(grant.leaseUntil) || Infinity);
+        }
+        this.armLeaseRecovery(earliest, 'grant');
+    }
+
+    armLeaseRecovery(at, reason) {
+        if (!this.leaseRecoveryRegistry || !(at < this.leaseRecoveryAt)) return;
+        this.leaseRecoveryAt = Math.ceil(at);
+        this.leaseRecoveryRegistry.armDeadline(LEASE_RECOVERY_KEY, this.leaseRecoveryAt, now => this.recoverDueLeases(now));
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('lease_recovery', 'armed', reason);
+    }
+
+    // The wake reads each holder's lease from its owner cache (BotLifeState,
+    // updated by every grant, renewal, commit, release and recovery): no
+    // expired lease, no write transaction; the deadline moves to the nearest
+    // expiry. An expired (or uncached) one runs the recovery, then the next
+    // wake is one recovery interval later, so a cache behind a renewal in the
+    // database costs at most the old poll.
+    recoverDueLeases(now) {
+        this.leaseRecoveryAt = Infinity;
+        if (this.stopping || !this.started) return;
+        let expired = false, next = Infinity;
+        for (const id of this.leaseHolders) {
+            const simulation = LifeState.cachedState(id)?.simulation;
+            const until = Number(simulation?.leaseUntil || 0);
+            if (!simulation) { expired = true; this.leaseHolders.delete(id); }
+            else if (simulation.ownerId !== ColdSimulationOwner.OWNER_ID || !(until > 0)) this.leaseHolders.delete(id);
+            else if (until <= now) expired = true;
+            else if (until < next) next = until;
+        }
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('lease_recovery', 'fired', expired ? 'expired' : 'none');
+        if (!expired) return this.armLeaseRecovery(next, 'next_expiry');
+        ColdSimulationOwner.recoverExpiredLeases(now)
+            .catch((error) => this.recordError(error))
+            .finally(() => this.armLeaseRecovery(now + leaseRecoveryIntervalMs(), 'after_recovery'));
+    }
+
     beginLeaseRenewalRound() {
         const previous = this.leaseRenewalRound;
         if (previous && !this.currentLeaseRenewalRound(previous)) this.cancelLeaseRenewalRound(previous);
@@ -2747,6 +2807,10 @@ class ColdSimulationCoordinator {
         if (this.reconcileTimer) clearInterval(this.reconcileTimer);
         if (this.snapshotContinuationTimer) clearTimeout(this.snapshotContinuationTimer);
         if (this.recoveryTimer) clearInterval(this.recoveryTimer);
+        this.leaseRecoveryRegistry?.cancelDeadline(LEASE_RECOVERY_KEY);
+        this.leaseRecoveryRegistry = null;
+        this.leaseRecoveryAt = Infinity;
+        this.leaseHolders.clear();
         if (this.renewalTimer) clearInterval(this.renewalTimer);
         if (this.historyCleanupTimer) clearInterval(this.historyCleanupTimer);
         if (this.restartTimer) clearTimeout(this.restartTimer);

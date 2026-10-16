@@ -49,6 +49,9 @@ const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwne
 const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const WAREHOUSE_CLEANUP_KEY = Symbol('warehouse-cleanup');
+const STATE_RETENTION_KEY = Symbol('state-retention');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const RequiredPartyFormation = invoke('GameServer/Bot/Population/RequiredPartyFormation');
 const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
@@ -1023,8 +1026,6 @@ const PopulationService = {
     initialSummaryTimer: null,
     schedulerTimer: null,
     backgroundJobRegistry: null,
-    warehouseCleanupTimer: null,
-    stateRetentionTimer: null,
     partyAssemblyEvents: null,
     partyRequirementRefreshDue: new Set(),
     phasePolicyTimer: null,
@@ -1137,20 +1138,20 @@ const PopulationService = {
 
         if (Config.warehouseCleanupEnabled !== false) {
             this.nextWarehouseCleanupAt = Date.now() + Math.max(1000, Number(Config.warehouseCleanupStartDelayMs) || 60000);
-            this.warehouseCleanupTimer = setInterval(() => {
-                this.runWarehouseCleanup();
-            }, Math.max(250, Number(Config.warehouseCleanupIntervalMs) || 2000));
-            if (typeof this.warehouseCleanupTimer.unref === 'function') this.warehouseCleanupTimer.unref();
+            this.armBackgroundAlarm(WAREHOUSE_CLEANUP_KEY, 'warehouse_cleanup',
+                Math.max(250, Number(Config.warehouseCleanupIntervalMs) || 2000),
+                () => this.nextWarehouseCleanupAt, timestamp => this.runWarehouseCleanup(timestamp));
         }
 
         if (Config.stateRetentionEnabled !== false) {
             this.nextStateRetentionAt = Date.now() + Math.max(1000, Number(Config.stateRetentionStartDelayMs) || 90000);
-            this.stateRetentionTimer = setInterval(() => {
-                this.runStateRetention();
-            }, Math.max(250, Number(Config.stateRetentionIntervalMs) || 1000));
-            if (typeof this.stateRetentionTimer.unref === 'function') this.stateRetentionTimer.unref();
+            this.armBackgroundAlarm(STATE_RETENTION_KEY, 'state_retention',
+                Math.max(250, Number(Config.stateRetentionIntervalMs) || 1000),
+                () => this.nextStateRetentionAt, timestamp => this.runStateRetention(timestamp));
         }
 
+        // The WAL reset stays a poll: its gate (WAL bytes past a threshold, an
+        // idle write queue, no checkpoint in flight) has no event to wait for.
         const walResetIntervalMs = Math.max(1000, Number(options.default.Database?.checkpointResetIntervalMs) || 5000);
         if (Number(options.default.Database?.checkpointResetWalBytes) > 0) {
             this.walResetTimer = setInterval(() => {
@@ -1200,18 +1201,10 @@ const PopulationService = {
         this.clanActionRunning = false;
         this.clanFounderRunning = false;
         this.nextClanActionAt = 0;
-        if (this.warehouseCleanupTimer) {
-            clearInterval(this.warehouseCleanupTimer);
-            this.warehouseCleanupTimer = null;
-        }
         this.warehouseCleanupRunning = false;
         this.warehouseCleanupCursor = 0;
         this.warehouseCleanupPassUnits = 0;
         this.nextWarehouseCleanupAt = 0;
-        if (this.stateRetentionTimer) {
-            clearInterval(this.stateRetentionTimer);
-            this.stateRetentionTimer = null;
-        }
         this.stateRetentionRunning = false;
         this.stateRetentionPassRows = 0;
         this.nextStateRetentionAt = 0;
@@ -1493,6 +1486,28 @@ const PopulationService = {
         this.backgroundJobRegistry = registry;
         registry.start();
         return registry;
+    },
+
+    // One deadline on the shared background heap instead of a fixed interval.
+    // The next run is the job's known next...At (its start delay, the pause
+    // after a pass) or one interval later: inside a pass, and after a deferral
+    // (player protected, event-loop lag, a busy write queue), which has no event
+    // to wait for. registry.stop() (population stop) drops the deadline and
+    // ends the chain.
+    armBackgroundAlarm(key, name, intervalMs, nextAt, run) {
+        const registry = this.backgroundJobRegistry;
+        if (!registry) return;
+        const now = Date.now(), known = Number(nextAt()) || 0;
+        registry.armDeadline(key, Math.ceil(Math.max(now + intervalMs, known)), timestamp => {
+            Promise.resolve().then(() => run(timestamp)).then(result => {
+                Config.developerDiagnostics && Diagnostics.count('background_alarm', result == null ? 'empty' : 'ran', name);
+            }, error => {
+                utils.infoWarn('BotPopulation', 'background %s failed: %s', name, error?.message || error);
+            }).finally(() => {
+                if (this.backgroundJobRegistry === registry) this.armBackgroundAlarm(key, name, intervalMs, nextAt, run);
+            });
+        });
+        Config.developerDiagnostics && Diagnostics.count('background_alarm', 'armed', `${name}:${known > now + intervalMs ? 'known' : 'interval'}`);
     },
 
     startPartyAssemblyEvents() {
