@@ -1,5 +1,6 @@
 'use strict';
 const DiagnosticConfig = require('./PopulationConfig');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 
 const { performance } = require('node:perf_hooks');
 const { unknownWorkshop } = require('./ColdEconomyDecision');
@@ -149,9 +150,31 @@ class ColdOccupationPlanner {
         for (const entry of this.slots.values()) {
             if (entry.input.mode === 'wish') continue; // Route-only work has no board/market dependencies.
             if (entry.dirty) continue;
-            entry.dirty = true; entry.cursor[14] = 2; DiagnosticConfig.developerDiagnostics && (this.stats.invalidations++);
-            if (entry.done) this.publish(entry.id, entry.input, unknownWorkshop(), { stale: true });
+            this.markReset(entry);
         }
+    }
+    markReset(entry) {
+        entry.dirty = true; entry.cursor[14] = 2; DiagnosticConfig.developerDiagnostics && (this.stats.invalidations++);
+        if (entry.done) this.publish(entry.id, entry.input, unknownWorkshop(), { stale: true });
+    }
+    // After a whole source table was replaced and its full copy applied: only
+    // the slots whose read items or admission scope moved are marked, as
+    // sourceChanged/scopeChanged mark them per row; a row the copy no longer
+    // has reads as a moved token. Not during the copy: the table reads empty.
+    recheckSources() {
+        let moved = 0, kept = 0;
+        for (const entry of this.slots.values()) {
+            if (entry.input.mode === 'wish' || entry.dirty || !entry.reads) continue;
+            let changed = entry.admissionScope != null && entry.admissionToken !== this.sourceScopeToken(entry.admissionScope);
+            if (!changed) {
+                for (const [id, token] of entry.reads) {
+                    if (this.sourceToken(id, entry.input) !== token) { changed = true; break; }
+                }
+            }
+            if (changed) { this.markReset(entry); moved++; } else kept++;
+        }
+        if (moved) Diagnostics.count('occupation', 'source_reset', 'moved', moved);
+        if (kept) Diagnostics.count('occupation', 'source_reset', 'kept', kept);
     }
 
     admit() {

@@ -41,6 +41,15 @@ assert(planner.slots.size <= 64);
 assert.equal(planner.workingContexts, 0, 'completed scalar cards do not disable the economic review cache');
 assert.equal(working.at(-1), 0);
 assert(working.every(count => count >= 0 && count <= 64), 'the graph reservation remains bounded through eviction and restarts');
+// A replaced source table rechecks the done slots: only a slot whose read token moved restarts.
+const before = planner.stats.invalidations, doneSlots = [...planner.slots.values()].filter(entry => entry.reads?.size && !entry.dirty);
+planner.recheckSources();
+assert.equal(planner.stats.invalidations, before, 'a replaced table with the same tokens restarts nothing');
+const movedId = doneSlots[0].id;
+tokens.set(movedId, (tokens.get(movedId) || 0) + 7);
+planner.recheckSources();
+assert.equal(planner.stats.invalidations, before + 1, 'only the slot that read the moved item restarts');
+assert(planner.slots.get(movedId).dirty && doneSlots.slice(1).every(entry => !entry.dirty));
 planner.stop(); assert.equal(planner.slots.size, 0); assert.equal(planner.dependencies.size, 0);
 
 // Query snapshots are temporary owners, unlike the kernel's native state.
