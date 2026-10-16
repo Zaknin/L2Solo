@@ -9,7 +9,7 @@ let builds = 0, hits = 0, reads = 0;
 Diagnostics.count = (layer, outcome) => { if (layer === 'price_mixture') { if (outcome === 'build') builds++; else if (outcome === 'hit') hits++; } };
 let median = Math.log(100), deals = 2, first = 80, index = .1;
 const counters = { itemPriceEvidence: () => { reads++; return { logMedian: median, deals }; },
-    firstPrice: () => first, counterOf: () => 'gear d', counter: () => ({ index }) };
+    firstPrice: () => first, counterOf: () => 'gear d', counter: () => ({ index }), indexOf: () => index };
 const learning = { knowledgeEnabled: () => true, errorOf: (understanding, experience) => .2 * (1 - understanding) / (1 + experience) };
 global.invoke = name => name === 'GameServer/Bot/Economy/MarketCounters' ? counters
     : name === 'GameServer/Bot/Economy/PriceLearning' ? learning : originalInvoke(name);

@@ -20,8 +20,9 @@ function sigma(belief) {
     return S0 / Math.sqrt(1 + belief.K);
 }
 
-function counterIndex(selfId, timestamp) {
-    return MarketCounters.counter(MarketCounters.counterOf(selfId), timestamp).index;
+// The index alone: the counter's buyers per hour and clock are not read here.
+function counterIndex(selfId) {
+    return MarketCounters.indexOf(MarketCounters.counterOf(selfId));
 }
 
 // ARCH-NOTE: the previous one-hour, item-only cache inferred willingness
@@ -53,7 +54,7 @@ function prior(selfId, ctx) {
     const ask = ctx.board?.first(id, SELL, { excludeOwner: ctx.characterId, enchant: 0 });
     const bid = ctx.board?.first(id, BUY, { excludeOwner: ctx.characterId, enchant: 0 });
     const first = MarketCounters.firstPrice(id, ctx.timestamp);
-    const index = counterIndex(id, ctx.timestamp);
+    const index = counterIndex(id);
     const demand = demandValue(id, ctx);
     const inputs = [deals.logMedian, Math.min(DEALS_WEIGHT_MAX, deals.deals),
         ask?.price > 0 ? Number(ask.price) : 0, bid?.price > 0 ? Number(bid.price) : 0,

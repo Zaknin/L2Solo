@@ -17,6 +17,7 @@ const Uptime = require('../Population/Uptime');
 const DataCache = invoke('GameServer/DataCache');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 const ShotTradeDemand = require('./ShotTradeDemand');
+const Diagnostics = require('./EconomyDiagnostics');
 
 const HOUR_MS = 60 * 60 * 1000;
 const PRICES_KEPT = 21;
@@ -50,6 +51,12 @@ let priceEvidenceCache = new WeakMap();
 let channel = null;
 const changeListeners = new Set();
 let loading = false;
+// The mean of the measured counter moves (moveOf's fallback), shared by every
+// reader until a move can change: a deal on this thread, a reset, a new table
+// or, in a worker, movesChanged() from its 'market' table watch. A worker that
+// never calls movesChanged keeps no mean: its rows change underneath.
+let meanMove = null;
+let movesWatched = false;
 
 function notifyChanged(change) {
     if (loading) return;
@@ -189,6 +196,7 @@ function deal(selfId, unitPrice, quantity, timestamp = Date.now(), sellerId = 0,
             const hours = Uptime.between(counter.hourAt, timestamp) / HOUR_MS;
             const step = Math.abs(counter.index - counter.hourIndex) / hours;
             counter.move = counter.move === null ? step : (counter.move + step) / 2;
+            meanMove = null;
             counter.hourAt = timestamp;
             counter.hourIndex = counter.index;
         }
@@ -288,6 +296,17 @@ function counter(key, timestamp = Date.now()) {
     return { key, deals, perHour, index, move };
 }
 
+// The market index of one counter (counter().index): null before a first
+// price. The same fields, without its rate, clock or object.
+function indexOf(key) {
+    if (mirror) {
+        const row = mirror().get(`c:${key}`);
+        return row?.[5] ? row[4] : null;
+    }
+    const kept = counters.get(key);
+    return kept?.indexed ? kept.index : null;
+}
+
 // The hourly move of one counter alone, null before a deal pair measured it.
 // The same field counter() reads, without its rate, clock or object.
 function measuredMove(key, rows, rowKey = `c:${key}`) {
@@ -301,6 +320,12 @@ function moveOf(key) {
     const rows = mirror ? mirror() : null;
     const own = measuredMove(key, rows);
     if (own !== null) return own;
+    const shared = !rows || movesWatched;
+    if (shared && meanMove !== null) {
+        if (Diagnostics.active()) Diagnostics.count('market', 'mean_move', 'hit');
+        return meanMove;
+    }
+    if (Diagnostics.active()) Diagnostics.count('market', 'mean_move', 'miss');
     let sum = 0;
     let count = 0;
     for (let at = 0; at < COUNTER_KEYS.length; at++) {
@@ -309,7 +334,15 @@ function moveOf(key) {
         sum += move;
         count += 1;
     }
-    return count ? sum / count : STARTING_MOVE;
+    const mean = count ? sum / count : STARTING_MOVE;
+    if (shared) meanMove = mean;
+    return mean;
+}
+
+// Worker: a 'c:' row of its 'market' table changed (or the table was reset).
+function movesChanged() {
+    meanMove = null;
+    movesWatched = true;
 }
 
 // The buyers per hour of a counter in each town at `timestamp`: [{ town,
@@ -387,6 +420,7 @@ function publish(tableChannel) {
 // Worker: the rows of its 'market' table (a Map), read when asked.
 function useTable(rows) {
     resets++;
+    meanMove = null;
     priceEvidenceCache = new WeakMap();
     mirror = rows;
     ShotTradeDemand.useTable(rows);
@@ -407,6 +441,7 @@ function revisionOf(key) {
 
 function reset() {
     resets++;
+    meanMove = null;
     priceEvidenceCache = new WeakMap();
     counters.clear();
     items.clear();
@@ -416,5 +451,5 @@ function reset() {
     notifyChanged({ reset: true });
 }
 
-module.exports = { STARTING_MOVE, COUNTER_KEYS, REPLAY_DEALS, counterOf, gradeOf, deal, load, counter, revisionOf, moveOf, itemDeals, itemPriceEvidence, townDemand, firstPrice,
+module.exports = { STARTING_MOVE, COUNTER_KEYS, REPLAY_DEALS, counterOf, gradeOf, deal, load, counter, indexOf, revisionOf, moveOf, movesChanged, itemDeals, itemPriceEvidence, townDemand, firstPrice,
     publish, useTable, useSpots, reset, subscribeChanges };

@@ -39,6 +39,7 @@ MarketCounters.itemPriceEvidence = () => ({
     deals: recent.length ? 5 : 0
 });
 MarketCounters.counter = () => ({ index: Math.log(1.2), deals: 5 });
+MarketCounters.indexOf = () => Math.log(1.2);
 MarketCounters.counterOf = (selfId) => Number(selfId) === OTHER ? 'gear d' : 'material none';
 MarketCounters.firstPrice = () => 500;
 const ctx = (extra = {}) => ({
