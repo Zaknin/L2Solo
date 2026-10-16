@@ -46,6 +46,22 @@ function removeFromSetMap(map, key, value) {
     if (values.size === 0) map.delete(key);
 }
 
+// Listeners told when a raid minion leaves the index: (minion, boss), the boss
+// read from the index without a rebuild (the spawn list still holds the minion).
+const minionRemovedListeners = new Set();
+
+function onMinionRemoved(listener) {
+    minionRemovedListeners.add(listener);
+}
+
+function bossIn(state, target) {
+    const bossObjectId = positiveId(target.minionBossObjectId);
+    const bossTemplateId = positiveId(target.minionBossTemplateId);
+    return (bossObjectId && state.bossesByObjectId.get(bossObjectId))
+        || (bossTemplateId && state.bossesByTemplateId.get(bossTemplateId)?.values().next().value)
+        || null;
+}
+
 function createState(spawns) {
     return {
         source: spawns,
@@ -161,10 +177,15 @@ function remove(world, npc) {
     let state = world.npc.raidEntityIndex;
     if (!state || state.source !== world.npc.spawns) state = rebuild(world);
     if (!state || !state.tracked.has(npc)) return false;
-    removeMembership(state, npc, state.membership.get(npc));
+    const membership = state.membership.get(npc);
+    removeMembership(state, npc, membership);
     state.tracked.delete(npc);
     state.indexedCount = Math.max(0, state.indexedCount - 1);
     DiagnosticConfig.developerDiagnostics && (telemetry.removes += 1);
+    if (membership?.raidMinion) {
+        const boss = bossIn(state, npc);
+        minionRemovedListeners.forEach((listener) => listener(npc, boss));
+    }
     return true;
 }
 
@@ -189,23 +210,14 @@ function bossFor(world, target) {
     if (isRaidBoss(target)) return target;
     DiagnosticConfig.developerDiagnostics && (telemetry.lookups += 1);
     const state = ensure(world);
-    if (!state) return null;
-    const bossObjectId = positiveId(target.minionBossObjectId);
-    const bossTemplateId = positiveId(target.minionBossTemplateId);
-    return (bossObjectId && state.bossesByObjectId.get(bossObjectId))
-        || (bossTemplateId && state.bossesByTemplateId.get(bossTemplateId)?.values().next().value)
-        || null;
+    return state ? bossIn(state, target) : null;
 }
 
 function entitiesForRaid(world, raid) {
     DiagnosticConfig.developerDiagnostics && (telemetry.lookups += 1);
     const state = ensure(world);
     if (!state || !raid) return [];
-    const bossObjectId = positiveId(raid.bossId);
-    const bossTemplateId = positiveId(raid.bossTemplateId);
-    const boss = (bossObjectId && state.bossesByObjectId.get(bossObjectId))
-        || (bossTemplateId && state.bossesByTemplateId.get(bossTemplateId)?.values().next().value)
-        || null;
+    const boss = bossIn(state, { minionBossObjectId: raid.bossId, minionBossTemplateId: raid.bossTemplateId });
     // This preserves the old behavior: orphan minions do not form a raid by
     // themselves after their authoritative boss object has left the world.
     if (!boss) return [];
@@ -251,6 +263,7 @@ module.exports = {
     ensure,
     add,
     remove,
+    onMinionRemoved,
     bossByObjectId,
     raidEntityByObjectId,
     bossByTemplateId,
