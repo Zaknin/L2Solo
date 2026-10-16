@@ -760,6 +760,30 @@ function reviewTrigger(state, projected, context, timestamp) {
 function samePlanJson(a, b) {
     return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
+// The existing native plan verdict, shared with the diagnostic result-site
+// candidate. It grants no economy command or social interaction.
+function nativePlanHolds(state, previousPlan, nativeReplan, timestamp, onFinalize = null) {
+    const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
+        && previousPlan.next == null && previousPlan.reason === 'wish_focus';
+    const wishHolds = (wishFocus || previousPlan?.source === 'wish_network')
+        && !previousPlan.levelingRecovery
+        && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
+    if (!previousPlan || DecisionSections.isEmptyWishPlan(previousPlan) || wishHolds) return true;
+    if (previousPlan.status !== 'active' || !nativeReplan.routeCurrent
+        || nativeReplan.failure || nativeReplan.invalidSource || nativeReplan.levelingRecovery) return false;
+    onFinalize?.();
+    return samePlanJson(GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp), previousPlan);
+}
+// Only a proved candidate reaches the ordinary build's transient deps. All
+// checks stay diagnostic; the actual card refusal and retention are unchanged.
+function socialShadowDeps(state, deps, prepared, timestamp, nativeHolds, edges = 0) {
+    const social = prepared.socialShadow;
+    if (!social) return deps;
+    const holds = social.holds && !edges && !state.party?.partyId && !state.partyId && !state.stats?.partyRequest
+        && SpotRiskPolicy.activitySpotAllowed(state, social.leaf, timestamp) && nativeHolds();
+    economyDiagnostics.count('card', 'social_check', `${social.kind}:${holds ? 'would_hold' : 'refused'}`);
+    return holds ? { ...deps, socialShadow: social } : deps;
+}
 // Diagnostics only: a lifecycle rebuild before a finite travel, death or
 // rest step (resolveTravel, resolveDeathRecovery and resolveRest read none
 // of its pick) names what it changed that the step still carries into the
@@ -1063,7 +1087,8 @@ function startKernel(config = {}) {
                     const why = [], prepared = {};
                     let fresh = false;
                     refreshed = !projected.party?.partyId && !projected.partyId
-                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps, { afterResult: true, why, prepared }) : null;
+                        ? ColdEconomyDecision.refreshAdvisory(projected, owner?.context?.wishAdvisory, deps,
+                            { afterResult: true, why, prepared, socialShadow: true }) : null;
                     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
                     // Both native stock gates read one prepared foundation;
                     // the same edges also drive the action after projection.
@@ -1094,8 +1119,14 @@ function startKernel(config = {}) {
                         } else why.push('economy_edges');
                     }
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                    return Economy.forState(projected, withIncomeRoute(advisoryRefusal(fresh ? { ...deps, advisoryFresh: true } : deps,
-                        'result', why[0] || 'party'), prepared.basics));
+                    const refusalDeps = advisoryRefusal(fresh ? { ...deps, advisoryFresh: true } : deps, 'result', why[0] || 'party');
+                    const candidateDeps = socialShadowDeps(projected, refusalDeps, prepared, timestamp, () => {
+                        const plan = projected.stats?.equipmentPlan || null;
+                        const replan = GearAcquisitionPlanner.replanContextFor(projected, plan, timestamp);
+                        return !replan.failure && !replan.invalidSource && !replan.levelingRecovery
+                            && nativePlanHolds(projected, plan, replan, timestamp);
+                    }, economyEdges);
+                    return Economy.forState(projected, withIncomeRoute(candidateDeps, prepared.basics));
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
@@ -1164,9 +1195,6 @@ function startKernel(config = {}) {
             // even when the expensive wish calculation still holds.
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
-            const wishHolds = (wishFocus || previousPlan?.source === 'wish_network')
-                && !previousPlan.levelingRecovery
-                && nativeReplan.recoveryTargets.length === (previousPlan.recoveryTargets || []).length;
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
             const nativeHolds = !nativeReplan.failure && !nativeReplan.invalidSource && !nativeReplan.levelingRecovery;
             // An active current plan: before, finalizePlan re-finalized it on
@@ -1192,22 +1220,17 @@ function startKernel(config = {}) {
                 // native stamps: the current advisory fence below is (its
                 // build holds the level and worn kit). A wake/expiry still
                 // goes through the native planner.
-                if (!previousPlan || DecisionSections.isEmptyWishPlan(previousPlan) || wishHolds) {
-                    return (planHoldsAnswer = true);
-                }
-                if (!routeHeld) return (planHoldsAnswer = false);
-                // The paid fixed point: finalizePlan and two stringify.
-                finalized = true;
-                if (economyDiagnostics.active()) economyDiagnostics.count('lifecycle', 'plan_holds', 'finalized');
-                return (planHoldsAnswer = samePlanJson(
-                    GearAcquisitionPlanner.finalizePlan(state, previousPlan, previousPlan, nativeReplan, timestamp), previousPlan));
+                return (planHoldsAnswer = nativePlanHolds(state, previousPlan, nativeReplan, timestamp, () => {
+                    finalized = true;
+                    if (economyDiagnostics.active()) economyDiagnostics.count('lifecycle', 'plan_holds', 'finalized');
+                }));
             };
             // A proved ordinary solo round keeps its accepted native plan.
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             const why = [], prepared = {};
             const refreshed = solo && nativeHolds && planHolds()
-                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared }) : null;
+                ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared, socialShadow: true }) : null;
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
@@ -1231,7 +1254,8 @@ function startKernel(config = {}) {
             const refusalDeps = economyDiagnostics.active() ? advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
                 : why[0] || (!solo ? 'party' : !planHolds() ? 'plan_changed'
                     : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : deps;
-            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(refusalDeps, prepared.basics));
+            const candidateDeps = socialShadowDeps(state, refusalDeps, prepared, timestamp, () => nativeHolds && planHolds());
+            const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(candidateDeps, prepared.basics));
             const selectedAcquisition = GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,

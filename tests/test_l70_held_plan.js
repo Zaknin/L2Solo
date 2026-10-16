@@ -52,6 +52,136 @@ const ownResult = (state, activity = 'resting') => ({ ...state, activity, adena:
     updatedAt: state.updatedAt + 1, vitals: { ...state.vitals, mp: state.vitals.mp - 1 }, stats: { ...state.stats } });
 
 try {
+    // Social leaves are calculated intentions, not native attack/help commands.
+    // The shadow joins the exact accepted build to its ordinary rebuild only.
+    {
+        const diagnostic = Config.developerDiagnostics;
+        const workerSource = fs.readFileSync(path.join(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'), 'utf8');
+        const helpers = workerSource.slice(workerSource.indexOf('function samePlanJson('),
+            workerSource.indexOf('// Diagnostics only: a lifecycle rebuild'));
+        const { nativePlanHolds, socialShadowDeps } = require('node:vm').runInNewContext(
+            `${helpers}; ({ nativePlanHolds, socialShadowDeps })`, {
+                DecisionSections: Sections, GearAcquisitionPlanner: invoke('GameServer/Bot/AI/GearAcquisitionPlanner'),
+                SpotRiskPolicy: invoke('GameServer/Bot/Population/SpotRiskPolicy'), economyDiagnostics: Diagnostics
+            });
+        const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
+        const Plan = invoke('GameServer/Bot/Population/ColdEconomyPlan');
+        const count = key => Diagnostics.metrics().counts?.[key] || 0;
+        let socialKind = 'pvp';
+        Providers.build = (...args) => {
+            builds++;
+            // Keep the native social root and solver; isolate its nomination
+            // from unrelated equipment choices in this controlled fixture.
+            const projection = originalBuild(...args), prefix = socialKind === 'pvp' ? 'scores:' : 'care:';
+            const root = projection.nodes.find(row => row.key === `${prefix}99999`);
+            assert(root, 'native provider generated the remembered social wish');
+            args[1].board.first(1864, SELL); // a soft market input, not an action on the social target
+            return { ...projection, nodes: [root], roots: [root.key], moneyPaths: [], sourceSections: null };
+        };
+        try {
+            for (const [kind, id] of [['pvp', 93901], ['helping', 93902]]) {
+                socialKind = kind;
+                const memory = { revision: 1, relations: [{ kind: 'character', targetId: 99999, trust: 50, hostility: 50 }] };
+                const native = subject(id, 1e6);
+                native.activity = 'resting'; native.vitals.hp = 1;
+                native.stats.restUntil = T + MINUTE;
+                const scenario = enabled => {
+                    // Native content tokens match across board serials, as
+                    // they do across main/worker indexes. Keep full key parity.
+                    const board = new BoardIndex(), options = { ...deps, memory, board };
+                    board.itemRevision = itemId => board.itemFingerprint(itemId);
+                    Config.developerDiagnostics = enabled; Economy.reset();
+                    const built = Economy.forState(native, options);
+                    const state = { ...native, stats: { ...native.stats, ...built.statsPacket } };
+                    assert.equal(built.network.activity.activity, kind);
+                    const accepted = Decisions.advisory(built, state);
+                    const rest = Resolver.resolveRest(state, 1000, T + 1000);
+                    assert.deepEqual(rest.materialize, { exp: 0, sp: 0, adena: 0, items: [] });
+                    assert.equal(rest.patch.activity, 'resting', 'quiet native recovery is still in progress');
+                    const next = { ...state, ...rest.patch, updatedAt: T + 1000 };
+                    const current = { ...options, timestamp: T + 1000 };
+                    board.put({ id, kind: 'shop', storeType: SELL, ownerId: 7,
+                        lines: [{ lineId: 1, selfId: 1864, count: 1, price: 10 }] });
+                    const prepared = {}, why = [];
+                    assert.equal(Decisions.refreshAdvisory(next, accepted, current,
+                        { prepared, why, socialShadow: true }), null, 'live reuse remains refused');
+                    assert.deepEqual(why, ['leaf_kind']);
+                    if (enabled) assert.equal(prepared.socialShadow?.holds, true, 'all later card checks hold');
+                    else assert.equal(prepared.socialShadow, undefined, 'off creates no candidate');
+                    const before = builds, same = count(`card:social_plan:${kind}:same`);
+                    const candidate = socialShadowDeps(next, current, prepared, T + 1000, () => true);
+                    const fresh = Economy.forState(next, candidate);
+                    assert.equal(builds, before + 1, 'only the ordinary soft-market rebuild runs');
+                    if (enabled) assert.equal(count(`card:social_plan:${kind}:same`) - same, 1,
+                        'the matching accepted baseline compares its existing fresh build');
+                    return { built, accepted, next, current, fresh };
+                };
+                const off = scenario(false), on = scenario(true);
+                for (const name of ['built', 'fresh']) {
+                    assert.deepEqual(on[name].network, off[name].network, `${kind}: full network unchanged off/on`);
+                    assert.deepEqual(on[name].statsPacket, off[name].statsPacket, `${kind}: complete packet unchanged off/on`);
+                }
+                const { accepted, next, current, fresh } = on;
+                const candidateFor = (state = next, card = accepted, input = current) => {
+                    const prepared = {};
+                    assert.equal(Decisions.refreshAdvisory(state, card, input, { prepared, socialShadow: true }), null);
+                    return prepared;
+                };
+                assert.equal(candidateFor(next, accepted, { ...current, memory: { ...memory, revision: 2 } }).socialShadow?.holds, false,
+                    'changed native memory revision refuses the candidate');
+                assert.equal(candidateFor({ ...next, stats: { ...next.stats, relations: [{ targetId: 4, trust: 1 }] } }).socialShadow?.holds, false,
+                    'changed fallback relations refuse the candidate');
+                for (const changed of [{ activityLeaf: next.stats.activityLeaf + 1 }, { wishFocus: ['foreign:focus', 0, 0] }])
+                    assert.equal(candidateFor({ ...next, stats: { ...next.stats, ...changed } }).socialShadow, undefined,
+                        'a foreign accepted tuple cannot become a candidate');
+                for (const leaf of [{ ...accepted.card.activity, targetId: 0 }, { ...accepted.card.activity, rootKey: 'scores:other' }])
+                    assert.equal(candidateFor(next, { ...accepted, card: { activity: leaf } }).socialShadow, undefined,
+                        'only canonical concrete social targets are considered');
+                for (const [state, nativeHolds, edges] of [
+                    [{ ...next, partyId: 2 }, true, 0], [{ ...next, stats: { ...next.stats, partyRequest: {} } }, true, 0],
+                    [next, false, 0], [next, true, Plan.edges(next, { ...next, activity: 'hunting' }, {}, T + 1000)]
+                ]) {
+                    if (nativeHolds && state === next) assert(edges, 'native recovery completion creates a result-site edge');
+                    const prepared = candidateFor(), refused = count(`card:social_check:${kind}:refused`);
+                    assert.strictEqual(socialShadowDeps(state, current, prepared, T + 1000, () => nativeHolds, edges), current);
+                    assert.equal(count(`card:social_check:${kind}:refused`) - refused, 1);
+                }
+                const replan = { recoveryTargets: [], routeCurrent: false };
+                assert(nativePlanHolds(next, null, replan, T + 1000));
+                assert.equal(nativePlanHolds(next, { status: 'active' }, replan, T + 1000), false,
+                    'a stale native route does not pass the shared plan proof');
+                // Same tuple, another actual build: the old advisory must not
+                // be compared with the newer cache entry as though it were its own.
+                assert.notStrictEqual(accepted.baseline, fresh.statsPacket.wishSections);
+                current.board.put({ id, kind: 'shop', storeType: SELL, ownerId: 7,
+                    lines: [{ lineId: 1, selfId: 1864, count: 2, price: 10 }] });
+                let prepared = candidateFor(), unavailable = count(`card:social_plan:${kind}:unavailable`);
+                Economy.forState(next, socialShadowDeps(next, current, prepared, T + 1000, () => true));
+                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1,
+                    'accepted/cache identity mismatch is unavailable, never same');
+                const latest = Economy.forState(next, current);
+                const published = { ...next, stats: { ...next.stats, ...latest.statsPacket } };
+                const card = Decisions.advisory(latest, published);
+                prepared = candidateFor(published, card);
+                unavailable = count(`card:social_plan:${kind}:unavailable`);
+                const before = builds;
+                Economy.forState(published, socialShadowDeps(published, current, prepared, T + 1000, () => true));
+                assert.equal(builds, before, 'a cache hit does not manufacture a second solver call');
+                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1, 'a hit is unavailable');
+                Economy.forgetContext(id);
+                prepared = candidateFor(published, card);
+                unavailable = count(`card:social_plan:${kind}:unavailable`);
+                Economy.forState(published, socialShadowDeps(published, current, prepared, T + 1000, () => true));
+                assert.equal(count(`card:social_plan:${kind}:unavailable`) - unavailable, 1, 'a missing held build is unavailable');
+                assert.equal(next.stats.pvpEncounter, undefined);
+                assert.equal(next.partyId, undefined, 'the shadow neither attacks nor creates a party');
+                current.board.remove(id);
+            }
+        } finally {
+            Config.developerDiagnostics = diagnostic;
+            Providers.build = (...args) => { builds++; return originalBuild(...args); };
+        }
+    }
     assert.equal(Sections.capability(subject(1), T), Sections.capability(subject(1), T + 11 * MINUTE),
         'fixture: the game day/night build mark does not move inside the test window');
     // A retained build accepts its exact unpublished input or its own output,

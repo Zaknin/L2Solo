@@ -425,9 +425,22 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
             const kind = leaf?.activity;
             const subtype = !kind ? 'none' : ['crafting', 'improving', 'helping', 'pvp'].includes(kind) ? kind : 'other';
             Diagnostics.count('card', 'leaf_kind_check', subtype);
+            // Shadow only: the worker still rebuilds. The same decoded leaf
+            // takes every later proof check, without granting social action.
+            if (options.socialShadow && options.prepared && ['pvp', 'helping'].includes(kind)
+                && Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
+                && leaf.rootKey === `${kind === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}`) {
+                options.prepared.socialShadow = { kind, baseline: accepted.baseline, leaf,
+                    holds: !leafRefusal(state, accepted, leaf, deps, current, options, true) };
+            }
         }
         return 'leaf_kind';
     }
+    return leafRefusal(state, accepted, leaf, deps, current, options);
+}
+// Shared continuation of the actual verdict and its diagnostic social
+// candidate. Only that candidate omits the unsupported native-action check.
+function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow = false) {
     if (state.incomingPending) return 'incoming';
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
@@ -435,13 +448,15 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
         && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record'; // lazy: as canReuse before L114 (load order unchecked)
     const timestamp = Number(deps.timestamp || Date.now());
     const baseline = accepted.baseline;
+    const Sections = DecisionSections;
     if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
     if (!Economy.heldEventsQuiet(state, { baseline, mp: accepted.mp, expPerHour: baseline.expHour, persona }, timestamp, deps, null, why))
         return `events:${why[0]}`;
-    if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: true, why }))
+    if (!Economy.calculationHolds(state, accepted.fence, deps, { activity: accepted.activity, leaf, baseline, timestamp, countDeferral: !socialShadow, why }))
         return `fence:${why[0]}`;
+    if (socialShadow) return '';
     return Economy.acceptedActivityHolds(state, leaf, deps, current) ? '' : 'accepted_leaf';
 }
 function canReuse(state, accepted, deps = {}, current = null, options = {}) {

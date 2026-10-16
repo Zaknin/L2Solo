@@ -1075,9 +1075,16 @@ function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kin
 // timestamp; one build of it serves them (ColdCombatProfile.withProfileScope).
 function forState(state = {}, deps = {}) {
     const outer = rowKeys;
+    const social = Diagnostics.active() ? deps.socialShadow : null;
+    if (social) social.outcome = 'unavailable';
     rowKeys = null;
     try { return CombatProfile.withProfileScope(state, () => buildForState(state, deps)); }
-    finally { rowKeys = outer; }
+    finally {
+        rowKeys = outer;
+        // One outcome per eligible candidate, including hits, missing held
+        // builds and unfinished incoming projections. None prove equality.
+        if (social) Diagnostics.count('card', 'social_plan', `${social.kind}:${social.outcome || 'unavailable'}`);
+    }
 }
 // Compare every rebuild with the actor's preceding build. Gate comparisons
 // have a narrower population (would_hold only), so keep this denominator.
@@ -1528,8 +1535,16 @@ function buildForState(state, deps) {
         elapsed = performance.now() - started;
         Diagnostics.duration('context', elapsed);
         Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
+        const social = deps.socialShadow, socialLeaf = held?.plan.network?.activity;
+        // Tuple equality alone cannot bind a card to this retained graph:
+        // temporary/unkept builds can publish the same tuple from another build.
+        const sameSocialBuild = social && held?.plan.statsPacket.wishSections === social.baseline
+            && socialLeaf?.activity === social.kind && socialLeaf.rootKey === social.leaf.rootKey
+            && socialLeaf.targetId === social.leaf.targetId;
+        const comparison = sameSocialBuild || gate === 'would_hold' ? gatePlanDiff(state, held, context, deps) : null;
+        if (sameSocialBuild) social.outcome = comparison;
         if (gate === 'would_hold') {
-            gateDiff = gatePlanDiff(state, held, context, deps);
+            gateDiff = comparison;
             Diagnostics.count('context', 'gate_plan', gateDiff);
             if (gateDiff === 'focus') {
                 // Each marginal shares the focus denominator; these are not paired transitions.
