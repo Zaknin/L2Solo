@@ -1,9 +1,19 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 
+// The party's own `revision` when its snapshot carries one (a safe integer),
+// else today's hash of the whole snapshot. Called once per prepare and once per
+// replay check; the counter says which way each stamp went.
 function partyStamp(party) {
-    return party ? createHash('sha256').update(JSON.stringify(party)).digest('hex') : null;
+    if (!party) return null;
+    if (Number.isSafeInteger(party.revision)) {
+        Diagnostics.count('projection_party', 'revision');
+        return `r${party.revision}`;
+    }
+    Diagnostics.count('projection_party', 'hashed');
+    return createHash('sha256').update(JSON.stringify(party)).digest('hex');
 }
 
 function stateStamp(state) {
@@ -54,11 +64,13 @@ class ColdProjectionRetention {
         if (state && typeof state === 'object') this.dirty.set(state, (this.dirty.get(state) || 0) + 1);
     }
 
-    prepare(state, context, partyGeneration) {
+    // `stamp`: the dependencies the caller already read for this context, so
+    // they are read once; without it the provider reads them here.
+    prepare(state, context, partyGeneration, stamp = null) {
         if (this.stateFor(state?.characterId) !== state || !context) return;
         const members = context.party ? (context.party.memberIds || []).map(id => this.stateFor(id)) : [];
         if (members.some(member => !member)) return;
-        const stamp = this.dependencies(state, context);
+        stamp ||= this.dependencies(state, context);
         this.prepared.set(context, {
             state, context, epoch: this.epoch(), stamp, partyGeneration,
             contextStamp: contextStamp(context),
