@@ -146,13 +146,6 @@ class ColdOccupationPlanner {
         }
         this.kick();
     }
-    resetSources() {
-        for (const entry of this.slots.values()) {
-            if (entry.input.mode === 'wish') continue; // Route-only work has no board/market dependencies.
-            if (entry.dirty) continue;
-            this.markReset(entry);
-        }
-    }
     markReset(entry) {
         entry.dirty = true; entry.cursor[14] = 2; DiagnosticConfig.developerDiagnostics && (this.stats.invalidations++);
         if (entry.done) this.publish(entry.id, entry.input, unknownWorkshop(), { stale: true });

@@ -108,7 +108,7 @@ const validating = new ColdOccupationPlanner({ schedule: () => {}, now: () => 0,
 validating.request(1, {}, { awaitResult: false }); validating.portion();
 scopeVersion++; validating.unit(validating.slots.get(1));
 assert.equal(validating.slots.get(1).dirty, true, 'scope token is checked before publishing');
-validating.resetSources(); validating.stop(); assert.equal(validating.scopeDependencies.size, 0);
+validating.stop(); assert.equal(validating.scopeDependencies.size, 0);
 
 // A board row change on item A rechecks A's readers and the category's
 // meeting representative, not every item read in the category.

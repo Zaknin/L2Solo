@@ -97,9 +97,9 @@ async function main() {
         result: () => null, sourceToken: () => 0 });
     planner.request(-1, { mode: 'wish' }, { awaitResult: false });
     planner.request(1, { mode: 'occupation' }, { awaitResult: false });
-    planner.portion(); planner.resetSources();
+    planner.portion(); planner.recheckSources();
     assert.equal(planner.slots.get(-1).dirty, false, 'market snapshot replacement cannot restart independent route work');
-    assert.equal(planner.slots.get(1).dirty, true, 'ordinary source-dependent work keeps its reset fence');
+    assert.equal(planner.slots.get(1).dirty, false, 'a replacement with the same tokens restarts nothing');
     planner.stop();
     const epoch = 'routes-preparation-test', messages = [];
     const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch, observer: nativeObserver,
