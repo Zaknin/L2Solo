@@ -434,12 +434,13 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
         activity, mp: Number(state.vitals?.mp), preparedMp: Number(state.vitals?.mp) };
     const restartProof = Economy?.restartEventProof(eventProof, accepted);
-    // An unarmed card is saved as null: a restart rebuilds that bot.
-    if (diagnostic && eventProof) Diagnostics.count('card', 'restart', restartProof ? 'armed' : 'unarmed');
     // lazy: cycle the shared sections also read the economy owner.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
         Sections.baselineIdentity(accepted.baseline), Sections.clockBytes(accepted.baseline)) : null;
+    // A card saved as null is rebuilt at restart: no prefix, or one over the saved field.
+    if (diagnostic && eventProof) Diagnostics.count('card', 'restart', accepted.saved ? 'armed'
+        : restartProof ? 'oversize' : 'unarmed');
     if (packet) packet.wishAdvisory = accepted.saved;
     if (publishedPacket(state, packet)) state.stats.wishAdvisory = accepted.saved;
     if (diagnostic && fence instanceof Uint8Array && RestartAdvisoryProbe.selected(state?.characterId)) {
