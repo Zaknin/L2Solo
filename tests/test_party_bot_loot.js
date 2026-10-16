@@ -4,6 +4,7 @@ require('../src/Global');
 
 const NpcRewards = invoke('GameServer/World/Generics/NpcRewards');
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const DataCache = invoke('GameServer/DataCache');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const BotManager = invoke('GameServer/Bot/BotManager');
@@ -116,7 +117,7 @@ try {
         dataSendToMeAndOthers() {}
     };
     BotManager.sessions = [botSession, distantBotSession];
-    World.user = { sessions: [leaderSession, botSession, distantBotSession] };
+    registerSessions([leaderSession, botSession, distantBotSession]);
     World.fetchNpcsInRadius = () => [];
     const npc = {
         fetchSelfId: () => 999,
@@ -291,7 +292,7 @@ try {
         fetchLocX: () => 130,
         fetchLocY: () => 200
     };
-    World.user = { sessions: [leaderSession, botSession, distantBotSession] };
+    registerSessions([leaderSession, botSession, distantBotSession]);
     World.fetchNpcsInRadius = () => [incomingThreat];
     PartyAwareness.invalidateThreatProjection(leaderSession);
     World.items = {
