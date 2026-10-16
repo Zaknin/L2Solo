@@ -290,7 +290,7 @@ function capture(economy, state, seen = state) {
     if (economy?.network?.quantityPrepared) for (const row of queue) visit(row.plan);
     const activity = leaf ? new CompactActivity(leaf) : null;
     if (activity) {
-        const rows = CraftInputReservations.selectedCraftRows(seen, economy?.network);
+        const rows = CraftInputReservations.heldCraftRows(seen, economy?.network?.craftNeeds);
         if (rows.length) activity.craftReservations = rows;
     }
     if (activity?.activity === 'shopping') {

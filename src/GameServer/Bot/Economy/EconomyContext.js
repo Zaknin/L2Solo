@@ -1990,7 +1990,7 @@ function buildForState(state, deps) {
         const leaf = plan.network?.activity, own = ownItem(leaf);
         remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
-            craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.selectedCraftRows(state, network) : undefined,
+            craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
             activity: state.activity, bandHash: fnv1a32(bandStructural),
@@ -2055,6 +2055,8 @@ function planTrimmer(unresolved = new Set()) {
 // keeps the item plans (TradeIntent.npcOwnsPurchase asks by `item:<id>`) and
 // the plans of requirement rows that have none. A selected crystal operation
 // also keeps its one root: owned inputs can remove it from the money queue.
+// craftNeeds: the selected craft's inputs, walked once on the full network
+// for the card and the held verdict (absent when the root is no craft).
 function compactNetwork(network) {
     const unresolved = new Set(), trim = planTrimmer(unresolved);
     const row = wish => ({ key: wish.key, need: wish.need, object: wish.object, price: wish.price, reserved: wish.reserved,
@@ -2072,9 +2074,11 @@ function compactNetwork(network) {
     if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange'].includes(leaf.kind)
         && all.has(leaf.rootKey)) plans.set(leaf.rootKey, trim(all.get(leaf.rootKey)));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
+    const craftNeeds = CraftInputReservations.selectedCraftNeeds(network);
     // The network's input key is the plan's key with its market (~2 KB of
     // text per bot, L104): view() gives it back from them, in its place.
-    return { ...network, inputKey: undefined, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans };
+    return { ...network, inputKey: undefined, queue, gap: !network.gap ? network.gap : at >= 0 ? queue[at] : row(network.gap), activity, plans,
+        ...(craftNeeds.length ? { craftNeeds } : {}) };
 }
 // The build's prices of what the plan's own numbers were made from (the
 // kit, the queue, the watch list): a later view starts from them, so its

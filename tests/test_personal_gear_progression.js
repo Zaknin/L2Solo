@@ -12,6 +12,7 @@ const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+const Reservations = invoke('GameServer/Bot/Economy/CraftInputReservations');
 const Listing = invoke('GameServer/Bot/Economy/MarketListingPolicy');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const { WishNetwork, createSolver } = require('../src/GameServer/Bot/Economy/WishNetwork');
@@ -234,9 +235,11 @@ function verify() {
     assert.equal(Disposition.selectedCraftAmounts(spare, { activity: { rootKey: inputs.key },
         plans: new Map([[inputs.key, inputs.paths[0]]]) })[1864], 8, 'active profitable craft protects only its actual inputs');
     const Decision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
-    const captured = Decision.compact(structuredClone(Decision.capture({ network: {
-        activity: { rootKey: inputs.key, activity: 'hunting', spotId: 'recipe' },
-        queue: [{ key: inputs.key, plan: inputs.paths[0] }] } }, spare)));
+    const network = { activity: { rootKey: inputs.key, activity: 'hunting', spotId: 'recipe' },
+        queue: [{ key: inputs.key, plan: inputs.paths[0] }] };
+    // A built network carries its one craft walk (compactNetwork's craftNeeds).
+    const captured = Decision.compact(structuredClone(Decision.capture({ network: { ...network,
+        craftNeeds: Reservations.selectedCraftNeeds(network) } }, spare)));
     assert.deepEqual(captured.activity.craftReservations, [[1864, 8]], 'physical craft reservations survive worker IPC');
     const protectedSale = Listing.evaluate(spare, { board: new BoardIndex(), now: timestamp, slots: 0,
         keptAmounts: {}, economy: { ...ctx, craftReservations: Object.fromEntries(captured.activity.craftReservations) } });
