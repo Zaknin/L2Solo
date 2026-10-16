@@ -313,6 +313,59 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     finally { Providers.build = build; Diagnostics.enabled = enabled; Diagnostics.push = push; Config.developerDiagnostics = true; }
 }
 
+// A ready craft loses its physical prerequisites even when its target is
+// still absent and the material keeps the same bag slot and weight tier.
+{
+    const Providers = invoke('GameServer/Bot/Economy/WishProviders'), build = Providers.build;
+    const productId = 1865, materialId = 1864, rootKey = `power:${productId}:7`;
+    Providers.build = () => ({ nodes: [
+        { key: rootKey, need: 'power', object: { itemId: productId }, valueHours: 1000,
+            paths: [{ requirements: [{ key: `item:${productId}`, amount: 5 }] }] },
+        { key: `item:${productId}`, price: 500, paths: [{ kind: 'craft', activity: 'crafting',
+            itemId: productId, recipeId: 7, productCount: 2, costHours: .1,
+            grossRequirements: [{ key: `item:${materialId}`, amount: 10 }],
+            requirements: [{ key: `item:${materialId}`, amount: 10 }] }] },
+        { key: `item:${materialId}`, price: 2, paths: [{ kind: 'buy', activity: 'shopping',
+            itemId: materialId, price: 2, unitPrice: 2, sourceType: 'afk', town: 'Giran',
+            executable: true, quoted: true, availableUnits: 100 }] }
+    ], roots: [rootKey], values: new Map([[productId, 1000]]), moneyPaths: [], horizon: 1, sourceSections: null });
+    const counters = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
+        .filter(([key]) => key.startsWith('context:craft_material:') || key.startsWith('context:gate:')));
+    const scenario = (diagnostic, mode) => {
+        Config.developerDiagnostics = diagnostic; Economy.reset();
+        const board = new BoardIndex(); board.itemRevision = id => board.itemFingerprint(id);
+        const options = { ...deps, board };
+        const native = { ...state(), characterId: 915, adena: 100000,
+            inventory: { ...state().inventory, [materialId]: { selfId: materialId, amount: 30, stackable: true } } };
+        const first = Economy.forState(native, options);
+        assert.equal(first.network.activity?.activity, 'crafting', 'the native solver chooses the ready craft');
+        const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
+        if (mode === 'unkept') Economy.forState({ ...accepted,
+            inventory: { ...accepted.inventory, [materialId]: { ...accepted.inventory[materialId], amount: 29 } } },
+        { ...options, rememberContext: false });
+        if (mode === 'pending') Economy.forState({ ...accepted, incomingPending: true }, options);
+        const amount = mode === 'same' || mode === 'unkept' || mode === 'pending' ? 31 : 29;
+        const changed = { ...accepted,
+            inventory: { ...accepted.inventory, [materialId]: { ...accepted.inventory[materialId], amount } },
+            ...(mode === 'incoming' ? { acceptedIncoming: { [materialId]: 1 } } : {}) };
+        const before = counters(), next = Economy.forState(changed, options);
+        return { first, next, counts: delta(before, counters()) };
+    };
+    try {
+        for (const mode of ['same', 'loss', 'incoming', 'unkept', 'pending']) {
+            const off = scenario(false, mode), on = scenario(true, mode);
+            assert.deepEqual(on.first.network, off.first.network, `${mode}: the first network is unchanged`);
+            assert.deepEqual(on.next.network, off.next.network, `${mode}: material evidence never changes the new network`);
+            assert.deepEqual(on.next.statsPacket, off.next.statsPacket, `${mode}: the new packet is unchanged`);
+            const lost = mode === 'loss' || mode === 'incoming';
+            assert.equal(on.counts[`context:craft_material:${lost ? 'loss' : 'unchanged'}`], 1,
+                `${mode}: the actual retained craft supplies the native material proof`);
+            assert.equal(on.counts[`context:gate:${lost ? 'check_failed' : 'would_hold'}`], 1,
+                `${mode}: material loss is an event; unkept and pending builds preserve the original proof`);
+        }
+    } finally { Providers.build = build; Config.developerDiagnostics = true; Economy.reset(); }
+}
+
 // The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})

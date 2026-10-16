@@ -12,7 +12,7 @@ const Funding = require('./PurchaseFunding');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
-const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
+const { WishNetwork, remember, admitRoots, remainingQuantity, craftMaterialLoss, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const Diagnostics = require('./EconomyDiagnostics');
@@ -429,6 +429,17 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
     if (!bagHolds(state, held.plan, timestamp)) return 'bag';
     if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'market';
     const leaf = held.plan.network?.activity;
+    if (leaf?.activity === 'crafting') {
+        const proof = last?.heldCraftProof;
+        const matched = proof && leaf.kind === 'craft' && proof.rootKey === leaf.rootKey
+            && proof.nodeKey === leaf.nodeKey && proof.output[0] === leaf.itemId
+            && proof.recipeId === leaf.recipeId && proof.batches === leaf.batches;
+        const result = matched ? craftMaterialLoss(proof, stockReader(state, () => proof.rootItem)) : 'unknown';
+        Diagnostics.count('context', 'craft_material', result);
+        // This only detects loss of the retained batch's necessary inputs.
+        // Enough physical stock does not prove a new allocation is ready.
+        if (result !== 'unchanged') return 'check_failed';
+    }
     if (materialHunt(leaf)) {
         const baseline = last?.heldHuntingUnits;
         if (!Number.isFinite(baseline) || ColdEconomyDecision.heldFor(state, leaf.itemId) < baseline
@@ -1272,7 +1283,8 @@ function buildForState(state, deps) {
             sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined,
             heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined,
             heldHuntingUnits: held ? last?.heldHuntingUnits : undefined, heldTargetItem: held ? last?.heldTargetItem : undefined,
-            heldTargetPresent: held ? last?.heldTargetPresent : undefined };
+            heldTargetPresent: held ? last?.heldTargetPresent : undefined,
+            heldCraftProof: held ? last?.heldCraftProof : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1487,9 +1499,11 @@ function buildForState(state, deps) {
         : softEvent(state, { baseline: acceptedSections, expPerHour: acceptedSections?.expHour, persona }, timestamp, deps))
         ?? (held && Sections.softDue(acceptedSections, 'market', timestamp) && !heldReadsHold() ? 'market' : null);
     const reconsider = dirty !== 0 || soft !== null;
+    let readyCraftProof = null;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
+        onReadyCraftProof: diagnostic ? proof => { readyCraftProof = proof; } : undefined,
         completionKey: context.completionKey,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
@@ -1614,6 +1628,13 @@ function buildForState(state, deps) {
             shadowEntry.heldTargetItem = acquisitionTarget(projection, plan.network?.focus?.[0]);
             shadowEntry.heldTargetPresent = shadowEntry.heldTargetItem
                 ? positive(state.inventory?.[shadowEntry.heldTargetItem]?.amount) > 0 : undefined;
+            // The proof belongs to the build actually retained, never a
+            // temporary/pending result. Keep only its small native quantities.
+            shadowEntry.heldCraftProof = readyCraftProof && leaf?.activity === 'crafting'
+                && readyCraftProof.rootKey === leaf.rootKey && readyCraftProof.nodeKey === leaf.nodeKey
+                && readyCraftProof.output[0] === leaf.itemId
+                ? { ...readyCraftProof, recipeId: leaf.recipeId, batches: leaf.batches,
+                    rootItem: projection.nodes.find(node => node.key === leaf.rootKey)?.object?.itemId } : undefined;
         }
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
