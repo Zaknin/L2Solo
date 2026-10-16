@@ -82,6 +82,7 @@ const tracked = Object.create(network, { createSolver: { value: options => {
         allocate: (wish, used) => { heavy.push(new WeakRef(wish)); return solver.allocate(wish, used); } };
 } } });
 const provider = load('WishProviders.js', name => {
+    if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: () => true };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
     if (name === './EconomyDiagnostics') return Diagnostics;

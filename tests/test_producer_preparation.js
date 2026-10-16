@@ -91,6 +91,7 @@ adapters['GameServer/Bot/Economy/PriceBelief'] = { prior: () => ({ mu: Math.log(
 const nativePrice = load('PriceDecision.js', name => require(path.resolve(root, name)), invokeAdapter);
 const producerPrice = { ...nativePrice, bidSale: (...args) => supported ? nativePrice.bidSale(...args) : { status: 'unknown' } };
 const provider = load('WishProviders.js' , name => {
+    if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     // Admitted synthetic origins (a missing recipe is never admitted, as in the real
     // catalogue) and the shared equipment rule (82e5323c, d300b1b7).
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true,
