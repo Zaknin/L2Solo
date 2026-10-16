@@ -210,7 +210,8 @@ function bounds(wallet) {
         else result[1] = result[1] === null ? price : Math.min(result[1], price);
     } };
 }
-function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null) {
+// facts: the build's semanticFacts(state, context.timestamp) when its caller already has them.
+function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
     const profileKey = CombatProfile.buildInputKey(state, context.timestamp);
@@ -223,7 +224,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
-        ...semanticFacts(state, context.timestamp), horizon: context.horizonHours,
+        ...(facts || semanticFacts(state, context.timestamp)), horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };

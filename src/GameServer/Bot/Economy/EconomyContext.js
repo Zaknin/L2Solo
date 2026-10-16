@@ -213,9 +213,10 @@ function producerScopeHolds(proof, deps) {
     return validProducerScope(proof.producerScope) && validProducerScope(deps.producerScope)
         && proof.producerScope[0] === deps.producerScope[0] && proof.producerScope[1] === deps.producerScope[1];
 }
-function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null) {
-    const current = fieldActivity(state, activity, leaf), stats = current.stats || {};
-    const facts = Sections.semanticFacts(current, timestamp), trip = Trip.frame(current);
+// facts: semanticFacts of the same state and timestamp when the caller already has them.
+function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
+    const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
+    facts ||= Sections.semanticFacts(current, timestamp);
     // Position and scroll quantity drift inside one route. Native route and
     // physical-fee checks still run before the held action is permitted.
     delete trip.loc; delete trip.inventory;
@@ -501,7 +502,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         decision: Object.freeze([Number(plan.statsPacket.decisionSeq || 0),
             Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
         activity: activityIdentity(leaf),
-        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf),
+        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf, options.facts),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
@@ -1887,8 +1888,10 @@ function buildForState(state, deps) {
     const belief = beliefs.get(watchedItem) || (basis && watchedItem > 0 ? beliefFor(watchedItem) : null);
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
+    // One read of the build's semantic facts: its observation baseline and its event key.
+    const facts = Sections.semanticFacts(state, timestamp);
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
-        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result });
+        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, facts);
     // The trigger is not the calculation basis. Only the proven money path
     // kept the original valuation inputs; a fresh fallback adopted all of
     // them and must publish matching baselines, including downstream money.
@@ -1980,7 +1983,7 @@ function buildForState(state, deps) {
         // The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
-        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots });
+        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots, facts });
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
