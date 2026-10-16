@@ -44,7 +44,7 @@ let incomeBaseCells = 0;
 // memoEvictions, incomeEvictions, baseEvictions count the oldest-row drops at their caps; resets the
 // wholesale clears that dropped rows (catalog, table or rate change).
 const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, incomeEvictions: 0, baseEvictions: 0, resets: 0,
-    bestHits: 0, bestMisses: 0, incomeHits: 0, incomeMisses: 0 };
+    bestHits: 0, bestMisses: 0, incomeHits: 0, incomeMisses: 0, spotIdRanks: 0 };
 function countReset(rows) { DiagnosticConfig.developerDiagnostics && rows && (stats.resets += 1); }
 function cachedRows() { return valueMemo.size + bestRows.size + incomeRows.size + incomeBases.size; }
 function cacheStats() {
@@ -370,9 +370,8 @@ function best(role, level, shots = true, metric = 'exp') {
     bestRows.set(key, bestRow);
     return bestRow;
 }
-// A shared bounded shortlist keeps route reviews from scanning the atlas
-// on every actor tick. Final safety, occupancy and travel remain actor facts.
-function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+// The table and rates of one income read, the shared rows reset when either moved.
+function incomeSource() {
     const t = load(), rates = ProgressionRates.profile();
     refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
@@ -382,6 +381,12 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         clearIncomeBases();
     }
     refreshValueMemo(t, rates);
+    return { t, rates };
+}
+// A shared bounded shortlist keeps route reviews from scanning the atlas
+// on every actor tick. Final safety, occupancy and travel remain actor facts.
+function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+    const { t, rates } = incomeSource();
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
     const key = `${role}:${level}:${costs.shots}:${costs.potions}:${minGap}:${Number(shots)}:${skill}`;
     if (incomeRows.has(key)) {
@@ -391,6 +396,31 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         return held;
     }
     DiagnosticConfig.developerDiagnostics && (stats.incomeMisses += 1);
+    const ranked = rankIncome(t, rates, role, level, costs, minGap, shots, skill);
+    const result = Object.freeze(ranked.map(({ index, income }) => {
+        const spotId = t.spots[index][0];
+        return Object.freeze({ ...rowAt(memoValue(t, rates, spotId, role, level, shots, skill)), income, spotId, useShots: shots });
+    }));
+    if (incomeRows.size >= 128) {
+        incomeRows.delete(incomeRows.keys().next().value);
+        DiagnosticConfig.developerDiagnostics && (stats.incomeEvictions += 1);
+    }
+    incomeRows.set(key, result);
+    return result;
+}
+// The spot ids of rankedIncome's shortlist, in its order. For a caller that
+// prices consumables with the bot's own beliefs: those prices are no key of
+// the shared shortlist (every bot would add its own row and evict the shared
+// game-data rows), and only the ids are read, so no row objects are built.
+function rankedSpotIds(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+    const { t, rates } = incomeSource();
+    const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
+    DiagnosticConfig.developerDiagnostics && (stats.spotIdRanks += 1);
+    return rankIncome(t, rates, role, level, costs, minGap, shots, skill).map(({ index }) => t.spots[index][0]);
+}
+// The positive incomes of the role/level band at these consumable prices,
+// best first (ties by spot id), the first 64: [{ index, income }].
+function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
     const basisKey = `${role}:${level}:${minGap}:${Number(shots)}:${skill}`;
     let basis = incomeBases.get(basisKey);
     if (basis) {
@@ -432,16 +462,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         if (income > 0) rows.push({ index: basis.indexes[index], income });
     }
     rows.sort((a, b) => b.income - a.income || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
-    const result = Object.freeze(rows.slice(0, 64).map(({ index, income }) => {
-        const spotId = t.spots[index][0];
-        return Object.freeze({ ...rowAt(memoValue(t, rates, spotId, role, level, shots, skill)), income, spotId, useShots: shots });
-    }));
-    if (incomeRows.size >= 128) {
-        incomeRows.delete(incomeRows.keys().next().value);
-        DiagnosticConfig.developerDiagnostics && (stats.incomeEvictions += 1);
-    }
-    incomeRows.set(key, result);
-    return result;
+    return rows.slice(0, 64);
 }
 function roles() {
     return load().roles;
@@ -456,4 +477,4 @@ function useFile(next = DEFAULT_FILE) {
     clearIncomeBases();
 }
 
-module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, useFile, useSpots, expGapFactor, cacheStats, DEFAULT_FILE };
+module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, rankedSpotIds, useFile, useSpots, expGapFactor, cacheStats, DEFAULT_FILE };

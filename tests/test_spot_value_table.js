@@ -165,4 +165,18 @@ process.env.L2NODE_PROGRESSION_RATE = 'x1';
     } finally { Config.developerDiagnostics = developer; Table.useFile(); }
     console.log(`Spot value memo ring order and clear passed in ${Date.now() - started} ms`);
 }
+{
+    // The uncached id view (a bot's own price beliefs) ranks exactly as the shared shortlist rows
+    // of the committed table (the fixture has no rewards, so no income).
+    Table.useFile();
+    {
+        for (const [role, level, costs, shots] of [['dps', 24, { shots: 0, potions: 0 }, true],
+            ['dps', 30, { shots: 5, potions: 40 }, false], ['spoiler', 20, { shots: 2, potions: 10 }, true]]) {
+            const ids = Table.rankedSpotIds(role, level, costs, -15, shots, { spoilSkillLevel: 1 });
+            assert.deepStrictEqual(ids, Table.rankedIncome(role, level, costs, -15, shots, { spoilSkillLevel: 1 }).map(row => row.spotId),
+                `${role} ${level}: the id view keeps the shortlist order`);
+        }
+        assert(Table.rankedSpotIds('dps', 24, { shots: 0, potions: 0 }, -15).length > 0, 'the committed table ranks a spot');
+    }
+}
 console.log('Spot value table lookups, curves, caps, rates and the committed table passed');

@@ -34,7 +34,7 @@ assert.equal(Income.evaluate({ ...base, party: { income: 1000 }, rewardFee: 4000
 for (const multiplier of [1, 10, 50]) assert.equal(Income.evaluate({ ...base,
     solo: { income: 1000 * multiplier }, party: { income: 200 * multiplier } }).accept, false);
 
-const original = { value: Table.value, ranked: Table.rankedIncome, hunt: Hunt.huntIncome,
+const original = { value: Table.value, ranked: Table.rankedIncome, rankedIds: Table.rankedSpotIds, hunt: Hunt.huntIncome,
     samples: Hunt.sampledRows, costs: Hunt.consumablePrices, ensure: Profiles.ensure, gate: Routes.isSpotAllowedForState, reader: Routes.spotAllowedReaderFor,
     forState: Economy.forState, forGroup: Economy.forGroup, npcs: Data.npcs, rewards: Data.npcRewards,
     rewardValue: Rewards.value };
@@ -61,6 +61,7 @@ try {
     Table.value = (id, role, level, shots) => id === 'lower' ? row(shots ? 650 : 600, shots ? 200 : 0)
         : row(shots ? 1200 : 300, shots ? 900 : 0);
     Table.rankedIncome = (role, level, costs, gap, shots) => spots.map(spot => ({ ...Table.value(spot.id, role, level, shots), spotId: spot.id }));
+    Table.rankedSpotIds = () => spots.map(spot => spot.id);
     Hunt.huntIncome = () => ({ perHour: 1000, expPerHour: 100 });
     Hunt.sampledRows = () => [];
     Hunt.consumablePrices = () => ({ shots: 1, potions: 10 });
@@ -164,7 +165,7 @@ try {
     assert.equal(ingredient.soloHours, 5000 / ingredient.soloIncome, 'a component is not the final gear completion time');
     assert.equal(ingredient.accept, false);
 } finally {
-    Table.value = original.value; Table.rankedIncome = original.ranked;
+    Table.value = original.value; Table.rankedIncome = original.ranked; Table.rankedSpotIds = original.rankedIds;
     Hunt.huntIncome = original.hunt; Hunt.sampledRows = original.samples; Hunt.consumablePrices = original.costs;
     Profiles.ensure = original.ensure; Routes.isSpotAllowedForState = original.gate; Routes.spotAllowedReaderFor = original.reader;
     Economy.forState = original.forState; Economy.forGroup = original.forGroup;

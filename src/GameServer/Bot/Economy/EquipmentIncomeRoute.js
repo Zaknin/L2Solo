@@ -38,8 +38,9 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     // Search-local: null rejects a spot; undefined awaits its first walk factor.
     const spotFactors = new Map();
     const candidates = shots => {
-        for (const row of Table.rankedIncome(tableRole, state.level, costs, minGap, shots,
-            { spoilSkillLevel: spoiler?.skillLevel || 0 })) ids.add(row.spotId);
+        // costs are the bot's own price beliefs: the id view, not the shared shortlist rows.
+        for (const spotId of Table.rankedSpotIds(tableRole, state.level, costs, minGap, shots,
+            { spoilSkillLevel: spoiler?.skillLevel || 0 })) ids.add(spotId);
         return [...ids].map(id => Index.spotById(spots, id)).filter(spot => {
             if (!spot) return false;
             if (spotFactors.has(spot)) return spotFactors.get(spot) !== null;
