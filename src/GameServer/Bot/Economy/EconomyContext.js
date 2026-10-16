@@ -1380,6 +1380,9 @@ function buildForState(state, deps) {
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         reconsider,
+        // Diagnostics only: the events that re-weigh (network:reconsider), 'quiet' for none.
+        reconsiderReasons: !diagnostic ? null : dirty ? Sections.sectionNames(dirty)
+            : [soft === null ? 'quiet' : soft === 'money' ? 'soft_money' : soft],
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,

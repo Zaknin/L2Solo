@@ -521,7 +521,8 @@ class WishNetwork {
     // never retains (RETAIN_ACTORS).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
-        caller = 'wish_network', trigger = 'request', stockFor = null, completionKey = null, reconsider = true }) {
+        caller = 'wish_network', trigger = 'request', stockFor = null, completionKey = null, reconsider = true,
+        reconsiderReasons = null }) {
         const diagnostic = Diagnostics.active();
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
@@ -714,9 +715,13 @@ class WishNetwork {
             activityLeaf: individual && activity ? fnv1a32(activity.key) : 0 };
         if (diagnostic) {
             Diagnostics.count('network', 'build');
-            Diagnostics.count('network', 'activity', completion ? 'completion' : heldActivity ? 'held'
+            const outcome = completion ? 'completion' : heldActivity ? 'held'
                 : heldLeaf ? 'outscored' : !inputActivityLeaf ? activity ? 'fresh' : 'none'
-                : focus?.[0] !== previous.focus?.[0] ? 'focus_moved' : 'gone');
+                : focus?.[0] !== previous.focus?.[0] ? 'focus_moved' : 'gone';
+            Diagnostics.count('network', 'activity', outcome);
+            // Which event (the caller's reasons, 'quiet' for none) kept or moved a held choice.
+            if (reconsiderReasons && (outcome === 'held' || outcome === 'outscored' || outcome === 'focus_moved'))
+                for (const reason of reconsiderReasons) Diagnostics.count('network', 'reconsider', `${reason}:${outcome}`);
             Diagnostics.count('network', cached ? sameResult(cached.result, result) ? 'unchanged' : 'changed' : 'comparison_unavailable');
             Diagnostics.duration('network', performance.now() - started);
         }

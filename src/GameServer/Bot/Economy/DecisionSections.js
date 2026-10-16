@@ -10,6 +10,16 @@ const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 let PurchaseFunding = null, EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
+// The decision sections in the order of their wishDirty bit (1 << at): one
+// table for the raise (DecisionEvents) and the names its readers count.
+const SECTIONS = Object.freeze(['build', 'combat', 'supply', 'benefits', 'sources', 'occupation', 'money', 'relations']);
+const sectionBit = name => 1 << SECTIONS.indexOf(name);
+// The names of the sections raised in wishDirty bits, in table order.
+function sectionNames(bits) {
+    const names = [];
+    for (let at = 0; at < SECTIONS.length; at++) if (bits & 1 << at) names.push(SECTIONS[at]);
+    return names;
+}
 function capability(state, timestamp = Date.now()) {
     const stats = state.stats || {};
     return hash([CombatProfile.buildInputKey(state, timestamp),
@@ -152,5 +162,5 @@ function events(before, after, timestamp = Date.now()) {
     if (previousFact('supply') !== current.supply) sections.add('supply');
     return [...sections];
 }
-module.exports = { capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
+module.exports = { SECTIONS, sectionBit, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
     SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, hash, isEmptyWishPlan };

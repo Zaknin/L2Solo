@@ -4,8 +4,9 @@ const Sections = require('../Economy/DecisionSections');
 const reasons = { town: 0, revived: 0, level: 0, weight: 0, bag: 0, money: 0,
     build: 0, sources: 0, supply: 0, occupation: 0, relations: 0, combat: 0, benefits: 0 };
 // Every reason marks a section, so the next build reconsiders the held focus and activity.
-const sectionBits = { build: 1, combat: 2, supply: 4, benefits: 8, sources: 16, occupation: 32, money: 64, funding: 64, relations: 128,
-    level: 1, revived: 2, weight: 4, bag: 4, town: 4 | 64 };
+const bit = Sections.sectionBit;
+const sectionBits = { ...Object.fromEntries(Sections.SECTIONS.map(name => [name, bit(name)])), funding: bit('money'),
+    level: bit('build'), revived: bit('combat'), weight: bit('supply'), bag: bit('supply'), town: bit('supply') | bit('money') };
 let hotEconomyBuilds = 0, reportedBuilds = 0, reportedAt = 0;
 function statsFor(session) {
     return session.coldLifeState ? (session.coldLifeState.stats ||= {}) : (session.decisionStats ||= {});
