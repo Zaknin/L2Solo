@@ -1,4 +1,5 @@
 'use strict';
+const { createHash } = require('node:crypto');
 
 // Private storage only. Exported snapshots and policy results remain ordinary
 // objects. Float64 keeps every accepted JS number, including clocks and ids.
@@ -60,10 +61,13 @@ class PackedInteractionRows {
         this.extras = null;
         this.fallback = null;
         const layouts = new Map(), characterIds = [];
+        const content = createHash('sha256').update('interaction-memory:1\n');
         for (let ordinal = 0; ordinal < this.length; ordinal++) {
             // Preserve the old JSON-clone normalization and isolate caller
             // mutations, while only one transient plain row exists at a time.
-            const row = JSON.parse(JSON.stringify(snapshot.relations[ordinal]));
+            const encoded = JSON.stringify(snapshot.relations[ordinal]);
+            const row = JSON.parse(encoded);
+            content.update(encoded).update('\n');
             if (!this.indexes.has(row.kind)) this.indexes.set(row.kind, new Map());
             this.indexes.get(row.kind).set(row.targetId, ordinal);
             if (row.kind === 'character') characterIds.push(row.targetId);
@@ -101,6 +105,7 @@ class PackedInteractionRows {
             }
         }
         this.characterIds = Object.freeze(characterIds);
+        this.contentIdentity = content.digest('hex');
     }
 
     decode(ordinal) {

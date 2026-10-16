@@ -49,6 +49,63 @@ function wired() {
 }
 
 async function unitChecks() {
+    // Source readiness precedes transport readiness. Other tables still stream
+    // while native warehouse/clan owners finish their startup projections.
+    {
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        const Supplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+        const channel = new ColdTableChannel(), mirror = new TableMirror();
+        let warehouseReady = false, clanReady = false;
+        const warehouses = new Map(), clans = new Map([[7, [7, 1, [], 1]]]);
+        channel.register('personal_warehouse', { key: row => row[0], allRows: () => warehouses.values(), ready: () => warehouseReady });
+        channel.register('clan_supplies', { key: row => row[0], allRows: () => clans.values(), ready: () => clanReady });
+        channel.register('independent', { key: row => row.id, allRows: () => [{ id: 1 }] });
+        mirror.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => Warehouse.prepareRow(row) });
+        mirror.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => Supplies.prepareRow(row) });
+        Warehouse.useRowSource(id => mirror.rows('personal_warehouse').get(id), () => mirror.ready('personal_warehouse'));
+        Supplies.useRowSource(id => mirror.rows('clan_supplies').get(id), () => mirror.ready('clan_supplies'));
+        try {
+            channel.attach({}, 'owner-ready', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
+            assert(mirror.ready('independent'), 'startup overlap remains useful for independent tables');
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), null, 'unloaded warehouse is not an empty warehouse');
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'level-only clan rows do not authorize demand reuse');
+            warehouseReady = true; channel.flush();
+            const empty = Warehouse.contentIdentity({ characterId: 1 });
+            assert.match(empty, /^[a-f0-9]{64}$/, 'a completed empty full copy publishes a known empty owner');
+            const values = [[1864, 10, 0], [627, 1, 7]], row = Warehouse.prepareRow([1, 9, values]);
+            const encoded = JSON.stringify(row);
+            warehouses.set(1, row); channel.changed('personal_warehouse', row); channel.flush();
+            const first = Warehouse.contentIdentity({ characterId: 1 });
+            assert.notEqual(first, empty);
+            assert.equal(JSON.stringify(row), encoded, 'private identity metadata adds no table wire fields');
+            const restarted = Warehouse.prepareRow([1, 1, structuredClone(values)]);
+            warehouses.set(1, restarted); channel.changed('personal_warehouse', restarted); channel.flush();
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), first, 'numeric publication version is not content identity');
+            const reordered = Warehouse.prepareRow([1, 2, [...values].reverse()]);
+            warehouses.set(1, reordered); channel.changed('personal_warehouse', reordered); channel.flush();
+            assert.notEqual(Warehouse.contentIdentity({ characterId: 1 }), first, 'native nonstackable publication order remains an input');
+            const malformed = [1, 3, [[1864, NaN, 0]]];
+            warehouses.set(1, malformed); channel.changed('personal_warehouse', malformed); channel.flush();
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), null, 'malformed native quantities never become an empty or null hash');
+            const final = Supplies.prepareRow([7, 1, [[1864, 3]], 22]);
+            clans.set(7, final); channel.changed('clan_supplies', final); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'queued final data is unknown until its owner finishes');
+            clanReady = true; channel.flush();
+            const clan = Supplies.contentIdentity({ clanId: 7 });
+            assert.match(clan, /^[a-f0-9]{64}$/);
+            assert.equal(Supplies.contentIdentity({ clanId: 99 }), null, 'a missing positive clan is never invented empty');
+            const same = Supplies.prepareRow([7, 1, [[1864, 3]], 1]);
+            clans.set(7, same); channel.changed('clan_supplies', same); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), clan);
+            const completed = Supplies.prepareRow([7, 1, [], 2]);
+            clans.set(7, completed); channel.changed('clan_supplies', completed); channel.flush();
+            assert.notEqual(Supplies.contentIdentity({ clanId: 7 }), clan, 'final empty demand differs from unmet native demand');
+            const badDemand = [7, 1, [[1864, Infinity]], 3];
+            clans.set(7, badDemand); channel.changed('clan_supplies', badDemand); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'nonfinite demands cannot share JSON null identity');
+        } finally { Warehouse.useRowSource(null); Supplies.useRowSource(null); }
+    }
+
     // Attach sends the whole table; changes follow in order, one version per flush.
     {
         const w = wired();

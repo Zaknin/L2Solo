@@ -11,6 +11,7 @@ const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
+const ColdEconomyDecision = require('./ColdEconomyDecision');
 const BotErrands = require('./BotErrands');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
@@ -417,9 +418,10 @@ class RetainedStateMap extends Map {
     #skillDtos;
     #sharingFailures = 0;
 
-    constructor(sources, shotIndex = null) {
+    constructor(sources, shotIndex = null, now = Date.now) {
         super();
         this.shotIndex = shotIndex;
+        this.now = now;
         this.#skillDtos = require('worker_threads').isMainThread ? null
             : new (require('./SkillDtoInterner').SkillDtoInterner)();
         Object.defineProperty(this, 'locationIndex', { value: sources.index, enumerable: true });
@@ -440,9 +442,6 @@ class RetainedStateMap extends Map {
 
     set(id, entry) {
         const current = this.get(id);
-        if (current?.state !== entry.state && typeof invoke === 'function') {
-            invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication');
-        }
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }
         catch (error) {
@@ -460,15 +459,20 @@ class RetainedStateMap extends Map {
         }
         // Worker calculation advice belongs to this existing native owner.
         // Publication replaces transport context, but is not a new decision.
-        // Keep advice off enumerable state/context DTOs; readers still prove
-        // every dependency before reuse, and retirement releases the owner.
-        const publishedContext = this.get(id)?.context;
+        // Decoded advice stays off enumerable context DTOs; only its bounded
+        // restart prefix lives in stats. Readers prove every dependency before
+        // reuse, and retirement releases the owner.
+        const published = this.get(id), publishedContext = published?.context;
         const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
-        const wishAdvisory = supplied ? entry.context.wishAdvisory : current?.context?.wishAdvisory;
+        const previousAdvice = current?.context?.wishAdvisory;
+        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(entry.context.wishAdvisory)
+            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(published.state, this.now()) : null;
+        const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(published.state, incomingAdvice, previousAdvice)
+            ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(published.state, previousAdvice) ? previousAdvice : null;
         if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
             && Object.isExtensible(publishedContext)) {
             Reflect.defineProperty(publishedContext, 'wishAdvisory', {
-                value: entry.state?.phase === 'cold' ? wishAdvisory : null,
+                value: published.state?.phase === 'cold' ? wishAdvisory : null,
                 writable: true, configurable: true, enumerable: false
             });
         }
@@ -551,7 +555,7 @@ class ColdSimulationKernel {
         // These are the original shared state objects. Shrinking their shape
         // or the coldCombat packet requires a shared-state task, not another
         // detached copy or an unmeasured fixed-memory subtraction.
-        this.states = new RetainedStateMap(CharacterStateSources.attachKernel(options.stateSources || CharacterStateSources.standalone()), options.shotIndex);
+        this.states = new RetainedStateMap(CharacterStateSources.attachKernel(options.stateSources || CharacterStateSources.standalone()), options.shotIndex, this.now);
         this.occupancy = new SpotOccupancyIndex({ locationIndex: this.states.locationIndex });
         this.interactionMemory = new (require('../../Social/InteractionMemory'))();
         this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
@@ -2327,8 +2331,12 @@ class ColdSimulationKernel {
         const id = Number(characterId);
         const proposal = this.dirty.get(id) || null;
         const active = this.inFlight.get(id) || null;
+        const accepted = this.states.get(id)?.context?.wishAdvisory;
+        const wishAdvisory = accepted ? ColdEconomyDecision.wireAdvisory(accepted) : null;
+        if (accepted && !wishAdvisory && EconomyDiagnostics.active()) EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         this.remove(id);
-        return { characterId: id, proposal, token: active?.grant || proposal?.token || null };
+        return { characterId: id, proposal, token: active?.grant || proposal?.token || null,
+            ...(wishAdvisory ? { wishAdvisory } : {}) };
     }
 
     pause() {

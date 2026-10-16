@@ -17,6 +17,7 @@ const DataCache = invoke('GameServer/DataCache');
 const ClanEconomy = require('./ClanEconomyContext');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const ReviewEvents = require('./ClanReviewEvents');
+const SupplyPolicy = require('./ClanSupplyPolicy');
 
 const metrics = {
     resolves: 0,
@@ -158,7 +159,9 @@ async function clanProjection(clanId = null) {
         if (!ClanSimulationPolicy.isStaticService(member)) byId.get(clanId).members.push(member);
     });
     const projection = [...byId.values()];
-    for (const clan of projection) require('./ClanSupplyPolicy').publish(clan);
+    for (const clan of projection) SupplyPolicy.publish(clan);
+    // Level-only startup rows are not the final native demand projection.
+    if (!hasClanId) SupplyPolicy.projectionReady();
     return projection;
 }
 

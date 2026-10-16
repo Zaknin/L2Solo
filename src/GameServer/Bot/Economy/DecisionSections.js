@@ -4,6 +4,7 @@
 // things. Only these compact boundaries belong to the saved decision; graphs
 // stay in EconomyContext's existing bounded working cache.
 const { fnv1a32 } = require('../Fnv1a');
+const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
 // Read through the module object at call time (tests replace buildInputKey).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -15,9 +16,13 @@ const hash = value => fnv1a32(JSON.stringify(value));
 // table for the raise (DecisionEvents) and the names its readers count.
 const SECTIONS = Object.freeze(['build', 'combat', 'supply', 'benefits', 'sources', 'occupation', 'money', 'relations']);
 function sectionBit(name) {
+    if (name === 'funding') name = 'money';
     const at = SECTIONS.indexOf(name);
     if (at < 0) throw new Error(`decision section: unknown ${name}`);
     return 1 << at;
+}
+function sectionMask(names) {
+    return names.reduce((bits, name) => bits | sectionBit(name), 0);
 }
 // The names of the sections raised in wishDirty bits, in table order.
 function sectionNames(bits) {
@@ -65,10 +70,60 @@ function meaningfulMoney(state, baseline = state.stats?.wishSections, escrow = 0
 // delay never starts a reconsideration by itself, it only lets one through.
 const SOFT_DELAY = Object.freeze({ money: 60 * 1000, observation: 5 * 60 * 1000,
     horizon: 5 * 60 * 1000, market: 10 * 60 * 1000 });
+const SOFT_KINDS = Object.freeze(Object.keys(SOFT_DELAY));
+function softDeadline(baseline, kind) {
+    const at = Number(baseline?.at), index = SOFT_KINDS.indexOf(kind);
+    if (!Number.isFinite(at) || index < 0) return NaN;
+    const age = baseline.ages?.[index] ?? 0;
+    if (!Number.isFinite(age) || age < 0 || age > SOFT_DELAY[kind]) return NaN;
+    return at - age + SOFT_DELAY[kind];
+}
+function clockBytes(baseline) {
+    return baseline?.ages ? Buffer.byteLength(JSON.stringify({ ages: baseline.ages })) - 1 : 0;
+}
+function baselineIdentity(baseline) {
+    const canonical = (value, depth = 0) => {
+        if (depth > 8) throw new TypeError('decision_baseline_depth');
+        if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (Array.isArray(value)) return ['array', value.map(row => canonical(row, depth + 1))];
+        if (value && typeof value === 'object') return ['object', Object.keys(value).sort()
+            .filter(key => value[key] !== undefined).map(key => [key, canonical(value[key], depth + 1)])];
+        throw new TypeError('decision_baseline_value');
+    };
+    try {
+        if (!baseline || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+        return createHash('sha256').update(JSON.stringify(canonical(baseline))).digest('hex');
+    } catch (_) { return null; }
+}
+function carrySectionClocks(previous, current, updated) {
+    if (!previous || !Number.isFinite(previous.at) || current.at < previous.at) return current;
+    const resets = { money: sectionBit('money'), observation: sectionBit('occupation') | sectionBit('build'),
+        horizon: sectionBit('benefits'), market: sectionBit('sources') };
+    const ages = SOFT_KINDS.map((kind, at) => updated & resets[kind] ? 0
+        : Math.min(SOFT_DELAY[kind], Math.max(0, current.at - previous.at) + Number(previous.ages?.[at] || 0)));
+    if (ages.some(age => age > 0)) current.ages = ages;
+    return current;
+}
+function carrySectionBaseline(previous, current, updated) {
+    if (!previous || !Number.isFinite(previous.at) || current.at < previous.at) return current;
+    const carry = (mask, fields) => {
+        if (updated & mask) return;
+        for (const name of fields) {
+            if (Object.hasOwn(previous, name)) current[name] = previous[name];
+            else delete current[name];
+        }
+    };
+    carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
+    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'incomeError', 'expHour']);
+    carry(sectionBit('benefits'), ['horizon']);
+    carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
+    return carrySectionClocks(previous, current, updated);
+}
 function softDue(baseline, kind, timestamp = Date.now()) {
-    const at = Number(baseline?.at);
+    const deadline = softDeadline(baseline, kind);
     // A baseline saved before L70 has no decision time: behave as before.
-    return !Number.isFinite(at) || Number(timestamp) - at >= SOFT_DELAY[kind];
+    return !Number.isFinite(deadline) || Number(timestamp) >= deadline;
 }
 // Hard: the held option became unaffordable or its funding/obligation mark
 // moved. Soft: a newly payable next wish or a drift beyond the bot's error.
@@ -191,5 +246,5 @@ function factEvents(previousFact, current, after, funding = false) {
     if (previousFact('supply') !== current.supply) sections.add('supply');
     return [...sections];
 }
-module.exports = { SECTIONS, sectionBit, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };
+module.exports = { SECTIONS, sectionBit, sectionMask, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
+    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };

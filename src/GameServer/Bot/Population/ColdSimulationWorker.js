@@ -100,6 +100,9 @@ const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
+const RecomputeGeneration = require('./RecomputeGeneration');
+const PersonalWarehouseIndex = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const ClanSupplyPolicy = invoke('GameServer/Clan/ClanSupplyPolicy');
 const { ColdOccupationPlanner } = require('./ColdOccupationPlanner');
 const OccupationSources = require('./ColdOccupationSources');
 const EconomicTrip = require('../Economy/EconomicTrip');
@@ -116,6 +119,8 @@ const SpotIndex = require('../AI/SpotIndex');
 const BotTargetMatchup = require('../AI/BotTargetMatchup');
 const SpotValueTable = require('../AI/SpotValueTable');
 const ColdCombatProfile = require('./ColdCombatProfile');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+const CraftEligibility = require('../Economy/CraftEligibility');
 const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
     /[\\/]src[\\/]Database\.js$/i.test(filename)
     || /[\\/]GameServer[\\/]World[\\/]World\.js$/i.test(filename)
@@ -500,6 +505,19 @@ function occupationFor(state, timestamp, context = {}, mode = 'occupation') {
         knownShotRecipes: context.knownShotRecipes || [], recipeBook: context.recipeBook, stock: context.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
+async function refreshCraftPacket(state, timestamp, context, refreshed, deps) {
+    if (!refreshed || !EconomyContext.eventReuseEnabled(deps) || !CraftEligibility.isServiceCrafter(state)) return refreshed;
+    const mp = Number(state.vitals?.mp), preparedMp = refreshed.advisory.preparedMp ?? refreshed.advisory.mp;
+    if (mp === preparedMp) return refreshed;
+    const sourceState = kernel.states.get(Number(state.characterId))?.state;
+    const action = await occupationFor(state, timestamp,
+        { ...context, stock: refreshed.economy.stock('shots'), economy: refreshed.economy }, 'action');
+    if (!action?.economyPlan || kernel.states.get(Number(state.characterId))?.state !== sourceState) return null;
+    // Native action preparation has completed on the held graph. Only this
+    // physical packet changes; decision clocks and saved original stay put.
+    const prepared = ColdEconomyDecision.refreshPreparedCraft(refreshed, action.economyPlan.shot || null, mp);
+    return prepared ? { ...prepared, economyPlan: action.economyPlan } : null;
+}
 function cancelRoute(characterId) {
     const id = Number(characterId);
     routeRequests.delete(id);
@@ -523,8 +541,7 @@ function requestRoute(payload) {
 }
 const refreshedStates = new WeakSet();
 function assetsKey(state) {
-    return `${invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').version(state)}:${
-        invoke('GameServer/Clan/ClanSupplyPolicy').version(state)}`;
+    return `${PersonalWarehouseIndex.version(state)}:${ClanSupplyPolicy.version(state)}`;
 }
 const economyPlanHash = plan => require('../Fnv1a').fnv1a32(JSON.stringify(plan));
 function occupationOwnerChanged(id, refresh = false) {
@@ -603,12 +620,13 @@ tables.watch('market', {
 });
 tables.watch('personal_warehouse', {
     reset: () => {},
-    put: key => occupationOwnerChanged(Number(key)),
+    put: (key, row) => { PersonalWarehouseIndex.prepareRow(row); occupationOwnerChanged(Number(key)); },
     remove: key => occupationOwnerChanged(Number(key))
 });
 tables.watch('clan_supplies', {
     reset: () => {},
-    put: key => {
+    put: (key, row) => {
+        ClanSupplyPolicy.prepareRow(row);
         // Only the bounded retained contexts can carry an obsolete hot card.
         // Cold owners notice the version at their next natural resolve.
         for (const entry of occupationPlanner.slots.values()) {
@@ -718,8 +736,8 @@ let planningOccupancyCachedAt = 0;
 // Personas come from the main thread's 'personas' table (BotPersona.loadAll).
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 BotPersona.useRowSource((characterId) => tables.rows('personas').get(characterId));
-invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
-invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
+ClanSupplyPolicy.useRowSource(id => tables.rows('clan_supplies').get(id), () => tables.ready('clan_supplies'));
+PersonalWarehouseIndex.useRowSource(id => tables.rows('personal_warehouse').get(id), () => tables.ready('personal_warehouse'));
 let eventLoopDelay = null;
 
 // The owner notices moved counters only during its own natural resolve.
@@ -812,13 +830,16 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
         if (diagnostic && advisory) economyDiagnostics.count('card', 'drop', owner.context.wishAdvisory ? 'remember_stale_kept' : 'remember_stale');
         return;
     }
-    // The fence must describe this exact state; the build activity and a
-    // trip to the held leaf's own spot compare as in the card (L70). A read
-    // market token already deferred by the reused plan stays soft (L70).
+    // Validate this publication against the original build's proof. The legacy
+    // fence remains the shadow baseline; neither path renews soft clocks.
     const why = diagnostic ? [] : undefined;
-    if (advisory && seen && (!deps || !invoke('GameServer/Bot/Economy/EconomyContext')
-        .calculationHolds(seen, advisory.fence, deps, { baseline: advisory.baseline, activity: advisory.activity,
-            leaf: advisory.card?.activity, timestamp: Number(deps.timestamp || Date.now()), why }))) {
+    const Economy = advisory && seen && deps ? EconomyContext : null;
+    const options = advisory && deps ? { baseline: advisory.baseline, activity: advisory.activity,
+        leaf: advisory.card?.activity, mp: advisory.mp, softPrefix: advisory.softPrefix === true,
+        timestamp: Number(deps.timestamp || Date.now()), why } : null;
+    if (advisory && seen && (!Economy || !(advisory.eventProof && Economy.eventReuseEnabled(deps)
+        ? Economy.eventProofHolds(seen, advisory.eventProof, deps, options)
+        : Economy.calculationHolds(seen, advisory.fence, deps, options)))) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
         advisory = null;
     }
@@ -1082,7 +1103,7 @@ function startKernel(config = {}) {
                     return { spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
                         board: boardReady(), buyOrderEscrow: context.buyOrderEscrow };
                 },
-                economyFor: (projected, deps) => {
+                economyFor: async (projected, deps) => {
                     observedDeps = deps;
                     const why = [], prepared = {};
                     let fresh = false;
@@ -1118,8 +1139,11 @@ function startKernel(config = {}) {
                             if (fresh) economyDiagnostics.count('advisory', 'edge_fresh', review);
                         } else why.push('economy_edges');
                     }
+                    if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, owner?.context || {}, refreshed, deps);
                     if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                    const refusalDeps = advisoryRefusal(fresh ? { ...deps, advisoryFresh: true } : deps, 'result', why[0] || 'party');
+                    const eventDeps = prepared.eventVerdict || prepared.eventCandidate ? { ...deps,
+                        eventVerdict: prepared.eventVerdict, eventCandidate: prepared.eventCandidate } : deps;
+                    const refusalDeps = advisoryRefusal(fresh ? { ...eventDeps, advisoryFresh: true } : eventDeps, 'result', why[0] || 'party');
                     const candidateDeps = socialShadowDeps(projected, refusalDeps, prepared, timestamp, () => {
                         const plan = projected.stats?.equipmentPlan || null;
                         const replan = GearAcquisitionPlanner.replanContextFor(projected, plan, timestamp);
@@ -1130,7 +1154,7 @@ function startKernel(config = {}) {
                 },
                 onEconomy: (built, seen) => {
                     economy = built; seenKey = ColdEconomyDecision.stateKey(seen);
-                    rememberWishAdvisory(owner, refreshed?.advisory || ColdEconomyDecision.advisory(built, seen),
+                    rememberWishAdvisory(owner, refreshed?.advisory || ColdEconomyDecision.advisory(built, seen, undefined, observedDeps),
                         refreshed ? null : seen, observedDeps);
                 }
             });
@@ -1152,7 +1176,7 @@ function startKernel(config = {}) {
             const context = kernel.states.get(Number(state.characterId))?.context || {};
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
-            const economyPlan = preparedAction?.economyPlan || null;
+            const economyPlan = preparedAction?.economyPlan || refreshed?.economyPlan || null;
             if (economyPlan?.d) { const owner = kernel.states.get(Number(projected.characterId));
                 if (owner) { owner.context.economyPending = economyPlan.d; owner.context.economyPlanHash = economyPlanHash(economyPlan); } }
             const market = reviewMarket(projected, timestamp, economy);
@@ -1229,8 +1253,9 @@ function startKernel(config = {}) {
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             const why = [], prepared = {};
-            const refreshed = solo && nativeHolds && planHolds()
+            let refreshed = solo && nativeHolds && planHolds()
                 ? ColdEconomyDecision.refreshAdvisory(state, context?.wishAdvisory, deps, { why, prepared, socialShadow: true }) : null;
+            if (refreshed) refreshed = await refreshCraftPacket(state, timestamp, context, refreshed, deps);
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
@@ -1240,6 +1265,7 @@ function startKernel(config = {}) {
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
                 const leaf = refreshed.economy.network.activity;
                 return { statsPacket: refreshed.economy.statsPacket,
+                    ...(refreshed.economyPlan ? { economyPlan: refreshed.economyPlan } : {}),
                     activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
                     economyDecision: refreshed.decision, previousPlan, acquisitionPlan: previousPlan,
                     partyRequest: null, reusablePartyRequest: false, replanFailure: null,
@@ -1251,9 +1277,11 @@ function startKernel(config = {}) {
                 ? { ...state, stats: { ...state.stats,
                     equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
             // The refusal name is read only by the diagnostics counters.
-            const refusalDeps = economyDiagnostics.active() ? advisoryRefusal(deps, 'lifecycle', refreshed ? 'excluded_spot'
+            const eventDeps = prepared.eventVerdict || prepared.eventCandidate ? { ...deps,
+                eventVerdict: prepared.eventVerdict, eventCandidate: prepared.eventCandidate } : deps;
+            const refusalDeps = economyDiagnostics.active() ? advisoryRefusal(eventDeps, 'lifecycle', refreshed ? 'excluded_spot'
                 : why[0] || (!solo ? 'party' : !planHolds() ? 'plan_changed'
-                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : deps;
+                    : nativeReplan.failure ? 'native_failure' : nativeReplan.invalidSource ? 'invalid_source' : 'leveling_recovery')) : eventDeps;
             const candidateDeps = socialShadowDeps(state, refusalDeps, prepared, timestamp, () => nativeHolds && planHolds());
             const preparedEconomy = Economy.forState(preparationState, withIncomeRoute(candidateDeps, prepared.basics));
             const selectedAcquisition = GearPlanSelection
@@ -1292,7 +1320,7 @@ function startKernel(config = {}) {
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
             rememberWishAdvisory(kernel.states.get(Number(state.characterId)),
-                ColdEconomyDecision.advisory(economy, seen, preparationState.activity), seen, deps);
+                ColdEconomyDecision.advisory(economy, seen, preparationState.activity, deps), seen, deps);
             if (economyDiagnostics.active()) countTransitRebuild(state, routedState, previousPlan);
             return {
                 ...(showcase?.economyPlan ? { economyPlan: showcase.economyPlan } : {}),
@@ -1381,7 +1409,7 @@ function startKernel(config = {}) {
         }
         return craftNpcRows;
     } });
-    invoke('GameServer/Bot/Economy/EconomyContext').configure({
+    EconomyContext.configure({
         board: boardReady,
         knownRecipes: id => invoke('GameServer/Bot/Economy/RecipeBookCodec').unpack(kernel.states.get(Number(id))?.context?.recipeBook) ?? undefined,
         producerSource: (state, board) => {
@@ -1402,7 +1430,10 @@ function startKernel(config = {}) {
         },
         buyOrderEscrow: id => kernel.states.get(Number(id))?.context?.buyOrderEscrow || 0,
         spots: () => planningSpots,
-        memory: (characterId) => kernel.interactionMemory.snapshot(characterId)
+        memory: (characterId) => kernel.interactionMemory.snapshot(characterId),
+        memoryIdentity: characterId => kernel.interactionMemory.contentIdentity(characterId),
+        sourceReady: () => tables.ready('board') && tables.ready('market'),
+        nativeCraftContinuation: true
     });
     OccupationSources.initialise();
     loopTimer = setInterval(() => {
@@ -1518,6 +1549,7 @@ async function handle(message) {
         }
         break;
     case 'init':
+        RecomputeGeneration.configure(payload.recomputeGeneration);
         startKernel(payload.config || {});
         send('ready', {
             phase: 'running',
@@ -1630,6 +1662,11 @@ async function handle(message) {
         occupationPlanner.cancel(payload.characterId);
         cancelRoute(payload.characterId);
         const result = kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null, token: null };
+        if (result.wishAdvisory && Protocol.validateEnvelope(Protocol.envelope('fence_ack', epoch, result, message.msgId),
+            'worker', { workerEpoch: epoch }).reason === 'message_too_large') {
+            delete result.wishAdvisory;
+            economyDiagnostics.count('card', 'drop', 'handoff_oversize');
+        }
         send('fence_ack', result, message.msgId);
         break;
     }

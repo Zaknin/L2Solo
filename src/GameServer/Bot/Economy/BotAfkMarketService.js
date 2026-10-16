@@ -813,8 +813,10 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         if (shot.wealth) {
             const Wealth = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
             if (!Wealth.eligible(state)) return { state };
-            const opportunity = Wealth.recheck(state, shot.wealth);
-            return opportunity ? Wealth.execute(state, opportunity, { stillPrepared }) : { state };
+            const refusal = {};
+            const opportunity = Wealth.recheck(state, shot.wealth, undefined, refusal);
+            return opportunity ? Wealth.execute(state, opportunity, { stillPrepared })
+                : { state: await Wealth.rejectAccepted(state, state, refusal) };
         }
         return { state: await require('./ColdShotEconomyService').execute(state, shot) };
     }) : null;

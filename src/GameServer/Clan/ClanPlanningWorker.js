@@ -24,8 +24,12 @@ let npcOffers = new Map();
 // Tables from the main thread's ColdTableChannel; pages are not answered.
 // The board's offers come from the 'board' table, indexed as it changes.
 const tables = new TableMirror();
-invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
-invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
+const ClanSupplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+const PersonalWarehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+tables.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => ClanSupplies.prepareRow(row) });
+tables.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => PersonalWarehouse.prepareRow(row) });
+ClanSupplies.useRowSource(id => tables.rows('clan_supplies').get(id), () => tables.ready('clan_supplies'));
+PersonalWarehouse.useRowSource(id => tables.rows('personal_warehouse').get(id), () => tables.ready('personal_warehouse'));
 const boardIndex = new BoardIndex();
 tables.watch('board', boardIndex.follower());
 const originalInvoke = global.invoke;

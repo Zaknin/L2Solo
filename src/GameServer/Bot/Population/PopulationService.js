@@ -34,6 +34,7 @@ const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyCompos
 const PartyRecruitmentChat = invoke('GameServer/Bot/Population/ColdPartyRecruitmentChat');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const GearPlanSelection = invoke('GameServer/Bot/AI/GearPlanSelection');
+const DecisionEvents = require('../AI/DecisionEvents');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const ColdCraftingService = invoke('GameServer/Bot/Economy/ColdCraftingService');
 const ColdWealthCraftService = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
@@ -3534,7 +3535,7 @@ const PopulationService = {
             // or a station may be temporarily unavailable. Do not pin the
             // bot at a station: re-enter hunting so the acquisition planner
             // can select the missing material again.
-            const recoveredState = !completed && craft.state?.activity !== 'traveling'
+            let recoveredState = !completed && craft.state?.activity !== 'traveling'
                 ? {
                     ...(craft.state || plannedState),
                     activity: 'hunting',
@@ -3548,6 +3549,8 @@ const PopulationService = {
                     }
                 }
                 : craft.state || plannedState;
+            if (!completed && ['materials_changed', 'missing_product', 'missing_station', 'insufficient_adena'].includes(craft.reason))
+                recoveredState = DecisionEvents.rejectedState(recoveredState, plannedState);
             return LifeState.upsertState(recoveredState, reason).then((saved) => {
                 const supplemented = craft.supplementedMaterials || [];
                 const supplyEvent = supplemented.length

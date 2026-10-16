@@ -106,6 +106,10 @@ function stageHours(state, expPerHour, persona) {
     const remaining = Math.max(0, Number(Data.experience[end - 1]) - positive(state.stats?.exp ?? state.exp));
     return expPerHour > 0 ? remaining / expPerHour : 0;
 }
+function decisionHorizon(state, context) {
+    return Number.isFinite(context.horizonHours) ? context.horizonHours
+        : stageHours(state, context.hunt.expPerHour, context.persona);
+}
 function deathHours(state, { expPerHour = 0, walkBackHours, returnHours, lostGearHours = 0, spotId } = {}) {
     const Death = invoke('GameServer/Progression/DeathExperience');
     const loss = Death.calculateLoss({ ...state, exp: state.stats?.exp ?? state.exp ?? 0 });
@@ -139,5 +143,5 @@ function progressStats(state, { timestamp = Date.now(), startedAt = 0, kills = 0
         frustration: Math.max(0, frustration - positive(kills) / Math.max(1, positive(stats.lifelongKills) + positive(kills))),
         lifelongKills: positive(stats.lifelongKills) + (knowledgeEnabled ? positive(kills) : 0) };
 }
-module.exports = { riskWeight, stageHours, deathHours, karmaHours, pkDropValue, resale, progressStats, trait,
+module.exports = { riskWeight, stageHours, decisionHorizon, deathHours, karmaHours, pkDropValue, resale, progressStats, trait,
     opportunity, acquisition, createOpportunity, addOutcome, finishOpportunity, OUTCOME_LIMIT, fundingDelay, readyBenefit };

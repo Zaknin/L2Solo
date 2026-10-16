@@ -122,6 +122,12 @@ class InteractionMemory {
         return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
     }
 
+    // Derived in the existing packing pass. Order is a native input: the
+    // economy reads the first matching relation, including player rows.
+    contentIdentity(ownerId) {
+        return this.snapshots.get(ownerId)?.contentIdentity ?? null;
+    }
+
     assess(source, target, context = {}, now = Date.now()) {
         if (this.clanSocial) {
             source = this.clanSocial.identity(source);

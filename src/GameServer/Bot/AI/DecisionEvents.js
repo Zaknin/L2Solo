@@ -11,6 +11,9 @@ let hotEconomyBuilds = 0, reportedBuilds = 0, reportedAt = 0;
 function statsFor(session) {
     return session.coldLifeState ? (session.coldLifeState.stats ||= {}) : (session.decisionStats ||= {});
 }
+function decisionStatsFor(session) {
+    return { ...session?.heldEconomy?.statsPacket, ...session?.decisionStats, ...session?.coldLifeState?.stats };
+}
 function raiseDecision(session, reason, { impossible = false } = {}) {
     if (!Object.hasOwn(reasons, reason)) throw new TypeError('unknown_decision_event');
     const stats = statsFor(session);
@@ -88,6 +91,32 @@ function prepared(session) {
     // Completing this same decision is not another personality roll.
     delete session.heldEconomy; delete session.economySeq;
 }
+// A real command rejection belongs to the accepted decision that attempted
+// it. The caller persists this returned state through its existing writer;
+// late failures never invalidate a newer decision or raise an event twice.
+function rejectedState(current, accepted = current) {
+    const source = accepted?.stats;
+    if (!current?.stats || !source || Number(current.characterId) !== Number(accepted.characterId) || current.stats.wishDirty
+        || Sections.decisionRefusal(current, Number(source.decisionSeq || 0), Number(source.activityLeaf || 0),
+            source.wishFocus?.[0] ?? null)) return current;
+    if (source.wishSections) {
+        const baseline = Sections.baselineIdentity(source.wishSections);
+        if (!baseline || baseline !== Sections.baselineIdentity(current.stats.wishSections)) return current;
+    }
+    const next = { ...current, stats: { ...current.stats } };
+    raiseDecision({ coldLifeState: next }, 'sources', { impossible: true });
+    return next;
+}
+function rejectSession(session, accepted) {
+    const characterId = Number(session?.actor?.fetchId?.());
+    if (!Number.isSafeInteger(characterId) || characterId <= 0) return false;
+    const stats = statsFor(session), current = { characterId, stats: decisionStatsFor(session) };
+    const rejected = rejectedState(current, accepted);
+    if (rejected === current) return false;
+    Object.assign(stats, { decisionSeq: rejected.stats.decisionSeq, activityLeaf: rejected.stats.activityLeaf,
+        wishDirty: rejected.stats.wishDirty });
+    return true;
+}
 function hold(session, actor, context) {
     invoke('GameServer/Inventory/ShotStock').enableAutoShot(actor, { stock: context.stock('shots') });
     if (context.routePending) return held(session) || { network: { activity: null },
@@ -104,6 +133,14 @@ function hold(session, actor, context) {
     session.heldEconomy = { network: { activity }, statsPacket: context.statsPacket,
         riskWeight: context.riskWeight, moneyPrice: context.moneyPrice, deathHours: context.deathHours,
         ...(context.inputKey ? { inputKey: require('../Fnv1a').fnv1a32(context.inputKey).toString(16) } : {}) };
+    if (context.eventProof?.()) {
+        // Capture only after the actor's actual packet and held leaf agree.
+        // lazy: worker only the main actor path publishes hot economic advice.
+        const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+        // lazy: worker cold event reconciliation never captures a hot card.
+        const accepted = require('../Population/ColdEconomyDecision').rememberPublished(context, Economy.stateForActor(actor, session));
+        if (accepted) statsFor(session).wishAdvisory = accepted.saved;
+    }
     session.decisionMarks = marksFor(session, actor);
     if (DiagnosticConfig.developerDiagnostics) {
         if (!reportedAt) reportedAt = Date.now();
@@ -131,4 +168,4 @@ function summary(hotHunters = 0, timestamp) {
     return { hotEconomyBuilds: builds, hotEconomyBuildsPerBotMinute: Math.round(perMinute * 100) / 100,
         total: hotEconomyBuilds, reasons: { ...reasons } };
 }
-module.exports = { statsFor, raiseDecision, observe, hold, held, prepared, summary, reconcile };
+module.exports = { statsFor, decisionStatsFor, raiseDecision, observe, hold, held, prepared, rejectedState, rejectSession, summary, reconcile };

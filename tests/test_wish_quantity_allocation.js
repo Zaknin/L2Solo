@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { WishNetwork, craftMaterialLoss } = require('../src/GameServer/Bot/Economy/WishNetwork');
+const { WishNetwork, craftMaterialLoss, createQuantityInputs, quantityInputsHold,
+    QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES } = require('../src/GameServer/Bot/Economy/WishNetwork');
 const Intent = require('../src/GameServer/Bot/Economy/TradeIntent');
 function build(nodes, roots, stockFor, onReadyCraftProof) {
     return new WishNetwork().build({ actorKey: 'quantity', inputKey: 'fresh', nodes, roots, stockFor,
@@ -103,4 +104,46 @@ function assertNoProofMetadata(value, seen = new Set()) {
 assertNoProofMetadata(ready);
 assertNoProofMetadata(shared);
 assert.equal(craftMaterialLoss(readyProof, physical(30)), 'unchanged', 'later captures do not mutate a retained proof');
+
+// Complete native reads precede pruning and include every alternative/root.
+// The old necessary craft proof cannot see another root's competing claim.
+{
+    const quantities = createQuantityInputs(), baseline = physical(38);
+    const watched = (id, rootKey) => quantities.stock(id, rootKey, baseline(id, rootKey));
+    const actual = build([other, root, alternativeReady, material], [other.key, root.key], watched);
+    assert.deepEqual(actual, build([other, root, alternativeReady, material], [other.key, root.key], baseline),
+        'capturing all native allocations preserves full decisions, plans and projections');
+    const inputs = quantities.finish();
+    assert(inputs && Object.isFrozen(inputs) && Object.isFrozen(inputs.rows));
+    assert(inputs.rows.every(Object.isFrozen));
+    assert(Buffer.byteLength(JSON.stringify(inputs)) <= QUANTITY_INPUT_BYTES);
+    assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === root.key && row[2] === 101 && row[3] === 0),
+        'zero output stock is an actual input too');
+    assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === other.key && row[2] === 202));
+    assert.equal(quantityInputsHold(inputs, { stockFor: baseline }), true);
+    assert.equal(quantityInputsHold(inputs, { stockFor: physical(30) }), false,
+        'loss above the selected craft necessary floor still invalidates competing allocation');
+    assert.equal(quantityInputsHold(inputs, { stockFor: physical(37, 1) }), false,
+        'equal owned+incoming totals cannot certify physical execution');
+    assert.equal(quantityInputsHold(inputs, { stockFor: (id, key) => key === other.key && id === 202
+        ? { owned: 0 } : baseline(id, key) }), false, 'root-specific protected stock is read with the same root');
+
+    const direct = createQuantityInputs();
+    direct.present(202, 3); direct.free(203, 0); direct.physical(204, 2); direct.incoming(205, 1); direct.freePresent(206, 3);
+    const directProof = direct.finish();
+    const readers = { physical: id => id === 202 ? 4 : 2, free: id => id === 206 ? 4 : 0, incoming: () => 1 };
+    assert.equal(quantityInputsHold(directProof, readers), true, 'a native positive-presence branch admits positive quantity drift');
+    assert.equal(quantityInputsHold(directProof, { ...readers, physical: () => 0 }), false);
+    assert.equal(quantityInputsHold(directProof, { ...readers, free: () => 1 }), false);
+    assert.equal(quantityInputsHold(null, readers), false, 'missing and unsupported evidence never mean quiet');
+
+    const overflow = createQuantityInputs();
+    for (let id = 1; id <= QUANTITY_INPUT_LIMIT + 1; id++) overflow.physical(id, 0);
+    assert.equal(overflow.finish(), null, 'overflow abstains instead of keeping a truncated proof');
+    const tooLarge = createQuantityInputs();
+    tooLarge.stock(1, 'x'.repeat(QUANTITY_INPUT_BYTES), {});
+    assert.equal(tooLarge.finish(), null, 'byte overflow also abstains');
+    const unstable = createQuantityInputs(); unstable.physical(1, 0); unstable.physical(1, 1);
+    assert.equal(unstable.finish(), null, 'inconsistent within-build owner answers cannot be certified');
+}
 console.log('Canonical wish quantities: whole batches, own/incoming stock, native readiness, basket cost and shared root allocation passed');

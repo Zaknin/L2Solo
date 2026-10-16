@@ -1,6 +1,6 @@
 'use strict';
 
-const { trait, stageHours, resale } = require('./EconomicValuation');
+const { trait, stageHours, decisionHorizon, resale } = require('./EconomicValuation');
 const { SELL } = require('../../AfkTrade/BoardIndex');
 const Sources = require('../../Items/ItemAcquisitionCatalog');
 const Diagnostics = require('./EconomyDiagnostics');
@@ -8,6 +8,7 @@ const Funding = require('./PurchaseFunding');
 const Equipment = require('../AI/BotEquipmentCompatibility');
 const Network = require('./WishNetwork');
 const Progression = require('../AI/PersonalGearProgression');
+const SoulCrystals = require('../../Items/SoulCrystalProgression');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -102,6 +103,17 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
     return result;
 }
 function rows(state) { return Object.values(state.inventory || {}); }
+// Direct provider questions use their original owner semantics. Allocation
+// stock has a separate root-specific reader (and different reservations).
+function quantityReaders(state) {
+    let crystalFree;
+    return {
+        physical: id => Math.max(0, Number(state.inventory?.[id]?.amount) || 0),
+        incoming: id => Number(state.acceptedIncoming?.[id] || 0),
+        free: id => need('./WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}),
+        crystalFree: id => (crystalFree ||= need('./BotCrystallization').freeReader(state))(id)
+    };
+}
 // The prepared native book is authority, including an empty learned book.
 // Workshop entries are a capped public offer, not the complete recipe book.
 function recipeIds(state, deps = {}) {
@@ -264,6 +276,27 @@ function buildProjection(state, ctx, deps) {
     // Diagnostics only: wall time per block (provider:<block>); a lazy source
     // closure counts in the block that calls it. Null while diagnostics are off.
     const blocks = Diagnostics.laps('provider:');
+    const nativeQuantities = quantityReaders(state), quantityInputs = ctx.quantityInputs;
+    const physical = id => {
+        const value = nativeQuantities.physical(id);
+        quantityInputs?.physical(id, value); return value;
+    };
+    const present = id => {
+        const value = nativeQuantities.physical(id);
+        quantityInputs?.present(id, value); return value > 0;
+    };
+    const free = id => {
+        const value = nativeQuantities.free(id);
+        quantityInputs?.free(id, value); return value;
+    };
+    const hasFree = id => {
+        const value = nativeQuantities.free(id);
+        quantityInputs?.freePresent(id, value); return value > 0;
+    };
+    const incoming = id => {
+        const value = nativeQuantities.incoming(id);
+        quantityInputs?.incoming(id, value); return value;
+    };
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const timestamp = ctx.timestamp ?? Date.now();
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -286,7 +319,8 @@ function buildProjection(state, ctx, deps) {
     // arena admission below. Only the previous final cut (<=40 nodes) is
     // kept by EconomyContext's existing bounded owner. A missing/evicted
     // descriptor is calculated normally; this never limits alternatives.
-    const keptSources = (deps.sourceSections?.nodes || []).filter(row => ctx.nodeInputs?.holds(row.inputs));
+    const keptSources = (deps.sourceSections?.nodes || []).filter(row => (!quantityInputs
+        || !(row.inputs.bag || []).some(([id]) => id === -1)) && ctx.nodeInputs?.holds(row.inputs));
     const descriptors = new Map(keptSources.map(row => [row.node.key, row.node]));
     const descriptorInputs = new Map(keptSources.map(row => [row.node.key, row.inputs]));
     // The read scope of the candidate whose arena built each descriptor;
@@ -309,7 +343,7 @@ function buildProjection(state, ctx, deps) {
     };
     const positive = value => Math.max(0, Number(value) || 0);
     const price = id => ctx.price(id);
-    const horizon = stageHours(state, ctx.hunt.expPerHour, ctx.persona);
+    const horizon = decisionHorizon(state, ctx);
     const progression = Progression.assess(state);
     const preparation = Progression.preparation(state, progression);
     const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
@@ -402,10 +436,9 @@ function buildProjection(state, ctx, deps) {
         if (workshop && own?.status === 'ready' && knownRecipes.has(Number(recipe.recipeId))
             && own.labourHours * Number(ctx.hourAdena || ctx.hunt?.perHour || 0) <= workshop.cost) workshop = null;
         if (recipe && (ownCapable || workshop) && nodes.length + recipe.materials.length < 36) {
-            const freeAmount = need('./WealthCraftDecision').freeAmount;
             const learned = !!workshop || dual || knownRecipes.has(Number(recipe.recipeId));
             ctx.nodeInputs?.bag(recipe.recipeItemId);
-            let scrollAvailable = learned || freeAmount(state, state.inventory?.[recipe.recipeItemId] || {}) > 0;
+            let scrollAvailable = learned || hasFree(recipe.recipeItemId);
             const scrollBoard = ctx.board || deps.board;
             if (!scrollAvailable && scrollBoard) {
                 for (const line of scrollBoard.list(recipe.recipeItemId, 1)) {
@@ -452,7 +485,13 @@ function buildProjection(state, ctx, deps) {
         // the real graph's descriptors; the arena bound is the evaluation's.
         if (descriptors.has(key)) {
             if (descriptorInputs.has(key)) {
-                ctx.nodeInputs.keep(descriptorInputs.get(key));
+                const inputs = descriptorInputs.get(key);
+                ctx.nodeInputs.keep(inputs);
+                // Descriptor reuse must not erase the bag dependencies that
+                // its original native construction recorded before pruning.
+                if (quantityInputs) for (const [inputId] of inputs.bag || []) {
+                    if (inputId !== -1) { present(inputId); hasFree(inputId); }
+                }
                 if (scratch && readScope) builtBy.set(key, readScope);
             }
             const missing = new Set();
@@ -475,14 +514,16 @@ function buildProjection(state, ctx, deps) {
         // A raid origin belongs to the clan's prepared roster. A personal
         // wish needs actual owned stock or a finite supplier, not a price.
         const ordinary = Sources.hasNonRaidSource(id);
-        if (!ordinary && !observed && !positive(state.inventory?.[id]?.amount)) return null;
+        if (!ordinary && !observed && !present(id)) return null;
         preparingItems.add(key);
         const paths = [{ kind: 'buy', activity: 'shopping', price: price(id), itemId: Number(id), amount: 1,
             available: !!observed || ordinary && price(id) > 0, executable: !!observed,
             ...(observed || { availableUnits: 0 }) }];
         const drop = sourcePath(id);
         if (drop) paths.push(drop);
-        if (invoke('GameServer/Items/SoulCrystalProgression').catalog.crystals[id]) ctx.nodeInputs?.wholeBag();
+        if (SoulCrystals.catalog.crystals[id]) {
+            ctx.nodeInputs?.wholeBag();
+        }
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
         const recipes = Recipes.resolveVariantsByProductId(id);
@@ -505,7 +546,7 @@ function buildProjection(state, ctx, deps) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
             const self = Crystals.canSelf(state);
-            for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena)) {
+            for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena, quantityInputs)) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
                     .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
                 if (requirements.some(row => !row.key)) continue;
@@ -522,7 +563,7 @@ function buildProjection(state, ctx, deps) {
         // Held units are worth what the bot gets selling them now (Q1 A);
         // only an item the bot holds needs that value.
         let exitValue;
-        if (positive(state.inventory?.[id]?.amount) > 0) {
+        if (present(id)) {
             const steps = Occupation.exitValue(state, id, ctx.board || deps.board);
             let step;
             do step = steps.next(); while (!step.done);
@@ -543,7 +584,16 @@ function buildProjection(state, ctx, deps) {
     // worker's existing item->recipe index, not a per-actor catalogue scan.
     const producerCandidates = function* () {
         for (const id of knownRecipes) yield Recipes.resolveByRecipeId(id);
-        for (const row of rows(state)) if (need('./WealthCraftDecision').freeAmount(state, row) > 0) yield Recipes.resolve?.(Number(row.selfId));
+        for (const row of rows(state)) {
+            const amount = need('./WealthCraftDecision').freeAmount(state, row);
+            // EC fences bag identities; this native branch depends only on
+            // whether its row has any free units, not the positive count.
+            if (quantityInputs) {
+                if (state.inventory?.[row.selfId] !== row) quantityInputs.unsupported();
+                else quantityInputs.freePresent(row.selfId, amount);
+            }
+            if (amount > 0) yield Recipes.resolve?.(Number(row.selfId));
+        }
         yield* deps.producerRecipes || [];
     };
     const production = new Map(), seenProduction = new Set();
@@ -557,7 +607,7 @@ function buildProjection(state, ctx, deps) {
         // Plan bound (E92 "Performance, fixed bounds"): preliminary admission
         // reads only the RecipeProductionIndex rows and O(1) facts per recipe;
         // the detailed exit pricing runs for PRODUCER_PRICED finalists only.
-        const Price = need('./PriceDecision'), WealthCraft = need('./WealthCraftDecision');
+        const Price = need('./PriceDecision');
         const ItemTemplates = need('../../Item/ItemTemplateIndex'), Profit = need('./CraftProfitPolicy');
         const items = invoke('GameServer/DataCache').items;
         const ownSalesByItem = new Map();
@@ -587,9 +637,9 @@ function buildProjection(state, ctx, deps) {
             if (!serviceCraft.canCraft(state, recipe)) continue;
             const count = Number(recipe.productCount || 1), id = Number(recipe.productId);
             if (!Number.isSafeInteger(count) || count <= 0) continue;
-            const stock = WealthCraft.freeAmount(state, state.inventory?.[id] || {});
+            const stock = free(id);
             const ownSales = ownSalesByItem.get(id) || [];
-            const oldUnits = stock + Number(state.acceptedIncoming?.[id] || 0) + ownSales.reduce((sum, line) => sum + Number(line.count), 0);
+            const oldUnits = stock + incoming(id) + ownSales.reduce((sum, line) => sum + Number(line.count), 0);
             if (!Number.isSafeInteger(oldUnits) || oldUnits < 0) continue;
             const material = String(ItemTemplates.find(items, id)?.template?.kind || '').startsWith('Other.Material');
             const shot = need('./ShotTradeDemand').isShot(id);
@@ -677,7 +727,7 @@ function buildProjection(state, ctx, deps) {
             const demand = [];
             for (const id of ctx.board.itemIds(3)) {
                 if (!sourceIndex.get(Number(id))?.some(entry => entry.kind === 'spoil')) continue;
-                if (positive(state.inventory?.[id]?.amount) || nodeKeys.has(`resale:${id}`)) continue;
+                if (present(id) || nodeKeys.has(`resale:${id}`)) continue;
                 const offer = ctx.board.first(id, 3, { excludeOwner: state.characterId, enchant: 0 });
                 if (!offer || !(offer.price > ctx.buyback(id))) continue;
                 const units = Math.max(1, Math.min(50, Math.floor(offer.count)));
@@ -712,7 +762,7 @@ function buildProjection(state, ctx, deps) {
     blocks?.lap('sources');
     for (const improvement of invoke('GameServer/Bot/Economy/BotImprovementPolicy').opportunities(state, ctx)) {
         const materials = improvement.materials.map(material => ({ ...material, missing: Math.max(0,
-            material.amount - positive(state.inventory?.[material.selfId]?.amount)) }));
+            material.amount - physical(material.selfId)) }));
         const requirements = materials.filter(material => material.missing > 0)
             .map(material => ({ key: itemNode(material.selfId), amount: material.missing }));
         if (requirements.some(row => !row.key)) continue;
@@ -732,7 +782,7 @@ function buildProjection(state, ctx, deps) {
     const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
     let futureGain;
     const acquisitionAllowed = id => Sources.hasNonRaidSource(id)
-        || positive(state.inventory?.[id]?.amount) > 0 || !!observedPurchase(id);
+        || present(id) || !!observedPurchase(id);
     for (const [slot, items] of gearCandidates(planningState, ctx, wornFor, acquisitionAllowed, progression, luxury)) for (const item of items) {
         if (!Planner.considerable(item, planningState, Planner.roleFor(planningState), acquisitionRank)) continue;
         const current = replacementWorn(wornFor, slot);
@@ -981,6 +1031,8 @@ function buildProjection(state, ctx, deps) {
         if (!(amount > 0) || !(stock.unitPrice > 0) || !(stock.benefitPerUnit > 0)) continue;
         const key = itemNode(stock.itemId);
         if (!key) continue;
+        const heldStock = nativeQuantities.physical(stock.itemId);
+        quantityInputs?.stockPhysical(`stock:${kind}`, stock.itemId, heldStock);
         root({ key: `stock:${kind}`, need: 'power', object: { itemId: stock.itemId, amount, kind },
             progressionPriority: progression.required && stock.survivalMissing > 0 ? 4 : 0,
             valueHours: amount * stock.benefitPerUnit * powerWeight, price: amount * stock.unitPrice,
@@ -990,7 +1042,7 @@ function buildProjection(state, ctx, deps) {
             // gross = held units + amount, so allocation leaves `amount`.
             paths: [{ requirements: [{ key, amount }],
                 grossRequirements: [{ key, amount: amount
-                    + Math.max(0, Number(state.inventory?.[stock.itemId]?.amount) || 0) }] }] });
+                    + heldStock }] }] });
         values.set(stock.itemId, stock.benefitPerUnit);
     }
     // Concrete remembered people, not persona-labelled lifelong goals.
@@ -1009,7 +1061,7 @@ function buildProjection(state, ctx, deps) {
     const resaleWishes = [];
     for (const id of known) {
         if (!Sources.hasSource(id)) continue;
-        if (positive(state.inventory?.[id]?.amount)) continue;
+        if (present(id)) continue;
         const ask = ctx.board?.first(id, SELL, { excludeOwner: state.characterId });
         if (!(ask?.price > 0)) continue;
         const Market = invoke('GameServer/Bot/Economy/MarketCounters');
@@ -1040,7 +1092,10 @@ function buildProjection(state, ctx, deps) {
     for (const node of deps.nodes || []) { if (node.need) root(node); else add(node); }
     const moneyPaths = ctx.hunt.perHour > 0 ? [{ activity: 'hunting', kind: 'money',
         spotId: ctx.bestSpotId, incomePerHour: ctx.hunt.perHour, riskHours: ctx.expectedDeathHours }] : [];
-    const sale = liquidationCandidates(state, ctx).filter(row => !values.has(Number(row.selfId)));
+    const liquidation = liquidationInputs(state, { shots: ctx.stock('shots'), potions: ctx.stock('potions'),
+        excluded: [...values.keys()].filter(id => Object.hasOwn(state.inventory || {}, id)) });
+    ctx.liquidationInputs = liquidation.proof;
+    const sale = (liquidation.candidates || liquidationCandidates(state, ctx)).filter(row => !values.has(Number(row.selfId)));
     const saleValue = sale.reduce((sum, row) => sum + ctx.buyback(row.selfId) * row.count, 0);
     if (saleValue > 0) {
         // NPC buyback is the same across towns. Compare the prepared routes
@@ -1200,4 +1255,32 @@ function liquidationCandidates(state, ctx) {
             ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) }
     }).filter(row => row.npcComparable);
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, recipeIds, knownWorkshop, personalCraftPlan, liquidationCandidates, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+// Re-run the native selector, including rejected and cap-displaced items. The
+// held foundation supplies only its stock targets; current owners still read
+// current bag/warehouse quantities, equipment and physical reservations.
+// These ordered pairs are its complete output consumed by the provider.
+function liquidationInputs(state, basis) {
+    if (!basis?.shots || !basis?.potions) return { proof: null, candidates: null };
+    const shots = basis.shots, potions = basis.potions;
+    const known = Number.isSafeInteger(shots.itemId) && shots.itemId > 0
+        && [shots.target, shots.beginnerCurrent ?? 0, potions.target].every(value => Number.isFinite(value) && value >= 0);
+    const excluded = basis.excluded || [];
+    if (!known || !Array.isArray(excluded) || excluded.length > 128
+        || !excluded.every(id => Number.isSafeInteger(id) && id > 0)
+        || new Set(excluded).size !== excluded.length) return { proof: null, candidates: null };
+    const exclusions = new Set(excluded);
+    // Select before filtering: an excluded item can still displace a later
+    // candidate at the native cap. These are the rows funding actually uses.
+    const candidates = liquidationCandidates(state, { stock: kind => basis[kind] })
+        .filter(row => !exclusions.has(Number(row.selfId)));
+    const proof = Object.freeze({
+        basis: Object.freeze({
+            shots: Object.freeze({ itemId: shots.itemId, target: shots.target, beginnerCurrent: shots.beginnerCurrent ?? 0 }),
+            potions: Object.freeze({ target: potions.target }),
+            excluded: Object.freeze(excluded.slice())
+        }),
+        rows: Object.freeze(candidates.map(row => Object.freeze([row.selfId, row.count])))
+    });
+    return { proof, candidates };
+}
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };

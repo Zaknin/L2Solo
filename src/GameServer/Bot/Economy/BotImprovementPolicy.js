@@ -104,7 +104,7 @@ function opportunities(state, ctx) {
     const Henna = invoke('GameServer/Henna/HennaRules');
     const SA = invoke('GameServer/Items/C4WeaponSAExchange');
     const config = Rules.configWith(globalThis.options?.default?.Enchant);
-    const horizon = Valuation.stageHours(state, ctx.hunt.expPerHour, ctx.persona);
+    const horizon = Valuation.decisionHorizon(state, ctx);
     const weight = (ctx.persona.primaryDrive === 'progression' ? 1 : .5) + Valuation.trait(ctx.persona, 'caution');
     // Gains come from the build (design 16.5): remembered per build and
     // candidate, so a review after an ordinary fight computes none of them.
@@ -141,7 +141,9 @@ function opportunities(state, ctx) {
                 return [{ scrollId: Number(id), scrollType: rule.scrollType, cost,
                     price: price * cost.count, riskHours: ctx.hunt.perHour > 0 ? loss / ctx.hunt.perHour : Infinity }];
             }).filter(row => {
-                const cash = row.price - positive(state.inventory?.[row.scrollId]?.amount) * ctx.price(row.scrollId);
+                const held = positive(state.inventory?.[row.scrollId]?.amount);
+                ctx.quantityInputs?.physical(row.scrollId, held);
+                const cash = row.price - held * ctx.price(row.scrollId);
                 ctx.walletBoundary?.(cash);
                 return cash <= positive(state.adena);
             });
@@ -203,7 +205,11 @@ function crystalPath(state, id, ctx, spots = []) {
     const Native = invoke('GameServer/Items/SoulCrystalProgression');
     const target = Native.catalog.crystals[id];
     if (!target || target.stage <= 0 || target.stage > 10 || state.level < 40) return null;
-    const held = Object.values(state.inventory || {}).filter(row => (Native.catalog.crystals[row.selfId] || [4662,4663,4664].includes(Number(row.selfId))) && row.amount > 0);
+    const held = Object.values(state.inventory || {}).filter(row => {
+        if (!Native.catalog.crystals[row.selfId] && ![4662,4663,4664].includes(Number(row.selfId))) return false;
+        ctx.quantityInputs?.physical(row.selfId, positive(row.amount));
+        return row.amount > 0;
+    });
     if (held.length > 1 || held[0]?.amount > 1) return null;
     const current = held[0] && (Native.catalog.crystals[held[0].selfId] || { color: {4662:'red',4663:'green',4664:'blue'}[held[0].selfId], stage: -1 });
     if (current && current.color !== target.color || current?.stage >= target.stage) return null;

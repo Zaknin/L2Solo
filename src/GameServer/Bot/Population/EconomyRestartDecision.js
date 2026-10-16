@@ -1,0 +1,69 @@
+'use strict';
+
+// The existing stats update carries one bounded decision, never its graph or
+// process-local market tokens. The economy owner validates the saved proof.
+const { deflateRawSync, inflateRawSync } = require('node:zlib');
+const MAX_BYTES = 1024, MAX_PLAIN_BYTES = 16384;
+const VERSION = 3;
+
+function cardData(value, maxBytes) {
+    if (typeof value !== 'string' || value.length > Math.ceil(maxBytes / 3) * 4
+        || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return null;
+    const bytes = Buffer.from(value, 'base64');
+    return bytes.byteLength >= 28 && bytes.byteLength <= maxBytes && bytes.toString('base64') === value
+        ? Uint8Array.from(bytes).buffer : null;
+}
+
+function encode(accepted, baselineIdentity, clockBytes = 0) {
+    if (!(accepted?.eventProof instanceof Uint8Array) || !(accepted.card?.data instanceof ArrayBuffer)
+        || typeof baselineIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(baselineIdentity)
+        || !Number.isSafeInteger(clockBytes) || clockBytes < 0 || clockBytes >= MAX_BYTES) return null;
+    try {
+        const metadata = Buffer.from(JSON.stringify([accepted.card.key, accepted.decisionSeq, accepted.activityLeaf,
+            accepted.focus, accepted.activity, accepted.mp, accepted.characterId]));
+        const card = Buffer.from(accepted.card.data), proof = Buffer.from(accepted.eventProof);
+        const size = 36 + metadata.length + card.length + proof.length;
+        if (!proof.length || metadata.length > 65535 || card.length > 65535 || size > MAX_PLAIN_BYTES) return null;
+        const plain = Buffer.allocUnsafe(size);
+        plain.writeUInt16LE(metadata.length, 0); plain.writeUInt16LE(card.length, 2);
+        Buffer.from(baselineIdentity, 'hex').copy(plain, 4);
+        metadata.copy(plain, 36); card.copy(plain, 36 + metadata.length); proof.copy(plain, 36 + metadata.length + card.length);
+        const value = [VERSION, deflateRawSync(plain, { level: 6 }).toString('base64')];
+        return Buffer.byteLength(JSON.stringify({ wishAdvisory: value })) + clockBytes <= MAX_BYTES ? value : null;
+    } catch (_) { return null; }
+}
+
+function decode(value, timestamp, maxCardBytes, characterId, baseline, baselineIdentity) {
+    if (!Array.isArray(value) || value.length !== 2 || value[0] !== VERSION
+        || typeof value[1] !== 'string' || value[1].length > MAX_BYTES
+        || !/^[A-Za-z0-9+/]*={0,2}$/.test(value[1])
+        || typeof baselineIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(baselineIdentity)) return null;
+    try {
+        if (Buffer.byteLength(JSON.stringify({ wishAdvisory: value })) > MAX_BYTES) return null;
+        const compressed = Buffer.from(value[1], 'base64');
+        if (compressed.toString('base64') !== value[1]) return null;
+        const plain = inflateRawSync(compressed, { maxOutputLength: MAX_PLAIN_BYTES });
+        if (plain.length < 36 || plain.subarray(4, 36).toString('hex') !== baselineIdentity) return null;
+        const metadataSize = plain.readUInt16LE(0), cardSize = plain.readUInt16LE(2), cardAt = 36 + metadataSize;
+        if (cardSize < 28 || cardSize > maxCardBytes || cardAt + cardSize >= plain.length) return null;
+        const raw = plain.subarray(36, cardAt), text = raw.toString('utf8');
+        if (!Buffer.from(text, 'utf8').equals(raw)) return null;
+        const row = JSON.parse(text);
+        if (!Array.isArray(row) || row.length !== 7 || typeof row[0] !== 'string' || row[0].length > 256
+            || !Number.isSafeInteger(row[1]) || row[1] < 0
+            || !Number.isSafeInteger(row[2]) || row[2] < 0 || row[2] > 0xffffffff
+            || row[3] !== null && (typeof row[3] !== 'string' || row[3].length > 128)
+            || typeof row[4] !== 'string' || !Number.isFinite(row[5])
+            || !Number.isSafeInteger(row[6]) || row[6] <= 0 || row[6] !== characterId) return null;
+        const at = baseline?.at, ages = baseline?.ages;
+        if (!Number.isFinite(at) || !Number.isFinite(timestamp) || timestamp < at
+            || ages !== undefined && (!Array.isArray(ages) || ages.length !== 4
+                || ages.some(age => !Number.isFinite(age) || age < 0))) return null;
+        const data = Uint8Array.from(plain.subarray(cardAt, cardAt + cardSize)).buffer;
+        return { key: row[0], data, decisionSeq: row[1], activityLeaf: row[2], focus: row[3], baseline,
+            activity: row[4], mp: row[5], eventProof: Uint8Array.from(plain.subarray(cardAt + cardSize)),
+            characterId: row[6], saved: value, softPrefix: true };
+    } catch (_) { return null; }
+}
+
+module.exports = { encode, decode, cardData, MAX_BYTES };

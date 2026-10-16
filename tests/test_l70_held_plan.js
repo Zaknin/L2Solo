@@ -16,6 +16,8 @@ const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 const Events = invoke('GameServer/Bot/AI/DecisionEvents');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+const RestartDecision = require('../src/GameServer/Bot/Population/EconomyRestartDecision');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
@@ -26,6 +28,7 @@ const T = 1e12, MINUTE = 60 * 1000;
 const board = new BoardIndex();
 const deps = { timestamp: T, knowledgeEnabled: true, board, spots: invoke('GameServer/Bot/Population/SpotProfiles').ensure() };
 const at = timestamp => ({ ...deps, timestamp });
+Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const originalBuild = Providers.build;
 let builds = 0;
 Providers.build = (...args) => { builds++; return originalBuild(...args); };
@@ -52,6 +55,256 @@ const ownResult = (state, activity = 'resting') => ({ ...state, activity, adena:
     updatedAt: state.updatedAt + 1, vitals: { ...state.vitals, mp: state.vitals.mp - 1 }, stats: { ...state.stats } });
 
 try {
+    {
+        const { packQuantityInputs, unpackQuantityInputs } = require('../src/GameServer/Bot/Economy/WishNetwork');
+        const proof = { version: 1, rows: [
+            ['physical', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER], ['present', 2, 1], ['freePresent', 3, 0],
+            ['incoming', 4, .125], ['free', 5, -0], ['crystalFree', 6, 1e20],
+            ['stock', 'power:🛡:7', 7, 2, .5], ['stockPhysical', 'power:🛡:7', 7, 3],
+            ['stock', 'other:8', 8, 0, 0] ] };
+        const packed = packQuantityInputs(proof), unpacked = unpackQuantityInputs(packed);
+        assert.deepEqual(unpacked, proof, 'all native quantity kinds, row order, strings and Number values survive exactly');
+        assert(Object.is(unpacked.rows[4][2], -0));
+        assert(Object.isFrozen(unpacked) && Object.isFrozen(unpacked.rows) && unpacked.rows.every(Object.isFrozen));
+        for (let size = 0; size < packed.length; size++) assert.equal(unpackQuantityInputs(packed.subarray(0, size)), null,
+            'truncated native quantity bytes never become a partial proof');
+        for (const bytes of [[...packed, 0], [2, 128, 0, 0], [2, 1, 1, 0, 0, 1, 128, 0],
+            [2, 1, 1, 0, 0, 1, 0, 1], [2, 1, 1, 1, 1, 1, 1, 255], [2, 1, 1, 0, 0, 1, 16, 0, 128, 0]])
+            assert.equal(unpackQuantityInputs(Uint8Array.from(bytes)), null, 'malformed tags, indexes, UTF-8 or trailing bytes refuse');
+        for (const row of [['stock', '\ud800', 1, 0, 0], ['physical', 1, -1], ['physical', 1, Infinity],
+            ['physical', 1, NaN], ['physical', 1.5, 0], ['stock', 'x'.repeat(4096), 1, 0, 0]])
+            assert.equal(packQuantityInputs({ version: 1, rows: [row] }), null);
+        assert.equal(packQuantityInputs({ version: 1, rows: Array(129).fill(['physical', 1, 0]) }), null);
+        assert.equal(unpackQuantityInputs(new Uint8Array(4097)), null);
+    }
+    {
+        const decision = Decisions.compact({ key: 'prepared-native-fixture', updatedAt: T, inputHash: 12345, riskWeight: 1.5,
+            usefulness: new Float32Array([1869, .125, 1870, 2.5]), watch: [[1869, 4, 3.5, 3]], materials: [[1870, 29]],
+            wish: [Decisions.kindCode('shots') | 128, 1200, 37],
+            clan: { horizonHours: 2, huntPerHour: 150, plan: { itemId: 17, valueHours: 3 } },
+            workshop: { known: true, recipeId: 22, productId: 1463, incomePerHour: 100, cycleHours: .5 },
+            feasibility: [12345, 2, 3], shot: { craft: { recipeId: 22, batches: 1 } },
+            activity: { activity: 'hunting', rootKey: 'stock:shots', itemId: 1870, amount: 29, npcId: 1001, spotId: 7 } });
+        const baseline = { at: T }, proof = {}, saved = [3, 'original'];
+        const accepted = { card: decision, baseline, eventProof: proof, saved, mp: 100, preparedMp: 100 };
+        const thin = { network: { activity: decision.activity } }, originalBytes = Buffer.from(decision.data).slice();
+        const refreshed = { decision, economy: thin, advisory: accepted };
+        const shot = { craft: { recipeId: 22, batches: 2 } };
+        const next = Decisions.refreshPreparedCraft(refreshed, shot, 70);
+        assert(next, 'a completed native preparation can replace its physical packet');
+        assert.deepEqual(next.decision.shot, shot);
+        for (const name of ['usefulness', 'wish', 'urgency', 'materials', 'watch', 'activity', 'feasibility', 'clan', 'workshop',
+            'inputHash', 'updatedAt', 'riskWeight', 'flags', 'key'])
+            assert.deepEqual(next.decision[name], decision[name], `MP preparation preserves the original ${name}`);
+        assert.deepEqual(Buffer.from(decision.data), originalBytes, 'the accepted original card is never mutated');
+        assert.equal(next.advisory.preparedMp, 70);
+        assert.equal(next.advisory.mp, 100, 'physical preparation does not restamp the decision MP baseline');
+        assert.strictEqual(next.advisory.baseline, baseline);
+        assert.strictEqual(next.advisory.eventProof, proof);
+        assert.strictEqual(next.advisory.saved, saved);
+        const returned = Decisions.refreshPreparedCraft(next, decision.shot, 100);
+        assert.deepEqual(Buffer.from(returned.decision.data), originalBytes, 'replacing the shot back preserves every original byte');
+        assert.equal(returned.advisory.preparedMp, 100, 'returning to the original MP still completes a new physical preparation');
+        const absent = Decisions.refreshPreparedCraft(next, null, 80);
+        assert.equal(absent.decision.shot, null);
+        const restored = Decisions.refreshPreparedCraft(absent, decision.shot, 100);
+        assert.deepEqual(Buffer.from(restored.decision.data), originalBytes, 'removing and adding a shot preserves all other sections');
+        assert.deepEqual(Decisions.refreshPreparedCraft(next, { large: 'x'.repeat(1000) }, 60).decision.shot, { unknown: true },
+            'the replacement uses the same native payload cap as a fresh card');
+    }
+    {
+        const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+        const Wire = require('../src/GameServer/Bot/Population/ColdStateWire');
+        const metadata = Generation.metadata(), identity = Generation.current();
+        const message = Protocol.envelope('init', 'generation-fixture', { config: {}, recomputeGeneration: metadata });
+        message.payload = Wire.packPayload(message.type, message.payload);
+        const received = JSON.parse(JSON.stringify(message));
+        assert.equal(Protocol.validateEnvelope(received, 'main', { workerEpoch: 'generation-fixture' }).ok, true);
+        const payload = Wire.unpackPayload(received.type, received.payload);
+        assert.deepEqual(payload.recomputeGeneration, metadata, 'the actual init wire preserves the native generation');
+        Generation.configure(payload.recomputeGeneration);
+        assert.equal(Generation.current(), identity, 'the worker init metadata derives the same native generation');
+    }
+    // Transport/lifetime proof uses a real native card; the opaque event
+    // proof's gameplay validation remains the economy owner's responsibility.
+    {
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
+        const { state, economy, accepted } = decided(93040);
+        assert(accepted, 'the native fixture produces a complete compact card');
+        const transportProof = { ...accepted.eventProof };
+        delete transportProof.market; delete transportProof.spots;
+        const original = { ...accepted, characterId: state.characterId, eventProof: { ...transportProof,
+            restartable: true, quantities: { version: 1, rows: [] }, liquidation: { basis: {}, rows: [] },
+            stockRoots: [], bands: [], safety: [0, 0, 0], hourAdena: 0 } };
+        const encode = value => RestartDecision.encode({ ...value, eventProof: Economy.restartEventProof(value.eventProof, value) },
+            Sections.baselineIdentity(value.baseline), Sections.clockBytes(value.baseline));
+        const saved = encode(original);
+        assert(saved, 'a compact card and bounded proof fit the saved field');
+        assert(Buffer.byteLength(JSON.stringify({ wishAdvisory: saved })) <= 1024);
+        const published = { ...state, stats: { ...state.stats, wishAdvisory: saved } };
+        const payload = require('node:zlib').inflateRawSync(Buffer.from(saved[1], 'base64'));
+        assert.equal(payload.subarray(4, 36).toString('hex'), Sections.baselineIdentity(original.baseline),
+            'the prefix references the already persisted baseline');
+        assert.equal(JSON.parse(payload.subarray(36, 36 + payload.readUInt16LE(0))).length, 7,
+            'the prefix does not duplicate the baseline or encode the card as nested base64');
+        const restartProof = Economy.restartEventProof;
+        try {
+            const prefixProof = restartProof(original.eventProof, original);
+            Economy.restartEventProof = () => prefixProof;
+            const adopted = { ...state, stats: { ...state.stats, wishAdvisory: 'old' } };
+            const publishedAdvice = Decisions.advisory(economy, adopted);
+            assert(publishedAdvice.saved);
+            assert.strictEqual(adopted.stats.wishAdvisory, publishedAdvice.saved,
+                'a result callback publishes the prefix after the actual packet was adopted');
+            const foreign = { ...state, stats: { ...state.stats, wishSections: { ...state.stats.wishSections }, wishAdvisory: 'old' } };
+            Decisions.advisory(economy, foreign);
+            assert.equal(foreign.stats.wishAdvisory, 'old', 'an unadopted packet cannot publish a prefix into another baseline');
+        } finally { Economy.restartEventProof = restartProof; }
+        const restored = Decisions.restoreAdvisory(published, T + MINUTE);
+        assert(restored, 'the existing actor publication can restore the decision');
+        assert.deepEqual(Buffer.from(restored.card.data), Buffer.from(original.card.data), 'every economic card byte survives');
+        assert.equal(restored.card.key, original.card.key);
+        assert.deepEqual(restored.baseline, original.baseline);
+        assert.deepEqual(restored.eventProof, original.eventProof);
+        assert.equal(restored.softPrefix, true);
+        const persisted = JSON.parse(JSON.stringify(published));
+        assert(Decisions.restoreAdvisory(persisted, T + MINUTE), 'the actual saved stats survive JSON transport');
+        const reorder = value => Array.isArray(value) ? value.map(reorder)
+            : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).reverse().map(key => [key, reorder(value[key])])) : value;
+        persisted.stats.wishSections = reorder(persisted.stats.wishSections);
+        assert(Decisions.restoreAdvisory(persisted, T + MINUTE), 'object field order does not change the native baseline identity');
+        for (const baseline of [undefined, { ...original.baseline, at: T + 1 }, { ...original.baseline, ages: [0, 0, 0, 1] }])
+            assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishSections: baseline } }, T + MINUTE), null,
+                'missing or foreign persisted baseline cannot adopt a saved prefix');
+        assert.equal(Decisions.restoreAdvisory(published, T - 1), null, 'clock rollback refuses the saved prefix');
+        assert.equal(Decisions.restoreAdvisory(published, T + Sections.SOFT_DELAY.market), null, 'the original deadline is exclusive');
+        const partialBaseline = { ...original.baseline, at: T + 4 * MINUTE, ages: [0, 0, 0, 4 * MINUTE] };
+        const partialSaved = encode({ ...original, baseline: partialBaseline, eventProof: { ...original.eventProof, at: partialBaseline.at } });
+        assert(partialSaved);
+        assert(Buffer.byteLength(JSON.stringify({ wishAdvisory: partialSaved })) + Sections.clockBytes(partialBaseline) <= 1024,
+            'the saved field and incremental section clocks share the byte budget');
+        const partial = { ...published, stats: { ...published.stats, wishSections: partialBaseline, wishAdvisory: partialSaved } };
+        assert(Decisions.restoreAdvisory(partial, T + 5 * MINUTE));
+        assert.equal(Decisions.restoreAdvisory(partial, T + Sections.SOFT_DELAY.market), null,
+            'refreshing another section cannot extend the original market deadline');
+        assert.equal(Decisions.restoreAdvisory({ ...published, characterId: state.characterId + 1 }, T + MINUTE), null,
+            'a saved card cannot cross owners');
+        for (const field of ['decisionSeq', 'activityLeaf']) assert.equal(Decisions.restoreAdvisory({ ...published,
+            stats: { ...published.stats, [field]: Number(published.stats[field] || 0) + 1 } }, T + MINUTE), null,
+        `a foreign ${field} cannot adopt the card`);
+        assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishFocus: ['foreign'] } }, T + MINUTE), null);
+        for (const invalid of [[1, saved[1]], [2, saved[1]], [3, 'broken'], [3, 'x'.repeat(1024)], {}])
+            assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishAdvisory: invalid } }, T + MINUTE), null);
+        const invalidBaseline = { ...original.baseline, ages: [0, 0, 0, Sections.SOFT_DELAY.market + 1] };
+        const invalidClock = encode({ ...original, baseline: invalidBaseline });
+        assert(invalidClock);
+        assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishSections: invalidBaseline, wishAdvisory: invalidClock } }, T + MINUTE), null,
+            'a nonfinite native deadline refuses malformed section clocks');
+        const oversized = { ...original, eventProof: Uint8Array.from(require('node:crypto').randomBytes(2048)) };
+        assert.equal(RestartDecision.encode(oversized, Sections.baselineIdentity(original.baseline)), null,
+            'oversize opaque proof abstains without truncating economic data');
+        const verify = Economy.eventProofHolds;
+        const enabled = Economy.eventReuseEnabled;
+        try {
+            let verdicts = 0;
+            Economy.eventReuseEnabled = () => true;
+            Economy.eventProofHolds = (_state, proof, _deps, options) => {
+                verdicts++;
+                assert.strictEqual(proof, restored.eventProof);
+                assert.strictEqual(options.baseline, restored.baseline);
+                assert.equal(options.softPrefix, true);
+                return true;
+            };
+            const first = Decisions.refreshAdvisory(published, restored, at(T + MINUTE), { afterResult: true });
+            assert(first, 'a shared owner verdict admits the restored prefix');
+            const next = { ...published, stats: { ...published.stats, ...first.economy.statsPacket }, updatedAt: T + 2 * MINUTE };
+            const second = Decisions.refreshAdvisory(next, first.advisory, at(T + 2 * MINUTE), { afterResult: true });
+            assert(second);
+            assert.equal(verdicts, 2, 'each use asks the same native verdict');
+            assert.strictEqual(second.advisory.baseline, restored.baseline);
+            assert.strictEqual(second.economy.statsPacket.wishAdvisory, saved, 'refresh never rewrites the persisted original payload');
+            assert.equal(Decisions.restoreAdvisory({ ...next, stats: { ...next.stats, ...second.economy.statsPacket } },
+                T + Sections.SOFT_DELAY.market), null, 'refresh cannot extend restart validity');
+        } finally { Economy.eventProofHolds = verify; Economy.eventReuseEnabled = enabled; }
+        const identity = Generation.current(), rate = options.default.General.adenaRate;
+        try {
+            options.default.General.adenaRate = Number(rate || 1) + .25;
+            assert.notEqual(Generation.current(), identity, 'native runtime rate changes invalidate the generation');
+        } finally {
+            if (rate === undefined) delete options.default.General.adenaRate;
+            else options.default.General.adenaRate = rate;
+        }
+        assert.equal(Generation.current(), identity, 'the same semantic rate profile has the same generation');
+        Warehouse.useRowSource(null);
+    }
+    // A visibility handoff carries advice through the existing native owner;
+    // retaining advice never revives permission to execute a stale card.
+    {
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
+        const { state, accepted } = decided(93041);
+        assert(accepted?.eventProof, 'the real completed build supplies its full event proof');
+        const wire = Decisions.wireAdvisory(accepted);
+        assert(wire, 'the native read set has a bounded public wire representation');
+        const received = Decisions.receiveAdvisory(structuredClone(wire));
+        assert(received);
+        assert.deepEqual(Buffer.from(received.card.data), Buffer.from(accepted.card.data));
+        assert.deepEqual(received.eventProof.market, [...accepted.eventProof.market]);
+        assert.deepEqual(received.eventProof.spots, [...accepted.eventProof.spots]);
+        const owner = new Decisions.ColdEconomyDecisions();
+        owner.accept(state.characterId, accepted.card, null, state);
+        assert(owner.retainAdvisory(state, received));
+        owner.fence(state.characterId);
+        assert.equal(owner.decided(state), null, 'a fence still removes compact-card execution permission');
+        assert.strictEqual(owner.advisoryFor(state).baseline, received.baseline);
+        const next = { ...state, updatedAt: T + 1000, stats: { ...state.stats } };
+        const card = Decisions.compact({ data: accepted.card.data.slice(0), updatedAt: next.updatedAt,
+            key: Decisions.stateKey(next), flags: 0 });
+        owner.accept(state.characterId, card, null, next);
+        assert.strictEqual(owner.advisoryFor(next).eventProof, received.eventProof,
+            'an ordinary publication preserves the original proof without restamping');
+        const carried = owner.advisoryFor(next);
+        owner.releaseAdvisory(state.characterId, { ...carried });
+        assert.strictEqual(owner.advisoryFor(next), carried, 'a mismatched transfer cannot release newer owner advice');
+        owner.releaseAdvisory(state.characterId, carried);
+        assert.equal(owner.advisoryFor(next), null, 'a completed transfer releases the old owner copy');
+        assert(owner.decided(next), 'releasing advice does not alter compact-card execution admission');
+        assert(owner.retainAdvisory(next, received));
+        const newer = { ...next, stats: { ...next.stats, wishSections: { ...next.stats.wishSections, at: T + 1000 } } };
+        assert.equal(owner.retainAdvisory(newer, received), false, 'a late old fence result cannot replace a newer published decision');
+        const foreign = { ...next, stats: { ...next.stats, activityLeaf: Number(next.stats.activityLeaf || 0) + 1 } };
+        owner.accept(state.characterId, card, null, foreign);
+        assert.equal(owner.advisoryFor(foreign), null, 'a foreign accepted tuple drops advice');
+        assert.equal(owner.retainAdvisory(foreign, received), false);
+        const Module = require('node:module'), filename = require.resolve('../src/GameServer/Bot/Population/ColdSimulationKernel');
+        const scopedRequire = Module.createRequire(filename), loaded = { exports: {} };
+        require('node:vm').runInThisContext(Module.wrap(fs.readFileSync(filename, 'utf8')), { filename })(loaded.exports,
+            name => name === 'worker_threads' ? { ...scopedRequire(name), isMainThread: false } : scopedRequire(name),
+            loaded, filename, path.dirname(filename));
+        const { ColdSimulationKernel } = loaded.exports;
+        const kernel = new ColdSimulationKernel({ now: () => T + 1000, resolveSolo: () => null });
+        const newerAdvice = { ...accepted, baseline: { ...accepted.baseline, at: T + 500 } };
+        const currentState = { ...state, simulation: { revision: 2 }, stats: { ...state.stats, wishSections: newerAdvice.baseline } };
+        kernel.upsert({ state: currentState, context: { wishAdvisory: Decisions.wireAdvisory(newerAdvice) } });
+        const retained = kernel.states.get(state.characterId).context.wishAdvisory;
+        assert(retained);
+        kernel.upsert({ state: { ...state, simulation: { revision: 1 } }, context: { wishAdvisory: wire } });
+        assert.strictEqual(kernel.states.get(state.characterId).state, currentState, 'a stale revision keeps authoritative state');
+        assert.strictEqual(kernel.states.get(state.characterId).context.wishAdvisory, retained,
+            'stale delivery cannot replace the newer retained proof with its older advice');
+        kernel.upsert({ state: { ...state, simulation: { revision: 1 } }, context: {
+            wishAdvisory: { ...wire, activityLeaf: Number(wire.activityLeaf || 0) + 1 } } });
+        assert.strictEqual(kernel.states.get(state.characterId).context.wishAdvisory, retained,
+            'foreign output advice cannot replace the proof of the actually published state');
+        const fenced = kernel.fence(state.characterId);
+        assert.equal(kernel.states.has(state.characterId), false, 'the worker releases the physical actor');
+        assert.deepEqual(Decisions.receiveAdvisory(fenced.wishAdvisory).baseline, newerAdvice.baseline,
+            'the original accepted baseline leaves with the native fence result');
+        owner.forget(state.characterId);
+        assert.equal(owner.size(), 0, 'actual retirement drops the retained advice');
+        Warehouse.useRowSource(null);
+    }
     // Social leaves are calculated intentions, not native attack/help commands.
     // The shadow joins the exact accepted build to its ordinary rebuild only.
     {
@@ -189,7 +442,10 @@ try {
     {
         const diagnostic = Config.developerDiagnostics;
         Config.developerDiagnostics = true;
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        Warehouse.useRowSource(() => null, () => true);
         const input = subject(93014), economy = Economy.forState(input, deps);
+        assert(economy.eventProof(), 'the tuple shadow fixture has complete native owner input proof');
         const before = builds;
         assert.strictEqual(Economy.forState(input, deps).plan, economy.plan, 'exact prepublication input replay remains valid');
         assert.equal(builds, before);
@@ -203,11 +459,13 @@ try {
         const foreignFocus = { ...published, stats: { ...published.stats, wishFocus: ['foreign:focus', 0, 0] } };
         for (const [foreign, reason] of [[foreignLeaf, 'activity_leaf'], [foreignFocus, 'wish_focus']]) {
             assert.equal(Decisions.refusal(foreign, accepted, deps), reason);
-            const refused = Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0;
+            const refused = Diagnostics.metrics().counts?.[`context:gate:${reason}`] || 0;
+            const held = Diagnostics.metrics().counts?.['context:gate:would_hold'] || 0;
             assert.notStrictEqual(Economy.forState(foreign, { ...deps, rememberContext: false }).plan, economy.plan,
                 'a foreign output tuple cannot reuse the cache entry');
-            assert.equal((Diagnostics.metrics().counts?.['context:gate:check_failed'] || 0) - refused, 1,
+            assert.equal((Diagnostics.metrics().counts?.[`context:gate:${reason}`] || 0) - refused, 1,
                 'shadow coverage refuses the same foreign output instead of counting would_hold');
+            assert.equal(Diagnostics.metrics().counts?.['context:gate:would_hold'] || 0, held);
         }
         const foreignInput = { ...input, stats: { ...input.stats, wishFocus: ['foreign:input', 0, 0] } };
         assert.equal(Economy.inputKey(foreignInput, deps), Economy.inputKey(input, deps), 'the old raw key omits focus');
@@ -218,6 +476,7 @@ try {
         assert.equal(Decisions.refusal(published, { ...accepted, focus: undefined }, deps), 'wish_focus',
             'legacy missing focus cannot bless an otherwise equal tuple');
         Config.developerDiagnostics = diagnostic;
+        Warehouse.useRowSource(null);
     }
     // (a) after-result own result only: no new build, the card is restamped.
     {

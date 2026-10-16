@@ -2,6 +2,8 @@
 const Station = require('../../World/GiranCrystallizationStation');
 const Rules = require('../../Items/C4EnchantRules');
 const Index = require('../../Item/ItemTemplateIndex');
+const Wealth = require('./WealthCraftDecision');
+const Disposition = require('./ItemDisposition');
 const BATCH_LIMIT = 16;
 let templates, candidates;
 function canSelf(state) {
@@ -34,25 +36,33 @@ function spareState(state) {
     return state.stats?.equipmentPlan?.strategy === 'luxury_exchange'
         ? { ...state, stats: { ...state.stats, equipmentPlan: null } } : state;
 }
-function free(state, id) {
-    const source = spareState(state), Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
-    return invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(source,
-        source.inventory?.[id] || {}, Disposition.reservedEquipmentAmounts(source));
+function freeReader(state) {
+    const source = spareState(state);
+    const freeAmount = Wealth.freeAmount;
+    const reserved = Disposition.reservedEquipmentAmounts(source);
+    return id => freeAmount(source, source.inventory?.[id] || {}, reserved);
 }
-function choices(state, purchase, trip, incomePerHour = 0) {
+function free(state, id) {
+    return freeReader(state)(id);
+}
+function choices(state, purchase, trip, incomePerHour = 0, quantityInputs = null) {
     const self = canSelf(state);
     if (!self && !trip?.known) return [];
     const operation = self ? { known: true, hours: 0, fees: 0 } : trip;
     const Data = invoke('GameServer/DataCache');
-    const rows = [], seen = new Set(catalog()), source = spareState(state), bundle = [];
-    const reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(source);
-    const freeAmount = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount;
+    const rows = [], seen = new Set(catalog()), bundle = [], readFree = freeReader(state);
     const capacity = Math.max(0, Math.min(BATCH_LIMIT, 80
-        - invoke('GameServer/Bot/Economy/ItemDisposition').inventorySlotCount(state)));
+        - Disposition.inventorySlotCount(state)));
     let bundleAmount = 0, bundleNet = 0;
     for (const row of Object.values(state.inventory || {})) if (reward(Index.find(Data.items, row.selfId))) seen.add(Number(row.selfId));
     for (const id of seen) {
-        const held = state.inventory?.[id], own = freeAmount(source, held || {}, reserved);
+        const held = state.inventory?.[id], own = readFree(id);
+        // Missing bag identities are fenced by the caller's structural event.
+        // These are the exact native questions for its existing physical rows.
+        if (held) {
+            quantityInputs?.present(id, Number(held.amount) || 0);
+            quantityInputs?.crystalFree(id, own);
+        }
         // A bought copy of worn/useful gear could be reconciled into the kit.
         // Prefer a different type or an already free physical spare.
         if (Number(held?.amount) > 0 && !own) continue;
@@ -99,21 +109,24 @@ function ready(state) {
     const plan = state.stats?.equipmentPlan;
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active'
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)) return false;
-    const amount = id => invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {});
+    const amount = id => Wealth.freeAmount(state, state.inventory?.[id] || {});
     const cost = plan.exchange?.materials?.find(row => Number(row.selfId) === 1458)?.amount;
     if (Number(cost) > 0 && amount(1458) >= Number(cost)) return true;
     const inputs = (plan.materials || []).filter(row => Number(row.selfId) !== 1458);
     return inputs.length > 0 && inputs.length <= BATCH_LIMIT && inputs.every(row => Number(row.amount) > 0
         && amount(row.selfId) >= Number(row.amount));
 }
-function completionKey(state) {
+function completionKey(state, quantityInputs = null) {
     if (state.stats?.lastImprovement?.kind !== 'crystallize') return null;
-    const plan = invoke('GameServer/Bot/Economy/ItemDisposition').equipmentInputPlan(state);
+    const plan = Disposition.equipmentInputPlan(state);
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active' || !plan.target?.slot) return null;
     const Luxury = require('./BotLuxuryExchange'), exchange = Luxury.resolve(plan.exchange);
     if (!exchange || Number(plan.target.selfId) !== exchange.itemId || !Luxury.eligible(state, exchange)
-        || !exchange.materials.every(row => invoke('GameServer/Bot/Economy/WealthCraftDecision')
-            .freeAmount(state, state.inventory?.[row.selfId] || {}) >= row.amount)) return null;
+        || !exchange.materials.every(row => {
+            const amount = Wealth.freeAmount(state, state.inventory?.[row.selfId] || {});
+            quantityInputs?.free(row.selfId, amount);
+            return amount >= row.amount;
+        })) return null;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     if (Planner.equipmentTargetFulfilled(state, plan)) return null;
     const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression'), assessment = Progression.assess(state);
@@ -123,4 +136,4 @@ function completionKey(state) {
     if (!priority || priority < Math.max(0, ...[...assessment.gaps.values()].map(row => row.priority))) return null;
     return `power:${exchange.itemId}:${Number(plan.target.slot)}`;
 }
-module.exports = { canSelf, reward, catalog, choices, free, inputAmount, ready, completionKey, npcId: Station.npcId, BATCH_LIMIT };
+module.exports = { canSelf, reward, catalog, choices, free, freeReader, inputAmount, ready, completionKey, npcId: Station.npcId, BATCH_LIMIT };

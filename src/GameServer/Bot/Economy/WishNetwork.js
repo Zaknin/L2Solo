@@ -12,6 +12,225 @@ const MAX_DEPTH = 4;
 // (EconomicValuation.OUTCOME_LIMIT); a larger composition is unresolved.
 const MAX_BRANCHES = 8;
 const nonnegative = value => Math.max(0, Number(value) || 0);
+// Native stock questions, before owned children disappear from a plan. Exact
+// answers also preserve the prior claims in every subsequent allocation pass.
+// This is one build's bounded evidence, never a second allocation or bag index.
+const QUANTITY_INPUT_LIMIT = 128;
+const QUANTITY_INPUT_BYTES = 4096;
+const QUANTITY_SCALARS = new Set(['physical', 'present', 'freePresent', 'incoming', 'free', 'crystalFree']);
+const QUANTITY_KINDS = Object.freeze([...QUANTITY_SCALARS, 'stock', 'stockPhysical']);
+// Exact transport of the native read list: no rows are merged, inferred or
+// discarded. The saved decision codec treats this owner's bytes opaquely.
+function packQuantityInputs(proof) {
+    if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return null;
+    try {
+        if (Buffer.byteLength(JSON.stringify(proof)) > QUANTITY_INPUT_BYTES) return null;
+        const bytes = [], ids = [], roots = [], literals = [];
+        const idIndex = new Map(), rootIndex = new Map(), literalIndex = new Map();
+        const intern = (value, list, index) => {
+            if (!index.has(value)) { index.set(value, list.length); list.push(value); }
+            return index.get(value);
+        };
+        const uint = value => {
+            if (!Number.isSafeInteger(value) || value < 0) throw Error('quantity integer');
+            do { const digit = value % 128; value = Math.floor(value / 128); bytes.push(digit + (value ? 128 : 0)); } while (value);
+        };
+        const numberTag = value => {
+            if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw Error('quantity value');
+            return Object.is(value, -0) || !Number.isSafeInteger(value) ? 3 : value <= 1 ? value : 2;
+        };
+        const number = (value, tag) => {
+            if (tag === 2) uint(value);
+            else if (tag === 3) { const encoded = Buffer.allocUnsafe(8); encoded.writeDoubleLE(value); bytes.push(...encoded); }
+        };
+        for (const row of proof.rows) {
+            if (!Array.isArray(row)) return null;
+            const kind = QUANTITY_KINDS.indexOf(row[0]), rooted = kind >= 6;
+            if (kind < 0 || row.length !== (kind === 6 ? 5 : kind === 7 ? 4 : 3)) return null;
+            const id = row[rooted ? 2 : 1];
+            if (!Number.isSafeInteger(id) || id <= 0) return null;
+            const item = intern(id, ids, idIndex);
+            if (rooted) {
+                const root = row[1]; if (typeof root !== 'string') return null;
+                if (!rootIndex.has(root)) {
+                    const decimal = String(id), at = root.indexOf(decimal);
+                    const literal = text => intern(text, literals, literalIndex);
+                    const encoded = at < 0 ? [0, literal(root)]
+                        : [1, literal(root.slice(0, at)), item, literal(root.slice(at + decimal.length))];
+                    rootIndex.set(root, roots.length); roots.push(encoded);
+                }
+            }
+            numberTag(row[rooted ? 3 : 2]); if (kind === 6) numberTag(row[4]);
+        }
+        bytes.push(2); uint(proof.rows.length); uint(ids.length); uint(roots.length); uint(literals.length);
+        for (const id of ids) uint(id);
+        for (const literal of literals) {
+            const encoded = Buffer.from(literal, 'utf8');
+            if (encoded.toString('utf8') !== literal) return null;
+            uint(encoded.length); bytes.push(...encoded);
+        }
+        for (const root of roots) { bytes.push(root[0]); for (const index of root.slice(1)) uint(index); }
+        for (const row of proof.rows) {
+            const kind = QUANTITY_KINDS.indexOf(row[0]), rooted = kind >= 6;
+            const value = row[rooted ? 3 : 2], first = numberTag(value), second = kind === 6 ? numberTag(row[4]) : 0;
+            bytes.push(kind + first * 8 + second * 32);
+            if (rooted) uint(rootIndex.get(row[1]));
+            uint(idIndex.get(row[rooted ? 2 : 1])); number(value, first);
+            if (kind === 6) number(row[4], second);
+        }
+        return bytes.length <= QUANTITY_INPUT_BYTES ? Uint8Array.from(bytes) : null;
+    } catch (_) { return null; }
+}
+function unpackQuantityInputs(value) {
+    if (!(value instanceof Uint8Array) || value.byteLength > QUANTITY_INPUT_BYTES) return null;
+    try {
+        const bytes = Buffer.from(value); let at = 0;
+        const byte = () => { if (at >= bytes.length) throw Error('quantity truncation'); return bytes[at++]; };
+        const uint = () => {
+            let result = 0, factor = 1, count = 0, digit;
+            do {
+                digit = byte(); count++; result += (digit % 128) * factor;
+                if (!Number.isSafeInteger(result) || count > 8) throw Error('quantity integer');
+                factor *= 128;
+            } while (digit >= 128);
+            if (count > 1 && digit === 0) throw Error('quantity overlong');
+            return result;
+        };
+        const number = tag => {
+            if (tag <= 1) return tag;
+            if (tag === 2) { const result = uint(); if (result <= 1) throw Error('quantity integer tag'); return result; }
+            if (at + 8 > bytes.length) throw Error('quantity number');
+            const result = bytes.readDoubleLE(at); at += 8;
+            if (!Number.isFinite(result) || result < 0 || Number.isSafeInteger(result) && !Object.is(result, -0)) throw Error('quantity value');
+            return result;
+        };
+        if (byte() !== 2) return null;
+        const count = uint(), idCount = uint(), rootCount = uint(), literalCount = uint();
+        if (count > QUANTITY_INPUT_LIMIT || idCount > count || rootCount > count || literalCount > rootCount * 2) return null;
+        const ids = [], seenIds = new Set();
+        for (let i = 0; i < idCount; i++) {
+            const id = uint(); if (!id || seenIds.has(id)) return null;
+            seenIds.add(id); ids.push(id);
+        }
+        const literals = [], seenLiterals = new Set();
+        for (let i = 0; i < literalCount; i++) {
+            const size = uint(); if (size > bytes.length - at) return null;
+            const raw = bytes.subarray(at, at + size), text = raw.toString('utf8'); at += size;
+            if (!Buffer.from(text, 'utf8').equals(raw) || seenLiterals.has(text)) return null;
+            seenLiterals.add(text); literals.push(text);
+        }
+        const roots = [], seenRoots = new Set();
+        for (let i = 0; i < rootCount; i++) {
+            const tag = byte(), first = uint(); if (first >= literals.length || tag > 1) return null;
+            let text = literals[first];
+            if (tag) {
+                const item = uint(), last = uint();
+                if (item >= ids.length || last >= literals.length) return null;
+                text += String(ids[item]) + literals[last];
+            }
+            if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return null;
+            seenRoots.add(text); roots.push(text);
+        }
+        const rows = []; let firstId = 0, firstRoot = 0;
+        for (let i = 0; i < count; i++) {
+            const header = byte(); if (header > 127) return null;
+            const kind = header % 8, first = Math.floor(header / 8) % 4, second = Math.floor(header / 32);
+            if (kind !== 6 && second) return null;
+            const row = [QUANTITY_KINDS[kind]];
+            if (kind >= 6) {
+                const root = uint(); if (root >= roots.length || root > firstRoot) return null;
+                if (root === firstRoot) firstRoot++; row.push(roots[root]);
+            }
+            const item = uint(); if (item >= ids.length || item > firstId) return null;
+            if (item === firstId) firstId++; row.push(ids[item], number(first));
+            if (kind === 6) row.push(number(second));
+            rows.push(Object.freeze(row));
+        }
+        if (at !== bytes.length || firstId !== ids.length || firstRoot !== roots.length) return null;
+        const proof = { version: 1, rows: Object.freeze(rows) };
+        return Buffer.byteLength(JSON.stringify(proof)) <= QUANTITY_INPUT_BYTES ? Object.freeze(proof) : null;
+    } catch (_) { return null; }
+}
+function createQuantityInputs() {
+    const rows = [], seen = new Map();
+    let bytes = 23, invalid = false, finished = false, proof = null;
+    const record = row => {
+        if (invalid || finished) return;
+        const key = row[0] === 'stock' || row[0] === 'stockPhysical'
+            ? `${row[0]}:${row[1]}:${row[2]}` : `${row[0]}:${row[1]}`;
+        const previous = seen.get(key);
+        if (previous) {
+            for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid = true;
+            return;
+        }
+        const size = Buffer.byteLength(JSON.stringify(row)) + 1;
+        if (rows.length >= QUANTITY_INPUT_LIMIT || bytes + size > QUANTITY_INPUT_BYTES) {
+            invalid = true; return;
+        }
+        seen.set(key, row); rows.push(Object.freeze(row)); bytes += size;
+    };
+    const scalar = kind => (id, value) => {
+        if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid = true;
+        if (kind === 'incoming' && Number(value || 0) < 0) invalid = true;
+        record([kind, Number(id), kind === 'present' || kind === 'freePresent' ? Number(nonnegative(value) > 0) : nonnegative(value)]);
+        return value;
+    };
+    return {
+        stock(id, rootKey, value) {
+            if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
+                || !Number.isFinite(nonnegative(value?.owned)) || !Number.isFinite(nonnegative(value?.incoming))) invalid = true;
+            record(['stock', String(rootKey), Number(id), nonnegative(value?.owned), nonnegative(value?.incoming)]);
+            return value;
+        },
+        stockPhysical(rootKey, id, value) {
+            if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
+                || !Number.isFinite(nonnegative(value))) invalid = true;
+            record(['stockPhysical', rootKey, Number(id), nonnegative(value)]);
+            return value;
+        },
+        physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
+        incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
+        unsupported() { invalid = true; },
+        finish() {
+            if (!finished) {
+                finished = true;
+                proof = invalid ? null : Object.freeze({ version: 1, rows: Object.freeze(rows) });
+                seen.clear();
+            }
+            return proof;
+        }
+    };
+}
+function quantityInputsHold(proof, readers, normalizeStock = null) {
+    if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return false;
+    for (const row of proof.rows) {
+        if (!Array.isArray(row)) return false;
+        if (row[0] === 'stock') {
+            if (row.length !== 5 || typeof row[1] !== 'string' || !Number.isSafeInteger(row[2]) || row[2] <= 0
+                || !Number.isFinite(row[3]) || row[3] < 0 || !Number.isFinite(row[4]) || row[4] < 0
+                || typeof readers?.stockFor !== 'function') return false;
+            const stock = readers.stockFor(row[2], row[1]);
+            const owned = nonnegative(stock?.owned);
+            const comparable = normalizeStock ? normalizeStock('stock', row[1], row[2], owned, row[3]) : owned;
+            if (comparable !== row[3] || nonnegative(stock?.incoming) !== row[4]) return false;
+        } else if (row[0] === 'stockPhysical') {
+            if (row.length !== 4 || typeof row[1] !== 'string' || !Number.isSafeInteger(row[2]) || row[2] <= 0
+                || !Number.isFinite(row[3]) || row[3] < 0 || typeof readers?.physical !== 'function') return false;
+            const owned = nonnegative(readers.physical(row[2]));
+            if ((normalizeStock ? normalizeStock('stockPhysical', row[1], row[2], owned, row[3]) : owned) !== row[3]) return false;
+        } else {
+            const read = row[0] === 'present' ? readers?.physical : row[0] === 'freePresent' ? readers?.free : readers?.[row[0]];
+            if (row.length !== 3 || !QUANTITY_SCALARS.has(row[0])
+                || !Number.isSafeInteger(row[1]) || row[1] <= 0 || !Number.isFinite(row[2]) || row[2] < 0
+                || typeof read !== 'function') return false;
+            const raw = read(row[1]);
+            if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return false;
+            const value = nonnegative(raw);
+            if ((row[0] === 'present' || row[0] === 'freePresent' ? Number(value > 0) : value) !== row[2]) return false;
+        }
+    }
+    return true;
+}
 // Native commands for `batches`: a path without perCommand runs one batch each.
 const commands = (batches, perCommand) => Math.ceil(batches / (Number(perCommand) >= 1 ? Number(perCommand) : 1));
 // A trip is one row per town: a quoted seller or workshop, or a farm spot
@@ -799,4 +1018,4 @@ class WishNetwork {
     }
 }
 
-module.exports = { WishNetwork, createSolver, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT };
+module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES };

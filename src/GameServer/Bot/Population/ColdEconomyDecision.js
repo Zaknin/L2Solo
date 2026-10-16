@@ -5,12 +5,14 @@
 // (where to hunt, which mob, which improvement) for its next context, route
 // and post-commit improvement. It reads the
 // worker's decision made on exactly that state instead of building the
-// network again on the main thread (L25). Kept in memory only, one entry per
-// bot; a missing or older entry waits for the next worker decision.
+// network again on the main thread (L25). The native actor retains accepted
+// advice; one bounded saved prefix can cross a restart until its original
+// market deadline. Every use still takes the economy owner's event verdict.
 const { isMainThread } = require('node:worker_threads');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const RestartAdvisoryProbe = require('../Economy/RestartAdvisoryProbe');
+const RestartDecision = require('./EconomyRestartDecision');
 // Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
 let CraftInputReservations = null, PurchaseFunding = null, DecisionSections = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
@@ -53,6 +55,15 @@ const MAX_BYTES = 800, MAX_SHOT_BYTES = 128;
 const MAX_ADVISORY_BYTES = 4096;
 const COMMAND_HEADER_BYTES = Buffer.byteLength(JSON.stringify(['00000000-0000-0000-0000-000000000000', 5, Number.MAX_SAFE_INTEGER]));
 const MAX_SHOT_PAYLOAD_BYTES = MAX_SHOT_BYTES - COMMAND_HEADER_BYTES;
+const cardWireRoom = key => MAX_BYTES - 48 - encoder.encode(String(key || '')).length;
+function shotOffset(counts) {
+    return 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
+        + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0) + (counts & FEASIBILITY ? 8 : 0);
+}
+function encodeShot(value) {
+    const encoded = value ? encoder.encode(JSON.stringify(value)) : null;
+    return encoded?.length > MAX_SHOT_PAYLOAD_BYTES ? encoder.encode(JSON.stringify({ unknown: true })) : encoded;
+}
 function workshopValues(value) {
     if (!value || value.known === false) return [0, 0, NaN, NaN];
     const recipeId = Number(value.recipeId || 0), productId = Number(value.productId || 0);
@@ -72,8 +83,7 @@ class CompactDecision {
     }
     get activity() {
         const counts = this.counts;
-        let at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
-            + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0) + (counts & FEASIBILITY ? 8 : 0);
+        let at = shotOffset(counts);
         if (counts & SHOT) at += 2 + new DataView(this.data).getUint16(at, true);
         if (at === this.data.byteLength) return null;
         const row = JSON.parse(decoder.decode(new Uint8Array(this.data, at)));
@@ -139,8 +149,7 @@ class CompactDecision {
     get shot() {
         const counts = this.counts;
         if (!(counts & SHOT) || this.workshopStale || this.stale || this.held) return null;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
-            + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0) + (counts & FEASIBILITY ? 8 : 0);
+        const at = shotOffset(counts);
         const bytes = new DataView(this.data).getUint16(at, true);
         return JSON.parse(decoder.decode(new Uint8Array(this.data, at + 2, bytes)));
     }
@@ -175,12 +184,11 @@ function compact(record) {
     const clan = record.clan;
     const workshop = Object.hasOwn(record, 'workshop') ? workshopValues(record.workshop) : null;
     const feasibility = Array.isArray(record.feasibility) && record.feasibility[2] <= 14 ? record.feasibility : null;
-    let shot = record.shot ? encoder.encode(JSON.stringify(record.shot)) : null;
-    if (shot?.length > MAX_SHOT_PAYLOAD_BYTES) shot = encoder.encode(JSON.stringify({ unknown: true }));
+    const shot = encodeShot(record.shot);
     const fixed = 28 + w * 21 + m * 12 + (wish ? 17 : 0) + (clan ? 32 : 0) + (workshop ? 32 : 0)
         + (feasibility ? 8 : 0) + (shot ? shot.length + 2 : 0) + activity.length;
     // The key and object/ArrayBuffer wire tags share this cap with the payload.
-    const wireRoom = MAX_BYTES - 48 - encoder.encode(String(record.key || '')).length;
+    const wireRoom = cardWireRoom(record.key);
     const n = Math.min(40, Math.floor(pairs.length / 2), Math.max(0, Math.floor((wireRoom - fixed) / 8)));
     const data = new ArrayBuffer(fixed + n * 8), view = new DataView(data);
     view.setUint32(0, n | (w << 6) | (m << 8) | (wish ? 4096 : 0) | (clan ? 8192 : 0) | (workshop ? WORKSHOP : 0) | (shot ? SHOT : 0) | (feasibility ? FEASIBILITY : 0), true);
@@ -199,6 +207,25 @@ function compact(record) {
     if (shot) { view.setUint16(at, shot.length, true); new Uint8Array(data, at + 2, shot.length).set(shot); at += shot.length + 2; }
     new Uint8Array(data, at).set(activity);
     return new CompactDecision(record.updatedAt, record.key, record.riskWeight, record.activity, data);
+}
+// A completed native preparation replaces only this binary section. A thin
+// served view cannot recreate the original graph's valuation or quantities.
+function refreshPreparedCraft(refreshed, shot, mp) {
+    const before = refreshed.decision, counts = before.counts, at = shotOffset(counts);
+    const previousEnd = at + (counts & SHOT ? 2 + new DataView(before.data).getUint16(at, true) : 0);
+    const encoded = encodeShot(shot), size = before.data.byteLength - (previousEnd - at) + (encoded ? encoded.length + 2 : 0);
+    if (previousEnd > before.data.byteLength || size > cardWireRoom(before.key)) return null;
+    const data = new ArrayBuffer(size), bytes = new Uint8Array(data), source = new Uint8Array(before.data);
+    bytes.set(source.subarray(0, at));
+    new DataView(data).setUint32(0, encoded ? counts | SHOT : counts & ~SHOT, true);
+    let next = at;
+    if (encoded) {
+        new DataView(data).setUint16(next, encoded.length, true); bytes.set(encoded, next + 2); next += encoded.length + 2;
+    }
+    bytes.set(source.subarray(previousEnd), next);
+    const decision = compact({ key: before.key, data });
+    refreshed.economy.shot = shot;
+    return { ...refreshed, decision, advisory: { ...refreshed.advisory, card: decision, preparedMp: mp } };
 }
 
 // What a decision depends on beyond updatedAt: a commit can merge clan or
@@ -372,32 +399,143 @@ function economyFor(state, deps = {}) {
 // there is no saved per-bot graph and no second decision map.
 // activity: the state the economy was built on, when the published state
 // already left it (a trip started after the build).
-function advisory(economy, state, activity = state.activity) {
+function advisory(economy, state, activity = state.activity, deps = {}) {
     const card = capture(economy, state);
-    const fence = economy?.calculationFence;
+    const eventProof = economy?.eventProof?.() || null;
+    // lazy: cycle EconomyContext creates accepted cards after its full build.
+    const Economy = eventProof ? invoke('GameServer/Bot/Economy/EconomyContext') : null;
+    const fence = eventProof && Economy.eventReuseEnabled(deps) ? null : economy?.calculationFence;
     const packet = economy?.statsPacket;
     const diagnostic = Diagnostics.active();
-    if (!(fence instanceof Uint8Array)) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_fence'); return null; }
+    if (diagnostic && economy.eventShadow) {
+        // This population compares compact cards from one ordinary rebuild;
+        // it does not certify equality of the retained full network queue.
+        const { accepted: original, verdict } = economy.eventShadow;
+        Diagnostics.count('card', 'event_gate', verdict.valid ? 'would_hold' : 'refused');
+        if (verdict.valid) {
+            const same = original?.card ? sameEconomicOutput(original.card, card) : null;
+            Diagnostics.count('card', 'event_output', same === null ? 'unavailable' : same ? 'same' : 'differ');
+        }
+    }
+    if (!(fence instanceof Uint8Array) && !eventProof) { if (diagnostic) Diagnostics.count('card', 'drop', 'no_fence'); return null; }
     if (diagnostic) {
         // L115: the real size of every card (fence + card), dropped or kept.
-        const total = fence.byteLength + card.data.byteLength;
+        const total = (fence?.byteLength || 0) + card.data.byteLength;
         Diagnostics.count('card', 'size', total <= 2048 ? 'le2k' : total <= 4096 ? '2-4k' : total <= 8192 ? '4-8k' : '8k+');
         if (card.data.byteLength > MAX_BYTES) Diagnostics.count('card', 'drop', 'oversize_card');
-        else if (total > MAX_ADVISORY_BYTES) Diagnostics.count('card', 'drop', 'oversize_total');
+        else if (!eventProof && total > MAX_ADVISORY_BYTES) Diagnostics.count('card', 'drop', 'oversize_total');
     }
-    if (card.data.byteLength > MAX_BYTES || fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
+    if (card.data.byteLength > MAX_BYTES || !eventProof && fence.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
     // Acceptance belongs to the build's output, even before its caller has
     // published that packet. A later publication never restarts its delays.
-    const accepted = { card, fence, decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
+    const accepted = { card, fence: fence?.byteLength + card.data.byteLength <= MAX_ADVISORY_BYTES ? fence : null,
+        eventProof, characterId: Number(state.characterId), decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
         activityLeaf: packet ? Number(packet.activityLeaf || 0) : undefined,
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
-        activity, mp: Number(state.vitals?.mp) };
-    if (diagnostic && RestartAdvisoryProbe.selected(state?.characterId)) {
+        activity, mp: Number(state.vitals?.mp), preparedMp: Number(state.vitals?.mp) };
+    const restartProof = Economy?.restartEventProof(eventProof, accepted);
+    // lazy: cycle the shared sections also read the economy owner.
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
+    accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
+        Sections.baselineIdentity(accepted.baseline), Sections.clockBytes(accepted.baseline)) : null;
+    if (packet) packet.wishAdvisory = accepted.saved;
+    if (publishedPacket(state, packet)) state.stats.wishAdvisory = accepted.saved;
+    if (diagnostic && fence instanceof Uint8Array && RestartAdvisoryProbe.selected(state?.characterId)) {
         // lazy: cycle EconomyContext constructs its accepted cards here.
         const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
         RestartAdvisoryProbe.observe(accepted, Economy.decodeCalculationFence);
     }
     return accepted;
+}
+
+// Decode once at the existing actor publication boundary. No graph or route
+// is rebuilt here; the first consumer must still pass the shared verdict.
+function restoreAdvisory(state, timestamp = Date.now()) {
+    // lazy: cycle the shared sections also read the economy owner.
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
+    const baseline = state.stats?.wishSections;
+    const decoded = RestartDecision.decode(state.stats?.wishAdvisory, timestamp, MAX_BYTES, Number(state.characterId),
+        baseline, Sections.baselineIdentity(baseline));
+    if (!decoded) return null;
+    const deadline = Sections.softDeadline(decoded.baseline, 'market'), clockBytes = Sections.clockBytes(decoded.baseline);
+    if (!Number.isFinite(deadline) || !Number.isSafeInteger(clockBytes) || clockBytes < 0 || timestamp >= deadline
+        || Buffer.byteLength(JSON.stringify({ wishAdvisory: decoded.saved })) + clockBytes > RestartDecision.MAX_BYTES) return null;
+    if (Sections.decisionRefusal(state, decoded.decisionSeq, decoded.activityLeaf, decoded.focus)) return null;
+    const { key, data, ...accepted } = decoded, card = readAdvisoryCard({ key, data });
+    if (!card) return null;
+    // lazy: cycle the native owner rehydrates its opaque saved proof.
+    const eventProof = invoke('GameServer/Bot/Economy/EconomyContext').restoreEventProof(accepted.eventProof, { ...accepted, card });
+    if (!eventProof) return null;
+    if (Diagnostics.active()) Diagnostics.count('card', 'restart', 'candidate');
+    return { ...accepted, eventProof, card, preparedMp: accepted.mp, fence: null };
+}
+function publishedPacket(state, packet) {
+    if (!packet?.wishSections || state.stats?.wishSections !== packet.wishSections) return false;
+    // lazy: cycle the shared sections also read the economy owner.
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
+    return !Sections.decisionRefusal(state, Number(packet.decisionSeq || 0), Number(packet.activityLeaf || 0),
+        packet.wishFocus?.[0] ?? null);
+}
+function rememberPublished(economy, state, deps = {}) {
+    if (!publishedPacket(state, economy?.statsPacket)) return null;
+    const accepted = advisory(economy, state, economy.state?.activity ?? state.activity, deps);
+    if (accepted && isMainThread) {
+        // lazy: worker the main native owner receives hot advice only after publication.
+        invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.retainAdvisory(state, accepted);
+    }
+    return accepted;
+}
+function readAdvisoryCard(record) {
+    try {
+        if (typeof record?.key !== 'string' || record.key.length > 256) return null;
+        const data = record.data instanceof ArrayBuffer ? record.data : RestartDecision.cardData(record.data, MAX_BYTES);
+        if (!data || data.byteLength < 28 || data.byteLength > MAX_BYTES) return null;
+        const card = compact({ key: record.key, data });
+        if (card.counts & ~131071 || (card.counts & 63) > 40 || ((card.counts >>> 8) & 15) > 8
+            || card.flags || !card.activity?.activity) return null;
+        // Validate all binary ranges before this becomes retained native data.
+        void card.usefulness; void card.watch; void card.materials; void card.workshop; void card.feasibility; void card.shot;
+        return card;
+    } catch (_) { return null; }
+}
+function wireAdvisory(accepted) {
+    if (!accepted?.card) return null;
+    // lazy: cycle EconomyContext owns its packed read-set conversion.
+    const Economy = accepted.eventProof ? invoke('GameServer/Bot/Economy/EconomyContext') : null;
+    const eventProof = Economy ? Economy.wireEventProof(accepted.eventProof) : null;
+    if (accepted.eventProof && !eventProof) return null;
+    return { ...accepted, eventProof, card: { key: accepted.card.key,
+        data: Buffer.from(accepted.card.data).toString('base64') },
+        fence: accepted.fence instanceof Uint8Array ? Buffer.from(accepted.fence).toString('base64') : null };
+}
+function receiveAdvisory(value) {
+    if (value?.card instanceof CompactDecision && value.card.data.byteLength <= MAX_BYTES
+        && Number.isFinite(value.baseline?.at)) return value;
+    const card = readAdvisoryCard(value?.card);
+    if (!card || !Number.isSafeInteger(value.characterId) || value.characterId <= 0
+        || !Number.isSafeInteger(value.decisionSeq) || value.decisionSeq < 0
+        || !Number.isSafeInteger(value.activityLeaf) || value.activityLeaf < 0 || value.activityLeaf > 0xffffffff
+        || value.focus !== null && typeof value.focus !== 'string' || !Number.isFinite(value.baseline?.at)
+        || !Number.isFinite(value.mp) || typeof value.activity !== 'string') return null;
+    let fence = value.fence;
+    if (typeof fence === 'string') {
+        if (fence.length > Math.ceil(MAX_ADVISORY_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(fence)) return null;
+        const bytes = Buffer.from(fence, 'base64');
+        if (bytes.toString('base64') !== fence || bytes.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
+        fence = Uint8Array.from(bytes);
+    } else if (fence !== null && !(fence instanceof Uint8Array)) return null;
+    return { ...value, card, fence };
+}
+function advisoryMatches(state, accepted) {
+    if (!accepted || accepted.characterId !== Number(state?.characterId)) return false;
+    // lazy: cycle the shared sections also read the economy owner.
+    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
+    return !Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
+}
+function advisoryPublicationHolds(state, advice, previous = null) {
+    return advisoryMatches(state, advice) && !(Number(previous?.baseline?.at) > advice.baseline.at
+        || Number(state.updatedAt || 0) > advice.card.updatedAt
+            && Number(state.stats?.wishSections?.at) > advice.baseline.at);
 }
 // The bot's own hunting/resting/travelling inside one decision is not an
 // event (L70). After a result the card is only restamped and published.
@@ -410,7 +548,9 @@ function advisory(economy, state, activity = state.activity) {
 // diagnostics read it; canReuse is its boolean).
 function refusal(state, accepted, deps = {}, current = null, options = {}) {
     if (!accepted || !accepted.card) return 'no_card';
+    if (accepted.characterId !== undefined && accepted.characterId !== Number(state.characterId)) return 'no_card';
     if (!accepted.baseline) return 'no_sections';
+    if (Diagnostics.active() && options.prepared && accepted.eventProof) options.prepared.eventCandidate = accepted;
     if (state.stats?.wishDirty) return 'wish_dirty';
     // lazy: cycle keep the section and card modules loadable in either order.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
@@ -420,7 +560,9 @@ function refusal(state, accepted, deps = {}, current = null, options = {}) {
     // economic step is a purchase or liquidation. Commands still prepare via
     // their native owner; unknown/completed/impossible leaves never reuse.
     const leaf = accepted.card.activity;
-    if (!leaf || !['hunting', 'shopping', 'selling'].includes(leaf.activity)) {
+    // lazy: cycle EconomyContext constructs and validates these cards.
+    const eventReuse = accepted.eventProof && invoke('GameServer/Bot/Economy/EconomyContext').eventReuseEnabled(deps);
+    if (!leaf || !eventReuse && !['hunting', 'shopping', 'selling'].includes(leaf.activity)) {
         if (Diagnostics.active()) {
             const kind = leaf?.activity;
             const subtype = !kind ? 'none' : ['crafting', 'improving', 'helping', 'pvp'].includes(kind) ? kind : 'other';
@@ -449,6 +591,13 @@ function leafRefusal(state, accepted, leaf, deps, current, options, socialShadow
     const timestamp = Number(deps.timestamp || Date.now());
     const baseline = accepted.baseline;
     const Sections = DecisionSections;
+    if (accepted.eventProof && Economy.eventReuseEnabled(deps)) {
+        const why = [], verdict = {};
+        const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
+            baseline, mp: accepted.mp, timestamp, softPrefix: accepted.softPrefix === true, why, verdict });
+        if (options.prepared) options.prepared.eventVerdict = verdict;
+        return holds ? '' : `events:${why[0] || 'unproved'}`;
+    }
     if (Sections.capability(state, timestamp) !== baseline.build) return 'capability';
     // The same event verdict as the cache entry (L70), incl. a crafter's MP.
     const persona = state.stats?.persona || invoke('GameServer/Bot/AI/BotPersona').of(state), why = []; // lazy: as canReuse before L114
@@ -481,10 +630,12 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
-        stockTargets: state.stats.stockTargets, wishSections: accepted.baseline, wishDirty: 0 };
+        stockTargets: state.stats.stockTargets, wishSections: accepted.baseline, wishDirty: 0,
+        wishAdvisory: accepted.saved || null };
     Object.assign(economy.network, { focus: state.stats.wishFocus, dormant: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf });
     Object.defineProperty(economy, 'calculationFence', { value: accepted.fence });
+    Object.defineProperty(economy, 'eventProof', { value: () => accepted.eventProof });
     return { economy, decision, advisory: { ...accepted, card: decision } };
 }
 
@@ -517,9 +668,10 @@ class ColdEconomyDecisions {
     // committed: the commit's result. A commit that merged board deals or PK
     // drops into the bag keeps the worker's updatedAt, but the decision was
     // made on the bag before them: keep its numbers, but defer its wishes.
-    accept(characterId, decision, committed = null) {
+    accept(characterId, decision, committed = null, state = null) {
         const id = Number(characterId);
         if (!id) return;
+        const advice = this.byId.get(id)?.advisory;
         const incoming = decision ? compact(decision) : null;
         const bagChanged = !!committed?.settled || !!committed?.pkDrops?.length;
         if (Diagnostics.active() && incoming && Number.isFinite(Number(incoming.updatedAt))) {
@@ -539,8 +691,38 @@ class ColdEconomyDecisions {
                     town: activity?.town, npcId: activity?.npcId, recipeId: activity?.recipeId });
             }
         }
-        if (incoming && Number.isFinite(Number(incoming.updatedAt))) this.byId.set(id, compact({ ...incoming, stale: bagChanged }));
+        if (incoming && Number.isFinite(Number(incoming.updatedAt))) {
+            const card = compact({ ...incoming, stale: bagChanged });
+            if (state && advisoryMatches(state, advice)) Object.defineProperty(card, 'advisory', {
+                value: advice, configurable: true, writable: true
+            });
+            this.byId.set(id, card);
+        }
         else if (this.byId.has(id)) this.byId.get(id).stale = true;
+    }
+
+    // The hot owner can retain advice without granting compact-card execution.
+    // Only the shared event verdict can consume this separate native view.
+    retainAdvisory(state, value) {
+        const advice = receiveAdvisory(value);
+        const id = Number(state.characterId), current = this.byId.get(id);
+        if (!advisoryPublicationHolds(state, advice, current?.advisory)) return false;
+        const card = current || compact({ key: advice.card.key, data: advice.card.data, stale: true });
+        Object.defineProperty(card, 'advisory', { value: advice, configurable: true, writable: true });
+        if (!current) this.byId.set(id, card);
+        return true;
+    }
+    advisoryFor(state) {
+        const advice = this.byId.get(Number(state?.characterId))?.advisory;
+        return advisoryMatches(state, advice) ? advice : null;
+    }
+    releaseAdvisory(id, expected) {
+        const card = this.byId.get(Number(id));
+        if (card && card.advisory === expected) delete card.advisory;
+    }
+    fence(id) {
+        const card = this.byId.get(Number(id));
+        if (card) { card.held = false; card.stale = true; }
     }
 
     // The worker's decision made on exactly this state, or held for a command.
@@ -572,7 +754,13 @@ class ColdEconomyDecisions {
         return this.matches(state, decision) ? decision : null;
     }
     activity(state) { return this.decided(state)?.activity || null; }
-    hold(id, decision) { if (decision) this.byId.set(Number(id), compact({ ...compact(decision), held: true })); }
+    hold(id, decision) {
+        if (!decision) return;
+        const advice = this.byId.get(Number(id))?.advisory;
+        const card = compact({ ...compact(decision), held: true });
+        if (advice) Object.defineProperty(card, 'advisory', { value: advice, configurable: true, writable: true });
+        this.byId.set(Number(id), card);
+    }
     release(id) { const decision = this.byId.get(Number(id)); if (decision) { decision.held = false; decision.stale = true; } }
     forget(id) {
         if (this.byId.delete(Number(id)) && Diagnostics.active()) Diagnostics.count('ready_card', 'eviction', 'owner_release');
@@ -604,5 +792,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, canReuse, refusal, refreshAdvisory, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, stateKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_ADVISORY_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

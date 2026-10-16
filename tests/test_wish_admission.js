@@ -82,6 +82,7 @@ const tracked = Object.create(network, { createSolver: { value: options => {
         allocate: (wish, used) => { heavy.push(new WeakRef(wish)); return solver.allocate(wish, used); } };
 } } });
 const provider = load('WishProviders.js', name => {
+    if (name === '../../Items/SoulCrystalProgression') return adapters['GameServer/Items/SoulCrystalProgression'];
     if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: () => true };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
@@ -119,7 +120,8 @@ const recipe = (recipeId, productId, materials) => {
     return recipeId;
 };
 // Each scenario has its own item array (the kit cache follows it), board and stock.
-function scenario({ items, asks = [], known = [], inventory = {}, improvements = [] }) {
+function scenario({ items, asks = [], known = [], inventory = {}, improvements = [], quantityInputs = null,
+    previous = undefined, reconsider = true }) {
     data.items = items; gearIds = new Set(items.map(row => row.selfId));
     opportunities = improvements; state.inventory = inventory;
     const board = new BoardIndex();
@@ -127,15 +129,16 @@ function scenario({ items, asks = [], known = [], inventory = {}, improvements =
         town, revision: 1, lines: [{ lineId: at + 1, selfId, count, price, enchant: 0 }] }));
     // EconomyContext's read scope: a candidate's reads count once kept.
     let open = null; const reads = new Set(), opened = [];
+    const readStock = (id, rootKey) => quantityInputs ? quantityInputs.stock(id, rootKey, stockFor(id)) : stockFor(id);
     const ctx = { timestamp: 1, persona, board, hunt: { perHour: 0, expPerHour: 0 }, deathHours: 0,
-        hourAdena: 100, riskWeight: 1, wallet: 0, survivalReserve: 0, stockFor,
+        hourAdena: 100, riskWeight: 1, wallet: 0, survivalReserve: 0, stockFor: readStock, quantityInputs,
         readScope: { open: () => { open = new Set(); opened.push(new WeakRef(open)); return open; }, close: () => { open = null; }, keep: kept => kept.forEach(id => reads.add(id)) },
         price: id => { (open || reads).add(Number(id)); return prices.get(Number(id)) ?? 1; }, buyback: () => 0,
         stock: () => ({ itemId: 900, missing: 0 }), spotValue: () => ({}), trip };
     const projection = provider.build(state, ctx, { board, knownRecipes: known.map(recipeId => ({ recipeId })) });
     const result = new network.WishNetwork().build({ actorKey: 'character:1', inputKey: 'admission', characterId: 1,
         nodes: projection.nodes, roots: projection.roots, wallet: 0, survivalReserve: 0, hourAdena: 100, riskWeight: 1,
-        persona, remembered: false, stockFor });
+        persona, remembered: false, stockFor: readStock, previous, reconsider });
     return { projection, admission: projection.admission, result, reads, opened };
 }
 const close = (actual, expected, message) => assert(Math.abs(actual - expected) < 1e-9, `${message}: ${actual} != ${expected}`);
@@ -314,6 +317,32 @@ assert.equal(held.result.focus?.[0], 'power:132:2', 'the held-material craft sta
 assert.equal(held.result.plans.get('power:132:2').price, 0);
 console.log('PASS a held-material craft is judged after allocation in the network as in admission');
 recipes.clear();
+
+// A different ingredient can remove the accepted root before loyalty runs.
+// The selected missing ingredient is unchanged; this is not its own progress.
+{
+    const items = [gear(133, 2, .5, 10000)], known = [recipe(333, 133, [[202, 10], [203, 1]])];
+    const asks = [[202, 10000, 20], [203, 1, 20]], inventory = { 202: { selfId: 202, amount: 10 } };
+    const quantities = network.createQuantityInputs();
+    const before = scenario({ items, known, asks, inventory, quantityInputs: quantities });
+    const proof = quantities.finish();
+    assert(proof, 'the complete native provider/solver quantity questions fit the bounded proof');
+    assert.equal(before.result.focus?.[0], 'power:133:2');
+    assert.equal(before.result.plans.get('power:133:2').requirements[0].plan.requirements[0].key, 'item:203');
+    const unchanged = scenario({ items, known, asks, inventory });
+    assert.deepEqual(before.projection, unchanged.projection, 'capture preserves the complete native projection');
+    assert.deepEqual(before.result, unchanged.result, 'capture preserves the complete native network');
+    const after = scenario({ items, known, asks,
+        inventory: { 202: { selfId: 202, amount: 9 } },
+        previous: { focus: before.result.focus }, reconsider: false });
+    assert(!after.projection.roots.includes('power:133:2'),
+        'the native admission drops the old root when its newly missing expensive ingredient exceeds the horizon');
+    assert.notEqual(after.result.focus?.[0], before.result.focus[0], 'reconsider=false cannot preserve a root removed at admission');
+    assert.equal(network.quantityInputsHold(proof, { ...provider.quantityReaders(state), stockFor }), false,
+        'the actual before-prune ingredient read names the missing event');
+    recipes.clear();
+    console.log('PASS native admission loses an accepted root on another ingredient even without reconsideration');
+}
 
 // 10. A rare piece (one listing) carries its status value in the gear root
 // before evaluation: the witness and the expanded wish read the same value.

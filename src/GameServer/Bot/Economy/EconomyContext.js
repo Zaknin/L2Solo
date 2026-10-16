@@ -1,5 +1,10 @@
 'use strict';
 const ClassProgression = invoke('GameServer/ClassProgression');
+const DataCache = invoke('GameServer/DataCache');
+const Roles = require('../AI/BotRoles');
+const Knowledge = require('../AI/KnowledgeLearning');
+const Crystallization = require('./BotCrystallization');
+const Floor = require('../Population/SurvivalFloor');
 
 const GearThreat = require('./GearThreat');
 const Improvement = require('./BotImprovementPolicy');
@@ -13,8 +18,15 @@ const Funding = require('./PurchaseFunding');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
-const { WishNetwork, remember, admitRoots, remainingQuantity, craftMaterialLoss, moneyQueue, cashCharge } = require('./WishNetwork');
+const Network = require('./WishNetwork');
+const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
+    createQuantityInputs, quantityInputsHold, packQuantityInputs, unpackQuantityInputs } = Network;
 const { isMainThread } = require('node:worker_threads');
+const { createHash } = require('node:crypto');
+const RecomputeGeneration = require('../Population/RecomputeGeneration');
+const Warehouse = require('./PersonalWarehouseIndex');
+const ClanSupply = require('../../Clan/ClanSupplyPolicy');
+const Recipes = require('../../Items/C4RecipeItems');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const Diagnostics = require('./EconomyDiagnostics');
 const { fnv1a32 } = require('../Fnv1a');
@@ -94,6 +106,8 @@ function projectionHash(projection) {
 }
 
 function stateForActor(actor, session = actor?.session) {
+    // lazy: cycle hot decision publication calls this native actor capture.
+    const decisionStats = require('../AI/DecisionEvents').decisionStatsFor(session);
     const stored = session?.coldLifeState || {};
     const current = invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(actor.fetchId?.());
     const inventory = {};
@@ -121,7 +135,7 @@ function stateForActor(actor, session = actor?.session) {
         adena: actor.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || 0,
         sp: actor.fetchSp?.() ?? stored.sp,
         spotId: session?.currentSpot?.id || stored.spotId,
-        stats: { ...session?.heldEconomy?.statsPacket, ...session?.decisionStats, ...stored.stats, coldCombat: hotKit, hennas: [...(session?.hennas || stored.stats?.hennas || [])], soulCrystalQuest: session?.questStates?.get(350)?.isStarted() === true || stored.stats?.soulCrystalQuest, classId: actor.fetchClassId?.(), exp: actor.fetchExp?.(), karma: actor.fetchKarma?.(), pk: actor.fetchPk?.() },
+        stats: { ...decisionStats, coldCombat: hotKit, hennas: [...(session?.hennas || stored.stats?.hennas || [])], soulCrystalQuest: session?.questStates?.get(350)?.isStarted() === true || stored.stats?.soulCrystalQuest, classId: actor.fetchClassId?.(), exp: actor.fetchExp?.(), karma: actor.fetchKarma?.(), pk: actor.fetchPk?.() },
         party: session?.hotBackgroundPartyId ? { partyId: session.hotBackgroundPartyId, role: stored.party?.role } : null,
         activity: session?.plan || 'hunting' };
     const loc = { locX: Number(actor.fetchLocX?.()), locY: Number(actor.fetchLocY?.()), locZ: Number(actor.fetchLocZ?.()) };
@@ -173,6 +187,45 @@ const DRIFT_KEY_PARTS = new Set(['items', 'adena', 'buy_order_escrow', 'decision
 const EVENT_KEY_INDEXES = INPUT_KEY_PARTS.flatMap((name, at) => DRIFT_KEY_PARTS.has(name) ? [] : [at]);
 const eventKeyHash = hashes => fnv1a32(EVENT_KEY_INDEXES.map(at => hashes[at]).join('|'));
 
+// One activation point for the complete mechanism. Production stays in
+// shadow until the accepted proof population agrees with fresh decisions.
+// A dependency override exercises the complete path in native regressions.
+const EVENT_REUSE_ACTIVE = false;
+function eventReuseEnabled(deps = {}) { return EVENT_REUSE_ACTIVE || deps.eventReuse === true; }
+const proofDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function activityIdentity(leaf) {
+    if (!leaf) return null;
+    const value = new ColdEconomyDecision.CompactActivity(leaf);
+    // These are the card's derived execution/funding annotations, not a
+    // different selected activity. Every native command field stays bound.
+    delete value.heldAtDecision; delete value.r; delete value.craftReservations;
+    return proofDigest(value);
+}
+function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null) {
+    const current = fieldActivity(state, activity, leaf), stats = current.stats || {};
+    const facts = Sections.semanticFacts(current, timestamp), trip = Trip.frame(current);
+    // Position and scroll quantity drift inside one route. Native route and
+    // physical-fee checks still run before the held action is permitted.
+    delete trip.loc; delete trip.inventory;
+    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57)
+        .map(row => rowKey({ ...row, amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
+            instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
+    return proofDigest(['recompute_event_inputs_v2', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+        Number(current.clanId ?? stats.clanId ?? 0), current.party || Number(current.partyId || 0),
+        stats.visitEvery, stats.karma, stats.race, stats.generatedCold, stats.persona,
+        stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
+        Number(stats.shotRecipeDemand?.at) + 1800000 > timestamp,
+        Providers.recipeIds(current, deps), deps.workshop?.recipeId, deps.workshop?.productId,
+        deps.memoryIdentity ?? deps.memory?.revision ?? stats.memoryRevision ?? null,
+        deps.memory ? null : stats.relations,
+        stats.clanMaterialDemand, Warehouse.contentIdentity(current), ClanSupply.contentIdentity(current), ClanSupply.hasWarehouse(current),
+        Math.floor(positive(stats.frustration) * 10), deps.gearThreatMask ?? GearThreat.maskFor(current, deps),
+        stats.role || Roles.inferRole(stats.classId || 0), current.accountName,
+        trip, deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending',
+        deps.mode || '', deps.inputKey || '', current.incomingPending === true,
+        deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled()]);
+}
+
 function inputKeyParts(state, deps = {}) {
     const stats = state.stats || {};
     const items = Object.values(state.inventory || {}).map(rowKeys === null ? rowKey : heldRowKey).sort().join(',');
@@ -193,7 +246,7 @@ function inputKeyParts(state, deps = {}) {
         state.spotId, deps.gearThreatMask ?? GearThreat.maskFor(state, deps), stats.huntEfficiency?.[0]?.at, deps.memory?.revision || stats.memoryRevision || 0,
         deps.inputKey || '', deps.mode || '', state.incomingPending === true, JSON.stringify(state.acceptedIncoming || null), Trip.key(state), deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending', stats.pk, stats.soulCrystalQuest, (stats.hennas || []).join(','),
         Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
-        deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled(),
+        deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled(),
         stats.production?.crafts || 0, positive(state.sp),
         (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')];
 }
@@ -218,13 +271,13 @@ function countMovedParts(layer, previous, current, names) {
 // verdict and the fence only the structure, so the other key is not built (L73).
 function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
     const stats = state.stats || {}, inventory = { ...state.inventory };
-    const role = state.party?.role || stats.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(stats.classId || 0);
+    const role = state.party?.role || stats.role || Roles.inferRole(stats.classId || 0);
     const partyId = Number(state.party?.partyId || state.partyId || 0);
     delete inventory[57];
     for (const [id, low, high, original] of bands) {
         const row = inventory[id], amount = Number(row?.amount);
         if (!row || !(amount >= low) || high !== null && !(amount <= high)) continue;
-        const template = ItemIndex.find(invoke('GameServer/DataCache').items, Number(id));
+        const template = ItemIndex.find(DataCache.items, Number(id));
         // The native loot projection omits a free stack's default metadata;
         // DB publication restores it. Its actual flags and ownership remain
         // inputs, while absent false/zero fields describe the same stack.
@@ -324,8 +377,14 @@ function fieldActivity(state, activity, leaf = null) {
 // The held leaf's own purchase item stays exact: its order counts only the
 // rise since the decision (remainingToOrder), so use inside a band would buy short.
 function bandsHold(state, bands = [], leaf = null) {
+    if (!Array.isArray(bands) || bands.length > 128) return false;
     const bought = leaf?.activity === 'shopping' ? Number(leaf.itemId) || 0 : 0;
-    for (const [id, low, high, original] of bands) {
+    for (const band of bands) {
+        if (!Array.isArray(band) || band.length !== 4) return false;
+        const [id, low, high, original] = band;
+        if (!Number.isSafeInteger(id) || id <= 0 || !Number.isFinite(low) || low < 0
+            || high !== null && (!Number.isFinite(high) || high < low)
+            || !Number.isFinite(original) || original < low || high !== null && original > high) return false;
         const amount = Number(state.inventory?.[id]?.amount);
         if (bought && Number(id) === bought ? amount !== original
             : !(amount >= low) || high !== null && !(amount <= high)) return false;
@@ -345,9 +404,9 @@ const miss = (why, reason) => { why?.push(reason); return false; };
 // once its kind's delay since the last actual decision has passed. The name
 // of the first one ('money' is also a hard money move), or null when quiet.
 // held: as in heldEventsQuiet (its mp is not read).
-function softEvent(state, held, timestamp, deps = {}) {
+function softEvent(state, held, timestamp, deps = {}, skipMoney = false) {
     const baseline = held.baseline;
-    if (Sections.moneyEvent(state, baseline, timestamp, deps.buyOrderEscrow)) return 'money';
+    if (!skipMoney && Sections.moneyEvent(state, baseline, timestamp, deps.buyOrderEscrow)) return 'money';
     if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return 'observation';
     if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return 'horizon';
     return null;
@@ -356,12 +415,12 @@ function softEvent(state, held, timestamp, deps = {}) {
 // seen: an object that receives the soft verdict once it is read
 // ({ at: the baseline's decision time, kind: softEvent's answer }), so the
 // build that follows a refusal does not read it again.
-function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why = null, seen = null) {
+function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why = null, seen = null, skipMoney = false) {
     const stats = state.stats || {}, baseline = held.baseline;
     if (stats.wishDirty) return miss(why, 'wish_dirty');
-    if (Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
+    if (!held.nativeCraftContinuation && Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
         && Number(state.vitals?.mp) !== Number(held.mp)) return miss(why, 'crafter_mp');
-    const soft = softEvent(state, held, timestamp, deps);
+    const soft = softEvent(state, held, timestamp, deps, skipMoney);
     if (seen) { seen.at = Number(baseline?.at); seen.kind = soft; }
     if (soft) return miss(why, soft);
     if (deferred) {
@@ -413,52 +472,207 @@ function acquisitionTarget(projection, focus) {
         && root.paths?.length === 1 && path?.requirements?.length === 1
         && requirement?.key === `item:${id}` && requirement.amount === 1 ? id : undefined;
 }
-function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietSections, improvementMark) {
-    if (!held) return 'no_held';
-    if (last?.heldEventHash !== eventHash) return 'event_key';
-    if (state.stats?.wishDirty) return 'wish_dirty';
-    const packet = held.plan.statsPacket;
-    const echo = Sections.decisionRefusal(state, Number(packet.decisionSeq || 0),
-        Number(packet.activityLeaf || 0), packet.wishFocus?.[0] ?? null);
-    if (echo) return echo === 'decision_seq' ? 'silent_seq' : 'check_failed';
-    if (!quietSections) return 'sections';
-    if (last?.heldImprovementMark !== improvementMark) return 'check_failed';
+// This proof is produced by the completed native build, shared by its cache
+// entry and compact execution card. It is never reconstructed from a later
+// publication. Market/occupancy reads retain their original soft deadline.
+function captureEventProof(state, deps = {}, options = {}) {
+    const plan = options.plan;
+    if (!plan || plan.pending || !plan.quantityInputs || !plan.liquidationInputs || extensions.size || deps.nodes?.length
+        || state.incomingPending || !plan.statsPacket?.wishSections
+        || !Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state) || !RecomputeGeneration.current()) return null;
+    const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
+    if (!leaf || !Number.isFinite(baseline.at)) return null;
+    const actual = { ...state, stats: { ...state.stats, ...plan.statsPacket } };
+    return Object.freeze({ version: 1, owner: Number(state.characterId), at: baseline.at,
+        generation: RecomputeGeneration.current(),
+        decision: Object.freeze([Number(plan.statsPacket.decisionSeq || 0),
+            Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
+        activity: activityIdentity(leaf),
+        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf),
+        quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
+        stockRoots: Object.freeze([...plan.stockRoots]),
+        bands: plan.quantityBands || [], safety: plan.bagSafety, hourAdena: plan.hourAdena,
+        market: options.reads, spots: options.spots,
+        // A restored prefix currently excludes process-local owner versions.
+        // Unsupported owners abstain; an empty numeric revision is not proof.
+        restartable: !!RecomputeGeneration.current() && typeof deps.memoryIdentity === 'string'
+            && deps.sourceReady === true });
+}
+
+function heldBuildVerdict(state, proof, deps = {}, options = {}) {
+    const refuse = (reason, names) => ({ valid: false, reason,
+        touchedSections: names ? Sections.sectionMask(names) : 0 });
+    if (!proof || proof.version !== 1 || proof.owner !== Number(state.characterId)
+        || !Array.isArray(proof.decision) || proof.decision.length !== 3
+        || !proof.decision.slice(0, 2).every(value => Number.isSafeInteger(value) && value >= 0)
+        || proof.decision[2] !== null && typeof proof.decision[2] !== 'string'
+        || !Array.isArray(proof.stockRoots) || proof.stockRoots.length > 40
+        || !proof.stockRoots.every(row => Array.isArray(row) && row.length === 2
+            && typeof row[0] === 'string' && Number.isSafeInteger(row[1]) && row[1] > 0)
+        || typeof proof.hard !== 'string' || !/^[a-f0-9]{64}$/.test(proof.hard)
+        || typeof proof.activity !== 'string' || !options.leaf?.activity
+        || !Array.isArray(proof.bands) || !Array.isArray(proof.liquidation?.rows)
+        || proof.liquidation.rows.length > 8 || !proof.liquidation.rows.every(row => Array.isArray(row)
+            && row.length === 2 && Number.isSafeInteger(row[0]) && row[0] > 0 && Number.isFinite(row[1]) && row[1] > 0)
+        || !options.softPrefix && (typeof proof.market?.[Symbol.iterator] !== 'function'
+            || typeof proof.spots?.[Symbol.iterator] !== 'function')
+        || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
+    const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
+    if (!baseline || !Number.isFinite(proof.at) || proof.at !== baseline.at || timestamp < proof.at)
+        return refuse('baseline');
+    if (options.softPrefix && (!proof.restartable || !proof.generation
+        || !Number.isFinite(Sections.softDeadline(baseline, 'market'))
+        || timestamp >= Sections.softDeadline(baseline, 'market'))) return refuse('restart_expired');
+    const generation = RecomputeGeneration.current();
+    if (!generation || proof.generation !== generation) return refuse('generation', ['build', 'sources']);
+    if (activityIdentity(options.leaf) !== proof.activity) return refuse('activity', ['sources']);
+    const echo = Sections.decisionRefusal(state, ...proof.decision);
+    if (echo) return refuse(echo, ['sources']);
+    deps = resolved(state, deps);
+    if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)
+        || options.softPrefix && (typeof deps.memoryIdentity !== 'string' || deps.sourceReady !== true))
+        return refuse('unready');
+    const dirty = Number(state.stats?.wishDirty) || 0;
+    if (dirty) return { valid: false, reason: 'wish_dirty', touchedSections: dirty };
+    const current = fieldActivity(state, options.activity, options.leaf);
+    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current, timestamp), current);
+    if (changed.length) return refuse('sections', changed);
+    if ((options.currentKey ?? eventInputKey(state, deps, timestamp, options.activity, options.leaf)) !== proof.hard)
+        return refuse('event_key', ['sources']);
     const why = [];
-    if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
-        expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, null, why)) return why[0];
-    if (!bandsHold(state, held.plan.quantityBands, held.plan.network?.activity)) return 'bands';
-    if (last?.heldTargetItem && (positive(state.inventory?.[last.heldTargetItem]?.amount) > 0) !== last.heldTargetPresent) return 'check_failed';
-    if (!bagHolds(state, held.plan, timestamp)) return 'bag';
-    if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'market';
-    const leaf = held.plan.network?.activity;
-    if (leaf?.activity === 'crafting') {
-        const proof = last?.heldCraftProof;
-        const matched = proof && leaf.kind === 'craft' && proof.rootKey === leaf.rootKey
-            && proof.nodeKey === leaf.nodeKey && proof.output[0] === leaf.itemId
-            && proof.recipeId === leaf.recipeId && proof.batches === leaf.batches;
-        const result = matched ? craftMaterialLoss(proof, stockReader(state, () => proof.rootItem)) : 'unknown';
-        Diagnostics.count('context', 'craft_material', result);
-        // This only detects loss of the retained batch's necessary inputs.
-        // Enough physical stock does not prove a new allocation is ready.
-        if (result !== 'unchanged') return 'check_failed';
+    if (!heldEventsQuiet(state, { baseline, mp: options.mp, expPerHour: baseline.expHour,
+        nativeCraftContinuation: deps.nativeCraftContinuation === true,
+        persona: personaOf(state, deps) }, timestamp, deps, null, why, null, options.rebuildBasis === true)) {
+        const reason = why[0];
+        return refuse(reason, reason === 'observation' ? ['occupation', 'benefits', 'sources']
+            : reason === 'horizon' ? ['benefits', 'sources']
+                : reason === 'money' ? ['money'] : ['sources']);
     }
-    if (materialHunt(leaf)) {
-        const baseline = last?.heldHuntingUnits;
-        if (!Number.isFinite(baseline) || ColdEconomyDecision.heldFor(state, leaf.itemId) < baseline
-            || ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: baseline }, state) <= 0) return 'check_failed';
+    if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
+    const safety = bagSafety(state, timestamp);
+    if (!Array.isArray(proof.safety) || proof.safety.length !== safety.length
+        || safety.some((value, at) => value !== proof.safety[at]))
+        return refuse('bag', ['supply', 'sources']);
+    const roots = new Map(proof.stockRoots);
+    const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
+        if (roots.get(key) !== id) return currentOwned;
+        const band = proof.bands?.find(row => row[0] === id);
+        return band && originalOwned === band[3] && currentOwned >= band[1]
+            && (band[2] === null || currentOwned <= band[2]) ? originalOwned : currentOwned;
+    };
+    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state),
+        stockFor: stockReader(state, key => roots.get(key)) }, stockAmount)) return refuse('quantity', ['sources', 'money']);
+    const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
+    const originalSales = proof.liquidation?.rows;
+    let changedLoot = false;
+    const sameSales = liquidation.proof && Array.isArray(originalSales)
+        && liquidation.proof.rows.length === originalSales.length
+        && liquidation.proof.rows.every(([id, count], at) => {
+            const original = originalSales[at];
+            if (id !== original?.[0]) return false;
+            if (count === original[1]) return true;
+            changedLoot = true;
+            const band = proof.bands?.find(row => row[0] === id);
+            const item = ItemIndex.find(DataCache.items, id);
+            // Only the existing finite unused-loot error band. Unlimited
+            // surplus stock is sale capacity, not economic noise.
+            return band && band[2] !== null && /^Other\.(Material|Arrow)/.test(String(item?.template?.kind || ''))
+                && count - original[1] === positive(state.inventory?.[id]?.amount) - band[3];
+        });
+    if (!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
+        return refuse('liquidation', ['sources', 'money']);
+    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp)) return refuse('check_failed', ['occupation', 'sources']);
+    if (options.rebuildBasis) {
+        // Reusing slow valuation facts is not permission to execute the old
+        // activity with the new wallet. Admission and the network run again.
+        if (!(marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || [])))
+            return refuse('market', ['sources', 'benefits']);
+        return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
-    let buyHolds = null;
-    if (leaf?.activity === 'shopping' && leaf.kind === 'buy') {
-        if (!Number.isFinite(last?.heldShoppingUnits)) return 'check_failed';
-        buyHolds = acceptedActivityHolds(state, { ...leaf, heldAtDecision: last.heldShoppingUnits }, deps);
-        if (!buyHolds) return 'check_failed';
+    const leaf = options.leaf;
+    if (leaf.activity === 'shopping' || leaf.activity === 'selling') {
+        if (!acceptedActivityHolds(state, leaf, deps, null, { liquidation: liquidation.candidates }))
+            return refuse('check_failed', ['sources', 'money']);
+    } else if (leaf.activity === 'hunting') {
+        if (materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(leaf, state) <= 0)
+            return refuse('check_failed', ['sources']);
+    } else if (leaf.activity === 'pvp' || leaf.activity === 'helping') {
+        if (!Number.isSafeInteger(leaf.targetId) || leaf.targetId <= 0
+            || leaf.rootKey !== `${leaf.activity === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}`)
+            return refuse('check_failed', ['relations']);
+    } else if (leaf.activity === 'crafting') {
+        // This retains the chosen intention. The native executor still
+        // prepares its actual batch and checks MP, materials and payment.
+        if (!Number.isSafeInteger(leaf.recipeId) || leaf.recipeId <= 0
+            || !Recipes.resolveByRecipeId(leaf.recipeId))
+            return refuse('check_failed', ['sources']);
+    } else if (leaf.activity === 'improving') {
+        if (!leaf.improvement || typeof leaf.improvement !== 'object' || Array.isArray(leaf.improvement))
+            return refuse('check_failed', ['sources']);
+    } else if (!['resting', 'traveling'].includes(leaf.activity)) {
+        return refuse('unsupported_leaf', ['sources']);
     }
-    if (!(marketHolds(board, held.reads, deps) && spotsHold(deps, held.spotReads))
-        && (Sections.softDue(held.plan.statsPacket.wishSections, 'market', timestamp)
-            || !(buyHolds ?? ownLeafHolds(state, held.plan, deps)))) return 'market';
-    if (deps.withNodes && !held.projection || deps.nodes?.length || extensions.size) return 'nodes_needed';
-    if (held.plan.pending) return 'plan_pending';
-    return 'would_hold';
+    if (!options.softPrefix && !(marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []))
+        && Sections.softDue(baseline, 'market', timestamp)) return refuse('market', ['sources', 'benefits']);
+    return { valid: true, reason: '', touchedSections: 0 };
+}
+function eventProofHolds(state, proof, deps = {}, options = {}) {
+    const verdict = heldBuildVerdict(state, proof, deps, options);
+    if (options.verdict) Object.assign(options.verdict, verdict);
+    if (!verdict.valid) options.why?.push(verdict.reason);
+    return verdict.valid;
+}
+function restartEventProof(proof, accepted) {
+    if (proof?.version !== 1 || proof.restartable !== true || !accepted?.card
+        || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity', 'hard',
+            'quantities', 'liquidation', 'stockRoots', 'bands', 'safety', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
+        || !RecomputeGeneration.current() || proof.generation !== RecomputeGeneration.current()
+        || !/^[a-f0-9]{64}$/.test(proof.generation) || !/^[a-f0-9]{64}$/.test(proof.hard)
+        || proof.owner !== accepted.characterId || proof.at !== accepted.baseline?.at
+        || !Array.isArray(proof.decision) || proof.decision.length !== 3
+        || proof.decision[0] !== accepted.decisionSeq || proof.decision[1] !== accepted.activityLeaf
+        || proof.decision[2] !== accepted.focus || proof.activity !== activityIdentity(accepted.card.activity)) return null;
+    const quantities = packQuantityInputs(proof.quantities);
+    if (!quantities) return null;
+    try {
+        const metadata = Buffer.from(JSON.stringify([proof.liquidation, proof.stockRoots, proof.bands, proof.safety, proof.hourAdena]));
+        const size = 35 + metadata.length + quantities.byteLength;
+        if (metadata.length > 65535 || size > FENCE_RAW_BYTES) return null;
+        const bytes = Buffer.allocUnsafe(size);
+        bytes[0] = 2; bytes.writeUInt16LE(metadata.length, 1);
+        // The domain-separated hard digest already commits to generation.
+        Buffer.from(proof.hard, 'hex').copy(bytes, 3);
+        metadata.copy(bytes, 35); Buffer.from(quantities).copy(bytes, 35 + metadata.length);
+        return Uint8Array.from(bytes);
+    } catch (_) { return null; }
+}
+function restoreEventProof(prefix, accepted) {
+    const generation = RecomputeGeneration.current();
+    if (!generation || !(prefix instanceof Uint8Array) || prefix.byteLength < 35
+        || prefix.byteLength > FENCE_RAW_BYTES || !accepted?.card) return null;
+    try {
+        const bytes = Buffer.from(prefix);
+        if (bytes[0] !== 2) return null;
+        const metadataSize = bytes.readUInt16LE(1), raw = bytes.subarray(35, 35 + metadataSize), text = raw.toString('utf8');
+        if (35 + metadataSize >= bytes.length || !Buffer.from(text, 'utf8').equals(raw)) return null;
+        const row = JSON.parse(text), quantities = unpackQuantityInputs(bytes.subarray(35 + metadataSize));
+        if (!Array.isArray(row) || row.length !== 5 || !quantities || !Number.isSafeInteger(accepted.characterId)
+            || !Number.isFinite(accepted.baseline?.at)) return null;
+        return Object.freeze({ version: 1, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
+            decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
+            activity: activityIdentity(accepted.card.activity), generation,
+            hard: bytes.subarray(3, 35).toString('hex'), quantities, liquidation: row[0], stockRoots: row[1],
+            bands: row[2], safety: row[3], hourAdena: row[4] });
+    } catch (_) { return null; }
+}
+function wireEventProof(proof) {
+    if (!proof || proof.version !== 1 || !proof.market || !proof.spots) return null;
+    try {
+        const market = [...proof.market], spots = [...proof.spots];
+        if (market.length > FENCE_SPOTS || spots.length > FENCE_SPOTS) return null;
+        const wire = { ...proof, market, spots };
+        return Buffer.byteLength(JSON.stringify(wire)) <= FENCE_RAW_BYTES ? wire : null;
+    } catch (_) { return null; }
 }
 // Sampled proof uses existing numeric fields: item/requested = held hunting
 // item/amount, before = retained raw bag+incoming, owned/actual = current bag/
@@ -506,7 +720,12 @@ function occupancyToken(deps, id) {
     return `${Number(row?.reservedCount ?? row?.count) || 0}`;
 }
 function spotsHold(deps, reads = []) {
-    for (const [id, token] of reads) if (occupancyToken(deps, id) !== token) return false;
+    if (typeof reads?.[Symbol.iterator] !== 'function') return false;
+    for (const row of reads) {
+        if (!Array.isArray(row) || row.length !== 2) return false;
+        const [id, token] = row;
+        if (occupancyToken(deps, id) !== token) return false;
+    }
     return true;
 }
 function quantityBands(state, context, projection) {
@@ -520,7 +739,7 @@ function quantityBands(state, context, projection) {
     const used = new Set((projection?.nodes || []).filter(node => node.key.startsWith('item:')).map(node => Number(node.key.slice(5))));
     const error = Sections.incomeError(state, context.persona);
     for (const [id, row] of Object.entries(state.inventory || {})) {
-        const amount = positive(row.amount), itemId = Number(id), template = ItemIndex.find(invoke('GameServer/DataCache').items, itemId);
+        const amount = positive(row.amount), itemId = Number(id), template = ItemIndex.find(DataCache.items, itemId);
         if (!amount || row.equipped || row.equippedCount || row.protected || row.protectedAmount || row.reservedAmount
             || row.acceptedCustomer || row.assignedClan || row.available === false || positive(reserved[id])
             || (row.stackable ?? template?.etc?.stackable) !== true) continue;
@@ -554,9 +773,17 @@ function quantityBands(state, context, projection) {
     }
     return bands;
 }
+function choiceBagValue(state, bands, price = buyback) {
+    return bands.reduce((value, [id, , high]) => value + (high === null ? 0
+        : positive(state.inventory?.[id]?.amount) * positive(price(id))), 0);
+}
+function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBagValue(state, bands)) {
+    return Number.isFinite(baseline?.bagValue)
+        && Math.abs(value - baseline.bagValue)
+            <= positive(hourAdena) * positive(baseline.incomeError);
+}
 function bagSafety(state, timestamp) {
-    const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
-    const bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
+    const bag = Floor.stateInventory(state, DataCache.items);
     const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
     return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
 }
@@ -680,7 +907,7 @@ function calculationHolds(state, fence, deps = {}, options = {}) {
     const [key, [tokens, items], spots, bands, safety] = fields;
     if (!bandsHold(state, bands, options.leaf)) return miss(why, 'bands');
     if (safety) {
-        const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), bag = Floor.stateInventory(state, invoke('GameServer/DataCache').items);
+        const bag = Floor.stateInventory(state, DataCache.items);
         if (bag.slots !== safety[0] || Floor.weightPenalty(bag.load, safety[2]) !== safety[1]) return miss(why, 'safety');
     }
     // options.activity is the fence's own build activity, so one key compares;
@@ -702,7 +929,7 @@ function firstSegment(a, b) {
 }
 // A retained leaf is calculation data. Recheck its native source, physical
 // resources and funding now; execution still uses the existing command/CAS.
-function acceptedActivityHolds(state, leaf, deps = {}, current = null) {
+function acceptedActivityHolds(state, leaf, deps = {}, current = null, prepared = null) {
     if (leaf.activity === 'hunting') return true;
     deps = resolved(state, deps, false);
     const trip = deps.tripCost || Trip.preparedReader(deps.routeRows || [], { hourAdena: positive(state.stats?.money?.[0]) });
@@ -719,7 +946,8 @@ function acceptedActivityHolds(state, leaf, deps = {}, current = null) {
     }
     if (leaf.activity === 'selling' && leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
         && invoke('GameServer/Bot/Population/ColdOccupationSources').hasNpcSellerInTown(leaf.town)) {
-        return Providers.liquidationCandidates(state, current ? current() : basics(state, deps)).some(row => leaf.items.includes(Number(row.selfId)));
+        return (prepared?.liquidation || Providers.liquidationCandidates(state, current ? current() : basics(state, deps)))
+            .some(row => leaf.items.includes(Number(row.selfId)));
     }
     return false;
 }
@@ -736,7 +964,12 @@ function marketToken(board, id, deps = {}) {
     return `${board?.itemRevision ? board.itemRevision(id) : '-'}|${Counters.revisionOf(Counters.counterOf(id))}|${deps.workshopRevision?.(id) || 0}`;
 }
 function marketHolds(board, reads, deps) {
-    for (const [id, token] of reads) if (marketToken(board, id, deps) !== token) return false;
+    if (typeof reads?.[Symbol.iterator] !== 'function') return false;
+    for (const row of reads) {
+        if (!Array.isArray(row) || row.length !== 2) return false;
+        const [id, token] = row;
+        if (marketToken(board, id, deps) !== token) return false;
+    }
     return true;
 }
 // A held entry's read set (items or spots with their tokens) in the build's
@@ -806,6 +1039,8 @@ function resolved(state, deps, production = true) {
     if (!deps.board && isMainThread) deps.board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
     if (typeof deps.spots === 'function') deps.spots = deps.spots();
     if (typeof deps.memory === 'function') deps.memory = deps.memory(state.characterId);
+    if (typeof deps.memoryIdentity === 'function') deps.memoryIdentity = deps.memoryIdentity(state.characterId);
+    if (typeof deps.sourceReady === 'function') deps.sourceReady = deps.sourceReady();
     // Stock, survival and own shot-use readers need only the hunt foundation.
     // Production sources and recipe books belong to the full wish review.
     if (production) {
@@ -847,15 +1082,18 @@ function personaOf(state, deps) {
 }
 function pricing(state, persona, board, timestamp, deps, read = () => {}, prices = new Map()) {
     const Belief = invoke('GameServer/Bot/Economy/PriceBelief');
-    const knowledgeEnabled = deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled();
+    const knowledgeEnabled = deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled();
     const priceCtx = { characterId: state.characterId, understanding: persona.understanding ?? 0.3,
         marketTrades: state.marketTrades, knowledgeEnabled, board, timestamp };
     const beliefs = new Map();
-    return { knowledgeEnabled, prices, beliefs, price: id => {
+    const beliefFor = id => {
+        if (!beliefs.has(Number(id))) beliefs.set(Number(id), Belief.prior(id, priceCtx) || null);
+        return beliefs.get(Number(id));
+    };
+    return { knowledgeEnabled, prices, beliefs, beliefFor, price: id => {
         read(id);
         if (!prices.has(Number(id))) {
-            const belief = Belief.prior(id, priceCtx);
-            if (belief) beliefs.set(Number(id), belief);
+            const belief = beliefFor(id);
             prices.set(Number(id), belief ? Math.exp(belief.mu) : 0);
         }
         return prices.get(Number(id));
@@ -990,7 +1228,7 @@ function incomeRouteFor(state, deps, timestamp, price, keep, watchSpot) {
 function foundation(state, deps, persona, timestamp, price, keepRoute = null, watchSpot = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
-    const role = state.party?.role || state.stats?.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(state.stats?.classId || 0);
+    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
     let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
     const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute, watchSpot);
@@ -1021,7 +1259,7 @@ function foundation(state, deps, persona, timestamp, price, keepRoute = null, wa
     let bagHours = 2;
     const hasBagForecast = spotTable?.stacks !== null && spotTable?.stacks !== undefined;
     if (hasBagForecast) {
-        const Floor = invoke('GameServer/Bot/Population/SurvivalFloor'), Data = invoke('GameServer/DataCache');
+        const Data = DataCache;
         const race = state.stats?.race ?? (Data.classTemplates == null ? undefined : ClassProgression.firstClassRow(Data.classTemplates, state.stats?.classId || 0))?.template?.race;
         // ARCH-NOTE: size the E9 bag interval on the bag after its
         // planned kit stacks exist. Otherwise an empty shot/potion row uses
@@ -1068,6 +1306,14 @@ function foundation(state, deps, persona, timestamp, price, keepRoute = null, wa
         riskWeight: Valuation.riskWeight(state, persona),
         expectedDeathHours: positive(bestTable?.deaths) * deathHours,
         karmaHours: Valuation.karmaHours(state, { ...hunt, lostGearHours, deathsPerHour: positive(bestTable?.deaths) }) };
+}
+function foundationFromPlan(state, plan, deps, price) {
+    const { stock, kitCost } = kitReader(plan.kit, price,
+        () => plan.kit.scrollHours ??= scrollHoursFor(state, deps.spots, plan.bestSpotId));
+    return { hunt: plan.hunt, hourAdena: plan.hourAdena, survivalReserve: plan.survivalReserve,
+        kit: plan.kit, stock, kitCost, lostGearHours: plan.lostGearHours, bestSpotId: plan.bestSpotId,
+        deathHours: plan.deathHours, riskWeight: plan.riskWeight,
+        expectedDeathHours: plan.expectedDeathHours, karmaHours: plan.karmaHours };
 }
 function basics(state = {}, deps = {}) {
     deps = resolved(state, deps, false);
@@ -1196,8 +1442,11 @@ function buildForState(state, deps) {
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
     // Diagnostics keep the parts to name the moved ones; the plain path joins as before.
+    const activeEvents = eventReuseEnabled(deps);
     const keyParts = diagnostic ? inputKeyParts(state, { ...deps, timestamp }) : null;
-    const key = keyParts !== null ? keyParts.join('|') : inputKey(state, { ...deps, timestamp });
+    const legacyKey = activeEvents && !diagnostic ? null
+        : keyParts !== null ? keyParts.join('|') : inputKey(state, { ...deps, timestamp });
+    const key = activeEvents ? eventInputKey(state, deps, timestamp, held?.activity, held?.plan.network?.activity) : legacyKey;
     if (held?.key !== key) rowKeys = new Map();
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them).
@@ -1211,7 +1460,10 @@ function buildForState(state, deps) {
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
     const input = held?.inputDecision;
     const replay = held?.key === key && input && !Sections.decisionRefusal(state, input[0], input[1], input[2]);
-    if ((replay || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
+    let eventVerdict = activeEvents ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
+        baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
+        leaf: held?.plan.network?.activity, mp: held?.mp, timestamp, currentKey: key }) : null;
+    if ((activeEvents ? eventVerdict.valid : replay || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
         && SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)
         && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
@@ -1238,6 +1490,21 @@ function buildForState(state, deps) {
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
             fenceData: { reads: held.reads, spots: held.spotReads } });
     }
+    eventVerdict ||= diagnostic ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
+        baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
+        leaf: held?.plan.network?.activity, mp: held?.mp, timestamp })
+        : { valid: false, reason: 'unproved', touchedSections: 0 };
+    // A lost graph cache still has the bot's accepted execution card. Compare
+    // its verdict with the one fresh card the normal publication captures;
+    // this transient reference never joins a retained plan or another map.
+    const candidate = diagnostic && !held ? deps.eventCandidate : null;
+    const eventShadow = candidate ? { accepted: candidate,
+        verdict: heldBuildVerdict(state, candidate.eventProof, deps, {
+            baseline: candidate.baseline, activity: candidate.activity, leaf: candidate.card?.activity,
+            mp: candidate.mp, timestamp, softPrefix: candidate.softPrefix === true }) } : null;
+    const basis = activeEvents && eventVerdict.reason === 'money' && heldBuildVerdict(state, held.plan.eventProof, deps, {
+        baseline: held.plan.statsPacket.wishSections, activity: held.activity, leaf: held.plan.network?.activity,
+        mp: held.mp, timestamp, currentKey: key, rebuildBasis: true }).basisValid ? held.plan : null;
     // With diagnostics the same key also names its parts; they are not retained.
     const { parts: sourceParts, tail: sourceTail, ...sections } = sectionKeys(state, { ...deps, timestamp }, [],
         diagnostic ? 'source_parts' : 'sources');
@@ -1263,7 +1530,8 @@ function buildForState(state, deps) {
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         const eventHash = eventKeyHash(hashes), baseline = held?.plan.statsPacket.wishSections;
         const quietSections = !!baseline && Sections.factEvents(name => baseline[name], Sections.semanticFacts(state, timestamp), state).length === 0;
-        gate = shadowGate(state, held, last, eventHash, timestamp, deps, sourceBoard, quietSections, improvementMark);
+        gate = held?.plan.eventProof ? eventVerdict.valid ? 'would_hold' : eventVerdict.reason
+            : held ? 'unproved' : 'no_held';
         Diagnostics.count('context', 'gate', gate);
         if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
         Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(state, held, sourceBoard, deps, timestamp));
@@ -1368,14 +1636,27 @@ function buildForState(state, deps) {
     const board = watchedBoard(sourceBoard, watch, id => { if (building) reads.set(id, tokenOf(id)); });
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
-    const { price, prices, beliefs, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read);
+    const { price, prices, beliefs, beliefFor, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read,
+        basis ? new Map(basis.prices) : new Map());
     // The income route record of this build (its own search or the basics'
     // one): its solo matchup profiles serve the providers' source route reader.
     let incomeRecord = null;
-    const base = foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; },
-        id => spotReads.set(id, spotTokenOf(id)));
+    const base = basis ? foundationFromPlan(state, basis, deps, price)
+        : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; },
+            id => spotReads.set(id, spotTokenOf(id)));
+    if (basis) {
+        // These facts still belong to the accepted basis. Retain their
+        // original tokens; a later read must not renew an untouched input.
+        for (const [id, token] of held.reads) { reads.set(id, token); if (id > 0) deps.onSourceRead?.(id); }
+        for (const [id, token] of held.spotReads) spotReads.set(id, token);
+    }
     const own = Hunt.sampledRows(state, timestamp, deps.mode);
+    const quantityInputs = createQuantityInputs();
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
+        quantityInputs,
+        ...(basis ? { horizonHours: basis.horizonHours } : {}),
+        touchedSections: Number(state.stats?.wishDirty || 0) | Number(deps.eventVerdict?.touchedSections || 0)
+            | Number(eventVerdict.touchedSections || 0),
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
@@ -1450,8 +1731,9 @@ function buildForState(state, deps) {
     // One stock reader for the provider's gear witnesses and the network
     // build; the projection is read lazily once it exists (stock roots).
     context.wallet = Funding.budget(state, deps.buyOrderEscrow);
-    context.stockFor = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
-    context.completionKey = invoke('GameServer/Bot/Economy/BotCrystallization').completionKey(state);
+    const nativeStock = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
+    context.stockFor = (id, rootKey) => quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
+    context.completionKey = Crystallization.completionKey(state, quantityInputs);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = held?.sections?.sources === sections.sources
         ? held.sourceSections : null;
@@ -1486,14 +1768,12 @@ function buildForState(state, deps) {
     // Unused free loot is compared with the last decision's own value/error,
     // while required materials retain their exact quantities in the key.
     const choiceShape = sectionKeys(state, deps, choiceBands.map(([id, low, high]) => [id, low, high, high === null ? low : 1]));
-    const bagValue = choiceBands.reduce((value, [id, , high]) => value + (high === null ? 0
-        : positive(state.inventory[id]?.amount) * positive(context.buyback(id))), 0);
+    const bagValue = choiceBagValue(state, choiceBands, context.buyback);
     const acceptedSections = state.stats?.wishSections;
     context.choiceInputs = Sections.hash([choiceShape.structural,
         [...reads].sort(([a], [b]) => a - b), [...spotReads].sort(([a], [b]) => String(a).localeCompare(String(b)))]);
     const unchangedChoice = Number(acceptedSections?.choices) === context.choiceInputs
-        && Number.isFinite(acceptedSections?.bagValue)
-        && Math.abs(bagValue - acceptedSections.bagValue) <= positive(context.hourAdena) * positive(acceptedSections.incomeError)
+        && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
         && heldReadsHold();
     context.choiceBagValue = unchangedChoice ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
@@ -1501,7 +1781,7 @@ function buildForState(state, deps) {
     // decision has passed (money, observation, horizon; the market items and
     // spot crowd the held build read). A rebuild where only noise moved keeps
     // them. A crafter's MP fences its plan (sources), not its goal: no event.
-    const dirty = Number(state.stats?.wishDirty) || 0;
+    const dirty = (Number(state.stats?.wishDirty) || 0) | (activeEvents ? context.touchedSections : 0);
     const soft = dirty ? null : (seen.at === Number(acceptedSections?.at) ? seen.kind
         : softEvent(state, { baseline: acceptedSections, expPerHour: acceptedSections?.expHour, persona }, timestamp, deps))
         ?? (held && Sections.softDue(acceptedSections, 'market', timestamp) && !heldReadsHold() ? 'market' : null);
@@ -1542,11 +1822,17 @@ function buildForState(state, deps) {
     let cumulative = base.survivalReserve;
     for (const wish of network.queue) { cumulative += cashCharge(wish); budget.watch(cumulative); }
     const watchedWish = network.gap || network.queue.find(wish => wish.key === network.focus?.[0]);
-    const belief = beliefs.get(Number(watchedWish?.object?.itemId));
+    const watchedItem = Number(watchedWish?.object?.itemId);
+    const belief = beliefs.get(watchedItem) || (basis && watchedItem > 0 ? beliefFor(watchedItem) : null);
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
         { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result });
+    // The trigger is not the calculation basis. Only the proven money path
+    // kept the original valuation inputs; a fresh fallback adopted all of
+    // them and must publish matching baselines, including downstream money.
+    if (activeEvents) Sections.carrySectionBaseline(acceptedSections, context.statsPacket.wishSections,
+        basis ? Sections.sectionBit('money') : Sections.sectionMask(Sections.SECTIONS));
     building = false; endTokens();
 
     if (diagnostic) {
@@ -1622,6 +1908,7 @@ function buildForState(state, deps) {
         // The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
+        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots });
         remember(cache, actorKey, { key, inputDecision: [inputSequence, inputActivityLeaf, inputFocus],
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
@@ -1657,6 +1944,7 @@ function buildForState(state, deps) {
         }
     }
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
+        eventShadow,
         fenceData: { reads: heldReads || reads, spots: heldSpots || spotReads,
             structural: deps.timestamp === timestamp ? bandStructural : null } });
 }
@@ -1747,6 +2035,8 @@ function planOf(context, base, { key, market, tripHour, projection = null, knowl
         network: compactNetwork(context.network), moneyPrice: context.moneyPrice, gapHorizonHours: context.gapHorizonHours,
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
+        quantityInputs: projection ? context.quantityInputs?.finish() : null,
+        liquidationInputs: context.liquidationInputs,
         prices: planPrices(prices, base.kit, context), gearPlanMemo: undefined };
 }
 // What a review's stock reader, usefulness, worth and purchase budget read:
@@ -1777,7 +2067,7 @@ function lazySpotValue(state, plan, deps) {
         { ...deps, timestamp: plan.timestamp, persona: plan.persona, deathHours: plan.deathHours }))(...args);
 }
 const buyback = id => invoke('GameServer/Items/NpcSellRules')
-    .npcBuyPrice(Number(ItemIndex.find(invoke('GameServer/DataCache').items, id)?.template?.price || 0));
+    .npcBuyPrice(Number(ItemIndex.find(DataCache.items, id)?.template?.price || 0));
 // One reader's context over a plan. `built` carries the building call's own
 // readers (prices with their memo, kit, spot value, trip, the projection);
 // a later view makes its own from the plan. The state is the caller's, held
@@ -1809,6 +2099,8 @@ function view(state, plan, deps, built = {}) {
     // The plan is the identity of one decision for memos kept beside it
     // (a refused trip, the gear plan choice), not this view object.
     Object.defineProperty(context, 'plan', { value: plan });
+    Object.defineProperty(context, 'eventProof', { value: () => plan.eventProof || null });
+    if (built.eventShadow) Object.defineProperty(context, 'eventShadow', { value: built.eventShadow });
     let fence;
     Object.defineProperty(context, 'calculationFence', { get: () => fence === undefined
         ? (fence = built.fenceData ? calculationFence(state, built.fenceData.reads, built.fenceData.spots, deps,
@@ -1851,7 +2143,24 @@ function keptTargets(state = {}, deps = {}) {
 function survivalReserve(state = {}) {
     return Array.isArray(state.stats?.money) ? positive(state.stats.money[2]) : basics(state).survivalReserve;
 }
-function forActor(actor, session, deps = {}) { return forState(stateForActor(actor, session), deps); }
+function forActor(actor, session, deps = {}) {
+    const state = stateForActor(actor, session);
+    if (!isMainThread || !eventReuseEnabled(deps)) return forState(state, deps);
+    // lazy: cycle the coordinator publishes hot handoffs through this owner.
+    const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+    const accepted = coordinator.economyDecisions?.advisoryFor(state);
+    if (!accepted) return forState(state, deps);
+    // The same accepted memory owner serves hot and cold validity. Reading
+    // the original advisory is not permission to execute its selected act.
+    // lazy: cycle the native memory runtime also calls economic consumers.
+    const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
+    const input = { ...deps, memory: memory.snapshot(Number(state.characterId)),
+        memoryIdentity: memory.contentIdentity(Number(state.characterId)),
+        routeRows: deps.routeRows || preparedRouteRows(state) || coordinator.routeRows?.(state) };
+    const prepared = {};
+    const refreshed = ColdEconomyDecision.refreshAdvisory(state, accepted, input, { prepared });
+    return refreshed?.economy || forState(state, { ...input, eventVerdict: prepared.eventVerdict });
+}
 function craftIncome(state) {
     // The guarded worker publication is the only production income reader on
     // main. A missing result leaves the independently supported hunt baseline.
@@ -1994,6 +2303,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, eventInputKey, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };
