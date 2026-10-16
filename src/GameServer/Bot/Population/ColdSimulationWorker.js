@@ -1418,7 +1418,7 @@ function startKernel(config = {}) {
                         deliverySendFailures: large, lastScanEvents: 160, consumedSpotKeys: 32, consumedActorKeys: 128,
                         pendingSpotKeys: large, pendingActorKeys: large, deliveryMode: 'addressed',
                         revenge: { evaluated: large, intents: large, at: frame.at, active: 128, sampledActors: 128, overflow: false } },
-                    tables: tables.summary(), heapUsed: large, rss: large,
+                    tables: tables.summary(), heapUsed: large, rss: large, heap: { used: large, total: large, external: large },
                     eventLoopUtilization: 1, eventLoopLagP95Ms: large,
                     eventLoopLagMaxMs: large
                 }, 'x'.repeat(160));

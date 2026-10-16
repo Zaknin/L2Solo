@@ -3,6 +3,7 @@
 const fs = require('fs');
 const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
+const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
 
 const databasePath = String(workerData?.databasePath || '');
 const connection = new DatabaseSync(databasePath, { timeout: 250 });
@@ -72,7 +73,7 @@ function checkpoint(message = {}) {
 }
 
 function respond(id, result) {
-    parentPort.postMessage({ type: 'result', id, result });
+    parentPort.postMessage({ type: 'result', id, result, ...(workerData?.developerDiagnostics ? { heap: heapRecord() } : {}) });
 }
 
 parentPort.on('message', (message = {}) => {

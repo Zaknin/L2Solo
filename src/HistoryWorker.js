@@ -11,6 +11,7 @@
 const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const HistoryStore = require('./HistoryStore');
+const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
 const diagnosticWriter = workerData.developerDiagnostics === true && workerData.diagnostics ? new (require('./EconomyDiagnosticWriter').EconomyDiagnosticWriter)(
     require('node:path').join(require('node:path').dirname(workerData.worldPath), 'logs'), workerData.diagnostics, { enabled: true }) : null;
 
@@ -42,14 +43,16 @@ function tick(withRetention = false) {
     lastTickAt = Date.now();
     try {
         const result = drain();
+        // The once-a-minute tick also carries this thread's heap.
+        const heap = withRetention ? { heap: heapRecord() } : null;
         // Also report a cursor that was reached before a restart: the main
         // thread then deletes outbox rows a crash left behind.
         if (result.upTo > reportedUpTo) {
             reportedUpTo = result.upTo;
-            parentPort.postMessage({ type: 'moved', ...result });
+            parentPort.postMessage({ type: 'moved', ...result, ...heap });
         } else {
             // Lets the main thread send the next wake message.
-            parentPort.postMessage({ type: 'idle' });
+            parentPort.postMessage({ type: 'idle', ...heap });
         }
         if (withRetention) {
             HistoryStore.retention(history);

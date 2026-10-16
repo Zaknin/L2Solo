@@ -2159,6 +2159,7 @@ function worldStatus() {
         runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
+            heap: PopulationStatus.heaps(cold.worker),
             developerDiagnostics: {
                 main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
                 worker: cold.worker?.developerDiagnostics || null,

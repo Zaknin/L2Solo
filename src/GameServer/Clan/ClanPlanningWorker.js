@@ -5,6 +5,7 @@ const OfferQuery = require('../Bot/Economy/OfferQuery');
 const TableMirror = require('../Bot/Population/TableMirror');
 const { BoardIndex } = require('../AfkTrade/BoardIndex');
 const { SpotCatalogReader } = require('./ClanSpotCatalog');
+const { heapRecord } = require('../Bot/Population/WorkerHeapTelemetry');
 const spotCatalog = new SpotCatalogReader();
 
 // Only immutable catalogs and per-request snapshots enter this process.
@@ -137,7 +138,7 @@ parentPort.on('message', (message) => {
                 member, spots, warehouseRows, { ...options, throwOnError: true })
                 : planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
             // lazy: worker the profile resolves its links through the stub invoke installed above.
-            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt,
+            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt, heap: heapRecord(),
                 gainStore: invoke('GameServer/Bot/Population/ColdCombatProfile').cacheStats() } : {}) } });
             return;
         } else {

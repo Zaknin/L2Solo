@@ -4,6 +4,7 @@ const { parentPort, workerData } = require('worker_threads');
 invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = workerData?.developerDiagnostics === true;
 const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 const TownPathCorridor = invoke('GameServer/Geodata/TownPathCorridor');
+const { heapRecord } = invoke('GameServer/Bot/Population/WorkerHeapTelemetry');
 
 GeodataEngine.init();
 let navigationRevision = null;
@@ -45,7 +46,8 @@ parentPort.on('message', (message) => {
             }
         );
         const result = request.townCorridor ? TownPathCorridor.build(path, checkBudget) : path;
-        parentPort.postMessage({ id, ok: true, path: result, workerMs: timed ? performance.now() - startedAt : null });
+        parentPort.postMessage({ id, ok: true, path: result, workerMs: timed ? performance.now() - startedAt : null,
+            ...(workerData?.developerDiagnostics === true ? { heap: heapRecord() } : {}) });
     } catch (error) {
         parentPort.postMessage({
             id,

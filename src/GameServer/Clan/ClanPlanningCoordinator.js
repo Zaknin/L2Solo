@@ -175,6 +175,8 @@ class ClanPlanningCoordinator {
         DiagnosticConfig.developerDiagnostics && (this.stats.maxRunMs = Math.max(this.stats.maxRunMs, result.durationMs));
         // The worker's ColdCombatProfile gain store after this run (L110).
         DiagnosticConfig.developerDiagnostics && result.gainStore && (this.stats.gainStore = result.gainStore);
+        // The worker's heap after this run (WorkerHeapTelemetry.heapRecord).
+        DiagnosticConfig.developerDiagnostics && result.heap && (this.stats.heap = result.heap);
         return result.plan;
     }
 

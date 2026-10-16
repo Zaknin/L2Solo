@@ -4,6 +4,7 @@ const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const MarketTradeOverview = require('./MarketTradeOverview');
 const MarketEconomyOverview = require('./MarketEconomyOverview');
+const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
 
 const connection = new DatabaseSync(String(workerData.databasePath), { readOnly: true, timeout: 250 });
 const all = (sql, params = []) => connection.prepare(sql).all(...params);
@@ -41,7 +42,8 @@ function overview(options = {}) {
 parentPort.on('message', (message = {}) => {
     if (message.type !== 'overview') return;
     try {
-        parentPort.postMessage({ id: message.id, overview: overview(message.options), stats: { ...stats } });
+        parentPort.postMessage({ id: message.id, overview: overview(message.options), stats: { ...stats },
+            ...(workerData.developerDiagnostics ? { heap: heapRecord() } : {}) });
     } catch (error) {
         parentPort.postMessage({ id: message.id, error: error?.message || String(error) });
     }

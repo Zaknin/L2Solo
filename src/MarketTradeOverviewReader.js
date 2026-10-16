@@ -3,6 +3,7 @@
 const path = require('path');
 const { Worker } = require('worker_threads');
 const { createAgeCache } = require('./WorldObserver/AgeCache');
+const PopulationConfig = require('./GameServer/Bot/Population/PopulationConfig');
 
 const CACHE_MS = 5000;
 // The default overview is shared within CACHE_MS; a timestamp or limit is read fresh.
@@ -11,6 +12,8 @@ let worker = null;
 let databasePath = null;
 let nextId = 0;
 let workerStats = null;
+// The worker's heap as of its last answer (WorkerHeapTelemetry.heapRecord).
+let workerHeap = null;
 const pending = new Map();
 
 function rejectPending(error) {
@@ -29,9 +32,10 @@ function start(nextPath) {
     rejectPending(new Error('market_overview_database_changed'));
     databasePath = nextPath;
     const instance = new Worker(path.join(__dirname, 'MarketTradeOverviewWorker.js'), {
-        workerData: { databasePath }
+        workerData: { databasePath, developerDiagnostics: PopulationConfig.developerDiagnostics === true }
     });
     worker = instance;
+    workerHeap = null;
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
         const entry = pending.get(Number(message.id));
@@ -41,6 +45,7 @@ function start(nextPath) {
         if (message.error) entry.reject(new Error(message.error));
         else {
             workerStats = message.stats || workerStats;
+            workerHeap = message.heap || workerHeap;
             entry.resolve(message.overview);
         }
         if (!pending.size) instance.unref();
@@ -78,7 +83,7 @@ function read(nextPath, options = {}) {
     return cacheable ? overviewCache() : request(options);
 }
 
-// Counters of the worker's window reuse, as of its last answer.
-function stats() { return { ...workerStats }; }
+// Counters of the worker's window reuse and its heap, as of its last answer.
+function stats() { return { ...workerStats, heap: workerHeap }; }
 
 module.exports = { read, stats };

@@ -23,6 +23,8 @@ let reader = null;
 let config = null;
 let stopping = false;
 let writerTelemetry = null;
+// The history thread's heap as of its last once-a-minute tick (WorkerHeapTelemetry.heapRecord).
+let workerHeap = null;
 let restartTimer = null;
 let nextId = 0;
 const pending = new Map();
@@ -129,6 +131,7 @@ function spawn() {
             ...(config.diagnostics ? { developerDiagnostics: true, diagnostics: config.diagnostics } : {}) }
     });
     worker = instance;
+    workerHeap = null;
     wakePending = false;
     writesSinceWake = 0;
     if (config.diagnostics) Diagnostics.connect(batch => {
@@ -141,6 +144,7 @@ function spawn() {
     if (PopulationConfig.developerDiagnostics) counters.starts += 1;
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
+        if (message.heap && PopulationConfig.developerDiagnostics) workerHeap = message.heap;
         if (message.type === 'economy_diagnostics_ack') {
             if (!config?.diagnostics || !PopulationConfig.developerDiagnostics) return;
             Diagnostics.ack(message.id, message.written);
@@ -275,7 +279,7 @@ function one(sql, params = []) {
 
 function stats() {
     if (!PopulationConfig.developerDiagnostics) return { path: config?.historyPath || null, running: !!worker, upTo: counters.upTo, diagnostics: { enabled: false } };
-    return { path: config?.historyPath || null, running: !!worker, ...counters,
+    return { path: config?.historyPath || null, running: !!worker, ...counters, heap: workerHeap,
         ...(PopulationConfig.developerDiagnostics && PopulationConfig.economyDiagnostics ? { economyDiagnostics: { ...Diagnostics.stats(), writer: writerTelemetry } } : {}) };
 }
 
