@@ -231,7 +231,7 @@ try {
             workshop: { known: true, recipeId: 22, productId: 1463, incomePerHour: 100, cycleHours: .5 },
             feasibility: [12345, 2, 3], shot: { craft: { recipeId: 22, batches: 1 } },
             activity: { activity: 'hunting', rootKey: 'stock:shots', itemId: 1870, amount: 29, npcId: 1001, spotId: 7 } });
-        const baseline = { at: T }, proof = {}, saved = [3, 'original'];
+        const baseline = { at: T }, proof = {}, saved = [4, 'original'];
         const accepted = { card: decision, baseline, eventProof: proof, saved, mp: 100, preparedMp: 100 };
         const thin = { network: { activity: decision.activity } }, originalBytes = Buffer.from(decision.data).slice();
         const refreshed = { decision, economy: thin, advisory: accepted };
@@ -341,7 +341,7 @@ try {
             stats: { ...published.stats, [field]: Number(published.stats[field] || 0) + 1 } }, T + MINUTE), null,
         `a foreign ${field} cannot adopt the card`);
         assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishFocus: ['foreign'] } }, T + MINUTE), null);
-        for (const invalid of [[1, saved[1]], [2, saved[1]], [3, 'broken'], [3, 'x'.repeat(1024)], {}])
+        for (const invalid of [[1, saved[1]], [2, saved[1]], [3, saved[1]], [4, 'broken'], [4, 'x'.repeat(1024)], {}])
             assert.equal(Decisions.restoreAdvisory({ ...published, stats: { ...published.stats, wishAdvisory: invalid } }, T + MINUTE), null);
         const invalidBaseline = { ...original.baseline, ages: [0, 0, 0, Sections.SOFT_DELAY.market + 1] };
         const invalidClock = encode({ ...original, baseline: invalidBaseline });

@@ -4,7 +4,8 @@
 // process-local market tokens. The economy owner validates the saved proof.
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const MAX_BYTES = 1024, MAX_PLAIN_BYTES = 16384;
-const VERSION = 3;
+// 4: the restart prefix inside is format 4; an older card is refused before inflate.
+const VERSION = 4;
 
 function cardData(value, maxBytes) {
     if (typeof value !== 'string' || value.length > Math.ceil(maxBytes / 3) * 4

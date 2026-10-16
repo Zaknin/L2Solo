@@ -434,6 +434,8 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
         activity, mp: Number(state.vitals?.mp), preparedMp: Number(state.vitals?.mp) };
     const restartProof = Economy?.restartEventProof(eventProof, accepted);
+    // An unarmed card is saved as null: a restart rebuilds that bot.
+    if (diagnostic && eventProof) Diagnostics.count('card', 'restart', restartProof ? 'armed' : 'unarmed');
     // lazy: cycle the shared sections also read the economy owner.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
@@ -465,7 +467,11 @@ function restoreAdvisory(state, timestamp = Date.now()) {
     if (!card) return null;
     // lazy: cycle the native owner rehydrates its opaque saved proof.
     const eventProof = invoke('GameServer/Bot/Economy/EconomyContext').restoreEventProof(accepted.eventProof, { ...accepted, card });
-    if (!eventProof || card.activity === null && (accepted.activityLeaf !== 0 || eventProof.activity !== null)) return null;
+    if (!eventProof) {
+        if (Diagnostics.active()) Diagnostics.count('card', 'drop', 'restart_prefix');
+        return null;
+    }
+    if (card.activity === null && (accepted.activityLeaf !== 0 || eventProof.activity !== null)) return null;
     if (Diagnostics.active()) Diagnostics.count('card', 'restart', 'candidate');
     return { ...accepted, eventProof, card, preparedMp: accepted.mp, fence: null };
 }
