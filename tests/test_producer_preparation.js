@@ -106,7 +106,7 @@ const provider = load('WishProviders.js' , name => {
     if (name === './PriceDecision') return producerPrice;
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
     if (name === './ShotTradeDemand') return require('../src/GameServer/Bot/Economy/ShotTradeDemand');
-    if (name === './EconomyDiagnostics') return { active: () => false };
+    if (name === './EconomyDiagnostics') return { active: () => false, laps: () => null };
     if (name === './EconomicValuation') return valuation;
     // Synthetic origins are admitted; the solver is the network under test.
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: recipe => !!recipe };

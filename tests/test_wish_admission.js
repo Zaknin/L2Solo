@@ -17,7 +17,9 @@ const data = { items: [] }, recipes = new Map(), gains = new Map(), prices = new
 let gearIds = new Set(), opportunities = [];
 const counts = new Map();
 let diagnostics = false;
-const Diagnostics = { active: () => diagnostics, enabled: () => false, push: () => {}, duration: () => {}, count: (group, name, reason, amount = 1) => {
+const Diagnostics = { active: () => diagnostics, enabled: () => false, push: () => {}, duration: () => {},
+    laps: () => diagnostics ? { lap() {}, done() {} } : null,
+    sizeBucket: () => 'size', count: (group, name, reason, amount = 1) => {
     const key = [group, name, reason].join('/'); counts.set(key, (counts.get(key) || 0) + amount); } };
 const adapters = {
     'GameServer/DataCache': data,

@@ -92,7 +92,7 @@ const provider = load('WishProviders.js', name => {
     // This isolated routing fixture supplies admitted synthetic origins.
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: () => true };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
-    if (name === './EconomyDiagnostics') return { active: () => false };
+    if (name === './EconomyDiagnostics') return { active: () => false, laps: () => null };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
     if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c' };
