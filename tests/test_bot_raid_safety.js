@@ -3,6 +3,7 @@ const assert = require('assert');
 require('../src/Global');
 
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const BotAI = invoke('GameServer/Bot/BotAI');
@@ -49,16 +50,6 @@ function actor(id, options = {}) {
                 : []
         }
     };
-}
-
-// Party members are read from World's registration index (World.insertUser),
-// as in production, not from a plain session list.
-function setSessions(sessions) {
-    World.user = { sessions: [], revision: 0 };
-    for (const session of sessions) {
-        session.fetchAccountId ??= () => `raid_safety_${session.actor.fetchId()}`;
-        World.insertUser(session);
-    }
 }
 
 const leader = actor(5001);
@@ -148,7 +139,7 @@ assert.strictEqual(BotHuntingTargetPolicy.canHunt({ template: { kind: 'Boss', na
 assert.strictEqual(BotHuntingTargetPolicy.canHunt({ clan: { clanName: 'ant_clan' } }), true,
     'ordinary monster clans must remain eligible even when the NPC name contains Guard');
 
-setSessions([leaderSession, companionSession]);
+registerSessions([leaderSession, companionSession]);
 World.npc = { spawns: [boss, minion, regular, siegeGuard, crumaInterior, crumaSurface], grid: {} };
 World.fetchNpcsInRadius = () => [boss, minion, regular, siegeGuard];
 
@@ -231,7 +222,7 @@ const heavySession = { actor: heavyFighter, partyCompanion: true, followPlayerSe
 const mageSession = { actor: mage, partyCompanion: true, followPlayerSession: leaderSession };
 boss.model = { raidBoss: true, raidAttackers: new Set() };
 boss.fetchDestId = () => undefined;
-setSessions([leaderSession, tankSession, heavySession, mageSession]);
+registerSessions([leaderSession, tankSession, heavySession, mageSession]);
 delete leaderSession.partyRaidEngagement;
 
 let engagement = BotRaidSafety.syncPlayerPartyRaid(leaderSession, 1000);
@@ -387,11 +378,11 @@ delete leaderSession.partyRaidEngagement;
 boss.model.raidAttackers.clear();
 leader.state.fetchCombats = () => false;
 boss.fetchDestId = () => undefined;
-setSessions([leaderSession, heavySession, mageSession]);
+registerSessions([leaderSession, heavySession, mageSession]);
 engagement = BotRaidSafety.syncPlayerPartyRaid(leaderSession, 1100);
 assert.strictEqual(engagement.openerId, heavyFighter.fetchId(), 'heavy armor must be the fallback opener when no tank is present');
 delete leaderSession.partyRaidEngagement;
-setSessions([leaderSession, mageSession]);
+registerSessions([leaderSession, mageSession]);
 engagement = BotRaidSafety.syncPlayerPartyRaid(leaderSession, 1200);
 assert.strictEqual(engagement.openerId, mage.fetchId(), 'any remaining companion must be able to open when no tank or heavy armor exists');
 
@@ -407,7 +398,7 @@ const holdingCompanion = {
 delete leaderSession.partyRaidEngagement;
 leader.fetchDestId = () => undefined;
 boss.fetchDestId = () => leader.fetchId();
-setSessions([leaderSession, holdingCompanion]);
+registerSessions([leaderSession, holdingCompanion]);
 PartyAwareness.invalidateThreatProjection(leaderSession);
 FleeingState.tick(holdingCompanion, safeCompanion, {}, {});
 assert.strictEqual(holdingCompanion.plan, 'fleeing',
@@ -420,7 +411,7 @@ const fleeingCompanion = {
     fleeStart: Date.now() - 2000
 };
 boss.fetchDestId = () => undefined;
-setSessions([leaderSession, fleeingCompanion]);
+registerSessions([leaderSession, fleeingCompanion]);
 PartyAwareness.invalidateThreatProjection(leaderSession);
 FleeingState.tick(fleeingCompanion, companion, {}, {});
 assert.strictEqual(fleeingCompanion.plan, 'following', 'a companion must return to its party after escaping a raid entity');

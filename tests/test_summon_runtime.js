@@ -23,6 +23,7 @@ const CubicControl = invoke('GameServer/Skills/CubicControl');
 const SummonControl = invoke('GameServer/Npc/SummonControl');
 const SkillExec = invoke('GameServer/Actor/Generics/SkillExec');
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const Database = invoke('Database');
 
 Database.updateItemAmount = () => Promise.resolve();
@@ -577,13 +578,7 @@ async function checkPhantomActions(session, summon, summonSkillId) {
     massCubicCompanion.actor.fetchId = () => 2000093;
     massCubicCompanion.followPlayerSession = massCubicSession;
     massCubicCompanion.partyCompanion = true;
-    // Party members come from the world's party group, which only canonical
-    // registration fills; a bare sessions array has no party membership.
-    World.user = { sessions: [], revision: 0 };
-    for (const member of [massCubicSession, massCubicCompanion]) {
-        member.fetchAccountId = () => `mass_cubic_fixture_${member.actor.fetchId()}`;
-        World.insertUser(member);
-    }
+    registerSessions([massCubicSession, massCubicCompanion]);
     SkillEffects.execute(massCubicSession, massCubicSession.actor, massCubicSession.actor, massCubicSkill);
     assert.strictEqual(massCubicSession.actor.cubics.get(1).sourceId, massCubicSession.actor.fetchId(), 'Mass Storm Cubic should retain the caster as cubic source');
     assert.strictEqual(massCubicCompanion.actor.cubics.get(1).sourceId, massCubicSession.actor.fetchId(), 'Mass Storm Cubic should apply the cubic to each active party companion');
@@ -871,12 +866,10 @@ async function checkPhantomActions(session, summon, summonSkillId) {
         soulless.fetchOwnerId = () => boxerSession.actor.fetchId();
         boxerSession.actor.setDestId(victim.actor.fetchId());
         const previousPvpWorld = World.user;
-        World.user = { sessions: [], revision: 0 };
         // Canonical registration is the native owner/party source. Assigning
         // an array alone intentionally cannot resurrect an actor membership.
+        registerSessions([boxerSession, victim, ally]);
         for (const member of [boxerSession, victim, ally]) {
-            member.fetchAccountId = () => member.accountId ?? `summon_fixture_${member.actor.fetchId()}`;
-            World.insertUser(member);
             assert.strictEqual(World.registeredActorById(member.actor.fetchId()).actor, member.actor);
             assert.strictEqual(World.registeredActorById(member.actor.fetchId()).session, member);
         }

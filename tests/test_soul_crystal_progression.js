@@ -11,6 +11,7 @@ const Attack = invoke('GameServer/Actor/Attack');
 const Npc = invoke('GameServer/Npc/Npc');
 const QuestService = invoke('GameServer/Quest/QuestService');
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const Progression = invoke('GameServer/Items/SoulCrystalProgression');
 const WriteQueue = invoke('GameServer/Persistence/CharacterWriteQueue');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-soul-growth-'));
@@ -68,9 +69,7 @@ async function main() {
     Database.init();
     DataCache.init();
     const a = await sessionFor(1), b = await sessionFor(2), c = await sessionFor(3);
-    // Party members are read from World's registration index, as in production.
-    World.user = { sessions: [], revision: 0 };
-    for (const session of [a, b, c]) World.insertUser(session);
+    registerSessions([a, b, c]);
     for (const selfId of Progression.crystalIds) {
         let template;
         DataCache.fetchItemFromSelfId(selfId, value => { template = value; });
