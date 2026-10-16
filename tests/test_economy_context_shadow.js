@@ -1,6 +1,5 @@
 'use strict';
-// Shadow counters of context rebuilds (diagnostics only): same/new key, gap since
-// the actor's previous build and what released its context. Never a decision input.
+// Shadow counters compare rebuild keys and plans. Never a decision input.
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'economy-context-shadow-'));
@@ -51,12 +50,12 @@ Economy.forState(state(), deps); Economy.forgetContext(901, 'state_publication')
 Economy.forState(state(), { ...deps, rememberContext: false });
 Object.assign(Diagnostics, original);
 
-// On, with a fake clock so the gap buckets are exact.
+// On, with a fake clock for deterministic native deadlines.
 const realNow = Date.now; let clock = 1e12; Date.now = () => clock;
 Config.developerDiagnostics = true; Economy.reset();
 let before = shadow();
 const first = Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:new_key': 1 }, 'first build has no previous key');
+assert.deepEqual(delta(before, shadow()), { 'context:shadow:new_key': 1 }, 'first build has no previous key');
 {
     const durations = Diagnostics.metrics().durations || {};
     assert.strictEqual(durations['context:not_retained']?.count, durations.context?.count, 'build time is split by reason');
@@ -76,9 +75,8 @@ before = shadow(); clock += 7000;
 Economy.forgetContext(901, 'explicit_invalidation');
 const republished = state();
 const second = Economy.forState(republished, deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:5_15s': 1,
-    'context:shadow_released:explicit_invalidation': 1, 'context:shadow_plan:same_key:same_plan': 1 },
-'a released context with an equal key is counted with its gap, release reason and the repeated plan');
+assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 },
+'a released context with an equal key counts the repeated plan');
 assert.deepEqual(second.statsPacket, first.statsPacket, 'counting never changes the decision');
 
 before = shadow(); clock += 40000;
@@ -87,21 +85,19 @@ assert.deepEqual(delta(before, shadow()), {});
 before = shadow(); clock += 2000;
 Economy.forgetContext(901, 'owner_release');
 Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:1_5s': 1,
-    'context:shadow_released:owner_release': 1, 'context:shadow_plan:same_key:same_plan': 1 }, 'the gap runs from the last use, a hit included');
+assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 }, 'a later released context keeps the aggregate key and plan counts');
 
 before = shadow(); const keyBefore = keyCounts();
 Economy.forState({ ...republished, adena: 5000 }, deps);
 let changed = delta(before, shadow());
-assert.deepEqual(changed, { 'context:shadow:input_dependency_changed:new_key': 1, 'context:shadow_plan:new_key:same_plan': 1 },
+assert.deepEqual(changed, { 'context:shadow:new_key': 1, 'context:shadow_plan:new_key:same_plan': 1 },
     'a richer wallet invalidates inputs while the mandatory kit remains the focus');
-assert.deepEqual(delta(keyBefore, keyCounts()), { 'context:key_part:adena': 1, 'context:key_parts:1': 1,
-    'context:key_single:adena:same_plan': 1 }, 'the one moved part is named with the plan outcome');
+assert.deepEqual(delta(keyBefore, keyCounts()), { 'context:key_part:adena': 1, 'context:key_parts:1': 1 }, 'the one moved input part is named');
 
 // A build that waits on incoming stock (early return) still classifies its plan.
 before = shadow();
 Economy.forState({ ...republished, adena: 5000, incomingPending: true }, deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:input_dependency_changed:new_key': 1, 'context:shadow_plan:new_key:new_plan': 1 });
+assert.deepEqual(delta(before, shadow()), { 'context:shadow:new_key': 1, 'context:shadow_plan:new_key:new_plan': 1 });
 Economy.forState({ ...republished, adena: 5000 }, deps);
 
 // An unkept build stays unkept even when an older kept context of the actor is released later.
@@ -110,7 +106,7 @@ Economy.forgetContext(901, 'explicit_invalidation');
 before = shadow(); clock += 200000;
 Economy.forState(state(), deps);
 changed = delta(before, shadow());
-assert.deepEqual(changed, { 'context:shadow:not_retained:new_key': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:new_key:'))) });
+assert.deepEqual(changed, { 'context:shadow:new_key': 1, ...Object.fromEntries(Object.entries(changed).filter(([key]) => key.startsWith('context:shadow_plan:new_key:'))) });
 assert.strictEqual(Object.keys(changed).filter(key => key.startsWith('context:shadow_plan:new_key:')).length, 1, 'a new key compares its plan with the previous build');
 
 // The LRU capacity names its own release.
@@ -118,15 +114,12 @@ Economy.forState(state(), deps);
 for (let id = 1000; id < 1000 + Economy.RETAIN_LIMIT; id++) Economy.forState({ ...state(), characterId: id }, deps);
 before = shadow();
 Economy.forState(state(), deps);
-assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_key': 1, 'context:shadow_gap:lt1s': 1,
-    'context:shadow_released:capacity': 1, 'context:shadow_plan:same_key:same_plan': 1 });
+assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'context:shadow_plan:same_key:same_plan': 1 });
 
-// L134 probes: the shadow plan per miss reason (context:same_key_<plan>:<reason>),
-// the clause that refused a same-key request (context:hold_refused), the
-// activity_leaf echo (context:leaf_echo) and the trip rows (context:trip_rows).
+// The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
-        .filter(([key]) => /^context:(hold_refused:|same_key_|leaf_echo:|trip_rows:)/.test(key)));
+        .filter(([key]) => /^context:(hold_refused:)/.test(key)));
     const rows = hours => Trip.towns.map((town, at) => Object.freeze([true, hours + at, 100]));
     const actor = (loc, stats = {}) => ({ ...state(), characterId: 902, loc: { locX: 80000 + loc, locY: 148000, locZ: -3500 },
         stats: { ...state().stats, ...stats } });
@@ -180,14 +173,8 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
         return keys[0];
     };
     assert.deepEqual(on.deltas.first, { 'context:hold_refused:no_held': 1 }, 'a first build has no held decision');
-    one('trip_same', /^context:trip_rows:same:/);
-    one('trip_moved', /^context:trip_rows:moved:/);
-    one('echo', /^context:leaf_echo:echo:/);
-    one('leaf_no_held', /^context:leaf_echo:no_held:/);
     assert.strictEqual(one('market', /^context:hold_refused:/), 'context:hold_refused:market_due');
-    one('market', /^context:same_key_(same|new)_plan:market_due$/);
     assert.strictEqual(one('decision', /^context:hold_refused:/), 'context:hold_refused:decision_seq');
-    one('decision', /^context:same_key_(same|new)_plan:input_dependency_changed$/);
 }
 
 // RTOKENS: the read set of a build (item ids, their market tokens, spots,
@@ -292,10 +279,10 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:not_retained:same_ke
         Economy.reset();
         const counts = () => Diagnostics.metrics().counts || {};
         Economy.forState(state(), deps);
-        const sameBefore = counts()['context:projection:not_retained:same'] || 0;
+        const sameBefore = counts()['context:projection:same'] || 0;
         Economy.forgetContext(901, 'explicit_invalidation');
         Economy.forState(state(), deps);
-        assert.strictEqual((counts()['context:projection:not_retained:same'] || 0) - sameBefore, 1,
+        assert.strictEqual((counts()['context:projection:same'] || 0) - sameBefore, 1,
             'an unchanged state rebuilds the same projection');
         assert.ok(Object.keys(counts()).some(key => key.startsWith('context:projection_size:')), 'a sampled owner records the size');
         const durations = Diagnostics.metrics().durations || {};

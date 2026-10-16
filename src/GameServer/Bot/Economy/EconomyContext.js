@@ -62,10 +62,7 @@ const GROUP_LIMIT = 256;
 // to name the parts that moved a rebuilt key. It never decides anything.
 const lastKeyHashes = new Map();
 const LAST_KEY_LIMIT = 8192;
-const GAP_BUCKETS = [[1000, 'lt1s'], [5000, '1_5s'], [15000, '5_15s'], [30000, '15_30s'], [60000, '30_60s'], [120000, '60_120s']];
-const gapBucket = ms => GAP_BUCKETS.find(([limit]) => ms < limit)?.[1] || 'ge120s';
-// A build forState did not keep stays 'unkept': a later release of an older
-// kept context of the same actor is not its release.
+
 function noteRelease(actorKey, reason) {
     const last = lastKeyHashes.get(actorKey);
     if (last && last.released !== 'unkept') last.released = reason;
@@ -1027,24 +1024,13 @@ function forState(state = {}, deps = {}) {
     try { return CombatProfile.withProfileScope(state, () => buildForState(state, deps)); }
     finally { rowKeys = outer; }
 }
-// The shadow plan comparison, also by the card refusal that sent this build
-// (deps.advisoryRefusal, set by the cold worker while diagnostics run), so a
-// refusal that rebuilds the same plan shows itself (L114).
-// A rebuild whose key moved in one part only also names that part with the
-// plan outcome: which single input change rebuilds an unchanged plan.
-// A same-key rebuild also names its miss reason with the plan outcome
-// (context:same_key_<plan>:<reason>). A single moved part with its own probe
-// (L134) names that probe's verdict with the plan outcome: activity_leaf as
-// an echo of the held build's own statsPacket (context:leaf_echo), trip as
-// equal or moved route rows (context:trip_rows).
-function countShadowPlan(deps, sameKey, samePlan, singlePart = null, reason = null, probe = null) {
+// Compare every rebuild with the actor's preceding build. Gate comparisons
+// have a narrower population (would_hold only), so keep this denominator.
+function countShadowPlan(deps, sameKey, samePlan) {
     const plan = samePlan ? 'same_plan' : 'new_plan';
     Diagnostics.count('context', 'shadow_plan', `${sameKey ? 'same_key' : 'new_key'}:${plan}`);
     if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_plan', `${deps.advisoryRefusal}:${plan}`);
     if (deps.advisoryRefusal && deps.advisoryFresh) Diagnostics.count('advisory', 'refusal_plan_fresh', `${deps.advisoryRefusal}:${plan}`);
-    if (singlePart !== null) Diagnostics.count('context', 'key_single', `${singlePart}:${plan}`);
-    if (sameKey) Diagnostics.count('context', `same_key_${plan}`, reason);
-    if (probe !== null) Diagnostics.count('context', singlePart === 'trip' ? 'trip_rows' : 'leaf_echo', `${probe}:${plan}`);
 }
 // Diagnostics only: the outer hit clauses (EC buildForState) a same-key
 // rebuild failed once its held entry passed the key or decisionHolds. Token
@@ -1188,7 +1174,7 @@ function buildForState(state, deps) {
         : outerWhy !== 'unknown' ? outerWhy
         : !isMainThread && held.stateRef.deref() !== state ? 'state_publication' : 'unknown';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
+    let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     let gate = null, gateDiff = null;
     if (diagnostic) {
@@ -1207,23 +1193,10 @@ function buildForState(state, deps) {
         shadowSame = same; previousPlan = last?.plan ?? null; previousRows = last?.rows ?? null;
         previousProjection = last?.projection ?? null;
         previousReadset = last?.readset ?? null; movedParts = [];
-        Diagnostics.count('context', 'shadow', `${diagnosticReason}:${same ? 'same_key' : 'new_key'}`);
+        Diagnostics.count('context', 'shadow', same ? 'same_key' : 'new_key');
         // Which parts moved since the actor's previous build (none known without one).
         if (!same && last?.parts?.length === hashes.length) {
             movedParts = countMovedParts('context', last.parts, hashes, INPUT_KEY_PARTS);
-            if (movedParts.length === 1) singlePart = movedParts[0];
-        }
-        if (same) {
-            Diagnostics.count('context', 'shadow_gap', gapBucket(Math.max(0, at - last.at)));
-            // 'capacity' (LRU), 'unkept' (forState did not keep it) or the owner's forgetContext reason.
-            if (diagnosticReason === 'not_retained') Diagnostics.count('context', 'shadow_released', last.released || 'unknown');
-
-        }
-        if (singlePart === 'activity_leaf') {
-            // Is the moved leaf the held build's own output (an echo of its statsPacket)?
-            const packet = held?.plan.statsPacket, stats = state.stats || {};
-            probe = !held ? 'no_held' : Number(stats.activityLeaf || 0) === Number(packet?.activityLeaf || 0)
-                && Number(stats.decisionSeq || 0) === Number(packet?.decisionSeq || 0) ? 'echo' : 'no_echo';
         }
         // The source memo key since the actor's previous build: same, or which parts moved.
         const sourceHash = fnv1a32(sections.sources), sourceHashes = sourcePartHashes(sourceParts, sections.build, sourceTail);
@@ -1232,7 +1205,7 @@ function buildForState(state, deps) {
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
-            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: kept ? eventHash : last?.heldEventHash };
+            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1361,8 +1334,6 @@ function buildForState(state, deps) {
     if (shadowEntry) {
         // The one rows hash of a build: kept for the actor's next build; a trip-only move compares it.
         shadowEntry.rows = rowsHash(context.routeRows);
-        if (singlePart === 'trip') probe = previousRows === null || shadowEntry.rows === null ? 'no_rows'
-            : previousRows === shadowEntry.rows ? 'same' : 'moved';
     }
     const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
     context.spotValue = (spot, ...args) => { context.sourceSpot(spot.id); return readSpot(spot, ...args); };
@@ -1382,7 +1353,7 @@ function buildForState(state, deps) {
             money: state.stats?.money || [0, 0, base.survivalReserve, 0], stockTargets: state.stats?.stockTargets || stockTargets(base) };
         if (shadowEntry) {
             const plan = planHash(context.network); shadowEntry.plan = plan;
-            if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart, diagnosticReason, probe);
+            if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
             noteReadSet(plan);
         }
         endTokens();
@@ -1412,7 +1383,7 @@ function buildForState(state, deps) {
     if (shadowEntry && Diagnostics.enabled(state.characterId)) {
         shadowEntry.projection = projectionHash(projection);
         if (previousProjection !== null) Diagnostics.count('context', 'projection',
-            `${diagnosticReason}:${shadowEntry.projection === previousProjection ? 'same' : 'differ'}`);
+            shadowEntry.projection === previousProjection ? 'same' : 'differ');
         let bytes = -1;
         try { bytes = Buffer.byteLength(JSON.stringify(projection.nodes)); } catch (_) { /* A node JSON cannot hold (a cycle, a BigInt). */ }
         Diagnostics.count('context', 'projection_size', bytes < 0 ? 'unmeasured' : Diagnostics.sizeBucket(bytes));
@@ -1503,7 +1474,7 @@ function buildForState(state, deps) {
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
         planOutcome = previousPlan === null ? 'first_build' : plan === previousPlan ? 'same_plan' : 'new_plan';
-        if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan, singlePart, diagnosticReason, probe);
+        if (previousPlan !== null) countShadowPlan(deps, shadowSame, plan === previousPlan);
         noteReadSet(plan);
     }
     // The build's record carries its cause (tools/timeline): the miss reason, the key parts that moved since
@@ -1547,6 +1518,7 @@ function buildForState(state, deps) {
             activity: state.activity, bandHash: fnv1a32(bandStructural),
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
+        if (shadowEntry) shadowEntry.heldEventHash = shadowEntry.eventHash;
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
             while (sourceHolders.size > SOURCE_MEMO_LIMIT) {
