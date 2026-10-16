@@ -5,6 +5,11 @@ const { MAX_BATCH: MAX_MEMORY_EVENTS } = require('../../Social/InteractionMemory
 // Admission and batch sizing must agree on the cost of one ordinary row.
 const EARLY_COMMIT_ROW_BUDGET_MS = 4;
 
+// The queue used to poll every 25 ms. It now sleeps until an entry is due, but
+// wakes only on that same 25 ms grid, so entries that fall due between two
+// ticks are still taken together in one batch (the commit batching is kept).
+const TICK_MS = 25;
+
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -27,7 +32,7 @@ class ColdCommitQueue {
         this.onResume = options.onResume || (() => {});
         this.admitEarlyFlush = options.admitEarlyFlush || (() => null);
         this.completeEarlyFlush = options.completeEarlyFlush || (() => {});
-        this.capacityBlocked = false;
+        this.capacityPressure = false;
         this.nextEarlyAttemptAt = 0;
         this.now = options.now || Date.now;
         this.targetMs = Math.max(100, Number(options.targetMs) || 2000);
@@ -44,6 +49,9 @@ class ColdCommitQueue {
         this.p2 = new Map();
         this.bytes = 0;
         this.timer = null;
+        this.timerFireAt = 0;
+        this.gridOrigin = 0;
+        this.started = false;
         this.flushing = false;
         this.stopping = false;
         this.paused = false;
@@ -67,14 +75,67 @@ class ColdCommitQueue {
             highWaterHits: 0,
             earlyAttempts: 0,
             earlyDenied: 0,
-            earlyEmpty: 0
+            earlyEmpty: 0,
+            timerArms: 0,
+            timerFires: 0,
+            timerIdle: 0
         };
     }
 
+    // Set by the coordinator when the worker reports a full inventory or
+    // clan-hall capacity: the early flush then needs a wake-up of its own.
+    get capacityBlocked() { return this.capacityPressure; }
+
+    set capacityBlocked(value) {
+        this.capacityPressure = value;
+        if (value) this.arm();
+    }
+
     start() {
-        if (this.timer) return;
-        this.timer = setInterval(() => this.flushDue(), 25);
+        if (this.started) return;
+        this.started = true;
+        this.gridOrigin = this.now();
+        this.arm();
+    }
+
+    // The first instant a flush has something to take. Every term is O(1): the
+    // lanes are in queuedAt order (see oldest()).
+    nextDueAt() {
+        let dueAt = Infinity;
+        if (this.p0.length) dueAt = 0;
+        if (this.p1.length) dueAt = Math.min(dueAt, this.oldest(this.p1) + this.p1TargetMs);
+        if (this.p2.size) dueAt = Math.min(dueAt, this.oldest(this.p2) + Math.min(this.targetMs, this.overdueMs));
+        if (this.capacityPressure && this.size()) dueAt = Math.min(dueAt, this.nextEarlyAttemptAt);
+        return dueAt;
+    }
+
+    // Sleeps until the next due entry. Called wherever the due set can change:
+    // an enqueue, the end of a flush, a capacity flag, start. A running flush
+    // re-arms itself when it ends, so a wake-up during it is not needed.
+    arm() {
+        if (!this.started || this.stopping || this.flushing || !this.size()) return;
+        const now = this.now();
+        const dueAt = this.nextDueAt();
+        let fireAt = this.gridOrigin + Math.ceil((Math.max(dueAt, now) - this.gridOrigin) / TICK_MS) * TICK_MS;
+        if (fireAt <= now) fireAt += TICK_MS;
+        if (this.timer && this.timerFireAt <= fireAt) return;
+        clearTimeout(this.timer);
+        this.timerFireAt = fireAt;
+        this.timer = setTimeout(() => this.onTimer(), Math.max(1, fireAt - now));
         this.timer.unref?.();
+        DiagnosticConfig.developerDiagnostics && (this.counters.timerArms += 1);
+    }
+
+    async onTimer() {
+        this.timer = null;
+        this.timerFireAt = 0;
+        DiagnosticConfig.developerDiagnostics && (this.counters.timerFires += 1);
+        try {
+            const flushed = await this.flushDue();
+            if (!flushed) DiagnosticConfig.developerDiagnostics && (this.counters.timerIdle += 1);
+        } finally {
+            this.arm();
+        }
     }
 
     size() {
@@ -123,6 +184,7 @@ class ColdCommitQueue {
         }
 
         if (priority === 'P0') setImmediate(() => this.flushDue(true));
+        this.arm();
         return { ok: true, priority, size: this.size(), bytes: this.bytes };
     }
 
@@ -140,9 +202,12 @@ class ColdCommitQueue {
         this.onResume();
     }
 
+    // The lanes keep queuedAt order: arrays are pushed in time order, and a
+    // coalesced P2 entry keeps both its Map position and its first queuedAt.
     oldest(lane) {
         if (lane instanceof Map) {
-            return [...lane.values()].reduce((oldest, entry) => Math.min(oldest, entry.queuedAt), this.now());
+            const first = lane.values().next();
+            return first.done ? this.now() : Number(first.value.queuedAt || this.now());
         }
         return lane.length ? Number(lane[0].queuedAt || this.now()) : this.now();
     }
@@ -192,8 +257,7 @@ class ColdCommitQueue {
         const p2Ready = this.p2.size > 0 && (force || timestamp - this.oldest(this.p2) >= this.targetMs);
         if (p2Overdue || (p2Ready && (this.p1Credit >= 4 || !p1Ready))) {
             this.lastBatchReason = force ? 'forced' : p2Overdue ? 'p2_overdue' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()]
-                .sort((a, b) => a.queuedAt - b.queuedAt), rowLimit);
+            const batch = this.takeLaneBatch([...this.p2.values()], rowLimit);
             batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
             this.p1Credit = 0;
             return batch;
@@ -205,8 +269,7 @@ class ColdCommitQueue {
         }
         if (p2Ready) {
             this.lastBatchReason = force ? 'forced' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()]
-                .sort((a, b) => a.queuedAt - b.queuedAt), rowLimit);
+            const batch = this.takeLaneBatch([...this.p2.values()], rowLimit);
             batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
             this.p1Credit = 0;
             return batch;
@@ -251,6 +314,7 @@ class ColdCommitQueue {
         }
         if (!batch.length) {
             if (earlyLease) this.completeEarlyFlush(earlyLease, 0);
+            this.arm();
             return false;
         }
         this.flushing = true;
@@ -330,6 +394,7 @@ class ColdCommitQueue {
             }
             this.flushing = false;
             this.maybeResume();
+            this.arm();
         }
         this.onResults(results);
         if (this.size() && (force || this.p0.length)) setImmediate(() => this.flushDue(force));
@@ -386,7 +451,7 @@ class ColdCommitQueue {
 
     async drain(timeoutMs = 10000) {
         this.stopping = true;
-        if (this.timer) clearInterval(this.timer);
+        clearTimeout(this.timer);
         this.timer = null;
         const deadline = this.now() + Math.max(100, Number(timeoutMs) || 10000);
         while ((this.size() || this.flushing) && this.now() < deadline) {
