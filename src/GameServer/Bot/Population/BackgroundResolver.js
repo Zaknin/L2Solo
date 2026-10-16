@@ -31,15 +31,16 @@ function botCombatStats(state, timestamp = Date.now()) {
     return ColdCombatProfile.profileFor(state, timestamp);
 }
 
-// combat_profile: the profile builds and their ms in one fight, read from
-// the profile's own totals around it; only while diagnostics count.
-function countedFight(kind, resolve, options) {
+// combat_profile: the profile builds and their ms in one fight or one solo
+// step (unit), read from the profile's own totals around it; only while
+// diagnostics count.
+function countedBuilds(unit, kind, resolve, options) {
     if (!Diagnostics.active()) return resolve(options);
     const builds = ColdCombatProfile.buildCount(), ms = ColdCombatProfile.buildMs();
     const result = resolve(options);
-    Diagnostics.count('combat_profile', 'fight', kind);
-    Diagnostics.count('combat_profile', 'fight_build', kind, ColdCombatProfile.buildCount() - builds);
-    Diagnostics.duration('combat_profile:fight', ColdCombatProfile.buildMs() - ms);
+    Diagnostics.count('combat_profile', unit, kind);
+    Diagnostics.count('combat_profile', `${unit}_build`, kind, ColdCombatProfile.buildCount() - builds);
+    Diagnostics.duration(`combat_profile:${unit}`, ColdCombatProfile.buildMs() - ms);
     return result;
 }
 
@@ -104,11 +105,22 @@ function coldWeaponVulnerability(bot, mob, semantic = {}) {
     return 1;
 }
 
-function coldPhysicalTargetModifier(bot, mob, semantic = {}, timestamp = Date.now()) {
+// The stat sources of a fighter (whose profile is the one read) at a hit's
+// time, held on the fighter for its fight (ColdCombatProfile.fightSources);
+// undefined without one, so statMultiplier builds them for that hit.
+function hitSources(fighter, timestamp) {
+    if (!fighter) return undefined;
+    fighter.statSources = ColdCombatProfile.fightSources(fighter.profile, timestamp, fighter.statSources || null);
+    return fighter.statSources.sources;
+}
+
+function coldPhysicalTargetModifier(bot, mob, semantic = {}, timestamp = Date.now(), fighter = null) {
     let modifier = coldWeaponVulnerability(bot, mob, semantic);
-    if (mob?.undead === true) modifier *= ColdCombatProfile.statMultiplier(bot, 'pAtkUndeadMul', timestamp);
     const raceStat = PHYSICAL_RACE_STATS[String(mob?.race || '').toLowerCase()];
-    if (raceStat) modifier *= ColdCombatProfile.statMultiplier(bot, raceStat, timestamp);
+    if (mob?.undead !== true && !raceStat) return modifier;
+    const sources = hitSources(fighter, timestamp);
+    if (mob?.undead === true) modifier *= ColdCombatProfile.statMultiplier(bot, 'pAtkUndeadMul', timestamp, sources);
+    if (raceStat) modifier *= ColdCombatProfile.statMultiplier(bot, raceStat, timestamp, sources);
     return modifier;
 }
 
@@ -118,11 +130,11 @@ function coldMagicTargetModifier(mob, semantic = {}) {
         : 1;
 }
 
-function coldNpcWeaponModifier(mob, target, timestamp = Date.now()) {
+function coldNpcWeaponModifier(mob, target, timestamp = Date.now(), fighter = null) {
     const kind = String(mob?.weaponKind || '');
-    if (kind === 'Weapon.Bow') return ColdCombatProfile.statMultiplier(target, 'bowWpnVuln', timestamp);
+    if (kind === 'Weapon.Bow') return ColdCombatProfile.statMultiplier(target, 'bowWpnVuln', timestamp, hitSources(fighter, timestamp));
     if (kind === 'Weapon.Blunt' || kind === 'Weapon.BigBlunt') {
-        return ColdCombatProfile.statMultiplier(target, 'bluntWpnVuln', timestamp);
+        return ColdCombatProfile.statMultiplier(target, 'bluntWpnVuln', timestamp, hitSources(fighter, timestamp));
     }
     return 1;
 }
@@ -1023,7 +1035,7 @@ function attackDamage(fighter, selected, target, rng, { vsMob = false, at = 0, s
     } else if (hitSucceeds(profile.accur, target.evasion, rng)) {
         damage = Formulas.calcPhysicalDamage(profile.pAtk, profile.equipment.pAtkRnd, target.pDef, selected?.power || 0,
             { critical: Formulas.rollCritical(profile.critical, rng), soulshot: shot?.soulshot === true, rng });
-        if (vsMob) damage *= coldPhysicalTargetModifier(profile, target, semantic, at);
+        if (vsMob) damage *= coldPhysicalTargetModifier(profile, target, semantic, at, fighter);
     }
     if (Number(semantic.requires?.charges) > 0) damage *= 0.8 + (0.201 * fighter.charges);
     return damage;
@@ -1286,7 +1298,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         } else if (hitSucceeds(mob.accur, soloFighter.profile.evasion, rng)) {
             const critical = Formulas.rollCritical(mob.critical, rng);
             const damage = Formulas.calcMeleeDamage(mob.pAtk, mob.pAtkRnd, soloFighter.profile.pDef, { critical, rng })
-                * coldNpcWeaponModifier(mob, soloFighter.profile, timestamp + time);
+                * coldNpcWeaponModifier(mob, soloFighter.profile, timestamp + time, soloFighter);
             vitals.hp -= Math.max(0, damage);
             mobReadyAt += Math.max(250, Formulas.calcMeleeAtkTime(mob.atkSpd));
         } else {
@@ -1594,7 +1606,7 @@ function resolvePartyFight({ members, spot, targetNpcId = 0, rng = Math.random, 
             if (target && hitSucceeds(mob.accur, target.profile.evasion, rng)) {
                 const damage = Formulas.calcMeleeDamage(bossPAtk, mob.pAtkRnd, target.profile.pDef, {
                     critical: Formulas.rollCritical(mob.critical, rng), rng
-                }) * coldNpcWeaponModifier(mob, target.profile, timestamp + time);
+                }) * coldNpcWeaponModifier(mob, target.profile, timestamp + time, target);
                 const before = target.vitals.hp;
                 target.vitals.hp = Math.max(0, before - damage);
                 if (target.vitals.hp < before) lastVictim = { fighter: target, at: time };
@@ -1605,7 +1617,7 @@ function resolvePartyFight({ members, spot, targetNpcId = 0, rng = Math.random, 
                 if (addTarget && hitSucceeds(mob.accur, addTarget.profile.evasion, rng)) {
                     const damage = Formulas.calcMeleeDamage(raidPressure.pAtk, mob.pAtkRnd, addTarget.profile.pDef, {
                         critical: Formulas.rollCritical(mob.critical, rng), rng
-                    }) * coldNpcWeaponModifier(mob, addTarget.profile, timestamp + time);
+                    }) * coldNpcWeaponModifier(mob, addTarget.profile, timestamp + time, addTarget);
                     const before = addTarget.vitals.hp;
                     addTarget.vitals.hp = Math.max(0, before - damage);
                     if (addTarget.vitals.hp < before) lastVictim = { fighter: addTarget, at: time };
@@ -1670,10 +1682,13 @@ function soloFightCount(spot, elapsedMs) {
 // when the spot has no production table (raids, rooms, older profiles) or its
 // production is 0: a respawn of 0 means no respawn data, not an empty spot.
 function soloShareMobs(spot, elapsedMs, hunters) {
-    const entries = (spot?.npcEntries || []).filter(entry => Number.isFinite(entry.production));
-    if (!entries.length || spot.raidBoss === true) return null;
-    const production = entries.reduce((sum, entry) => sum + entry.production, 0);
-    if (production <= 0) return null;
+    let rows = 0, production = 0;
+    for (const entry of spot?.npcEntries || []) {
+        if (!Number.isFinite(entry.production)) continue;
+        rows += 1;
+        production += entry.production;
+    }
+    if (!rows || spot.raidBoss === true || production <= 0) return null;
     return production * elapsedMs / 3600000 / Math.max(1, Number(hunters) || 1);
 }
 
@@ -1693,7 +1708,7 @@ const BackgroundResolver = {
         coldRaidEncounterProfile },
     resolveDeathRecovery,
     resolveRest,
-    resolvePartyFight: options => countedFight('party', resolvePartyFight, options),
+    resolvePartyFight: options => countedBuilds('fight', 'party', resolvePartyFight, options),
     needsRest,
     staleShopping,
     estimateRestMs,
@@ -1939,7 +1954,7 @@ const BackgroundResolver = {
                 inventory: patch.inventory || state.inventory,
                 stats: { ...(state.stats || {}), ...(patch.stats || {}) }
             };
-            const result = countedFight('solo', resolveFight, { state: fightState, spot, pressure, targetNpcId, rng,
+            const result = countedBuilds('fight', 'solo', resolveFight, { state: fightState, spot, pressure, targetNpcId, rng,
                 timestamp: timestamp + combatMs, fightLimitMs: combatBudgetMs - combatMs,
                 maxActions: actionBudget - combatActions });
             if (result.avoided) {
@@ -2118,9 +2133,13 @@ BackgroundResolver.resolveSolo = (options = {}) => {
             nextResolveAt: timestamp + 1000, debug: { reason: competitionReason, fights: 0, wins: 0 } }
         // Only raw equipment preparation is shared within this synchronous
         // round. Each fight still reads its current profile, effects and vitals.
-        : ColdCombatProfile.withEquipmentPreparation(() => resolveSolo({
-            ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
-        }));
+        // The step's own reads of the state at its timestamp (survival floor,
+        // standing regen, rest) share one profile (withProfileScope): nothing
+        // in the step writes the state's profile inputs, fights work on copies.
+        : ColdCombatProfile.withEquipmentPreparation(() => ColdCombatProfile.withProfileScope(competition.state,
+            () => countedBuilds('step', 'solo', resolveSolo, {
+                ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
+            })));
     if (options.state?.stats?.pveEncounter && !Object.hasOwn(result.debug || {}, 'pendingFight')) {
         result.patch = { ...result.patch, stats: { ...(result.patch?.stats || options.state.stats), pveEncounter: null } };
     }

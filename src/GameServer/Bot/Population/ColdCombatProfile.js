@@ -200,6 +200,24 @@ function statSources(profile, timestamp, options = {}) {
     return sources;
 }
 
+// The stat sources of one profile across the hits of a fight. Of the inputs
+// of statSources only the effects still active and the night move with the
+// hit's time, so held (the caller's last answer, kept on its fighter) stands
+// while the profile and its effects list are the same objects, the night is
+// the same and the time lies between its build and the first effect expiry
+// after it. Returns held or a new { profile, effects, night, from, until, sources }.
+function fightSources(profile, timestamp, held = null) {
+    const night = GameTime.isNight(timestamp);
+    if (held !== null && held.profile === profile && held.effects === profile.effects && held.night === night
+        && timestamp >= held.from && timestamp < held.until) return held;
+    let until = Infinity;
+    for (const effect of profile.effects || []) {
+        const end = number(effect?.expiresAt);
+        if (end > timestamp && end < until) until = end;
+    }
+    return { profile, effects: profile.effects, night, from: timestamp, until, sources: statSources(profile, timestamp) };
+}
+
 function statValues(profile, stat, timestamp, sources = statSources(profile, timestamp)) {
     return sources.map((stats) => number(stats?.[stat], NaN)).filter(Number.isFinite);
 }
@@ -1123,7 +1141,7 @@ function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs,
-    holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    fightSources, holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add
