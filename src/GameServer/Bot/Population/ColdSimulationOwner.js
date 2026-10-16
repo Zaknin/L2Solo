@@ -101,7 +101,9 @@ function withPersistedStats(state, result) {
         // The commit hands over its own parse of the stats it wrote when nothing rewrote them.
         const stats = result.committedStats || JSON.parse(result.row.statsJson);
         if (!stats || typeof stats !== 'object') return state;
-        const persisted = { ...state, name: result.row.characterName || state.name, stats };
+        // The row's revisions (Database.stateRevisions) ride on the state, so
+        // readers of the cached state ask whether the bag or the kit moved.
+        const persisted = { ...state, ...Database.stateRevisions(result.row), name: result.row.characterName || state.name, stats };
         // The commit merged what the board held for the bot (deals, closed
         // records): the stored bag is the one the bot goes on with.
         if (!result.settled && !result.pkDrops?.length) return persisted;

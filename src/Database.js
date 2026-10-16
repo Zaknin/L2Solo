@@ -27,6 +27,7 @@ const ColdProtocol = require('./GameServer/Bot/Population/ColdSimulationProtocol
 const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCheckpoint');
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
+const Hold = require('./GameServer/Bot/Economy/Hold');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
@@ -1718,7 +1719,46 @@ function applySchemaMigrations() {
         DROP INDEX IF EXISTS bot_life_state_goal_review;
         DROP INDEX IF EXISTS bot_life_state_market_page;
     `)]);
-    const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
+    // A bot's stored bag, learned skills and henna slots each carry a
+    // revision that moves with every write of that input, so a reader keys on
+    // a number instead of a JSON compare or a reread. A writer that sets
+    // inventoryRevision itself (the cold commit) skips the trigger's second
+    // row write. A world saved before this starts at 0 (unknown: recompute).
+    migrations.push([68, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        for (const column of STATE_REVISION_COLUMNS) {
+            if (!columns.has(column)) connection.exec(`ALTER TABLE bot_life_state ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+        }
+        const bump = (column, id, also = '') => `UPDATE bot_life_state SET ${column} = ${column} + 1 WHERE characterId = ${id}${also};`;
+        // A row moved to another bot moves both bots' revisions, each once.
+        const moved = (column) => `${bump(column, 'NEW.characterId')} ${bump(column, 'OLD.characterId', ' AND OLD.characterId IS NOT NEW.characterId')}`;
+        // A row table's triggers only where the table exists (a test world can
+        // mark earlier migrations applied without their tables).
+        const tables = new Set(connection.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((table) => table.name));
+        connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS bot_life_state_inventory_revision AFTER UPDATE OF inventorySummary ON bot_life_state
+            WHEN OLD.inventorySummary IS NOT NEW.inventorySummary AND OLD.inventoryRevision = NEW.inventoryRevision
+            BEGIN ${bump('inventoryRevision', 'NEW.characterId')} END;`);
+        if (tables.has('skills')) connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS skills_revision_insert AFTER INSERT ON skills
+            BEGIN ${bump('skillsRevision', 'NEW.characterId')} END;
+            CREATE TRIGGER IF NOT EXISTS skills_revision_update AFTER UPDATE OF selfId, level, passive, characterId ON skills
+            WHEN OLD.selfId IS NOT NEW.selfId OR OLD.level IS NOT NEW.level OR OLD.passive IS NOT NEW.passive
+                OR OLD.characterId IS NOT NEW.characterId
+            BEGIN ${moved('skillsRevision')} END;
+            CREATE TRIGGER IF NOT EXISTS skills_revision_delete AFTER DELETE ON skills
+            BEGIN ${bump('skillsRevision', 'OLD.characterId')} END;`);
+        if (tables.has('character_hennas')) connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_insert AFTER INSERT ON character_hennas
+            BEGIN ${bump('hennaRevision', 'NEW.characterId')} END;
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_update AFTER UPDATE OF slot, symbolId, characterId ON character_hennas
+            WHEN OLD.slot IS NOT NEW.slot OR OLD.symbolId IS NOT NEW.symbolId OR OLD.characterId IS NOT NEW.characterId
+            BEGIN ${moved('hennaRevision')} END;
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_delete AFTER DELETE ON character_hennas
+            BEGIN ${bump('hennaRevision', 'OLD.characterId')} END;
+        `);
+    }]);
+    const applied =new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
         connection.exec('BEGIN IMMEDIATE');
@@ -2529,6 +2569,20 @@ const COLD_SIMULATION_PATCH_COLUMNS = new Set([
     'targetLevelBand', 'deathCount', 'partyId', 'inventorySummary', 'statsJson', 'updatedAt'
 ]);
 
+// bot_life_state columns (migration 68): the stored bag summary, the learned
+// skills rows and the henna rows of the bot. Only the database moves them.
+const STATE_REVISION_COLUMNS = Object.freeze(['inventoryRevision', 'skillsRevision', 'hennaRevision']);
+
+// The one reader of the revisions on a bot_life_state row (or a state that
+// copied them): 0 when absent, which means unknown, so recompute.
+function stateRevisions(row) {
+    return {
+        inventoryRevision: Math.max(0, Number(row?.inventoryRevision) || 0),
+        skillsRevision: Math.max(0, Number(row?.skillsRevision) || 0),
+        hennaRevision: Math.max(0, Number(row?.hennaRevision) || 0)
+    };
+}
+
 function parsedObject(raw) {
     if (!raw) return {};
     if (typeof raw === 'object') return raw;
@@ -2584,13 +2638,37 @@ function heldSkillCurrent(held, fresh) {
 // Returns `combat` itself when the learned rows rebuild it unchanged, so the
 // caller re-serializes stats only after a skill move (a level-up, a grant).
 function nativeColdCombatSkillsUnsafe(characterId, combat) {
-    if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
+    return coldCombatSkillsUnsafe(characterId, combat).kit;
+}
+
+// The kit and how it was reached: 'skipped' (the hold kept it: its stamp is
+// the row's skillsRevision, so the learned rows are those it was built from),
+// 'same' (the rows rebuilt it unchanged), 'stamped' (unchanged, the stamp
+// moved) or 'rebuilt'. With the row's skillsRevision the kit carries it as
+// its stamp; without it (a save or party write) a kit keeps the stamp it has:
+// it was built from the rows at or after that stamp, so an equal stamp still
+// proves the rows.
+const SKILLS_HOLD = 'commit_skills';
+function coldCombatSkillsUnsafe(characterId, combat, skillsRevision) {
+    if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return { kit: combat, outcome: 'same' };
+    const native = combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database';
+    const known = skillsRevision !== undefined;
+    const why = !known || !Hold.asked(SKILLS_HOLD) ? null
+        : native && combat.skillsRevision === skillsRevision ? [] : [combat.skillsRevision === undefined ? 'unproved' : 'skills'];
+    if (why && Hold.check(SKILLS_HOLD, why)) return { kit: combat, outcome: 'skipped' };
+    const started = why ? performance.now() : 0;
     const learned = ColdCombatProfile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
     const held = Array.isArray(combat.skills) ? combat.skills : null;
-    if (held && combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database'
-        && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill))) return combat;
+    const same = held && native && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill));
+    // Shadow: a quiet verdict whose rebuild would move the kit is a missed event.
+    if (why) Hold.compare(SKILLS_HOLD, { characterId }, why, () => same ? '' : 'skills', performance.now() - started);
+    if (same) {
+        return !known || combat.skillsRevision === skillsRevision ? { kit: combat, outcome: 'same' }
+            : { kit: { ...combat, skillsRevision }, outcome: 'stamped' };
+    }
     const proposed = new Map((held || []).map(skill => [Number(skill.selfId), skill]));
-    return { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
+    return { outcome: 'rebuilt', kit: { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
+        ...(known ? { skillsRevision } : {}),
         skills: learned.map(skill => {
             const sameRank = proposed.get(skill.selfId);
             // Hot Skill models resolve C4 semantics (for example buff power)
@@ -2598,7 +2676,7 @@ function nativeColdCombatSkillsUnsafe(characterId, combat) {
             // learned rank; changed/missing ranks need a fresh native DTO.
             return Number(sameRank?.level) === skill.level
                 ? { ...skill, ...sameRank, selfId: skill.selfId, level: skill.level, passive: skill.passive } : skill;
-        }) };
+        }) } };
 }
 
 // Resolved on first use; require() re-resolved the path on every cold commit.
@@ -2610,11 +2688,12 @@ const clanMembershipPolicy = () => ClanMembershipPolicyModule
 // returns what later cold commit steps would otherwise parse again: the final
 // stats as parsedObject(patch.statsJson) would see them (undefined when the
 // patch carries no stats), whether they are exactly JSON.parse(patch.statsJson)
-// (no repair re-serialized them), whether the learned rows rebuilt the combat
-// kit (undefined without one) and the proposed death-experience record.
+// (no repair re-serialized them), how the combat kit was checked against the
+// learned rows (coldCombatSkillsUnsafe's outcome, undefined without a kit) and
+// the proposed death-experience record.
 function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
     const next = { ...patch };
-    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, skillsRebuilt: undefined, deathExperience: undefined };
+    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, skills: undefined, deathExperience: undefined };
     const proposedRaw = next.statsJson;
     const currentViews = statsViews(row?.statsJson);
     const proposedViews = statsViews(proposedRaw);
@@ -2627,17 +2706,25 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
     parts?.lap('stats_parse');
     // Each repair below edits `incoming`; it is serialized once after the last.
     let dirty = false;
-    let skillsRebuilt;
+    let stamped = false;
+    let skills;
     // A resolve owns effects, cooldowns and other transient combat state.
     // Only the native learned rows own the skill set and its ranks.
     const combat = incoming.coldCombat || current.coldCombat;
     if (combat && Number(row?.characterId) > 0) {
-        const rebuilt = nativeColdCombatSkillsUnsafe(row.characterId, combat);
-        skillsRebuilt = rebuilt !== combat;
+        // Only a whole row read in this transaction proves the revision; a
+        // partial row leaves the kit unproved (checked, stamp kept).
+        const checked = coldCombatSkillsUnsafe(row.characterId, combat,
+            Number.isSafeInteger(row.skillsRevision) ? row.skillsRevision : undefined);
+        const rebuilt = checked.kit;
+        skills = checked.outcome;
         // A non-string proposal leaves this step serialized, as it always did.
         if (rebuilt !== incoming.coldCombat || typeof next.statsJson !== 'string') {
+            // A stamp on the proposed kit (a number on a parsed object) keeps
+            // the stats an exact parse of what is written: still handed back.
+            if (skills === 'stamped' && combat === incoming.coldCombat && typeof next.statsJson === 'string') stamped = true;
+            else dirty = true;
             incoming.coldCombat = rebuilt;
-            dirty = true;
         }
     }
     parts?.lap('stats_skills');
@@ -2677,7 +2764,7 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
             && incoming.equipmentPlan?.clanGoal?.clanId === current.clanDiscipline.clanId) incoming.equipmentPlan = null;
         dirty = true;
     }
-    if (dirty) {
+    if (dirty || stamped) {
         next.statsJson = JSON.stringify(incoming);
         stats = incoming;
     }
@@ -2691,7 +2778,7 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
         stats = repaired.stats;
         if (repaired.activity !== proposed.activity) next.activity = repaired.activity;
     }
-    return { patch: next, stats, statsParsed: !dirty && repaired === proposed, skillsRebuilt, deathExperience };
+    return { patch: next, stats, statsParsed: !dirty && repaired === proposed, skills, deathExperience };
 }
 
 function syncInventorySummaryUnsafe(characterId, inventory = {}) {
@@ -2904,9 +2991,12 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
     }
     // A PvP tally and a PK death drop (tried on the step that ends at 0 HP; it
     // returns its death sequence only when it wrote) rewrite this bot's life
-    // state after the commit's UPDATE.
+    // state after the commit's UPDATE. A learned skill moves only its
+    // skillsRevision (the trigger).
     const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
-    return { drops: dropped?.drops || [], rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
+    return { drops: dropped?.drops || [],
+        rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0,
+        skillsWritten: physical.skills?.length > 0 };
 }
 
 function dropPkDeathItemsUnsafe(characterId) {
@@ -5582,6 +5672,10 @@ const Database = {
         'raid-boss:upsert');
     },
 
+    // A bot's input revisions (bag summary, learned skills, henna slots) from
+    // its bot_life_state row or a state that copied them; 0 = unknown.
+    stateRevisions,
+
     claimColdSimulationLease(request = {}) {
         const characterId = Number(request.characterId);
         const expectedRevision = Number(request.expectedRevision);
@@ -5763,11 +5857,11 @@ const Database = {
             const conflict = coldSimulationConflict(row, fields, fields.timestamp);
             parts?.lap('row_read');
             if (conflict !== 'cas_failed') return { fields, row, conflict };
-            const { patch, stats, statsParsed, skillsRebuilt, deathExperience } = preserveColdVersionedStatsParsed(row, fields.requestedPatch, parts);
+            const { patch, stats, statsParsed, skills, deathExperience } = preserveColdVersionedStatsParsed(row, fields.requestedPatch, parts);
             const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
             const partition = coldSimulationPartition(proposed, request, stats);
             parts?.lap('stats_merge');
-            return { fields, row, conflict, patch, stats, statsParsed, skillsRebuilt, deathExperience, partition };
+            return { fields, row, conflict, patch, stats, statsParsed, skills, deathExperience, partition };
         };
         const validatedRaidKeys = new Set();
         const validateAtomicGroups = () => atomicGroups.forEach((group, groupId) => {
@@ -5867,10 +5961,16 @@ const Database = {
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
             const parts = Diagnostics.laps('commit_');
             parts && Diagnostics.count('commit_input', checked ? 'group_check' : 'read');
-            const { row, conflict, patch, stats, statsParsed, skillsRebuilt, deathExperience, partition } = checked || commitInput(request, fields, parts);
+            const { row, conflict, patch, stats, statsParsed, skills, deathExperience, partition } = checked || commitInput(request, fields, parts);
             if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
             const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
+            // The commit moves the bag revision with its own write, so the
+            // revision trigger adds no second row write and the built row holds it.
+            const bagMoved = patch.inventorySummary !== undefined && patch.inventorySummary !== row.inventorySummary
+                && Number.isSafeInteger(row.inventoryRevision);
+            if (bagMoved) entries.push(['inventoryRevision', row.inventoryRevision + 1]);
+            parts && Diagnostics.count('commit_bag', bagMoved ? 'moved' : 'same');
             const revision = expectedRevision + 1;
             const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
             assignments.push(
@@ -5896,7 +5996,7 @@ const Database = {
             parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
-            const { drops: pkDrops, rewrote } = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : { drops: [], rewrote: false };
+            const { drops: pkDrops, rewrote, skillsWritten } = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : { drops: [], rewrote: false };
             parts?.lap('physical');
             // What deals and closed records left for the bot on the board while
             // the worker held it reaches its bag with this save.
@@ -5917,9 +6017,13 @@ const Database = {
                 ...row, ...Object.fromEntries(entries), simulationOwner: LEGACY_SIMULATION_OWNER,
                 simulationRevision: revision, simulationLeaseId: null, simulationLeaseUntil: 0
             });
-            parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : 'built');
+            // Written skill rows may have moved the revision under the built row.
+            if (skillsWritten && !settled && !rewritten) {
+                committedRow.skillsRevision = Number(one('SELECT skillsRevision FROM bot_life_state WHERE characterId = ?', [characterId])?.skillsRevision) || 0;
+            }
+            parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : skillsWritten ? 'built_skills' : 'built');
             parts && Diagnostics.count('commit_stats', statsParsed && !rewritten ? 'handed' : 'reparsed');
-            parts && skillsRebuilt !== undefined && Diagnostics.count('commit_skills', skillsRebuilt ? 'rebuilt' : 'same');
+            parts && skills !== undefined && Diagnostics.count('commit_skills', skills);
             parts?.lap('reread');
             parts?.done();
             return {
