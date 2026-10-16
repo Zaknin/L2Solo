@@ -95,7 +95,8 @@ function lifecycle(character, profile, inventory, revision = 0) {
         vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
         timing: { activityStartedAt: 100, nextResolveAt: 1000, lastResolvedAt: 500, lastHotAt: null },
         party: { partyId: null },
-        stats: { probe: character.name },
+        // The native henna slots a loaded state carries (BotLifeState load).
+        stats: { probe: character.name, hennas: [null, null, null] },
         inventory,
         simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision, leaseId: null, leaseUntil: 0 },
         updatedAt: 1000
@@ -224,6 +225,7 @@ async function createProbe(index) {
         if (result.committedStats) assert.deepStrictEqual(result.committedStats, JSON.parse(stored.statsJson),
             `the stats handed back for ${result.characterId} are the stored stats`);
     }
+    assert(committedRows.some((result) => result.committedStats), 'a commit hands its stats parse back');
     const byId = new Map(results.map((result) => [Number(result.characterId), result]));
     assert.strictEqual(byId.get(states[0].characterId).ok, true);
     assert.strictEqual(byId.get(states[1].characterId).reason, 'stale_revision', 'one stale row must not roll back valid peers');
@@ -392,7 +394,7 @@ async function createProbe(index) {
     // batch counts its bots.
     const metrics = invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics();
     assert(metrics.counts['commit_batch:bots:all'] >= 2, 'the commit batch counts its bots');
-    for (const part of ['row_read', 'stats_merge', 'row_write', 'physical', 'settle', 'reread']) {
+    for (const part of ['row_read', 'stats_parse', 'stats_skills', 'stats_merge', 'row_write', 'physical', 'settle', 'reread']) {
         assert(metrics.durations[`commit_${part}`]?.count >= 1, `commit part ${part} is timed`);
     }
     console.log('Cold owner batch partial-stale and ACK-loss checks passed');

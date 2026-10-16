@@ -2610,10 +2610,11 @@ const clanMembershipPolicy = () => ClanMembershipPolicyModule
 // returns what later cold commit steps would otherwise parse again: the final
 // stats as parsedObject(patch.statsJson) would see them (undefined when the
 // patch carries no stats), whether they are exactly JSON.parse(patch.statsJson)
-// (no repair re-serialized them) and the proposed death-experience record.
+// (no repair re-serialized them), whether the learned rows rebuilt the combat
+// kit (undefined without one) and the proposed death-experience record.
 function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
     const next = { ...patch };
-    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, deathExperience: undefined };
+    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, skillsRebuilt: undefined, deathExperience: undefined };
     const proposedRaw = next.statsJson;
     const currentViews = statsViews(row?.statsJson);
     const proposedViews = statsViews(proposedRaw);
@@ -2626,12 +2627,13 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
     parts?.lap('stats_parse');
     // Each repair below edits `incoming`; it is serialized once after the last.
     let dirty = false;
+    let skillsRebuilt;
     // A resolve owns effects, cooldowns and other transient combat state.
     // Only the native learned rows own the skill set and its ranks.
     const combat = incoming.coldCombat || current.coldCombat;
     if (combat && Number(row?.characterId) > 0) {
         const rebuilt = nativeColdCombatSkillsUnsafe(row.characterId, combat);
-        parts && Diagnostics.count('commit_skills', rebuilt === combat ? 'same' : 'rebuilt');
+        skillsRebuilt = rebuilt !== combat;
         // A non-string proposal leaves this step serialized, as it always did.
         if (rebuilt !== incoming.coldCombat || typeof next.statsJson !== 'string') {
             incoming.coldCombat = rebuilt;
@@ -2689,7 +2691,7 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
         stats = repaired.stats;
         if (repaired.activity !== proposed.activity) next.activity = repaired.activity;
     }
-    return { patch: next, stats, statsParsed: !dirty && repaired === proposed, deathExperience };
+    return { patch: next, stats, statsParsed: !dirty && repaired === proposed, skillsRebuilt, deathExperience };
 }
 
 function syncInventorySummaryUnsafe(characterId, inventory = {}) {
@@ -2900,10 +2902,11 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
         write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.karma', ?, '$.pk', ?) WHERE characterId = ?",
             [current.karma, current.pk, characterId]);
     }
-    // A PvP tally and a PK death drop (only on the step that ends at 0 HP)
-    // write this bot's life state after the commit's UPDATE.
-    const dying = Number(before?.hp) > 0 && Number(physical.hp) <= 0;
-    return { drops: dying ? dropPkDeathItemsUnsafe(characterId).drops : [], rewrote: dying || physical.pvpKills?.length > 0 };
+    // A PvP tally and a PK death drop (tried on the step that ends at 0 HP; it
+    // returns its death sequence only when it wrote) rewrite this bot's life
+    // state after the commit's UPDATE.
+    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
+    return { drops: dropped?.drops || [], rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
 }
 
 function dropPkDeathItemsUnsafe(characterId) {
@@ -5760,11 +5763,11 @@ const Database = {
             const conflict = coldSimulationConflict(row, fields, fields.timestamp);
             parts?.lap('row_read');
             if (conflict !== 'cas_failed') return { fields, row, conflict };
-            const { patch, stats, statsParsed, deathExperience } = preserveColdVersionedStatsParsed(row, fields.requestedPatch, parts);
+            const { patch, stats, statsParsed, skillsRebuilt, deathExperience } = preserveColdVersionedStatsParsed(row, fields.requestedPatch, parts);
             const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
             const partition = coldSimulationPartition(proposed, request, stats);
             parts?.lap('stats_merge');
-            return { fields, row, conflict, patch, stats, statsParsed, deathExperience, partition };
+            return { fields, row, conflict, patch, stats, statsParsed, skillsRebuilt, deathExperience, partition };
         };
         const validatedRaidKeys = new Set();
         const validateAtomicGroups = () => atomicGroups.forEach((group, groupId) => {
@@ -5864,7 +5867,7 @@ const Database = {
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
             const parts = Diagnostics.laps('commit_');
             parts && Diagnostics.count('commit_input', checked ? 'group_check' : 'read');
-            const { row, conflict, patch, stats, statsParsed, deathExperience, partition } = checked || commitInput(request, fields, parts);
+            const { row, conflict, patch, stats, statsParsed, skillsRebuilt, deathExperience, partition } = checked || commitInput(request, fields, parts);
             if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
             const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
@@ -5916,6 +5919,7 @@ const Database = {
             });
             parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : 'built');
             parts && Diagnostics.count('commit_stats', statsParsed && !rewritten ? 'handed' : 'reparsed');
+            parts && skillsRebuilt !== undefined && Diagnostics.count('commit_skills', skillsRebuilt ? 'rebuilt' : 'same');
             parts?.lap('reread');
             parts?.done();
             return {
