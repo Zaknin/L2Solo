@@ -11,6 +11,7 @@ const SkillExec = invoke('GameServer/Actor/Generics/SkillExec');
 const SkillRequest = invoke('GameServer/Actor/Generics/SkillRequest');
 const SkillModel = invoke('GameServer/Model/Skill');
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const skillTree = require('../data/Skills/Tree/tree.json');
 
 DataCache.init();
@@ -221,7 +222,7 @@ try {
     const partySummon = targetActor(1001020, 550, 0);
     partyMember.summon = partySummon;
     const partyMemberSession = { actor: partyMember, partyCompanion: true, followPlayerSession: casterSession };
-    World.user = { sessions: [casterSession, partyMemberSession] };
+    registerSessions([casterSession, partyMemberSession]);
     const partyTargets = attack.resolveSkillTargets(casterSession, caster, caster, cachedSkill(1251));
     assert.deepStrictEqual(
         partyTargets.map((target) => target.fetchId()),
