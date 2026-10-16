@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS characters (
 CREATE INDEX IF NOT EXISTS characters_username ON characters(username);
 CREATE INDEX IF NOT EXISTS characters_clanId ON characters(clanId);
 CREATE INDEX IF NOT EXISTS characters_clan_level_id ON characters(clanId, level DESC, id ASC);
+-- The observer lists the persisted PKs on every world poll: only these rows are indexed.
+CREATE INDEX IF NOT EXISTS characters_karma_positive ON characters(karma) WHERE karma > 0;
 
 CREATE TABLE IF NOT EXISTS character_death_experience (
     characterId INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,

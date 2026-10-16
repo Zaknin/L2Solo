@@ -362,7 +362,7 @@ function compactHotBot(status, pkIds = new Set(), session = null) {
 let persistedPkIds = new Set();
 
 async function refreshPersistedPkIds() {
-    const rows = await Database.execute(['SELECT id FROM characters WHERE karma > 0', []]);
+    const rows = await Database.execute(['SELECT id FROM characters WHERE karma > 0', []], 'observer:pk-ids');
     const previous = persistedPkIds;
     persistedPkIds = new Set(rows.map(row => Number(row.id)));
     return new Set([...previous, ...persistedPkIds]);
