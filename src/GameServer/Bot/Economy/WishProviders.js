@@ -260,6 +260,9 @@ function build(state, ctx, deps = {}) {
     return result;
 }
 function buildProjection(state, ctx, deps) {
+    // Diagnostics only: wall time per block (provider:<block>); a lazy source
+    // closure counts in the block that calls it. Null while diagnostics are off.
+    const blocks = Diagnostics.laps('provider:');
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const timestamp = ctx.timestamp ?? Date.now();
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -346,6 +349,7 @@ function buildProjection(state, ctx, deps) {
         if (!purchases.has(id)) purchases.set(id, purchaseFor(id));
         return purchases.get(id);
     };
+    blocks?.lap('build');
     // The farm or spoil path reads GearAcquisitionPlanner.sourceFacts: the
     // hunt rules the bot hunts by (D4-D6), an hour at its net cost (D7). The
     // trip is one row per town in the network, never once per unit.
@@ -704,6 +708,7 @@ function buildProjection(state, ctx, deps) {
     }
     // Paid enchant, SA and henna are objects of the same power queue.
     // Missing materials inherit that value; only a genuinely ready leaf applies.
+    blocks?.lap('sources');
     for (const improvement of invoke('GameServer/Bot/Economy/BotImprovementPolicy').opportunities(state, ctx)) {
         const materials = improvement.materials.map(material => ({ ...material, missing: Math.max(0,
             material.amount - positive(state.inventory?.[material.selfId]?.amount)) }));
@@ -754,6 +759,7 @@ function buildProjection(state, ctx, deps) {
     // the network uses, over its own scratch arena of item descriptors. A
     // forecast without a supplier no longer screens out a step now: the
     // fundable path wins its family, then benefit per effort.
+    blocks?.lap('benefits');
     const admission = { candidates: 0, evaluations: 0, maxScratch: 0, rounds: 0, pending: [], admitted: [] };
     const solverOptions = { hourAdena: ctx.hourAdena, riskWeight: ctx.riskWeight, stockFor: ctx.stockFor || null,
         wallet: ctx.wallet ?? positive(state.adena), survivalReserve: ctx.survivalReserve };
@@ -943,6 +949,7 @@ function buildProjection(state, ctx, deps) {
     let step = admitting.next();
     while (!step.done) step = admitting.next();
     const admittedGear = step.value;
+    blocks?.lap('admission');
     if (!progression.required && rare && statusWeight > 0) {
         const held = admittedGear.some(row => row.node.object.itemId === Number(rare.item.selfId));
         const key = !held && itemNode(rare.item.selfId);
@@ -1089,8 +1096,8 @@ function buildProjection(state, ctx, deps) {
         if (sourceBytes <= 8192) sourceSections = structuredClone(candidate);
     } catch (_) { /* An uncloneable candidate falls back to calculation. */ }
     if (Diagnostics.active()) Diagnostics.count('source_memo', 'size', sourceBytes < 0 ? 'unmeasured'
-        : sourceBytes > 8192 ? 'over8k' : !sourceSections ? 'uncloneable'
-        : sourceBytes < 2048 ? 'lt2k' : sourceBytes < 4096 ? '2_4k' : '4_8k');
+        : sourceBytes > 8192 || sourceSections ? Diagnostics.sizeBucket(sourceBytes) : 'uncloneable');
+    blocks?.lap('tail'); blocks?.done();
     return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
 }
 // Only public recipe rows and a prepared route can prove a usable service.

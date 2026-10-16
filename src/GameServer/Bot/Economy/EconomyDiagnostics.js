@@ -42,6 +42,18 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         row.count++; row.totalMs += ms; row.maxMs = Math.max(row.maxMs, ms);
         row.samples[row.next] = ms; row.next = (row.next + 1) % LIMITS.durationSamples;
     }
+    // Wall time of the consecutive parts of one call: lap(part) closes the part
+    // since the previous lap, done() records each part as layer prefix+part.
+    // Null while diagnostics are off: no clock read, no allocation.
+    function laps(prefix) {
+        if (!active()) return null;
+        let last = performance.now();
+        const spent = {};
+        return {
+            lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
+            done() { for (const part in spent) duration(prefix + part, spent[part]); }
+        };
+    }
     function lose(reason, amount = 1) {
         dropped += amount; drops ||= { rate: 0, queue: 0, size: 0, transport: 0, writer: 0, invalid: 0, stop: 0, upstream: 0, admission: 0 };
         drops[reason] += amount;
@@ -169,8 +181,12 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
                 { count: row.count, totalMs: row.totalMs, maxMs: row.maxMs, samples: row.samples.slice() }])) : {},
             detail: stats() };
     }
-    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, metrics, stats, omitAggregatesOnOverflow,
+    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, laps, metrics, stats, omitAggregatesOnOverflow,
         noteDropped(amount) { if (active() && Number.isSafeInteger(amount) && amount > 0) lose('upstream', amount); },
         connect(send) { if (!detail()) return false; transport = send; pump(); return true; } };
 }
-module.exports = { ...create(), create, LIMITS };
+// One size scale for serialized economy payloads (source memo, retained projection).
+function sizeBucket(bytes) {
+    return bytes < 2048 ? 'lt2k' : bytes < 4096 ? '2_4k' : bytes <= 8192 ? '4_8k' : 'over8k';
+}
+module.exports = { ...create(), create, LIMITS, sizeBucket };

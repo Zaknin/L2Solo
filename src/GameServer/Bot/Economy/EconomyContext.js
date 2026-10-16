@@ -73,6 +73,25 @@ const positive = value => Math.max(0, Number(value) || 0);
 // stamps inside focus/dormant rows are not acted on. Shadow count only.
 const planHash = network => fnv1a32(JSON.stringify([network.focus?.[0] ?? null, (network.queue || []).map(row => [row.key, row.funded === true]),
     network.activity?.key ?? network.activity?.kind ?? null, (network.dormant || []).map(row => Array.isArray(row) ? row[0] : row)]));
+// What the network build reads from a provider projection, without serializing
+// the nodes: each node's and each path's own scalar values in field order
+// (nested objects skipped, requirements as key and amount), item values, roots,
+// money paths, horizon; node order ignored. O(nodes x paths x fields). Shadow count only.
+const scalarsOf = (row, into) => { for (const name in row) { const value = row[name];
+    if (value === null || typeof value !== 'object') into.push(value); } };
+function projectionHash(projection) {
+    const nodes = projection.nodes.map(node => {
+        const row = []; scalarsOf(node, row);
+        for (const path of node.paths || []) {
+            row.push('|'); scalarsOf(path, row);
+            for (const need of path.requirements || []) row.push(need.key, need.amount);
+            for (const need of path.grossRequirements || []) row.push(need.key, need.amount);
+        }
+        return JSON.stringify(row);
+    }).sort();
+    return fnv1a32(JSON.stringify([nodes, [...projection.values].sort(([a], [b]) => a - b), projection.roots,
+        projection.moneyPaths, projection.horizon]));
+}
 
 function stateForActor(actor, session = actor?.session) {
     const stored = session?.coldLifeState || {};
@@ -1071,12 +1090,13 @@ function buildForState(state, deps) {
         ? 'input_dependency_changed' : !isMainThread && held.stateRef.deref() !== state ? 'state_publication'
         : deps.withNodes && !held.projection ? 'nodes_needed' : 'used_market_changed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let shadowSame = false, previousPlan = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
+    let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
         const same = last?.hash === hash, hashes = partHashes(keyParts);
         shadowSame = same; previousPlan = last?.plan ?? null; previousRows = last?.rows ?? null;
+        previousProjection = last?.projection ?? null;
         previousReadset = last?.readset ?? null; movedParts = [];
         Diagnostics.count('context', 'shadow', `${diagnosticReason}:${same ? 'same_key' : 'new_key'}`);
         // Which parts moved since the actor's previous build (none known without one).
@@ -1106,7 +1126,7 @@ function buildForState(state, deps) {
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
-            sourceHash, sourceParts: sourceHashes };
+            sourceHash, sourceParts: sourceHashes, projection: null };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1272,10 +1292,26 @@ function buildForState(state, deps) {
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = held?.sections?.sources === sections.sources
         ? held.sourceSections : null;
-    if (diagnostic) Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
-        : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'key');
+    if (diagnostic) {
+        Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
+            : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'key');
+        Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
+    }
     const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra] });
     context.projection = projection;
+    if (shadowEntry) {
+        // Would the provider's output repeat the actor's previous one, per miss reason
+        // (the workshop path below is added outside the provider, so it is left out).
+        shadowEntry.projection = projectionHash(projection);
+        if (previousProjection !== null) Diagnostics.count('context', 'projection',
+            `${diagnosticReason}:${shadowEntry.projection === previousProjection ? 'same' : 'differ'}`);
+        // The size a retained projection would hold, on sampled owners only.
+        if (Diagnostics.enabled(state.characterId)) {
+            let bytes = -1;
+            try { bytes = Buffer.byteLength(JSON.stringify(projection.nodes)); } catch (_) { /* A node JSON cannot hold (a cycle, a BigInt). */ }
+            Diagnostics.count('context', 'projection_size', bytes < 0 ? 'unmeasured' : Diagnostics.sizeBucket(bytes));
+        }
+    }
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
         cycleHours: workshop.cycleHours, repeatable: true });
