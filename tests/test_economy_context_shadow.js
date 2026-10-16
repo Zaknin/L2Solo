@@ -568,7 +568,8 @@ restoreScope();
     const builds = records.filter(row => row.phase === 'wish_context');
     assert.deepEqual(builds.map(row => [row.reason, row.outcome]), [
         ['not_retained', undefined],
-        ['held_refused', undefined],
+        // A sampled owner's refused build names whether it changed the plan.
+        ['held_refused', 'same_plan'],
         ['hit_same_inputs', 'held']], JSON.stringify(builds));
     assert.ok(builds[0].durationMs >= 0 && builds[1].durationMs >= 0, 'a build records its time');
     assert.strictEqual(builds[2].durationMs, undefined, 'a hit has no build time');
