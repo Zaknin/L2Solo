@@ -4,6 +4,7 @@ const Valuation = require('./EconomicValuation');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('./EconomyDiagnostics');
 const { packetRowWishes } = require('./PurchaseFunding');
+const Bytes = require('./CompactBytes');
 const NEEDS = Object.freeze(['power', 'status', 'care', 'scores']);
 const MAX_NODES = 40;
 const MAX_ROOTS = 12;
@@ -20,133 +21,116 @@ const QUANTITY_INPUT_BYTES = 4096;
 const QUANTITY_SCALARS = new Set(['physical', 'present', 'freePresent', 'incoming', 'free', 'crystalFree']);
 const QUANTITY_KINDS = Object.freeze([...QUANTITY_SCALARS, 'stock', 'stockPhysical']);
 // Exact transport of the native read list: no rows are merged, inferred or
-// discarded. The saved decision codec treats this owner's bytes opaquely.
+// discarded. Each id, root and root literal is written once, at its first
+// use (an id as the signed delta from the previous new id), and
+// as its first-use index after that. Values 0 and 1 live in the row header.
+// The saved decision codec treats this owner's bytes opaquely.
 function packQuantityInputs(proof) {
     if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return null;
     try {
         if (Buffer.byteLength(JSON.stringify(proof)) > QUANTITY_INPUT_BYTES) return null;
-        const bytes = [], ids = [], roots = [], literals = [];
-        const idIndex = new Map(), rootIndex = new Map(), literalIndex = new Map();
-        const intern = (value, list, index) => {
-            if (!index.has(value)) { index.set(value, list.length); list.push(value); }
-            return index.get(value);
-        };
-        const uint = value => {
-            if (!Number.isSafeInteger(value) || value < 0) throw Error('quantity integer');
-            do { const digit = value % 128; value = Math.floor(value / 128); bytes.push(digit + (value ? 128 : 0)); } while (value);
-        };
+        const write = Bytes.writer(), ids = new Map(), roots = new Map(), literals = new Map();
+        let lastId = 0;
         const numberTag = value => {
             if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw Error('quantity value');
             return Object.is(value, -0) || !Number.isSafeInteger(value) ? 3 : value <= 1 ? value : 2;
         };
         const number = (value, tag) => {
-            if (tag === 2) uint(value);
-            else if (tag === 3) { const encoded = Buffer.allocUnsafe(8); encoded.writeDoubleLE(value); bytes.push(...encoded); }
+            if (tag === 2) write.uint(value);
+            else if (tag === 3) write.double(value);
         };
+        const literal = text => {
+            if (literals.has(text)) { write.uint(literals.get(text)); return; }
+            write.uint(literals.size); literals.set(text, literals.size); write.text(text);
+        };
+        write.byte(3); write.uint(proof.rows.length);
         for (const row of proof.rows) {
             if (!Array.isArray(row)) return null;
             const kind = QUANTITY_KINDS.indexOf(row[0]), rooted = kind >= 6;
             if (kind < 0 || row.length !== (kind === 6 ? 5 : kind === 7 ? 4 : 3)) return null;
-            const id = row[rooted ? 2 : 1];
-            if (!Number.isSafeInteger(id) || id <= 0) return null;
-            const item = intern(id, ids, idIndex);
+            const id = row[rooted ? 2 : 1], value = row[rooted ? 3 : 2];
+            if (!Number.isSafeInteger(id) || id <= 0 || rooted && typeof row[1] !== 'string') return null;
+            const first = numberTag(value), second = kind === 6 ? numberTag(row[4]) : 0, fresh = !ids.has(id);
+            write.byte(kind + first * 8 + second * 32 + (fresh ? 128 : 0));
+            if (fresh) {
+                write.signed(id - lastId);
+                ids.set(id, ids.size); lastId = id;
+            } else write.uint(ids.get(id));
             if (rooted) {
-                const root = row[1]; if (typeof root !== 'string') return null;
-                if (!rootIndex.has(root)) {
+                const root = row[1];
+                if (roots.has(root)) write.uint(roots.get(root));
+                else {
+                    write.uint(roots.size); roots.set(root, roots.size);
+                    // Tag 1: the root embeds this row's own id between two literals.
                     const decimal = String(id), at = root.indexOf(decimal);
-                    const literal = text => intern(text, literals, literalIndex);
-                    const encoded = at < 0 ? [0, literal(root)]
-                        : [1, literal(root.slice(0, at)), item, literal(root.slice(at + decimal.length))];
-                    rootIndex.set(root, roots.length); roots.push(encoded);
+                    if (at < 0) { write.byte(0); literal(root); }
+                    else { write.byte(1); literal(root.slice(0, at)); literal(root.slice(at + decimal.length)); }
                 }
             }
-            numberTag(row[rooted ? 3 : 2]); if (kind === 6) numberTag(row[4]);
-        }
-        bytes.push(2); uint(proof.rows.length); uint(ids.length); uint(roots.length); uint(literals.length);
-        for (const id of ids) uint(id);
-        for (const literal of literals) {
-            const encoded = Buffer.from(literal, 'utf8');
-            if (encoded.toString('utf8') !== literal) return null;
-            uint(encoded.length); bytes.push(...encoded);
-        }
-        for (const root of roots) { bytes.push(root[0]); for (const index of root.slice(1)) uint(index); }
-        for (const row of proof.rows) {
-            const kind = QUANTITY_KINDS.indexOf(row[0]), rooted = kind >= 6;
-            const value = row[rooted ? 3 : 2], first = numberTag(value), second = kind === 6 ? numberTag(row[4]) : 0;
-            bytes.push(kind + first * 8 + second * 32);
-            if (rooted) uint(rootIndex.get(row[1]));
-            uint(idIndex.get(row[rooted ? 2 : 1])); number(value, first);
+            number(value, first);
             if (kind === 6) number(row[4], second);
         }
-        return bytes.length <= QUANTITY_INPUT_BYTES ? Uint8Array.from(bytes) : null;
+        const bytes = write.finish();
+        return bytes.length <= QUANTITY_INPUT_BYTES ? bytes : null;
     } catch (_) { return null; }
 }
 function unpackQuantityInputs(value) {
     if (!(value instanceof Uint8Array) || value.byteLength > QUANTITY_INPUT_BYTES) return null;
     try {
-        const bytes = Buffer.from(value); let at = 0;
-        const byte = () => { if (at >= bytes.length) throw Error('quantity truncation'); return bytes[at++]; };
-        const uint = () => {
-            let result = 0, factor = 1, count = 0, digit;
-            do {
-                digit = byte(); count++; result += (digit % 128) * factor;
-                if (!Number.isSafeInteger(result) || count > 8) throw Error('quantity integer');
-                factor *= 128;
-            } while (digit >= 128);
-            if (count > 1 && digit === 0) throw Error('quantity overlong');
-            return result;
-        };
+        const read = Bytes.reader(value);
         const number = tag => {
             if (tag <= 1) return tag;
-            if (tag === 2) { const result = uint(); if (result <= 1) throw Error('quantity integer tag'); return result; }
-            if (at + 8 > bytes.length) throw Error('quantity number');
-            const result = bytes.readDoubleLE(at); at += 8;
+            if (tag === 2) { const result = read.uint(); if (result <= 1) throw Error('quantity integer tag'); return result; }
+            const result = read.double();
             if (!Number.isFinite(result) || result < 0 || Number.isSafeInteger(result) && !Object.is(result, -0)) throw Error('quantity value');
             return result;
         };
-        if (byte() !== 2) return null;
-        const count = uint(), idCount = uint(), rootCount = uint(), literalCount = uint();
-        if (count > QUANTITY_INPUT_LIMIT || idCount > count || rootCount > count || literalCount > rootCount * 2) return null;
-        const ids = [], seenIds = new Set();
-        for (let i = 0; i < idCount; i++) {
-            const id = uint(); if (!id || seenIds.has(id)) return null;
-            seenIds.add(id); ids.push(id);
-        }
         const literals = [], seenLiterals = new Set();
-        for (let i = 0; i < literalCount; i++) {
-            const size = uint(); if (size > bytes.length - at) return null;
-            const raw = bytes.subarray(at, at + size), text = raw.toString('utf8'); at += size;
-            if (!Buffer.from(text, 'utf8').equals(raw) || seenLiterals.has(text)) return null;
+        const literal = () => {
+            const index = read.uint();
+            if (index < literals.length) return literals[index];
+            if (index > literals.length) throw Error('quantity literal');
+            const text = read.text();
+            if (seenLiterals.has(text)) throw Error('quantity literal');
             seenLiterals.add(text); literals.push(text);
-        }
-        const roots = [], seenRoots = new Set();
-        for (let i = 0; i < rootCount; i++) {
-            const tag = byte(), first = uint(); if (first >= literals.length || tag > 1) return null;
-            let text = literals[first];
-            if (tag) {
-                const item = uint(), last = uint();
-                if (item >= ids.length || last >= literals.length) return null;
-                text += String(ids[item]) + literals[last];
-            }
-            if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return null;
-            seenRoots.add(text); roots.push(text);
-        }
-        const rows = []; let firstId = 0, firstRoot = 0;
+            return text;
+        };
+        if (read.byte() !== 3) return null;
+        const count = read.uint();
+        if (count > QUANTITY_INPUT_LIMIT) return null;
+        const rows = [], ids = [], seenIds = new Set(), roots = [], seenRoots = new Set();
+        let lastId = 0;
         for (let i = 0; i < count; i++) {
-            const header = byte(); if (header > 127) return null;
-            const kind = header % 8, first = Math.floor(header / 8) % 4, second = Math.floor(header / 32);
+            const header = read.byte(), kind = header % 8, first = Math.floor(header / 8) % 4, second = Math.floor(header / 32) % 4;
             if (kind !== 6 && second) return null;
+            let id;
+            if (header >= 128) {
+                id = lastId + read.signed();
+                if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) return null;
+                seenIds.add(id); ids.push(id); lastId = id;
+            } else {
+                const index = read.uint();
+                if (index >= ids.length) return null;
+                id = ids[index];
+            }
             const row = [QUANTITY_KINDS[kind]];
             if (kind >= 6) {
-                const root = uint(); if (root >= roots.length || root > firstRoot) return null;
-                if (root === firstRoot) firstRoot++; row.push(roots[root]);
+                const index = read.uint();
+                if (index > roots.length) return null;
+                if (index === roots.length) {
+                    const tag = read.byte();
+                    if (tag > 1) return null;
+                    const text = tag ? literal() + String(id) + literal() : literal();
+                    if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return null;
+                    seenRoots.add(text); roots.push(text);
+                }
+                row.push(roots[index]);
             }
-            const item = uint(); if (item >= ids.length || item > firstId) return null;
-            if (item === firstId) firstId++; row.push(ids[item], number(first));
+            row.push(id, number(first));
             if (kind === 6) row.push(number(second));
             rows.push(Object.freeze(row));
         }
-        if (at !== bytes.length || firstId !== ids.length || firstRoot !== roots.length) return null;
+        if (!read.done()) return null;
         const proof = { version: 1, rows: Object.freeze(rows) };
         return Buffer.byteLength(JSON.stringify(proof)) <= QUANTITY_INPUT_BYTES ? Object.freeze(proof) : null;
     } catch (_) { return null; }

@@ -292,66 +292,91 @@ try {
 
     });
     scenario('native restart codec and owners', () => {
-        // Recreate the actual owner card, then erase process-local economy state.
-        Economy.reset(); clock = T;
-        const armedBuild = Economy.forState(input, options());
-        const armedCard = Decisions.advisory(armedBuild, input, input.activity, options());
-        const armedPrefix = Economy.restartEventProof(armedCard.eventProof, armedCard);
-        console.log(`INFO typical armed persistence=${!!armedCard.saved} card=${armedCard.card.data.byteLength} prefix=${armedPrefix?.byteLength ?? Buffer.byteLength(JSON.stringify(armedPrefix))} field=${armedCard.saved ? Buffer.byteLength(JSON.stringify({ wishAdvisory: armedCard.saved })) : 'unsupported'} clocks=${Sections.clockBytes(armedCard.baseline)}`);
+        // Recreate the actual owner card, then erase process-local economy
+        // state: the saved field and the native owners are all that remain.
+        // The largest section clocks a live baseline can carry beside the field.
+        const worstClocks = Sections.clockBytes({ ages: Object.values(Sections.SOFT_DELAY) });
+        const PROOF_FIELDS = ['version', 'restartable', 'owner', 'at', 'generation', 'decision', 'activity', 'hard',
+            'quantities', 'liquidation', 'stockRoots', 'bands', 'safety', 'hourAdena', 'producerScope'];
+        const decide = (input, label) => {
+            Economy.reset(); clock = T;
+            const build = Economy.forState(input, options());
+            const card = Decisions.advisory(build, input, input.activity, options());
+            assert(card?.eventProof, JSON.stringify({ blocked: `native ${label} has no accepted executable proof`,
+                focus: build.network.focus, leaf: build.network.activity,
+                quantities: build.plan.quantityInputs?.rows.length ?? null }));
+            const prefix = Economy.restartEventProof(card.eventProof, card);
+            assert(prefix, `the native ${label} proof has a restart prefix`);
+            assert.equal(prefix[0], 4, 'binary prefix format');
+            // Strict deep equality compares every Number with Object.is (-0 too).
+            const decoded = Economy.restoreEventProof(prefix, card);
+            for (const name of PROOF_FIELDS) assert.deepEqual(decoded[name], card.eventProof[name], `${label} restart keeps ${name} exactly`);
+            const field = card.saved ? Buffer.byteLength(JSON.stringify({ wishAdvisory: card.saved })) : null;
+            const clocks = Sections.clockBytes(card.baseline);
+            console.log(`INFO native ${label} restart rows=${card.eventProof.quantities.rows.length} card=${card.card.data.byteLength} prefix=${prefix.byteLength} field=${field} clocks=${clocks} worstClocks=${worstClocks}`);
+            assert(card.saved && field + Math.max(clocks, worstClocks) <= Restart.MAX_BYTES, JSON.stringify({ blocked: `native ${label} restart proof does not fit the unchanged 1KB budget`,
+                cardBytes: card.card.data.byteLength, prefixBytes: prefix.byteLength, field, clocks, worstClocks }));
+            return { input, build, card, prefix, field, clocks };
+        };
+        // A process restart: new economy, memory and native table owners.
+        const restart = ({ input, build }) => {
+            const saved = JSON.parse(JSON.stringify(publish(input, build)));
+            Economy.reset(); clock = T + 1000;
+            const oldIdentity = memory.contentIdentity(input.characterId), memorySnapshot = memory.snapshot(input.characterId);
+            memory = new InteractionMemory(); memory.accept(memorySnapshot);
+            assert.equal(memory.contentIdentity(input.characterId), oldIdentity, 'native accepted memory contents survive packing in a new process owner');
+            mirror = new TableMirror();
+            mirror.watch('personal_warehouse', { reset() {}, put: (_key, row) => Warehouse.prepareRow(row), remove() {} });
+            mirror.watch('clan_supplies', { reset() {}, put: (_key, row) => Supplies.prepareRow(row), remove() {} });
+            const restartedChannel = new ColdTableChannel();
+            let restartedReady = false;
+            restartedChannel.register('personal_warehouse', { key: row => row[0], allRows: () => [], ready: () => restartedReady });
+            restartedChannel.register('clan_supplies', { key: row => row[0],
+                allRows: () => [[7, 1, [], 999]], ready: () => restartedReady });
+            restartedChannel.attach({}, 'native-restart', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
+            const restored = Decisions.restoreAdvisory(saved, clock);
+            assert(restored, 'the native saved card decodes after losing every local economy entry');
+            assert.equal(verdict(saved, restored).reason, 'unready', 'decoded cards wait for real native owner copies');
+            restartedReady = true; restartedChannel.flush();
+            assert.equal(verdict(saved, restored).valid, true, JSON.stringify(verdict(saved, restored)));
+            assert.equal(Decisions.refusal(saved, restored, options()), '');
+            return { saved, restored };
+        };
+
+        // The typical armed hunter keeps its held decision across a restart.
+        const armed = decide(input, 'armed');
+        const armedRestart = restart(armed);
+        assert.deepEqual(Buffer.from(armedRestart.restored.card.data), Buffer.from(armed.card.card.data), 'every armed card byte survives');
+        console.log(`PASS native armed restart field=${armed.field} + worst clocks ${worstClocks} = ${armed.field + worstClocks}/${Restart.MAX_BYTES}`);
+
+        // Corrupt, old or oversize prefixes are refused whole: restore -> null -> rebuild.
+        const { prefix: armedPrefix, card: armedCard } = armed;
+        const refused = (bytes, why) => assert.equal(Economy.restoreEventProof(Uint8Array.from(bytes), armedCard), null, why);
+        for (const version of [2, 3, 5]) refused([version, ...armedPrefix.subarray(1)], `format ${version} is not this prefix`);
+        for (let size = 0; size < armedPrefix.length; size++) refused(armedPrefix.subarray(0, size), 'a truncated prefix never becomes a partial proof');
+        refused([...armedPrefix, 0], 'a trailing byte refuses');
+        refused([4, ...new Uint8Array(65536)], 'the owner\'s 64 KiB raw bound refuses');
+        // Fixed offsets from the end: quantities, the one-byte empty producer
+        // scope, then hourAdena as its tag and raw double.
+        const quantityBytes = Network.packQuantityInputs(armedCard.eventProof.quantities).length;
+        const scopeAt = armedPrefix.length - quantityBytes - 1;
+        const [scope, content] = armedCard.eventProof.producerScope;
+        assert.equal(content, createHash('sha256').update('[]').digest('hex'), 'this armed fixture reads empty producer content');
+        assert.equal(armedPrefix[scopeAt], Number(scope.split(':')[1]), 'the empty scope is its level byte alone');
+        assert(!Number.isInteger(armedCard.eventProof.hourAdena) && armedPrefix[scopeAt - 9] === 1, 'hourAdena is a raw double');
+        const corrupt = (at, value) => Object.assign(Uint8Array.from(armedPrefix), { [at]: value });
+        refused(corrupt(scopeAt, 10), 'an unknown producer level refuses');
+        refused(corrupt(scopeAt, 32), 'an unknown producer scope tag refuses');
+        refused(corrupt(scopeAt + 1, 2), 'an old quantity codec version refuses');
+        refused(corrupt(scopeAt - 9, 5), 'an unknown number tag refuses');
+        refused(corrupt(scopeAt - 9, 0), 'an integer tag cannot reread a double');
+        console.log(`PASS native restart prefix rejects old formats / ${armedPrefix.length} truncations / trailing / oversize / tags`);
+
         // This is a second genuine native actor, not a smaller projection or
-        // truncated proof of the armed cohort. Typical armed restart coverage
-        // remains unsupported until its unchanged full payload fits the cap.
-        const restartInput = actor(9802, 0, 1);
-        Economy.reset();
-        const restartBuild = Economy.forState(restartInput, options());
-        const restartCard = Decisions.advisory(restartBuild, restartInput, restartInput.activity, options());
-        assert(restartCard?.eventProof, JSON.stringify({ blocked: 'native starter has no accepted executable proof',
-            focus: restartBuild.network.focus, leaf: restartBuild.network.activity,
-            quantities: restartBuild.plan.quantityInputs?.rows.length ?? null }));
-        const restartPrefix = Economy.restartEventProof(restartCard.eventProof, restartCard);
-        assert(restartPrefix);
-        const restoredProof = Economy.restoreEventProof(restartPrefix, restartCard);
-        assert.deepEqual(restoredProof.producerScope, restartCard.eventProof.producerScope);
-        const oldPrefix = restartPrefix.slice(); oldPrefix[0] = 2;
-        assert.equal(Economy.restoreEventProof(oldPrefix, restartCard), null, 'a prefix without source membership proof fails closed');
-        if (!restartCard.saved) {
-            const artifact = path.join(os.tmpdir(), 'l2-recompute-chain-restart-blocker.json');
-            fs.writeFileSync(artifact, JSON.stringify({ input: restartInput, state: publish(restartInput, restartBuild),
-                card: { key: restartCard.card.key, data: Buffer.from(restartCard.card.data).toString('base64') },
-                decisionSeq: restartCard.decisionSeq, activityLeaf: restartCard.activityLeaf, focus: restartCard.focus,
-                baseline: restartCard.baseline, activity: restartCard.activity, mp: restartCard.mp,
-                characterId: restartCard.characterId, eventProof: restartCard.eventProof,
-                restartProof: restartPrefix instanceof Uint8Array ? Buffer.from(restartPrefix).toString('base64') : restartPrefix }));
-            console.log(`BLOCKED native restart evidence: ${artifact}`);
-        }
-        assert(restartCard.saved, JSON.stringify({ blocked: 'native restart proof does not fit the unchanged 1KB budget',
-            cardBytes: restartCard.card.data.byteLength,
-            proofBytes: Buffer.byteLength(JSON.stringify(restartCard.eventProof)),
-            prefixBytes: restartPrefix?.byteLength ?? Buffer.byteLength(JSON.stringify(restartPrefix)) }));
-        const saved = JSON.parse(JSON.stringify(publish(restartInput, restartBuild)));
-        const restartBytes = Buffer.byteLength(JSON.stringify({ wishAdvisory: restartCard.saved }));
-        const restartClockBytes = Sections.clockBytes(restartCard.baseline);
-        assert(restartBytes + restartClockBytes <= Restart.MAX_BYTES);
-        console.log(`PASS native saved restart bytes field=${restartBytes} clocks=${restartClockBytes} total=${restartBytes + restartClockBytes}/${Restart.MAX_BYTES}`);
-        Economy.reset(); clock = T + 1000;
-        const oldIdentity = memory.contentIdentity(restartInput.characterId), memorySnapshot = memory.snapshot(restartInput.characterId);
-        memory = new InteractionMemory(); memory.accept(memorySnapshot);
-        assert.equal(memory.contentIdentity(restartInput.characterId), oldIdentity, 'native accepted memory contents survive packing in a new process owner');
-        mirror = new TableMirror();
-        mirror.watch('personal_warehouse', { reset() {}, put: (_key, row) => Warehouse.prepareRow(row), remove() {} });
-        mirror.watch('clan_supplies', { reset() {}, put: (_key, row) => Supplies.prepareRow(row), remove() {} });
-        const restartedChannel = new ColdTableChannel();
-        let restartedReady = false;
-        restartedChannel.register('personal_warehouse', { key: row => row[0], allRows: () => [], ready: () => restartedReady });
-        restartedChannel.register('clan_supplies', { key: row => row[0],
-            allRows: () => [[7, 1, [], 999]], ready: () => restartedReady });
-        restartedChannel.attach({}, 'native-restart', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
-        const restored = Decisions.restoreAdvisory(saved, clock);
-        assert(restored, 'the native saved card decodes after losing every local economy entry');
-        assert.equal(verdict(saved, restored).reason, 'unready', 'decoded cards wait for real native owner copies');
-        restartedReady = true; restartedChannel.flush();
-        assert.equal(verdict(saved, restored).valid, true, JSON.stringify(verdict(saved, restored)));
-        assert.equal(Decisions.refusal(saved, restored, options()), '');
+        // truncated proof of the armed cohort.
+        const starter = decide(actor(9802, 0, 1), 'starter');
+        const { saved, restored } = restart(starter);
+        console.log(`PASS native saved restart bytes field=${starter.field} + worst clocks ${worstClocks} = ${starter.field + worstClocks}/${Restart.MAX_BYTES}`);
         Generation.configure(generationB);
         const decodedB = Decisions.restoreAdvisory(saved, clock);
         if (decodedB) assert.equal(verdict(saved, decodedB).valid, false,

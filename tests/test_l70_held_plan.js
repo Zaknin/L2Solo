@@ -210,9 +210,13 @@ try {
         assert(Object.isFrozen(unpacked) && Object.isFrozen(unpacked.rows) && unpacked.rows.every(Object.isFrozen));
         for (let size = 0; size < packed.length; size++) assert.equal(unpackQuantityInputs(packed.subarray(0, size)), null,
             'truncated native quantity bytes never become a partial proof');
-        for (const bytes of [[...packed, 0], [2, 128, 0, 0], [2, 1, 1, 0, 0, 1, 128, 0],
-            [2, 1, 1, 0, 0, 1, 0, 1], [2, 1, 1, 1, 1, 1, 1, 255], [2, 1, 1, 0, 0, 1, 16, 0, 128, 0]])
-            assert.equal(unpackQuantityInputs(Uint8Array.from(bytes)), null, 'malformed tags, indexes, UTF-8 or trailing bytes refuse');
+        assert.deepEqual(unpackQuantityInputs(Uint8Array.from([3, 1, 128, 2])), { version: 1, rows: [['physical', 1, 0]] });
+        // Each vector breaks one rule of that minimal valid list: [3, 1, 128, 2].
+        for (const bytes of [[...packed, 0], [2, 1, 128, 2], [3, 1, 128, 2, 0], [3, 128, 0, 128, 2],
+            [3, 2, 128, 2, 128, 0], [3, 1, 0, 0], [3, 1, 128, 0], [3, 1, 128, 1], [3, 1, 128 + 64, 2, 0],
+            [3, 1, 128 + 32, 2], [3, 1, 128 + 16, 2, 1], [3, 1, 128 + 6, 2, 1], [3, 1, 128 + 6, 2, 0, 2, 0, 1, 97],
+            [3, 1, 128 + 6, 2, 0, 0, 0, 1, 255], [3, 1, 128 + 6, 2, 0, 1, 0, 1, 97, 1, 1, 97], [3, 1, 128, 130, 0]])
+            assert.equal(unpackQuantityInputs(Uint8Array.from(bytes)), null, 'old versions, malformed tags, indexes, ids, UTF-8 or trailing bytes refuse');
         for (const row of [['stock', '\ud800', 1, 0, 0], ['physical', 1, -1], ['physical', 1, Infinity],
             ['physical', 1, NaN], ['physical', 1.5, 0], ['stock', 'x'.repeat(4096), 1, 0, 0]])
             assert.equal(packQuantityInputs({ version: 1, rows: [row] }), null);
@@ -277,7 +281,8 @@ try {
         const transportProof = { ...accepted.eventProof };
         delete transportProof.market; delete transportProof.spots;
         const original = { ...accepted, characterId: state.characterId, eventProof: { ...transportProof,
-            restartable: true, quantities: { version: 1, rows: [] }, liquidation: { basis: {}, rows: [] },
+            restartable: true, quantities: { version: 1, rows: [] }, liquidation: { basis: { shots: { itemId: 1835, target: 0,
+                beginnerCurrent: 0 }, potions: { target: 0 }, excluded: [] }, rows: [] },
             stockRoots: [], bands: [], safety: [0, 0, 0], hourAdena: 0 } };
         const encode = value => RestartDecision.encode({ ...value, eventProof: Economy.restartEventProof(value.eventProof, value) },
             Sections.baselineIdentity(value.baseline), Sections.clockBytes(value.baseline));

@@ -1286,4 +1286,25 @@ function liquidationInputs(state, basis) {
     });
     return { proof, candidates };
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+// Exact transport of one proof above for the saved restart prefix: its fixed
+// basis shape, then the ordered rows. Any other shape is refused, not cut.
+const plainKeys = (value, keys) => !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+function packLiquidationInputs(proof, write) {
+    const basis = proof?.basis, shots = basis?.shots;
+    if (!plainKeys(proof, ['basis', 'rows']) || !plainKeys(basis, ['shots', 'potions', 'excluded'])
+        || !plainKeys(shots, ['itemId', 'target', 'beginnerCurrent']) || !plainKeys(basis.potions, ['target'])
+        || !Array.isArray(proof.rows) || !proof.rows.every(row => Array.isArray(row) && row.length === 2)) return false;
+    write.uint(shots.itemId); write.number(shots.target); write.number(shots.beginnerCurrent); write.number(basis.potions.target);
+    write.list(basis.excluded, id => write.uint(id));
+    write.list(proof.rows, ([id, count]) => { write.uint(id); write.number(count); });
+    return true;
+}
+function unpackLiquidationInputs(read) {
+    const shots = Object.freeze({ itemId: read.uint(), target: read.number(), beginnerCurrent: read.number() });
+    const potions = Object.freeze({ target: read.number() });
+    const excluded = Object.freeze(read.list(() => read.uint()));
+    const rows = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number()])));
+    return Object.freeze({ basis: Object.freeze({ shots, potions, excluded }), rows });
+}
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, packLiquidationInputs, unpackLiquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
