@@ -39,6 +39,10 @@ const DataCache = invoke('GameServer/DataCache');
 const { equipmentValue, liveEquipmentValue } = invoke('GameServer/Item/EquipmentValue');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const WorldProjection = invoke('WorldObserver/WorldObserverProjection');
+// Main-thread cost of the open map: durations observer_dynamic (hot actors per
+// /world/changes poll), observer_changes, observer_status, observer_cold_change
+// (each cold state change once the projection exists), observer_json.
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -2042,9 +2046,11 @@ function bindColdProjection() {
         if (!projectionRuntime.initialized || !state?.characterId) return;
         const BotManager = invoke('GameServer/Bot/BotManager');
         if (BotManager.findSessionById(Number(state.characterId))) return;
+        const clock = Diagnostics.active() ? performance.now() : null;
         const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
         const actor = compactStateBot(state, new Set(), LifeState.cachedState(leaderId));
         if (actor) WorldProjection.apply({ upserts: [projectionActor(actor, 'bot')] });
+        if (clock !== null) Diagnostics.duration('observer_cold_change', performance.now() - clock);
     });
 }
 
@@ -2072,6 +2078,10 @@ async function ensureWorldProjection() {
 
 async function refreshDynamicProjection() {
     await ensureWorldProjection();
+    // Main-thread time only: the persisted PK read between the two halves is
+    // its own Database operation (observer:pk-ids).
+    let clock = Diagnostics.active() ? performance.now() : null;
+    let busyMs = 0;
     const BotManager = invoke('GameServer/Bot/BotManager');
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
     const pkHotIds = new Set(BotManager.sessions
@@ -2090,7 +2100,9 @@ async function refreshDynamicProjection() {
         ...players.map((actor) => `player:${Number(actor.id)}`)
     ]);
     const upserts = [...hot, ...players];
+    if (clock !== null) busyMs += performance.now() - clock;
     const pkIds = await refreshPersistedPkIds();
+    if (clock !== null) clock = performance.now();
     for (const id of pkIds) {
         if (nextDynamicKeys.has(`bot:${id}`)) continue;
         const state = LifeState.cachedState(id);
@@ -2115,7 +2127,9 @@ async function refreshDynamicProjection() {
         } else removals.push({ kind, id });
     });
     projectionRuntime.dynamicKeys = nextDynamicKeys;
-    return WorldProjection.apply({ upserts, removals });
+    const applied = WorldProjection.apply({ upserts, removals });
+    if (clock !== null) Diagnostics.duration('observer_dynamic', busyMs + performance.now() - clock);
+    return applied;
 }
 
 async function worldBootstrap() {
@@ -2143,13 +2157,14 @@ async function worldBootstrap() {
 function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
     const diagnostics = PopulationConfig.developerDiagnostics === true;
+    const clock = diagnostics ? performance.now() : null;
     const memory = diagnostics ? process.memoryUsage() : null;
     const cold = diagnostics ? ColdSimulationCoordinator.snapshot() : null;
     // Coordinator retains the last worker packet across a restart. A new
     // ready/catalog handoff must finish before those stage fields are usable.
     const worker = cold?.ready === true && cold.snapshotsLoaded === true ? cold.worker : null;
     const commitQueue = worker ? cold.queue : null;
-    return {
+    const status = {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
         uptimeMs: Math.round(process.uptime() * 1000),
@@ -2201,7 +2216,7 @@ function worldStatus() {
             } : null,
             heap: PopulationStatus.heaps({ coldWorker: cold.worker }),
             developerDiagnostics: {
-                main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
+                main: Diagnostics.metrics(),
                 worker: cold.worker?.developerDiagnostics || null,
                 transport: HistoryDatabase.stats().economyDiagnostics || { enabled: false },
                 observer: observerDiagnostics()
@@ -2213,6 +2228,9 @@ function worldStatus() {
             }
         } : null
     };
+    // This build's own time shows in the next one.
+    if (clock !== null) Diagnostics.duration('observer_status', performance.now() - clock);
+    return status;
 }
 
 // The status panel polls every 30 s per tab and reads the population counts
@@ -2295,7 +2313,10 @@ async function marketHistorySnapshot(selfId, range = '24h') {
 async function worldChanges(revision) {
     await ensureWorldProjection();
     await refreshDynamicProjection();
-    return { epoch: WORLD_EPOCH, ...WorldProjection.changesSince(revision) };
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const changes = { epoch: WORLD_EPOCH, ...WorldProjection.changesSince(revision) };
+    if (clock !== null) Diagnostics.duration('observer_changes', performance.now() - clock);
+    return changes;
 }
 
 async function snapshot() {
@@ -2469,11 +2490,14 @@ function teleportPlayerToRaid(playerName, bossTemplateId) {
 }
 
 function sendJson(response, data, statusCode = 200) {
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const body = JSON.stringify(data);
+    if (clock !== null) Diagnostics.duration('observer_json', performance.now() - clock);
     response.writeHead(statusCode, {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store'
     });
-    response.end(JSON.stringify(data));
+    response.end(body);
 }
 
 function sendSnapshotJson(request, response, json) {

@@ -10,6 +10,8 @@
 // Transfers (trades, escrow, warehouses) net to zero inside their operation;
 // what an operation adds or removes in total is a faucet or a sink.
 
+const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
+
 const HOUR_MS = 60 * 60 * 1000;
 
 // store -> { table, value column, item column or a fixed item, extra WHEN }
@@ -37,6 +39,24 @@ let operation = null;
 let operationDetail = null;
 let pending = null;
 const totals = new Map();
+// Developer timing of the JS side of one write-queue job: the economy_flow()
+// callbacks and the fold into the hourly totals. Read as the main thread's
+// developerDiagnostics durations journal_record / journal_fold and the count
+// journal:<commit|discard>:rows. The trigger programs inside SQLite are not
+// in it; they stay in the job's Database run time.
+let timed = false;
+let recordMs = 0;
+let recordRows = 0;
+
+function closeTiming(outcome) {
+    if (recordRows > 0) {
+        Diagnostics.duration('journal_record', recordMs);
+        Diagnostics.count('journal', outcome, 'rows', recordRows);
+    }
+    timed = false;
+    recordMs = 0;
+    recordRows = 0;
+}
 
 function label() {
     return operationDetail ? `${operation}/${operationDetail}` : operation;
@@ -46,6 +66,9 @@ function begin(name) {
     operation = String(name || 'raw');
     operationDetail = null;
     pending = null;
+    timed = Diagnostics.active();
+    recordMs = 0;
+    recordRows = 0;
 }
 
 // A sub-reason inside one operation, e.g. the kind of a cold commit.
@@ -68,6 +91,7 @@ function record(store, selfId, delta) {
 }
 
 function commit(at = Date.now()) {
+    const foldClock = timed && pending ? performance.now() : null;
     if (pending) {
         const hour = Math.floor(at / HOUR_MS);
         pending.forEach((entry) => {
@@ -81,12 +105,15 @@ function commit(at = Date.now()) {
             }
         });
     }
+    if (foldClock !== null) Diagnostics.duration('journal_fold', performance.now() - foldClock);
+    closeTiming('commit');
     operation = null;
     operationDetail = null;
     pending = null;
 }
 
 function discard() {
+    closeTiming('discard');
     operation = null;
     operationDetail = null;
     pending = null;
@@ -147,7 +174,14 @@ let attachedTables = new Set();
 function attach(connection) {
     attachedTables = new Set();
     connection.function('economy_flow', { useBigIntArguments: true }, (store, selfId, delta) => {
+        if (!timed) {
+            record(store, selfId, delta);
+            return null;
+        }
+        const started = performance.now();
         record(store, selfId, delta);
+        recordMs += performance.now() - started;
+        recordRows += 1;
         return null;
     });
     attachMissing(connection);
