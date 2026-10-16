@@ -737,7 +737,7 @@ function buildProjection(state, ctx, deps) {
         const benefitHorizon = early ? futureHorizon : horizon;
         const currentPrice = current ? price(current.selfId) : 0;
         const market = invoke('GameServer/Bot/Economy/MarketCounters');
-        const future = resale(price(item.selfId), { trend: market.moveOf(market.counterOf(item.selfId), ctx.timestamp),
+        const future = resale(price(item.selfId), { trend: market.moveOf(market.counterOf(item.selfId)),
             hours: benefitHorizon, understanding: ctx.persona.understanding, assertiveness: trait(ctx.persona, 'assertiveness'),
             caution: trait(ctx.persona, 'caution'), nextBuyerUse: price(item.selfId) * Math.min(1, gain.attack + gain.defence),
             npcFloor: ctx.buyback(item.selfId) });
@@ -1005,7 +1005,7 @@ function buildProjection(state, ctx, deps) {
         const ask = ctx.board?.first(id, SELL, { excludeOwner: state.characterId });
         if (!(ask?.price > 0)) continue;
         const Market = invoke('GameServer/Bot/Economy/MarketCounters');
-        const future = resale(price(id), { trend: Market.moveOf(Market.counterOf(id), ctx.timestamp),
+        const future = resale(price(id), { trend: Market.moveOf(Market.counterOf(id)),
             hours: horizon, understanding: ctx.persona.understanding, assertiveness: trait(ctx.persona, 'assertiveness'),
             caution: trait(ctx.persona, 'caution'), nextBuyerUse: price(id), npcFloor: ctx.buyback(id) });
         if (future > ask.price) resaleWishes.push({ id, ask, profit: future - ask.price });

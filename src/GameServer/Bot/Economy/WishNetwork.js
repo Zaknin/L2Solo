@@ -93,7 +93,7 @@ function moneyQueue(wishes, wallet, survivalReserve = 0, floor = 0) {
 // Only the main thread holds them (its group solve and repeated readers hit).
 // The cold worker keeps the result in the held plan (EconomyContext cache,
 // 2048 plans), so a second per-actor copy there never hit and only cost
-// copies and evictions (live: 0 hits, 15,893 misses).
+// copies and evictions.
 const ACTOR_LIMIT = 64;
 const RETAIN_ACTORS = isMainThread;
 function remember(map, key, value, limit = ACTOR_LIMIT) {
