@@ -288,7 +288,6 @@ async function main() {
         assert.strictEqual(budgetStopped.claimed, 1, 'the scheduler may acquire only the action currently being admitted');
         assert.strictEqual(budgetStopped.attempted, 0, 'an action claimed after the deadline must not start');
         assert.strictEqual(budgetStopped.released, 1, 'an unstarted action must return to pending immediately');
-        assert.strictEqual(budgetStopped.leftRunning, 0, 'budget exhaustion must not leak a running action');
         assert.strictEqual(budgetStopped.budgetStopped, true);
         const queueAfterBudgetStop = await Database.fetchClanActionQueueStats();
         assert.strictEqual(queueAfterBudgetStop.running, 0);

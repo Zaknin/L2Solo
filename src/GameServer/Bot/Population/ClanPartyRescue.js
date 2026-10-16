@@ -27,10 +27,11 @@ async function rescue({ requester, objective, rows, entry, commit, create, relea
     if (!eligible(requester, objective)) return null;
     const clanId = Number(entry.clanId);
     const memberOfClan = state => Clan.findById(clanId)?.members?.some(member => Number(member.id) === Number(state.characterId));
-    const sameDuty = party => party?.status === 'active' && party.stats?.objective?.clanGoalKey === objective.clanGoalKey;
-    const target = Parties.active().find(party => sameDuty(party)
-        && party.memberIds.includes(requester.characterId))
-        || Parties.active().find(party => sameDuty(party));
+    // The goal-key index holds the active parties on this duty; an objective
+    // without a key keeps the scan (the index drops empty keys).
+    const sameDuty = objective.clanGoalKey ? Parties.activeByGoalKey(objective.clanGoalKey, 'clan_party_rescue')
+        : Parties.active().filter(party => party?.status === 'active' && party.stats?.objective?.clanGoalKey === objective.clanGoalKey);
+    const target = sameDuty.find(party => party.memberIds.includes(requester.characterId)) || sameDuty[0] || null;
     if (target && require('./PartyMarketBreak').pending(target, now).length) return null;
     const retained = target ? await Life.statesForParty(target.partyId) : [requester];
     if (target && (retained.length !== target.memberIds.length || !retained.every(state =>

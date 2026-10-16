@@ -17,6 +17,7 @@ function stub(obj, key, value) { const old = obj[key]; originals.push(() => { ob
 async function run() {
     let parties = [], created = null, replies = 0, released = 0;
     stub(Parties, 'active', () => parties); stub(Parties, 'find', id => parties.find(p => p.partyId === id));
+    stub(Parties, 'activeByGoalKey', key => parties.filter(p => p.status === 'active' && p.stats?.objective?.clanGoalKey === key));
     stub(Clan, 'findById', () => ({ members: [1, 2, 3, 4].map(id => ({ id })) }));
     stub(Chat, 'onPartyHelp', () => { replies++; });
     const requester = bot(1); requester.stats.clanPartyObjective = objective;

@@ -782,9 +782,9 @@ const ClanActionService = {
             }
             // The caller reads only queue.ready, and only to continue soon: a
             // drained queue (no claimable action) has none ready, and a budget
-            // stop continues anyway. Read the stats when the batch limit
-            // stopped the loop, or for the diagnostics.
-            const readStats = DiagnosticConfig.developerDiagnostics || (!drained && !summary.budgetStopped);
+            // stop continues anyway. Read the stats only when the batch limit
+            // stopped the loop (the same path with the diagnostics on).
+            const readStats = !drained && !summary.budgetStopped;
             Diagnostics.count('clan_actions', 'queue_stats', readStats ? 'read' : 'skipped');
             const queue = readStats ? await refreshQueueStats() : { ready: 0 };
             summary.leftRunning = number(queue.running);

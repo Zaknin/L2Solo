@@ -1,6 +1,5 @@
 const View = require('./ClanSocialView');
 const Policy = require('./ClanSocialPolicy');
-const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const view = new View();
@@ -97,9 +96,8 @@ async function refresh(force = false) {
     })().finally(() => { running = null; });
     return running;
 }
-// Diagnostics only (the observer's diagnostics page): counted when read, not on every refresh.
+// Diagnostics only (the observer's diagnostics page, which checks the flag): counted when read, not on every refresh.
 function summary(at = Date.now()) {
-    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     const counts = { clans: view.clans.size, relations: 0, discipline: {} };
     for (const snapshot of view.clans.values()) for (const r of snapshot.relations) {
         counts.relations++;
