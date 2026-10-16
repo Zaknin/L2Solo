@@ -214,10 +214,11 @@ function onMinionDeath(world, minion) {
     return markShort(RaidEntityIndex.bossFor(world, minion), minion?.minionGroup);
 }
 
-// Every way a raid minion leaves the world (corpse decay, despawn, cleanup)
-// passes RaidEntityIndex.remove: the group is short whether or not a death
-// announced it. A boss that dropped its state (its death, a leader's
-// replacement) takes no refill.
+// Every removal of a live raid minion (despawn, cleanup) passes
+// RaidEntityIndex.remove: the group is short whether or not a death announced
+// it. A corpse swept from the spawn list without that call (SpoilSweep) had its
+// death announce the group already. A boss that dropped its state (its death,
+// a leader's replacement) takes no refill.
 RaidEntityIndex.onMinionRemoved((minion, boss) => {
     const group = minion.minionGroup;
     const announced = refillDue.has(group);
