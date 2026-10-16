@@ -160,19 +160,11 @@ class HotBoardReviewService {
                 currentRegion: record.session.currentRegion || hot.currentRegion,
                 spotId: record.session.currentSpot?.id ?? hot.spotId,
                 marketTrades: hot.marketTrades || {}, stats: { ...hot.stats, classId: Number(actor.fetchClassId?.() ?? hot.stats?.classId ?? 0) } };
-            const persona = invoke('GameServer/Bot/AI/BotPersona').of(state), packet = state.stats?.money;
             // A natural look consumes accepted scalar prices of time/money.
             // It cannot build a whole hunt/stock/recipe forecast on main.
-            const prepared = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided?.(state);
-            const readyWorth = id => require('../Population/ColdEconomyDecision').preparedCardWorth(prepared,
-                id, state, Number(packet?.[1]), persona.understanding, invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled());
-            const economy = { persona, hourAdena: Number(packet?.[0]), moneyPrice: Number(packet?.[1]),
-                gapHorizonHours: NaN, worth: readyWorth };
             const Look = require('./BoardLook'), lines = this.board.ownerLines(id);
             const mask = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.feasibilityFor(state);
-            const ctx = this.pricing.traderContext(state, { economy, persona, board: this.board,
-                npcOffersFor: selfId => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId),
-                preparedWorth: readyWorth, preparedBuffer: prepared?.data,
+            const ctx = this.listings.cardTraderContext(state, { board: this.board,
                 canSell: Look.feasibilityPredicate(state, lines, mask) });
             // The cursor is attached to the native hot session, so >8 lines
             // advance on successive natural breaks without a polling timer.

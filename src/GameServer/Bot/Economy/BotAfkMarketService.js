@@ -10,9 +10,11 @@ const BuyStoreService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const LotPolicy = require('./MarketLotPolicy');
 const { isNativeSource } = require('./TradeIntent');
+const Diagnostics = require('./EconomyDiagnostics');
 const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 
 const BoardRules = require('../../AfkTrade/BoardRules');
@@ -839,7 +841,18 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         return result;
     });
     if (plan.sell?.length) await run(async () => {
-        const ctx = ListingPolicy.traderContext(state);
+        // A line's pricing state (MarketPricing.lineState) reads the persona,
+        // the board and the item beliefs, never the hunt/stock forecast: the
+        // card context serves it. Only an enchanted line's belief reads
+        // economy.price; that line takes the full context, built once.
+        const ctx = ListingPolicy.cardTraderContext(state);
+        let full = null;
+        const lineContext = enchant => {
+            if (!(enchant > 0)) return ctx;
+            if (!full && Diagnostics.active()) Diagnostics.count('trader_context', 'full', 'enchanted_sale');
+            return full ||= ListingPolicy.traderContext(state, { now: ctx.timestamp });
+        };
+        if (Diagnostics.active()) Diagnostics.count('trader_context', 'card', 'plan_sell');
         // Listings come from MarketListingPolicy.evaluate: sale candidates
         // and classify already admitted their sources.
         const listings = plan.sell.slice(0, 8).map(([selfId, count, price, town, plannedEnchant]) => {
@@ -858,7 +871,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
             if (!Number.isSafeInteger(enchant) || enchant < 0) throw Error('economy_plan_invalid_enchant');
             return { selfId: Number(selfId), count: Number(count), price: Number(price), enchant,
                 name: item?.template?.name || `Item ${selfId}`, kind: item?.template?.kind || '',
-                pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
+                pricing: MarketPricing.lineState(selfId, lineContext(enchant),
                     { price: Number(price), storeType: AfkTrade.SELL, enchant, count: Number(count) }) };
         });
         const planTowns = new Map(listings.map((line, at) => [lineKey(line), plan.sell[at][3]]));
@@ -891,7 +904,9 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         if (Object.hasOwn(plan, 'buyCaps') && (!Array.isArray(plan.buyCaps) || plan.buyCaps.length !== plan.buyAds.length
             || plan.buyCaps.some((cap, at) => cap !== null && (!Number.isSafeInteger(cap) || cap < 1 || plan.buyAds[at][2] > cap))))
             throw Error('economy_plan_bid_cap');
-        const ctx = ListingPolicy.traderContext(state);
+        // Unenchanted bids: their pricing state needs no forecast (see plan.sell).
+        const ctx = ListingPolicy.cardTraderContext(state);
+        if (Diagnostics.active()) Diagnostics.count('trader_context', 'card', 'plan_buy');
         let money = PurchaseFunding.budget(state, buyOrderEscrow(ownerId));
         // Planned bids come from BuyAdPolicy.linesFor: bidFor admitted each source.
         // A survival item's ad may spend its kit cost from the survival
@@ -911,7 +926,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
             return { selfId, count, price, intent, survivalCost, purchaseCap: plan.buyCaps?.[at] ?? Infinity,
                 enchant: 0, name: item?.template?.name || `Item ${selfId}`,
                 slot: Number(item?.etc?.slot || 0), stackable: item?.etc?.stackable === true,
-                pricing: invoke('GameServer/Bot/Economy/MarketPricing').lineState(selfId, ctx,
+                pricing: MarketPricing.lineState(selfId, ctx,
                     { price, storeType: AfkTrade.BUY, enchant: 0, count: Number(count) }) };
         });
         // A standing bid may have been repriced since worker preparation.

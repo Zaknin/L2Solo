@@ -5,6 +5,9 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
+const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
+const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+const KnowledgeLearning = invoke('GameServer/Bot/AI/KnowledgeLearning');
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
 
 
@@ -46,7 +49,7 @@ function classify(state, item) {
 function traderContext(state, options = {}) {
     return MarketPricing.traderContext(state, {
         timestamp: Number(options.now) || Date.now(),
-        persona: options.persona ?? invoke('GameServer/Bot/AI/BotPersona').of(state),
+        persona: options.persona ?? BotPersona.of(state),
         board: Object.hasOwn(options, 'board') ? options.board : invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(),
         npcOffersFor: options.npcOffersFor
             || ((selfId) => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId)),
@@ -60,6 +63,24 @@ function traderContext(state, options = {}) {
         derivedDemandValue: options.derivedDemandValue,
         derivedDemandSupported: options.derivedDemandSupported
     });
+}
+
+// What main knows for pricing from the worker's accepted card, without a
+// forecast: the persona, the money packet and the card's worths; no hunt,
+// stock or recipe build. A reader of economy.price (an enchanted line's
+// belief, MarketPricing.beliefFor) takes traderContext. options as
+// MarketPricing.traderContext's deps (board, npcOffersFor, canSell, ...).
+function cardTraderContext(state, options = {}) {
+    const persona = BotPersona.of(state), packet = state.stats?.money;
+    // lazy: worker the coordinator's accepted decisions live on main only
+    const prepared = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided?.(state);
+    const worth = id => ColdEconomyDecision.preparedCardWorth(prepared,
+        id, state, Number(packet?.[1]), persona.understanding, KnowledgeLearning.knowledgeEnabled());
+    return MarketPricing.traderContext(state, {
+        board: invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(), // lazy: worker main-only board
+        npcOffersFor: selfId => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId), // lazy: worker main-only NPC shops
+        ...options, persona, preparedWorth: worth, preparedBuffer: prepared?.data,
+        economy: { persona, hourAdena: Number(packet?.[0]), moneyPrice: Number(packet?.[1]), gapHorizonHours: NaN, worth } });
 }
 
 // Board slots of a bot (user, 2026-10-05): 3 shop lines + 5 sell ads.
@@ -211,6 +232,7 @@ module.exports = {
     isGear,
     prioritizeListings,
     traderContext,
+    cardTraderContext,
     actorState,
     npcSaleForActor
 };
