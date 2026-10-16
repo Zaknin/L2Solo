@@ -16,6 +16,15 @@ if (!process.argv.includes('--gc-child')) {
     assert.deepEqual(window.snapshot(5000), { heapAfterGc: 200, heapAfterGcMax10: 300 });
     assert.deepEqual(window.snapshot(Telemetry.WINDOW_MS + 1), { heapAfterGc: 200, heapAfterGcMax10: 200 });
     assert.deepEqual(window.snapshot(Telemetry.WINDOW_MS + 2001), { heapAfterGc: 200, heapAfterGcMax10: 0 });
+    // heapRecord() has no after-GC fields until this isolate's observer runs, then carries the window in MB.
+    assert.deepEqual(Object.keys(Telemetry.heapRecord()), ['used', 'total', 'external', 'limit']);
+    const observed = Telemetry.observe();
+    assert.equal(Telemetry.observe(), observed, 'one observer per isolate');
+    assert.deepEqual([Telemetry.heapRecord().afterGc, Telemetry.heapRecord().afterGcMax], [null, null]);
+    observed.window.record(300 * 1024 * 1024); observed.window.record(100 * 1024 * 1024);
+    assert.deepEqual([Telemetry.heapRecord().afterGc, Telemetry.heapRecord().afterGcMax], [100, 300]);
+    observed.close();
+    assert.equal(Telemetry.heapRecord().afterGc, undefined);
     const workerPath = path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js');
     const wrapper = `const fs=require('node:fs'),path=require('node:path'),Module=require('node:module');
       const {parentPort,workerData}=require('node:worker_threads');
@@ -42,7 +51,8 @@ if (!process.argv.includes('--gc-child')) {
                 assert(message.payload.heapAfterGcMax10 >= message.payload.heapAfterGc);
                 // The kernel's due-heap node count keeps its numeric key; the V8 record has its own.
                 assert.equal(typeof message.payload.heap, 'number');
-                for (const key of ['used', 'total', 'external', 'limit']) assert(Number.isFinite(message.payload.v8Heap?.[key]), key);
+                for (const key of ['used', 'total', 'external', 'limit', 'afterGc', 'afterGcMax']) assert(Number.isFinite(message.payload.v8Heap?.[key]), key);
+                assert(message.payload.v8Heap.afterGcMax >= message.payload.v8Heap.afterGc);
                 console.log('Actual cold-worker heartbeat carries major-GC heap and ten-minute maximum');
             } finally { clearTimeout(timer); worker.terminate(); }
         }

@@ -3,7 +3,8 @@
 const fs = require('fs');
 const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
-const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+const { heapRecord, observe } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+if (workerData?.developerDiagnostics) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 
 const databasePath = String(workerData?.databasePath || '');
 const connection = new DatabaseSync(databasePath, { timeout: 250 });

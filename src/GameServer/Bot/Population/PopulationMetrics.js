@@ -2,6 +2,7 @@ const { DiagnosticMetricMap } = require('./DiagnosticMetricMap');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const { monitorEventLoopDelay } = require('perf_hooks');
+const WorkerHeapTelemetry = require('./WorkerHeapTelemetry');
 
 function now() {
     return Date.now();
@@ -164,6 +165,7 @@ const PopulationMetrics = {
     timer: null,
     coldSafetySource: null,
     delayHistogram: null,
+    heapObserver: null,
     delayWindowStartedAt: 0,
 
     init() {
@@ -215,6 +217,7 @@ const PopulationMetrics = {
             this.delayHistogram = monitorEventLoopDelay({ resolution: 20 });
             this.delayHistogram.enable();
             this.delayWindowStartedAt = now();
+            this.heapObserver = WorkerHeapTelemetry.observe();
         }
 
         let expectedAt = now() + Config.eventLoopSampleMs;
@@ -243,6 +246,8 @@ const PopulationMetrics = {
     stopEventLoopMonitor() {
         this.delayHistogram?.disable();
         this.delayHistogram = null;
+        this.heapObserver?.close();
+        this.heapObserver = null;
         if (!this.timer) return;
         clearInterval(this.timer);
         this.timer = null;

@@ -4,7 +4,8 @@ const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const MarketTradeOverview = require('./MarketTradeOverview');
 const MarketEconomyOverview = require('./MarketEconomyOverview');
-const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+const { heapRecord, observe } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+if (workerData.developerDiagnostics) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 
 const connection = new DatabaseSync(String(workerData.databasePath), { readOnly: true, timeout: 250 });
 const all = (sql, params = []) => connection.prepare(sql).all(...params);

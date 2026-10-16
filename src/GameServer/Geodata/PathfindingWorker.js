@@ -4,7 +4,8 @@ const { parentPort, workerData } = require('worker_threads');
 invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = workerData?.developerDiagnostics === true;
 const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 const TownPathCorridor = invoke('GameServer/Geodata/TownPathCorridor');
-const { heapRecord } = invoke('GameServer/Bot/Population/WorkerHeapTelemetry');
+const { heapRecord, observe } = invoke('GameServer/Bot/Population/WorkerHeapTelemetry');
+if (workerData?.developerDiagnostics === true) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 
 GeodataEngine.init();
 let navigationRevision = null;

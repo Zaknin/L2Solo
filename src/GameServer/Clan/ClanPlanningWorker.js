@@ -5,7 +5,8 @@ const OfferQuery = require('../Bot/Economy/OfferQuery');
 const TableMirror = require('../Bot/Population/TableMirror');
 const { BoardIndex } = require('../AfkTrade/BoardIndex');
 const { SpotCatalogReader } = require('./ClanSpotCatalog');
-const { heapRecord } = require('../Bot/Population/WorkerHeapTelemetry');
+const { heapRecord, observe } = require('../Bot/Population/WorkerHeapTelemetry');
+if (workerData?.developerDiagnostics) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 const spotCatalog = new SpotCatalogReader();
 
 // Only immutable catalogs and per-request snapshots enter this process.

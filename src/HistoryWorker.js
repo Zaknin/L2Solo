@@ -11,7 +11,8 @@
 const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const HistoryStore = require('./HistoryStore');
-const { heapRecord } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+const { heapRecord, observe } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+if (workerData.developerDiagnostics === true) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 const diagnosticWriter = workerData.developerDiagnostics === true && workerData.diagnostics ? new (require('./EconomyDiagnosticWriter').EconomyDiagnosticWriter)(
     require('node:path').join(require('node:path').dirname(workerData.worldPath), 'logs'), workerData.diagnostics, { enabled: true }) : null;
 
