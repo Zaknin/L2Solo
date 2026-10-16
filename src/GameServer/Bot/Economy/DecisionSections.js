@@ -143,7 +143,6 @@ function isEmptyWishPlan(plan) {
         && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
 }
 function events(before, after, timestamp = Date.now()) {
-    const sections = new Set();
     // Main may replay a validated worker packet that already describes this
     // same round. Compare its actual baselines, not sequence alone; a packet
     // preceding a new death/level/resource event still raises that event.
@@ -154,12 +153,17 @@ function events(before, after, timestamp = Date.now()) {
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before,
         Number(before.timing?.lastResolvedAt || before.updatedAt || timestamp)))[key];
     const current = semanticFacts(after, timestamp);
+    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp)
+        || !previous.funding && fundingMark(before) !== fundingMark(after));
+}
+// One semantic comparison for state publication and the diagnostic event gate.
+// A reader supplies the baseline facts; money keeps its own soft verdict.
+function factEvents(previousFact, current, after, funding = false) {
+    const sections = new Set();
     if (!previousFact('dead') && current.dead) sections.add('combat');
     if (previousFact('build') !== current.build) { sections.add('build'); sections.add('benefits'); sections.add('sources'); }
-    const oldStats = before.stats || {};
     if (previousFact('relations') !== current.relations) sections.add('relations');
-    if (moneyEvent(after, represented || oldStats.wishSections, timestamp)
-        || !previous.funding && fundingMark(before) !== fundingMark(after)) sections.add('funding');
+    if (funding) sections.add('funding');
     if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') sections.add('occupation');
     if (current.riskDeaths > previousFact('riskDeaths')) { sections.add('combat'); sections.add('occupation'); }
     // Physical exhaustion is never hidden by economic uncertainty.
@@ -167,4 +171,4 @@ function events(before, after, timestamp = Date.now()) {
     return [...sections];
 }
 module.exports = { SECTIONS, sectionBit, sectionNames, capability, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, hash, isEmptyWishPlan };
+    SOFT_DELAY, softDue, moneyEvent, observationEvent, horizonEvent, sample, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan };

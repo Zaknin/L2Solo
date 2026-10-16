@@ -168,6 +168,14 @@ const INPUT_KEY_PARTS = Object.freeze(['level', 'class_id', 'craft_level', 'item
     'warehouse_version', 'spot_id', 'gear_threat', 'hunt_efficiency_at', 'memory_revision',
     'deps_input_key', 'mode', 'incoming_pending', 'accepted_incoming', 'trip', 'route', 'pk', 'soul_crystal_quest', 'hennas',
     'exp_bucket', 'knowledge', 'crafts', 'sp', 'skills']);
+// Diagnostics only: one partition of the full fingerprint. Trip stays wholly
+// drift until region/target events replace its location fingerprint.
+const DRIFT_KEY_PARTS = new Set(['items', 'adena', 'buy_order_escrow', 'decision_seq', 'activity_leaf',
+    'workshop_income', 'workshop_cycle', 'producer_revision', 'mp', 'sp', 'pk', 'crafts',
+    'market_sell_retry_after', 'hunt_efficiency_at', 'exp_bucket', 'accepted_incoming', 'trip']);
+const EVENT_KEY_INDEXES = INPUT_KEY_PARTS.flatMap((name, at) => DRIFT_KEY_PARTS.has(name) ? [] : [at]);
+const eventKeyHash = hashes => fnv1a32(EVENT_KEY_INDEXES.map(at => hashes[at]).join('|'));
+
 function inputKeyParts(state, deps = {}) {
     const stats = state.stats || {};
     const items = Object.values(state.inventory || {}).map(rowKeys === null ? rowKey : heldRowKey).sort().join(',');
@@ -385,8 +393,43 @@ function decisionHolds(state, held, timestamp, deps, deferred = null, why = null
     if (!bandsHold(state, bands, held.plan.network?.activity)) return miss(why, 'bands');
     if (fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
         { ...deps, timestamp }, bands).structural) !== held.bandHash) return miss(why, 'band_structure');
-    const safety = bagSafety(state, timestamp), heldSafety = held.plan.bagSafety;
-    return !!heldSafety && safety.every((value, at) => value === heldSafety[at]) || miss(why, 'bag_safety');
+    return bagHolds(state, held.plan, timestamp) || miss(why, 'bag_safety');
+}
+function bagHolds(state, plan, timestamp) {
+    const safety = bagSafety(state, timestamp), heldSafety = plan.bagSafety;
+    return !!heldSafety && safety.every((value, at) => value === heldSafety[at]);
+}
+// Pure diagnostic verdict. The live fingerprint and decisionHolds stay in
+// charge until the event crossings and shadow plan comparisons are complete.
+function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietSections) {
+    if (!held) return 'no_held';
+    if (last?.heldEventHash !== eventHash) return 'event_key';
+    if (state.stats?.wishDirty) return 'wish_dirty';
+    if (Number(state.stats?.decisionSeq || 0) !== Number(held.plan.statsPacket.decisionSeq || 0)) return 'silent_seq';
+    if (!quietSections) return 'sections';
+    const why = [];
+    if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
+        expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, null, why)) return why[0];
+    if (!bandsHold(state, held.plan.quantityBands, held.plan.network?.activity)) return 'bands';
+    if (!bagHolds(state, held.plan, timestamp)) return 'bag';
+    if (!(marketHolds(board, held.reads, deps) && spotsHold(deps, held.spotReads))
+        && (Sections.softDue(held.plan.statsPacket.wishSections, 'market', timestamp) || !ownLeafHolds(state, held.plan, deps))) return 'market';
+    if (deps.withNodes && !held.projection || deps.nodes?.length || extensions.size) return 'nodes_needed';
+    if (held.plan.pending) return 'plan_pending';
+    return 'would_hold';
+}
+// Compare funded flags only after both plans see the request's current wallet.
+function gatePlanDiff(state, held, fresh, deps) {
+    const before = held.plan.network;
+    if (before.focus?.[0] !== fresh.network.focus?.[0]) return 'focus';
+    if ((before.activity?.key ?? before.activity?.kind ?? null) !== (fresh.network.activity?.key ?? fresh.network.activity?.kind ?? null)) return 'leaf';
+    const left = before.queue || [], right = fresh.network.queue || [];
+    if (left.length !== right.length || left.some((row, at) => row.key !== right[at].key)) return 'queue';
+    const current = new Map(moneyQueue(left, positive(state.adena) + positive(deps.buyOrderEscrow),
+        held.plan.survivalReserve, held.plan.hourAdena > 0 ? 1 / held.plan.hourAdena : 0).queue.map(row => [row.key, row.funded]));
+    const repriced = moneyQueue(right, positive(state.adena) + positive(deps.buyOrderEscrow),
+        fresh.survivalReserve, fresh.hourAdena > 0 ? 1 / fresh.hourAdena : 0).queue;
+    return repriced.some(row => current.get(row.key) !== row.funded) ? 'funded' : 'same';
 }
 // Soft market/crowd never excuses the held leaf's own offer, funding and
 // route: they are checked exactly through the existing authority.
@@ -1125,9 +1168,20 @@ function buildForState(state, deps) {
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, singlePart = null, previousRows = null, probe = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
+    let gate = null, gateDiff = null;
     if (diagnostic) {
         const hash = fnv1a32(key), last = lastKeyHashes.get(actorKey), at = Date.now();
         const same = last?.hash === hash, hashes = partHashes(keyParts);
+        const eventHash = eventKeyHash(hashes), baseline = held?.plan.statsPacket.wishSections;
+        const quietSections = !!baseline && Sections.factEvents(name => baseline[name], Sections.semanticFacts(state, timestamp), state).length === 0;
+        gate = shadowGate(state, held, last, eventHash, timestamp, deps, sourceBoard, quietSections);
+        Diagnostics.count('context', 'gate', gate);
+        if (gate === 'silent_seq') Diagnostics.count('context', 'silent', 'decision_seq');
+        Diagnostics.count('context', 'hold_refused', !held ? 'no_held' : why[0] || outerRefusal(held, sourceBoard, deps, timestamp));
+        if (!held) Diagnostics.count('context', 'not_retained', deps.rememberContext === false ? 'unkept_caller' : last?.released || 'first');
+        if (quietSections && !state.stats?.wishDirty && last?.parts?.length === hashes.length) {
+            for (const at of EVENT_KEY_INDEXES) if (last.parts[at] !== hashes[at]) Diagnostics.count('context', 'silent', INPUT_KEY_PARTS[at]);
+        }
         shadowSame = same; previousPlan = last?.plan ?? null; previousRows = last?.rows ?? null;
         previousProjection = last?.projection ?? null;
         previousReadset = last?.readset ?? null; movedParts = [];
@@ -1141,10 +1195,7 @@ function buildForState(state, deps) {
             Diagnostics.count('context', 'shadow_gap', gapBucket(Math.max(0, at - last.at)));
             // 'capacity' (LRU), 'unkept' (forState did not keep it) or the owner's forgetContext reason.
             if (diagnosticReason === 'not_retained') Diagnostics.count('context', 'shadow_released', last.released || 'unknown');
-            // Why the held context did not serve this repeated request: the
-            // first refusing clause of the hit check above.
-            Diagnostics.count('context', 'same_key_refused', !held ? 'no_held'
-                : why.length ? why[0] : outerRefusal(held, sourceBoard, deps, timestamp));
+
         }
         if (singlePart === 'activity_leaf') {
             // Is the moved leaf the held build's own output (an echo of its statsPacket)?
@@ -1159,7 +1210,7 @@ function buildForState(state, deps) {
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, at, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
-            sourceHash, sourceParts: sourceHashes, projection: null };
+            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: kept ? eventHash : last?.heldEventHash };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1421,6 +1472,11 @@ function buildForState(state, deps) {
         elapsed = performance.now() - started;
         Diagnostics.duration('context', elapsed);
         Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
+        if (gate === 'would_hold') {
+            gateDiff = gatePlanDiff(state, held, context, deps);
+            Diagnostics.count('context', 'gate_plan', gateDiff);
+            Diagnostics.count('context', 'gate_ms', 'would_hold', Math.round(elapsed));
+        }
         const plan = planHash(network);
         if (shadowEntry) shadowEntry.plan = plan;
         planOutcome = previousPlan === null ? 'first_build' : plan === previousPlan ? 'same_plan' : 'new_plan';
@@ -1435,7 +1491,9 @@ function buildForState(state, deps) {
         outcome: planOutcome, moved: movedText(movedParts || []), readset: readsetVerdict || 'none', durationMs: Math.round(elapsed * 100) / 100,
         decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
-        available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0] });
+        available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
+        heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
+        heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     plan.bagSafety = bagSafety(state, timestamp);

@@ -12,7 +12,7 @@ const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 're
     'wallet', 'available', 'budget', 'reserve', 'priorityReserve', 'escrow', 'unitPrice', 'valueHours',
     'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind'];
 const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
-    'moved', 'readset'];
+    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf'];
 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {
