@@ -21,7 +21,7 @@ const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
 const Network = require('./WishNetwork');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
-    createQuantityInputs, quantityInputsHold, unpackQuantityInputs } = Network;
+    createQuantityInputs, quantityInputsHold, eachQuantityRow } = Network;
 const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
 const RecomputeGeneration = require('../Population/RecomputeGeneration');
@@ -608,19 +608,17 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) return refuse('quantity', ['sources', 'money']);
-    // The proof is held packed; its rows live for this verdict only.
-    const proved = unpackQuantityInputs(proof.quantities);
-    if (!proved) return refuse('unproved');
-    const quantities = own === null ? proved : { ...proved, rows: proved.rows.filter(row => !ownQuantityRow(row, leaf.rootKey, own)) };
+    // The proof is held packed and read as a stream: no rows array.
+    const ownRow = own === null ? null : row => ownQuantityRow(row, leaf.rootKey, own);
     const stock = stockReader(state, key => roots.get(key));
-    const reservedRows = reserved && new Map(quantities.rows.filter(row => row[0] === 'stock'
-        && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
-    const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
-        const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
-        return row && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
+    // A reserved input's stock row holds while its owned+incoming does not fall.
+    const stockFor = !reserved ? stock : (id, rootKey, row) => {
+        const current = stock(id, rootKey);
+        return isReserved(id) && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
     };
-    if (!quantityInputsHold(quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount))
-        return refuse('quantity', ['sources', 'money']);
+    const moved = [];
+    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved))
+        return moved.length ? refuse('quantity', ['sources', 'money']) : refuse('unproved');
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -716,7 +714,7 @@ function restoreEventProof(prefix, accepted) {
         const hourAdena = read.number(), producerScope = ProductionIndex.unpackScopeIdentity(read);
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
         const packed = producerScope ? Uint8Array.from(read.rest()) : null;
-        const quantities = packed && unpackQuantityInputs(packed) ? packed : null;
+        const quantities = packed && eachQuantityRow(packed, () => true) ? packed : null;
         if (!quantities || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
@@ -732,9 +730,19 @@ function wireEventProof(proof) {
     try {
         const market = [...proof.market], spots = [...proof.spots];
         if (market.length > FENCE_SPOTS || spots.length > FENCE_SPOTS) return null;
-        const wire = { ...proof, market, spots };
+        if (!(proof.quantities instanceof Uint8Array)) return null;
+        // Packed quantities cross as canonical base64 (receiveEventProof), so
+        // this JSON size is the wire's.
+        const wire = { ...proof, market, spots, quantities: Buffer.from(proof.quantities).toString('base64') };
         return Buffer.byteLength(JSON.stringify(wire)) <= FENCE_RAW_BYTES ? wire : null;
     } catch (_) { return null; }
+}
+// The proof from its wire form or in process; null when its packed
+// quantities are malformed or above their bound.
+function receiveEventProof(proof) {
+    const value = proof?.quantities, cap = Network.QUANTITY_INPUT_BYTES;
+    const quantities = value instanceof Uint8Array ? value.byteLength <= cap ? value : null : Bytes.fromBase64(value, cap);
+    return quantities ? { ...proof, quantities } : null;
 }
 // Sampled proof uses existing numeric fields: item/requested = held hunting
 // item/amount, before = the held build's bag+incoming at the decision,
@@ -2459,6 +2467,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, eventInputKey, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, heldLeafRefusal, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, eventInputKey, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, structuralSegment, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, inputKey, inputKeyParts, INPUT_KEY_PARTS, RETAIN_LIMIT, sectionKeys, calculationHolds, acceptedActivityHolds, heldLeafRefusal, encodeCalculationFence, decodeCalculationFence, FENCE_BYTES, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

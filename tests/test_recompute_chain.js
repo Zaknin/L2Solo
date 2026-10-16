@@ -427,7 +427,7 @@ try {
         console.log(`INFO native crystal1458 clauses=${JSON.stringify(crystalReads)} rootCount=${competing.size}`);
         assert(crystalReads.length, 'this native cohort must actually consume a physical crystal input');
         const readers = state => ({ ...Providers.quantityReaders(state), stockFor: build.stockFor });
-        assert.equal(Network.quantityInputsHold(quantities, readers(crystal)), true);
+        assert.equal(Network.quantityInputsHold(build.plan.quantityInputs, readers(crystal)), true);
         assert.equal(competing.size, 0, 'this cohort did not consume allocation stock1458; it cannot prove competing-root changes');
         assert.equal(build.network.activity, null);
         assert.equal(build.plan.pending, false);
@@ -454,10 +454,10 @@ try {
         assert.equal(capture({ ...build.plan, network: { ...build.plan.network, activity: undefined } }), null,
             'missing activity is distinct from explicit native null');
         const loss = { ...crystal, inventory: { ...inventory, 1458: { ...inventory[1458], amount: 140 } } };
-        assert.equal(Network.quantityInputsHold(quantities, readers(loss)), true,
+        assert.equal(Network.quantityInputsHold(build.plan.quantityInputs, readers(loss)), true,
             'native presence questions tolerate a decrement that keeps the same positive answer');
         const exhausted = { ...crystal, inventory: { ...inventory, 1458: { ...inventory[1458], amount: 0 } } };
-        assert.equal(Network.quantityInputsHold(quantities, readers(exhausted)), false,
+        assert.equal(Network.quantityInputsHold(build.plan.quantityInputs, readers(exhausted)), false,
             'the actual native presence predicate crosses when physical crystals are exhausted');
         const exhaustedPublished = { ...publishedNull, inventory: exhausted.inventory };
         assert.equal(verdict(exhaustedPublished, acceptedNull).valid, false,
@@ -472,7 +472,7 @@ try {
         assert.deepEqual(capturedChoices, ordinaryChoices, 'capturing actual native crystal reads preserves every ranked choice');
         assert.equal(capturedChoices[0].selfId, 166);
         assert.equal(capturedChoices[0].batchLimit, 2);
-        const spareProof = Network.unpackQuantityInputs(reads.finish());
+        const spareProof = reads.finish();
         assert(spareProof);
         assert.equal(Network.quantityInputsHold(spareProof, Providers.quantityReaders(held)), true);
         const consumed = { ...held, inventory: { ...held.inventory, 166: { ...held.inventory[166], amount: 1 } } };
@@ -515,6 +515,12 @@ try {
         const moved = { ...published, acceptedIncoming: { ...published.acceptedIncoming, [last]: 1 } };
         assert.equal(verdict(moved, large).reason, 'quantity', 'the 600th row is read: its answer moving is a quantity event');
         console.log('PASS 600-row packed quantity proof / wire / restart / last row read');
+    });
+
+    scenario('packed quantities the codec cannot read are unproved', () => {
+        for (const quantities of [Uint8Array.of(9, 9, 9), Uint8Array.of(3, 1, 128), null])
+            assert.equal(verdict(published, { ...accepted, eventProof: { ...accepted.eventProof, quantities } }).reason, 'unproved');
+        console.log('PASS unreadable packed quantities refuse as unproved');
     });
 
     scenario('a void quantity proof names its first reason', () => {

@@ -103,4 +103,11 @@ function reader(value) {
     };
 }
 
-module.exports = { writer, reader };
+// Bytes that cross a JSON-measured wire as text: the canonical base64 of
+// at most maxBytes bytes, else null.
+function fromBase64(text, maxBytes) {
+    if (typeof text !== 'string' || text.length > Math.ceil(maxBytes / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return null;
+    const bytes = Buffer.from(text, 'base64');
+    return bytes.toString('base64') === text && bytes.byteLength <= maxBytes ? Uint8Array.from(bytes) : null;
+}
+module.exports = { writer, reader, fromBase64 };

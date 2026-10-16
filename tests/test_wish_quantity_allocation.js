@@ -120,17 +120,17 @@ assert.equal(craftMaterialLoss(readyProof, physical(30)), 'unchanged', 'later ca
     assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === root.key && row[2] === 101 && row[3] === 0),
         'zero output stock is an actual input too');
     assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === other.key && row[2] === 202));
-    assert.equal(quantityInputsHold(inputs, { stockFor: baseline }), true);
-    assert.equal(quantityInputsHold(inputs, { stockFor: physical(30) }), false,
+    assert.equal(quantityInputsHold(packed, { stockFor: baseline }), true);
+    assert.equal(quantityInputsHold(packed, { stockFor: physical(30) }), false,
         'loss above the selected craft necessary floor still invalidates competing allocation');
-    assert.equal(quantityInputsHold(inputs, { stockFor: physical(37, 1) }), false,
+    assert.equal(quantityInputsHold(packed, { stockFor: physical(37, 1) }), false,
         'equal owned+incoming totals cannot certify physical execution');
-    assert.equal(quantityInputsHold(inputs, { stockFor: (id, key) => key === other.key && id === 202
+    assert.equal(quantityInputsHold(packed, { stockFor: (id, key) => key === other.key && id === 202
         ? { owned: 0 } : baseline(id, key) }), false, 'root-specific protected stock is read with the same root');
 
     const direct = createQuantityInputs();
     direct.present(202, 3); direct.free(203, 0); direct.physical(204, 2); direct.incoming(205, 1); direct.freePresent(206, 3);
-    const directProof = unpackQuantityInputs(direct.finish());
+    const directProof = direct.finish();
     const readers = { physical: id => id === 202 ? 4 : 2, free: id => id === 206 ? 4 : 0, incoming: () => 1 };
     assert.equal(quantityInputsHold(directProof, readers), true, 'a native positive-presence branch admits positive quantity drift');
     assert.equal(quantityInputsHold(directProof, { ...readers, physical: () => 0 }), false);

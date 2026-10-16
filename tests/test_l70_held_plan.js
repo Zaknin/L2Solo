@@ -400,6 +400,17 @@ try {
         assert.deepEqual(Buffer.from(received.card.data), Buffer.from(accepted.card.data));
         assert.deepEqual(received.eventProof.market, [...accepted.eventProof.market]);
         assert.deepEqual(received.eventProof.spots, [...accepted.eventProof.spots]);
+        assert.deepEqual(Buffer.from(received.eventProof.quantities), Buffer.from(accepted.eventProof.quantities),
+            'the packed quantity proof crosses as its exact bytes');
+        // Its wire form is canonical base64 within the packed bound; in process it stays bytes.
+        const { QUANTITY_INPUT_BYTES } = invoke('GameServer/Bot/Economy/WishNetwork');
+        for (const quantities of ['%%%%', 'AAAA=', Buffer.alloc(QUANTITY_INPUT_BYTES + 1).toString('base64'), null])
+            assert.equal(Decisions.receiveAdvisory(structuredClone({ ...wire, eventProof: { ...wire.eventProof, quantities } })), null,
+                'malformed, non-canonical, over-bound or missing packed quantities refuse the advice');
+        assert(Decisions.receiveAdvisory({ ...wire, eventProof: { ...wire.eventProof, quantities: accepted.eventProof.quantities } }),
+            'in-process packed bytes are accepted as they are');
+        assert.equal(Decisions.wireAdvisory({ ...accepted, eventProof: { ...accepted.eventProof, quantities: { version: 1, rows: [] } } }), null,
+            'a proof whose quantities are not packed bytes has no wire form');
         const owner = new Decisions.ColdEconomyDecisions();
         owner.accept(state.characterId, accepted.card, null, state);
         assert(owner.retainAdvisory(state, received));
@@ -449,6 +460,18 @@ try {
         assert.equal(kernel.states.has(state.characterId), false, 'the worker releases the physical actor');
         assert.deepEqual(Decisions.receiveAdvisory(fenced.wishAdvisory).baseline, newerAdvice.baseline,
             'the original accepted baseline leaves with the native fence result');
+        {
+            // Advice without a wire form leaves the worker's fence as a counted drop.
+            const diagnostic = Config.developerDiagnostics, drops = () => Number(Diagnostics.metrics().counts?.['card:drop:handoff_unproved'] || 0);
+            Config.developerDiagnostics = true;
+            try {
+                const before = drops();
+                kernel.states.set(state.characterId, { state: currentState, context: { wishAdvisory: { ...newerAdvice,
+                    eventProof: { ...newerAdvice.eventProof, quantities: { version: 1, rows: [] } } } } });
+                assert.equal(kernel.fence(state.characterId).wishAdvisory, undefined, 'unpacked quantities do not cross');
+                assert.equal(drops(), before + 1, 'the fence counts card:drop:handoff_unproved');
+            } finally { Config.developerDiagnostics = diagnostic; }
+        }
         owner.forget(state.characterId);
         assert.equal(owner.size(), 0, 'actual retirement drops the retained advice');
         Warehouse.useRowSource(null);

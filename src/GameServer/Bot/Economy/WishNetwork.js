@@ -76,8 +76,12 @@ function packQuantityInputs(proof) {
         return bytes.length <= QUANTITY_INPUT_BYTES ? bytes : null;
     } catch (_) { return null; }
 }
-function unpackQuantityInputs(value) {
-    if (!(value instanceof Uint8Array) || value.byteLength > QUANTITY_INPUT_BYTES) return null;
+// The one decoder: calls visit(row) for each row in order. False on a
+// malformed or over-cap stream, or when visit returns false; a reader
+// error inside visit is not a codec refusal and propagates.
+function eachQuantityRow(value, visit) {
+    if (!(value instanceof Uint8Array) || value.byteLength > QUANTITY_INPUT_BYTES) return false;
+    let visiting = false;
     try {
         const read = Bytes.reader(value);
         const number = tag => {
@@ -97,44 +101,53 @@ function unpackQuantityInputs(value) {
             seenLiterals.add(text); literals.push(text);
             return text;
         };
-        if (read.byte() !== 3) return null;
+        if (read.byte() !== 3) return false;
         const count = read.uint();
-        if (count > QUANTITY_INPUT_LIMIT) return null;
-        const rows = [], ids = [], seenIds = new Set(), roots = [], seenRoots = new Set();
+        if (count > QUANTITY_INPUT_LIMIT) return false;
+        const ids = [], seenIds = new Set(), roots = [], seenRoots = new Set();
         let lastId = 0;
         for (let i = 0; i < count; i++) {
             const header = read.byte(), kind = header % 8, first = Math.floor(header / 8) % 4, second = Math.floor(header / 32) % 4;
-            if (kind !== 6 && second) return null;
+            if (kind !== 6 && second) return false;
             let id;
             if (header >= 128) {
                 id = lastId + read.signed();
-                if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) return null;
+                if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) return false;
                 seenIds.add(id); ids.push(id); lastId = id;
             } else {
                 const index = read.uint();
-                if (index >= ids.length) return null;
+                if (index >= ids.length) return false;
                 id = ids[index];
             }
-            const row = [QUANTITY_KINDS[kind]];
+            let row;
             if (kind >= 6) {
                 const index = read.uint();
-                if (index > roots.length) return null;
+                if (index > roots.length) return false;
                 if (index === roots.length) {
                     const tag = read.byte();
-                    if (tag > 1) return null;
+                    if (tag > 1) return false;
                     const text = tag ? literal() + String(id) + literal() : literal();
-                    if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return null;
+                    if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return false;
                     seenRoots.add(text); roots.push(text);
                 }
-                row.push(roots[index]);
-            }
-            row.push(id, number(first));
-            if (kind === 6) row.push(number(second));
-            rows.push(Object.freeze(row));
+                row = kind === 6 ? [QUANTITY_KINDS[kind], roots[index], id, number(first), number(second)]
+                    : [QUANTITY_KINDS[kind], roots[index], id, number(first)];
+            } else row = [QUANTITY_KINDS[kind], id, number(first)];
+            visiting = true;
+            if (visit(row) === false) return false;
+            visiting = false;
         }
-        if (!read.done()) return null;
-        return Object.freeze({ version: 1, rows: Object.freeze(rows) });
-    } catch (_) { return null; }
+        return read.done();
+    } catch (error) {
+        if (visiting) throw error;
+        return false;
+    }
+}
+// The whole list, frozen (tests, inspection). A verdict streams instead.
+function unpackQuantityInputs(value) {
+    const rows = [];
+    if (!eachQuantityRow(value, row => { rows.push(Object.freeze(row)); })) return null;
+    return Object.freeze({ version: 1, rows: Object.freeze(rows) });
 }
 function createQuantityInputs() {
     const rows = [], seen = new Map();
@@ -174,7 +187,7 @@ function createQuantityInputs() {
         physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
         incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
         unsupported() { invalid ||= 'unsupported'; },
-        // The packed proof (unpackQuantityInputs reads it) or null.
+        // The packed proof (eachQuantityRow reads it) or null.
         finish() {
             if (!finished) {
                 finished = true;
@@ -188,35 +201,34 @@ function createQuantityInputs() {
         }
     };
 }
-function quantityInputsHold(proof, readers, normalizeStock = null) {
-    if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return false;
-    for (const row of proof.rows) {
-        if (!Array.isArray(row)) return false;
+// Whether every row of the packed proof still answers the same; skip(row)
+// true leaves a row out. Rows come from the decoder, so their shape and
+// values are already valid; a missing reader is never quiet. A moved
+// answer pushes 'quantity' to why; false without it is a stream the
+// codec refuses (or a missing reader). stockFor gets the row it answers.
+function quantityInputsHold(packed, readers, normalizeStock = null, skip = null, why = null) {
+    const moved = () => { why?.push('quantity'); return false; };
+    return eachQuantityRow(packed, row => {
+        if (skip?.(row)) return true;
         if (row[0] === 'stock') {
-            if (row.length !== 5 || typeof row[1] !== 'string' || !Number.isSafeInteger(row[2]) || row[2] <= 0
-                || !Number.isFinite(row[3]) || row[3] < 0 || !Number.isFinite(row[4]) || row[4] < 0
-                || typeof readers?.stockFor !== 'function') return false;
-            const stock = readers.stockFor(row[2], row[1]);
+            if (typeof readers?.stockFor !== 'function') return false;
+            const stock = readers.stockFor(row[2], row[1], row);
             const owned = nonnegative(stock?.owned);
             const comparable = normalizeStock ? normalizeStock('stock', row[1], row[2], owned, row[3]) : owned;
-            if (comparable !== row[3] || nonnegative(stock?.incoming) !== row[4]) return false;
-        } else if (row[0] === 'stockPhysical') {
-            if (row.length !== 4 || typeof row[1] !== 'string' || !Number.isSafeInteger(row[2]) || row[2] <= 0
-                || !Number.isFinite(row[3]) || row[3] < 0 || typeof readers?.physical !== 'function') return false;
-            const owned = nonnegative(readers.physical(row[2]));
-            if ((normalizeStock ? normalizeStock('stockPhysical', row[1], row[2], owned, row[3]) : owned) !== row[3]) return false;
-        } else {
-            const read = row[0] === 'present' ? readers?.physical : row[0] === 'freePresent' ? readers?.free : readers?.[row[0]];
-            if (row.length !== 3 || !QUANTITY_SCALARS.has(row[0])
-                || !Number.isSafeInteger(row[1]) || row[1] <= 0 || !Number.isFinite(row[2]) || row[2] < 0
-                || typeof read !== 'function') return false;
-            const raw = read(row[1]);
-            if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return false;
-            const value = nonnegative(raw);
-            if ((row[0] === 'present' || row[0] === 'freePresent' ? Number(value > 0) : value) !== row[2]) return false;
+            return comparable === row[3] && nonnegative(stock?.incoming) === row[4] || moved();
         }
-    }
-    return true;
+        if (row[0] === 'stockPhysical') {
+            if (typeof readers?.physical !== 'function') return false;
+            const owned = nonnegative(readers.physical(row[2]));
+            return (normalizeStock ? normalizeStock('stockPhysical', row[1], row[2], owned, row[3]) : owned) === row[3] || moved();
+        }
+        const read = row[0] === 'present' ? readers?.physical : row[0] === 'freePresent' ? readers?.free : readers?.[row[0]];
+        if (typeof read !== 'function') return false;
+        const raw = read(row[1]);
+        if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return moved();
+        const value = nonnegative(raw);
+        return (row[0] === 'present' || row[0] === 'freePresent' ? Number(value > 0) : value) === row[2] || moved();
+    });
 }
 // Native commands for `batches`: a path without perCommand runs one batch each.
 const commands = (batches, perCommand) => Math.ceil(batches / (Number(perCommand) >= 1 ? Number(perCommand) : 1));
@@ -1005,4 +1017,4 @@ class WishNetwork {
     }
 }
 
-module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES };
+module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, eachQuantityRow, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES };

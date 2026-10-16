@@ -67,7 +67,7 @@ assert.equal(owned.batchLimit, 2);
     const captured = Crystals.choices(held, () => null, station, 0, quantities);
     assert.deepEqual(captured, Crystals.choices(held, () => null, station),
         'native quantity capture preserves every ranked crystallization choice');
-    const proof = Network.unpackQuantityInputs(quantities.finish());
+    const proof = quantities.finish();
     assert(proof, 'actual held native inputs fit the bounded owner proof');
     assert(Network.quantityInputsHold(proof, Providers.quantityReaders(held)));
     const consumed = { ...held, inventory: { ...held.inventory, 166: { ...held.inventory[166], amount: 1 } } };
