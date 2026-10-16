@@ -78,7 +78,8 @@ class ColdCommitQueue {
             earlyEmpty: 0,
             timerArms: 0,
             timerFires: 0,
-            timerIdle: 0
+            timerIdle: 0,
+            groupIndexes: 0
         };
     }
 
@@ -212,16 +213,32 @@ class ColdCommitQueue {
         return lane.length ? Number(lane[0].queuedAt || this.now()) : this.now();
     }
 
+    // One atomic group's entries, in lane order, for every group in the lane:
+    // one pass, built only when a batch meets its first grouped entry.
+    groupIndex(lane) {
+        const groups = new Map();
+        for (const entry of lane.values()) {
+            const groupId = entry.atomicGroup?.id;
+            if (!groupId) continue;
+            const group = groups.get(groupId);
+            if (group) group.push(entry);
+            else groups.set(groupId, [entry]);
+        }
+        DiagnosticConfig.developerDiagnostics && (this.counters.groupIndexes += 1);
+        return groups;
+    }
+
+    // Takes the batch out of the lane itself: an array lane (P0, P1) or the P2
+    // Map keyed by characterId, both read in queuedAt order without a copy.
     takeLaneBatch(lane, limit) {
         const selected = [];
         const selectedEntries = new Set();
+        let groups = null;
         let memoryEvents = 0;
-        for (const entry of lane) {
+        for (const entry of lane.values()) {
             if (selectedEntries.has(entry)) continue;
             const groupId = entry.atomicGroup?.id;
-            const group = groupId
-                ? lane.filter((candidate) => candidate.atomicGroup?.id === groupId)
-                : [entry];
+            const group = groupId ? (groups ||= this.groupIndex(lane)).get(groupId) : [entry];
             if (selected.length && selected.length + group.length > limit) break;
             if (!selected.length && group.length > limit) break;
             const groupMemoryEvents = group.reduce((count, candidate) =>
@@ -238,9 +255,12 @@ class ColdCommitQueue {
             if (selected.length >= limit) break;
         }
         if (!selected.length) return [];
-        const selectedSet = new Set(selected);
-        for (let index = lane.length - 1; index >= 0; index--) {
-            if (selectedSet.has(lane[index])) lane.splice(index, 1);
+        if (lane instanceof Map) {
+            for (const entry of selected) lane.delete(Number(entry.characterId));
+        } else {
+            let kept = 0;
+            for (const entry of lane) if (!selectedEntries.has(entry)) lane[kept++] = entry;
+            lane.length = kept;
         }
         return selected;
     }
@@ -257,8 +277,7 @@ class ColdCommitQueue {
         const p2Ready = this.p2.size > 0 && (force || timestamp - this.oldest(this.p2) >= this.targetMs);
         if (p2Overdue || (p2Ready && (this.p1Credit >= 4 || !p1Ready))) {
             this.lastBatchReason = force ? 'forced' : p2Overdue ? 'p2_overdue' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()], rowLimit);
-            batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
+            const batch = this.takeLaneBatch(this.p2, rowLimit);
             this.p1Credit = 0;
             return batch;
         }
@@ -269,8 +288,7 @@ class ColdCommitQueue {
         }
         if (p2Ready) {
             this.lastBatchReason = force ? 'forced' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()], rowLimit);
-            batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
+            const batch = this.takeLaneBatch(this.p2, rowLimit);
             this.p1Credit = 0;
             return batch;
         }
@@ -471,8 +489,8 @@ class ColdCommitQueue {
 
     snapshot() {
         const now = this.now();
-        const queued = [...this.p0, ...this.p1, ...this.p2.values()];
-        const oldestAt = queued.reduce((oldest, entry) => Math.min(oldest, Number(entry.queuedAt || now)), now);
+        // Each lane is in queuedAt order: its head is its oldest entry.
+        const oldestAt = Math.min(this.oldest(this.p0), this.oldest(this.p1), this.oldest(this.p2));
         return {
             ...(DiagnosticConfig.developerDiagnostics ? this.counters : { diagnosticsEnabled: false }),
             depth: this.size(),
@@ -480,7 +498,7 @@ class ColdCommitQueue {
             p0: this.p0.length,
             p1: this.p1.length,
             p2: this.p2.size,
-            oldestMs: queued.length ? Math.max(0, now - oldestAt) : 0,
+            oldestMs: this.size() ? Math.max(0, now - oldestAt) : 0,
             paused: this.paused,
             flushing: this.flushing,
             ...(DiagnosticConfig.developerDiagnostics ? {
