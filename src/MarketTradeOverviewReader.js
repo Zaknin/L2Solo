@@ -10,6 +10,7 @@ let nextId = 0;
 let cache = null;
 let cacheAt = 0;
 let inFlight = null;
+let workerStats = null;
 const pending = new Map();
 
 function rejectPending(error) {
@@ -40,7 +41,10 @@ function start(nextPath) {
         pending.delete(Number(message.id));
         clearTimeout(entry.timer);
         if (message.error) entry.reject(new Error(message.error));
-        else entry.resolve(message.overview);
+        else {
+            workerStats = message.stats || workerStats;
+            entry.resolve(message.overview);
+        }
         if (!pending.size) instance.unref();
     });
     const failed = (error) => {
@@ -83,4 +87,7 @@ function read(nextPath, options = {}) {
     return job;
 }
 
-module.exports = { read };
+// Counters of the worker's window reuse, as of its last answer.
+function stats() { return { ...workerStats }; }
+
+module.exports = { read, stats };

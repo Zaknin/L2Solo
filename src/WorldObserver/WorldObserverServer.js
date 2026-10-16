@@ -27,6 +27,7 @@ const ClanOrderService = invoke('GameServer/Clan/ClanOrderService');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
 const Database = invoke('Database');
+const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
@@ -2194,7 +2195,8 @@ function observerDiagnostics() {
     return {
         ...observerStats,
         worldStatusCache: cachedWorldStatus.stats(),
-        clanDirectoryCache: cachedClanSnapshot.stats()
+        clanDirectoryCache: cachedClanSnapshot.stats(),
+        marketOverviewWorker: MarketTradeOverviewReader.stats()
     };
 }
 
