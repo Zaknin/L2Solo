@@ -38,7 +38,7 @@ const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, l
     stub(Config, 'maxBackgroundParties', 10); stub(Config, 'protectedPartyFormationMainBudgetMs', 50);
     stub(Population, 'playerActivityProfile', () => ({ protected: true }));
     stub(Population, 'realPlayerSessions', () => []);
-    stub(Database, 'isReady', () => false); stub(Database, 'stats', () => ({ pending: 0 }));
+    stub(Database, 'isReady', () => false); stub(Database, 'stats', () => ({ pending: 0 })); stub(Database, 'pending', () => 0);
     stub(Metrics, 'currentEventLoopLag', () => 0);
     stub(Coordinator, 'snapshot', () => ({ ready: true, snapshotsLoaded: true, queue: {} }));
     // Selection/hydration are covered by protected-party and atomic DB tests;

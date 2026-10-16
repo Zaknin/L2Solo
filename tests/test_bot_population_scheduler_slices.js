@@ -29,6 +29,7 @@ const originalStateRetentionPassRows = PopulationService.stateRetentionPassRows;
 const originalNextStateRetentionAt = PopulationService.nextStateRetentionAt;
 const originalPartyFormationPending = PopulationService.partyFormationPending;
 const originalDatabaseStats = Database.stats;
+const originalDatabasePending = Database.pending;
 const originalDatabaseCheckpoint = Database.checkpoint;
 const originalWalResetRunning = PopulationService.walResetRunning;
 const originalNextWalResetAt = PopulationService.nextWalResetAt;
@@ -119,6 +120,7 @@ async function run() {
         }
     };
     Database.stats = () => checkpointState;
+    Database.pending = () => checkpointState.pending;
     Database.checkpoint = async (checkpointOptions) => {
         checkpointCalls += 1;
         assert.strictEqual(checkpointOptions.mode, 'truncate');
@@ -191,6 +193,7 @@ async function run() {
     assert.strictEqual(phaseLockedCleanupCalls, 0, 'warehouse cleanup must yield before opening a competing transaction');
     BotWarehouse.cleanupHistoricalBatch = originalWarehouseCleanup;
     Database.stats = originalDatabaseStats;
+    Database.pending = originalDatabasePending;
     Database.checkpoint = originalDatabaseCheckpoint;
     Object.assign(databaseConfig, originalResetConfig);
 
@@ -318,6 +321,7 @@ run()
         PopulationService.nextWalResetAt = originalNextWalResetAt;
         PopulationService.lastWalResetResult = originalLastWalResetResult;
         Database.stats = originalDatabaseStats;
+        Database.pending = originalDatabasePending;
         Database.checkpoint = originalDatabaseCheckpoint;
         Metrics.currentEventLoopLag = originalEventLoopLag;
         PlayerActivitySignal.reset();

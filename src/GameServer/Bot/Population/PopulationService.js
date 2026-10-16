@@ -3030,7 +3030,7 @@ const PopulationService = {
             Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('event_loop_lag');
             return Promise.resolve(null);
         }
-        if (Number(Database.stats().pending || 0) > 0) {
+        if (Database.pending() > 0) {
             Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('database_queue');
             return Promise.resolve(null);
         }
@@ -3088,7 +3088,7 @@ const PopulationService = {
             Config.developerDiagnostics && Metrics.recordStateRetentionDeferral('event_loop_lag');
             return Promise.resolve(null);
         }
-        if (Number(Database.stats().pending || 0) > 0) {
+        if (Database.pending() > 0) {
             Config.developerDiagnostics && Metrics.recordStateRetentionDeferral('database_queue');
             return Promise.resolve(null);
         }

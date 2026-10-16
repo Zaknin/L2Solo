@@ -118,6 +118,8 @@ const metrics = {
     waitMs: 0,
     runMs: 0,
     maxPending: 0,
+    // Diagnostic snapshots built by stats(); control reads use pending().
+    snapshots: 0,
     byOperation: null
 };
 
@@ -6589,6 +6591,7 @@ const Database = {
         // Depth and physical checkpoint outcomes are runtime control sources.
         if (!DiagnosticConfig.developerDiagnostics) return { path: databasePath || null, historyPath: historyPath || null,
             pending: metrics.pending, diagnostics: { enabled: false }, checkpoint: CheckpointCoordinator.snapshot(), history: History.stats() };
+        metrics.snapshots += 1;
         const operations = Object.fromEntries(Array.from(metrics.byOperation?.entries() || []).map(([key, value]) => [key, { ...value }]));
         const snapshot = {
             path: databasePath || null,
@@ -6600,6 +6603,7 @@ const Database = {
             writes: metrics.writes,
             transactions: metrics.transactions,
             failures: metrics.failures,
+            snapshots: metrics.snapshots,
             avgWaitMs: metrics.total ? Math.round(metrics.waitMs / metrics.total) : 0,
             avgRunMs: metrics.total ? Math.round(metrics.runMs / metrics.total) : 0,
             operations,
@@ -6608,6 +6612,12 @@ const Database = {
         };
         if (resetPeak) metrics.maxPending = metrics.pending;
         return snapshot;
+    },
+
+    // Operations waiting on the write queue. The schedulers read this on every
+    // admission; stats() copies every operation counter and is for status.
+    pending() {
+        return metrics.pending;
     },
 
     checkpoint(options = {}) {

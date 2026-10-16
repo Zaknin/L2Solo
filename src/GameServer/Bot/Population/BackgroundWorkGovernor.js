@@ -115,7 +115,7 @@ function pressureSnapshot(options = {}) {
     let dbPending = number(options.dbPending, NaN);
     if (!Number.isFinite(dbPending)) {
         try {
-            dbPending = Math.max(0, number(Database.stats().pending));
+            dbPending = Math.max(0, number(Database.pending()));
         } catch (_) {
             dbPending = 0;
         }

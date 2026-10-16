@@ -268,7 +268,7 @@ class ColdSimulationCoordinator {
                 if (state) this.markDirty(state, { critical: true, reason: 'competition_action' });
             },
             canRun: () => !this.stopping && this.ready && this.snapshotsLoaded && !this.pauseReasons.size
-                && !this.queue?.flushing && !invoke('Database').stats().pending
+                && !this.queue?.flushing && !invoke('Database').pending()
                 && Number(Metrics.currentEventLoopLag()) < 40
         });
         this.commandInflight = new Map();
