@@ -288,7 +288,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 
 // Resolved on first use, like the other lazy dependencies of the worker:
 // require() inside lifecycleKind ran per inventory item on every row.
-let C4Unseal, PartyMarketBreak, ClanPartyDuty;
+let C4Unseal, PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
 function lifecycleKind(state = {}, context = {}) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
@@ -313,7 +313,8 @@ function lifecycleKind(state = {}, context = {}) {
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
     if (['shopping', 'crafting', 'merchant'].includes(state.activity)) return 'command';
-    if (plan.strategy === 'luxury_exchange' && require('../Economy/BotCrystallization').ready(state)) return 'command';
+    if (plan.strategy === 'luxury_exchange'
+        && (BotCrystallization ||= require('../Economy/BotCrystallization')).ready(state)) return 'command';
     if (String(plan.strategy || '') === 'market') {
         const price = Math.max(0, Number(plan.market?.price || 0));
         const reserve = Math.max(0, Number(plan.market?.reserve || 0));
@@ -345,14 +346,16 @@ function isSchedulableKind(kind) {
     return kind !== 'inactive' && kind !== 'event_driven' && kind !== 'party_member';
 }
 
-function playerWaitingTransition(state, context) {
+// A caller that already read this state's kind in the same call passes it;
+// otherwise the kind is read only when the cheap meeting test passes.
+function playerWaitingTransition(state, context, kind = null) {
     return context?.playerWaiting === true && !!state?.stats?.tradeMeeting
-        && lifecycleKind(state, context) === 'resolver';
+        && (kind ?? lifecycleKind(state, context)) === 'resolver';
 }
 
-function meetingTravelTransition(state, context) {
+function meetingTravelTransition(state, context, kind = null) {
     return state?.activity === 'traveling' && !!state.stats?.tradeMeeting
-        && lifecycleKind(state, context) === 'resolver';
+        && (kind ?? lifecycleKind(state, context)) === 'resolver';
 }
 
 function priorityForResult(state, result) {
@@ -661,8 +664,8 @@ class ColdSimulationKernel {
         if (this.busy(leaderId) || lifecycleKind(leader.state, leader.context) !== 'party') return;
         const due = this.dueAt(leader.state, leader.context), scheduled = this.scheduleTokens.get(leaderId);
         if (scheduled?.version === leader.version && scheduled.dueAt === due
-            && scheduled.heapEntry.playerWaiting === playerWaitingTransition(leader.state, leader.context)) return;
-        this.schedule(leaderId, leader.version, due);
+            && scheduled.heapEntry.playerWaiting === playerWaitingTransition(leader.state, leader.context, 'party')) return;
+        this.schedule(leaderId, leader.version, due, 'party');
     }
 
     upsert(entry = {}) {
@@ -702,17 +705,30 @@ class ColdSimulationKernel {
             this.refreshPartyMeetingLeader(characterId, current);
             return false;
         }
-        if (current && incomingRevision === currentRevision
-            && this.dueAt(current.state, current.context)
-                === this.dueAt(state, entry.context || {})
-            && lifecycleKind(current.state, current.context) === lifecycleKind(state, entry.context || {})) {
+        const nextContext = entry.context || {};
+        // The incoming state's due time and kind, read once by the same-revision
+        // compare and handed to ensureScheduled below for this state only (the
+        // kind also reads the clock, so it is never kept past this call).
+        let nextDue = null, nextKind = null, unchanged = false;
+        if (current && incomingRevision === currentRevision) {
+            const due = this.dueAt(state, nextContext);
+            // dueAt reads this bot's stored row for a meeting in its party;
+            // here that row is still the old one, so a due read while the
+            // meeting flag clears is read again after the store.
+            if (!current.state.stats?.tradeMeeting || state.stats?.tradeMeeting) nextDue = due;
+            if (this.dueAt(current.state, current.context) === due) {
+                nextKind = lifecycleKind(state, nextContext);
+                unchanged = lifecycleKind(current.state, current.context) === nextKind;
+            }
+        }
+        if (unchanged) {
             // A full catalog refresh normally changes only context. Keep the
             // existing heap version so ten-second refreshes do not accumulate
             // one invalid future node per bot until its next due time.
             this.states.set(characterId, {
                 ...current,
                 state,
-                context: entry.context || {}
+                context: nextContext
             });
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
@@ -720,20 +736,20 @@ class ColdSimulationKernel {
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
             this.refreshCommandSource(characterId);
             this.buyerStateChanged(characterId);
-            this.ensureScheduled(characterId);
+            this.ensureScheduled(characterId, nextDue, nextKind);
             this.refreshPartyMeetingLeader(characterId, current);
             return true;
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        this.states.set(characterId, { state, context: entry.context || {}, version });
+        this.states.set(characterId, { state, context: nextContext, version });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
         this.refreshCommandSource(characterId);
         this.buyerStateChanged(characterId);
-        this.ensureScheduled(characterId);
+        this.ensureScheduled(characterId, nextDue, nextKind);
         this.refreshPartyMeetingLeader(characterId, current);
         return true;
     }
@@ -783,16 +799,18 @@ class ColdSimulationKernel {
         this.commandStartedAt.delete(id);
     }
 
-    schedule(characterId, version, dueAt) {
+    // kind: the lifecycleKind of the stored state when the caller has just read it.
+    schedule(characterId, version, dueAt, kind = null) {
         const id = Number(characterId);
         // Replacing a token also removes its actual indexed node; otherwise a
         // long future deadline keeps every superseded token until it is due.
         this.heap.remove(this.scheduleTokens.get(id)?.heapEntry);
         const token = this.nextScheduleToken++;
+        const current = this.states.get(id);
         const heapEntry = { characterId: id, version: Number(version),
             dueAt: Number(dueAt || this.now()), scheduleToken: token,
-            playerWaiting: playerWaitingTransition(this.states.get(id)?.state, this.states.get(id)?.context),
-            meetingTravel: meetingTravelTransition(this.states.get(id)?.state, this.states.get(id)?.context) };
+            playerWaiting: playerWaitingTransition(current?.state, current?.context, kind),
+            meetingTravel: meetingTravelTransition(current?.state, current?.context, kind) };
         this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
         this.heap.push(heapEntry);
     }
@@ -965,7 +983,9 @@ class ColdSimulationKernel {
         return true;
     }
 
-    ensureScheduled(characterId, dueAt = null) {
+    // dueAt and kind: the due time and lifecycleKind of the stored state when
+    // the caller has just read them in the same call; null reads them here.
+    ensureScheduled(characterId, dueAt = null, kind = null) {
         const id = Number(characterId);
         const current = this.states.get(id);
         if (!current || this.busy(id)) return false;
@@ -975,14 +995,16 @@ class ColdSimulationKernel {
         }
         if (this.hasNormalCoverage(id)) {
             const scheduled = this.scheduleTokens.get(id);
-            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context)
-                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context)) {
-                this.schedule(id, current.version, scheduled.dueAt);
+            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context, kind)
+                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context, kind)) {
+                this.schedule(id, current.version, scheduled.dueAt, kind);
             }
             return false;
         }
-        if (this.hasAcceptedPartyGrant(id) || !isSchedulableKind(lifecycleKind(current.state, current.context))) return false;
-        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state, current.context));
+        if (this.hasAcceptedPartyGrant(id)) return false;
+        kind ??= lifecycleKind(current.state, current.context);
+        if (!isSchedulableKind(kind)) return false;
+        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state, current.context), kind);
         return true;
     }
 
@@ -1396,6 +1418,14 @@ class ColdSimulationKernel {
             this.requeue(Number(id), timestamp + 1000);
             DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += 1);
         });
+    }
+
+    // The earliest time tick() can find timed work: the heap head (a bot, a
+    // claim_ack alarm or a decision deadline, all on the one heap) or the
+    // first possible lease expiry. At or before now: work is due (maybe held
+    // by capacity or a pause). A superseded heap node only makes it earlier.
+    nextWakeAt() {
+        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), this.inFlight.checkAt);
     }
 
     // Diagnostics only: why a scheduler tick sent no claim. `no_claim`: the tick
