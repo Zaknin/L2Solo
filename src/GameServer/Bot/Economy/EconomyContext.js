@@ -335,15 +335,29 @@ function bandsHold(state, bands = [], leaf = null) {
 // held: { baseline, mp, expPerHour, persona } of the last actual decision.
 // A failing check names itself in `why` (an array or null) and fails.
 const miss = (why, reason) => { why?.push(reason); return false; };
+// The soft events of the verdict: a money, observation or horizon change
+// once its kind's delay since the last actual decision has passed. The name
+// of the first one ('money' is also a hard money move), or null when quiet.
+// held: as in heldEventsQuiet (its mp is not read).
+function softEvent(state, held, timestamp, deps = {}) {
+    const baseline = held.baseline;
+    if (Sections.moneyEvent(state, baseline, timestamp)) return 'money';
+    if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return 'observation';
+    if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return 'horizon';
+    return null;
+}
 // why: an array that receives the failing event's name (L114 diagnostics).
-function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why = null) {
+// seen: an object that receives the soft verdict once it is read
+// ({ at: the baseline's decision time, kind: softEvent's answer }), so the
+// build that follows a refusal does not read it again.
+function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why = null, seen = null) {
     const stats = state.stats || {}, baseline = held.baseline;
     if (stats.wishDirty) return miss(why, 'wish_dirty');
     if (Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
         && Number(state.vitals?.mp) !== Number(held.mp)) return miss(why, 'crafter_mp');
-    if (Sections.moneyEvent(state, baseline, timestamp)) return miss(why, 'money');
-    if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return miss(why, 'observation');
-    if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return miss(why, 'horizon');
+    const soft = softEvent(state, held, timestamp, deps);
+    if (seen) { seen.at = Number(baseline?.at); seen.kind = soft; }
+    if (soft) return miss(why, soft);
     if (deferred) {
         if (Sections.meaningfulMoney(state, baseline)) deferred.push('money');
         if (Sections.observationChanged(state, baseline, timestamp, deps.mode)) deferred.push('observation');
@@ -355,7 +369,7 @@ function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why
 // structure of the build (as its calculation fence) and bag slots/weight.
 // why (diagnostics only, as in heldEventsQuiet): the first refusing clause's
 // name; the events name themselves (wish_dirty, crafter_mp, money, ...).
-function decisionHolds(state, held, timestamp, deps, deferred = null, why = null) {
+function decisionHolds(state, held, timestamp, deps, deferred = null, why = null, seen = null) {
     if (!held) return false;
     if (held.bandHash === undefined) return miss(why, 'no_band_hash');
     if (held.plan.pending) return miss(why, 'plan_pending');
@@ -366,7 +380,7 @@ function decisionHolds(state, held, timestamp, deps, deferred = null, why = null
     // key, so the decision sequence alone tells the same decision.
     if (Number(state.stats?.decisionSeq || 0) !== Number(held.plan.statsPacket.decisionSeq || 0)) return miss(why, 'decision_seq');
     if (!heldEventsQuiet(state, { baseline: held.plan.statsPacket.wishSections, mp: held.mp,
-        expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred, why)) return false;
+        expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred, why, seen)) return false;
     const bands = held.plan.quantityBands || [];
     if (!bandsHold(state, bands, held.plan.network?.activity)) return miss(why, 'bands');
     if (fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
@@ -1067,9 +1081,12 @@ function buildForState(state, deps) {
     // rebuilds only once the market delay since the last actual decision
     // has passed, and never while the held leaf's own offer, funding or
     // route fails; every hard condition above still cuts through at once.
-    const deferred = diagnostic ? [] : null, why = diagnostic ? [] : null;
-    if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred, why)) && (!deps.withNodes || held.projection)
-        && (marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads)
+    const deferred = diagnostic ? [] : null, why = diagnostic ? [] : null, seen = { at: NaN, kind: null };
+    // The held build's market items and spot crowd still read the same: read once per request.
+    let readsHeld = null;
+    const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
+    if ((held?.key === key || decisionHolds(state, held, timestamp, deps, deferred, why, seen)) && (!deps.withNodes || held.projection)
+        && (heldReadsHold()
             || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp)
                 && ownLeafHolds(state, held.plan, deps) && (deferred?.push('market'), true))) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) deps.onSourceRead(id);
@@ -1344,17 +1361,25 @@ function buildForState(state, deps) {
     const unchangedChoice = Number(acceptedSections?.choices) === context.choiceInputs
         && Number.isFinite(acceptedSections?.bagValue)
         && Math.abs(bagValue - acceptedSections.bagValue) <= positive(context.hourAdena) * positive(acceptedSections.incomeError)
-        && (!held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads));
+        && heldReadsHold();
     context.choiceBagValue = unchangedChoice ? acceptedSections.bagValue : bagValue;
+    // An event re-weighs the held focus and step (WishNetwork reconsider): a
+    // raised section, or a soft change once its kind's delay since the last
+    // decision has passed (money, observation, horizon; the market items and
+    // spot crowd the held build read). A rebuild where only noise moved keeps
+    // them. A crafter's MP fences its plan (sources), not its goal: no event.
+    const dirty = Number(state.stats?.wishDirty) || 0;
+    const soft = dirty ? null : (seen.at === Number(acceptedSections?.at) ? seen.kind
+        : softEvent(state, { baseline: acceptedSections, expPerHour: acceptedSections?.expHour, persona }, timestamp, deps))
+        ?? (held && Sections.softDue(acceptedSections, 'market', timestamp) && !heldReadsHold() ? 'market' : null);
+    const reconsider = dirty !== 0 || soft !== null;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
         completionKey: context.completionKey,
         characterId: state.characterId, decisionSeq: state.stats?.decisionSeq, activityLeaf: state.stats?.activityLeaf,
         wallet: context.wallet, survivalReserve: base.survivalReserve,
-        preserveFocus: !state.stats?.wishDirty && Number(state.stats?.activityLeaf) > 0 && unchangedChoice,
-        // A raised section is the event that weighs the held activity again (DecisionEvents).
-        reconsider: !!state.stats?.wishDirty,
+        reconsider,
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,

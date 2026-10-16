@@ -140,7 +140,19 @@ const goneWithoutEvent = network.build({ ...eventInput, inputKey: 'leaf-gone-qui
         paths: [{ activity: 'crafting', costHours: 1 }] }], remembered: false, reconsider: false });
 assert.equal(goneWithoutEvent.activity.activity, 'crafting', 'a held step that is no longer a candidate is replaced without an event');
 assert.equal(goneWithoutEvent.decisionSeq, eventInput.decisionSeq + 1);
-console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf / quiet rebuild keeps the leaf');
+// The focus reads the same event gate: a quiet rebuild keeps the held focus
+// however much better a challenger became; an event lets it move.
+const challenged = { ...eventInput, previous: { focus: ['left', 0, 0] },
+    nodes: [eventInput.nodes[0], { ...eventInput.nodes[1], valueHours: 3 }], remembered: false };
+const movedFocus = new Set();
+for (let decisionSeq = 1; decisionSeq <= 30; decisionSeq++) {
+    const quiet = network.build({ ...challenged, decisionSeq, reconsider: false });
+    assert.equal(quiet.focus[0], 'left', 'a quiet rebuild keeps the held focus');
+    assert.equal(quiet.decisionSeq, decisionSeq, 'a kept focus does not reseed the roll');
+    movedFocus.add(network.build({ ...challenged, decisionSeq, reconsider: true }).focus[0]);
+}
+assert(movedFocus.has('right'), 'an event lets an outscoring focus win the roll');
+console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf / quiet rebuild keeps the leaf and focus');
 
 const liquidationInput = { actorKey: 'finite-sale', inputKey: 'bag', remembered: false,
     wallet: 10, hourAdena: 0, roots: ['upgrade'], nodes: [{ key: 'upgrade', need: 'power',

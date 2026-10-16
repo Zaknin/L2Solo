@@ -284,6 +284,13 @@ try {
             // after its 10 min delay since the last actual decision.
             if (event === 'quote') assert.equal(Economy.forState(subject, options).network.focus[0], 'held',
                 'a moved quote waits for the market delay');
+            else {
+                // A required material's count is a bag row, not an event: the
+                // held focus stays until a raised section re-weighs it.
+                assert.equal(Economy.forState(subject, options).network.focus[0], 'held',
+                    'a quiet material move keeps the held focus');
+                invoke('GameServer/Bot/AI/DecisionEvents').raiseDecision({ coldLifeState: subject }, 'bag');
+            }
             const changed = Economy.forState(subject, event === 'quote'
                 ? { ...options, timestamp: deps.timestamp + Sections.SOFT_DELAY.market } : options);
             assert.equal(changed.network.focus[0], 'challenger', `a real ${event} event permits the native loyalty comparison`);
