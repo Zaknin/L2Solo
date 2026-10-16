@@ -50,6 +50,8 @@ const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulati
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const Hold = invoke('GameServer/Bot/Economy/Hold');
+const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const WAREHOUSE_CLEANUP_KEY = Symbol('warehouse-cleanup');
 const STATE_RETENTION_KEY = Symbol('state-retention');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
@@ -58,6 +60,8 @@ const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
 const CLEANUP_BUSY_FLAGS = ['marketReturn'];
 const ACTIVATION_BUSY_FLAGS = ['supplyErrand'];
 const BackgroundPartyLifecycle = invoke('GameServer/Bot/Population/BackgroundPartyLifecycle');
+const ClanPartyCapacity = invoke('GameServer/Bot/Population/ClanPartyCapacity');
+const ClanEquipmentPartyPolicy = invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
 const ClanSimulationService = invoke('GameServer/Clan/ClanSimulationService');
 const ClanActionService = invoke('GameServer/Clan/ClanActionService');
@@ -317,6 +321,17 @@ function occupiedPartySlots() {
 
 const { acquisitionRequirementKey, acquisitionFallbackEvent } = require('./PartyRequirementRefresh');
 
+// The event inputs of a party's requirement refresh (hold place
+// party_requirements): its objective and each member's kit (class, level,
+// worn gear, hennas, skills, craft; DecisionSections.kit, no effects or
+// night: no clock part). Money, market and occupancy drift and stay out; the
+// shadow compare shows whether a refresh with these quiet still changes a plan.
+function partyRequirementInputs(party, members, timestamp) {
+    const facts = members.map(member => [Number(member.characterId), DecisionSections.kit(member, timestamp)])
+        .sort((a, b) => a[0] - b[0]);
+    return DecisionSections.hash([partyObjectiveGroupingKey(party.stats?.objective) ?? null, facts]);
+}
+
 function partyObjectivesShareRoute(left, right) {
     const leftClanGoal = String(left?.clanGoalKey || '');
     const rightClanGoal = String(right?.clanGoalKey || '');
@@ -347,13 +362,44 @@ function partyObjectiveGroupingKey(objective) {
     return clanGoalKey ? `clan-goal:${clanGoalKey}` : objective?.objectiveKey;
 }
 
-function partyObjectiveKeyForState(state) {
-    return partyObjectiveGroupingKey(partyObjectiveForState(state))
+// objective: the state's partyObjectiveForState when the caller already has it.
+function partyObjectiveKeyForState(state, objective = partyObjectiveForState(state)) {
+    return partyObjectiveGroupingKey(objective)
         || `spot:${state?.spotId || 'unknown'}`;
 }
 
-function partyObjectiveSpotForState(state) {
-    return PartyRequestPlanner.objectiveSpot(state, partyObjectiveForState(state));
+function partyObjectiveSpotForState(state, objective = partyObjectiveForState(state)) {
+    return PartyRequestPlanner.objectiveSpot(state, objective);
+}
+
+// Spot id -> active background parties there, as a Map-like get(). Counted on
+// the first read only: a group sort reads it when two groups tie before it,
+// and an event assembly usually has one group (no scan of all parties).
+function activePartiesBySpotOnRead() {
+    let counts = null;
+    return {
+        get(spotId) {
+            if (!counts) {
+                counts = new Map();
+                for (const party of BackgroundPartyState.active()) {
+                    const id = String(party.spotId || '');
+                    if (id) counts.set(id, Number(counts.get(id) || 0) + 1);
+                }
+                Config.developerDiagnostics && Diagnostics.count('party_assembly', 'spot_counts', 'built');
+            }
+            return counts.get(spotId);
+        }
+    };
+}
+
+// One assembly pass reads each candidate's objective once (it was read up to
+// ten times per candidate, also inside sort comparators).
+function partyObjectiveMemo() {
+    const objectives = new Map();
+    return state => {
+        if (!objectives.has(state)) objectives.set(state, partyObjectiveForState(state));
+        return objectives.get(state);
+    };
 }
 
 function directDropTargetNpcId(...plans) {
@@ -796,7 +842,7 @@ function commitPartyMembership(party, members = [], event = null) {
         && !invoke('GameServer/AfkTrade/TradeMeetingService').canJoinParty(member.characterId, member))) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'party_trade_busy' });
     }
-    if (invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy').needsReview(party, selected, Date.now())) {
+    if (ClanEquipmentPartyPolicy.needsReview(party, selected, Date.now())) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'clan_party_unsafe' });
     }
 
@@ -876,22 +922,20 @@ async function releaseForClanHelp(state) {
 }
 
 async function createAndCommitBackgroundParty(members = [], objectiveOverride = null, options = {}) {
-    const Capacity = invoke('GameServer/Bot/Population/ClanPartyCapacity');
-    const objective = objectiveOverride || members.map(partyObjectiveForState).find(Capacity.required);
+    const objective = objectiveOverride || members.map(partyObjectiveForState).find(ClanPartyCapacity.required);
     if (objective?.fullRoster) {
         members = require('../../Clan/ClanRaidRoster').selectMembers(members, objective, partyLimitsForObjective(objective));
         if (members.length !== 9) return null;
     }
-    const safety = invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy');
-    if (safety.applies(objective)) {
-        members = members.filter(member => safety.allowed(member, objective));
+    if (ClanEquipmentPartyPolicy.applies(objective)) {
+        members = members.filter(member => ClanEquipmentPartyPolicy.allowed(member, objective));
         if (members.length < partyLimitsForObjective(objective).minSize) return null;
     }
     let release = partyAdmission.reserve(BackgroundPartyState.admitted(), Config);
-    if (!release && Capacity.required(objective)) {
+    if (!release && ClanPartyCapacity.required(objective)) {
         const limits = partyLimitsForObjective(objective);
         if (require('../../Clan/ClanRaidRoster').selectMembers(members, objective, limits).length < limits.minSize) return null;
-        const reclaimed = await Capacity.reclaim(objective, {
+        const reclaimed = await ClanPartyCapacity.reclaim(objective, {
             parties: BackgroundPartyState, life: LifeState, database: Database, metrics: Metrics
         });
         if (reclaimed) release = partyAdmission.reserve(BackgroundPartyState.admitted(), Config);
@@ -1028,12 +1072,14 @@ const PopulationService = {
     backgroundJobRegistry: null,
     partyAssemblyEvents: null,
     partyRequirementRefreshDue: new Set(),
+    // partyId -> { why, moved }: the hold verdict of a due refresh, until the
+    // refresh completes (shadow; read by its compare).
+    partyRequirementVerdicts: new Map(),
     phasePolicyTimer: null,
     seedTimer: null,
     classProgressionMigrationTimer: null,
     nextColdCombatProfileMigrationAt: 0,
     nextPartyRequestCleanupAt: 0,
-    nextColdOwnerRecoveryAt: 0,
     nextWarehouseCleanupAt: 0,
     warehouseCleanupCursor: 0,
     warehouseCleanupPassUnits: 0,
@@ -1048,7 +1094,6 @@ const PopulationService = {
     resolving: false,
     classProgressionMigrationRunning: false,
     coldCombatProfileMigrationRunning: false,
-    coldOwnerRecoveryRunning: false,
     warehouseCleanupRunning: false,
     stateRetentionRunning: false,
     partyFormationRunning: false,
@@ -1524,7 +1569,10 @@ const PopulationService = {
         });
         this.partyAssemblyEvents = service;
         service.unsubscribeRequirements = BackgroundPartyState.subscribeChanges(party => {
-            if (party.status !== 'active') this.partyRequirementRefreshDue.delete(String(party.partyId));
+            if (party.status !== 'active') {
+                this.partyRequirementRefreshDue.delete(String(party.partyId));
+                this.partyRequirementVerdicts.delete(String(party.partyId));
+            }
         });
         service.start();
         service.unsubscribeHelp = Help.subscribePending(() => service.wakeHelp());
@@ -1545,23 +1593,24 @@ const PopulationService = {
         this.partyAssemblyEvents = null;
         service?.unsubscribeHelp?.(); service?.unsubscribePresence?.(); service?.unsubscribeRequirements?.(); service?.stop();
         this.partyRequirementRefreshDue.clear();
+        this.partyRequirementVerdicts.clear();
     },
 
     partyAssemblyInput(state, timestamp = Date.now()) {
         if (state?.phase !== 'cold' || state.party?.partyId || state.partyId
-            || !['hunting', 'resting', 'party_wait'].includes(state.activity)
-            || !partyObjectiveSpotForState(state)
-            || state.stats?.equipmentPlan?.strategy === 'market'
+            || !['hunting', 'resting', 'party_wait'].includes(state.activity)) return null;
+        const objective = partyObjectiveForState(state);
+        const spotId = partyObjectiveSpotForState(state, objective);
+        if (!spotId || state.stats?.equipmentPlan?.strategy === 'market'
             || invoke('GameServer/Bot/AI/BotServiceIdentity').isStaticService(state)) return null;
         const request = state.stats?.partyRequest;
-        const objective = partyObjectiveForState(state);
         const deferredAt = request?.status === 'deferred' ? Number(request.deferredUntil || 0) : 0;
         const cooldownAt = Number(state.stats?.partyRequest?.deferredUntil || 0);
         const dueAt = deferredAt > timestamp ? deferredAt : cooldownAt > timestamp ? cooldownAt
             : request?.status === 'open' ? Number(request.requestedAt || timestamp) + PartyRequestPlanner.maxAgeMs(request.priority) : 0;
         // Ownership/HP/coordinates pulse regularly. Refresh their original
         // reference without restarting an unchanged recruitment decision.
-        return { key: `spot:${partyObjectiveSpotForState(state)}`, dueAt,
+        return { key: `spot:${spotId}`, dueAt,
             stamp: [state.level ?? null, state.stats?.classId ?? null, state.clanId ?? state.stats?.clanId ?? null,
                 objective?.spotId ?? null, request?.status ?? null, request?.priority ?? null,
                 state.stats?.equipmentPlan?.strategy ?? null, state.stats?.equipmentPlan?.target?.selfId ?? null] };
@@ -1948,6 +1997,9 @@ const PopulationService = {
         const players = this.realPlayerSessions();
         const cooldownRadius = Math.max(Config.cooldownRadius, Config.activationRadius);
         const seenParties = new Set();
+        // The nearest player distance of each hot bot, once: the filter and the
+        // sort read it (the sort recomputed every player distance per comparison).
+        const nearest = new Map();
         const candidates = BotManager.sessions
             .filter((session) => session.actor && session.accountId && String(session.accountId).startsWith('bot_'))
             .filter((session) => {
@@ -1957,6 +2009,9 @@ const PopulationService = {
                 // continue hunting and washing karma in the cold simulation.
                 if (session.pkProfile || session.plan === 'pk_hunting') return false;
                 if (session.clanAllianceQuest || session.partyCompanion === true || session.followPlayerSession) return false;
+                let distance = Infinity;
+                for (const playerSession of players) distance = Math.min(distance, distance2d(session.actor, playerSession.actor));
+                nearest.set(session, distance);
                 const failedRaidReady = session.hotBackgroundPartyId
                     && HotPartyLifecycle.raidFailureReady(
                         BackgroundPartyState.find(session.hotBackgroundPartyId),
@@ -1965,10 +2020,7 @@ const PopulationService = {
                 if (failedRaidReady) return true;
                 const lastHotAt = session.populationHotAt || 0;
                 if (lastHotAt && now - lastHotAt < Config.cooldownGraceMs && !session.pvpEncounter) return false;
-                if (players.length === 0) return true;
-                return players.every((playerSession) => (
-                    distance2d(session.actor, playerSession.actor) > cooldownRadius
-                ));
+                return distance > cooldownRadius;
             })
             .filter(session => {
                 if (!session.hotBackgroundPartyId) return true;
@@ -1976,15 +2028,7 @@ const PopulationService = {
                 seenParties.add(session.hotBackgroundPartyId);
                 return true;
             })
-            .sort((a, b) => {
-                const aDistance = players.length
-                    ? Math.min(...players.map((player) => distance2d(a.actor, player.actor)))
-                    : Infinity;
-                const bDistance = players.length
-                    ? Math.min(...players.map((player) => distance2d(b.actor, player.actor)))
-                    : Infinity;
-                return bDistance - aDistance;
-            })
+            .sort((a, b) => nearest.get(b) - nearest.get(a))
             .slice(0, Config.cooldownBatchSize);
 
         return candidates.reduce((chain, session) => (
@@ -2213,6 +2257,8 @@ const PopulationService = {
                 Config.developerDiagnostics && Metrics.recordPartyFormationStage(name, Date.now() - stageStartedAt);
             });
         };
+        const objectiveOf = partyObjectiveMemo();
+        const openRequired = state => objectiveOf(state)?.status === 'open' && objectiveOf(state)?.priority === 'required';
         const formationWork = () => {
             return timedStage('cleanup', () => cleanup)
             // Production inspects one indexed group page. Tooling can explicitly
@@ -2220,21 +2266,15 @@ const PopulationService = {
             .then(() => timedStage('candidate_projection', () => (candidates ? Promise.resolve(candidates) : LifeState.coldPartyCandidateProjections())
                 .then((states) => ({
                     states,
-                    partyRequestBacklog: states.some((state) => partyObjectiveForState(state)?.status === 'open'),
-                    requiredPartyRequestCount: states.filter((state) => (
-                        partyObjectiveForState(state)?.status === 'open'
-                        && partyObjectiveForState(state)?.priority === 'required'
-                    )).length
+                    partyRequestBacklog: states.some((state) => objectiveOf(state)?.status === 'open'),
+                    requiredPartyRequestCount: states.filter(openRequired).length
                 }))))
             .then(({ states, partyRequestBacklog, requiredPartyRequestCount }) => {
                 const willingStates = states.filter((state) => (
                     requiresClanEquipmentParty(state)
                     || PersonaPartyPolicy.backgroundIntent(state).accept
                 ));
-                const requiredStates = willingStates.filter((state) => (
-                    partyObjectiveForState(state)?.status === 'open'
-                    && partyObjectiveForState(state)?.priority === 'required'
-                ));
+                const requiredStates = willingStates.filter(openRequired);
                 const reclaim = activity.protected
                     ? Promise.resolve([])
                     : this.reviewBackgroundPartyDemand(requiredStates, {
@@ -2245,7 +2285,8 @@ const PopulationService = {
                     ? Promise.resolve(new Set())
                     : reclaim.then(() => this.recruitBackgroundMembers(willingStates, {
                         deadlineAt,
-                        markBudgetStop: () => budgetReached()
+                        markBudgetStop: () => budgetReached(),
+                        objectiveOf
                     }));
                 return reclaim.then(() => recruit).then((recruitedIds) => ({
                     states: willingStates.filter((state) => !recruitedIds.has(Number(state.characterId))),
@@ -2256,7 +2297,7 @@ const PopulationService = {
             .then(({ states, partyRequestBacklog, requiredPartyRequestCount }) => {
                 const activeParties = occupiedPartySlots();
                 const slots = Math.max(0, partyCapacityLimit() - activeParties);
-                const clanDemand = states.some(state => invoke('GameServer/Bot/Population/ClanPartyCapacity').required(partyObjectiveForState(state)));
+                const clanDemand = states.some(state => ClanPartyCapacity.required(objectiveOf(state)));
                 if (slots <= 0 && !clanDemand) return [];
                 // A live player keeps a small formation reserve, but that
                 // reserve must not turn into a burst of simultaneous party
@@ -2266,22 +2307,18 @@ const PopulationService = {
                     Config.partyFormationBatchSize,
                     activity.protected ? 1 : Config.partyFormationBatchSize
                 );
-                const activePartiesBySpot = BackgroundPartyState.active().reduce((counts, party) => {
-                    const spotId = String(party.spotId || '');
-                    if (spotId) counts.set(spotId, Number(counts.get(spotId) || 0) + 1);
-                    return counts;
-                }, new Map());
-                const groups = this.groupPartyCandidatesByObjective(states, { prioritizePartyWait: partyRequestBacklog, activePartiesBySpot })
-                    .sort((a, b) => Number(b.some(state => invoke('GameServer/Bot/Population/ClanPartyCapacity').required(partyObjectiveForState(state))))
-                        - Number(a.some(state => invoke('GameServer/Bot/Population/ClanPartyCapacity').required(partyObjectiveForState(state)))));
+                const groups = this.groupPartyCandidatesByObjective(states, { prioritizePartyWait: partyRequestBacklog,
+                    activePartiesBySpot: activePartiesBySpotOnRead(), objectiveOf });
+                const clanRequired = new Map(groups.map(group => [group, group.some(state => ClanPartyCapacity.required(objectiveOf(state)))]));
+                groups.sort((a, b) => Number(clanRequired.get(b)) - Number(clanRequired.get(a)));
                 const created = [];
 
                 return groups.reduce((chain, group) => chain.then(() => {
                     if (created.length >= maxNewParties || budgetReached()) return null;
                     const requestedObjective = group
-                        .map((state) => partyObjectiveForState(state))
+                        .map(objectiveOf)
                         .find((objective) => objective?.priority === 'required')
-                        || partyObjectiveForState(group[0]);
+                        || objectiveOf(group[0]);
                     const partyLimits = partyLimitsForObjective(requestedObjective);
                     if (group.length < partyLimits.minSize) return null;
 
@@ -2390,20 +2427,21 @@ const PopulationService = {
 
     groupPartyCandidatesByObjective(states = [], options = {}) {
         const timestamp = options.timestamp ?? Date.now();
+        const objectiveOf = options.objectiveOf || partyObjectiveMemo();
         const grouped = new Map();
         (states || []).forEach((state) => {
-            const key = partyObjectiveKeyForState(state);
+            const key = partyObjectiveKeyForState(state, objectiveOf(state));
             if (!grouped.has(key)) grouped.set(key, []);
             grouped.get(key).push(state);
         });
         return Array.from(grouped.entries())
             .map(([key, group]) => ({
                 key,
-                spotId: partyObjectiveSpotForState(group[0]),
+                spotId: partyObjectiveSpotForState(group[0], objectiveOf(group[0])),
                 states: group.sort((a, b) => Number(a.level || 1) - Number(b.level || 1)),
-                admissionPriority: admissionPriority(group.map(partyObjectiveForState), timestamp),
+                admissionPriority: admissionPriority(group.map(objectiveOf), timestamp),
                 partyWaiters: group.filter((state) => state.activity === 'party_wait'
-                    || partyObjectiveForState(state)?.status === 'open').length
+                    || objectiveOf(state)?.status === 'open').length
             }))
             .sort((a, b) => {
                 if (a.admissionPriority !== b.admissionPriority) return b.admissionPriority - a.admissionPriority;
@@ -2445,7 +2483,21 @@ const PopulationService = {
             if (budgetReached()) break;
             this.partyRequirementRefreshDue.add(String(party.partyId));
         }
-        return Promise.resolve(refreshable.filter(party => this.partyRequirementRefreshDue.has(String(party.partyId))).map(party => party.partyId));
+        const due = refreshable.filter(party => this.partyRequirementRefreshDue.has(String(party.partyId)));
+        if (!Hold.asked('party_requirements')) return Promise.resolve(due.map(party => party.partyId));
+        // Shadow verdict: would this timed refresh have been skipped because
+        // no member input event happened since the last one? The refresh
+        // still runs; the 'on' skip is not wired here.
+        return Promise.resolve(LifeState.cachedStatesForParties(due)).then(membersByParty => {
+            for (const party of due) {
+                const held = party.stats?.requirementInputs, why = [];
+                if (!held) why.push('unproved');
+                else if (held !== partyRequirementInputs(party, membersByParty.get(String(party.partyId)) || [], timestamp)) why.push('event_key');
+                Hold.check('party_requirements', why);
+                this.partyRequirementVerdicts.set(String(party.partyId), { why, moved: false });
+            }
+            return due.map(party => party.partyId);
+        });
     },
 
     async applyWorkerPartyRequirements(party, resolution) {
@@ -2461,6 +2513,8 @@ const PopulationService = {
             changed = !!await LifeState.upsertState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
                 'party_requirement_refresh') || changed;
         }
+        const verdict = this.partyRequirementVerdicts.get(String(party.partyId));
+        if (verdict && changed) verdict.moved = true;
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
         if (!resolution.requirementRefreshedAt) return [];
         const timestamp = Number(resolution.requirementRefreshedAt);
@@ -2501,6 +2555,15 @@ const PopulationService = {
                 lastRequirementRefreshAt: timestamp
             }
         };
+        // The held record of the hold place: the inputs this refresh answered
+        // (none while the place is not asked: a stale one would hold wrongly).
+        if (Hold.asked('party_requirements')) nextParty.stats.requirementInputs = partyRequirementInputs(nextParty, retainedMembers, timestamp);
+        else delete nextParty.stats.requirementInputs;
+        if (verdict) {
+            this.partyRequirementVerdicts.delete(String(party.partyId));
+            Hold.compare('party_requirements', { characterId: Number(party.leaderId) }, verdict.why,
+                () => verdict.moved || departures.length ? 'plan' : '', 0);
+        }
         if (Number(nextLeaderId) !== Number(party.leaderId)) {
             await syncPartyLeader(retainedMembers, nextParty, nextLeaderId);
         }
@@ -2524,12 +2587,45 @@ const PopulationService = {
             return true;
         };
         const claimed = new Set();
+        // Each candidate's objective, grouping key and objective spot once per
+        // pass; a party is matched against them before its members hydrate.
+        const objectiveOf = options.objectiveOf || partyObjectiveMemo();
+        const facts = new Map(candidates.map(state => {
+            const objective = objectiveOf(state);
+            return [state, { objective, key: partyObjectiveKeyForState(state, objective),
+                spotId: partyObjectiveSpotForState(state, objective) }];
+        }));
+        const matches = (party, state) => {
+            const partyObjective = party.stats?.objective || null, fact = facts.get(state);
+            return partyObjective
+                ? (fact.key === partyObjectiveGroupingKey(partyObjective)
+                    || partyObjectivesShareRoute(partyObjective, fact.objective)
+                    || (!partyObjective.clanGoalKey
+                        && state.stats?.partyRequest?.priority !== 'required'
+                        && fact.spotId === partyObjective.spotId))
+                : state.spotId === party.spotId;
+        };
+        // A party no candidate matches recruits nobody: it is neither hydrated
+        // nor visited (claims only shrink the candidates). A party the open
+        // slots admit has fewer member ids than its cap, and its hydrated
+        // members are a subset of them, so the full-roster repair below never
+        // ran for a party without a match either.
+        const matched = new Map();
+        let skipped = 0;
         const parties = BackgroundPartyState.active()
             .filter((party) => {
                 const limits = partyLimitsForObjective(party?.stats?.objective || null);
-                return !PartyMarketBreak.pending(party).length && (party.memberIds || []).length < limits.maxSize;
+                if (PartyMarketBreak.pending(party).length || (party.memberIds || []).length >= limits.maxSize) return false;
+                const pool = candidates.filter(state => matches(party, state));
+                if (!pool.length) { skipped++; return false; }
+                matched.set(party, pool);
+                return true;
             })
             .sort((a, b) => (a.memberIds || []).length - (b.memberIds || []).length);
+        if (Config.developerDiagnostics) {
+            if (parties.length) Diagnostics.count('party_assembly', 'recruit_parties', 'matched', parties.length);
+            if (skipped) Diagnostics.count('party_assembly', 'recruit_parties', 'skipped', skipped);
+        }
 
         return Promise.resolve(LifeState.cachedStatesForParties(parties)).then((membersByParty) => parties.reduce((chain, party) => chain.then(() => {
             if (budgetReached()) return null;
@@ -2561,17 +2657,9 @@ const PopulationService = {
                     });
                 }
                 const partyObjective = party.stats?.objective || null;
-                const ClanEquipmentPartyPolicy = invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy');
-                const nearby = candidates.filter((state) => (
+                const nearby = matched.get(party).filter((state) => (
                     !claimed.has(Number(state.characterId))
                     && ClanEquipmentPartyPolicy.allowed(state, partyObjective)
-                    && (partyObjective
-                        ? (partyObjectiveKeyForState(state) === partyObjectiveGroupingKey(partyObjective)
-                            || partyObjectivesShareRoute(partyObjective, partyObjectiveForState(state))
-                            || (!partyObjective.clanGoalKey
-                                && state.stats?.partyRequest?.priority !== 'required'
-                                && partyObjectiveSpotForState(state) === partyObjective.spotId))
-                        : state.spotId === party.spotId)
                 ));
                 const recruits = PartyComposition.selectRecruits(members, nearby, {
                     maxSize: partyLimits.maxSize,
@@ -2655,17 +2743,6 @@ const PopulationService = {
                         });
                 });
             }), Promise.resolve())).then(() => claimed);
-    },
-
-    recoverExpiredColdOwnerLeases(timestamp = Date.now()) {
-        if (this.coldOwnerRecoveryRunning || timestamp < this.nextColdOwnerRecoveryAt) {
-            return Promise.resolve({ affectedRows: 0, rows: [] });
-        }
-        this.coldOwnerRecoveryRunning = true;
-        this.nextColdOwnerRecoveryAt = timestamp + Math.max(1000, Number(Config.coldOwnerRecoveryIntervalMs) || 5000);
-        return ColdSimulationOwner.recoverExpiredLeases(timestamp).finally(() => {
-            this.coldOwnerRecoveryRunning = false;
-        });
     },
 
     resolveOwnedColdState(state) {
@@ -3032,7 +3109,7 @@ const PopulationService = {
             }
 
             if (partySessionExpired(party, startedAt)
-                || invoke('GameServer/Bot/Population/ClanEquipmentPartyPolicy').needsReview(party, members, startedAt)) {
+                || ClanEquipmentPartyPolicy.needsReview(party, members, startedAt)) {
                 return commitPartyReview(party, members, startedAt);
             }
 
