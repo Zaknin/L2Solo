@@ -38,7 +38,7 @@ async function sessionFor(id) {
         state: { fetchCasts: () => casts, setCasts: value => { casts = value; }, setHits() {} },
         backpack: new Backpack({ items: await Database.fetchItems(id), paperdoll: {} })
     };
-    const session = { actor, packets: [], dataSendToMe(p) { this.packets.push(p); }, dataSendToMeAndOthers(p) { this.packets.push(p); } };
+    const session = { actor, packets: [], fetchAccountId: () => `soul_growth_${id}`, dataSendToMe(p) { this.packets.push(p); }, dataSendToMeAndOthers(p) { this.packets.push(p); } };
     await QuestService.ensureLoaded(session);
     return session;
 }
@@ -68,7 +68,9 @@ async function main() {
     Database.init();
     DataCache.init();
     const a = await sessionFor(1), b = await sessionFor(2), c = await sessionFor(3);
-    World.user = { sessions: [a, b, c] };
+    // Party members are read from World's registration index, as in production.
+    World.user = { sessions: [], revision: 0 };
+    for (const session of [a, b, c]) World.insertUser(session);
     for (const selfId of Progression.crystalIds) {
         let template;
         DataCache.fetchItemFromSelfId(selfId, value => { template = value; });
@@ -135,6 +137,7 @@ async function main() {
 
     b.partyCompanion = true; b.followPlayerSession = a;
     c.partyCompanion = true; c.followPlayerSession = a;
+    World.refreshPartyMemberships([b, c]);
     await setCrystal(a, 4639); await setCrystal(b, 4650); await setCrystal(c, 4661);
     await kill(b, mob(12372), 0.99, b.actor, false);
     assert.deepEqual([a, b, c].map(s => s.actor.backpack.fetchItems()[0].fetchSelfId()), [5577, 5578, 5579], 'full party grows without use at guaranteed bosses');
