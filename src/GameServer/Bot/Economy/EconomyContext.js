@@ -10,6 +10,7 @@ const Sections = require('./DecisionSections');
 // Read through the module object at call time (tests replace withProfileScope).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
+const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge } = require('./WishNetwork');
 const { isMainThread } = require('node:worker_threads');
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
@@ -408,8 +409,16 @@ function shadowGate(state, held, last, eventHash, timestamp, deps, board, quietS
     if (!bandsHold(state, held.plan.quantityBands, held.plan.network?.activity)) return 'bands';
     if (!bagHolds(state, held.plan, timestamp)) return 'bag';
     if (!SpotRiskPolicy.activitySpotAllowed(state, held.plan.network?.activity, timestamp)) return 'market';
+    const leaf = held.plan.network?.activity;
+    let buyHolds = null;
+    if (leaf?.activity === 'shopping' && leaf.kind === 'buy') {
+        if (!Number.isFinite(last?.heldShoppingUnits)) return 'check_failed';
+        buyHolds = acceptedActivityHolds(state, { ...leaf, heldAtDecision: last.heldShoppingUnits }, deps);
+        if (!buyHolds) return 'check_failed';
+    }
     if (!(marketHolds(board, held.reads, deps) && spotsHold(deps, held.spotReads))
-        && (Sections.softDue(held.plan.statsPacket.wishSections, 'market', timestamp) || !ownLeafHolds(state, held.plan, deps))) return 'market';
+        && (Sections.softDue(held.plan.statsPacket.wishSections, 'market', timestamp)
+            || !(buyHolds ?? ownLeafHolds(state, held.plan, deps)))) return 'market';
     if (deps.withNodes && !held.projection || deps.nodes?.length || extensions.size) return 'nodes_needed';
     if (held.plan.pending) return 'plan_pending';
     return 'would_hold';
@@ -1199,7 +1208,8 @@ function buildForState(state, deps) {
             countMovedParts('source_memo', last.sourceParts, sourceHashes, SOURCE_PART_NAMES);
         const kept = deps.rememberContext !== false;
         shadowEntry = { hash, released: kept ? null : 'unkept', plan: null, parts: hashes, rows: null, readset: null,
-            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined, heldParts: held ? last?.heldParts : undefined };
+            sourceHash, sourceParts: sourceHashes, projection: null, eventHash, heldEventHash: held ? last?.heldEventHash : undefined,
+            heldParts: held ? last?.heldParts : undefined, heldShoppingUnits: held ? last?.heldShoppingUnits : undefined };
         remember(lastKeyHashes, actorKey, shadowEntry, LAST_KEY_LIMIT);
     }
     const reads = new Map();
@@ -1515,6 +1525,10 @@ function buildForState(state, deps) {
         if (shadowEntry) {
             shadowEntry.heldEventHash = shadowEntry.eventHash;
             shadowEntry.heldParts = shadowEntry.parts;
+            // Diagnostic execution proof only: raw leaves keep their live semantics.
+            const leaf = plan.network?.activity;
+            shadowEntry.heldShoppingUnits = leaf?.activity === 'shopping' && leaf.kind === 'buy'
+                ? ColdEconomyDecision.heldFor(state, leaf.itemId) : undefined;
         }
         if (retainedSourceMemo) {
             sourceHolders.delete(actorKey); sourceHolders.add(actorKey);

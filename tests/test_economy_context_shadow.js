@@ -132,6 +132,79 @@ assert.deepEqual(delta(before, shadow()), { 'context:shadow:same_key': 1, 'conte
     }
 }
 
+// Shopping shadow checks use the retained decision's total bag + incoming baseline.
+// The live leaf and decisions stay identical with diagnostics disabled/enabled.
+{
+    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
+    const Evidence = invoke('GameServer/Bot/Economy/WishPurchaseEvidence');
+    const build = Providers.build, reader = Evidence.reader;
+    const itemId = 1864, itemKey = `item:${itemId}`, rootKey = `resale:${itemId}`;
+    let quoteReads = 0;
+    Providers.build = (_state, context) => {
+        context.board.first(itemId, 1);
+        return { nodes: [
+            { key: rootKey, need: 'power', object: { itemId, kind: 'resale' }, valueHours: 1000, price: 50,
+                paths: [{ requirements: [{ key: itemKey, amount: 5 }] }] },
+            { key: itemKey, price: 10, paths: [{ kind: 'buy', activity: 'shopping', itemId, price: 10,
+                unitPrice: 10, sourceType: 'afk', town: 'Giran', availableUnits: 100, quoted: true, executable: true }] }
+        ], roots: [rootKey], values: new Map([[itemId, 10]]), moneyPaths: [], horizon: 1, sourceSections: null };
+    };
+    Evidence.reader = (...args) => {
+        const read = reader(...args);
+        return id => { quoteReads++; return read(id); };
+    };
+    const scenario = diagnostic => {
+        Config.developerDiagnostics = diagnostic; Economy.reset();
+        const board = new BoardIndex();
+        // Equivalent scenario boards share content tokens, independent of construction serial.
+        board.itemRevision = id => board.itemFingerprint(id);
+        const offer = count => board.put({ id: 91201, ownerId: 7, storeType: 1, town: 'Giran',
+            lines: [{ lineId: 1, selfId: itemId, count, price: 10 }] });
+        offer(100);
+        const tripCost = Object.assign(() => 0, { details: () => ({ known: true, hours: .1, fees: 0 }) });
+        const options = { ...deps, board, tripCost };
+        const native = { ...state(), characterId: 912, adena: 1e6,
+            inventory: { ...state().inventory, [itemId]: { selfId: itemId, amount: 3, stackable: true } } };
+        const results = [], verdicts = [];
+        const request = (current, extra = {}) => {
+            const before = Diagnostics.metrics().counts || {};
+            const quotes = quoteReads;
+            const result = Economy.forState(current, { ...options, ...extra });
+            if (diagnostic) verdicts.push(Object.keys(delta(before, Diagnostics.metrics().counts || {}))
+                .filter(key => key.startsWith('context:gate:')));
+            results.push({ network: result.network, packet: result.statsPacket });
+            assert.equal(Object.hasOwn(result.plan.network.activity || {}, 'heldAtDecision'), false,
+                'shadow metadata never stamps the live network leaf');
+            return { result, quotes: quoteReads - quotes };
+        };
+        const first = request(native).result;
+        assert.equal(first.network.activity?.activity, 'shopping');
+        assert.equal(first.network.activity?.amount, 2, 'the real quantity solver subtracts the three owned units');
+        assert.equal(request(native).result.plan, first.plan, 'a cache hit preserves the original diagnostic baseline');
+        const accepted = { ...native, stats: { ...native.stats, ...first.statsPacket } };
+        const partial = { ...accepted, acceptedIncoming: { [itemId]: 1 } };
+        const part = request(partial, { rememberContext: false });
+        if (diagnostic) assert.equal(part.quotes, 1, 'one current offer check on an otherwise quiet partial fill');
+        assert.equal(part.result.network.activity.amount, 1, 'the fresh decision orders only the missing unit');
+        offer(99); // Token moved, quote stayed usable: the same buy proof covers soft deferral.
+        const transferred = { ...accepted, inventory: { ...accepted.inventory,
+            [itemId]: { ...accepted.inventory[itemId], amount: 4 } } };
+        const transfer = request(transferred, { rememberContext: false });
+        if (diagnostic) assert.equal(transfer.quotes, 1, 'market deferral reuses the baseline-aware offer proof');
+        request({ ...partial, incomingPending: true });
+        request({ ...accepted, acceptedIncoming: { [itemId]: 2 } }, { rememberContext: false });
+        if (diagnostic) assert.deepEqual(verdicts, [
+            ['context:gate:no_held'], [], ['context:gate:would_hold'], ['context:gate:would_hold'],
+            ['context:gate:event_key'], ['context:gate:check_failed']
+        ], 'partial fills and incoming-to-bag transfer hold; full arrival refuses despite intervening unkept/pending builds');
+        return results;
+    };
+    try {
+        const off = scenario(false), on = scenario(true);
+        assert.deepEqual(on, off, 'shopping diagnostics never change live funding, activities, rolls or packets');
+    } finally { Providers.build = build; Evidence.reader = reader; Config.developerDiagnostics = true; }
+}
+
 // The first refused held clause covers every rebuild; diagnostic observations keep decisions identical.
 {
     const probeKeys = () => Object.fromEntries(Object.entries(Diagnostics.metrics().counts || {})
