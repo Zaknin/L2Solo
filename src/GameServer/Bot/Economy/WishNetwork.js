@@ -146,8 +146,10 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
     const plans = new Map(), ordinaryPlans = new Map(), visiting = new Set();
     // A finite trial may plan a future purchase before a seller appears.
     // Its source choice cannot overwrite ordinary executable-first item
-    // plans. This scratch map has at most the same 40 graph-node keys;
+    // plans. These scratch maps are bounded by the graph and depth limit;
     // only the selected root/child plans survive in the bounded result.
+    // Each mode keeps at most MAX_DEPTH + 1 plans per node: a shared input
+    // can afford a longer source chain when it is nearer the root.
     const producerPlans = new Map();
     const completionPlans = new Map(), producerCompletionPlans = new Map();
     const adenaToHours = hourAdena > 0 ? 1 / hourAdena : Infinity;
@@ -198,13 +200,14 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         if (visiting.has(key)) throw new TypeError('cyclic_wish_network');
         const node = byKey.get(key);
         if (!node) throw new TypeError('missing_wish_requirement');
-        if (depth > MAX_DEPTH) throw new RangeError('wish_network_depth');
+        // A source beyond the budget cannot invalidate a shorter alternative
+        // (for example buying D gear instead of crafting its raw materials).
+        if (depth > MAX_DEPTH) return null;
         const memo = completionFirst ? planning ? producerCompletionPlans : completionPlans : planning ? producerPlans : ordinaryPlans;
-        if (!allocation && memo.has(key)) {
+        const memoKey = `${depth}:${key}`;
+        if (!allocation && memo.has(memoKey)) {
             if (diagnostic) Diagnostics.count('network', 'node_hit', 'same_build');
-            const cachedPlan = memo.get(key);
-            if (depth + (cachedPlan?.height || 0) > MAX_DEPTH) throw new RangeError('wish_network_depth');
-            return cachedPlan;
+            return memo.get(memoKey);
         }
         visiting.add(key);
         const itemId = key.startsWith('item:') ? Number(key.slice(5)) : 0;
@@ -324,7 +327,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 resolved &&= branches <= MAX_BRANCHES;
                 const basePrice = price, baseEffort = effort, baseHours = hours;
                 price += tripValue(tripEntries, 'fees'); effort += tripEffort(tripEntries); hours += tripValue(tripEntries, 'hours');
-                if (allocation && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
+                if (available && allocation && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
                 if (available) return { ...path, executable, supported, resolved, branches, quoted, tripEntries,
                     successProbability: probability, attemptProbability: successProbability, untilSuccess,
                     ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
@@ -385,7 +388,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
             item: requirement.key.startsWith('item:') ? Number(requirement.key.slice(5)) : undefined });
         visiting.delete(key);
         if (allocation) allocation.used = alternativeUse;
-        else { memo.set(key, best); if (!planning) plans.set(key, best); }
+        else { memo.set(memoKey, best); if (!planning) plans.set(key, best); }
         return best;
     };
     const finiteProduction = key => {
