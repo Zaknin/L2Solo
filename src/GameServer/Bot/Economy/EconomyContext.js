@@ -162,11 +162,11 @@ const rowKey = row => [row.selfId, row.amount, row.equippedCount || row.equipped
     row.reservedAmount, row.protectedAmount, row.protected, row.acceptedCustomer, row.assignedClan, row.available,
     (row.instances || []).map(item=>[item.id,item.enchant,item.slot,item.equipped,item.amount].join('/')).join(';')].join(':');
 // ARCH-NOTE: PERF: a bag row is not mutated while one forState build runs.
-// Once the build's own key missed the held one (rowKeys set: a miss or the
-// own-result check), a row's key part is made once and shared by the state's
-// later keys and its section copies, whose unbanded rows are the same
-// objects. The same-inputs hit makes one key and sets nothing. A nested build
-// starts without it; it dies when forState returns.
+// Once the build's own key missed the held one (the own-result check) or
+// the request missed the hit clause (a build), a row's key part is made once
+// and shared by the state's later keys and its section copies, whose
+// unbanded rows are the same objects. The same-inputs hit makes one key and
+// sets nothing. A nested build starts without it; it dies when forState returns.
 let rowKeys = null;
 const heldRowKey = row => {
     if (row === null || typeof row !== 'object') return rowKey(row);
@@ -452,6 +452,8 @@ function heldEventsQuiet(state, held, timestamp, deps = {}, deferred = null, why
 // structure of the build (as its calculation fence) and bag slots/weight.
 // why (diagnostics only, as in heldEventsQuiet): the first refusing clause's
 // name; the events name themselves (wish_dirty, crafter_mp, money, ...).
+// seen (as in heldEventsQuiet) also receives the band-aware structure it
+// made of the state itself (seen.structural), which the hit's fence repeats.
 function decisionHolds(state, held, timestamp, deps, deferred = null, why = null, seen = null) {
     if (!held) return false;
     if (held.bandHash === undefined) return miss(why, 'no_band_hash');
@@ -467,8 +469,10 @@ function decisionHolds(state, held, timestamp, deps, deferred = null, why = null
         expPerHour: held.plan.hunt.expPerHour, persona: held.plan.persona }, timestamp, deps, deferred, why, seen)) return false;
     const bands = held.plan.quantityBands || [];
     if (!bandsHold(state, bands, held.plan.network?.activity)) return miss(why, 'bands');
-    if (fnv1a32(sectionKeys(fieldActivity(state, held.activity, held.plan.network?.activity),
-        { ...deps, timestamp }, bands).structural) !== held.bandHash) return miss(why, 'band_structure');
+    const shaped = fieldActivity(state, held.activity, held.plan.network?.activity);
+    const structural = sectionKeys(shaped, { ...deps, timestamp }, bands).structural;
+    if (fnv1a32(structural) !== held.bandHash) return miss(why, 'band_structure');
+    if (seen && shaped === state) seen.structural = structural;
     return bagHolds(state, held.plan, timestamp) || miss(why, 'bag_safety');
 }
 function bagHolds(state, plan, timestamp) {
@@ -1187,7 +1191,16 @@ function defaultProducerSource(state, board) {
     const level = invoke('GameServer/Bot/Economy/CraftEligibility').craftLevelFor(state), scope = index.scopeFor(level);
     return { recipes: index.rowsFor(level), scope, revision: index.revision(scope), identity: index.contentIdentity(scope) };
 }
+// The deps a full resolve made, with the state it was made for: a check
+// inside the same build (heldBuildVerdict, acceptedActivityHolds) is given
+// the build's own deps and does not resolve them again (a second producer
+// source read and onSourceScope call). An entry dies with its deps object.
+const resolvedFor = new WeakMap();
 function resolved(state, deps, production = true) {
+    if (state && resolvedFor.get(deps) === state) {
+        if (Diagnostics.active()) Diagnostics.count('context', 'resolved', 'reused');
+        return deps;
+    }
     deps = { ...runtime, ...deps };
     if (typeof deps.board === 'function') deps.board = deps.board();
     if (!deps.board && isMainThread) deps.board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
@@ -1230,6 +1243,7 @@ function resolved(state, deps, production = true) {
         const Sources = invoke('GameServer/Bot/Population/ColdOccupationSources');
         Sources.initialise(); return Sources.npcOffersFor(id);
     };
+    if (production) resolvedFor.set(deps, state);
     return deps;
 }
 function personaOf(state, deps) {
@@ -1609,7 +1623,7 @@ function buildForState(state, deps) {
     // rebuilds only once the market delay since the last actual decision
     // has passed, and never while the held leaf's own offer, funding or
     // route fails; every hard condition above still cuts through at once.
-    const deferred = diagnostic ? [] : null, why = diagnostic ? [] : null, seen = { at: NaN, kind: null };
+    const deferred = diagnostic ? [] : null, why = diagnostic ? [] : null, seen = { at: NaN, kind: null, structural: null };
     // The held build's market items and spot crowd still read the same: read once per request.
     let readsHeld = null;
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
@@ -1646,9 +1660,16 @@ function buildForState(state, deps) {
         // A late price read of a held plan joins its inputs, as in its build.
         const late = id => { id = Number(id); if (held.reads.has(id)) return;
             held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
+        // The own-result check already made the fence's structure (the held
+        // bands over this state); shared at the build's timestamp, as below.
+        const structural = deps.timestamp === timestamp ? seen.structural : null;
+        if (diagnostic && structural !== null) Diagnostics.count('context', 'hit_fence', 'shared');
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection,
-            fenceData: { reads: held.reads, spots: held.spotReads } });
+            fenceData: { reads: held.reads, spots: held.spotReads, structural } });
     }
+    // A same-key request that missed the hit clause builds its later keys
+    // (sources, choice shape, band structure) from the same bag rows too.
+    rowKeys ??= new Map();
     eventVerdict ||= diagnostic ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
