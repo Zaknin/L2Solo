@@ -42,9 +42,21 @@ function mainPublication() {
     const group = Economy.forGroup({ id: 'publication-a', adena: 200 }, members.slice(0, 2), deps);
     const unaffected = Economy.forGroup({ id: 'publication-b', adena: 200 }, members.slice(2), deps);
     const before = Profile.size().ownerBuilds;
+    // Losing the copy is not a reason to rebuild: the group key holds the
+    // wallet and every member's input key, so it alone decides a hit.
     kernel.upsert({ state: structuredClone(members[0]), context: { route: null } });
-    assert.equal(Economy.size().groups, 1, 'publication removes the group holding the prior member');
+    const published = kernel.states.get(911).state;
+    assert.notStrictEqual(published, members[0]);
+    assert.equal(Economy.size().groups, 2, 'a publication alone evicts no group');
+    assert.strictEqual(Economy.forGroup({ id: 'publication-a', adena: 200 }, [published, members[1]], deps), group,
+        'a republished member with unchanged inputs keeps the group');
     assert.strictEqual(Economy.forGroup({ id: 'publication-b', adena: 200 }, members.slice(2), deps), unaffected);
+    assert.equal(kernel.upsert({ state: { ...published, adena: 300 }, context: { route: null } }), true);
+    const moved = kernel.states.get(911).state;
+    const regrouped = Economy.forGroup({ id: 'publication-a', adena: 200 }, [moved, members[1]], deps);
+    assert.notStrictEqual(regrouped, group, 'a member whose inputs changed misses the group by key');
+    assert.notEqual(regrouped.inputKey, group.inputKey);
+    assert.equal(Economy.size().groups, 2, 'the rebuilt group replaces its own entry');
     assert.equal(Profile.size().ownerBuilds, before, 'context invalidation preserves native build gains');
     const current = kernel.states.get(911).state;
     const rebuilt = Economy.forState(current, deps);
@@ -55,7 +67,7 @@ function mainPublication() {
     assert.equal(kernel.upsert({ state: stale, context: { stalePage: true } }), false);
     assert.strictEqual(Economy.forState(current, deps).plan, rebuilt.plan, 'rejected old snapshots do not evict the canonical context');
     kernel.remove(913);
-    assert.equal(Economy.size().groups, 0, 'member removal releases a group even without party fields in its state');
+    assert.equal(Economy.size().groups, 1, 'member removal releases its group even without party fields in its state');
     assert.equal(Profile.size().ownerBuilds, before - 1, 'actual removal still releases its build owner');
     for (const id of [911, 912, 914]) kernel.remove(id);
     Economy.forget(901);
@@ -94,6 +106,7 @@ module.exports.publicationProbe = async stage => {
         const group = Economy.forGroup({id:'worker-publication',adena:200},members,options);
         assert.equal(Economy.size().groups,1);
         module.exports.previous = group.state;
+        module.exports.group = group;
         module.exports.buildOwners = Profile.size().ownerBuilds;
         const hot = {...current,characterId:913,phase:'hot'};
         kernel.upsert({state:hot,context:{route:null}});
@@ -110,7 +123,9 @@ module.exports.publicationProbe = async stage => {
     if (stage === 'replaced') {
         assert.notStrictEqual(current,module.exports.previous);
         assert.equal(Economy.size().context,2,'native publication keeps independently validated member calculations');
-        assert.equal(Economy.size().groups,0,'native snapshot publication evicted every old group closure');
+        assert.equal(Economy.size().groups,1,'native snapshot publication alone evicts no group');
+        assert.strictEqual(Economy.forGroup({id:'worker-publication',adena:200},[current,kernel.states.get(912).state],options),
+            module.exports.group,'a republished member with unchanged inputs keeps the group by key');
         assert.equal(Profile.size().ownerBuilds,module.exports.buildOwners);
         const economy=Economy.forState(current,options);
         assert.strictEqual(economy.state,current);

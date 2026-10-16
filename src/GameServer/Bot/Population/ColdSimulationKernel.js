@@ -442,12 +442,6 @@ class RetainedStateMap extends Map {
 
     set(id, entry) {
         const current = this.get(id);
-        // A replaced member state retires every group closure built over the
-        // old object; the member's own held calculation stays (cache hygiene).
-        if (current?.state !== entry.state && typeof invoke === 'function') {
-            // lazy: optional standalone kernels run before Global defines invoke.
-            invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication');
-        }
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }
         catch (error) {
