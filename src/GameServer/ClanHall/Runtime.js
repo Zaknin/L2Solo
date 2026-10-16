@@ -1,6 +1,8 @@
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Policy = require('./Policy');
 const ReviewEvents = require('../Clan/ClanReviewEvents');
+const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
+const Clans = invoke('GameServer/Clan/ClanService');
 const HOUR = 60 * 60 * 1000;
 let halls = [],
     timer = null,
@@ -12,6 +14,11 @@ let nextDuesAt = 0;
 // Hourly dues pass per clan: when it is due and how far it got (4 members per tick).
 const duesPasses = new Map();
 const financeSamples = [];
+// The earliest deadline Repository.settle acts on (an auction end of a free hall,
+// the rent or service date of an owned one; unpaid rent keeps its past date, so
+// it stays due every tick as before). Every hall write goes through settle and
+// comes back here through applyRows (tick, the NPC writes' refresh, start).
+let nextSettleAt = 0;
 function financeSummary() {
     if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
     const sorted = [...financeSamples].sort((a, b) => a - b);
@@ -19,6 +26,17 @@ function financeSummary() {
 }
 function applyRows(rows) {
     halls = rows.map((h) => ({ ...Policy.definition(h.id), ...h, functions: JSON.parse(h.functionsJson || '{}') }));
+    nextSettleAt = Infinity;
+    for (const h of halls) {
+        const at = h.ownerId ? Math.min(Number(h.rentDueAt) || 0, Number(h.serviceDueAt) || 0) : Number(h.auctionEndsAt) || 0;
+        if (at < nextSettleAt) nextSettleAt = at;
+    }
+}
+// settle also releases a hall whose owner clan is gone (dissolveClan refuses a
+// hall owner, so this is a guard): a clan missing from the cache keeps it due.
+function settleDue(now) {
+    if (now >= nextSettleAt) return true;
+    return halls.some(h => h.ownerId && !Clans.findById(h.ownerId));
 }
 function owned(clanId) {
     return Number(clanId) > 0 ? halls.find((h) => h.ownerId === Number(clanId)) || null : null;
@@ -43,7 +61,7 @@ function refresh(rows) {
             const actor = session.actor,
                 id = actor?.fetchClanId?.();
             if (id && (id === h.ownerId || id === before.get(h.id))) {
-                const clan = invoke('GameServer/Clan/ClanService').findById(id);
+                const clan = Clans.findById(id);
                 if (clan) {
                     session.dataSendToMe(response.pledgeShowInfoUpdate(clan));
                     // Lisvus Auction.removeBids / ClanHall.RentTask: notify online clan members.
@@ -118,15 +136,21 @@ async function tick() {
     running = true;
     try {
         const db = invoke('Database');
-        refresh(await db.tickClanHalls());
+        const due = settleDue(Date.now());
+        Diagnostics.count('clan_hall', 'tick', due ? 'due' : 'skipped');
+        if (due) refresh(await db.tickClanHalls());
         if (!invoke('GameServer/Clan/ClanSimulationConfig').enabled) return;
         const deadline = Date.now() + 40;
         const financeStarted = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
+        let planned = false;
         try {
             await db.planClanHallFinanceBatch([...financeDirty].slice(0, 4), {
                 deadline,
                 before: id => { financeDirty.delete(id); },
-                settled: (id, result) => { if (result?.staleFinance) financeDirty.add(id); },
+                settled: (id, result) => {
+                    if (result?.staleFinance) financeDirty.add(id);
+                    else if (result?.ok) planned = true;
+                },
                 failed: id => { financeDirty.add(id); }
             });
         } finally {
@@ -146,7 +170,9 @@ async function tick() {
             nextDuesAt = Infinity;
             for (const id of duesClans) nextDuesAt = Math.min(nextDuesAt, duesPasses.get(id)?.nextAt || 0);
         }
-        refresh(await db.fetchClanHallAuctions());
+        // A committed plan may install a hall function (Repository.prepareClanHallFinance):
+        // the reread follows a settle or a plan, not every tick.
+        if (due || planned) refresh(await db.fetchClanHallAuctions());
     } finally {
         running = false;
     }
@@ -180,7 +206,7 @@ module.exports = {
         if (timer) clearInterval(timer);
         timer = null;
         unsubscribe?.(); unsubscribe = null;
-        financeDirty.clear(); duesClans.clear(); duesPasses.clear(); nextDuesAt = 0;
+        financeDirty.clear(); duesClans.clear(); duesPasses.clear(); nextDuesAt = 0; nextSettleAt = 0;
         financeSamples.length = 0;
     },
     async refresh() {
