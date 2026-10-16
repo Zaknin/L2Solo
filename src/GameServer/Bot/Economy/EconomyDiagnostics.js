@@ -4,7 +4,7 @@
 const Config = require('../Population/PopulationConfig');
 const { isMainThread } = require('node:worker_threads');
 const LIMITS = Object.freeze({ recordBytes: 1024, batch: 16, batchBytes: 16384,
-    mainRecords: 256, workerRecords: 64, keys: 512, owners: 16, perSecond: 64,
+    mainRecords: 256, workerRecords: 64, keys: 512, owners: 16, perSecond: 64, mismatchPerSecond: 16,
     layers: 32, durationSamples: 32 });
 const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 'remaining', 'recordId', 'lineId',
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
@@ -16,7 +16,8 @@ const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 
     'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot'];
 
 // A completed native comparison is useful even outside the owner detail
-// sample. It still shares every record/rate/queue/transport limit below.
+// sample. Its rows (any of the bots) have their own per-second budget, so a
+// flood never takes the sampled owners' rate; queue and bytes stay shared.
 function isPlanMismatch(input) {
     return Number.isSafeInteger(input?.owner) && input.owner > 0
         && input.phase === 'wish_context' && input.gate === 'would_hold'
@@ -32,7 +33,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     let rows = null, bytes = 0, selected = null, explicit = null, selectionKey = null;
     let counters = null, durations = null, transport = null, inFlight = null;
     let selectionListener = null;
-    let seq = 0, second = -1, rate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
+    let seq = 0, second = -1, rate = 0, mismatchRate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
     let drops = null;
     const active = () => config.developerDiagnostics === true;
     const detail = () => active() && config.economyDiagnostics === true;
@@ -132,7 +133,8 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     function enqueue(input, imported = false) {
         if (!detail()) return false;
         // A mismatch never enrolls its owner for alternatives or later detail.
-        if (!isPlanMismatch(input)) {
+        const mismatch = isPlanMismatch(input);
+        if (!mismatch) {
             if (imported) {
                 refreshSelection();
                 if (!(explicit || selected).has(Number(input?.owner))) return false;
@@ -140,9 +142,10 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         }
         offered++;
         const timestamp = now(), bucket = Math.floor(timestamp / 1000);
-        if (second !== bucket) { second = bucket; rate = 0; }
+        if (second !== bucket) { second = bucket; rate = 0; mismatchRate = 0; }
         const summary = input.phase === 'wish_context' && typeof input.gate === 'string';
-        if (rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
+        if (mismatch ? mismatchRate >= LIMITS.mismatchPerSecond
+            : rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
         // Forward the event's original time and thread, never a late main snapshot.
         const record = { v: 1, at: Number.isFinite(input.at) ? input.at : timestamp,
             thread: imported && ['main', 'worker'].includes(input.thread) ? input.thread : thread, owner: Number(input.owner) };
@@ -155,7 +158,8 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         if ((rows?.length || 0) >= (summary ? capacity : capacity - summaryReserve)
             || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
         // Every transition is eligible; minute-based owner/phase dedup broke correlation.
-        rate++; rows ||= []; rows.push(row); bytes += size; pump(); return true;
+        if (mismatch) mismatchRate++; else rate++;
+        rows ||= []; rows.push(row); bytes += size; pump(); return true;
     }
     function push(input) { return enqueue(input); }
     function accept(records) {

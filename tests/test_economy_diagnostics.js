@@ -50,11 +50,24 @@ for (const imported of [false, true]) {
     for (let i = 0; i < 48; i++) assert(send({ owner: 64, phase: 'wish_alternative', reason: String(i) }));
     assert.equal(send({ owner: 64, phase: 'wish_context', reason: 'hit_same_inputs' }), false,
         'a cheap hit cannot consume a reserved build-summary slot');
-    for (let i = 0; i < 16; i++) assert(send({ owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }));
-    assert.equal(admission.stats().queued, LIMITS.perSecond);
+    for (let i = 0; i < LIMITS.mismatchPerSecond; i++) assert(send({ owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }));
+    assert.equal(admission.stats().queued, 48 + LIMITS.mismatchPerSecond);
     assert.equal(send({ owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'leaf' }), false,
-        'an unselected mismatch still obeys the original total rate cap');
+        'an unselected mismatch obeys its own rate cap');
     assert.equal(admission.stats().drops.rate, 2);
+}
+// A mismatch flood from any bots spends its own budget, never a sampled owner's.
+for (const imported of [false, true]) {
+    const admission = create({ config, thread: imported ? 'main' : 'worker', now: () => timestamp });
+    const send = row => imported ? admission.accept([JSON.stringify(row)]) === 1 : admission.push(row);
+    let admitted = 0;
+    for (let i = 0; i < LIMITS.perSecond; i++)
+        admitted += send({ owner: 1000 + i, phase: 'wish_context', gate: 'would_hold', gateDiff: 'focus' }) ? 1 : 0;
+    assert.equal(admitted, LIMITS.mismatchPerSecond);
+    assert.equal(admission.stats().drops.rate, LIMITS.perSecond - LIMITS.mismatchPerSecond);
+    assert(send({ owner: 64, phase: 'purchase', reason: 'filled' }), 'a sampled owner detail row survives the flood');
+    assert(send({ owner: 128, phase: 'wish_context', gate: 'refused', reason: 'build' }), 'a sampled owner summary row survives the flood');
+    assert.equal(admission.stats().queued, LIMITS.mismatchPerSecond + 2);
 }
 // Exact completed mismatches bypass owner selection only, on both hops.
 const mismatch = { owner: 192, phase: 'wish_context', gate: 'would_hold', gateDiff: 'queue' };
