@@ -10,9 +10,9 @@ const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 're
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
     'errandAt', 'receiptUnits', 'receiptSpent', 'decisionSeq', 'activityLeaf', 'inputActivityLeaf', 'inputHash', 'target', 'owned', 'missing', 'requested', 'planned',
     'wallet', 'available', 'budget', 'reserve', 'priorityReserve', 'escrow', 'unitPrice', 'valueHours',
-    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind'];
+    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'baselineAt', 'reconsidered'];
 const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
-    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf'];
+    'moved', 'readset', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent'];
 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {

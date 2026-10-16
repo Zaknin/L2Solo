@@ -1253,7 +1253,7 @@ function buildForState(state, deps) {
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     let shadowSame = false, previousPlan = null, previousProjection = null, shadowEntry = null, previousRows = null;
     let previousReadset = null, movedParts = null, readsetVerdict = null, planOutcome = null, elapsed = 0;
-    let gate = null, gateDiff = null;
+    let gate = null, gateDiff = null, socialDiff = null;
     let improvementMark;
     if (diagnostic) {
         // Only a diagnostic miss scans native targets. A hit performs none;
@@ -1563,7 +1563,7 @@ function buildForState(state, deps) {
             && socialLeaf?.activity === social.kind && socialLeaf.rootKey === social.leaf.rootKey
             && socialLeaf.targetId === social.leaf.targetId;
         const comparison = sameSocialBuild || gate === 'would_hold' ? gatePlanDiff(state, held, context, deps) : null;
-        if (sameSocialBuild) social.outcome = comparison;
+        if (sameSocialBuild) { social.outcome = comparison; socialDiff = comparison; }
         if (gate === 'would_hold') {
             gateDiff = comparison;
             Diagnostics.count('context', 'gate_plan', gateDiff);
@@ -1592,6 +1592,10 @@ function buildForState(state, deps) {
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
+        ...(['focus', 'queue'].includes(socialDiff) ? {
+            social: `${deps.socialShadow.kind}:${socialDiff}`, baselineAt: deps.socialShadow.baseline.at,
+            reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet'
+        } : null),
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held, shadowEntry) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
