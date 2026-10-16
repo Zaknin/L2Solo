@@ -1,9 +1,8 @@
 'use strict';
 const Station = require('../../World/GiranCrystallizationStation');
-const Rules = require('../../Items/C4EnchantRules');
 const Index = require('../../Item/ItemTemplateIndex');
 const BATCH_LIMIT = 16;
-let templates, candidates = new Map();
+let Rules, templates, candidates = new Map();
 function canSelf(state, rank = 'd') {
     return (state.stats?.coldCombat?.skills || state.skills || [])
         .some(skill => Number(skill.selfId) === 248 && Number(skill.level) >= (rank === 'c' ? 2 : 1));
@@ -12,7 +11,7 @@ function reward(template, enchant = 0, self = false) {
     const rank = template?.etc?.rank;
     if (!['d', 'c'].includes(rank)) return null;
     const kind = template.template.kind;
-    const gross = Rules.crystalCount({ rank, cristals: template.etc.cristals, enchant,
+    const gross = (Rules ||= require('../../Items/C4EnchantRules')).crystalCount({ rank, cristals: template.etc.cristals, enchant,
         isWeapon: () => kind.startsWith('Weapon.'), isArmor: () => kind.startsWith('Armor.'),
         fetchKind: () => kind });
     const net = self ? gross : gross - Math.ceil(gross * 15 / 100);
@@ -134,6 +133,10 @@ function preparation(state) {
 // Scheduler admission reads only the selected bounded inputs. The worker
 // still chooses the operation and the native transaction validates ownership.
 function ready(state) {
+    // Ordinary scheduler rows need no game catalogue or reservation services.
+    const saved = state?.stats?.equipmentPlan;
+    if (!saved?.crystalPreparation && saved?.strategy !== 'luxury_exchange'
+        && saved?.exchange?.kind !== 'luxury_exchange') return false;
     const plan = invoke('GameServer/Bot/Economy/ItemDisposition').equipmentInputPlan(state);
     if (plan?.crystalPreparation && plan.status === 'active') {
         const prep = plan.crystalPreparation;

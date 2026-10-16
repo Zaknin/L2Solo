@@ -134,10 +134,11 @@ async function pureAndWorker(clan, prospects) {
             Data.npcs.find(npc => npc.template?.level >= 45 && npc.template?.level <= 55 && Gear.isBotEligibleSourceNpcId(npc.selfId))];
         assert.equal(mobs.length, 2);
         Data.npcRewards = mobs.map(npc => ({ selfId: npc.selfId, template: npc.template, rewards: [{ overall: 100,
-            items: [{ selfId: 80, chance: 100, min: 1, max: 1 }] }], spoils: [] }));
+            items: [{ selfId: 79, chance: 100, min: 1, max: 1 }] }], spoils: [] }));
         const profiles = [{ ...prepared.raids[0], npcEntries: [{ selfId: mobs[0].selfId, count: 1 }], raidBossTemplateId: mobs[0].selfId },
             { id: 'ordinary:alternative', avgLevel: 50, npcEntries: [{ selfId: mobs[1].selfId, count: 1 }] }];
-        const sources = Gear.sourceForItem(80, profiles, clan.members[0], { allowRaidSources: true });
+        // The C-equipped roster can pursue B drops; A stays market-only until B is ready.
+        const sources = Gear.sourceForItem(79, profiles, clan.members[0], { allowRaidSources: true });
         assert.equal(sources.length, 2);
         assert.equal(sources[0].spotId, 'ordinary:alternative', 'same native sourceEffort ranks real cheaper alternative above conditional raid');
     } finally { Data.npcRewards = oldRewards; }

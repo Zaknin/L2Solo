@@ -567,7 +567,9 @@ const cases = {
     main_giran_improvement_unchanged: () => {
         cfg.inTown = true;
         cfg.leaf = { activity: 'improving', improvement: { kind: 'luxury_exchange' } };
-        return { state: hunter({ currentRegion: 'Giran' }), workerRequest: { precomputedResult: workerFight(), context: { spot: { id: spotA.id } } } };
+        const town = invoke('GameServer/World/TownRespawn').towns.giran_town;
+        return { state: hunter({ currentRegion: 'Giran', loc: { locX: town.locX, locY: town.locY, locZ: town.locZ } }),
+            workerRequest: { precomputedResult: workerFight(), context: { spot: { id: spotA.id } } } };
     },
     main_crafting_after_apply: () => {
         cfg.solo = () => ({ patch: { activity: 'crafting' }, events: [], debug: { craft: true } });
