@@ -18,6 +18,7 @@ const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 
 // Rebuild persisted kits that could have been overwritten by an older resolve.
 const PROFILE_VERSION = 6;
@@ -558,12 +559,29 @@ function sharedOptions(options, timestamp) {
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
     const scope = profileScope !== null && profileScope.state === state && sharedOptions(options, timestamp) ? profileScope : null;
     if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
-    const profile = buildProfile(state, timestamp, options);
+    const profile = Diagnostics.active() ? countedBuild(state, timestamp, options) : buildProfile(state, timestamp, options);
     if (scope === null) return profile;
     scope.timestamp = timestamp;
     scope.profile = profile;
     return { ...profile };
 }
+
+// Profile builds for the live read (combat_profile:build:all and its ms);
+// a fight reads the totals around itself (buildCount, buildMs). Counted only
+// while diagnostics are on.
+let builds = 0, buildTime = 0;
+function countedBuild(state, timestamp, options) {
+    const startedAt = performance.now();
+    const profile = buildProfile(state, timestamp, options);
+    const ms = performance.now() - startedAt;
+    builds += 1;
+    buildTime += ms;
+    Diagnostics.count('combat_profile', 'build', 'all');
+    Diagnostics.duration('combat_profile:build', ms);
+    return profile;
+}
+function buildCount() { return builds; }
+function buildMs() { return buildTime; }
 
 function buildProfile(state, timestamp, options) {
     const saved = state.stats?.coldCombat;
@@ -784,14 +802,15 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     if (options.matchupProfiles?.length) {
         let resisted = 0;
         entries = entries.map(entry => {
-            const npc = ItemTemplateIndex.find(DataCache.npcs, entry.selfId);
-            const target = npcCombatStats(npc);
-            const match = Matchup.evaluate(options.matchupProfiles, target);
-            if (!match.eligible) resisted += 1;
+            // A solo pick reads the shared species verdict its route search
+            // read: the same evaluate and soloCanHunt for these profiles and
+            // safety options (resisted only names a pick without safety).
             if (options.soloSafety) {
-                match.eligible = Matchup.soloCanHunt(options.matchupProfiles, target,
-                    { maxTargetLevel: options.maxTargetLevel, npcLevel: Number(npc.template?.level || 0) }).eligible;
+                const verdict = Matchup.speciesVerdict(options.matchupProfiles, entry.selfId, options);
+                return { ...entry, match: { eligible: verdict?.canHunt === true, efficiency: verdict?.efficiency } };
             }
+            const match = Matchup.evaluate(options.matchupProfiles, npcCombatStats(ItemTemplateIndex.find(DataCache.npcs, entry.selfId)));
+            if (!match.eligible) resisted += 1;
             return { ...entry, match };
         }).filter(entry => entry.match.eligible);
         if (!entries.length) return { avoided: true,
@@ -917,6 +936,11 @@ function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
     return scope.power;
 }
 function computePowerKey(state, timestamp, canonicalSlots) {
+    return powerParts(state, timestamp, canonicalSlots).join('|');
+}
+// The build inputs of a profile, one part per input event: class (saved,
+// current), level, worn gear, hennas, skills, the hot capture, active effects.
+function powerParts(state, timestamp, canonicalSlots) {
     const saved = state.stats?.coldCombat || {};
     const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'
@@ -930,7 +954,7 @@ function computePowerKey(state, timestamp, canonicalSlots) {
     // carry its alias at the root. Both forms have the same native build.
     return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
-        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects].join('|');
+        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects];
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
@@ -945,6 +969,40 @@ function buildInputKey(state = {}, timestamp = Date.now()) {
     if (scope !== null) { scope.keyAt = timestamp; scope.key = key; }
     return key;
 }
+// The combat profile hold (Hold.js place 'combat_profile'): the events of a
+// profile are its build inputs (powerParts, the parts DecisionSections' build
+// fact reads through buildInputKey) and the day/night flip, held as one small
+// hash each under HOLD_EVENTS. Not buildInputKey itself: its buildGainsFor
+// would register a fight state as the owner's economy build. HELD_FIELDS are
+// the computed numbers a held copy is compared on; cp regenerates with time
+// (not an event) and is the last held value, read as drift.
+const HOLD_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture', 'effects', 'night'];
+const HELD_FIELDS = ['classId', 'level', 'maxHp', 'maxMp', 'maxCp', 'pAtk', 'mAtk', 'pDef', 'mDef', 'accur', 'evasion',
+    'critical', 'mCritRate', 'atkSpd', 'castSpd', 'weaponMask', 'maxLoad'];
+function holdEvents(state = {}, timestamp = Date.now()) {
+    const parts = powerParts(state, timestamp, true);
+    for (let index = 0; index < parts.length; index++) parts[index] = fnv1a32(String(parts[index]));
+    parts.push(GameTime.isNight(timestamp) ? 1 : 0);
+    return parts;
+}
+// The name of the first event between held and current holdEvents, or ''.
+function holdEvent(held, current) {
+    for (let index = 0; index < HOLD_EVENTS.length; index++) if (held[index] !== current[index]) return HOLD_EVENTS[index];
+    return '';
+}
+function heldValues(profile) {
+    const values = HELD_FIELDS.map(field => profile[field]);
+    values.push(profile.cp);
+    return values;
+}
+// The first computed field of profile that differs from held values, or ''.
+function heldMove(values, profile) {
+    for (let index = 0; index < HELD_FIELDS.length; index++) {
+        if (values[index] !== profile[HELD_FIELDS[index]]) return HELD_FIELDS[index];
+    }
+    return '';
+}
+function heldDrift(values, profile) { return values[HELD_FIELDS.length] === profile.cp ? '' : 'cp'; }
 function powerFor(state = {}, timestamp = Date.now(), options = {}) {
     const profile = profileFor(state, timestamp, options);
     return Object.fromEntries(POWER_FIELDS.map(field => [field, profile[field]]));
@@ -1064,7 +1122,8 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs,
+    holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

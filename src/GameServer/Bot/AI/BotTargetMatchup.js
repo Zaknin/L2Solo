@@ -486,18 +486,43 @@ const spotMatchups = new WeakMap();
 // most spots. Bounded like the verdict pool; results already handed out stay valid.
 const uniqueSpotResults = new Map();
 
-function spotMatchup(spot, profiles, options = {}) {
-    if (!profiles?.length) return evaluate([], {});
-    let total = 0, effective = 0, eligible = false, safe = 0;
-    const byOptions = verdictsFor(profiles);
-    // Counts of this fingerprint; unshared (unfingerprinted) arrays have none.
-    const held = entryCounts.get(byOptions);
+// The species verdicts of one fingerprint (byOptions, its counts held: none
+// for an unshared array) under one set of safety options.
+function optionVerdicts(byOptions, held, options) {
     const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
     let verdicts = byOptions.get(optionsKey);
     if (!verdicts) {
         byOptions.set(optionsKey, verdicts = new Map());
         if (held?.live) { held.maps += 1; stats.optionMaps += 1; }
     }
+    return verdicts;
+}
+// Verdicts and spot results one call stored, against the entry budget.
+function countStored(byOptions, held, added, spots) {
+    if (!held?.live) return;
+    held.entries += added; held.spots += spots;
+    stats.verdictEntries += added; stats.spotStores += spots;
+    if (stats.verdictEntries + stats.spotStores > VERDICT_ENTRY_BUDGET) trimSharedVerdicts(Date.now(), byOptions);
+}
+// One species' verdict ({ efficiency, canHunt } or null) for profiles under
+// safety options: the one a spot search with the same profiles and options
+// reads, so a solo fight's pick (ColdCombatProfile.npcForSpot) shares it.
+function speciesVerdict(profiles, selfId, options = {}) {
+    const byOptions = verdictsFor(profiles), held = entryCounts.get(byOptions);
+    const verdicts = optionVerdicts(byOptions, held, options), before = verdicts.size;
+    const verdict = npcVerdict(verdicts, Number(selfId),
+        { profiles, soloSafety: options.soloSafety, maxTargetLevel: options.maxTargetLevel });
+    countStored(byOptions, held, verdicts.size - before, 0);
+    return verdict;
+}
+
+function spotMatchup(spot, profiles, options = {}) {
+    if (!profiles?.length) return evaluate([], {});
+    let total = 0, effective = 0, eligible = false, safe = 0;
+    const byOptions = verdictsFor(profiles);
+    // Counts of this fingerprint; unshared (unfingerprinted) arrays have none.
+    const held = entryCounts.get(byOptions);
+    const verdicts = optionVerdicts(byOptions, held, options);
     const entriesBefore = verdicts.size;
     let bySpot = spotMatchups.get(verdicts);
     if (!bySpot) spotMatchups.set(verdicts, bySpot = new WeakMap());
@@ -518,13 +543,7 @@ function spotMatchup(spot, profiles, options = {}) {
         eligible ||= canHunt;
         if (canHunt) safe += weight;
     }
-    // Verdicts and the spot result stored by this call.
-    if (held?.live) {
-        const added = verdicts.size - entriesBefore;
-        held.entries += added; held.spots += 1;
-        stats.verdictEntries += added; stats.spotStores += 1;
-        if (stats.verdictEntries + stats.spotStores > VERDICT_ENTRY_BUDGET) trimSharedVerdicts(Date.now(), byOptions);
-    }
+    countStored(byOptions, held, verdicts.size - entriesBefore, 1);
     const efficiency = total ? effective / total : 1;
     const safeFraction = total ? safe / total : 1;
     const spotEligible = !total || (eligible && (!options.soloSafety || safeFraction >= 0.6));
@@ -550,5 +569,5 @@ function damageRate(profiles, target = {}) {
 }
 
 module.exports = { MIN_EFFICIENCY, VERDICT_PROFILE_LIMIT, VERDICT_ENTRY_BUDGET, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
-    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup,
+    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup, speciesVerdict,
     cacheStats, sharedVerdictProfiles: () => sharedVerdicts.size, uniqueVerdictCount: () => uniqueVerdicts.size };
