@@ -78,7 +78,7 @@ function tick(actions) {
                 const participant = side => {
                     const s = life.cachedState(side.principalId), p = side.partyId ? actions.parties.find(side.partyId) : null;
                     return { id: s.characterId, partyId: side.partyId, size: side.memberIds.length,
-                        revision: Number(s.simulation?.revision || 0), memoryRevision: actions.memory.snapshot(s.characterId)?.revision,
+                        revision: Number(s.simulation?.revision || 0), memoryRevision: actions.memory.revision(s.characterId),
                         partyUpdatedAt: p?.updatedAt };
                 };
                 const event = { key: e.key, at, pressure: 3, spotId: e.spotId, npcId: e.npcId,

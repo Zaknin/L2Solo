@@ -122,6 +122,11 @@ class InteractionMemory {
         return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
     }
 
+    // The accepted snapshot's revision, without the deep copy snapshot() makes.
+    revision(ownerId) {
+        return this.snapshots.get(ownerId)?.revision;
+    }
+
     // Derived in the existing packing pass. Order is a native input: the
     // economy reads the first matching relation, including player rows.
     contentIdentity(ownerId) {

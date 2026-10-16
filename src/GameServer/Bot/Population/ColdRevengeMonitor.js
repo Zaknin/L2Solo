@@ -1,4 +1,5 @@
 const Policy = require('../../Social/RevengePolicy');
+const TendencyRoll = require('../AI/TendencyRoll');
 const MAX_ACTORS = 128;
 const partyId = state => state.party?.partyId || state.partyId || null;
 const unitId = state => partyId(state) || `solo:${state.characterId}`;
@@ -28,12 +29,13 @@ class ColdRevengeMonitor {
         this.cursor += Math.min(MAX_ACTORS, active.length);
         return events;
     }
-    sampleActors(actors, read, memory, at, personaFor, rng, acceptEvent = () => true) {
+    // `rng` is the test override of the roll (tests force outcomes with () => 0).
+    sampleActors(actors, read, memory, at, personaFor, rng = null, acceptEvent = () => true) {
         const events = [];
         const identity = s => ({ id: s.characterId, clanId: Number(s.stats?.clanId || 0), partyId: partyId(s) });
         const participant = e => ({ id: e.state.characterId, name: e.state.name, partyId: partyId(e.state),
             size: e.context?.party?.memberIds?.length || 1, partyUpdatedAt: e.context?.party?.updatedAt,
-            revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.views.get(e.state.characterId)?.revision });
+            revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.revision(e.state.characterId) });
         const examined = Math.min(MAX_ACTORS, actors.length);
         Object.assign(this.report, { at, active: actors.length, sampledActors: examined, overflow: false });
         for (let i = 0; i < examined; i++) {
@@ -46,8 +48,10 @@ class ColdRevengeMonitor {
                 if (!memory.views.get(id)?.ready) continue;
                 const social = Policy.evaluate(memory.assess(identity(a), identity(b), {}, at), personaFor(a));
                 if (!(social.chance > 0)) continue;
-                // One roll per group per cooldown, independent of observer/heartbeat frequency.
-                const roll = rng();
+                // One roll per grievance (actor, peer) and retry window, the cooldown
+                // this decision starts: independent of the sample time, the batch
+                // order and the observer/heartbeat frequency. The chance stays the policy's.
+                const roll = rng ? rng() : TendencyRoll.roll('revenge', a.characterId, b.characterId, Math.floor(at / Policy.RETRY_MS));
                 if (roll < social.chance) {
                     const event = { key: `revenge:${at}:${a.characterId}:${b.characterId}`, at, action: 'revenge', reason: social.reason,
                         spotId: a.spotId, npcId: 0, contextVersion: 1, pvpIntent: true, revengeRoll: roll, chance: social.chance,

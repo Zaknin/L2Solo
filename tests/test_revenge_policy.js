@@ -63,6 +63,15 @@ assert.strictEqual(fresh(entries.map(e => ({ ...e, state: { ...e.state, loc: { .
 const bounded = new ColdRevengeMonitor();
 bounded.sample(Array.from({ length: 2000 }, (_, i) => ({ ...entries[0], state: { ...entries[0].state, characterId: i + 100 } })), memory, at, () => persona, () => 0);
 assert.strictEqual(bounded.cursor, MAX_ACTORS, 'worker decision work has a fixed actor budget');
+// Without the test override the roll is the grievance's own: one per (actor,
+// peer, retry window), the same at any sample time inside the window.
+const TendencyRoll = require('../src/GameServer/Bot/AI/TendencyRoll');
+const unforced = t => new ColdRevengeMonitor().sampleActors(entries, id => entries.find(e => e.state.characterId === id),
+    memory, t, () => persona).map(e => e.revengeRoll);
+const ownRoll = TendencyRoll.roll('revenge', 1, 2, Math.floor(at / Policy.RETRY_MS));
+const chanceOf = Policy.evaluate(memory.assess({ id: 1, clanId: 0, partyId: null }, { id: 2, clanId: 0, partyId: null }, {}, at), persona).chance;
+assert.deepStrictEqual(unforced(at), ownRoll < chanceOf ? [ownRoll] : [], 'the roll is seeded by the grievance and its window');
+assert.deepStrictEqual(unforced(at + 1000), unforced(at), 'a later sample in the same window reads the same roll');
 const slow = new ColdCompetitionMonitor({ capacityForSpot: () => 100, personaFor: () => persona });
 const fast = new ColdCompetitionMonitor({ capacityForSpot: () => 100, personaFor: () => persona });
 for (let t = at; t <= at + 120000; t += 1000) fast.sample(entries, memory, t);
