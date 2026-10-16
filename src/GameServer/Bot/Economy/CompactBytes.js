@@ -1,8 +1,11 @@
 'use strict';
-// One canonical byte form for the bounded saved proofs (the quantity read
-// list, the restart prefix): unsigned LEB128 integers, exact Numbers and
-// UTF-8 text. A read throws on truncation or a non-canonical form; each
-// owner's codec catches it and refuses the whole value.
+// The primitives of the bounded saved proofs (the quantity read list, the
+// restart prefix): unsigned LEB128 integers, exact Numbers and UTF-8 text,
+// each with one canonical byte form. A read throws on truncation or a
+// non-canonical primitive; each owner's codec catches it and refuses the
+// whole value. An owner's layout may still read more than one byte form as
+// the same content (WishNetwork accepts root text splits its pack never
+// writes): nothing compares saved bytes, only the decoded values.
 
 // An exact Number: tag 0 and an unsigned integer, or tag 1 and the raw
 // double (-0, negative, fraction, above 2^53); tag 2 is a permitted null.
