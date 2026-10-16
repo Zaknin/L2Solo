@@ -38,6 +38,11 @@ const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const RecomputeGeneration = require('./RecomputeGeneration');
+const Hold = require('../Economy/Hold');
+const { fnv1a32 } = require('../Fnv1a');
+const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+const GoalService = invoke('GameServer/Bot/Goals/GoalService');
+const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 
 const ColdTrip = require('./ColdTrip');
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
@@ -1200,6 +1205,10 @@ class ColdSimulationCoordinator {
             && !LevelingRoutes.isSpotAllowedForState(currentGround, state, soloOptions());
         const leaf = partyRoute ? null : index.wishLeaf !== undefined ? index.wishLeaf
             : this.economyDecisions.activity(state);
+        // Place 'route' (Hold.js), a solo context only: would the spot chosen
+        // last time stand? Shadow: counted, the search below still runs.
+        const hold = !partyRoute && index.routeHold === true && Hold.asked('route')
+            ? this.routeHold(state, currentId, leaf, excludedSpotIds, index, soloOptions, timestamp) : null;
         const wished = leaf?.activity === 'hunting' && leaf.spotId
             ? index.spots.get(String(leaf.spotId)) : null;
         const wishDestination = wished && wished.raidBoss !== true
@@ -1261,6 +1270,7 @@ class ColdSimulationCoordinator {
                 emergencyOptions
             )?.spot || null : null;
         }
+        if (hold) this.recordHeldRoute(state, hold, selected);
         if (!selected) return null;
 
         const repairingPartyPosition = partyRoute && String(selected.id) === String(party.spotId || '')
@@ -1312,6 +1322,67 @@ class ColdSimulationCoordinator {
         };
     }
 
+    // The route hold (Hold.js place 'route', shadow). The held decision is the
+    // spot a solo context chose (null: none), kept while its event inputs stay
+    // quiet: the combat profile events (ColdCombatProfile.holdEvents, named as
+    // the combat_profile place names them), party and clan, the ground the bot
+    // stands on, the wish leaf's spot and the wish focus, the equipment plan
+    // and party request fields the search reads (its leveling recovery read
+    // through the planner, which ends by time), and the risk exclusions with
+    // the recovery level penalty. Occupancy and safety are checked on the held
+    // spot, never keyed. One record per bot in this.routeHolds: the spot id,
+    // the 9 profile hashes, four short strings and two hashes.
+    routeHold(state, ground, leaf, excludedSpotIds, index, soloOptions, timestamp) {
+        const stats = state.stats || {};
+        const plan = stats.equipmentPlan, request = stats.partyRequest;
+        const events = {
+            spotId: null,
+            profile: ColdCombatProfile.holdEvents(state, timestamp),
+            relations: `${Number(state.party?.partyId || state.partyId || 0)}|${Number(state.clanId ?? stats.clanId ?? 0)}`,
+            occupation: String(ground ?? ''),
+            leaf: leaf?.activity === 'hunting' ? String(leaf.spotId ?? '') : '',
+            focus: String(stats.wishFocus?.[0] ?? ''),
+            plan: plan || request ? fnv1a32(`${plan?.status}|${plan?.strategy}|${plan?.next?.spotId}|${plan?.next?.npcId}|`
+                + `${plan?.next?.sourceKind}|${plan?.partyNeed}|${plan?.requiresParty}|`
+                + `${plan && GearAcquisitionPlanner.levelingRecoveryFor(state, plan, timestamp) ? 1 : 0}|`
+                + `${request?.status}|${request?.priority}`) : 0,
+            risk: fnv1a32(`${[...excludedSpotIds].sort().join(',')}|${SpotRiskPolicy.recoveryFor(state)?.levelPenalty || 0}`)
+        };
+        const held = (this.routeHolds ||= new Map()).get(Number(state.characterId));
+        let reason = !held ? 'unproved' : ColdCombatProfile.holdEvent(held.profile, events.profile)
+            || (held.relations !== events.relations ? 'relations'
+                : held.occupation !== events.occupation ? 'occupation'
+                    : held.leaf !== events.leaf ? 'activity_leaf'
+                        : held.focus !== events.focus ? 'focus'
+                            : held.plan !== events.plan ? 'equipment_plan'
+                                : held.risk !== events.risk ? 'risk' : '');
+        // Feasibility of the held spot: still in the catalog, not excluded,
+        // room for the bot, still safe for its kit (the profiles the search
+        // builds anyway). A held "no spot" has nothing to check.
+        if (!reason && held.spotId !== null) {
+            const spot = index.spots.get(held.spotId);
+            reason = !spot ? 'spots'
+                : excludedSpotIds.has(held.spotId) ? 'risk'
+                    : !SpotProfiles.hasCapacityForStates(spot, [state], index.occupancy) ? 'capacity'
+                        : !LevelingRoutes.isSpotAllowedForState(spot, state, soloOptions()) ? 'unsafe' : '';
+        }
+        const why = reason ? [reason] : [];
+        Hold.check('route', why);
+        return { why, held, events, startedAt: performance.now() };
+    }
+
+    // The search's choice becomes the bot's held record; a sampled owner with
+    // a held record also writes the same/new row against it.
+    recordHeldRoute(state, hold, selected) {
+        const spotId = selected?.id == null ? null : String(selected.id);
+        if (hold.held) {
+            Hold.compare('route', state, hold.why, () => hold.held.spotId === spotId ? '' : 'spot',
+                performance.now() - hold.startedAt);
+        }
+        hold.events.spotId = spotId;
+        this.routeHolds.set(Number(state.characterId), hold.events);
+    }
+
     async ensureCraftRecipes(state) {
         if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) {
             await invoke('GameServer/Bot/Economy/CraftWorkshopService').knownFor(state.characterId);
@@ -1353,7 +1424,8 @@ class ColdSimulationCoordinator {
             interactionMemory,
             clanHallServices: invoke('GameServer/ClanHall/ColdVisit').needed(state),
             pressure,
-            goalReviewAt: Number(invoke('GameServer/Bot/Goals/GoalService').snapshot(state.characterId)?.current?.nextReviewAt || 0),
+            goalReviewAt: Number(GoalService.snapshot(state.characterId)?.current?.nextReviewAt || 0),
+            goalRevision: GoalService.revision(state.characterId),
             // The worker cannot see AFK shops: hand it the Adena the bot's own
             // buy order holds, which still counts as purchase budget.
             buyOrderEscrow: invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId),
@@ -1365,7 +1437,7 @@ class ColdSimulationCoordinator {
                 ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
-            route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf })
+            route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf, routeHold: true })
         };
         this.notePendingRoute(state, context.route);
         this.projectionRetention.prepare(state, context, index.partyGeneration);

@@ -9,7 +9,7 @@ const Diagnostics = require('./EconomyDiagnostics');
 // recomputes) | 'on' (a quiet verdict skips the recompute).
 const MODE = Object.freeze({ transit: 'shadow', economy_leaf: 'shadow', combat_profile: 'shadow',
     edges: 'shadow', card_leaf: 'shadow', ready_card: 'shadow', card_kit: 'shadow', commit_skills: 'shadow',
-    party_requirements: 'shadow' });
+    party_requirements: 'shadow', route: 'shadow' });
 
 // The test override, as deps.eventReuse: deps.hold = { <place>: true }.
 function on(place, deps = null) { return MODE[place] === 'on' || deps?.hold?.[place] === true; }
