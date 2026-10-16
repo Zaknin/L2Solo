@@ -326,7 +326,7 @@ recipes.clear();
     const asks = [[202, 10000, 20], [203, 1, 20]], inventory = { 202: { selfId: 202, amount: 10 } };
     const quantities = network.createQuantityInputs();
     const before = scenario({ items, known, asks, inventory, quantityInputs: quantities });
-    const proof = quantities.finish();
+    const proof = network.unpackQuantityInputs(quantities.finish());
     assert(proof, 'the complete native provider/solver quantity questions fit the bounded proof');
     assert.equal(before.result.focus?.[0], 'power:133:2');
     assert.equal(before.result.plans.get('power:133:2').requirements[0].plan.requirements[0].key, 'item:203');

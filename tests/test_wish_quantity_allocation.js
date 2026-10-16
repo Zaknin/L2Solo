@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { WishNetwork, craftMaterialLoss, createQuantityInputs, quantityInputsHold,
+const { WishNetwork, craftMaterialLoss, createQuantityInputs, quantityInputsHold, unpackQuantityInputs,
     QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES } = require('../src/GameServer/Bot/Economy/WishNetwork');
 const Intent = require('../src/GameServer/Bot/Economy/TradeIntent');
 function build(nodes, roots, stockFor, onReadyCraftProof) {
@@ -113,10 +113,10 @@ assert.equal(craftMaterialLoss(readyProof, physical(30)), 'unchanged', 'later ca
     const actual = build([other, root, alternativeReady, material], [other.key, root.key], watched);
     assert.deepEqual(actual, build([other, root, alternativeReady, material], [other.key, root.key], baseline),
         'capturing all native allocations preserves full decisions, plans and projections');
-    const inputs = quantities.finish();
+    const packed = quantities.finish(), inputs = unpackQuantityInputs(packed);
+    assert(packed instanceof Uint8Array && packed.byteLength <= QUANTITY_INPUT_BYTES);
     assert(inputs && Object.isFrozen(inputs) && Object.isFrozen(inputs.rows));
     assert(inputs.rows.every(Object.isFrozen));
-    assert(Buffer.byteLength(JSON.stringify(inputs)) <= QUANTITY_INPUT_BYTES);
     assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === root.key && row[2] === 101 && row[3] === 0),
         'zero output stock is an actual input too');
     assert(inputs.rows.some(row => row[0] === 'stock' && row[1] === other.key && row[2] === 202));
@@ -130,7 +130,7 @@ assert.equal(craftMaterialLoss(readyProof, physical(30)), 'unchanged', 'later ca
 
     const direct = createQuantityInputs();
     direct.present(202, 3); direct.free(203, 0); direct.physical(204, 2); direct.incoming(205, 1); direct.freePresent(206, 3);
-    const directProof = direct.finish();
+    const directProof = unpackQuantityInputs(direct.finish());
     const readers = { physical: id => id === 202 ? 4 : 2, free: id => id === 206 ? 4 : 0, incoming: () => 1 };
     assert.equal(quantityInputsHold(directProof, readers), true, 'a native positive-presence branch admits positive quantity drift');
     assert.equal(quantityInputsHold(directProof, { ...readers, physical: () => 0 }), false);
@@ -141,7 +141,7 @@ assert.equal(craftMaterialLoss(readyProof, physical(30)), 'unchanged', 'later ca
     for (let id = 1; id <= QUANTITY_INPUT_LIMIT + 1; id++) overflow.physical(id, 0);
     assert.equal(overflow.finish(), null, 'overflow abstains instead of keeping a truncated proof');
     const tooLarge = createQuantityInputs();
-    tooLarge.stock(1, 'x'.repeat(QUANTITY_INPUT_BYTES), {});
+    tooLarge.stock(1, 'x'.repeat(QUANTITY_INPUT_BYTES), {});  // the packed form exceeds its byte cap
     assert.equal(tooLarge.finish(), null, 'byte overflow also abstains');
     const unstable = createQuantityInputs(); unstable.physical(1, 0); unstable.physical(1, 1);
     assert.equal(unstable.finish(), null, 'inconsistent within-build owner answers cannot be certified');

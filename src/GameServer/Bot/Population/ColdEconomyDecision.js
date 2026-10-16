@@ -15,7 +15,7 @@ const RestartAdvisoryProbe = require('../Economy/RestartAdvisoryProbe');
 const RestartDecision = require('./EconomyRestartDecision');
 const CraftInputReservations = require('../Economy/CraftInputReservations');
 // Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
-let PurchaseFunding = null, DecisionSections = null;
+let PurchaseFunding = null, DecisionSections = null, WishNetwork = null;
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -517,11 +517,20 @@ function readAdvisoryCard(record) {
         return card;
     } catch (_) { return null; }
 }
+// Packed bytes cross a JSON-measured wire as canonical base64 (fence, the
+// proof's packed quantities); null when malformed or above maxBytes.
+function bytesFromBase64(text, maxBytes) {
+    if (typeof text !== 'string' || text.length > Math.ceil(maxBytes / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return null;
+    const bytes = Buffer.from(text, 'base64');
+    return bytes.toString('base64') === text && bytes.byteLength <= maxBytes ? Uint8Array.from(bytes) : null;
+}
 function wireAdvisory(accepted) {
     if (!accepted?.card) return null;
     // lazy: cycle EconomyContext owns its packed read-set conversion.
     const Economy = accepted.eventProof ? invoke('GameServer/Bot/Economy/EconomyContext') : null;
-    const eventProof = Economy ? Economy.wireEventProof(accepted.eventProof) : null;
+    const quantities = accepted.eventProof?.quantities;
+    const eventProof = Economy && quantities instanceof Uint8Array
+        ? Economy.wireEventProof({ ...accepted.eventProof, quantities: Buffer.from(quantities).toString('base64') }) : null;
     if (accepted.eventProof && !eventProof) return null;
     return { ...accepted, eventProof, card: { key: accepted.card.key,
         data: Buffer.from(accepted.card.data).toString('base64') },
@@ -539,12 +548,14 @@ function receiveAdvisory(value) {
         || card.activity === null && (value.activityLeaf !== 0 || value.eventProof?.activity !== null)) return null;
     let fence = value.fence;
     if (typeof fence === 'string') {
-        if (fence.length > Math.ceil(MAX_ADVISORY_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(fence)) return null;
-        const bytes = Buffer.from(fence, 'base64');
-        if (bytes.toString('base64') !== fence || bytes.byteLength + card.data.byteLength > MAX_ADVISORY_BYTES) return null;
-        fence = Uint8Array.from(bytes);
+        fence = bytesFromBase64(fence, MAX_ADVISORY_BYTES - card.data.byteLength);
+        if (!fence) return null;
     } else if (fence !== null && !(fence instanceof Uint8Array)) return null;
-    return { ...value, card, fence };
+    // lazy: cycle WishNetwork's load chain reaches this module; it owns the packed proof bound.
+    const Network = value.eventProof ? WishNetwork ||= require('../Economy/WishNetwork') : null;
+    const quantities = Network ? bytesFromBase64(value.eventProof.quantities, Network.QUANTITY_INPUT_BYTES) : null;
+    if (value.eventProof && !quantities) return null;
+    return { ...value, card, fence, eventProof: value.eventProof && { ...value.eventProof, quantities } };
 }
 function advisoryMatches(state, accepted) {
     if (!accepted || accepted.characterId !== Number(state?.characterId)) return false;

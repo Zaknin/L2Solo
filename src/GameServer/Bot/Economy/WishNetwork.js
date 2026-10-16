@@ -16,8 +16,11 @@ const nonnegative = value => Math.max(0, Number(value) || 0);
 // Native stock questions, before owned children disappear from a plan. Exact
 // answers also preserve the prior claims in every subsequent allocation pass.
 // This is one build's bounded evidence, never a second allocation or bag index.
-const QUANTITY_INPUT_LIMIT = 128;
-const QUANTITY_INPUT_BYTES = 4096;
+// It is held packed (the codec below, ~3-6 B a row); the rows exist only
+// while a build records them and while one verdict reads them. The byte cap
+// bounds the packed form, the one form that is held, saved and sent.
+const QUANTITY_INPUT_LIMIT = 1024;
+const QUANTITY_INPUT_BYTES = 8192;
 const QUANTITY_SCALARS = new Set(['physical', 'present', 'freePresent', 'incoming', 'free', 'crystalFree']);
 const QUANTITY_KINDS = Object.freeze([...QUANTITY_SCALARS, 'stock', 'stockPhysical']);
 // Exact transport of the native read list: no rows are merged, inferred or
@@ -28,7 +31,6 @@ const QUANTITY_KINDS = Object.freeze([...QUANTITY_SCALARS, 'stock', 'stockPhysic
 function packQuantityInputs(proof) {
     if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return null;
     try {
-        if (Buffer.byteLength(JSON.stringify(proof)) > QUANTITY_INPUT_BYTES) return null;
         const write = Bytes.writer(), ids = new Map(), roots = new Map(), literals = new Map();
         let lastId = 0;
         const numberTag = value => {
@@ -131,14 +133,13 @@ function unpackQuantityInputs(value) {
             rows.push(Object.freeze(row));
         }
         if (!read.done()) return null;
-        const proof = { version: 1, rows: Object.freeze(rows) };
-        return Buffer.byteLength(JSON.stringify(proof)) <= QUANTITY_INPUT_BYTES ? Object.freeze(proof) : null;
+        return Object.freeze({ version: 1, rows: Object.freeze(rows) });
     } catch (_) { return null; }
 }
 function createQuantityInputs() {
     const rows = [], seen = new Map();
     // invalid: '' or the first reason the proof is void (diagnostics name it).
-    let bytes = 23, invalid = '', finished = false, proof = null;
+    let invalid = '', finished = false, packed = null;
     const record = row => {
         if (invalid || finished) return;
         const key = row[0] === 'stock' || row[0] === 'stockPhysical'
@@ -148,11 +149,8 @@ function createQuantityInputs() {
             for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid ||= 'conflict';
             return;
         }
-        const size = Buffer.byteLength(JSON.stringify(row)) + 1;
-        if (rows.length >= QUANTITY_INPUT_LIMIT || bytes + size > QUANTITY_INPUT_BYTES) {
-            invalid = rows.length >= QUANTITY_INPUT_LIMIT ? 'rows' : 'bytes'; return;
-        }
-        seen.set(key, row); rows.push(Object.freeze(row)); bytes += size;
+        if (rows.length >= QUANTITY_INPUT_LIMIT) { invalid = 'rows'; return; }
+        seen.set(key, row); rows.push(row);
     };
     const scalar = kind => (id, value) => {
         if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
@@ -176,15 +174,17 @@ function createQuantityInputs() {
         physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
         incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
         unsupported() { invalid ||= 'unsupported'; },
+        // The packed proof (unpackQuantityInputs reads it) or null.
         finish() {
             if (!finished) {
                 finished = true;
-                proof = invalid ? null : Object.freeze({ version: 1, rows: Object.freeze(rows) });
+                if (!invalid) packed = packQuantityInputs({ version: 1, rows });
+                if (!invalid && !packed) invalid = 'bytes';
                 // Diagnostics: why a completed build has no quantity proof.
                 if (invalid && Diagnostics.active()) Diagnostics.count('context', 'quantity_invalid', invalid);
-                seen.clear();
+                seen.clear(); rows.length = 0;
             }
-            return proof;
+            return packed;
         }
     };
 }

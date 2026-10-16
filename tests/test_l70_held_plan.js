@@ -199,7 +199,7 @@ async function main() {
 
 try {
     {
-        const { packQuantityInputs, unpackQuantityInputs } = require('../src/GameServer/Bot/Economy/WishNetwork');
+        const { packQuantityInputs, unpackQuantityInputs, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES } = require('../src/GameServer/Bot/Economy/WishNetwork');
         const proof = { version: 1, rows: [
             ['physical', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER], ['present', 2, 1], ['freePresent', 3, 0],
             ['incoming', 4, .125], ['free', 5, -0], ['crystalFree', 6, 1e20],
@@ -219,10 +219,10 @@ try {
             [3, 1, 128 + 6, 2, 0, 0, 0, 1, 255], [3, 1, 128 + 6, 2, 0, 1, 0, 1, 97, 1, 1, 97], [3, 1, 128, 130, 0]])
             assert.equal(unpackQuantityInputs(Uint8Array.from(bytes)), null, 'old versions, malformed tags, indexes, ids, UTF-8 or trailing bytes refuse');
         for (const row of [['stock', '\ud800', 1, 0, 0], ['physical', 1, -1], ['physical', 1, Infinity],
-            ['physical', 1, NaN], ['physical', 1.5, 0], ['stock', 'x'.repeat(4096), 1, 0, 0]])
+            ['physical', 1, NaN], ['physical', 1.5, 0], ['stock', 'x'.repeat(QUANTITY_INPUT_BYTES), 1, 0, 0]])
             assert.equal(packQuantityInputs({ version: 1, rows: [row] }), null);
-        assert.equal(packQuantityInputs({ version: 1, rows: Array(129).fill(['physical', 1, 0]) }), null);
-        assert.equal(unpackQuantityInputs(new Uint8Array(4097)), null);
+        assert.equal(packQuantityInputs({ version: 1, rows: Array(QUANTITY_INPUT_LIMIT + 1).fill(['physical', 1, 0]) }), null);
+        assert.equal(unpackQuantityInputs(new Uint8Array(QUANTITY_INPUT_BYTES + 1)), null);
     }
     {
         const decision = Decisions.compact({ key: 'prepared-native-fixture', updatedAt: T, inputHash: 12345, riskWeight: 1.5,
@@ -282,7 +282,7 @@ try {
         const transportProof = { ...accepted.eventProof };
         delete transportProof.market; delete transportProof.spots;
         const original = { ...accepted, characterId: state.characterId, eventProof: { ...transportProof,
-            restartable: true, quantities: { version: 1, rows: [] }, liquidation: { basis: { shots: { itemId: 1835, target: 0,
+            restartable: true, quantities: invoke('GameServer/Bot/Economy/WishNetwork').packQuantityInputs({ version: 1, rows: [] }), liquidation: { basis: { shots: { itemId: 1835, target: 0,
                 beginnerCurrent: 0 }, potions: { target: 0 }, excluded: [] }, rows: [] },
             stockRoots: [], bands: [], safety: [0, 0, 0], hourAdena: 0 } };
         const encode = value => RestartDecision.encode({ ...value, eventProof: Economy.restartEventProof(value.eventProof, value) },

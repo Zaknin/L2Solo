@@ -120,7 +120,7 @@ try {
     const proof = first.eventProof();
     assert(proof, JSON.stringify({ blocked: 'native cohort has no complete event proof',
         focus: first.network.focus, leaf: first.network.activity?.activity,
-        quantityRows: first.plan.quantityInputs?.rows.length ?? null,
+        quantityRows: Network.unpackQuantityInputs(first.plan.quantityInputs)?.rows.length ?? null,
         liquidation: !!first.plan.liquidationInputs,
         warehouse: Warehouse.ready(), clan: Supplies.ready(), generation: Generation.current() }));
     assert.equal(first.network.activity.activity, 'hunting', 'the ordinary armed cohort actually hunts');
@@ -240,7 +240,7 @@ try {
         const nativeIndex = OccupationSources.recipeIndex(board), scope = nativeIndex.scopeFor(level);
         const build = Economy.forState(beginner, options()), card = Decisions.advisory(build, beginner, beginner.activity, options());
         assert(card?.eventProof, JSON.stringify({ blocked: 'native beginner has no complete proof',
-            quantityRows: build.plan.quantityInputs?.rows.length ?? null, leaf: build.network.activity }));
+            quantityRows: Network.unpackQuantityInputs(build.plan.quantityInputs)?.rows.length ?? null, leaf: build.network.activity }));
         const state = publish(beginner, build), members = new Set([...nativeIndex.rowsFor(level)].map(recipe => recipe.recipeId));
         const read = new Set([...card.eventProof.market].map(row => row[0]));
         const added = RecipeCatalog.recipeItemRows(Recipes).find(recipe => recipe.type === 'dwarven'
@@ -305,7 +305,7 @@ try {
             const card = Decisions.advisory(build, input, input.activity, options());
             assert(card?.eventProof, JSON.stringify({ blocked: `native ${label} has no accepted executable proof`,
                 focus: build.network.focus, leaf: build.network.activity,
-                quantities: build.plan.quantityInputs?.rows.length ?? null }));
+                quantities: Network.unpackQuantityInputs(build.plan.quantityInputs)?.rows.length ?? null }));
             const prefix = Economy.restartEventProof(card.eventProof, card);
             assert(prefix, `the native ${label} proof has a restart prefix`);
             assert.equal(prefix[0], 4, 'binary prefix format');
@@ -314,7 +314,7 @@ try {
             for (const name of PROOF_FIELDS) assert.deepEqual(decoded[name], card.eventProof[name], `${label} restart keeps ${name} exactly`);
             const field = card.saved ? Buffer.byteLength(JSON.stringify({ wishAdvisory: card.saved })) : null;
             const clocks = Sections.clockBytes(card.baseline);
-            console.log(`INFO native ${label} restart rows=${card.eventProof.quantities.rows.length} card=${card.card.data.byteLength} prefix=${prefix.byteLength} field=${field} clocks=${clocks} worstClocks=${worstClocks}`);
+            console.log(`INFO native ${label} restart rows=${Network.unpackQuantityInputs(card.eventProof.quantities).rows.length} quantityBytes=${card.eventProof.quantities.byteLength} card=${card.card.data.byteLength} prefix=${prefix.byteLength} field=${field} clocks=${clocks} worstClocks=${worstClocks}`);
             assert(card.saved && field + Math.max(clocks, worstClocks) <= Restart.MAX_BYTES, JSON.stringify({ blocked: `native ${label} restart proof does not fit the unchanged 1KB budget`,
                 cardBytes: card.card.data.byteLength, prefixBytes: prefix.byteLength, field, clocks, worstClocks }));
             return { input, build, card, prefix, field, clocks };
@@ -359,7 +359,7 @@ try {
         refused([4, ...new Uint8Array(65536)], 'the owner\'s 64 KiB raw bound refuses');
         // Fixed offsets from the end: quantities, the one-byte empty producer
         // scope, then hourAdena as its tag and raw double.
-        const quantityBytes = Network.packQuantityInputs(armedCard.eventProof.quantities).length;
+        const quantityBytes = armedCard.eventProof.quantities.byteLength;
         const scopeAt = armedPrefix.length - quantityBytes - 1;
         const [scope, content] = armedCard.eventProof.producerScope;
         assert.equal(content, createHash('sha256').update('[]').digest('hex'), 'this armed fixture reads empty producer content');
@@ -418,8 +418,9 @@ try {
             storeType: 1, kind: 'shop', town: 'Giran', lines: [{ lineId: id, selfId: id, count: 1, enchant: 0, price }] });
         Economy.reset();
         const build = Economy.forState(crystal, options());
-        const quantities = build.plan.quantityInputs;
+        const quantities = Network.unpackQuantityInputs(build.plan.quantityInputs);
         assert(quantities, 'the completed native crystal build captures all quantity answers within its bound');
+        console.log(`INFO native crystal quantity rows=${quantities.rows.length} packed=${build.plan.quantityInputs.byteLength}`);
         const competing = new Set(quantities.rows
             .filter(row => row[0] === 'stock' && row[2] === 1458).map(row => row[1]));
         const crystalReads = quantities.rows.filter(row => (row[0] === 'stock' || row[0] === 'stockPhysical' ? row[2] : row[1]) === 1458);
@@ -471,7 +472,7 @@ try {
         assert.deepEqual(capturedChoices, ordinaryChoices, 'capturing actual native crystal reads preserves every ranked choice');
         assert.equal(capturedChoices[0].selfId, 166);
         assert.equal(capturedChoices[0].batchLimit, 2);
-        const spareProof = reads.finish();
+        const spareProof = Network.unpackQuantityInputs(reads.finish());
         assert(spareProof);
         assert.equal(Network.quantityInputsHold(spareProof, Providers.quantityReaders(held)), true);
         const consumed = { ...held, inventory: { ...held.inventory, 166: { ...held.inventory[166], amount: 1 } } };
@@ -480,6 +481,40 @@ try {
         assert.equal(Network.quantityInputsHold(spareProof, Providers.quantityReaders(consumed)), false);
         board.remove(90); board.remove(166);
         console.log('PASS native crystal presence crossing / physical spare batch2->1 / no competing-root claim');
+    });
+
+    // Real bags ask p50 220 / p90 705 distinct quantity questions: a large
+    // proof is held packed and the verdict reads every row of it.
+    scenario('a 600-row quantity proof is held packed and read whole', () => {
+        const real = Network.unpackQuantityInputs(accepted.eventProof.quantities), reads = Network.createQuantityInputs();
+        for (const row of real.rows) {
+            if (row[0] === 'stock') reads.stock(row[2], row[1], { owned: row[3], incoming: row[4] });
+            else if (row[0] === 'stockPhysical') reads.stockPhysical(row[1], row[2], row[3]);
+            else reads[row[0]](row[1], row[2]);
+        }
+        // Items the bot does not hold; the last one is an incoming question.
+        const last = 3000000 + 600;
+        for (let id = 3000000 + real.rows.length + 1; id < last; id++) reads.present(id, 0);
+        reads.incoming(last, 0);
+        const packed = reads.finish();
+        assert(packed instanceof Uint8Array, 'a 600-row native read list fits the packed bound');
+        const rows = Network.unpackQuantityInputs(packed).rows;
+        assert.equal(rows.length, 600);
+        assert.deepEqual(rows.slice(0, real.rows.length), real.rows, 'the packed form keeps every captured row exactly');
+        console.log(`INFO 600-row proof packed=${packed.byteLength} B (${(packed.byteLength / 600).toFixed(1)} B/row); `
+            + `armed fixture ${real.rows.length} rows packed=${accepted.eventProof.quantities.byteLength} B`);
+        const large = { ...accepted, eventProof: { ...accepted.eventProof, quantities: packed } };
+        assert.equal(verdict(published, large).valid, true, JSON.stringify(verdict(published, large)));
+        const received = Decisions.receiveAdvisory(structuredClone(Decisions.wireAdvisory(large)));
+        assert(received, 'the large packed proof crosses the thread wire');
+        assert.deepEqual(Buffer.from(received.eventProof.quantities), Buffer.from(packed));
+        assert.equal(verdict(published, received).valid, true, JSON.stringify(verdict(published, received)));
+        const prefix = Economy.restartEventProof(large.eventProof, large);
+        assert(prefix, 'the restart prefix writes the held bytes');
+        assert.deepEqual(Buffer.from(Economy.restoreEventProof(prefix, large).quantities), Buffer.from(packed));
+        const moved = { ...published, acceptedIncoming: { ...published.acceptedIncoming, [last]: 1 } };
+        assert.equal(verdict(moved, large).reason, 'quantity', 'the 600th row is read: its answer moving is a quantity event');
+        console.log('PASS 600-row packed quantity proof / wire / restart / last row read');
     });
 
     scenario('a void quantity proof names its first reason', () => {
@@ -495,7 +530,7 @@ try {
             assert.equal(conflict.finish(), null);
             const complete = Network.createQuantityInputs();
             complete.physical(57, 10); complete.physical(57, 10);
-            assert.equal(complete.finish().rows.length, 1);
+            assert.equal(Network.unpackQuantityInputs(complete.finish()).rows.length, 1);
             assert.deepEqual(named, ['context:rows', 'context:conflict'], 'the first reason only, once per proof');
         } finally { Diagnostics.active = active; Diagnostics.count = count; }
         console.log('PASS void quantity proof reasons');

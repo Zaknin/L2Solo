@@ -21,7 +21,7 @@ const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
 const Network = require('./WishNetwork');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
-    createQuantityInputs, quantityInputsHold, packQuantityInputs, unpackQuantityInputs } = Network;
+    createQuantityInputs, quantityInputsHold, unpackQuantityInputs } = Network;
 const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
 const RecomputeGeneration = require('../Population/RecomputeGeneration');
@@ -608,10 +608,12 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) return refuse('quantity', ['sources', 'money']);
-    const quantities = own === null || !Array.isArray(proof.quantities?.rows) ? proof.quantities
-        : { ...proof.quantities, rows: proof.quantities.rows.filter(row => !Array.isArray(row) || !ownQuantityRow(row, leaf.rootKey, own)) };
+    // The proof is held packed; its rows live for this verdict only.
+    const proved = unpackQuantityInputs(proof.quantities);
+    if (!proved) return refuse('unproved');
+    const quantities = own === null ? proved : { ...proved, rows: proved.rows.filter(row => !ownQuantityRow(row, leaf.rootKey, own)) };
     const stock = stockReader(state, key => roots.get(key));
-    const reservedRows = reserved && new Map((quantities?.rows || []).filter(row => Array.isArray(row) && row[0] === 'stock'
+    const reservedRows = reserved && new Map(quantities.rows.filter(row => row[0] === 'stock'
         && isReserved(row[2])).map(row => [`${row[1]}|${row[2]}`, row]));
     const stockFor = !reservedRows?.size ? stock : (id, rootKey) => {
         const current = stock(id, rootKey), row = reservedRows.get(`${rootKey}|${id}`);
@@ -674,8 +676,8 @@ function restartEventProof(proof, accepted) {
         || proof.decision[0] !== accepted.decisionSeq || proof.decision[1] !== accepted.activityLeaf
         || proof.decision[2] !== accepted.focus || proof.activity !== activityIdentity(accepted.card.activity)
         || proof.activity === null && (accepted.card.activity !== null || proof.decision[1] !== 0)) return null;
-    const quantities = packQuantityInputs(proof.quantities);
-    if (!quantities) return null;
+    const quantities = proof.quantities;
+    if (!(quantities instanceof Uint8Array)) return null;
     try {
         // Version, the domain-separated hard digest (it already commits to
         // generation), the soft facts in the shared exact byte form, then the
@@ -712,7 +714,9 @@ function restoreEventProof(prefix, accepted) {
         const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
         const safety = Object.freeze(read.list(() => read.number()));
         const hourAdena = read.number(), producerScope = ProductionIndex.unpackScopeIdentity(read);
-        const quantities = producerScope ? unpackQuantityInputs(read.rest()) : null;
+        // The packed quantity proof stays packed; a prefix it cannot read is refused here.
+        const packed = producerScope ? Uint8Array.from(read.rest()) : null;
+        const quantities = packed && unpackQuantityInputs(packed) ? packed : null;
         if (!quantities || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
