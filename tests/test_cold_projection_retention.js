@@ -274,7 +274,9 @@ async function publish() {
         // Cover loadActive clearing/removal and due/createOrUpdate accepted
         // cache writers against scripted SQL outcomes, never a live DB.
         let loaded = [partyRow];
-        Database.execute = async ([sql]) => /SELECT \*/.test(sql) ? loaded : /SELECT 1/.test(sql) ? [{ 1: 1 }] : { affectedRows: 1 };
+        // init reads the boot pause (L136, 55f4bc48): no earlier bot write, no due shift.
+        Database.execute = async ([sql]) => /SELECT \*/.test(sql) ? loaded : /SELECT 1/.test(sql) ? [{ 1: 1 }]
+            : /MAX\(updatedAt\)/.test(sql) ? [{ lastWriteAt: null }] : { affectedRows: 1 };
         await Parties.init();
         generation = Parties.generation();
         await Parties.loadActive();
