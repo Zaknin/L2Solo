@@ -19,7 +19,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = Math.min(thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, Math.max(1, capacity));
     // Reserve final build evidence inside the existing budgets. Detailed
     // alternatives emitted first must not consume every summary slot.
-    const summaryReserve = Math.max(1, Math.ceil(capacity * LIMITS.owners / LIMITS.perSecond));
+    const summaryReserve = Math.min(capacity - 1, Math.ceil(capacity * LIMITS.owners / LIMITS.perSecond));
     let rows = null, bytes = 0, selected = null, explicit = null, selectionKey = null;
     let counters = null, durations = null, transport = null, inFlight = null;
     let selectionListener = null;

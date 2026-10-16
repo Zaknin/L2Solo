@@ -56,7 +56,7 @@ assert.equal(rejectedByMain.stats().drops.admission, 1); assert.equal(rejectedBy
 let queueClock = 0;
 const boundedWorker = create({ config: { developerDiagnostics: true, economyDiagnostics: true, economyDiagnosticsBotIds: '64' },
     thread: 'worker', capacity: LIMITS.mainRecords, now: () => queueClock });
-for (let i = 0; i < LIMITS.workerRecords; i++) assert(boundedWorker.push({ owner: 64, phase: 'queue_cap' }));
+for (let i = 0; i < LIMITS.workerRecords; i++) assert(boundedWorker.push({ owner: 64, phase: 'wish_context', gate: 'would_hold' }));
 queueClock += 1000;
 assert.equal(boundedWorker.push({ owner: 64, phase: 'queue_cap' }), false);
 assert.equal(boundedWorker.stats().queued, LIMITS.workerRecords, 'worker cap also applies to default/imported collectors');
