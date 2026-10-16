@@ -158,7 +158,17 @@ function partyInput(state) {
     const stats = state.stats || {}, partyId = Number(state.party?.partyId || state.partyId || 0);
     return partyId ? { ...state.party, partyId, role: state.party?.role || stats.role || Roles.inferRole(stats.classId || 0) } : null;
 }
+// The key parts in order (diagnostics: context:key_moved:<name> names the
+// first part that moved against the held proof while the digest differs).
+const KEY_PART_NAMES = Object.freeze(['version', 'generation', 'facts', 'inventory', 'improvement', 'clan', 'party',
+    'visit_every', 'karma', 'race', 'generated_cold', 'persona', 'craft_station', 'soul_crystal_quest', 'shot_recipe_item',
+    'shot_recipe_fresh', 'recipes', 'workshop_recipe', 'workshop_product', 'memory_identity', 'relations',
+    'clan_material_demand', 'warehouse', 'clan_supply', 'clan_warehouse', 'frustration', 'gear_threat', 'role', 'account',
+    'trip', 'route_state', 'mode', 'input_key', 'incoming_pending', 'knowledge']);
 function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
+    return proofDigest(eventInputParts(state, deps, timestamp, activity, leaf, facts));
+}
+function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
     const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
     facts ||= Sections.semanticFacts(current, timestamp);
     // Position and scroll quantity drift inside one route. Native route and
@@ -170,7 +180,7 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
     const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57 && Number(row.selfId) !== own)
         .map(row => rowKey({ ...canonicalRow(row), amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
             instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
-    return proofDigest(['recompute_event_inputs_v4', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+    return ['recompute_event_inputs_v4', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), partyInput(current) || 0,
         stats.visitEvery, stats.karma ?? 0, stats.race, stats.generatedCold, stats.persona,
         stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
@@ -183,7 +193,13 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
         stats.role || Roles.inferRole(stats.classId || 0), current.accountName,
         trip, deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending',
         deps.mode || '', deps.inputKey || '', current.incomingPending === true,
-        deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled()]);
+        deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled()];
+}
+// Diagnostics: the first key part that differs between the held proof's
+// parts and this request's ('none' when only the digest differs).
+function movedKeyPart(parts, heldParts) {
+    const at = parts.findIndex((part, i) => JSON.stringify(part) !== heldParts[i]);
+    return KEY_PART_NAMES[at] || 'none';
 }
 
 // The fields of the section keys (sectionKeys: the source memo and the
@@ -358,7 +374,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         decision: Object.freeze([Number(plan.statsPacket.decisionSeq || 0),
             Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
         activity: activityIdentity(leaf),
-        hard: eventInputKey(actual, deps, plan.timestamp, state.activity, leaf, options.facts),
+        hard: proofDigest(options.parts || eventInputParts(actual, deps, plan.timestamp, state.activity, leaf, options.facts)),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
@@ -397,8 +413,11 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             || typeof proof.spots?.[Symbol.iterator] !== 'function')
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
     const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
-    if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at) || proof.at !== baseline.at || timestamp < proof.at)
-        return refuse('baseline');
+    if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at)) return refuse('baseline');
+    // Diagnostics split of one refusal: the held plan's baseline moved under
+    // its proof, or the request's clock runs before the proof's.
+    if (proof.at !== baseline.at) return refuse('baseline_at');
+    if (timestamp < proof.at) return refuse('baseline_clock');
     if (options.softPrefix && (!proof.restartable || !proof.generation
         || !Number.isFinite(Sections.softDeadline(baseline, 'market'))
         || timestamp >= Sections.softDeadline(baseline, 'market'))) return refuse('restart_expired');
@@ -1223,7 +1242,14 @@ function buildForState(state, deps) {
     // one verdict on the held build (heldBuildVerdict). Off, every request
     // builds; diagnostics still ask the verdict for the gate counters.
     const activeEvents = eventReuseEnabled(deps);
-    const key = eventInputKey(state, deps, timestamp, held?.activity, held?.plan.network?.activity);
+    const keyParts = diagnostic && held?.plan.keyParts
+        ? eventInputParts(state, deps, timestamp, held.activity, held.plan.network?.activity) : null;
+    const key = keyParts ? proofDigest(keyParts) : eventInputKey(state, deps, timestamp, held?.activity, held?.plan.network?.activity);
+    let keyMoved = null;
+    if (keyParts && key !== held.plan.eventProof?.hard) {
+        keyMoved = movedKeyPart(keyParts, held.plan.keyParts);
+        Diagnostics.count('context', 'key_moved', keyMoved);
+    }
     // The held build's market items and spot crowd still read the same: read once per request.
     let readsHeld = null;
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
@@ -1571,6 +1597,7 @@ function buildForState(state, deps) {
         inputActivityLeaf: gate === 'would_hold' ? inputActivityLeaf : undefined,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
         available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
+        ...(keyMoved ? { moved: keyMoved } : {}),
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
@@ -1589,7 +1616,11 @@ function buildForState(state, deps) {
         // with it. The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
         heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
-        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots, facts });
+        const parts = diagnostic ? eventInputParts({ ...state, stats: { ...state.stats, ...plan.statsPacket } }, deps,
+            plan.timestamp, state.activity, plan.network?.activity, facts) : null;
+        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots, facts, parts });
+        // Diagnostics: the parts behind the proof's digest, for context:key_moved.
+        if (parts && plan.eventProof) plan.keyParts = parts.map(part => JSON.stringify(part));
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).

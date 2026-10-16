@@ -161,7 +161,7 @@ try {
     assert.equal(verdict(published, accepted).reason, 'unready');
     Warehouse.useRowSource(id => mirror.rows('personal_warehouse').get(id), () => mirror.ready('personal_warehouse'));
     const forwards = clock; clock = T - 1;
-    assert.equal(verdict(published, accepted).reason, 'baseline', 'runtime clock reversal refuses the same proof');
+    assert.equal(verdict(published, accepted).reason, 'baseline_clock', 'runtime clock reversal refuses the same proof');
     clock = forwards;
     for (const invalid of [{ sample: null }, { sample: 's1:bad' }, { share: undefined }, { share: 2 }]) {
         assert.equal(verdict(published, { ...accepted, baseline: { ...accepted.baseline, ...invalid } }).reason, 'baseline',
