@@ -31,7 +31,8 @@ const heldByBag = new WeakMap();
 // answer is not kept, only the plain one the scheduler asks on every pass.
 function sealedHeld(inventory, accept = null) {
     if (!inventory || typeof inventory !== 'object') return null;
-    if (!accept && heldByBag.has(inventory)) return heldByBag.get(inventory);
+    const held = accept ? undefined : heldByBag.get(inventory);
+    if (held !== undefined) return held;
     Diagnostics.count('mammon', 'scan', accept ? 'accept' : 'plain');
     let found = null;
     for (const key in inventory) {
