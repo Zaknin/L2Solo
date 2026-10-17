@@ -681,16 +681,30 @@ async function listOnBoard(state, options = {}) {
     return { state: LifeState.snapshot(ownerId) || state, listed, reason: reason || ads.reason, shopTown };
 }
 
+// The owner's sell-ad room: the lines already up (its ads, the shop) and
+// the free ad records.
+function sellAdRoom(ownerId, shop) {
+    const ads = AfkTrade.ownerRecords(ownerId).filter((record) => record.kind === 'sell_ad');
+    return { advertised: new Set(linesOf(ads).map(lineKey)), inShop: new Set(linesOf(shop ? [shop] : []).map(lineKey)),
+        free: Math.max(0, BoardRules.BOT_RECORDS.sell_ad - ads.length) };
+}
+
 // One sell ad per listing the shop has no line for, while the bot has ad
 // slots left (BoardRules.BOT_RECORDS); an item it already advertises keeps
 // its ad. All in one move from the bag. `inventory`: the bag the caller read
 // for this review; a shop published since took only items of its own lines,
 // which no ad takes (a row that changed meanwhile refuses the move).
+// `inventory` may be a loader instead: it is read only when the board still
+// has room for a listing not yet up (the room is read again after it).
 async function listSellAds(ownerId, state, listings, shop, inventory, options = {}) {
-    const records = AfkTrade.ownerRecords(ownerId);
-    const advertised = new Set(linesOf(records.filter((record) => record.kind === 'sell_ad')).map(lineKey));
-    const inShop = new Set(linesOf(shop ? [shop] : []).map(lineKey));
-    const free = Math.max(0, BoardRules.BOT_RECORDS.sell_ad - records.filter((record) => record.kind === 'sell_ad').length);
+    if (typeof inventory === 'function') {
+        const room = sellAdRoom(ownerId, shop);
+        if (!room.free) return { listed: 0, reason: 'board_cap_reached' };
+        if (!(listings || []).some((listing) => !room.inShop.has(lineKey(listing))
+            && !room.advertised.has(lineKey(listing)))) return { listed: 0 };
+        inventory = await inventory();
+    }
+    const { advertised, inShop, free } = sellAdRoom(ownerId, shop);
     if (!free) return { listed: 0, reason: 'board_cap_reached' };
     const configs = [];
     for (const listing of listings || []) {
@@ -890,9 +904,8 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
                 return { state, reason: 'shop_visit_changed' };
             return listOnBoard(state, { decided: { listings }, planTowns });
         }
-        const inventory = await Database.fetchItems(ownerId, 'market_execute_plan');
-        return listSellAds(ownerId, state, listings, shop, inventory,
-            { planTowns });
+        return listSellAds(ownerId, state, listings, shop,
+            () => Database.fetchItems(ownerId, 'market_execute_plan'), { planTowns });
     });
     // An empty desired list closes the old ads; it does not run another bid
     // decision on main. The plan's quote remains the quote the worker made.
