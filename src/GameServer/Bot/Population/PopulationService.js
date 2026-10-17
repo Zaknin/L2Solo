@@ -3977,7 +3977,17 @@ const PopulationService = {
     logSummary(reason = 'summary') {
         if (!Config.developerDiagnostics) return { enabled: false };
         const summary = this.summary();
-        Config.developerDiagnostics && console.info('BotPopulation :: %s %s', reason, summary.line);
+        console.info('BotPopulation :: %s %s', reason, summary.line);
+        // A bot due for over a minute is not normal (user 2026-10-17): name it
+        // and say why it waits, one line per summary.
+        const queue = summary.coldQueue || {};
+        if (queue.oldest && queue.oldestAgeMs >= 60000) {
+            const bot = queue.oldest, at = Date.now();
+            console.info('BotPopulation :: overdue %s(%d) %s due %ds ago, last step %ds ago, reason %s, due total %d',
+                bot.name, bot.characterId, bot.activity, Math.round(queue.oldestAgeMs / 1000),
+                bot.lastResolvedAt > 0 ? Math.round((at - bot.lastResolvedAt) / 1000) : -1,
+                ColdSimulationCoordinator.overdueReason(bot.characterId), queue.due);
+        }
         return summary;
     }
 };

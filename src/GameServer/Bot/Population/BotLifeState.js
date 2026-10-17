@@ -3800,7 +3800,9 @@ const BotLifeState = {
             due: 0,
             highLevel: 0,
             replans: 0,
-            oldestAgeMs: 0
+            oldestAgeMs: 0,
+            // The bot waiting longest: the summary names it when it passes 60 s.
+            oldest: null
         };
 
         cache.forEach((state) => {
@@ -3830,7 +3832,12 @@ const BotLifeState = {
             }
 
             const dueAt = nextResolveAt > 0 ? nextResolveAt : Number(state.updatedAt || timestamp);
-            summary.oldestAgeMs = Math.max(summary.oldestAgeMs, Math.max(0, timestamp - dueAt));
+            const ageMs = Math.max(0, timestamp - dueAt);
+            if (ageMs > summary.oldestAgeMs || !summary.oldest) {
+                summary.oldestAgeMs = ageMs;
+                summary.oldest = { characterId: state.characterId, name: state.name, activity: state.activity,
+                    dueAt, lastResolvedAt: Number(state.timing?.lastResolvedAt || 0) };
+            }
         });
 
         return summary;

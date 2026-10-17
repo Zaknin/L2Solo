@@ -2919,6 +2919,19 @@ class ColdSimulationCoordinator {
         return { stopped: true, drained, queue };
     }
 
+    // Why a due bot has not stepped, from what this thread owns: its lifecycle
+    // command still runs, a hot handoff fences it, or the worker has not
+    // claimed it; the heartbeat says whether the worker's slots are full.
+    overdueReason(characterId) {
+        if (!this.worker || !this.ready) return 'worker_not_ready';
+        if (this.commandInflight.has(characterId)) return 'command_inflight';
+        if (this.fencedBots.has(characterId)) return 'hot_handoff_fenced';
+        const beat = this.lastWorkerSnapshot || {};
+        const occupied = Number(beat.claiming || 0) + Number(beat.inFlight || 0) + Number(beat.commanding || 0);
+        const max = Number(this.workerMaxInFlight || 0);
+        return `${max > 0 && occupied >= max ? 'worker_full' : 'unclaimed'}:${occupied}/${max || '-'}`;
+    }
+
     snapshot() {
         return {
             ...(Config.developerDiagnostics ? this.counters : { diagnosticsEnabled: false }),
