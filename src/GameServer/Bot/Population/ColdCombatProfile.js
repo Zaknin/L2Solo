@@ -1152,8 +1152,16 @@ function gainFor(entry, key, compute) {
     let effect;
     try { effect = compute(); } finally { buildSite = outerSite; }
     const zero = Object.is(effect.attack, 0) && Object.is(effect.defence, 0);
+    // A limit miss is a computed gain the caller uses, only not kept: the
+    // limits bound the store, they cut no candidate. combat_profile:gain_limit
+    // names the full part: the shared candidate index, the entry or its
+    // nonzero gains.
     if (id === undefined || entry.size >= ENTRY_LIMIT || (!zero && entry.gainSize >= NONZERO_LIMIT)) {
-        PopulationConfig.developerDiagnostics && (stats.limitMisses += 1);
+        if (PopulationConfig.developerDiagnostics) {
+            stats.limitMisses += 1;
+            Diagnostics.count('combat_profile', 'gain_limit',
+                id === undefined ? 'index' : entry.size >= ENTRY_LIMIT ? 'entries' : 'nonzero');
+        }
         return effect;
     }
     const idCapacity = entry.size === entry.ids.length ? Math.min(ENTRY_LIMIT, entry.ids.length * 2) : entry.ids.length;

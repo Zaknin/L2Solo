@@ -82,18 +82,31 @@ function enchantCost(item, from, to, scroll, config) {
     const zero = coefficients[0].a / (1 - coefficients[0].b);
     return { count: coefficients[from].a + coefficients[from].b * zero, reach: 1, lossChance: 0 };
 }
-function stuckCost(state, item, ctx, before = null) {
+// The share of the attack rate left without the worn weapon (bare, or the
+// best spare worn instead) is a gain of the build like any candidate: kept
+// per build in the gain store (gainFor), one entry for the bare remainder and
+// one per spare (the spares are not worn, so not in the build key: their
+// template, enchant and slot are in the candidate key). min(1, max(r) / c) is
+// max(min(1, r / c)) exactly, so the stored shares give the same income.
+function stuckCost(state, item, ctx, build = null) {
     if (!item.equipped || !adapter(item).isWeapon()) return 0;
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const timestamp = ctx.timestamp ?? Date.now();
-    before = before || Profile.powerNumbers(Profile.buildGainsFor(state, timestamp));
-    let remainder = changedInventory(state,item,{equipped:false});
-    const spares = instances(state).filter(other => other.id !== item.id && adapter(other).isWeapon());
+    build ||= Profile.buildGainsFor(state, timestamp);
     const rate = profile => profile.pAtk * profile.atkSpd + profile.mAtk * profile.castSpd;
-    let remainingRate = rate(Profile.powerFor(remainder, timestamp));
-    for (const spare of spares) remainingRate = Math.max(remainingRate,
-        rate(Profile.powerFor(changedInventory(remainder,spare,{equipped:true}), timestamp)));
-    const remainingIncome = ctx.hunt.perHour * Math.min(1, remainingRate / Math.max(1,rate(before)));
+    const key = `stuck:${item.selfId}:${item.slot}:${positive(item.enchant)}`;
+    let remainder = null;
+    const bare = () => remainder ||= changedInventory(state, item, { equipped: false });
+    const share = (candidate, after) => Profile.gainFor(build, candidate, () => ({
+        attack: Math.min(1, rate(Profile.powerFor(after(), timestamp, Profile.buildOptions(build, timestamp)))
+            / Math.max(1, rate(Profile.powerNumbers(build)))), defence: 0 })).attack;
+    let kept = share(key, bare);
+    for (const spare of instances(state)) {
+        if (spare.id === item.id || !adapter(spare).isWeapon()) continue;
+        kept = Math.max(kept, share(`${key}:${spare.selfId}.${positive(spare.enchant)}.${Number(spare.slot) || 0}`,
+            () => changedInventory(bare(), spare, { equipped: true })));
+    }
+    const remainingIncome = ctx.hunt.perHour * kept;
     const lostPerHour = Math.max(0,ctx.hunt.perHour - remainingIncome);
     if (!lostPerHour) return 0;
     const replacement = positive(ctx.price(item.selfId));
@@ -120,7 +133,7 @@ function opportunities(state, ctx) {
     for (const { item, a, category } of targets(state)) {
         // What losing this weapon costs: once per item, only where a try can fail.
         let stuck = null;
-        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, Profile.powerNumbers(build)));
+        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, build));
         const equipped = item.equipped;
         const buyer = !equipped && ctx.board?.first(item.selfId, 3, { excludeOwner: state.characterId });
         if (!equipped && !buyer && !ctx.board?.first(item.selfId, 1, { excludeOwner: state.characterId })) continue;
