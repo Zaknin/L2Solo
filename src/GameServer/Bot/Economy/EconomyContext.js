@@ -1305,9 +1305,12 @@ function buildForState(state, deps) {
     // The step's second request against the build its first one left: both
     // requests of a worker step (pre-round lifecycle, post-round result) carry
     // the step's one timestamp, and every kept request stamps it (askedAt).
-    // The prize of a post-round hold: refused = a second build in the step.
+    // The prize of a post-round hold: refused = any build of the second
+    // request; second_build = one after the first request built (2 -> 1).
     const secondAsk = diagnostic && !isMainThread && held?.askedAt === timestamp;
+    const secondBuild = secondAsk && held.plan.timestamp === timestamp;
     if (secondAsk) Hold.count('economy', holdWhy?.length === 0 ? 'post_round:held' : 'post_round:refused');
+    if (secondBuild && holdWhy?.length !== 0) Hold.count('economy', 'post_round:second_build');
     if (holdWhy?.length === 0) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
@@ -1631,7 +1634,7 @@ function buildForState(state, deps) {
             Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
         }
         // Sampled owners: what the step's second build changed against the first.
-        if (secondAsk && gateDiff && Diagnostics.enabled(state.characterId)) Hold.count('economy', `post_round:${gateDiff}`);
+        if (secondBuild && gateDiff && Diagnostics.enabled(state.characterId)) Hold.count('economy', `post_round:${gateDiff}`);
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
     const mismatch = gateDiff !== null && Diagnostics.isPlanMismatch({ owner: state.characterId, phase: 'wish_context', gate, gateDiff });
