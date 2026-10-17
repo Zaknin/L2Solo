@@ -2131,7 +2131,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
     const spotValue = options.spotValue
         || (SpotEconomics ||= require('../Economy/SpotEconomics')).create(state, { timestamp, occupancy: options.occupancy });
-    const trips = options.trips || new Map();
+    const trips = options.trips || new Map(), occupied = options.occupied || new Map();
     const current = String(state.stats?.travel?.spotId || state.spotId || null);
     const bestForWish = options.bestForWish;
     const spoilOnly = bestForWish?.spoilOnly, progressionRequired = bestForWish?.progressionRequired;
@@ -2253,11 +2253,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
                     if (tally && !partyNeeded++ && !tally.has('party_needed')) tally.set('party_needed', 0);
                     if (readyOnly) continue;
                     reason = 'party_needed';
-                } else {
-                    const target = sourceTargetOf(entry);
-                    target.capacity = LevelingRoutes.capacityForSpot(spot);
-                    if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
-                }
+                } else if (sourceSpotOccupied(spot, state, options.occupancy, occupied)) reason = 'occupied';
                 if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
             }
             let row = null, perHour = 0, trip = null, town = null;
@@ -2306,6 +2302,19 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         for (let step = Math.ceil(processed / SOURCE_FACT_STEP); step < Math.ceil(plannedTurns / SOURCE_FACT_STEP); step++) yield 'source';
         return facts;
     }
+}
+
+// A non-raid record's occupied verdict reads only its spot, the bot and the
+// occupancy: one answer per spot object in verdicts (the caller's map lives
+// one build, as the route reader's verdicts do).
+function sourceSpotOccupied(spot, state, occupancy, verdicts) {
+    let full = verdicts.get(spot);
+    if (full === undefined) {
+        full = !sourceHasCapacity({ spotId: spot.id, capacity: LevelingRoutes.capacityForSpot(spot), raidBoss: spot.raidBoss === true },
+            state, { occupancy });
+        verdicts.set(spot, full);
+    }
+    return full;
 }
 
 // The first field in which the bounded walk's answer differs from the full

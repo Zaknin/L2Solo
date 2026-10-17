@@ -377,7 +377,8 @@ function buildProjection(state, ctx, deps) {
     const Occupation = invoke('GameServer/Bot/Population/ColdOccupationSources');
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);
-    const sourceTrips = new Map(), farmFacts = new Map();
+    // The occupied verdict per spot, beside the route reader's verdicts.
+    const sourceTrips = new Map(), sourceOccupied = new Map(), farmFacts = new Map();
     const routeAllowed = Planner.sourceRouteReader(state, { timestamp, occupancy: deps.occupancy, matchupProfiles: deps.soloProfiles });
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
@@ -403,7 +404,7 @@ function buildProjection(state, ctx, deps) {
             // also counted as ready or by its reason (refusals only as counts).
             const diagnostic = Diagnostics.active(), reasons = diagnostic ? new Map() : null;
             const steps = Planner.sourceFacts(state, id, 1, { spots: deps.spots, spotValue, occupancy: deps.occupancy,
-                trips: sourceTrips, trip: deps.tripCost || ctx.trip || { details: () => ({ known: false }) }, spoiler, timestamp,
+                trips: sourceTrips, occupied: sourceOccupied, trip: deps.tripCost || ctx.trip || { details: () => ({ known: false }) }, spoiler, timestamp,
                 economicLower: progression.required || !!spoiler, readyOnly: true, counts: reasons, routeAllowed,
                 bestForWish: { spoilOnly, progressionRequired: progression.required, hourAdena: ctx.hourAdena } });
             let step;
