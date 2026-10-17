@@ -136,4 +136,5 @@ async function run() {
     assert.equal(buyReview.withdrawals.length, 1, 'BUY review uses the same source admission');
     console.log('item source market admission: PASS');
 }
-run().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });
+run().then(async () => { await Database.close(); process.exit(0); })
+    .catch(async error => { console.error(error); await Database.close(); process.exit(1); });

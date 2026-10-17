@@ -6,6 +6,8 @@ const MAX_BYTES = 768;
 const MAX_SHOT_BYTES = 128;
 const { COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES } = require('./ColdEconomyDecision');
 const MAX_PLAN_PAYLOAD_BYTES = MAX_BYTES - COMMAND_HEADER_BYTES - 32 - 8;
+const BoardRules = require('../../AfkTrade/BoardRules');
+const MAX_BUYS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
 
 // Arrival and recovery are natural decision points; ordinary counts/XP/wallet
 // changes do not schedule main-thread economic work.
@@ -79,7 +81,7 @@ function* prepareNative(state, economy, options) {
     if (!options.showcaseOnly) {
         const Alternative = require('../Economy/BidPurchaseAlternative');
         const bidCtx = economy.trip?.details ? { ...ctx, travelDetails: economy.trip.details } : ctx;
-        for (const line of own.filter(row => row.storeType === 3 && row.count > 0 && row.pricing).slice(0, 5)) {
+        for (const line of own.filter(row => row.storeType === 3 && row.count > 0 && row.pricing).slice(0, MAX_BUYS)) {
             const ceiling = Math.min(Alternative.forLine(line, bidCtx), Alternative.cashCap(line, bidCtx));
             if (Number.isSafeInteger(ceiling) && ceiling >= 0 && ceiling < line.price)
                 limits.push([line.lineId, line.recordId, line.revision, line.count, line.price, ceiling]);
@@ -104,8 +106,8 @@ function* prepareNative(state, economy, options) {
         conditionalKept.delete(`${line.selfId}:${line.enchant || 0}`);
     const sale = Listing.evaluate(saleState, { ...options, economy, stockQuotes: true,
         slots: Listing.BOARD_SLOTS, kept, conditionalKept, stored: new Map() });
-    // A profitable surplus sale is a temporary meeting, not a replacement
-    // wish. Leave the selected purchase/focus intact for the next review.
+    // A profitable surplus sale uses a meeting or a backed shop in the town
+    // already reached. Leave the selected purchase/focus intact for review.
     const answer = canAct && !options.showcaseOnly ? Ready.sale(sale.answers, state) : null;
     if (answer) return { take: answer, sell: [], withdraw: [], travel: null, ...bidLimits };
     // Only native acceptance reserves a quote; rejection keeps the plan.
@@ -157,6 +159,13 @@ function* prepareNative(state, economy, options) {
         const lines = BuyAds.linesFor(buyState, goal, { ...options, economy,
             townFor: items => Town.buyAdTown(state, items, own),
             watchList: economy.watchList || [], money });
+        // The native activity selected the priority. A buy may replace a sale
+        // shop; ordinary surplus listings cannot evict a standing buy shop.
+        plan.buyShop = ['upgrade_gear', 'buy_craft_material'].includes(goal?.type) ? BoardRules.BUY
+            : goal?.type === 'sell_inventory' ? BoardRules.SELL : 0;
+        if (plan.buyShop === BoardRules.BUY && lines.length
+            || own.some(line => line.kind === 'shop' && line.storeType === BoardRules.BUY) && plan.buyShop !== BoardRules.SELL)
+            delete plan.shop;
         let batch;
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
@@ -205,7 +214,7 @@ function* prepareNative(state, economy, options) {
 // survivalCost) and executable purchase limits. Native publication reuses
 // these scalars, never another route or price calculation.
 function buyBatch(lines) {
-    const rows = lines.slice(0, 3);
+    const rows = lines.slice(0, MAX_BUYS);
     const buyAds = rows.map(row => row.intent ? require('../Economy/TradeIntent').encode(row.intent) : [row.selfId, row.count, row.price]);
     const buyKit = rows.map(row => Number(row.survivalCost) || 0);
     const buyCaps = rows.map(row => Number.isFinite(row.purchaseCap) ? Math.floor(row.purchaseCap) : null);

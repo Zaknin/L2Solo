@@ -47,6 +47,9 @@ const encoder = new TextEncoder(), decoder = new TextDecoder();
 const WORKSHOP = 16384;
 const SHOT = 32768;
 const FEASIBILITY = 65536;
+// Keep the original two watch-count bits and use two spare header bits for
+// the shop's three requests plus five meeting adverts.
+const watchCount = counts => ((counts >>> 6) & 3) | (((counts >>> 17) & 3) << 2);
 const URGENCY_STAGE = 1, URGENCY_SHOTS = 2, URGENCY_POTIONS = 3;
 const MAX_BYTES = 800, MAX_SHOT_BYTES = 128;
 const MAX_ADVISORY_BYTES = 4096;
@@ -71,7 +74,7 @@ class CompactDecision {
     }
     get activity() {
         const counts = this.counts;
-        let at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
+        let at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12
             + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0) + (counts & FEASIBILITY ? 8 : 0);
         if (counts & SHOT) at += 2 + new DataView(this.data).getUint16(at, true);
         if (at === this.data.byteLength) return null;
@@ -93,19 +96,19 @@ class CompactDecision {
     get inputHash() { return new DataView(this.data).getUint32(4, true); }
     get usefulness() { return new Float32Array(this.data, 28, (this.counts & 63) * 2); }
     get watch() {
-        const counts = this.counts, n = counts & 63, w = (counts >>> 6) & 3, view = new DataView(this.data);
+        const counts = this.counts, n = counts & 63, w = watchCount(counts), view = new DataView(this.data);
         return Array.from({ length: w }, (_, i) => { const at = 28 + n * 8 + i * 21;
             return [view.getUint32(at, true), view.getFloat64(at + 4, true), view.getFloat64(at + 12, true), view.getUint8(at + 20)]; });
     }
     get materials() {
-        const counts = this.counts, n = counts & 63, w = (counts >>> 6) & 3, m = (counts >>> 8) & 15, view = new DataView(this.data);
+        const counts = this.counts, n = counts & 63, w = watchCount(counts), m = (counts >>> 8) & 15, view = new DataView(this.data);
         return Array.from({ length: m }, (_, i) => { const at = 28 + n * 8 + w * 21 + i * 12;
             return [view.getUint32(at, true), view.getFloat64(at + 4, true)]; });
     }
     get wish() {
         const counts = this.counts;
         if (!(counts & 4096)) return null;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12;
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12;
         const view = new DataView(this.data);
         const kind = view.getUint8(at) & 63;
         if (kind === URGENCY_ONLY) return null;
@@ -114,13 +117,13 @@ class CompactDecision {
     get urgency() {
         const counts = this.counts;
         if (!(counts & 4096)) return 0;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12;
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12;
         return new DataView(this.data).getUint8(at) >>> 6;
     }
     get clan() {
         const counts = this.counts;
         if (!(counts & 8192)) return null;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12 + (counts & 4096 ? 17 : 0);
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12 + (counts & 4096 ? 17 : 0);
         const view = new DataView(this.data), itemId = view.getFloat64(at + 16, true);
         return { horizonHours: view.getFloat64(at, true), huntPerHour: view.getFloat64(at + 8, true),
             plan: itemId ? { itemId, valueHours: view.getFloat64(at + 24, true) } : null };
@@ -128,7 +131,7 @@ class CompactDecision {
     get workshop() {
         const counts = this.counts;
         if (!(counts & WORKSHOP) || this.workshopStale) return unknownWorkshop();
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12
             + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0);
         const view = new DataView(this.data);
         const incomePerHour = view.getFloat64(at + 16, true), cycleHours = view.getFloat64(at + 24, true);
@@ -138,7 +141,7 @@ class CompactDecision {
     get shot() {
         const counts = this.counts;
         if (!(counts & SHOT) || this.workshopStale || this.stale || this.held) return null;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12
             + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0) + (counts & FEASIBILITY ? 8 : 0);
         const bytes = new DataView(this.data).getUint16(at, true);
         return JSON.parse(decoder.decode(new Uint8Array(this.data, at + 2, bytes)));
@@ -146,7 +149,7 @@ class CompactDecision {
     get feasibility() {
         const counts = this.counts;
         if (!(counts & FEASIBILITY) || this.workshopStale || this.stale) return null;
-        const at = 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21 + ((counts >>> 8) & 15) * 12
+        const at = 28 + (counts & 63) * 8 + watchCount(counts) * 21 + ((counts >>> 8) & 15) * 12
             + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0) + (counts & WORKSHOP ? 32 : 0);
         const view = new DataView(this.data);
         return [view.getUint32(at, true), view.getUint16(at + 4, true), view.getUint16(at + 6, true)];
@@ -161,7 +164,7 @@ function compact(record) {
         return result;
     }
     const pairs = record.usefulness || [], watch = record.watch || [], materials = record.materials || [], wish = record.wish;
-    const w = Math.min(3, watch.length), m = Math.min(8, materials.length);
+    const w = Math.min(8, watch.length), m = Math.min(8, materials.length);
     const leaf = record.activity;
     const activity = leaf ? encoder.encode(JSON.stringify([leaf.activity, leaf.spotId, leaf.npcId, leaf.kind, leaf.rootKey,
         leaf.itemId, leaf.amount, leaf.price, leaf.recipeId, leaf.targetId, leaf.funding, leaf.items, leaf.improvement,
@@ -182,7 +185,7 @@ function compact(record) {
     const wireRoom = MAX_BYTES - 48 - encoder.encode(String(record.key || '')).length;
     const n = Math.min(40, Math.floor(pairs.length / 2), Math.max(0, Math.floor((wireRoom - fixed) / 8)));
     const data = new ArrayBuffer(fixed + n * 8), view = new DataView(data);
-    view.setUint32(0, n | (w << 6) | (m << 8) | (wish ? 4096 : 0) | (clan ? 8192 : 0) | (workshop ? WORKSHOP : 0) | (shot ? SHOT : 0) | (feasibility ? FEASIBILITY : 0), true);
+    view.setUint32(0, n | ((w & 3) << 6) | ((w >>> 2) << 17) | (m << 8) | (wish ? 4096 : 0) | (clan ? 8192 : 0) | (workshop ? WORKSHOP : 0) | (shot ? SHOT : 0) | (feasibility ? FEASIBILITY : 0), true);
     view.setUint32(4, record.inputHash >>> 0, true);
     new Float32Array(data, 28, n * 2).set(pairs.subarray ? pairs.subarray(0, n * 2) : pairs.slice(0, n * 2));
     let at = 28 + n * 8;
@@ -299,7 +302,7 @@ function capture(economy, state, seen = state) {
         // Upper two bits reuse the existing byte; amount and price remain exact.
         wish: wish ? [(kindCode(wish.object?.kind) & 63) | (urgency << 6),
             Number(wish.object?.amount || 0), Number(wish.price || 0)] : urgency ? [URGENCY_ONLY | (urgency << 6), 0, 0] : null,
-        watch: (economy?.watchList || []).slice(0, 3).map(row => [Number(row.itemId), Number(row.amount), Number(row.worth), kindCode(row.kind)]),
+        watch: (economy?.watchList || []).slice(0, 8).map(row => [Number(row.itemId), Number(row.amount), Number(row.worth), kindCode(row.kind)]),
         materials: [...missing].slice(0, 8), usefulness, inputHash: fnv1a32(economy?.inputKey || ''), clan,
         workshop: economy?.workshop || unknownWorkshop(), shot: economy?.shot || null,
         feasibility: economy?.workshop?.feasibility || economy?.feasibility || null
@@ -436,7 +439,7 @@ function sameEconomicOutput(before, after) {
     if (before.data.byteLength > MAX_BYTES || after.data.byteLength > MAX_BYTES) return null;
     if (before.data.byteLength !== after.data.byteLength || before.counts !== after.counts) return false;
     const counts = before.counts;
-    const fingerprint = counts & FEASIBILITY ? 28 + (counts & 63) * 8 + ((counts >>> 6) & 3) * 21
+    const fingerprint = counts & FEASIBILITY ? 28 + (counts & 63) * 8 + watchCount(counts) * 21
         + ((counts >>> 8) & 15) * 12 + (counts & 4096 ? 17 : 0) + (counts & 8192 ? 32 : 0)
         + (counts & WORKSHOP ? 32 : 0) : -1;
     const left = new Uint8Array(before.data), right = new Uint8Array(after.data);

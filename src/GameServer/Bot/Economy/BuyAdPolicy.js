@@ -2,6 +2,7 @@ const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const { isNativeSource } = require('./TradeIntent');
+const BoardRules = require('../../AfkTrade/BoardRules');
 const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
 function templateFor(selfId) {
@@ -28,7 +29,7 @@ function retainedLines(state, lines, owned, town) {
     let money = PurchaseFunding.budget(state);
     const result = [];
     for (const line of lines) {
-        const previous = owned.find(row => row.kind === 'buy_ad' && row.storeType === 3 && row.town === town
+        const previous = owned.find(row => ['buy_ad', 'shop'].includes(row.kind) && row.storeType === 3 && row.town === town
             && Number(row.selfId) === Number(line.selfId) && Number(row.enchant || 0) === Number(line.enchant || 0));
         const price = previous && (!Number.isFinite(line.purchaseCap) || Number(previous.price) <= line.purchaseCap)
             ? Number(previous.price) : Number(line.price);
@@ -122,12 +123,13 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
     const owned = options.board?.ownerLines?.(Number(state.characterId)) || [];
-    const candidates = goals.slice(0, 3);
+    const limit = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
+    const candidates = goals.slice(0, limit);
     const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
     let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));
     // Rejected lines can change the grade/town of a mixed order. Price the
     // final town too, before publication; this loop only removes candidates.
-    for (let pass = 0; pass <= 3; pass++) {
+    for (let pass = 0; pass <= limit; pass++) {
         const lines = [];
         for (const candidate of candidates) {
             const bid = bidFor({ ...state, adena: wallet }, candidate, { money: candidate.intent?.key ? Infinity : money, ...options, town });
