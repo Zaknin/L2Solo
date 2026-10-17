@@ -116,6 +116,10 @@ async function fillUnderLease({ label, storeType, lines, ownerItems, counterpart
     assert.strictEqual(Number(after[1864] || 0), 2, `${label}: the hunt's stems stay`);
     const cached = LifeState.cachedState(owner.id);
     assert.strictEqual(cached.adena, after[57], `${label}: the bot goes on with the merged wallet`);
+    // The merge moved the row's updatedAt; a cache behind it would make every
+    // later command of this bot stale against the row (L127).
+    const [lifeRow] = await Database.execute(['SELECT updatedAt FROM bot_life_state WHERE characterId = ?', [owner.id]]);
+    assert.strictEqual(cached.updatedAt, Number(lifeRow.updatedAt), `${label}: the cached checkpoint follows the merged row`);
     assert.deepStrictEqual(Database.boardSettlementOwners(), [], `${label}: nothing waits after the commit`);
 }
 

@@ -103,7 +103,11 @@ function withPersistedStats(state, result) {
         if (!stats || typeof stats !== 'object') return state;
         // The row's revisions (Database.stateRevisions) ride on the state, so
         // readers of the cached state ask whether the bag or the kit moved.
-        const persisted = { ...state, ...Database.stateRevisions(result.row), name: result.row.characterName || state.name, stats };
+        // Its updatedAt too: a settlement merged inside the commit moves it past
+        // the worker's clock, and a command checkpoint built from the cache
+        // must match the row (L127: stale_command loop).
+        const persisted = { ...state, ...Database.stateRevisions(result.row), name: result.row.characterName || state.name, stats,
+            updatedAt: Number(result.row.updatedAt) || Number(state.updatedAt || 0) };
         // The commit merged what the board held for the bot (deals, closed
         // records): the stored bag is the one the bot goes on with.
         if (!result.settled && !result.pkDrops?.length) return persisted;
