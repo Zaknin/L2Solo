@@ -927,6 +927,12 @@ function save(row, options = {}) {
         }
         Metrics.recordDbFlush();
         row.statsJson = result.statsJson;
+        // The UPSERT preserves native ownership columns. A retained session
+        // may carry an older revision, so publish the same queued ROW's actual
+        // ownership rather than rewinding cache authority after a valid save.
+        for (const key of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
+            if (Object.prototype.hasOwnProperty.call(result, key)) row[key] = result[key];
+        }
         return enqueueEquipmentGoalAdvance(row.equipmentAdvance).then(() => result);
     });
 }

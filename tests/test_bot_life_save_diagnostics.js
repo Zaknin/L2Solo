@@ -161,6 +161,10 @@ async function rejection(work, expected) {
     assert.equal(logs[1].phase, 'write_admission');
     assert.equal(logs[1].code, 'BOT_WORKER_COMMAND_ADMISSION_REFUSED');
     assert.equal(logs[1].sqliteCode, null);
+    assert.equal(logs[1].admissionStage, 'native_checkpoint');
+    assert.equal(logs[1].characterId, id);
+    assert.equal(logs[1].commandId, 'save-diagnostic');
+    assert.deepEqual(logs[1].checkpointDifferences, { simulationRevision: { expected: 0, current: 1 } });
     assert.deepEqual(await facts(), revised, 'a native stale checkpoint cannot rewrite the state');
     const captureFailure = Error('SECRET_CAPTURE_MESSAGE');
     await rejection(() => Database.saveBotLifeState(statement, new Proxy({}, {
@@ -183,6 +187,30 @@ async function rejection(work, expected) {
         assert(log.frames.every(frame => /^\s+at /.test(frame)));
     }
     assert(!JSON.stringify(logs).includes('SECRET_'), 'SQL, parameters and arbitrary error messages stay private');
+    const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+    Config.developerDiagnostics = false;
+    const beforePending = Database.stats().pending;
+    await rejection(() => Database.saveBotLifeState(statement, { beforeWrite }), () => refusedError);
+    assert.equal(logs.length, 5, 'checkpoint facts remain available without broad developer diagnostics');
+    assert.equal(logs[4].characterId, id);
+    assert.deepEqual(logs[4].checkpointDifferences, logs[1].checkpointDifferences);
+    assert.equal(logs[4].frames, undefined);
+    assert.equal(Database.stats().pending, beforePending);
+    const workerRefusal = new WorkerCommandAdmissionRefusal('stale_command');
+    let retired = false;
+    const guarded = Checkpoint.create(id, { workerAdmission: {
+        characterId: id, commandId: 'retired-worker-command', commandCheckpoint: Protocol.commandCheckpoint(revised[0]),
+        check() { if (retired) throw workerRefusal; return null; }
+    } });
+    Checkpoint.bindRow(guarded, statement, id);
+    retired = true;
+    await rejection(() => Database.saveBotLifeState(statement, { beforeWrite: guarded }), () => workerRefusal);
+    assert.equal(logs[5].admissionStage, 'worker_admission');
+    assert.equal(logs[5].commandId, 'retired-worker-command');
+    assert.equal(logs[5].checkpointDifferences, null, 'an unavailable native comparison is not reported as changed values');
+    assert.equal(Checkpoint.refusalDiagnostic(forged), null);
+    assert(!JSON.stringify(logs).includes('SECRET_'));
+    Config.developerDiagnostics = true;
     console.log('Native save diagnostics: SQL, stale admission, capture, throwing logger/getter and exact rejection PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     console.warn = originalWarn; Checkpoint.check = originalCheck;

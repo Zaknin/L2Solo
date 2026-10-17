@@ -439,6 +439,10 @@ const BotAI = {
             invoke('GameServer/ClanHall/BotVisit').finish(session, bot, Date.now() + 300000);
         }
 
+        // Accepted board custody owns travel and waiting before ordinary AI;
+        // combat and death still release that hold and retain their priority.
+        if (invoke('GameServer/Bot/AI/BotTownTravel').holdMeeting(session, bot, botDead || defendingPvp)) return;
+
         if (!botDead && !defendingPvp
             && invoke('GameServer/Bot/AI/ClanAllianceSupportAI').tick(session, bot, invoke(path.actor))) return;
 
