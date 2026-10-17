@@ -276,11 +276,11 @@ try {
     Events.reconcile(state, after, deps.timestamp);
     assert.equal(after.stats.decisionSeq, state.stats.decisionSeq, 'ordinary round keeps the decision');
     assert.equal(after.stats.activityLeaf, state.stats.activityLeaf);
-    const nativeBuildInput = Profile.buildInputKey;
+    const nativeKitEvents = Profile.kitEvents;
     let previousBuildReads = 0;
-    Profile.buildInputKey = (subject, timestamp) => {
+    Profile.kitEvents = subject => {
         if (subject === state) previousBuildReads++;
-        return nativeBuildInput(subject, timestamp);
+        return nativeKitEvents(subject);
     };
     try {
         Sections.events(state, after, deps.timestamp);
@@ -290,7 +290,7 @@ try {
         Sections.events(state, after, deps.timestamp);
         assert.equal(previousBuildReads, 1, 'an unknown previous build still gets its conservative native fact');
         state.stats.wishSections = saved;
-    } finally { Profile.buildInputKey = nativeBuildInput; }
+    } finally { Profile.kitEvents = nativeKitEvents; }
     const levelled = { ...state, level: state.level + 1, stats: { ...state.stats } };
     assert(Events.reconcile(state, levelled, deps.timestamp).includes('build'));
     assert.equal(levelled.stats.decisionSeq, state.stats.decisionSeq + 1);
@@ -317,16 +317,13 @@ try {
     assert.notEqual(Sections.capability(skillAuthority, deps.timestamp), Sections.capability(state, deps.timestamp));
     const buffed = { ...state, stats: { ...state.stats, coldCombat: { ...state.stats.coldCombat,
         effects: [{ id: 1068, key: 'might', stats: { pAtkMul: 1.1 }, expiresAt: deps.timestamp + 10 }] } } };
-    buffed.stats.wishSections = { ...state.stats.wishSections, build: Sections.capability(buffed, deps.timestamp) };
+    buffed.stats.wishSections = { ...state.stats.wishSections, build: Sections.semanticFacts(buffed).build };
     const expired = structuredClone(buffed);
-    assert.equal(typeof buffed.stats.wishSections.kit, 'number', 'a build baseline records its kit');
-    const expiry = Events.reconcile(buffed, expired, deps.timestamp + 11);
-    assert.deepEqual([...expiry].sort(), ['benefits', 'combat', 'sources'],
-        'an expired buff is compared with the accepted build and raises the fight sections, not a new build');
-    const noKit = structuredClone(buffed);
-    delete noKit.stats.wishSections.kit;
-    assert(Events.reconcile(noKit, structuredClone(buffed), deps.timestamp + 11).includes('build'),
-        'a baseline saved before the kit names a build event, as before');
+    assert.equal(Sections.semanticFacts(buffed).build, Sections.semanticFacts(state).build,
+        'the build fact is the kit: an active effect is no economy input');
+    assert.deepEqual(Events.reconcile(buffed, expired, deps.timestamp + 11), [],
+        'an expired buff raises no economy event');
+    assert.equal(expired.stats.decisionSeq, buffed.stats.decisionSeq, 'a buff expiry keeps the decision');
     const deceased = { ...state, activity: 'dead', stats: { ...state.stats } };
     assert(Events.reconcile(state, deceased, deps.timestamp).includes('combat'));
     assert.equal(deceased.stats.decisionSeq, state.stats.decisionSeq + 1, 'simultaneous death changes coalesce');

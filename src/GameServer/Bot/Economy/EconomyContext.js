@@ -151,7 +151,7 @@ function producerScopeHolds(proof, deps) {
     return validProducerScope(proof.producerScope) && validProducerScope(deps.producerScope)
         && proof.producerScope[0] === deps.producerScope[0] && proof.producerScope[1] === deps.producerScope[1];
 }
-// facts: semanticFacts of the same state and timestamp when the caller already has them.
+// facts: semanticFacts of the same state when the caller already has them.
 // A party as a key input: none is null whatever its representation (an
 // empty party record, a null id); a member is its party with the id and role.
 function partyInput(state) {
@@ -171,7 +171,7 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
 }
 function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
     const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
-    facts ||= Sections.semanticFacts(current, timestamp);
+    facts ||= Sections.semanticFacts(current);
     // Position and scroll quantity drift inside one route. Native route and
     // physical-fee checks still run before the held action is permitted.
     delete trip.loc; delete trip.inventory;
@@ -445,7 +445,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const current = fieldActivity(state, options.activity, options.leaf);
     // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
     const facts = Diagnostics.active() ? [] : null;
-    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current, timestamp), current, false, facts);
+    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current), current, false, facts);
     if (changed.length) {
         // Hold place economy_occupation (shadow): an occupation move alone that
         // the held leaf ordered (Sections.occupationPlanned) would not refuse.
@@ -1592,7 +1592,7 @@ function buildForState(state, deps) {
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
     // One read of the build's semantic facts: its observation baseline and its event key.
-    const facts = Sections.semanticFacts(state, timestamp);
+    const facts = Sections.semanticFacts(state);
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
         { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, facts);
     // The trigger is not the calculation basis. Only the proven money path
