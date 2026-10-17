@@ -18,6 +18,8 @@ const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const { BoardIndex } = invoke('GameServer/AfkTrade/BoardIndex');
 const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const InventoryLimits = invoke('GameServer/Inventory/InventoryLimits');
+const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 
 const T = 1e12, MINUTE = 60 * 1000;
 const deps = { timestamp: T, knowledgeEnabled: true, board: new BoardIndex(),
@@ -81,13 +83,20 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
     assert.deepEqual(verdict({ ...arrived, activity: 'resting', spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
         'resting elsewhere (a flight, a pull) is an occupation event');
 }
-// 3. A bag row below a crossing: loot inside its band keeps the build; a new
-// row takes a bag slot (the bag safety is exact: a crossing, as before).
+// 3. A bag row below a crossing: a new row below the slot limit and loot
+// inside its band keep the build; the row that fills the bag refuses (the bag
+// safety is one crossing, the bag full).
 {
+    // A quest item (no sale price): no liquidation row, only its slot.
+    const row = amount => ({ 687: { selfId: 687, amount, stackable: false } });
+    assert.deepEqual(verdict(after(state, { inventory: { ...bag(), ...row(1) } }), held), { kept: true, reasons: ['held'] },
+        'a new bag row below the slot limit keeps the held build');
     assert.deepEqual(verdict(after(state, { inventory: bag(1) }), held), { kept: true, reasons: ['held'] },
-        'a bag row below its crossing keeps the held build');
-    assert.deepEqual(verdict(after(state, { inventory: bag(0, [{ id: 4, selfId: 1870, amount: 1, equipped: 0, slot: 0 }]) }), held),
-        { kept: false, reasons: ['bag'] }, 'a new bag row refuses by its slot, not by an event key');
+        'loot inside its band keeps the held build');
+    const free = InventoryLimits.forState(state) - Floor.stateInventory(state, Data.items).slots;
+    assert(free > 1, 'fixture: free slots');
+    assert.deepEqual(verdict(after(state, { inventory: { ...bag(), ...row(free) } }), held), { kept: false, reasons: ['bag'] },
+        'the row that fills the bag refuses');
 }
 // 4. Real crossings still refuse: death, a kit change, a level.
 {

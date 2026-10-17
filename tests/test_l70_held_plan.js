@@ -858,7 +858,7 @@ try {
         const nativePenalty = Floor.weightPenalty;
         Floor.weightPenalty = (...args) => nativePenalty(...args) + 1;
         try { Economy.forState(ownResult(held.state), at(T + 1000)); } finally { Floor.weightPenalty = nativePenalty; }
-        assert(builds > before, 'a weight tier change is an event');
+        assert.equal(builds, before, 'the weight tier is no economy input: only a full bag is the bag event');
         const poor = decided(93004, 1e6);
         before = builds;
         Economy.forState({ ...ownResult(poor.state), adena: low - 1 }, at(T + 1000));

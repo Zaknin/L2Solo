@@ -245,8 +245,9 @@ restoreScope();
             { rememberContext: false });
         if (diagnostic) {
             assert.deepEqual(verdicts, [['hold:economy:unproved'], ['hold:economy:held'], ['hold:economy:held'], ['hold:economy:held'],
-                ['hold:economy:event_key'], ['hold:economy:check_failed'], ['hold:economy:quantity'], ['hold:economy:bag']],
-                'a bag loss below the decision count is a quantity event; a new target stack takes a bag slot');
+                ['hold:economy:event_key'], ['hold:economy:check_failed'], ['hold:economy:quantity'], ['hold:economy:held']],
+                'a bag loss below the decision count is a quantity event; a new target stack below the slot limit holds '
+                + '(gear progression reserves it: no free stock moved; its equip is the kit event)');
             const complete = summaries.find(row => row.gate === 'check_failed' && row.actual === 2);
             assert.deepEqual([complete.item, complete.requested, complete.before, complete.owned, complete.actual, complete.remaining],
                 [itemId, 2, 3, 3, 2, 0]);
@@ -257,10 +258,10 @@ restoreScope();
         const present = { ...native, inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } };
         const held = request(present);
         request({ ...native, stats: { ...native.stats, ...held.statsPacket } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:bag'], 'a claimed target stack that leaves the bag frees its slot');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:held'], 'a claimed target stack (never free stock) that leaves the bag holds');
         targetClaimed = false;
         // A funding hunt's drops are not its own progress: they are a wished
-        // material reaching its count. A new target stack takes a bag slot.
+        // material reaching its count.
         Economy.reset(); funding = true; targetAmount = 2;
         const fundingHeld = request(native);
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 } },
@@ -268,7 +269,7 @@ restoreScope();
         if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:quantity'], 'a funding hunt has no own item: its material rows hold exactly');
         request({ ...native, stats: { ...native.stats, ...fundingHeld.statsPacket }, acceptedIncoming: { [itemId]: 10 },
             inventory: { ...native.inventory, [targetId]: { selfId: targetId, amount: 1 } } }, { rememberContext: false });
-        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:bag'], 'a new target stack takes a bag slot');
+        if (diagnostic) assert.deepEqual(verdicts.at(-1), ['hold:economy:quantity'], 'a funding hunt\'s moved material rows stay a quantity event beside a new target stack');
         funding = false; targetAmount = 1;
         // A material hunt from none: its first drop is a new bag row of its
         // own item, its progress, not an input event.

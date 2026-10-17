@@ -181,8 +181,8 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
     delete trip.loc; delete trip.inventory; delete trip.currentRegion;
     if (trip.stats.travel) delete trip.stats.travel.to;
     // Bag rows are no key part: a row the build read is held by its own proof
-    // rows (bands, quantity, liquidation), the bag's slots and weight tier by
-    // the bag safety, the equipped kit by the build fact. Only the physical
+    // rows (bands, quantity, liquidation), a full bag by the bag safety, the
+    // equipped kit by the build fact. Only the physical
     // owners stay: a card never authorizes another object of the same item.
     // The leaf's own item is its progress: its new objects are no event.
     const own = ColdEconomyDecision.ownItem(leaf), instances = [];
@@ -389,7 +389,7 @@ function captureEventProof(state, deps = {}, options = {}) {
     if (missing) return null;
     const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
     const actual = { ...state, stats: { ...state.stats, ...plan.statsPacket } };
-    return Object.freeze({ version: 1, owner: Number(state.characterId), at: baseline.at,
+    return Object.freeze({ version: 2, owner: Number(state.characterId), at: baseline.at,
         generation: RecomputeGeneration.current(),
         decision: Object.freeze([Number(plan.statsPacket.decisionSeq || 0),
             Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
@@ -398,7 +398,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
-        bands: plan.quantityBands || [], safety: eventBagSafety(plan.bagSafety, state, leaf), hourAdena: plan.hourAdena,
+        bands: plan.quantityBands || [], safety: [plan.bagFull], hourAdena: plan.hourAdena,
         market: options.reads, spots: options.spots,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
@@ -415,7 +415,7 @@ function softSourcesHold(proof, deps) {
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const refuse = (reason, names) => ({ valid: false, reason,
         touchedSections: names ? Sections.sectionMask(names) : 0 });
-    if (!proof || proof.version !== 1 || proof.owner !== Number(state.characterId)
+    if (!proof || proof.version !== 2 || proof.owner !== Number(state.characterId)
         || !Array.isArray(proof.decision) || proof.decision.length !== 3
         || !proof.decision.slice(0, 2).every(value => Number.isSafeInteger(value) && value >= 0)
         || proof.decision[2] !== null && typeof proof.decision[2] !== 'string'
@@ -474,9 +474,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
                 : reason === 'money' ? ['money'] : ['sources']);
     }
     if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
-    const safety = eventBagSafety(bagSafety(state, timestamp), state, options.leaf);
-    if (!Array.isArray(proof.safety) || proof.safety.length !== safety.length
-        || safety.some((value, at) => value !== proof.safety[at]))
+    if (!Array.isArray(proof.safety) || proof.safety.length !== 1 || proof.safety[0] !== bagFull(state))
         return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
@@ -556,7 +554,7 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
     return verdict.valid;
 }
 function restartEventProof(proof, accepted) {
-    if (proof?.version !== 1 || proof.restartable !== true || !accepted?.card
+    if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
         || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity', 'hard',
             'quantities', 'liquidation', 'producerScope', 'stockRoots', 'bands', 'safety', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
         || !validProducerScope(proof.producerScope)
@@ -611,14 +609,14 @@ function restoreEventProof(prefix, accepted) {
         if (!quantities || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
-        return Object.freeze({ version: 1, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
+        return Object.freeze({ version: 2, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
             hard, quantities, liquidation, stockRoots, bands, safety, hourAdena, producerScope });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
-    if (!proof || proof.version !== 1 || !proof.market || !proof.spots || !validProducerScope(proof.producerScope)
+    if (!proof || proof.version !== 2 || !proof.market || !proof.spots || !validProducerScope(proof.producerScope)
         || (proof.activity === null ? proof.decision?.[1] !== 0 : typeof proof.activity !== 'string')) return null;
     try {
         const market = [...proof.market], spots = [...proof.spots];
@@ -767,19 +765,12 @@ function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBa
         && Math.abs(value - baseline.bagValue)
             <= positive(hourAdena) * positive(baseline.incomeError);
 }
-function bagSafety(state, timestamp) {
-    const bag = Floor.stateInventory(state, DataCache.items);
-    const profile = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, timestamp);
-    return [bag.slots, Floor.weightPenalty(bag.load, profile.maxLoad), profile.maxLoad];
-}
-// The event proof's bag safety: the held leaf's own item stack is its
-// progress, not a slot input (its first unit is no event) while the bag is
-// below its limit: a full bag is one. Its weight stays in the load: a weight
-// tier crossing still is one. Capture and verdict only.
-function eventBagSafety(safety, state, leaf) {
-    const own = ColdEconomyDecision.ownItem(leaf), row = own === null ? null : state.inventory?.[own];
-    if (!row || !Array.isArray(safety) || safety[0] >= InventoryLimits.forState(state)) return safety;
-    return [safety[0] - Floor.stateInventory({ inventory: { [own]: row } }, DataCache.items).slots, safety[1], safety[2]];
+// The event proof's bag safety: one crossing, the bag full (its slot limit;
+// the full-bag sale itself is SurvivalFloor's, read every step). The slot
+// count, weight tier and load drift with every loot row: the build reads
+// slots only as free hours. Capture and verdict only.
+function bagFull(state) {
+    return Number(Floor.stateInventory(state, DataCache.items).slots >= InventoryLimits.forState(state));
 }
 // Each distinct token once, in first-seen order, and per [id, token] pair
 // the slot of its token in that list (HeldReads).
@@ -1670,7 +1661,7 @@ function buildForState(state, deps) {
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    plan.bagSafety = bagSafety(state, timestamp);
+    plan.bagFull = bagFull(state);
     // Source memo belongs only to the bounded cache owner. A planning view
     // or a group closure must never retain a second copy outside that cap.
     const retainedSourceMemo = projection.sourceSections;
