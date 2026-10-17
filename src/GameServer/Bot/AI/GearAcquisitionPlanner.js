@@ -2098,17 +2098,27 @@ function sourceRouteReader(state, options = {}) {
     const Spots = invoke('GameServer/Bot/AI/SpotService');
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
+    const level = Number(state.level || 1);
     let profiles = null;
+    // The first clause that refuses the spot, cheap ones first: the matchup
+    // verdict (profiles, NPC verdicts) is the costly one.
+    const refusal = spot => {
+        if (spot.raidBoss === true) return 'raid';
+        if (excluded.has(String(spot.id))) return 'excluded';
+        const soloOptions = { timestamp, occupancy: options.occupancy,
+            mode: 'solo', capacityStates: [state] };
+        if (!Spots.isSuitable(spot, level, soloOptions)
+            && !(economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= level - 15)) return 'level';
+        if (!Profiles.hasCapacityForStates(spot, [state], options.occupancy)) return 'capacity';
+        profiles ||= options.matchupProfiles || BotTargetMatchup.stateProfiles(state, soloOptions);
+        if (!LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })) return 'matchup';
+        return null;
+    };
     return spot => {
         if (!allowed.has(spot)) {
-            const soloOptions = { timestamp, occupancy: options.occupancy,
-                mode: 'solo', capacityStates: [state] };
-            profiles ||= options.matchupProfiles || BotTargetMatchup.stateProfiles(state, soloOptions);
-            allowed.set(spot, spot.raidBoss !== true && !excluded.has(String(spot.id))
-                && LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })
-                && (Spots.isSuitable(spot, Number(state.level || 1), soloOptions)
-                    || economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= Number(state.level || 1) - 15)
-                && Profiles.hasCapacityForStates(spot, [state], options.occupancy));
+            const refused = refusal(spot);
+            if (refused && Diagnostics.active()) Diagnostics.count('source_route', 'refused', refused);
+            allowed.set(spot, !refused);
         }
         return allowed.get(spot);
     };
