@@ -83,7 +83,7 @@ async function resolveClan(clan) {
     let buyer = null;
     for (const candidate of candidates) {
         const state = await stateFor(candidate.characterId);
-        if (!state || state.phase !== 'cold' || String(state.partyId || '') !== '') continue;
+        if (!state || state.phase !== 'cold' || String(state.party?.partyId || '') !== '') continue;
         const nextOffer = playerControlled ? ClanOrderService.memberOffer(state, itemId, Math.min(maxUnitPrice, remainingBudget))
             : MarketOpportunity.bestOffer(itemId, { buyerCharacterId: state.characterId,
                 budget: Math.min(Number(goal.plan.maxPrice) || Infinity, PurchaseFunding.spendable(state, 0, { free: true }) + clanBudget) });
