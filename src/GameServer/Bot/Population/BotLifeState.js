@@ -3805,9 +3805,14 @@ const BotLifeState = {
             oldest: null
         };
 
+        const noteOldest = (state, dueAt, ageMs, owner) => {
+            if (ageMs <= summary.oldestAgeMs && summary.oldest) return;
+            summary.oldestAgeMs = Math.max(0, ageMs);
+            summary.oldest = { characterId: state.characterId, name: state.name, activity: state.activity,
+                dueAt, lastResolvedAt: Number(state.timing?.lastResolvedAt || 0), owner };
+        };
         cache.forEach((state) => {
             if (state.phase !== 'cold'
-                || (state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main')
                 || state.activity === 'pk_hunting'
                 || state.partyId
                 || state.party?.partyId
@@ -3818,6 +3823,14 @@ const BotLifeState = {
             // resolve deadline is not a task waiting in the worker's heap.
             if (state.stats?.tradeMeeting
                 && require('./ColdSimulationKernel').lifecycleKind(state) === 'event_driven') return;
+            const owner = String(state.simulation?.ownerId || 'legacy_main');
+            if (owner !== 'legacy_main') {
+                // Claimed: its turn runs in the worker, not a due bot. A lease
+                // past its end and still held is a stall: name it.
+                const leaseUntil = Number(state.simulation?.leaseUntil || 0);
+                if (leaseUntil > 0 && timestamp > leaseUntil) noteOldest(state, leaseUntil, timestamp - leaseUntil, owner);
+                return;
+            }
 
             const nextResolveAt = Number(state.timing?.nextResolveAt || 0);
             if (nextResolveAt > timestamp && !hasStaleRateModelPlan(state)) return;
@@ -3832,12 +3845,7 @@ const BotLifeState = {
             }
 
             const dueAt = nextResolveAt > 0 ? nextResolveAt : Number(state.updatedAt || timestamp);
-            const ageMs = Math.max(0, timestamp - dueAt);
-            if (ageMs > summary.oldestAgeMs || !summary.oldest) {
-                summary.oldestAgeMs = ageMs;
-                summary.oldest = { characterId: state.characterId, name: state.name, activity: state.activity,
-                    dueAt, lastResolvedAt: Number(state.timing?.lastResolvedAt || 0) };
-            }
+            noteOldest(state, dueAt, timestamp - dueAt, owner);
         });
 
         return summary;

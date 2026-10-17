@@ -1135,7 +1135,9 @@ const PopulationService = {
         this.started = true;
         Promise.resolve(this.lifeReadyPromise).then(() => ClanActionService.startEvents(() => { this.nextClanActionAt = 0; }))
             .catch(error => utils.infoWarn('ClanReview', 'startup: %s', error.message));
-        if (Config.developerDiagnostics) this.initialSummaryTimer = setTimeout(() => {
+        // The summary timers run without diagnostics too: the overdue line
+        // (logSummary) is the signal that a bot stopped stepping.
+        this.initialSummaryTimer = setTimeout(() => {
             this.logSummary('start');
             this.initialSummaryTimer = null;
         }, 5000);
@@ -1144,7 +1146,7 @@ const PopulationService = {
             this.initialSummaryTimer.unref();
         }
 
-        if (Config.developerDiagnostics) this.summaryTimer = setInterval(() => {
+        this.summaryTimer = setInterval(() => {
             this.logSummary('summary');
         }, Config.summaryIntervalMs);
 
@@ -3975,18 +3977,20 @@ const PopulationService = {
     },
 
     logSummary(reason = 'summary') {
-        if (!Config.developerDiagnostics) return { enabled: false };
-        const summary = this.summary();
-        console.info('BotPopulation :: %s %s', reason, summary.line);
+        // Without diagnostics only the cheap cold-queue scan runs, for the line below.
+        const summary = Config.developerDiagnostics ? this.summary() : { enabled: false, coldQueue: LifeState.coldDueSummary() };
+        if (summary.line) console.info('BotPopulation :: %s %s', reason, summary.line);
         // A bot due for over a minute is not normal (user 2026-10-17): name it
-        // and say why it waits, one line per summary.
+        // and say why it waits, one line per summary. A claimed bot counts
+        // from its lease end: its lease expired and the claim still stands.
         const queue = summary.coldQueue || {};
         if (queue.oldest && queue.oldestAgeMs >= 60000) {
             const bot = queue.oldest, at = Date.now();
+            const reason = bot.owner !== 'legacy_main' ? `claimed_by:${bot.owner}:lease_expired`
+                : ColdSimulationCoordinator.overdueReason(bot.characterId);
             console.info('BotPopulation :: overdue %s(%d) %s due %ds ago, last step %ds ago, reason %s, due total %d',
                 bot.name, bot.characterId, bot.activity, Math.round(queue.oldestAgeMs / 1000),
-                bot.lastResolvedAt > 0 ? Math.round((at - bot.lastResolvedAt) / 1000) : -1,
-                ColdSimulationCoordinator.overdueReason(bot.characterId), queue.due);
+                bot.lastResolvedAt > 0 ? Math.round((at - bot.lastResolvedAt) / 1000) : -1, reason, queue.due);
         }
         return summary;
     }
