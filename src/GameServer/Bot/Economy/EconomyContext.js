@@ -437,14 +437,17 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const generation = RecomputeGeneration.current();
     if (!generation || proof.generation !== generation) return refuse('generation', ['build', 'sources']);
     if (activityIdentity(options.leaf) !== proof.activity) return refuse('activity', ['sources']);
+    // A raised event (reconcile bumps the sequence with it) is named by its
+    // sections before the echo, as the card names it (refused_plan:wish_dirty.<sections>).
+    const dirty = Number(state.stats?.wishDirty) || 0;
+    if (dirty) return { valid: false, reason: 'wish_dirty', touchedSections: dirty,
+        ...(Diagnostics.active() ? { facts: Sections.sectionNames(dirty).join('+') } : {}) };
     const echo = Sections.decisionRefusal(state, ...proof.decision);
     if (echo) return refuse(echo, ['sources']);
     deps = resolved(state, deps);
     if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)
         || options.softPrefix && (typeof deps.memoryIdentity !== 'string' || deps.sourceReady !== true))
         return refuse('unready');
-    const dirty = Number(state.stats?.wishDirty) || 0;
-    if (dirty) return { valid: false, reason: 'wish_dirty', touchedSections: dirty };
     const current = fieldActivity(state, options.activity, options.leaf);
     // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
     const facts = Diagnostics.active() ? [] : null;
@@ -1624,10 +1627,11 @@ function buildForState(state, deps) {
             // same per refusal reason is the waste the reason's rule costs.
             gateDiff = gatePlanDiff(state, held, context, deps);
             // An event_key refusal names the moved field, a sections refusal
-            // the moved facts: per field, does the move give another plan
-            // (focus or leaf: a real decision change; queue, funded: its order)?
+            // the moved facts, a wish_dirty refusal its raised sections: per
+            // field, does the move give another plan (focus or leaf: a real
+            // decision change; queue, funded: its order)?
             const refusal = gate === 'event_key' && keyMoved ? `event_key.${keyMoved}`
-                : gate === 'sections' && eventVerdict.facts ? `sections.${eventVerdict.facts}` : gate;
+                : (gate === 'sections' || gate === 'wish_dirty') && eventVerdict.facts ? `${gate}.${eventVerdict.facts}` : gate;
             Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
         }
         // Sampled owners: what the step's second build changed against the first.
