@@ -54,7 +54,7 @@ function choices(state, purchase, trip, incomePerHour = 0, rank = 'd', quantityI
     const capacity = Math.max(0, Math.min(BATCH_LIMIT, require('../../Inventory/InventoryLimits').forState(state)
         - invoke('GameServer/Bot/Economy/ItemDisposition').inventorySlotCount(state)));
     let bundleAmount = 0, bundleNet = 0;
-    for (const row of Object.values(state.inventory || {})) if (Index.find(Data.items, row.selfId)?.etc?.rank === rank) seen.add(Number(row.selfId));
+    for (const row of Object.values(state.inventory || {})) { const template = Index.find(Data.items, row.selfId); if (template?.etc?.rank === rank && reward(template)) seen.add(Number(row.selfId)); }
     for (const id of seen) {
         const held = state.inventory?.[id], own = readFree(id);
         // Missing bag identities are fenced by the caller's structural event.
