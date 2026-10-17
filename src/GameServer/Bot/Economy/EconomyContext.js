@@ -1587,7 +1587,8 @@ function buildForState(state, deps) {
             // Sampled owners: did the build the verdict refused change the plan?
             // same per refusal reason is the waste the reason's rule costs.
             gateDiff = gatePlanDiff(state, held, context, deps);
-            Diagnostics.count('context', 'refused_plan', `${gate}:${gateDiff === 'same' ? 'same' : 'new'}`);
+            // An event_key refusal names the moved field: per field, does the key move give another plan?
+        Diagnostics.count('context', 'refused_plan', `${gate === 'event_key' && keyMoved ? `event_key.${keyMoved}` : gate}:${gateDiff === 'same' ? 'same' : 'new'}`);
         }
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
