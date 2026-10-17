@@ -118,12 +118,28 @@ const spareShirt = { ...wornStarter, inventory: { 1146: { ...wornStarter.invento
     instances: [...wornStarter.inventory[1146].instances,
         { id: 9060001, amount: 1, equipped: false, slot: 0, enchant: 6 }]
 } } };
-assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(spareShirt, { now }), {
-    reason: 'npc_only_inventory', slots: 2, npcOnlySlots: 1, limit: ItemDisposition.INVENTORY_SLOT_LIMIT
-}, 'a single unused starter piece starts NPC cleanup despite the market cooldown');
-assert.strictEqual(invoke('GameServer/Bot/Population/PopulationService').prepareInventoryCleanupProposal(spareShirt, now)
-    ?.stats.forcedMarketCleanup.cleanupReason, 'npc_only_inventory',
-    'the cold resolve turns an unused starter piece into an NPC cleanup trip');
+const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
+for (const marketSellRetryAfter of [0, now + 60000]) {
+    const singleSpare = { ...spareShirt, stats: { ...spareShirt.stats, marketSellRetryAfter } };
+    assert.strictEqual(ItemDisposition.inventoryCleanupNeed(singleSpare, { now }), null,
+        'one spare starter piece does not interrupt hunting, with or without a market cooldown');
+    assert.strictEqual(PopulationService.prepareInventoryCleanupProposal(singleSpare, now), null,
+        'the cold resolve keeps hunting instead of starting a trip for one spare starter piece');
+}
+const accumulatedStarters = { ...spareShirt, inventory: { 1146: { ...spareShirt.inventory[1146],
+    amount: ItemDisposition.NPC_ONLY_CLEANUP_MIN_SLOTS + 1,
+    instances: [wornStarter.inventory[1146].instances[0],
+        ...Array.from({ length: ItemDisposition.NPC_ONLY_CLEANUP_MIN_SLOTS }, (_, index) => (
+            { id: 9060001 + index, amount: 1, equipped: false, slot: 0, enchant: 6 }
+        ))]
+} } };
+assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(accumulatedStarters, { now }), {
+    reason: 'npc_only_inventory', slots: ItemDisposition.NPC_ONLY_CLEANUP_MIN_SLOTS + 1,
+    npcOnlySlots: ItemDisposition.NPC_ONLY_CLEANUP_MIN_SLOTS, limit: ItemDisposition.INVENTORY_SLOT_LIMIT
+}, 'accumulated unused starter gear still starts NPC cleanup despite the market cooldown');
+assert.strictEqual(PopulationService.prepareInventoryCleanupProposal(accumulatedStarters, now)
+    ?.stats.forcedMarketCleanup.npcOnlySlots, ItemDisposition.NPC_ONLY_CLEANUP_MIN_SLOTS,
+    'the cold resolve schedules a town cleanup with the accumulated NPC-only stock');
 
 const starterBoard = new BoardIndex({ groupOf: MarketCounters.counterOf });
 for (const [index, item] of starterGear.entries()) starterBoard.put({ id: 970000 + index,
