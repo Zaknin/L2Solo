@@ -2173,6 +2173,16 @@ class ColdSimulationCoordinator {
         }
     }
 
+    // One top-level afterCommit step: its time joins the flush's sum for that
+    // step name (gs: afterCommitSteps). Nested steps run untimed inside it.
+    async timedStep(entry, name, work) {
+        const stepMs = entry.stepMs;
+        if (!stepMs) return this.step(name, entry.nextState.characterId, work);
+        const startedAt = performance.now();
+        try { return await this.step(name, entry.nextState.characterId, work); }
+        finally { stepMs[name] = (stepMs[name] || 0) + performance.now() - startedAt; }
+    }
+
     async afterCommit(entry, committed = {}) {
         if (Config.developerDiagnostics === true) invoke('GameServer/Bot/Economy/ConsumptionDiagnostics').publish(
             entry.nextState.characterId, entry.proposal.result?.consumptionDiagnostics, {
@@ -2180,29 +2190,30 @@ class ColdSimulationCoordinator {
                 revision: committed.revision ?? committed.row?.simulationRevision ?? entry.proposal.token?.revision, sequence: entry.proposal.sequence
             });
         const id = entry.nextState.characterId;
+        const step = (name, work) => this.timedStep(entry, name, work);
         const source = entry.proposal[PROPOSAL_SOURCE];
         const sourceCurrent = () => !this.stopping && (!source || source.worker === this.worker && source.epoch === this.workerEpoch);
         const beforeWrite = () => {
             if (!sourceCurrent()) throw Error('cold_postcommit_source_retired');
         };
         const committedPartyRow = committed.partyRow || committed.raidPartyRow;
-        await this.step('partyCache', id, () => {
+        await step('partyCache', () => {
             if (committedPartyRow && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
                 < Number(committedPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committedPartyRow);
         });
-        await this.step('raidCache', id, () => {
+        await step('raidCache', () => {
             if (committed.raidRow) invoke('GameServer/Bot/Population/ColdRaidAuthority').accept(committed.raidRow);
         });
-        await this.step('raidSettlement', id, async () => {
+        await step('raidSettlement', async () => {
             if (committedPartyRow && entry.proposal.partyResolution?.party?.stats?.raidEncounter?.status === 'defeated') {
                 await invoke('GameServer/Bot/Population/ColdRaidWorldBridge').settle(entry.proposal.partyResolution.party, { respawnAt: committed.raidRespawnAt });
             }
         });
         let state = LifeState.cachedState(id) || entry.nextState;
         const trained = { done: false };
-        if (sourceCurrent()) await this.step('economyDecision', id,
+        if (sourceCurrent()) await step('economyDecision',
             () => this.economyDecisions.accept(id, entry.proposal.economyDecision, committed, state));
-        await this.step('journal', id, () => LifeEvents.recordMany(id, entry.proposal.result?.events || []));
+        await step('journal', () => LifeEvents.recordMany(id, entry.proposal.result?.events || []));
         if (sourceCurrent() && entry.proposal.market) {
             // The resolve has already advanced native ownership. Capture its
             // accepted authority after commit, never the worker's old revision.
@@ -2215,23 +2226,23 @@ class ColdSimulationCoordinator {
                     && Number(actual.revision || 0) === coldAuthority.revision
                     && (actual.leaseId || null) === coldAuthority.leaseId;
             };
-            await this.step('board', id, () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
+            await step('board', () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
                 .applyReview(id, entry.proposal.market, { coldAuthority, canCommitReview }));
         }
-        await this.step('equipment', id, () => LifeState.enqueueEquipmentGoalAdvanceForState(state));
+        await step('equipment', () => LifeState.enqueueEquipmentGoalAdvanceForState(state));
         // Main can replace the worker's resolved state with a paid forced
         // cleanup trip. Its old optional actions were prepared before that
         // fare and activity change; the accepted resolve is not fresh consent.
         if (sourceCurrent() && entry.proposal.economyPlan && !entry.proposal.inventoryCleanupForced) {
             const started = Config.developerDiagnostics ? performance.now() : 0;
-            const decision = await this.step('improvement', id, () => this.economyDecisions.decided(state));
+            const decision = await step('improvement', () => this.economyDecisions.decided(state));
             // Native moves publish a new timestamp. Hold the worker's one
             // decision across this plan exactly as the town command does.
             this.economyDecisions.hold(id, decision);
             const preparedState = state;
             try {
-                state = await this.step('improvement', id, () => this.reviewCommittedEconomy(state, beforeWrite, decision || null, trained)) || state;
-                const applied = await this.step('economyPlan', id, () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
+                state = await step('improvement', () => this.reviewCommittedEconomy(state, beforeWrite, decision || null, trained)) || state;
+                const applied = await step('economyPlan', () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
                     .executePlan(state, entry.proposal.economyPlan,
                         { beforeWrite, preparedState, step: work => this.step('economyPlan', id, work) }));
                 state = LifeState.cachedState(id) || applied?.state || state;
@@ -2246,13 +2257,13 @@ class ColdSimulationCoordinator {
         // The native plan may have just started a trip or changed the money
         // packet. Correct only this owner's standing bids against that final
         // state, even when wish preparation or a board write was deferred.
-        if (sourceCurrent()) await this.step('boardLimits', id, async () => {
+        if (sourceCurrent()) await step('boardLimits', async () => {
             const checked = await invoke('GameServer/Bot/Economy/BotAfkMarketService')
                 .reviewPurchaseLimits(state, { beforeWrite });
             state = checked.state || state;
         });
-        await this.step('clanEvents', id, () => invoke('GameServer/Clan/ClanReviewEvents').committedMember(entry.proposal[CLAN_BEFORE], state));
-        await this.step('party', id, async () => {
+        await step('clanEvents', () => invoke('GameServer/Clan/ClanReviewEvents').committedMember(entry.proposal[CLAN_BEFORE], state));
+        await step('party', async () => {
             if (entry.proposal.partyResolution?.party) {
                 const party = entry.proposal.partyResolution.party;
                 if (!committedPartyRow) await BackgroundPartyState.createOrUpdate(party);
@@ -2300,27 +2311,27 @@ class ColdSimulationCoordinator {
             }
         });
         if (entry.proposal.partyResolution?.party && this.population?.applyWorkerPartyRequirements) {
-            await this.step('partyPlans', id, () => this.population.applyWorkerPartyRequirements(
+            await step('partyPlans', () => this.population.applyWorkerPartyRequirements(
                 BackgroundPartyState.find(entry.proposal.partyResolution.partyId) || entry.proposal.partyResolution.party,
                 entry.proposal.partyResolution));
         }
         if (entry.proposal.buffOffer) {
-            await this.step('buff', id, () => invoke('GameServer/Bot/Economy/ColdBuffService')
+            await step('buff', () => invoke('GameServer/Bot/Economy/ColdBuffService')
                 .applyOffer(entry.proposal.buffOffer, { beforeWrite }));
         }
         // Hunts and party rewards can raise a level without producing any
         // market work. Train after the prepared actions so their committed
         // revision remains valid until they finish.
-        if (sourceCurrent() && !trained.done) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
+        if (sourceCurrent() && !trained.done) state = await step('training', () => LifeState.reviewTrainingAfterCommit(
             LifeState.cachedState(id) || state, { beforeWrite })) || LifeState.cachedState(id) || state;
-        if (Config.developerDiagnostics) await this.step('metrics', id, () => {
+        if (Config.developerDiagnostics) await step('metrics', () => {
             Metrics.recordBackgroundResolve();
             Metrics.recordCombat(entry.proposal.result?.debug);
             Metrics.recordResolveDuration(Math.max(0, Date.now() - Number(entry.proposal.enqueuedAt || Date.now())));
         });
         if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
             this.requestEconomyRefresh(id);
-        await this.step('announce', id, () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
+        await step('announce', () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
         return state;
     }
 

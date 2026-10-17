@@ -20,6 +20,11 @@ function percentile(values, ratio = 0.95) {
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
 }
 
+function pushSample(samples, durationMs) {
+    samples.push(Math.max(0, Number(durationMs) || 0));
+    if (samples.length > 256) samples.shift();
+}
+
 class ColdCommitQueue {
     constructor(options = {}) {
         if (typeof options.prepare !== 'function') throw new Error('prepare callback is required');
@@ -58,6 +63,8 @@ class ColdCommitQueue {
         this.p1Credit = 0;
         this.samples = { claim: [], commit: [], queue: [] };
         this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [] };
+        // afterCommit split by the caller's step names: one sum per step per flush.
+        this.stepSamples = {};
         this.flushReasons = {};
         this.lastBatchReason = null;
         this.counters = {
@@ -342,6 +349,8 @@ class ColdCommitQueue {
         const startedAt = this.now();
         let results = [];
         let afterCommitMs = 0;
+        // The afterCommit callback adds each step's time here (entry.stepMs).
+        const stepMs = DiagnosticConfig.developerDiagnostics ? {} : null;
         try {
             const prepared = [];
             for (const proposal of batch) {
@@ -352,7 +361,7 @@ class ColdCommitQueue {
                         continue;
                     }
                     prepared.push({ proposal, token: proposal.token, nextState, options: proposal.options || {},
-                        atomicGroup: proposal.atomicGroup || null });
+                        atomicGroup: proposal.atomicGroup || null, ...(stepMs ? { stepMs } : {}) });
                 } catch (error) {
                     results.push({ ok: false, characterId: proposal.characterId, reason: error?.message || 'prepare_error', proposal });
                 }
@@ -402,6 +411,7 @@ class ColdCommitQueue {
             })));
         } finally {
             DiagnosticConfig.developerDiagnostics && this.recordStage('afterCommit', afterCommitMs);
+            if (stepMs) for (const [step, ms] of Object.entries(stepMs)) pushSample(this.stepSamples[step] ||= [], ms);
             if (earlyLease) this.completeEarlyFlush(earlyLease, this.now() - startedAt);
             if (!this.size()) this.capacityBlocked = false;
             if (DiagnosticConfig.developerDiagnostics) {
@@ -482,9 +492,7 @@ class ColdCommitQueue {
     recordStage(stage, durationMs) {
         if (!DiagnosticConfig.developerDiagnostics) return;
         const samples = this.stageSamples[stage];
-        if (!samples) return;
-        samples.push(Math.max(0, Number(durationMs) || 0));
-        if (samples.length > 256) samples.shift();
+        if (samples) pushSample(samples, durationMs);
     }
 
     snapshot() {
@@ -506,6 +514,8 @@ class ColdCommitQueue {
             stages: Object.fromEntries(Object.entries(this.stageSamples).map(([stage, samples]) => [stage, {
                 count: samples.length, p95Ms: percentile(samples)
             }])),
+            afterCommitSteps: Object.fromEntries(Object.entries(this.stepSamples)
+                .map(([step, samples]) => [step, Math.round(percentile(samples))])),
             commitP95Ms: percentile(this.samples.commit),
             queueP95Ms: percentile(this.samples.queue)
             } : {})
