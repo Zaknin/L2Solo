@@ -191,8 +191,7 @@ function gearGainReader(state, timestamp, build, caster = require('./BotImprovem
         return Number(item.selfId) < Number(ownWeapon.key)
             && !Planner.equipmentItemBetter(ownWeapon.item, item, role, classId);
     };
-    return (item, targetSlot = Number(item.etc.slot)) => Profile.gainFor(build, `${caster ? 'm' : 'p'}:gear:${threatMask}:${item.selfId}:${targetSlot}`, () => {
-        const before = Profile.powerNumbers(build);
+    return (item, targetSlot = Number(item.etc.slot)) => Profile.gainFor(build, `${caster ? 'm' : 'p'}:gear:${threatMask}:${item.selfId}:${targetSlot}`, (base = state, before = Profile.powerNumbers(build)) => {
         const slot = targetSlot;
         if (Equipment.isWeaponSlot(slot) && !selectedWeapon(item)) return { attack: 0, defence: 0 };
         // Only a new native gain needs a hypothetical bag. Prepare its unchanged
@@ -216,13 +215,13 @@ function gearGainReader(state, timestamp, build, caster = require('./BotImprovem
         const inventory = { ...withoutSlot, [item.selfId]: { selfId: Number(item.selfId),
             amount: paired ? Math.max(Number(previous?.amount || 0) + 1, equippedSlots.length) : 1,
             equipped: true, equippedCount: equippedSlots.length, equippedSlots, slot, enchant: 0 } };
-        const after = Profile.powerFor({ ...state, inventory }, timestamp, Profile.buildOptions(build, timestamp));
+        const after = Profile.powerFor({ ...base, inventory }, timestamp, Profile.buildOptions(build, timestamp));
         const attack = caster ? 'mAtk' : 'pAtk';
         const attackGain = Math.max(0, Number(after[attack]) / Math.max(1, Number(before[attack])) - 1);
         const defenceGain = Math.max(0, 1 - Number(before.pDef) / Math.max(1, Number(after.pDef)));
         const magicGain = Math.max(0, 1 - Number(before.mDef) / Math.max(1, Number(after.mDef)));
         return { attack: attackGain, defence: threatMask === 1 ? defenceGain : Math.max(defenceGain, magicGain) };
-    });
+    }, state, timestamp);
 }
 // Damage per second in a 60-second rotation: each skill's reuse limits its
 // casts; attacks fill time left over. A second nuke adds its own casts.

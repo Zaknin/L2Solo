@@ -1070,9 +1070,12 @@ function resizeGains(entry, idCapacity, gainCapacity) {
     entry.ids = ids; entry.slots = slots; entry.gains = gains;
     return entry;
 }
-function newEntry(power, night, baseKey) {
+// kit: a hash of the entry's kit parts (powerKey without the effects),
+// diagnostics only (gain_switch below), 0 while they are off.
+function newEntry(power, night, baseKey, state) {
     return resizeGains({ power: Float64Array.from(POWER_FIELDS.map(field => power[field])),
-        size: 0, gainSize: 0, owners: 0, night, baseKey }, 32, 32);
+        size: 0, gainSize: 0, owners: 0, night, baseKey,
+        kit: Diagnostics.active() ? buildHash(kitParts(state, false).join('|')) : 0 }, 32, 32);
 }
 function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false } = {}) {
     const text = powerKey(state, timestamp), baseKey = buildHash(text);
@@ -1085,14 +1088,14 @@ function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false
             entry = { night: 2, owners: 0 };
             if (owner) buildGains.set(baseKey, entry);
             key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
-            entry = newEntry(power, 1, baseKey);
-        } else entry = newEntry(power, 0, baseKey);
+            entry = newEntry(power, 1, baseKey, state);
+        } else entry = newEntry(power, 0, baseKey, state);
         if (owner) buildGains.set(key, entry);
     } else if (entry.night === 2) {
         key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
         entry = buildGains.get(key);
         if (!entry) {
-            entry = newEntry(powerFor(state, timestamp), 1, baseKey);
+            entry = newEntry(powerFor(state, timestamp), 1, baseKey, state);
             if (owner) buildGains.set(key, entry);
         }
     }
@@ -1107,6 +1110,7 @@ function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false
         if (entry.night === 1) buildGains.get(baseKey).owners++;
         if (held !== undefined) {
             PopulationConfig.developerDiagnostics && (preparation ? stats.preparationSwitches += 1 : stats.switches += 1);
+            if (!preparation && Diagnostics.active()) countSwitch(buildGains.get(held), entry);
             releaseBuild(held);
         }
         // No preparation outlives the build it was planned from; after a
@@ -1133,7 +1137,55 @@ function forgetBuild(characterId) {
     forgetFrom(ownerPreparations, Number(characterId));
     forgetFrom(ownerBuilds, Number(characterId));
 }
-function gainFor(entry, key, compute) {
+// The shadow for gains keyed by the kit (design rules, Recompute: shadow
+// first). The store keys an entry by powerKey: the kit and the active
+// effects, so a buff's start or expiry moves the bot to a new entry and its
+// gains are computed again. combat_profile:gain_switch:<kit|effects|night>
+// names why an owner's own build moved to another entry; effects_gains adds
+// the gains the old entry held, what a kit key would have kept.
+function countSwitch(old, entry) {
+    if (!old) return;
+    const reason = old.baseKey === entry.baseKey ? 'night' : old.kit !== 0 && old.kit === entry.kit ? 'effects' : 'kit';
+    Diagnostics.count('combat_profile', 'gain_switch', reason);
+    if (reason === 'effects' && old.size > 0) Diagnostics.count('combat_profile', 'gain_switch', 'effects_gains', old.size);
+}
+// combat_profile:gain_kit:<same|diff|no_effects>, sampled owners only: each
+// computed gain is computed again for the kit alone (the state without the
+// effects powerKey's effects part holds, before and after) and compared.
+// same: per component (attack, defence) both zero or both positive and
+// within GAIN_KIT_ERROR of the larger; no_effects: nothing to drop, the kit
+// gain is the gain. GAIN_KIT_ERROR is the floor of the bot's own error
+// (DecisionSections.incomeError: .03 for the best-informed bot), as the store
+// has no persona: a diff here is a diff for every bot. The kit's own power is
+// one build per entry (kitPowers).
+const GAIN_KIT_ERROR = 0.03;
+const kitPowers = new WeakMap();
+function sameGain(gain, kit) {
+    for (const part of ['attack', 'defence']) {
+        if ((gain[part] > 0) !== (kit[part] > 0)
+            || Math.abs(gain[part] - kit[part]) > GAIN_KIT_ERROR * Math.max(Math.abs(gain[part]), Math.abs(kit[part])))
+            return false;
+    }
+    return true;
+}
+function kitGainShadow(entry, state, timestamp, compute, effect) {
+    if (!Diagnostics.enabled(Number(state.characterId))) return;
+    if (effectsPart(state, timestamp) === '') {
+        Diagnostics.count('combat_profile', 'gain_kit', 'no_effects');
+        return;
+    }
+    const saved = state.stats?.coldCombat || {};
+    const kit = { ...state, stats: { ...state.stats, coldCombat: { ...saved,
+        effects: (saved.effects || []).filter(item => capturedEquipmentEffect(item, state)) } } };
+    let before = kitPowers.get(entry);
+    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp, buildOptions(entry, timestamp))));
+    const kitEffect = withBuildSite('shadow', () => compute(kit, before));
+    Diagnostics.count('combat_profile', 'gain_kit', sameGain(effect, kitEffect) ? 'same' : 'diff');
+}
+// compute(base = the owner's state, before = the entry's power numbers): the
+// gain of one candidate; the shadow passes the kit state and its power.
+// state and timestamp (optional) are the owner's, read only by the shadow.
+function gainFor(entry, key, compute, state = null, timestamp = 0) {
     let id = candidateIndex.get(key);
     if (id === undefined && candidateIndex.size < CANDIDATE_LIMIT) {
         id = candidateIndex.size;
@@ -1151,6 +1203,7 @@ function gainFor(entry, key, compute) {
     buildSite = 'gain';
     let effect;
     try { effect = compute(); } finally { buildSite = outerSite; }
+    if (state !== null && Diagnostics.active()) kitGainShadow(entry, state, timestamp, compute, effect);
     const zero = Object.is(effect.attack, 0) && Object.is(effect.defence, 0);
     // A limit miss is a computed gain the caller uses, only not kept: the
     // limits bound the store, they cut no candidate. combat_profile:gain_limit
