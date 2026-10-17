@@ -294,6 +294,8 @@ class ColdSimulationCoordinator {
         });
         this.commandInflight = new Map();
         this.commitAcknowledgements = new Map();
+        // Leader acks waiting for their deferred party work; stop() waits for them.
+        this.heldAcks = new Set();
         this.fencedBots = new Set();
         this.pauseReasons = new Set();
         this.snapshotQueue = new ColdSnapshotQueue({
@@ -342,7 +344,7 @@ class ColdSimulationCoordinator {
             routeCapacityRejects: 0,
             afterCommitStepErrors: { partyCache: 0, raidCache: 0, raidSettlement: 0, economyDecision: 0,
                 board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
-                economyPlan: 0, clanEvents: 0, partyPlans: 0, buff: 0 }
+                economyPlan: 0, clanEvents: 0, partyGoals: 0, partyPlans: 0, buff: 0 }
         };
         this.economyPlanCount = 0;
         this.economyPlanTimes = [];
@@ -359,10 +361,22 @@ class ColdSimulationCoordinator {
                 lifeEvents: LifeEvents.resolvePayload(entry.nextState.characterId, entry.proposal.result?.events) }))),
             afterCommit: (entry, result) => this.afterCommit(entry, result),
             onResults: (results) => {
+                // A party leader with deferred party work is acked when that work settles
+                // (afterCommit ARCH-NOTE); every other result is acked now.
+                const held = results.filter((result) => result.deferred), now = results.filter((result) => !result.deferred);
                 const startedAt = Config.developerDiagnostics ? Date.now() : 0;
-                this.handleCommitResults(results)
-                    .catch((error) => { this.finishCommitAcknowledgements(results, false); this.recordError(error); })
+                this.handleCommitResults(now)
+                    .catch((error) => { this.finishCommitAcknowledgements(now, false); this.recordError(error); })
                     .finally(() => { if (Config.developerDiagnostics) this.queue.recordStage('ackBuild', Date.now() - startedAt); });
+                if (!held.length) return;
+                const heldAck = Promise.all(held.map((result) => result.deferred))
+                    .then(() => this.handleCommitResults(held))
+                    .catch((error) => { this.finishCommitAcknowledgements(held, false); this.recordError(error); })
+                    .finally(() => {
+                        this.heldAcks.delete(heldAck);
+                        if (Config.developerDiagnostics) this.queue.recordStage('partyAck', Date.now() - startedAt);
+                    });
+                this.heldAcks.add(heldAck);
             },
             onPause: () => this.setPauseReason('commit_queue_high_water', true),
             onResume: () => this.setPauseReason('commit_queue_high_water', false),
@@ -2177,12 +2191,12 @@ class ColdSimulationCoordinator {
 
     // One top-level afterCommit step: its time joins the flush's sum for that
     // step name (gs: afterCommitSteps). Nested steps run untimed inside it.
-    async timedStep(entry, name, work) {
-        const stepMs = entry.stepMs;
-        if (!stepMs) return this.step(name, entry.nextState.characterId, work);
+    // A deferred step runs after the flush and records its own sample.
+    async timedStep(entry, name, work, record = (ms) => { entry.stepMs[name] = (entry.stepMs[name] || 0) + ms; }) {
+        if (!entry.stepMs) return this.step(name, entry.nextState.characterId, work);
         const startedAt = performance.now();
         try { return await this.step(name, entry.nextState.characterId, work); }
-        finally { stepMs[name] = (stepMs[name] || 0) + performance.now() - startedAt; }
+        finally { record(performance.now() - startedAt); }
     }
 
     async afterCommit(entry, committed = {}) {
@@ -2198,6 +2212,10 @@ class ColdSimulationCoordinator {
         const beforeWrite = () => {
             if (!sourceCurrent()) throw Error('cold_postcommit_source_retired');
         };
+        // Party work that runs after this flush, in order, while the leader's ack waits.
+        const deferred = [];
+        const later = (name, work) => deferred.push(() => this.timedStep(entry, name, work,
+            (ms) => this.queue.recordStep(name, ms)));
         const committedPartyRow = committed.partyRow || committed.raidPartyRow;
         await step('partyCache', () => {
             if (committedPartyRow && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
@@ -2299,20 +2317,28 @@ class ColdSimulationCoordinator {
                     Metrics.recordPartyDissolution();
                 } else {
                     Metrics.recordPartyResolve();
-                    // ARCH-NOTE: the commit still awaits the worker goal review;
-                    // a busy worker now answers at once with the current objective.
+                    // ARCH-NOTE: the goal review and the member plans run after the flush
+                    // but before the leader's commit_ack. Until that ack the kernel holds
+                    // every member inFlight (ColdSimulationKernel claim check), so no party
+                    // commit can land the party row while main reviews it: the worker's
+                    // hunt commit writes that row through createOrUpdate ->
+                    // saveBackgroundParty, a blind statsJson upsert. The ack then carries
+                    // the reviewed leader state after the table changes (handleCommitResults),
+                    // so the leader is never acked first and reviewed later.
                     if (entry.proposal.partyResolution.reviewGoals
                         && this.population?.reconcileWorkerPartyGoals) {
-                        await this.population.reconcileWorkerPartyGoals(party, Number(entry.proposal.enqueuedAt || Date.now()))
+                        const enqueuedAt = Number(entry.proposal.enqueuedAt || Date.now());
+                        later('partyGoals', () => this.population.reconcileWorkerPartyGoals(party, enqueuedAt)
                             .catch((error) => {
                                 utils.infoWarn('BotGoals', 'worker party goal reconcile failed for %s: %s', party.partyId, error?.message || error);
-                            });
+                            }));
                     }
                 }
             }
         });
+        // It writes member rows and the party row: deferred and held like the goal review, after it.
         if (entry.proposal.partyResolution?.party && this.population?.applyWorkerPartyRequirements) {
-            await step('partyPlans', () => this.population.applyWorkerPartyRequirements(
+            later('partyPlans', () => this.population.applyWorkerPartyRequirements(
                 BackgroundPartyState.find(entry.proposal.partyResolution.partyId) || entry.proposal.partyResolution.party,
                 entry.proposal.partyResolution));
         }
@@ -2333,6 +2359,15 @@ class ColdSimulationCoordinator {
         if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
             this.requestEconomyRefresh(id);
         await step('announce', () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
+        // Starts after training, so the review reads the trained state and the plans
+        // it writes are not overwritten by it. A replaced worker skips it: its kernel
+        // no longer holds these members inFlight.
+        if (deferred.length) entry.deferred = (async () => {
+            for (const work of deferred) {
+                if (source && (source.worker !== this.worker || source.epoch !== this.workerEpoch)) return;
+                await work();
+            }
+        })();
         return state;
     }
 
@@ -2919,6 +2954,7 @@ class ColdSimulationCoordinator {
             }
         }
         const queue = await this.queue.drain(10000);
+        await Promise.race([Promise.allSettled([...this.heldAcks]), wait(10000)]);
         await Promise.race([this.commandTail.catch(() => null), wait(10000)]);
         await Promise.race([this.historyCleanupInFlight || Promise.resolve(), wait(10000)]).catch(() => null);
         this.historyCleanupInFlight = null;

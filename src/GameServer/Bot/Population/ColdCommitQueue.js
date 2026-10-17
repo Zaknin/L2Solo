@@ -62,7 +62,8 @@ class ColdCommitQueue {
         this.paused = false;
         this.p1Credit = 0;
         this.samples = { claim: [], commit: [], queue: [] };
-        this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [] };
+        // partyAck: from the flush's results to a held party leader's ack.
+        this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [], partyAck: [] };
         // afterCommit split by the caller's step names: one sum per step per flush.
         this.stepSamples = {};
         this.flushReasons = {};
@@ -397,7 +398,8 @@ class ColdCommitQueue {
                     } else {
                         DiagnosticConfig.developerDiagnostics && (this.counters.rejected += 1);
                     }
-                    results.push({ ...result, proposal: entry?.proposal, nextState: entry?.nextState });
+                    // `deferred`: party work afterCommit left running; onResults holds that ack.
+                    results.push({ ...result, proposal: entry?.proposal, nextState: entry?.nextState, deferred: entry?.deferred });
                 }
             }
             DiagnosticConfig.developerDiagnostics && (this.counters.flushes += 1);
@@ -411,7 +413,7 @@ class ColdCommitQueue {
             })));
         } finally {
             DiagnosticConfig.developerDiagnostics && this.recordStage('afterCommit', afterCommitMs);
-            if (stepMs) for (const [step, ms] of Object.entries(stepMs)) pushSample(this.stepSamples[step] ||= [], ms);
+            if (stepMs) for (const [step, ms] of Object.entries(stepMs)) this.recordStep(step, ms);
             if (earlyLease) this.completeEarlyFlush(earlyLease, this.now() - startedAt);
             if (!this.size()) this.capacityBlocked = false;
             if (DiagnosticConfig.developerDiagnostics) {
@@ -469,10 +471,13 @@ class ColdCommitQueue {
             throw error;
         }
         const result = results?.[0] || { ok: false, characterId: id, reason: 'missing_commit_result' };
+        const entry = { proposal, token: proposal.token, nextState };
         if (result.ok) {
-            try { await this.afterCommit({ proposal, token: proposal.token, nextState }, result); }
+            try { await this.afterCommit(entry, result); }
             catch (error) { DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1); result.afterCommitError = error?.message || 'after_commit_error'; }
         }
+        // A fence hands the bot over after this returns: its party work settles first.
+        await entry.deferred;
         this.onResults([{ ...result, proposal, nextState }]);
         return { ...result, proposal, nextState };
     }
@@ -487,6 +492,10 @@ class ColdCommitQueue {
             else await delay(10);
         }
         return { drained: this.size() === 0 && !this.flushing, ...this.snapshot() };
+    }
+
+    recordStep(step, durationMs) {
+        if (DiagnosticConfig.developerDiagnostics) pushSample(this.stepSamples[step] ||= [], durationMs);
     }
 
     recordStage(stage, durationMs) {
