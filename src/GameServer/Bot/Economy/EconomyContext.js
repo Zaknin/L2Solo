@@ -172,9 +172,11 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
 function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
     const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
     facts ||= Sections.semanticFacts(current);
-    // Position and scroll quantity drift inside one route. Native route and
-    // physical-fee checks still run before the held action is permitted.
-    delete trip.loc; delete trip.inventory;
+    // Position, region, the trip's target point and scroll quantity drift
+    // inside one route. Native route and physical-fee checks still run
+    // before the held action is permitted.
+    delete trip.loc; delete trip.inventory; delete trip.currentRegion;
+    if (trip.stats.travel) delete trip.stats.travel.to;
     // The leaf's own item is its progress, not an input: its first unit
     // (a new bag row) is no event. Capture and verdict pass the same leaf.
     const own = ColdEconomyDecision.ownItem(leaf);
@@ -285,17 +287,15 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
     return { build, sources: `${sourceParts.join('|')}|${build}|${Sections.hash(sourceTail)}` };
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
-// Only this kind is equalised; location, region and the travel target stay
-// exact inside Trip.key, so 'to town' never matches 'to a spot'. One trip
-// is the plan itself: a hunter or rester leaving for its held hunting
-// leaf's own spot (Sections.occupationPlanned). Only that trip record is
-// dropped from the comparison; a trip to any other spot or a town, and the
-// arrival, stay exact.
+// Only this kind is equalised; the trip record (its town, spot and arrival
+// activity) stays exact, so 'to town' never matches 'to a spot'. One trip
+// is the plan itself: leaving for the held leaf's own hunting spot or its
+// own town (Sections.occupationPlanned). Only that trip record is dropped
+// from the comparison; a trip anywhere else, and the arrival, stay exact.
 const FIELD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling']);
 function fieldActivity(state, activity, leaf = null) {
     if (!activity || activity === state.activity || !FIELD_ACTIVITIES.has(activity) || !FIELD_ACTIVITIES.has(state.activity)) return state;
-    return state.activity === 'traveling' && leaf?.activity === 'hunting' && leaf.spotId != null
-        && Sections.occupationPlanned(state, leaf)
+    return state.activity === 'traveling' && Sections.occupationPlanned(state, leaf)
         ? { ...state, activity, stats: { ...state.stats, travel: null } } : { ...state, activity };
 }
 // The held leaf's own purchase item stays exact: its order counts only the
