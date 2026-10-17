@@ -143,6 +143,12 @@ async function refreshMeetingRecords(row) {
         }
     }
 }
+function setPresenceMarker(session, id, anchor) {
+    session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
+        locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null,
+        otherId: Number(anchor.actorA) === Number(id) ? anchor.actorB : anchor.actorA, town: anchor.town,
+        route: JSON.parse(Number(anchor.actorA) === Number(id) ? anchor.routeB || '{}' : anchor.routeA || '{}') } : undefined;
+}
 async function syncActors(row) {
     for (const id of [row.actorA, row.actorB]) {
         const session = sessionFor(id), actor = session?.actor;
@@ -161,10 +167,7 @@ async function syncActors(row) {
                 else delete stats.tradeMeeting;
                 session.coldLifeState = { ...session.coldLifeState, stats };
             }
-            session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
-                locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null,
-                otherId: Number(anchor.actorA) === Number(id) ? anchor.actorB : anchor.actorA, town: anchor.town,
-                route: JSON.parse(Number(anchor.actorA) === Number(id) ? anchor.routeB || '{}' : anchor.routeA || '{}') } : undefined;
+            setPresenceMarker(session, id, anchor);
             if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
         }
         await afk().syncOnlineInventory(id, await db().fetchItems(id, 'trade_meeting_sync'));
@@ -473,6 +476,13 @@ async function processMeeting(id, meetingId) {
             const cancelled = await db().cancelTradeMeeting(row.id, 'player_left'); acceptRows(cancelled); wake(id); return;
         }
     }
+    const marker = session?.tradeMeetingPresence;
+    // Cold acceptance has no session to mark. Restore the anchor when its
+    // actor materializes, before starting a walk that must publish arrival.
+    // Retain a current marker: its waypoint/presence transitions wake this
+    // queue, while ordinary held AI ticks deliberately do not poll it.
+    if (state?.phase === 'hot' && state.stats?.tradeMeeting?.[0] === row.id && Number(session?.actor?.fetchId?.()) === id
+        && (marker?.id !== row.id || marker.actorId !== id)) setPresenceMarker(session, id, row);
     const arrived = await db().arriveTradeMeeting(row.id); acceptRows(arrived);
     if (arrived?.meeting.state !== 'accepted') { await syncActors(arrived.meeting);
         for (const ad of arrived.closed || []) afk().refreshRecord(ad);
