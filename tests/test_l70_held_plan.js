@@ -630,9 +630,22 @@ try {
                     assert.equal(Decisions.refreshAdvisory(state, accepted, input, { prepared: {}, why }), null);
                     return why[0];
                 };
-                assert(Decisions.refreshAdvisory(next, accepted, { ...current, memory: { revision: 2,
-                    relations: [{ ...memory.relations[0], trust: 60, hostility: 40 }] } }, { prepared: {}, why: [] }),
-                    'a memory revision that keeps the friend and enemy the review read keeps the card');
+                // The friend and enemy are the key's; their trust and hostility
+                // are the observation's bond, beyond the bot's error once its
+                // delay passed (the baseline's error, here ~0.2).
+                const bond = next.stats.wishSections, error = bond.incomeError;
+                assert.deepEqual(bond.bond, [50, 50], 'the baseline holds the bond the review read');
+                const remembered = (trust, hostility, at = current.timestamp + Sections.SOFT_DELAY.observation) => ({ ...current,
+                    timestamp: at, memory: { revision: 2, relations: [{ ...memory.relations[0], trust, hostility }] } });
+                const small = 50 * (1 + error / 2), large = 50 * (1 + error * 2);
+                assert(Decisions.refreshAdvisory(next, accepted, remembered(small, 50 / (1 + error / 2)), { prepared: {}, why: [] }),
+                    'a trust and hostility drift inside the error keeps the card after the delay');
+                assert(Decisions.refreshAdvisory(next, accepted, remembered(large, 50, current.timestamp), { prepared: {}, why: [] }),
+                    'a change beyond the error keeps the card inside the observation delay');
+                assert.equal(refused(next, remembered(large, 50)), 'events:observation',
+                    'a trust change beyond the error refuses the card after the delay');
+                assert.equal(refused(next, remembered(50, 50 / (1 + error * 2))), 'events:observation',
+                    'a hostility change beyond the error refuses the card after the delay');
                 assert.equal(refused(next, { ...current, memory: { revision: 2,
                     relations: [{ ...memory.relations[0], targetId: 99998 }] } }), 'events:event_key',
                     'another remembered friend or enemy refuses the card');

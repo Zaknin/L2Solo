@@ -191,7 +191,8 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
     instances.sort();
     // Karma enters through the trip (its town-closing flip, EconomicTrip.frame);
     // frustration through the observation baseline (beyond the bot's error);
-    // memory as the friend and enemy the review reads, not its revision.
+    // memory as the friend and enemy the review reads, not its revision
+    // (their trust and hostility: the observation's bond, beyond the error).
     const { friend, enemy } = Providers.relationTargets(current, deps);
     return ['recompute_event_inputs_v6', RecomputeGeneration.current(), facts, instances, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), partyInput(current) || 0,
@@ -342,7 +343,10 @@ const miss = (why, reason) => { why?.push(reason); return false; };
 function softEvent(state, held, timestamp, deps = {}, skipMoney = false) {
     const baseline = held.baseline;
     if (!skipMoney && Sections.moneyEvent(state, baseline, timestamp, deps.buyOrderEscrow)) return 'money';
-    if (Sections.observationEvent(state, baseline, timestamp, deps.mode)) return 'observation';
+    // The bond only from a caller that read the memory: a step gate without
+    // it (the worker's transit hold) leaves the bond to the verdict.
+    const bondNow = Object.hasOwn(deps, 'memory') ? () => Providers.relationBond(state, deps) : null;
+    if (Sections.observationEvent(state, baseline, timestamp, deps.mode, bondNow)) return 'observation';
     if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return 'horizon';
     return null;
 }
@@ -1593,7 +1597,7 @@ function buildForState(state, deps) {
     // One read of the build's semantic facts: its observation baseline and its event key.
     const facts = Sections.semanticFacts(state);
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
-        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, facts);
+        { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, facts, Providers.relationBond(state, deps));
     // The trigger is not the calculation basis. Only the proven money path
     // kept the original valuation inputs; a fresh fallback adopted all of
     // them and must publish matching baselines, including downstream money.

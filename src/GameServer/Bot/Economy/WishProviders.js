@@ -114,6 +114,15 @@ function relationTargets(state, deps = {}) {
     return { friend: relations.find(row => Number(row.trust ?? row.affinity ?? 0) > 0) || null,
         enemy: relations.find(row => Number(row.hostility ?? row.anger ?? 0) > 0) || null };
 }
+// Those targets' magnitudes, the friend's trust and the enemy's hostility,
+// rounded (the observation baseline holds a few bytes); null without either.
+// Which person they are is the event key's (relationTargets); how much is soft.
+function relationBond(state, deps = {}) {
+    const { friend, enemy } = relationTargets(state, deps);
+    if (!friend && !enemy) return null;
+    const round = value => Math.round(Number(value || 0) * 1000) / 1000;
+    return [round(friend?.trust ?? friend?.affinity), round(enemy?.hostility ?? enemy?.anger)];
+}
 // Direct provider questions use their original owner semantics. Allocation
 // stock has a separate root-specific reader (and different reservations).
 function quantityReaders(state) {
@@ -1314,4 +1323,4 @@ function unpackLiquidationInputs(read) {
     const rows = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number()])));
     return Object.freeze({ basis: Object.freeze({ shots, potions, excluded }), rows });
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, relationTargets, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, packLiquidationInputs, unpackLiquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, relationTargets, relationBond, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, packLiquidationInputs, unpackLiquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };

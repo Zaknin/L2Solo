@@ -181,7 +181,7 @@ function carrySectionBaseline(previous, current, updated) {
         }
     };
     carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
-    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour', 'frustration']);
+    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour', 'frustration', 'bond']);
     carry(sectionBit('benefits'), ['horizon']);
     carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
     return carrySectionClocks(previous, current, updated);
@@ -216,7 +216,16 @@ function learnedChange(current, previous, error, share, previousShare) {
 // The learned frustration the decision weighed its risk with (riskWeight's
 // 1 + frustration), rounded: the baseline holds a few bytes.
 const frustrationOf = state => Math.round(positive(state.stats?.frustration) * 1000) / 1000;
-function observationChanged(state, baseline, timestamp, mode) {
+// bondNow: the caller's reader of the current relation bond
+// (WishProviders.relationBond), called only once the rest held; null when the
+// caller read no memory. The bond, like frustration, drifts beyond the error.
+function bondChanged(baseline, bondNow, error) {
+    const base = baseline.bond;
+    if (!Array.isArray(base) || typeof bondNow !== 'function') return false;
+    const bond = bondNow();
+    return Array.isArray(bond) && bond.some((value, at) => Math.abs(value - Number(base[at])) > Math.abs(Number(base[at])) * error);
+}
+function observationChanged(state, baseline, timestamp, mode, bondNow = null) {
     if (!baseline) return true;
     const current = sample(state, timestamp, mode);
     const previous = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
@@ -228,11 +237,12 @@ function observationChanged(state, baseline, timestamp, mode) {
     return !observationBaselineValid(baseline, previous) || !Number.isFinite(share)
         || Math.abs(share - previousShare) > previousShare * error
         || Number.isFinite(frustration) && Math.abs(frustrationOf(state) - frustration) > (1 + frustration) * error
-        || learnedChange(current, previous, error, share, previousShare);
+        || learnedChange(current, previous, error, share, previousShare)
+        || bondChanged(baseline, bondNow, error);
 }
-function observationEvent(state, baseline, timestamp, mode) {
+function observationEvent(state, baseline, timestamp, mode, bondNow = null) {
     if (!baseline) return true;
-    return softDue(baseline, 'observation', timestamp) && observationChanged(state, baseline, timestamp, mode);
+    return softDue(baseline, 'observation', timestamp) && observationChanged(state, baseline, timestamp, mode, bondNow);
 }
 function bounds(wallet) {
     const result = [-1, null];
@@ -244,7 +254,8 @@ function bounds(wallet) {
     } };
 }
 // facts: the build's semanticFacts(state) when its caller already has them.
-function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null) {
+// bond: the build's relation bond (WishProviders.relationBond), null without one.
+function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null, bond = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
     const profileKey = CombatProfile.buildInputKey(state, context.timestamp);
@@ -258,7 +269,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...(facts || semanticFacts(state)), horizon: context.horizonHours,
-        expHour: positive(context.hunt?.expPerHour), frustration: frustrationOf(state),
+        expHour: positive(context.hunt?.expPerHour), frustration: frustrationOf(state), ...(bond ? { bond } : {}),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };
 }
@@ -268,7 +279,7 @@ function semanticFacts(state) {
     const stockIds = [736, invoke('GameServer/Inventory/ShotStock').planForState(state).selfId,
         invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId];
     return { build: kit(state),
-        relations: hash([partyId ? state.party : null, Number(state.clanId ?? stats.clanId ?? 0), stats.relations, stats.memoryRevision]),
+        relations: hash([partyId ? state.party : null, Number(state.clanId ?? stats.clanId ?? 0), stats.relations]),
         occupation: hash([state.spotId, state.activity === 'resting' ? 'hunting' : state.activity]),
         dead: Number(state.activity === 'dead' || Number(state.vitals?.hp) <= 0),
         riskDeaths: positive(stats.spotRisk?.windowDeaths),
