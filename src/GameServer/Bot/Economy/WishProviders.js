@@ -107,6 +107,13 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
     return result;
 }
 function rows(state) { return Object.values(state.inventory || {}); }
+// The remembered people the review reads: the first friend (trust) and the
+// first enemy (hostility) of the bot's memory, else of its saved relations.
+function relationTargets(state, deps = {}) {
+    const relations = deps.memory?.relations || state.stats?.relations || [];
+    return { friend: relations.find(row => Number(row.trust ?? row.affinity ?? 0) > 0) || null,
+        enemy: relations.find(row => Number(row.hostility ?? row.anger ?? 0) > 0) || null };
+}
 // Direct provider questions use their original owner semantics. Allocation
 // stock has a separate root-specific reader (and different reservations).
 function quantityReaders(state) {
@@ -1051,12 +1058,10 @@ function buildProjection(state, ctx, deps) {
         values.set(stock.itemId, stock.benefitPerUnit);
     }
     // Concrete remembered people, not persona-labelled lifelong goals.
-    const relations = deps.memory?.relations || state.stats?.relations || [];
-    const friend = relations.find(row => Number(row.trust ?? row.affinity ?? 0) > 0);
+    const { friend, enemy } = relationTargets(state, deps);
     if (friend) root({ key: `care:${friend.targetId}`, need: 'care', object: { targetId: friend.targetId },
         valueHours: trait(ctx.persona, 'empathy') * trait(ctx.persona, 'sociability') * positive(friend.trust ?? friend.affinity),
         price: 0, paths: [{ activity: 'helping', targetId: friend.targetId, costHours: 1 }] });
-    const enemy = relations.find(row => Number(row.hostility ?? row.anger ?? 0) > 0);
     if (enemy) root({ key: `scores:${enemy.targetId}`, need: 'scores', object: { targetId: enemy.targetId },
         valueHours: positive(enemy.hostility ?? enemy.anger) * trait(ctx.persona, 'assertiveness'), price: 0,
         paths: [{ activity: 'pvp', targetId: enemy.targetId, costHours: 1, riskHours: ctx.deathHours + ctx.karmaHours }] });
@@ -1309,4 +1314,4 @@ function unpackLiquidationInputs(read) {
     const rows = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number()])));
     return Object.freeze({ basis: Object.freeze({ shots, potions, excluded }), rows });
 }
-module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, packLiquidationInputs, unpackLiquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };
+module.exports = { GEAR_FINALISTS_PER_SLOT, PRODUCER_PRICED, nominationBasis, recipeIds, quantityReaders, relationTargets, knownWorkshop, personalCraftPlan, liquidationCandidates, liquidationInputs, packLiquidationInputs, unpackLiquidationInputs, build, gearCandidates, gearGain, skillGain, attackRate, rotationRate, worn };

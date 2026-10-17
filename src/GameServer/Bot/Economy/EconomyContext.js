@@ -162,9 +162,9 @@ function partyInput(state) {
 // first part that moved against the held proof while the digest differs,
 // context:key_moved_all:<name> every one).
 const KEY_PART_NAMES = Object.freeze(['version', 'generation', 'facts', 'inventory', 'improvement', 'clan', 'party',
-    'visit_every', 'karma', 'race', 'generated_cold', 'persona', 'craft_station', 'soul_crystal_quest', 'shot_recipe_item',
-    'shot_recipe_fresh', 'recipes', 'workshop_recipe', 'workshop_product', 'memory_identity', 'relations',
-    'clan_material_demand', 'warehouse', 'clan_supply', 'clan_warehouse', 'frustration', 'gear_threat', 'role', 'account',
+    'visit_every', 'race', 'generated_cold', 'persona', 'craft_station', 'soul_crystal_quest', 'shot_recipe_item',
+    'shot_recipe_fresh', 'recipes', 'workshop_recipe', 'workshop_product', 'relations',
+    'clan_material_demand', 'warehouse', 'clan_supply', 'clan_warehouse', 'gear_threat', 'role', 'account',
     'trip', 'route_state', 'mode', 'input_key', 'incoming_pending', 'knowledge']);
 function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
     return proofDigest(eventInputParts(state, deps, timestamp, activity, leaf, facts));
@@ -183,16 +183,19 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
     const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57 && Number(row.selfId) !== own)
         .map(row => rowKey({ ...canonicalRow(row), amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
             instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
-    return ['recompute_event_inputs_v4', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+    // Karma enters through the trip (its town-closing flip, EconomicTrip.frame);
+    // frustration through the observation baseline (beyond the bot's error);
+    // memory as the friend and enemy the review reads, not its revision.
+    const { friend, enemy } = Providers.relationTargets(current, deps);
+    return ['recompute_event_inputs_v5', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), partyInput(current) || 0,
-        stats.visitEvery, stats.karma ?? 0, stats.race, stats.generatedCold, stats.persona,
+        stats.visitEvery, stats.race, stats.generatedCold, stats.persona,
         stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
         Number(stats.shotRecipeDemand?.at) + 1800000 > timestamp,
         Providers.recipeIds(current, deps), deps.workshop?.recipeId, deps.workshop?.productId,
-        deps.memoryIdentity ?? deps.memory?.revision ?? stats.memoryRevision ?? null,
-        deps.memory ? null : stats.relations,
+        [friend?.targetId ?? null, enemy?.targetId ?? null],
         stats.clanMaterialDemand, Warehouse.contentIdentity(current), ClanSupply.contentIdentity(current), ClanSupply.hasWarehouse(current),
-        Math.floor(positive(stats.frustration) * 10), deps.gearThreatMask ?? GearThreat.maskFor(current, deps),
+        deps.gearThreatMask ?? GearThreat.maskFor(current, deps),
         stats.role || Roles.inferRole(stats.classId || 0), current.accountName,
         trip, deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending',
         deps.mode || '', deps.inputKey || '', current.incomingPending === true,

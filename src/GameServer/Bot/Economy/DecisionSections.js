@@ -181,7 +181,7 @@ function carrySectionBaseline(previous, current, updated) {
         }
     };
     carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
-    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour']);
+    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour', 'frustration']);
     carry(sectionBit('benefits'), ['horizon']);
     carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
     return carrySectionClocks(previous, current, updated);
@@ -213,14 +213,21 @@ function learnedChange(current, previous, error, share, previousShare) {
         return !Number.isFinite(old) || Math.abs(value * share - old) > Math.abs(old) * error;
     }));
 }
+// The learned frustration the decision weighed its risk with (riskWeight's
+// 1 + frustration), rounded: the baseline holds a few bytes.
+const frustrationOf = state => Math.round(positive(state.stats?.frustration) * 1000) / 1000;
 function observationChanged(state, baseline, timestamp, mode) {
     if (!baseline) return true;
     const current = sample(state, timestamp, mode);
     const previous = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
     const share = Hunt.onSpotShare(state), previousShare = baseline.share ?? 1;
     const error = positive(baseline.incomeError);
+    // Frustration drifts every round; it is an event only beyond the bot's
+    // error on its risk weight (a baseline saved before it has none).
+    const frustration = Number(baseline.frustration);
     return !observationBaselineValid(baseline, previous) || !Number.isFinite(share)
         || Math.abs(share - previousShare) > previousShare * error
+        || Number.isFinite(frustration) && Math.abs(frustrationOf(state) - frustration) > (1 + frustration) * error
         || learnedChange(current, previous, error, share, previousShare);
 }
 function observationEvent(state, baseline, timestamp, mode) {
@@ -251,7 +258,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...(facts || semanticFacts(state)), horizon: context.horizonHours,
-        expHour: positive(context.hunt?.expPerHour),
+        expHour: positive(context.hunt?.expPerHour), frustration: frustrationOf(state),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };
 }

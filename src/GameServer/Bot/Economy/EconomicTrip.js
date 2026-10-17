@@ -151,7 +151,8 @@ function frame(state) {
     const travel = state?.stats?.travel;
     return { activity: String(state?.activity || ''), currentRegion: state?.currentRegion == null ? null : String(state.currentRegion),
         loc: point(state?.loc), inventory: { 736: { amount: Math.max(0, Number(state?.inventory?.[736]?.amount || 0)) } },
-        stats: { karma: Math.max(0, Number(state?.stats?.karma || 0)),
+        // Karma: only its town-closing flip is a route input (Karma.closesTowns).
+        stats: { karma: Number(Karma.closesTowns(state?.stats?.karma)),
             marketReturn: state?.stats?.marketReturn?.loc ? { loc: point(state.stats.marketReturn.loc) } : null,
             travel: travel ? { townName: travel.townName == null ? null : String(travel.townName),
                 arrivalActivity: travel.arrivalActivity == null ? null : String(travel.arrivalActivity), to: point(travel.to) } : null } };
@@ -194,7 +195,7 @@ function preparedReader(rows, { hourAdena } = {}) {
 function reader(state, { hourAdena, origin = null } = {}) {
     const pointKey = loc => [loc?.locX, loc?.locY, loc?.locZ];
     const key = JSON.stringify([hourAdena, Trip.honest(), state?.activity, state?.currentRegion,
-        state?.stats?.karma, state?.inventory?.[736]?.amount, pointKey(state?.loc), pointKey(origin),
+        Karma.closesTowns(state?.stats?.karma), state?.inventory?.[736]?.amount, pointKey(state?.loc), pointKey(origin),
         pointKey(state?.stats?.marketReturn?.loc), state?.stats?.travel?.townName,
         state?.stats?.travel?.arrivalActivity, pointKey(state?.stats?.travel?.to)]);
     if (state && readers.get(state)?.key === key) return readers.get(state).cost;

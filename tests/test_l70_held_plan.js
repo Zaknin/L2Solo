@@ -630,8 +630,12 @@ try {
                     assert.equal(Decisions.refreshAdvisory(state, accepted, input, { prepared: {}, why }), null);
                     return why[0];
                 };
-                assert.equal(refused(next, { ...current, memory: { ...memory, revision: 2 } }), 'events:event_key',
-                    'changed native memory revision refuses the card');
+                assert(Decisions.refreshAdvisory(next, accepted, { ...current, memory: { revision: 2,
+                    relations: [{ ...memory.relations[0], trust: 60, hostility: 40 }] } }, { prepared: {}, why: [] }),
+                    'a memory revision that keeps the friend and enemy the review read keeps the card');
+                assert.equal(refused(next, { ...current, memory: { revision: 2,
+                    relations: [{ ...memory.relations[0], targetId: 99998 }] } }), 'events:event_key',
+                    'another remembered friend or enemy refuses the card');
                 assert.equal(refused({ ...next, stats: { ...next.stats, relations: [{ targetId: 4, trust: 1 }] } }), 'events:sections',
                     'changed fallback relations refuse the card');
                 assert.equal(refused({ ...next, partyId: 2 }), 'events:event_key', 'a party refuses the card');
