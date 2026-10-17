@@ -954,7 +954,10 @@ function save(row, options = {}) {
 }
 
 // The world was paused while the server was down (L136): every persisted due
-// time moves by the downtime, so a restart does not make all bots due at once.
+// time moves by the downtime, so a restart does not make all bots due at once,
+// and so does lastResolvedAt: the step's length is now - lastResolvedAt
+// (ColdSimulationKernel), so an unmoved stamp would credit the downtime as
+// hunting time (fights, mob share, regen) the bot never lived.
 // Downtime = this process start - the last row write before it, measured once
 // per boot; BackgroundPartyState moves its party due times by the same value.
 let bootPause = null;
@@ -977,8 +980,9 @@ function shiftDueTimesByDowntime() {
     return measureBootPause().then(({ startedAt, downtimeMs }) => {
         if (!(downtimeMs > 0)) return 0;
         return Database.execute([
-            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?
-            WHERE nextResolveAt > 0 AND updatedAt > 0 AND updatedAt < ?`, [downtimeMs, downtimeMs, startedAt]
+            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, lastResolvedAt = lastResolvedAt + ?, updatedAt = updatedAt + ?
+            WHERE (nextResolveAt > 0 OR lastResolvedAt > 0) AND updatedAt > 0 AND updatedAt < ?`,
+        [downtimeMs, downtimeMs, downtimeMs, startedAt]
         ]).then((result) => {
             const shifted = Number(result?.affectedRows || 0);
             utils.infoWarn('BotLife', 'cold hydrate: shifted %d due times by %d ms', shifted, downtimeMs);

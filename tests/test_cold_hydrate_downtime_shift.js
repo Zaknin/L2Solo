@@ -3,7 +3,9 @@
 // was paused), bots and active parties, in the row and the cache alike, so the
 // worker's first command checkpoint and the party commit fence still match
 // the row. updatedAt moves too, so a second boot with no write in between
-// shifts only its own gap, not the first downtime again.
+// shifts only its own gap, not the first downtime again. lastResolvedAt moves
+// with them: the first step's length (now - lastResolvedAt) must not hold the
+// downtime, or the bot is credited hunting time it never lived.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -79,7 +81,8 @@ async function run() {
     const expected = {
         overdue: [shifted(rows.overdue[2], true), shifted(rows.overdue[3], true)],
         later: [shifted(rows.later[2], true), shifted(rows.later[3], true)],
-        unset: [null, rows.unset[3]],
+        // No due time, but a last step: the step length still excludes the downtime.
+        unset: [null, shifted(rows.unset[3], true)],
         future: [rows.future[2], rows.future[3]]
     };
     for (const [key, [id]] of Object.entries(rows)) {
@@ -89,6 +92,9 @@ async function run() {
         assert.equal(row.nextResolveAt === null ? null : Number(row.nextResolveAt), expected[key][0], `${key}: row due time`);
         assert.equal(Number(row.updatedAt), expected[key][1], `${key}: updatedAt moves with the due time`);
         assert.equal(state.updatedAt, Number(row.updatedAt), `${key}: cached updatedAt matches the row`);
+        const lastResolvedAt = key === 'future' ? rows.future[3] - 1000 : expected[key][1] - 1000;
+        assert.equal(Number(row.lastResolvedAt), lastResolvedAt, `${key}: lastResolvedAt moves with the due time`);
+        assert.equal(state.timing.lastResolvedAt, lastResolvedAt, `${key}: cached lastResolvedAt matches the row`);
         assert(Protocol.sameCommandCheckpoint(state, checkpointRow(row)),
             `${key}: the worker's first command checkpoint matches the row`);
     }
@@ -106,8 +112,11 @@ async function run() {
     assert.equal(child.status, 0, `second boot failed: ${child.stdout}\n${child.stderr}`);
     const line = /cold hydrate: shifted (\d+) due times by (\d+) ms/.exec(child.stdout);
     assert(line, `second boot shifts and logs: ${child.stdout}`);
-    const gap = Number(line[2]);
-    assert(gap > 0 && gap < downtime / 2, `second boot shifts only its gap, not the downtime again (got ${gap} ms)`);
+    // The gap is this process's start to the child's start; the first downtime
+    // counted again would exceed everything that elapsed since this start
+    // (the bound holds on a loaded machine, where this test takes minutes).
+    const gap = Number(line[2]), elapsed = Date.now() - startedAt;
+    assert(gap > 0 && gap <= elapsed, `second boot shifts only its gap, not the downtime again (got ${gap} ms, elapsed ${elapsed} ms)`);
     const db = new DatabaseSync(fixture.world, { readOnly: true });
     const overdue = db.prepare('SELECT nextResolveAt FROM bot_life_state WHERE characterId=?').get(rows.overdue[0]);
     const partyAfter = db.prepare('SELECT nextResolveAt FROM bot_background_parties WHERE partyId=?').get(PARTY);
