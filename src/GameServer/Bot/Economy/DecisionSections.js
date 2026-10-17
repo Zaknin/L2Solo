@@ -6,7 +6,6 @@
 const { fnv1a32 } = require('../Fnv1a');
 const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
-const Diagnostics = require('./EconomyDiagnostics');
 // Read through the module object at call time (tests replace buildInputKey, kitEvents).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -302,14 +301,10 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     let original;
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before))[key];
     const current = semanticFacts(after);
-    const changed = factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
-        || !previous.funding && fundingMark(before) !== fundingMark(after));
-    // Shadow (counter only): an occupation change the held decision itself
-    // ordered (a trip it began, or the arrival where its trip led) is its own
-    // output, not an input; it still raises the section today.
-    if (Diagnostics.active() && changed.includes('occupation'))
-        Diagnostics.count('sections', 'occupation', plannedOccupation(before, after) ? 'planned' : 'unplanned');
-    return changed;
+    // An occupation change the held decision itself ordered (a trip it
+    // began, or the arrival where its trip led) is its own output, no event.
+    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
+        || !previous.funding && fundingMark(before) !== fundingMark(after), null, plannedOccupation(before, after));
 }
 // The occupation change the held trip describes: a trip begun this round, or
 // the arrival where it led (occupationPlanned against the trip's target).
@@ -324,8 +319,8 @@ function plannedOccupation(before, after) {
 // hunting spot arriving to hunt, or to its town), or the arrival where it
 // led (its hunting spot, hunting or resting there; else its own activity).
 // Death, recall, a party pull, a flight or a yield are none of these and
-// stay events. The worker's verdict reads it in shadow (Hold place
-// economy_occupation); its field-trip clause is EconomyContext.fieldActivity's.
+// stay events. The held build's verdict reads it (factEvents' planned); its
+// field-trip clause is EconomyContext.fieldActivity's.
 function occupationPlanned(state, leaf) {
     if (!leaf?.activity) return false;
     const hunt = leaf.activity === 'hunting';
@@ -343,15 +338,16 @@ function occupationPlanned(state, leaf) {
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.
 // facts (diagnostics, optional): an array that receives the name of every
-// raised fact, in this order.
-function factEvents(previousFact, current, after, funding = false, facts = null) {
+// raised fact, in this order. planned: the occupation the held decision
+// ordered (occupationPlanned / plannedOccupation), its own output, no event.
+function factEvents(previousFact, current, after, funding = false, facts = null, planned = false) {
     const sections = new Set();
     const raise = fact => { facts?.push(fact); for (const name of FACT_SECTIONS[fact]) sections.add(name); };
     if (!previousFact('dead') && current.dead) raise('dead');
     if (previousFact('build') !== current.build) raise('build');
     if (previousFact('relations') !== current.relations) raise('relations');
     if (funding) { facts?.push('funding'); sections.add('funding'); }
-    if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') raise('occupation');
+    if (!planned && previousFact('occupation') !== current.occupation && after.activity !== 'resting') raise('occupation');
     if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
     if (previousFact('supply') !== current.supply) raise('supply');
