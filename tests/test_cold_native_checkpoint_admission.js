@@ -428,7 +428,13 @@ async function boundary(target, mode) {
             }
             console.log('SHARED_CALLBACK', JSON.stringify({ target, id, writers: writerCallbacks.map(value => value.name), exactFunctions: new Set(writerCallbacks.map(value => value.callback)).size }));
         } else {
-            assert.deepEqual(after, before, 'changed Native authority must conserve the exact accepted partial eight-table/cache image');
+            // A legacy_main row moved past the cache: the refusal reloads the row
+            // into the Main cache so the retry carries the row's checkpoint (L127);
+            // the tables and the publications stay untouched.
+            const { cache: cacheAfter, ...tablesAfter } = after, { cache: cacheBefore, ...tablesBefore } = before;
+            assert.deepEqual(tablesAfter, tablesBefore, 'changed Native authority must conserve the exact accepted partial eight-table image');
+            if (target === 'row') assert(Protocol.sameCommandCheckpoint(point(row(after, id)), cacheAfter), 'the refused command reloads the moved row into the cache');
+            else assert.deepEqual(cacheAfter, cacheBefore, 'a row under another owner is published by that owner, not reloaded');
             assert.equal(publications.length, 0);
             assert.equal(receipts.length, 1); assert.equal(receipts[0].payload.results[0].ok, false);
         }
