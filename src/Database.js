@@ -6009,6 +6009,9 @@ const Database = {
             // as EXP. Cold-to-hot resurrection reads this durable record.
             syncColdDeathExperienceUnsafe(characterId, deathExperience, timestamp);
             const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
+            // The resolve's life events (BotLifeEvents.resolvePayload) leave
+            // with its save: the outbox row commits or rolls back with it.
+            if (request.lifeEvents) historyOutboxUnsafe('life_events', request.lifeEvents);
             parts?.lap('settle');
             // After the UPDATE only a settlement (it returns its read) and the
             // physical step's PvP tally or PK death drop write this bot's life

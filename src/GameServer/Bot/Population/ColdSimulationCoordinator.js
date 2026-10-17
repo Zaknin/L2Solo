@@ -341,7 +341,7 @@ class ColdSimulationCoordinator {
             snapshotDeferrals: 0,
             routeCapacityRejects: 0,
             afterCommitStepErrors: { partyCache: 0, raidCache: 0, raidSettlement: 0, economyDecision: 0,
-                journal: 0, board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
+                board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
                 economyPlan: 0, clanEvents: 0, partyPlans: 0, buff: 0 }
         };
         this.economyPlanCount = 0;
@@ -354,7 +354,9 @@ class ColdSimulationCoordinator {
             maxEntries: Config.coldWorkerQueueMaxEntries || 1024,
             maxBytes: Config.coldWorkerQueueMaxBytes || 4 * 1024 * 1024,
             prepare: (proposal) => this.prepareProposal(proposal),
-            commit: (entries) => ColdSimulationOwner.commitAndReleaseBatch(entries),
+            // The journal rides the commit transaction (the world outbox), not a write per bot after it.
+            commit: (entries) => ColdSimulationOwner.commitAndReleaseBatch(entries.map((entry) => ({ ...entry,
+                lifeEvents: LifeEvents.resolvePayload(entry.nextState.characterId, entry.proposal.result?.events) }))),
             afterCommit: (entry, result) => this.afterCommit(entry, result),
             onResults: (results) => {
                 const startedAt = Config.developerDiagnostics ? Date.now() : 0;
@@ -2213,7 +2215,6 @@ class ColdSimulationCoordinator {
         const trained = { done: false };
         if (sourceCurrent()) await step('economyDecision',
             () => this.economyDecisions.accept(id, entry.proposal.economyDecision, committed, state));
-        await step('journal', () => LifeEvents.recordMany(id, entry.proposal.result?.events || []));
         if (sourceCurrent() && entry.proposal.market) {
             // The resolve has already advanced native ownership. Capture its
             // accepted authority after commit, never the worker's old revision.

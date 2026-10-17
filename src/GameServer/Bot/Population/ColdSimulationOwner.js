@@ -357,7 +357,8 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             allowLifecycle: entry.options?.allowLifecycle === true || options.allowLifecycle === true,
             atomicGroup: entry.atomicGroup || null,
             journalReason: entry.journalReason || options.journalReason || null,
-            ...(entry.proposal?.result?.memoryEvents ? { memoryEvents: entry.proposal.result.memoryEvents } : {})
+            ...(entry.proposal?.result?.memoryEvents ? { memoryEvents: entry.proposal.result.memoryEvents } : {}),
+            ...(entry.lifeEvents ? { lifeEvents: entry.lifeEvents } : {})
         });
     });
     if (!requests.length) return Promise.resolve(rejected);

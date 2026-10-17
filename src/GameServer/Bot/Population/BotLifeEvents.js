@@ -13,9 +13,9 @@ function now() {
 // routine event (rest, hunt) updates the bot's latest one of the same type
 // within 30 minutes, and each bot keeps its 20 most telling events
 // (HistoryStore APPLY.life_events).
-function writeEvents(characterId, events) {
+function outboxPayload(characterId, events) {
     const createdAt = now();
-    return Database.recordHistory('life_events', {
+    return {
         characterId,
         prune: 'recent',
         events: events.map((event) => ({
@@ -26,10 +26,24 @@ function writeEvents(characterId, events) {
             meta: event.meta || {},
             coalesce: true
         }))
-    }, 'history:life-events');
+    };
+}
+
+function writeEvents(characterId, events) {
+    return Database.recordHistory('life_events', outboxPayload(characterId, events), 'history:life-events');
+}
+
+// A resolve's events ({ type, summary, meta, weight }) as the outbox payload
+// of the world write that saves the resolve; null when none is complete.
+function resolvePayload(characterId, events = []) {
+    const valid = (events || []).filter((event) => event?.type && event?.summary)
+        .map((event) => ({ eventType: event.type, summary: event.summary, meta: event.meta, weight: event.weight }));
+    return characterId && valid.length ? outboxPayload(characterId, valid) : null;
 }
 
 const BotLifeEvents = {
+    resolvePayload,
+
     init() {
         if (initialized) return Promise.resolve(true);
         if (initStarted) return initPromise;
@@ -65,10 +79,10 @@ const BotLifeEvents = {
         const ready = initialized ? Promise.resolve(true) : this.init();
         return ready.then((isReady) => {
             if (!isReady) return [];
-            const valid = events.filter((event) => event?.type && event?.summary)
-                .map((event) => ({ eventType: event.type, summary: event.summary, meta: event.meta, weight: event.weight }));
-            if (!valid.length) return [];
-            return writeEvents(characterId, valid).then((outboxId) => valid.map(() => outboxId));
+            const payload = resolvePayload(characterId, events);
+            if (!payload) return [];
+            return Database.recordHistory('life_events', payload, 'history:life-events')
+                .then((outboxId) => payload.events.map(() => outboxId));
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to record life events: %s', err.message);
             return [];

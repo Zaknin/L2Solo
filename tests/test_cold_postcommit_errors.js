@@ -59,13 +59,9 @@ async function run() {
     assert.deepEqual(consumptionRows[0], [1, [[1539, 5, 3, 1]], { source: 'cold_commit', commandId: 'consume-command', proposalId: 'consume-proposal', revision: 5, sequence: 9 }]);
     assert.equal(logs.filter(line => line.includes('postcommit improvement failed')).length, 1);
     coordinator.economyDecisions.decided = () => null;
-    stub(Events, 'recordMany', () => { throw Error('journal_probe'); });
     logs.length = 0;
     await coordinator.afterCommit(entry);
     assert.equal(partyWrites, 2); assert.equal(resolves, 2); assert.equal(announcements, 2);
-    assert.equal(logs.filter(line => line.includes('postcommit journal failed')).length, 1);
-    assert.equal(coordinator.counters.afterCommitStepErrors.journal, 1);
-    stub(Events, 'recordMany', async () => {});
     coordinator.population.applyWorkerPartyRequirements = () => { throw Error('party_plan_probe'); };
     logs.length = 0;
     await coordinator.afterCommit(entry);

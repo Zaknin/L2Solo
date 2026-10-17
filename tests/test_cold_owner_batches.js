@@ -202,7 +202,10 @@ async function createProbe(index) {
                 skills: [{ selfId: 1000 + index, name: `Batch Skill ${index}`, passive: index === 0, level: 2 },
                     { selfId: 239, name: 'Expertise', passive: true, level: 1 }]
             } : null
-        }
+        },
+        // The journal rides the save: the stale member's events must not land.
+        ...(index < 2 ? { lifeEvents: invoke('GameServer/Bot/Population/BotLifeEvents').resolvePayload(
+            states[index].characterId, [{ type: 'batch_probe', summary: `probe ${index}` }]) } : {})
     }));
     // The committed row handed back to the owner is the row as stored:
     // compare it with a fresh read of every column.
@@ -230,6 +233,9 @@ async function createProbe(index) {
     assert.strictEqual(byId.get(states[0].characterId).ok, true);
     assert.strictEqual(byId.get(states[1].characterId).reason, 'stale_revision', 'one stale row must not roll back valid peers');
     assert.strictEqual(byId.get(states[2].characterId).ok, true);
+    const journaled = await Database.readHistory(['SELECT characterId FROM bot_life_events WHERE eventType = ?', ['batch_probe']]);
+    assert.deepStrictEqual(journaled.map((row) => Number(row.characterId)), [states[0].characterId],
+        'the life events commit with their save; a rejected save writes none');
     assert.deepStrictEqual(await wholeImage(states[1].characterId), staleBefore,
         'the rejected member retains its exact prepared physical/cache image');
     for (const state of states) {
