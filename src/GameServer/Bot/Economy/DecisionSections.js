@@ -336,8 +336,9 @@ function occupationPlanned(state, leaf) {
             && travel.arrivalActivity === 'hunting' && travel.townName == null
             : leaf.town != null && travel.townName != null && String(travel.townName) === String(leaf.town);
     }
-    if (hunt) return (state.activity === 'hunting' || state.activity === 'resting')
-        && (leaf.spotId == null || String(state.spotId) === String(leaf.spotId));
+    // A hunting leaf without a spot names no arrival: any spot is an event.
+    if (hunt) return leaf.spotId != null && (state.activity === 'hunting' || state.activity === 'resting')
+        && String(state.spotId) === String(leaf.spotId);
     return state.activity === leaf.activity;
 }
 // One semantic comparison for state publication and the diagnostic event gate.

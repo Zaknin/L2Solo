@@ -90,6 +90,11 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
     assert.equal(state.activity, 'hunting', 'fixture: the round starts hunting');
     assert.equal(rest(state.spotId), false, 'a rest where the bot hunted is no reconcile event');
     assert.equal(rest(`${state.spotId}_other`), true, 'a rest at another spot is a reconcile occupation event');
+    // A hunting leaf without a spot plans no arrival (only a town leaf matches by town).
+    for (const activity of ['hunting', 'resting'])
+        assert.equal(Sections.occupationPlanned({ ...arrived, activity }, { ...leaf, spotId: null }), false,
+            `${activity} under a hunting leaf without a spot is no planned occupation`);
+    assert.equal(Sections.occupationPlanned(arrived, leaf), true, 'fixture: the own spot of the leaf is planned');
 }
 // 3. A bag row below a crossing: a new row below the slot limit and loot
 // inside its band keep the build; the row that fills the bag refuses (the bag
