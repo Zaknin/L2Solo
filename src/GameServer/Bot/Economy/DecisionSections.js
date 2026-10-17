@@ -198,8 +198,8 @@ function moneyEvent(state, baseline = state.stats?.wishSections, timestamp = Dat
 }
 function incomeError(state, persona) {
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
-    return Learning.knowledgeEnabled() ? Learning.stageError(.03 + .25 * (1 - Number(persona?.understanding ?? .3)),
-        .03, state.stats?.lifelongKills ?? state.stats?.fightsWon ?? 0, Learning.gradeOfLevel(state.level)) : 0;
+    return Learning.knowledgeEnabled() ? Learning.stageError(Learning.INCOME_ERROR_FLOOR + .25 * (1 - Number(persona?.understanding ?? .3)),
+        Learning.INCOME_ERROR_FLOOR, state.stats?.lifelongKills ?? state.stats?.fightsWon ?? 0, Learning.gradeOfLevel(state.level)) : 0;
 }
 function sample(state, timestamp = Date.now(), mode) {
     const rows = Hunt.sampledRows(state, timestamp, mode);

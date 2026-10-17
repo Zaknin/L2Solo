@@ -2388,11 +2388,11 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     // A retained row counts one cell per record and one per eligible record
     // (its level-ordered ordinal), so at most two per record.
     const retain = 2 * entries.length <= MAX_SOURCE_FACT_RULE_CELLS;
-    // Make room before allocation: the cache retains <= 1 MiB of ordinal
-    // backing. Uncollected evictions or rows held by an active reader can
-    // outlive the cache. Oversized rows get no ordinal backing and are not
-    // retained; this caller uses their full rule arrays and original walk.
-    if (retain) makeFactRuleRoom(entries.length);
+    // The cache retains <= 1 MiB of ordinal backing; room for a retained row
+    // is made once it is built, for all its cells at once. Uncollected
+    // evictions or rows held by an active reader can outlive the cache.
+    // Oversized rows get no ordinal backing and are not retained; this
+    // caller uses their full rule arrays and original walk.
     const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
     const eligible = retain ? new Uint32Array(entries.length) : null;
     const staticBuckets = [], bucketsByRuleKind = new Map();
@@ -2429,7 +2429,8 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     if (retain) {
         rankSourceFactRules(rules);
         rules.cells += eligibleCount;
-        makeFactRuleRoom(eligibleCount);
+        // Room for the whole row at once: the entries were not counted yet.
+        makeFactRuleRoom(rules.cells);
         sourceIndexCache.factRuleCells += rules.cells;
         cache.set(key, rules);
         if (Diagnostics.active()) Diagnostics.count('source_bound', 'row', 'levels', rules.levels.length);

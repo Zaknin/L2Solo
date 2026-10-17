@@ -60,7 +60,7 @@ async function run() {
         return;
     }
     await Database.init();
-    const startedAt = Math.floor(SERVER_STARTED_AT), downtime = 60000, lastWrite = startedAt - downtime;
+    const startedAt = Math.floor(SERVER_STARTED_AT), downtime = 6 * 3600000, lastWrite = startedAt - downtime;
     const rows = {
         overdue: [9600411, 'DowntimeOverdue', lastWrite - 120000, lastWrite],
         later: [9600412, 'DowntimeLater', lastWrite + 300000, lastWrite - 30000],
@@ -112,11 +112,11 @@ async function run() {
     assert.equal(child.status, 0, `second boot failed: ${child.stdout}\n${child.stderr}`);
     const line = /cold hydrate: shifted (\d+) due times by (\d+) ms/.exec(child.stdout);
     assert(line, `second boot shifts and logs: ${child.stdout}`);
-    // The gap is this process's start to the child's start; the first downtime
-    // counted again would exceed everything that elapsed since this start
-    // (the bound holds on a loaded machine, where this test takes minutes).
-    const gap = Number(line[2]), elapsed = Date.now() - startedAt;
-    assert(gap > 0 && gap <= elapsed, `second boot shifts only its gap, not the downtime again (got ${gap} ms, elapsed ${elapsed} ms)`);
+    // The gap is this process's start to the child's start, minutes at most on
+    // a loaded machine; the six-hour fixture downtime counted again would
+    // exceed half of it by hours.
+    const gap = Number(line[2]);
+    assert(gap > 0 && gap < downtime / 2, `second boot shifts only its gap, not the downtime again (got ${gap} ms)`);
     const db = new DatabaseSync(fixture.world, { readOnly: true });
     const overdue = db.prepare('SELECT nextResolveAt FROM bot_life_state WHERE characterId=?').get(rows.overdue[0]);
     const partyAfter = db.prepare('SELECT nextResolveAt FROM bot_background_parties WHERE partyId=?').get(PARTY);

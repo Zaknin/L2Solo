@@ -96,9 +96,12 @@ function halfLifeOf(grade, domain = 'mobs') {
 
 // Points stay lifelong in the caller's own domain. Domain adapters derive the
 // trait base/floor; the shared switch gates estimates AND event increments.
+// The floor of a bot's own error on a reading (income, gain): differences
+// under it are noise for every bot, the best-informed one included.
+const INCOME_ERROR_FLOOR = .03;
 function stageError(base, floor, points, grade, domain = 'mobs') {
     return learnedError(base, floor, points, halfLifeOf(grade, domain));
 }
 
-module.exports = { knowledgeEnabled, learnedError, stages, gradeOfLevel, halfLifeOf, stageError,
+module.exports = { knowledgeEnabled, learnedError, INCOME_ERROR_FLOOR, stages, gradeOfLevel, halfLifeOf, stageError,
     STAGE_KILL_FRACTION, FIRST_ECONOMIC_HALF_LIFE };

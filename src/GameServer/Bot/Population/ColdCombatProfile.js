@@ -19,6 +19,7 @@ const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
 
 // Rebuild persisted kits that could have been overwritten by an older resolve.
 const PROFILE_VERSION = 6;
@@ -604,6 +605,7 @@ function countedBuild(state, timestamp, options) {
     return profile;
 }
 function withBuildSite(site, work) {
+    if (!Diagnostics.active()) return work();
     const outer = buildSite;
     buildSite = site;
     try { return work(); }
@@ -1153,17 +1155,15 @@ function countSwitch(old, entry) {
 // computed gain is computed again for the kit alone (the state without the
 // effects powerKey's effects part holds, before and after) and compared.
 // same: per component (attack, defence) both zero or both positive and
-// within GAIN_KIT_ERROR of the larger; no_effects: nothing to drop, the kit
-// gain is the gain. GAIN_KIT_ERROR is the floor of the bot's own error
-// (DecisionSections.incomeError: .03 for the best-informed bot), as the store
-// has no persona: a diff here is a diff for every bot. The kit's own power is
-// one build per entry (kitPowers).
-const GAIN_KIT_ERROR = 0.03;
+// within the bot's error floor (Learning.INCOME_ERROR_FLOOR) of the larger;
+// no_effects: nothing to drop, the kit gain is the gain. The floor, as the
+// store has no persona: a diff here is a diff for every bot. The kit's own
+// power is one build per entry (kitPowers).
 const kitPowers = new WeakMap();
 function sameGain(gain, kit) {
     for (const part of ['attack', 'defence']) {
         if ((gain[part] > 0) !== (kit[part] > 0)
-            || Math.abs(gain[part] - kit[part]) > GAIN_KIT_ERROR * Math.max(Math.abs(gain[part]), Math.abs(kit[part])))
+            || Math.abs(gain[part] - kit[part]) > Learning.INCOME_ERROR_FLOOR * Math.max(Math.abs(gain[part]), Math.abs(kit[part])))
             return false;
     }
     return true;
