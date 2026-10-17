@@ -9,7 +9,7 @@ function spawnItem(session, selfId, amount, coords, onSpawn) {
         this.items.spawns.push(item);
         const packet = ServerResponse.spawnItem(item);
         if (session) session.dataSendToMeAndOthers(packet, item);
-        else this.fetchVisibleUsers(item).forEach(recipient => recipient.dataSendToMe(packet));
+        else this.fetchVisibleUsers(null, item).forEach(recipient => recipient.dataSendToMe(packet));
         onSpawn?.(item);
     });
 }

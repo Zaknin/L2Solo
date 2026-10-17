@@ -450,7 +450,14 @@ function reportTransactionSqliteFailure(operation, phase, error) {
 // without changing either rejection identity or the existing failure counters.
 function reportBotLifeSaveFailure(phase, error) {
     try {
+        const checkpoint = NativeWriteCheckpoint.refusalDiagnostic(error);
         if (!DiagnosticConfig.developerDiagnostics) {
+            if (checkpoint) {
+                console.warn('DB          :: bot life save failure %s', JSON.stringify({
+                    operation: 'bot-life:save', phase, admissionRefusalReason: error.message, ...checkpoint
+                }));
+                return;
+            }
             console.warn('DB          :: bot life save failure %s %s', phase, error?.message || 'unknown');
             return;
         }
@@ -464,7 +471,7 @@ function reportBotLifeSaveFailure(phase, error) {
             sqliteCode: error?.errcode ?? null, sqliteReason: error?.errstr ?? null,
             admissionRefusalReason: error instanceof WorkerCommandAdmissionRefusal
                 && reasons.includes(error.message) ? error.message : null,
-            configuredWriterBusyTimeoutMs: 5000, frames
+            configuredWriterBusyTimeoutMs: 5000, frames, ...(checkpoint || {})
         }));
     } catch (_) { /* Diagnostics must preserve the original save rejection. */ }
 }
@@ -4210,7 +4217,9 @@ const Database = {
                 if (admission.nativeProof) NativeWriteCheckpoint.checkRow(admission.nativeProof, statement);
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
-                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'statsJson';
+                const returning = admission.nativeProof
+                    ? `${NativeWriteCheckpoint.columns.join(', ')}, simulationLeaseUntil, statsJson`
+                    : 'simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
                     // BotLifeState.save supplies its native 29-column ROW.
@@ -4230,7 +4239,9 @@ const Database = {
                 const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
-                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson };
+                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson,
+                    simulationOwner: row?.simulationOwner, simulationRevision: row?.simulationRevision,
+                    simulationLeaseId: row?.simulationLeaseId, simulationLeaseUntil: row?.simulationLeaseUntil };
             } catch (error) {
                 reportBotLifeSaveFailure(phase, error);
                 throw error;

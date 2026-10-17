@@ -27,6 +27,30 @@ function inCombat(session, bot) {
     return hasCombatThreat(session, bot) || !!bot.state.fetchCasts?.();
 }
 
+// The paid route token covers only one physical leg. Accepted custody keeps
+// ordinary AI paused through subsequent walks and the wait for settlement.
+// Preserve the plan so an existing shopping continuation can still resume it.
+function holdMeeting(session, bot, interrupted = false) {
+    const id = Number(bot.fetchId());
+    const current = invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(id);
+    const state = current || (session.coldLifeState?.characterId === id ? session.coldLifeState : null);
+    const marker = session.tradeMeetingPresence;
+    const meetingId = (marker?.actorId === id && marker.id) || state?.stats?.tradeMeeting?.[0];
+    if (!meetingId || interrupted || hasCombatThreat(session, bot)) {
+        session.meetingAiHold = undefined;
+        if (meetingId && session.meetingTravel?.id === meetingId) session.meetingTravel = undefined;
+        return false;
+    }
+    const held = session.meetingAiHold;
+    if (held?.actor !== bot || held.id !== meetingId) {
+        session.meetingAiHold = { actor: bot, id: meetingId };
+        // Wake once on acquisition/recovery, never poll the native queue on
+        // waiting ticks. Physical arrivals continue through presenceChanged.
+        require('../../AfkTrade/TradeMeetingService').wake(id);
+    }
+    return true;
+}
+
 function clearCombatTrip(session) {
     session.pendingTownTrip = undefined;
     session.townEscape = undefined;
@@ -290,6 +314,7 @@ module.exports = {
     clearCombatTrip,
     hasCombatThreat,
     inCombat,
+    holdMeeting,
     interruptEscape,
     request,
     requestMeeting,

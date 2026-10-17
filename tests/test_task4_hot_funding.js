@@ -34,7 +34,7 @@ const deps = {
     'GameServer/Bot/Economy/TownNpcCatalog': {},
     'GameServer/Bot/AI/BotMammonUnseal': { plan: () => null },
     'GameServer/Bot/AI/CompanionDualSwordCrafting': { plan: () => ({ handled: false }) },
-    'GameServer/Bot/Economy/EconomyContext': { routeState: state => state, forState: () => ({
+    'GameServer/Bot/Economy/EconomyContext': { stateForActor: () => ({ currentRegion: 'Giran' }), forState: () => ({
         network: { activity: leaf, queue: [{ key: 'item:49', funded: true, ratio: 0.2, object: { itemId: ROOT } }] },
         statsPacket: { money }, worth: () => Infinity }) },
     'GameServer/DataCache': { items: [] }

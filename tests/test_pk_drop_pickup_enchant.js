@@ -29,7 +29,7 @@ async function session(id) {
 
 (async () => {
     await Database.init();
-    const previousSpawn = World.spawnItem, previousUserInfo = Response.userInfo;
+    const previousSpawn = World.spawnItem, previousUserInfo = Response.userInfo, previousUser = World.user;
     try {
         await Native.character(Database, 9401, 'PkOwner', 'pk_pickup_owner');
         await Native.character(Database, 9402, 'Collector', 'pk_pickup_collector');
@@ -42,8 +42,28 @@ async function session(id) {
         await Database.setItem(9402, { selfId: 123, name: 'Saber', amount: 1 });
         const owner = await session(9401), collector = await session(9402);
         const awards = [], ground = { items: { nextId: 700001, spawns: [] },
+            fetchVisibleUsers: (...args) => World.fetchVisibleUsers(...args),
             purchaseItem(...args) { const award = Purchase(...args); awards.push(award); return award; } };
         World.spawnItem = (...args) => Spawn.call(ground, ...args);
+        World.user = { sessions: [], revision: 0 };
+        const Model = invoke('GameServer/Model/Actor');
+        const observer = (id, x, online = true) => {
+            const packets = [];
+            const recipient = { accountId: `drop_observer_${id}`, fetchAccountId() { return this.accountId; },
+                dataSendToMe: packet => packets.push(packet) };
+            recipient.actor = new Model({ id, name: recipient.accountId, username: recipient.accountId,
+                clanId: 0, isOnline: false, locX: x, locY: 1000, locZ: 0 });
+            recipient.actor.session = recipient;
+            World.insertUser(recipient); recipient.actor.setIsOnline(online);
+            return packets;
+        };
+        const nearby = observer(9410, 1100), far = observer(9411, 20000), offline = observer(9412, 1000, false);
+        Drops.spawn(9401, { locX: 1000, locY: 1000, locZ: 0 }, [{ selfId: 123, amount: 1, enchant: 7 }]);
+        const coldDrop = ground.items.spawns.pop();
+        assert(coldDrop, 'a cold victim leaves an actual ground item');
+        assert.deepEqual(nearby, [Response.spawnItem(coldDrop)], 'nearby players receive the native cold PK spawn packet');
+        assert.deepEqual(far, [], 'distant players receive no spawn packet');
+        assert.deepEqual(offline, [], 'offline actors receive no spawn packet');
         // Inventory and spawn packets remain native; this fixture has no combat stats.
         Response.userInfo = () => Buffer.alloc(0);
         assert.equal(Drops.drop(owner, owner.actor, () => 0).length, 3);
@@ -69,6 +89,7 @@ async function session(id) {
         console.log('PASS native PK drop → ground pickup: separate enchanted instances and pet data survive reopening');
     } finally {
         World.spawnItem = previousSpawn;
+        World.user = previousUser;
         Response.userInfo = previousUserInfo;
         await Database.close();
     }

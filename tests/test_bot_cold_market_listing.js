@@ -94,7 +94,8 @@ async function run() {
         name: replacement.template.name, amount: 1, equipped: true, slot: replacement.etc.slot, enchant: 0 })).insertId);
     const replacedState = await LifeState.upsertState({ ...spareSale.state, activity: 'shopping',
         inventory: LifeState.inventorySummaryFromItems(await Database.fetchItems(96)) }, 'starter_replaced_fixture');
-    assert.strictEqual(ItemDisposition.inventoryCleanupNeed(replacedState, { now: 1001 })?.reason, 'npc_only_inventory');
+    assert.strictEqual(ItemDisposition.inventoryCleanupNeed(replacedState, { now: 1001 }), null,
+        'one replaced starter piece does not force a town trip; the existing visit still sells it');
     const replacedSale = await ListingService.open(replacedState, { ...cleanupOptions, now: 1001 });
     const afterReplacement = await Database.fetchItems(96);
     assert.strictEqual(replacedSale.listed, false);
