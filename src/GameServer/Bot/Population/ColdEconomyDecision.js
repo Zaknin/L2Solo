@@ -376,10 +376,30 @@ function preparedCardWorth(decision, id, state, moneyPrice, understanding, enabl
     return NaN;
 }
 
+// The basics' enumerable keys, learned from the first build: basics() always
+// returns the same shape, so a later view defines them without a build.
+let basicsKeys = null;
+// The view's basics (the hour-value foundation with its income route search)
+// are built on first read: GoalService.review through NeedsEvaluator reads
+// only the card's leaf. The build takes the view's timestamp and board, as
+// the eager build did. Without the money packet, with an urgency or before
+// the first build the view's own fields need them at once.
 function view(state, decision, deps = {}, preparedBase = null) {
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const base = preparedBase || Economy.basics(state, deps), packet = state.stats?.money;
+    // lazy: cycle AfkTradeService loads the economy that reads these views
+    const board = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
+    const timestamp = Number(deps.timestamp || Date.now());
+    const baseDeps = deps.board === board && deps.timestamp === timestamp ? deps : { ...deps, board, timestamp };
+    let base = preparedBase;
+    const basics = () => {
+        if (base) return base;
+        // lazy: cycle EconomyContext constructs and validates these cards
+        base = invoke('GameServer/Bot/Economy/EconomyContext').basics(state, baseDeps);
+        basicsKeys ||= Object.keys(base);
+        return base;
+    };
+    const packet = state.stats?.money;
     const valid = Array.isArray(packet) && packet.length >= 4;
+    if (!valid || decision?.urgency || !basicsKeys) basics();
     const hourAdena = valid ? Number(packet[0]) : base.hourAdena;
     const moneyPrice = valid ? Number(packet[1]) : hourAdena > 0 ? 1 / hourAdena : 0;
     const known = id => {
@@ -388,21 +408,28 @@ function view(state, decision, deps = {}, preparedBase = null) {
         return null;
     };
     const enabled = deps.knowledgeEnabled ?? invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled();
-    const itemUsefulness = id => personalUsefulness(known(id) || 0, state, base.persona.understanding, enabled, id);
+    const itemUsefulness = id => personalUsefulness(known(id) || 0, state, basics().persona.understanding, enabled, id);
     const activity = decision?.activity || null;
     const wish = decision?.wish ? { object: { kind: kindFor(decision.wish[0]), amount: decision.wish[1] }, price: decision.wish[2] } : null;
-    return { ...base, state, hourAdena, moneyPrice, survivalReserve: valid ? Number(packet[2]) : base.survivalReserve,
+    const own = { state, hourAdena, moneyPrice, survivalReserve: valid ? Number(packet[2]) : base.survivalReserve,
         gapHorizonHours: !decision?.urgency ? 0 : decision.urgency === URGENCY_SHOTS
             ? base.stock('shots').targetHours : decision.urgency === URGENCY_POTIONS
                 ? base.stock('potions').targetHours
                 : invoke('GameServer/Bot/Economy/EconomicValuation').stageHours(state, base.hunt.expPerHour, base.persona),
-        board: deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null),
-        network: { activity }, activity, wish,
+        board, network: { activity }, activity, wish,
         craftReservations: Object.fromEntries(activity?.craftReservations || []),
         watchList: (decision?.watch || []).map(row => ({ itemId: row[0], amount: row[1], worth: row[2], kind: kindFor(row[3]) })),
         materials: decision?.materials || [], inputHash: decision?.inputHash || 0, decided: !!decision,
         workshop: decision?.workshop || unknownWorkshop(),
-        itemUsefulness, worth: id => known(id) !== null && moneyPrice > 0 ? itemUsefulness(id) / moneyPrice : base.price(id) };
+        itemUsefulness, worth: id => known(id) !== null && moneyPrice > 0 ? itemUsefulness(id) / moneyPrice : basics().price(id) };
+    if (base) return { ...base, ...own };
+    // Own enumerable getters: a spread or a key walk of the view sees the
+    // basics as before (and builds them); a write replaces the getter.
+    const economy = {};
+    for (const key of basicsKeys) if (!Object.hasOwn(own, key)) Object.defineProperty(economy, key, {
+        enumerable: true, configurable: true, get: () => basics()[key],
+        set: value => { Object.defineProperty(economy, key, { value, writable: true, enumerable: true, configurable: true }); } });
+    return Object.assign(economy, own);
 }
 function economyFor(state, deps = {}) {
     if (isMainThread && state?.phase === 'cold') return view(state,
