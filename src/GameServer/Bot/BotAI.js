@@ -231,6 +231,7 @@ const BotAI = {
     },
 
     stop(session) {
+        session.pendingShoppingMeeting?.controller.abort();
         invoke('GameServer/Bot/AI/TownNpcApproach').reset(session);
         invoke('GameServer/Bot/AI/TownTraffic').remove(Number(session.actor?.fetchId?.()));
         invoke('GameServer/Bot/AI/BotChatReactions').cancel(session);

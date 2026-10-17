@@ -61,7 +61,8 @@ async function sellInventoryToAfk(bot, store, coldState = null, sale = null) {
             bot.fetchId(), currentStore, item.selfId, qty,
             { objectId: item.objectId, expectedPrice: line.price, coldState: state }
         );
-        if (result.pending) return { pending: true, coldState: result.state || state,
+        if (result.pending) return { ...result, coldState: result.state || state,
+            pendingSale: { qty, name: line.name || item.selfId, totalAdena: qty * line.price },
             itemsSold: sold.reduce((sum, line) => sum + line.qty, 0), totalAdena: sold.reduce((sum, line) => sum + line.totalAdena, 0), sold };
         state = result.coldState || state;
         sold.push({ qty, name: line.name || item.selfId, totalAdena: result.totalPrice });
@@ -230,6 +231,7 @@ function shoppingNpcSale(session) {
 }
 
 function clearShoppingServiceState(session) {
+    session.pendingShoppingMeeting?.controller.abort();
     TownNpcApproach.reset(session);
     CompanionNavigationRecovery.clear(session);
     session.shoppingNpcSale = undefined;
@@ -240,7 +242,35 @@ function clearShoppingServiceState(session) {
     session.shoppingEquipmentPlanChecked = undefined;
 }
 
-function prepareEquipmentMarketStop(session, bot, town, BotAI) {
+async function waitForShoppingMeeting(session, bot, pending, visit) {
+    const current = () => session.actor === bot && session.plan === 'shopping' && !bot.isDead?.()
+        && session.companionShopping === visit.errand && session.shoppingTarget === visit.target
+        && session.shopTimer === visit.shopTimer;
+    if (!current()) return { interrupted: true };
+    session.pendingShoppingMeeting?.controller.abort();
+    const marker = { controller: new AbortController() };
+    session.pendingShoppingMeeting = marker;
+    try {
+        const receipt = await require('../../../AfkTrade/TradeMeetingService').waitForResult(
+            pending.token || pending.preparationId, bot.fetchId(), { signal: marker.controller.signal });
+        if (!current() || marker.controller.signal.aborted) return { interrupted: true };
+        if (receipt?.meetingId) await invoke('GameServer/AfkTrade/AfkTradeService').settleOwners([bot.fetchId()]);
+        if (!current() || marker.controller.signal.aborted) return { interrupted: true };
+        const state = LifeState.cachedState(bot.fetchId());
+        if (state) {
+            session.coldLifeState = state;
+            refreshPartyMemberships([session], invoke);
+        }
+        return receipt || { outcome: 'cancelled' };
+    } catch (error) {
+        if (!current() || marker.controller.signal.aborted) return { interrupted: true };
+        throw error;
+    } finally {
+        if (session.pendingShoppingMeeting === marker) session.pendingShoppingMeeting = undefined;
+    }
+}
+
+function prepareEquipmentMarketStop(session, bot, town, BotAI, economy) {
     const plan = session.coldLifeState?.stats?.equipmentPlan;
     if (session.companionShopping || session.shoppingTarget || session.shoppingEquipmentPlanChecked) return false;
     if (!town?.name || Number(session.companionEquipmentRetryAt || 0) > Date.now()) return false;
@@ -252,7 +282,7 @@ function prepareEquipmentMarketStop(session, bot, town, BotAI) {
 
     // One indexed lookup per town visit is enough. If the offer disappears,
     // the normal purchase failure cooldown handles the next attempt.
-    const errand = unseal || CompanionEquipmentShopping.planErrand(session, bot, town);
+    const errand = unseal || CompanionEquipmentShopping.planErrand(session, bot, town, 0, [], economy);
     if (errand?.pending) return true;
     session.shoppingEquipmentPlanChecked = true;
     if (!errand) return false;
@@ -406,7 +436,7 @@ module.exports = {
         // station revision fails the craft, which clears the phase and retries.
         const paidCraft = !session.companionShopping && session.shoppingServicePhase !== 'workshop' && workshopTarget(session, bot);
         if (paidCraft) { session.shoppingTarget = paidCraft; session.shoppingServicePhase = 'workshop'; }
-        if (session.shoppingServicePhase !== 'workshop' && prepareEquipmentMarketStop(session, bot, closestTown, BotAI) && !session.companionShopping) return;
+        if (session.shoppingServicePhase !== 'workshop' && prepareEquipmentMarketStop(session, bot, closestTown, BotAI, hotEconomy) && !session.companionShopping) return;
         if (session.shoppingServicePhase !== 'workshop') prepareWarehouseStop(session, bot, closestTown, BotAI);
 
         if (!session.shoppingTarget) {
@@ -623,6 +653,7 @@ module.exports = {
     async sellAndRestock(session, bot, Generics, BotAI) {
         const NpcTalkResponse = invoke(path.world + 'NpcTalkResponse');
         const companionErrand = session.companionShopping;
+        const visit = { errand: companionErrand, target: session.shoppingTarget, shopTimer: session.shopTimer };
 
         if (companionErrand?.kind === 'mammon_unseal') {
             try {
@@ -728,14 +759,20 @@ module.exports = {
                 const storeItem = store?.items?.find((item) => Number(item.selfId) === Number(companionErrand.itemId)
                     && (store.afkTrade !== true || Number(item.afkTradeLineId) === Number(companionErrand.lineId)));
                 if (store?.afkTrade === true && !storeItem) throw new Error('afk_trade_stock_changed');
-                const bought = store?.afkTrade === true
+                let bought = store?.afkTrade === true
                     ? await invoke('GameServer/AfkTrade/AfkTradeService').buyFromShop(
                         bot.fetchId(), store, companionErrand.itemId, companionErrand.amount || 1,
                         { lineId: companionErrand.lineId, expectedPrice: companionErrand.price, coldState: session.coldLifeState,
                             funding: companionErrand.funding }
                     )
                     : await TradeService.buyFromStore(bot, store, companionErrand.itemId, companionErrand.amount || 1);
-                if (bought.pending) return;
+                if (bought.pending) {
+                    const receipt = await waitForShoppingMeeting(session, bot, bought, visit);
+                    if (receipt.interrupted) return;
+                    if (receipt.outcome !== 'completed') throw Error('trade_meeting_cancelled');
+                    bought = { amount: companionErrand.amount || 1,
+                        totalPrice: (companionErrand.amount || 1) * companionErrand.price };
+                }
                 const boughtSummary = store?.afkTrade === true
                     ? { qty: bought.amount, name: storeItem?.name || companionErrand.itemName, totalAdena: bought.totalPrice }
                     : bought;
@@ -826,13 +863,21 @@ module.exports = {
 
             if (store && store.storeType === 3) {
                 try {
-                    const result = store.afkTrade === true
+                    let result = store.afkTrade === true
                         ? await sellInventoryToAfk(bot, store, session.coldLifeState, session.shoppingTarget.sale || null)
                         : await TradeService.sellInventoryToStore(bot, store, {
                         buyerActor: buyer,
                         state: session.coldLifeState
                         });
-                    if (result.pending) return;
+                    if (result.pending) {
+                        const receipt = await waitForShoppingMeeting(session, bot, result, visit);
+                        if (receipt.interrupted) return;
+                        if (receipt.outcome !== 'completed') throw Error('trade_meeting_cancelled');
+                        const sale = result.pendingSale;
+                        result = { ...result, pending: false, coldState: session.coldLifeState,
+                            itemsSold: result.itemsSold + sale.qty, totalAdena: result.totalAdena + sale.totalAdena,
+                            sold: [...result.sold, sale] };
+                    }
                     if (result.coldState) {
                         session.coldLifeState = result.coldState;
                         refreshPartyMemberships([session], invoke);

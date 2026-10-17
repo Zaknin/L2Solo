@@ -21,10 +21,12 @@ function actor(id) {
 const session = { actor: actor(5) };
 const inventory = [];
 let releaseAnchor, anchorAsked = false;
+let botState = null;
 const cancelled = { id: 9, actorA: 5, actorB: 6, state: 'cancelled', locX: 0, locY: 0, locZ: 0 };
+let resultMeeting = cancelled;
 const native = {
     recoverTradeMeetings: async () => [],
-    fetchTradeMeetingByToken: async token => token === 'switch' ? cancelled : null,
+    fetchTradeMeetingByToken: async token => token === 'switch' ? resultMeeting : null,
     fetchTradeMeetingForOwner: id => id === 5
         ? new Promise(resolve => { anchorAsked = true; releaseAnchor = resolve; }) : Promise.resolve(null),
     fetchItems: async () => []
@@ -32,7 +34,7 @@ const native = {
 global.utils = { infoWarn() {} };
 global.invoke = name => ({
     Database: native,
-    'GameServer/Bot/Population/BotLifeState': { cachedState: () => null,
+    'GameServer/Bot/Population/BotLifeState': { cachedState: id => id === 5 ? botState : null,
         subscribeChanges: () => () => {}, subscribeMarketReviewChanges: () => () => {} },
     'GameServer/AfkTrade/AfkTradeService': { subscribeBoardChanges: () => () => {},
         syncOnlineInventory: async id => { inventory.push(id); } },
@@ -67,6 +69,22 @@ global.invoke = name => ({
             await syncing;
             assert.deepEqual(session.tradeMeetingPresence, { id: 11, actorId: 5, otherId: 8,
                 locX: 10, locY: 20, locZ: 0, present: null, town: 'Giran', route: { durationMs: 45000 } });
+        }
+        // A meeting can start cold, then finish after its shopper materializes.
+        // No sellAndRestock continuation owns that inherited session snapshot.
+        for (const outcome of ['completed', 'cancelled']) for (const nextMeeting of [null, [11, 2]]) {
+            resultMeeting = { ...cancelled, state: outcome };
+            session.coldLifeState = { characterId: 5, stats: { tradeMeeting: [9, 1], wishFocus: 'retained' } };
+            botState = { characterId: 5, phase: 'hot', stats: nextMeeting ? { tradeMeeting: nextMeeting } : {} };
+            anchorAsked = false;
+            const syncing = Service.accept('switch');
+            for (let i = 0; i < 50 && !anchorAsked; i++) await new Promise(resolve => setImmediate(resolve));
+            assert(anchorAsked);
+            releaseAnchor(null);
+            await syncing;
+            assert.deepEqual(session.coldLifeState.stats.tradeMeeting || null, nextMeeting,
+                'a terminal native meeting retires the inherited hot shopping blocker and preserves any next commitment');
+            assert.equal(session.coldLifeState.stats.wishFocus, 'retained', 'unrelated hot session state is preserved');
         }
         console.log('Meeting result after character switch passed');
     } finally { Service.reset(); }
