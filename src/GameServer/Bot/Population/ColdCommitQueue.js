@@ -398,7 +398,8 @@ class ColdCommitQueue {
                     } else {
                         DiagnosticConfig.developerDiagnostics && (this.counters.rejected += 1);
                     }
-                    // `deferred`: party work afterCommit left running; onResults holds that ack.
+                    // `deferred`: party work afterCommit left for after the flush; onResults
+                    // starts it and holds that ack until it settles.
                     results.push({ ...result, proposal: entry?.proposal, nextState: entry?.nextState, deferred: entry?.deferred });
                 }
             }
@@ -476,8 +477,8 @@ class ColdCommitQueue {
             try { await this.afterCommit(entry, result); }
             catch (error) { DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1); result.afterCommitError = error?.message || 'after_commit_error'; }
         }
-        // A fence hands the bot over after this returns: its party work settles first.
-        await entry.deferred;
+        // A fence hands the bot over after this returns: its party work runs first.
+        await entry.deferred?.();
         this.onResults([{ ...result, proposal, nextState }]);
         return { ...result, proposal, nextState };
     }

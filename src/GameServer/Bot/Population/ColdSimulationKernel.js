@@ -606,6 +606,8 @@ class ColdSimulationKernel {
             leaseRecoveries: 0,
             leaseRenewals: 0,
             leaseRenewalMisses: 0,
+            // commit_acks that came after their lease ended or was re-claimed (a held party ack).
+            lateAcks: 0,
             proposalCompactions: 0,
             proposalOversize: 0,
             proposalOversizeRejected: 0,
@@ -2258,9 +2260,11 @@ class ColdSimulationKernel {
             if (!identity) return;
             const id = Number(result.characterId);
             const active = this.inFlight.get(id);
-            if (!this.sameLease(active?.grant, identity.token) || active.pendingCommitId !== identity.key
-                || this.states.get(id)?.state.phase !== 'cold'
-                || Number(active.grant.leaseUntil) <= this.now()) return;
+            if (!this.sameLease(active?.grant, identity.token) || Number(active.grant.leaseUntil) <= this.now()) {
+                DiagnosticConfig.developerDiagnostics && (this.stats.lateAcks += 1);
+                return;
+            }
+            if (active.pendingCommitId !== identity.key || this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
             if (result.ok && result.state) {

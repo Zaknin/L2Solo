@@ -294,8 +294,9 @@ class ColdSimulationCoordinator {
         });
         this.commandInflight = new Map();
         this.commitAcknowledgements = new Map();
-        // Leader acks waiting for their deferred party work; stop() waits for them.
-        this.heldAcks = new Set();
+        // characterId -> { startedAt, ack }: a leader whose ack waits for its deferred
+        // party work (overdueReason reads the age; stop() waits for the acks).
+        this.heldAcks = new Map();
         this.fencedBots = new Set();
         this.pauseReasons = new Set();
         this.snapshotQueue = new ColdSnapshotQueue({
@@ -369,14 +370,19 @@ class ColdSimulationCoordinator {
                     .catch((error) => { this.finishCommitAcknowledgements(now, false); this.recordError(error); })
                     .finally(() => { if (Config.developerDiagnostics) this.queue.recordStage('ackBuild', Date.now() - startedAt); });
                 if (!held.length) return;
-                const heldAck = Promise.all(held.map((result) => result.deferred))
+                // The flush is over here: the deferred party work starts now, not inside it.
+                const ack = Promise.all(held.map((result) => result.deferred()))
                     .then(() => this.handleCommitResults(held))
                     .catch((error) => { this.finishCommitAcknowledgements(held, false); this.recordError(error); })
                     .finally(() => {
-                        this.heldAcks.delete(heldAck);
+                        for (const result of held) {
+                            const id = Number(result.characterId);
+                            if (this.heldAcks.get(id)?.ack === ack) this.heldAcks.delete(id);
+                        }
                         if (Config.developerDiagnostics) this.queue.recordStage('partyAck', Date.now() - startedAt);
                     });
-                this.heldAcks.add(heldAck);
+                const holding = { startedAt: Date.now(), ack };
+                for (const result of held) this.heldAcks.set(Number(result.characterId), holding);
             },
             onPause: () => this.setPauseReason('commit_queue_high_water', true),
             onResume: () => this.setPauseReason('commit_queue_high_water', false),
@@ -2192,11 +2198,14 @@ class ColdSimulationCoordinator {
     // One top-level afterCommit step: its time joins the flush's sum for that
     // step name (gs: afterCommitSteps). Nested steps run untimed inside it.
     // A deferred step runs after the flush and records its own sample.
-    async timedStep(entry, name, work, record = (ms) => { entry.stepMs[name] = (entry.stepMs[name] || 0) + ms; }) {
+    async timedStep(entry, name, work, record) {
         if (!entry.stepMs) return this.step(name, entry.nextState.characterId, work);
         const startedAt = performance.now();
         try { return await this.step(name, entry.nextState.characterId, work); }
-        finally { record(performance.now() - startedAt); }
+        finally {
+            const ms = performance.now() - startedAt;
+            if (record) record(ms); else entry.stepMs[name] = (entry.stepMs[name] || 0) + ms;
+        }
     }
 
     async afterCommit(entry, committed = {}) {
@@ -2359,15 +2368,16 @@ class ColdSimulationCoordinator {
         if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
             this.requestEconomyRefresh(id);
         await step('announce', () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
-        // Starts after training, so the review reads the trained state and the plans
-        // it writes are not overwritten by it. A replaced worker skips it: its kernel
-        // no longer holds these members inFlight.
-        if (deferred.length) entry.deferred = (async () => {
+        // onResults starts it after the flush, so the review reads the trained state of
+        // every member of the batch and the plans it writes are not overwritten by it.
+        // A replaced worker or a stop skips the rest: its kernel no longer holds these
+        // members inFlight.
+        if (deferred.length) entry.deferred = async () => {
             for (const work of deferred) {
-                if (source && (source.worker !== this.worker || source.epoch !== this.workerEpoch)) return;
+                if (this.stopping || source && (source.worker !== this.worker || source.epoch !== this.workerEpoch)) return;
                 await work();
             }
-        })();
+        };
         return state;
     }
 
@@ -2402,10 +2412,13 @@ class ColdSimulationCoordinator {
             try { ClanRaidRoster.wakeCancelled({ stats: JSON.parse(change.statsJson || '{}') }); }
             catch (error) { this.recordError(error); }
         }
-        results = results.filter(result => {
+        const current = results.filter(result => {
             const source = result.proposal?.[PROPOSAL_SOURCE];
             return !source || (source.worker === worker && source.epoch === epoch);
         });
+        // A retired source gets no ack: its meeting waiters learn it here.
+        if (current.length < results.length) this.finishCommitAcknowledgements(results.filter(result => !current.includes(result)), false);
+        results = current;
         if (!results.length) {
             this.tableChannel.flush();
             return;
@@ -2427,6 +2440,7 @@ class ColdSimulationCoordinator {
             if (party?.updatedAt === change.expectedUpdatedAt) await ClanRaidRoster.cancelUnopened(party, result.detail);
         }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
+            this.finishCommitAcknowledgements(results, false);
             this.tableChannel.flush();
             return;
         }
@@ -2436,6 +2450,7 @@ class ColdSimulationCoordinator {
             if (state) await this.step('economyPlan', result.characterId, () => this.ensureCraftRecipes(state));
         }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
+            this.finishCommitAcknowledgements(results, false);
             this.tableChannel.flush();
             return;
         }
@@ -2954,7 +2969,7 @@ class ColdSimulationCoordinator {
             }
         }
         const queue = await this.queue.drain(10000);
-        await Promise.race([Promise.allSettled([...this.heldAcks]), wait(10000)]);
+        await Promise.race([Promise.allSettled([...this.heldAcks.values()].map((held) => held.ack)), wait(10000)]);
         await Promise.race([this.commandTail.catch(() => null), wait(10000)]);
         await Promise.race([this.historyCleanupInFlight || Promise.resolve(), wait(10000)]).catch(() => null);
         this.historyCleanupInFlight = null;
@@ -2970,7 +2985,15 @@ class ColdSimulationCoordinator {
     // Why a due bot has not stepped, from what this thread owns: its lifecycle
     // command still runs, a hot handoff fences it, or the worker has not
     // claimed it; the heartbeat says whether the worker's slots are full.
+    // How long this leader's commit_ack has waited for its party work (0: not held).
+    heldAckAgeMs(characterId) {
+        const held = this.heldAcks.get(Number(characterId));
+        return held ? Math.max(1, Date.now() - held.startedAt) : 0;
+    }
+
     overdueReason(characterId) {
+        const heldMs = this.heldAckAgeMs(characterId);
+        if (heldMs) return `held_ack:${Math.round(heldMs / 1000)}s`;
         if (!this.worker || !this.ready) return 'worker_not_ready';
         if (this.commandInflight.has(characterId)) return 'command_inflight';
         if (this.fencedBots.has(characterId)) return 'hot_handoff_fenced';
@@ -2990,6 +3013,7 @@ class ColdSimulationCoordinator {
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
             pendingRoutes: { size: this.pendingRoutes.size, ...this.pendingRouteStats },
+            heldAcks: this.heldAcks.size,
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
             economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,

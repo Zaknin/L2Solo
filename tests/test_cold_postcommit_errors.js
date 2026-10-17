@@ -11,6 +11,7 @@ let consumptionRows = [];
 const originalConsumptionPublish = Consumption.publish;
 const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const { ColdCommitQueue } = invoke('GameServer/Bot/Population/ColdCommitQueue');
 const originals = [];
 function stub(object, key, value) { originals.push(() => { object[key] = value; }); object[key] = value; }
 const state = { characterId: 1, phase: 'cold', activity: 'shopping', updatedAt: 100,
@@ -65,6 +66,7 @@ async function run() {
     coordinator.population.applyWorkerPartyRequirements = () => { throw Error('party_plan_probe'); };
     logs.length = 0;
     await coordinator.afterCommit(entry);
+    await entry.deferred();
     assert.equal(resolves, 3); assert.equal(announcements, 3);
     assert.equal(logs.filter(line => line.includes('postcommit partyPlans failed')).length, 1);
     assert.equal(coordinator.counters.afterCommitStepErrors.partyPlans, 1);
@@ -77,6 +79,31 @@ async function run() {
     assert.equal(logs.filter(line => line.includes('postcommit clanEvents failed')).length, 1);
     await coordinator.afterCommit(entry, { row: { simulationRevision: 6 } });
     assert.equal(consumptionRows.at(-1)[2].revision, 6, 'row-form durable revision is also accepted authority');
+    // Party work starts after the flush; a replaced worker skips what is left of it
+    // and the held leader's ack waiter is released once.
+    const flushQueue = new ColdCommitQueue({ prepare: async proposal => proposal.baseState,
+        commit: async entries => entries.map(row => ({ ok: true, characterId: row.nextState.characterId })),
+        afterCommit: (row, result) => coordinator.afterCommit(row, result), onResults: coordinator.queue.onResults });
+    const recordStage = coordinator.queue.recordStage.bind(coordinator.queue);
+    coordinator.queue = Object.assign(flushQueue, { recordStage });
+    const partyWork = [], finished = [];
+    coordinator.population.reconcileWorkerPartyGoals = async () => {
+        partyWork.push(['goals', flushQueue.flushing]);
+        coordinator.worker = null;
+    };
+    coordinator.population.applyWorkerPartyRequirements = async () => { partyWork.push(['plans']); };
+    const finish = coordinator.finishCommitAcknowledgements.bind(coordinator);
+    coordinator.finishCommitAcknowledgements = (results, acknowledged) => { finished.push(acknowledged); return finish(results, acknowledged); };
+    coordinator.handleProposalBatch({ payload: { proposals: [{ ...entry.proposal, proposalId: 'leader-proposal', characterId: 1, baseState: state,
+        token: { characterId: 1, ownerId: 'cold_simulation_owner', revision: 6, leaseId: 'leader-lease', leaseUntil: Date.now() + 60000 },
+        partyResolution: { ...entry.proposal.partyResolution, partyId: 2, reviewGoals: true } }] } });
+    const waiter = coordinator.commitAcknowledgements.get(1).promise;
+    await flushQueue.flushDue(true);
+    await Promise.all([...coordinator.heldAcks.values()].map(held => held.ack));
+    assert.equal(await waiter, false, 'a retired worker gets no ack and its waiter is released');
+    assert.deepEqual(partyWork, [['goals', false]], 'goal review runs after the flush; plans skipped after the worker left');
+    assert.deepEqual(finished, [false]);
+    assert.equal(coordinator.heldAcks.size, 0);
     invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = false;
     Consumption.publish = () => { throw Error('consumption publisher called off'); };
     await coordinator.afterCommit(entry);
