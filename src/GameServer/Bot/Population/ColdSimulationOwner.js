@@ -108,9 +108,9 @@ function withPersistedStats(state, result) {
         // must match the row (L127: stale_command loop).
         const persisted = { ...state, ...Database.stateRevisions(result.row), name: result.row.characterName || state.name, stats,
             updatedAt: Number(result.row.updatedAt) || Number(state.updatedAt || 0) };
-        // The commit merged what the board held for the bot (deals, closed
-        // records): the stored bag is the one the bot goes on with.
-        if (!result.settled && !result.pkDrops?.length) return persisted;
+        // Board settlements, drops and native party payments can all change
+        // the bag after the proposed state: continue with the committed bag.
+        if (!result.settled && !result.pkDrops?.length && !result.partyPayment) return persisted;
         return { ...persisted, adena: Number(result.row.adena || 0), inventory: JSON.parse(result.row.inventorySummary || '{}') };
     } catch (_) {
         return state;

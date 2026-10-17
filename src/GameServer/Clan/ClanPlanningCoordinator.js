@@ -241,12 +241,15 @@ async function context() {
     const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
     const items = invoke('GameServer/Bot/AI/BotGear').currentWearableRows(cache.items);
+    const recipes = [...craft.publishedStationRecipes().recipes];
     const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
     if (!staticMarkets.has(rate)) {
         if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {
             const npcOffers = [];
-            for (let i = 0; i < items.length; i++) {
-                npcOffers.push(...market.npcOffersAll(items[i].selfId).map(offerRow));
+            const supplyIds = [...new Set([...items.map(item => item.selfId),
+                ...recipes.flatMap(recipe => recipe.materials.map(row => row.selfId))])];
+            for (let i = 0; i < supplyIds.length; i++) {
+                npcOffers.push(...market.npcOffersAll(supplyIds[i]).map(offerRow));
                 if (i % 8 === 7) await yieldLoop();
             }
             const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
@@ -268,7 +271,6 @@ async function context() {
     // The board reaches the worker as its 'board' table; the configured
     // merchants' live stores come with each plan.
     const fixedOffers = market.fixedStoreOffers().map(offerRow);
-    const recipes = [...craft.publishedStationRecipes().recipes];
     const general = {};
     for (const key of ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate', 'maxLevel']) {
         general[key] = global.options.default.General?.[key];

@@ -97,6 +97,7 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
             if (statement.includes('INSERT INTO bot_life_state') && Number(params?.[0]) === 101) {
                 return Promise.reject(new Error('synthetic row failure'));
             }
+            if (/\bRETURNING\b/i.test(statement)) return Promise.resolve([]);
             if (statement.includes('UPDATE bot_life_state')) return Promise.resolve({ affectedRows: 0 });
             return Promise.resolve([]);
         };

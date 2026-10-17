@@ -15,7 +15,10 @@ function render(session, message = '') {
 }
 
 module.exports = function diamondExchange(session, parts) {
+    const actor = session.actor, talk = session.activeNpcTalk;
+    const current = () => session.actor === actor && session.activeNpcTalk === talk;
     return Service.mutate(session, async () => {
+        if (!current()) return;
         if (!Catalog.hasNpc(session.activeNpcTalk?.selfId) || !Profession.nearbyNpc(session)) {
             return session.dataSendToMe(Response.actionFailed());
         }
@@ -23,18 +26,24 @@ module.exports = function diamondExchange(session, parts) {
         const itemId = Number(parts[1]);
         if (!Catalog.hasRecipe(itemId)) return;
         let rows;
-        try { rows = await Database.exchangeDimensionalDiamond(session.actor.fetchId(), itemId); }
-        catch (error) { return render(session, 'The exchange could not be completed. Check your Dimensional Diamonds.'); }
-        for (const row of rows) {
-            if (!row.amount) session.actor.backpack.items = session.actor.backpack.items.filter(item => item.fetchId() !== row.id);
-            else if (session.actor.backpack.fetchItemRaw(row.id)) session.actor.backpack.fetchItemRaw(row.id).setAmount(row.amount);
-            else session.actor.backpack.insertItem(row.id, row.selfId, row);
+        try { rows = await Database.exchangeDimensionalDiamond(actor.fetchId(), itemId); }
+        catch (error) {
+            if (current()) return render(session, 'The exchange could not be completed. Check your Dimensional Diamonds.');
+            return;
         }
-        session.dataSendToMe(Response.itemsList(session.actor.backpack.fetchItems()));
+        // A new selection loads its own inventory. Keep an accepted exchange
+        // on the original character without refreshing its detached actor.
+        if (session.actor !== actor) return;
+        for (const row of rows) {
+            if (!row.amount) actor.backpack.items = actor.backpack.items.filter(item => item.fetchId() !== row.id);
+            else if (actor.backpack.fetchItemRaw(row.id)) actor.backpack.fetchItemRaw(row.id).setAmount(row.amount);
+            else actor.backpack.insertItem(row.id, row.selfId, row);
+        }
+        session.dataSendToMe(Response.itemsList(actor.backpack.fetchItems()));
         Service.transmitItemReceived(session, itemId, 1);
-        return render(session, `Received ${H.itemName(itemId)}.`);
+        if (current()) return render(session, `Received ${H.itemName(itemId)}.`);
     }).catch(error => {
         utils.infoWarn('Quest', 'diamond exchange failed: %s', error.message);
-        session.dataSendToMe(Response.actionFailed());
+        if (current()) session.dataSendToMe(Response.actionFailed());
     });
 };

@@ -13,6 +13,8 @@ async function form(sides, context, valid) {
     }
     const existing = grouped[0]?.party;
     if (existing?.stats?.objective?.clanGoalKey || existing?.stats?.objective?.clanOperation) return { ok: false, reason: 'clan_objective' };
+    const Material = require('../Population/CraftMaterialParty');
+    if (Material.isObjective(existing?.stats?.objective)) return { ok: false, reason: 'material_party_requires_review' };
     const release = existing ? () => {} : invoke('GameServer/Bot/Population/PopulationService').reserveCompetitionPartySlot();
     if (!release) return { ok: false, reason: 'party_capacity' };
     if (existing && Lifecycle.pending.has(existing.partyId)) { release(); return { ok: false, reason: 'party_transition' }; }
@@ -26,6 +28,7 @@ async function form(sides, context, valid) {
         const canCommit = () => valid() && sessions.every(s => s.hotCompetitionCommit === token)
             && Date.now() - context.at <= 10000;
         if (!canCommit() || states.some(s => s?.phase !== 'hot')) return { ok: false, reason: 'hot_party_context_changed' };
+        if (states.some(s => Material.requestOf(s))) return { ok: false, reason: 'material_party_requires_review' };
         const Composition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
         const leaderId = existing?.leaderId || Composition.chooseLeader(states)?.characterId || ids[0];
         const partyId = existing?.partyId || `bgp_hot_${randomUUID()}`;
@@ -39,7 +42,7 @@ async function form(sides, context, valid) {
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, Number(existing?.updatedAt || 0) + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
         const assignments = states.map(s => Life.preparePartyAssignment({ ...s, activity: 'grouped', spotId: context.spotId },
-            partyId, Composition.roleForState(s), leaderId));
+            partyId, Composition.roleForState(s), leaderId, null, context.spotId));
         const result = await invoke('Database').commitBackgroundPartyMembership({ party: prepared.row, members: assignments,
             expectedPhase: 'hot', expectedPartyUpdatedAt: existing?.updatedAt ?? null, canCommitHot: canCommit,
             event: { characterId: leaderId, eventType: existing ? 'party_recruit' : 'party',

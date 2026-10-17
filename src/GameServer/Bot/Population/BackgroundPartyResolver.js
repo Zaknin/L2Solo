@@ -155,6 +155,16 @@ const BackgroundPartyResolver = {
                 debug: { reason: 'missing_party_members_or_spot' }
             };
         }
+        const Material = require('./CraftMaterialParty');
+        const materialHunt = Material.isObjective(party.stats?.objective);
+        if (materialHunt && !party.stats.pveEncounter && !Material.needs(members, party.stats.objective, party.stats.agreement).length) {
+            return { memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 1000 } })),
+                atomic: true, events: [], nextResolveAt: null, partyPatch: { status: 'dissolved', nextResolveAt: null,
+                    stats: { partyBreakReason: 'craft_materials_collected', dissolvedAt: timestamp, lastResolveAt: timestamp } },
+                debug: { reason: 'craft_materials_collected', fights: 0, wins: 0 } };
+        }
+        if (materialHunt) targetNpcId = Material.target(party, members);
         const targetOnSpot = ColdCombatProfile.spotSpawns(spot, targetNpcId) ? 1 : 0;
         const raidObjective = spot.raidBoss === true
             && party.stats?.objective?.sourceKind === 'raid'
@@ -692,6 +702,7 @@ const BackgroundPartyResolver = {
         const riskDelta = !fights ? 0 : deaths > 0 ? 0.05 : losses > wins ? 0.02 : -0.01;
 
         return {
+            ...(materialHunt ? { atomic: true } : {}),
             memberResults: distributedMemberResults,
             events,
             partyPatch: {
@@ -700,6 +711,7 @@ const BackgroundPartyResolver = {
                 risk: clamp(Number(party.risk || 0.25) + riskDelta, 0.05, 0.95),
                 stats: {
                     ...(lootDistribution.agreement ? { agreement: lootDistribution.agreement } : {}),
+                    ...(materialHunt ? { materialTargetNpcId: targetNpcId } : {}),
                     pveEncounter: raid ? null : pending,
                     ...(raid ? { raidEncounter: raidSnapshot } : {}),
                     ...(marked && attemptedFights > 0 ? { raidAdmission: admission.proof } : {}),

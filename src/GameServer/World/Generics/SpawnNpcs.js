@@ -6,6 +6,7 @@ const NpcVisibility = invoke('GameServer/World/NpcVisibility');
 const NpcAggro = invoke('GameServer/Npc/NpcAggro');
 const RaidBossState = invoke('GameServer/World/RaidBossState');
 const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
+const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 
 const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 
@@ -78,7 +79,10 @@ function randomCoords(definition) {
 
     const polygon = bounds.map((bound) => [bound.locX, bound.locY]);
     const pos = require('random-point-in-shape')(polygon);
-    return { locX: pos[0], locY: pos[1], locZ: bounds[0].maxZ, head: utils.randomNumber(65536) };
+    // A territory's maxZ is a layer hint, not the surface at every XY.
+    // Keep explicit datapack coordinates above unchanged (towns/dungeon floors).
+    const locZ = GeodataEngine.getHeight(pos[0], pos[1], bounds[0].maxZ);
+    return { locX: pos[0], locY: pos[1], locZ, head: utils.randomNumber(65536) };
 }
 
 function isRaidBossDefinition(definition) {

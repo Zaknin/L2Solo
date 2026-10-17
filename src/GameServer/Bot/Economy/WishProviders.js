@@ -47,7 +47,8 @@ function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisit
     const role = Planner.roleFor(state);
     const classId = Number(state.stats?.classId || state.classId || 0);
     const kits = invoke('GameServer/Bot/AI/BotGear').wishKitsFor(Data.items, revision, classId, role, Planner, Sources);
-    const maxRank = GEAR_RANKS.indexOf(Progression.acquisitionRankFor(state, progression || undefined));
+    const maxRank = GEAR_RANKS.indexOf(ctx && progression?.rank === 3
+        ? Planner.gradeForLevel(state.level) : Progression.acquisitionRankFor(state, progression || undefined));
     const result = new Map();
     const budget = Math.max(0, Number(ctx?.wallet ?? Funding.budget(state)) - Number(ctx?.survivalReserve || 0));
     const [target, held] = ctx?.nominationBasis || nominationBasis(state);
@@ -363,11 +364,14 @@ function buildProjection(state, ctx, deps) {
     const positive = value => Math.max(0, Number(value) || 0);
     const price = id => ctx.price(id);
     const horizon = decisionHorizon(state, ctx);
-    const progression = Progression.assess(state);
-    const preparation = Progression.preparation(state, progression);
+    const cProgression = Progression.assess(state);
+    const progression = Progression.acquisitionAssessment ? Progression.acquisitionAssessment(state, cProgression) : cProgression;
+    const preparation = Progression.preparation(state, cProgression);
     const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
-    const luxury = Progression.allowsCGradeAcquisition(state) && (state.level < 52 || progression.required) && (state.level >= 40 || preparation)
+    const luxury = Progression.allowsCGradeAcquisition(state) && (state.level < 52 || cProgression.required) && (state.level >= 40 || preparation)
         ? need('./BotLuxuryExchange').recipes() : null;
+    const crystalSupply = Number(state.level) >= 52 && !cProgression.required && Progression.adventurer?.(state);
+    const luxuryInputs = new Map();
     const powerWeight = (ctx.persona.primaryDrive === 'progression' ? 1 : 0.5) + trait(ctx.persona, 'caution');
     const statusWeight = trait(ctx.persona, 'ambition') * (1 + Number(ctx.persona.primaryDrive === 'wealth'));
     const sourceIndex = deps.spots?.length ? Planner.sourceIndexFor(deps.spots) : null;
@@ -399,10 +403,30 @@ function buildProjection(state, ctx, deps) {
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
+    const crystalPurchaseFor = luxury || crystalSupply
+        ? need('./WishPurchaseEvidence').reader(state, ctx, deps, { npcOnly: true, town: 'Giran' }) : null;
     const purchases = new Map();
     const observedPurchase = id => {
-        if (!purchases.has(id)) purchases.set(id, purchaseFor(id));
+        if (!purchases.has(id)) {
+            const item = crystalPurchaseFor && need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
+            const retail = crystalPurchaseFor && need('./BotCrystallization').reward(item) ? crystalPurchaseFor(id) : null;
+            purchases.set(id, retail || purchaseFor(id));
+        }
         return purchases.get(id);
+    };
+    let cCrystalChoices;
+    const crystalChoices = () => {
+        if (cCrystalChoices) return cCrystalChoices;
+        const Crystals = need('./BotCrystallization'), exchanges = need('./BotLuxuryExchange').recipes();
+        const trip = ctx.trip?.details?.('Giran');
+        cCrystalChoices = Crystals.choices(state, id => {
+            const exchange = exchanges.get(Number(id));
+            return exchange && trip?.known ? { price: exchange.materials[0].amount * price(1458),
+                tripFees: trip.fees, tripHours: trip.hours, town: 'Giran', sourceType: 'luxury', availableUnits: Infinity } : null;
+        }, trip, ctx.hourAdena, 'c', quantityInputs);
+        for (const choice of cCrystalChoices) for (const row of choice.inputs || [{ selfId: choice.selfId }])
+            if (exchanges.has(Number(row.selfId))) luxuryInputs.set(Number(row.selfId), exchanges.get(Number(row.selfId)));
+        return cCrystalChoices;
     };
     blocks?.lap('build');
     // The farm or spoil path reads GearAcquisitionPlanner.sourceFacts: the
@@ -410,6 +434,7 @@ function buildProjection(state, ctx, deps) {
     // trip is one row per town in the network, never once per unit.
     const sourcePath = (id, spoilOnly = false) => {
         if (!sourceIndex?.has(Number(id))) return null;
+        if (Progression.isCGradeHelmet(need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id)))) return null;
         const factsKey = spoilOnly ? `spoil:${id}` : Number(id);
         if (!farmFacts.has(factsKey)) {
             const input = ctx.nodeInputs?.begin();
@@ -498,7 +523,7 @@ function buildProjection(state, ctx, deps) {
         if (!Sources.hasSource(id)) return null;
         const key = `item:${id}`;
         if (nodeKeys.has(key)) return key;
-        if (depth >= 3 || nodes.length >= 36 || preparingItems.has(key)) return null;
+        if (depth >= (crystalSupply ? 6 : 3) || nodes.length >= 36 || preparingItems.has(key)) return null;
         // A memoized subgraph enters the real graph under the same 36-node
         // cap as a fresh build: its whole missing closure is counted first.
         // A candidate's scratch arena copies it whole, so its witness reads
@@ -536,10 +561,13 @@ function buildProjection(state, ctx, deps) {
         const ordinary = Sources.hasNonRaidSource(id);
         if (!ordinary && !observed && !present(id)) return null;
         preparingItems.add(key);
+        if (crystalSupply && Number(id) === 1459) crystalChoices();
+        const scrapExchange = luxuryInputs.get(Number(id));
+        const marketOnly = Progression.marketOnly?.(state, need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id)), progression);
         const paths = [{ kind: 'buy', activity: 'shopping', price: price(id), itemId: Number(id), amount: 1,
             available: !!observed || ordinary && price(id) > 0, executable: !!observed,
             ...(observed || { availableUnits: 0 }) }];
-        const drop = sourcePath(id);
+        const drop = !scrapExchange && !marketOnly && sourcePath(id);
         if (drop) paths.push(drop);
         if (SoulCrystals.catalog.crystals[id]) {
             ctx.nodeInputs?.wholeBag();
@@ -547,31 +575,46 @@ function buildProjection(state, ctx, deps) {
         const crystal = invoke('GameServer/Bot/Economy/BotImprovementPolicy').crystalPath(state, id, ctx, deps.spots || []);
         if (crystal) paths.push(crystal);
         const recipes = Recipes.resolveVariantsByProductId(id);
+        const targetTemplate = need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
+        const unseal = targetTemplate?.etc?.rank === 'b' && [9, 12].includes(Number(targetTemplate.etc.slot))
+            ? invoke('GameServer/Items/C4Unseal').forProduct(id) : null;
+        if (unseal) {
+            const input = itemNode(unseal.sourceId, depth + 1), trip = ctx.trip?.details?.('Giran');
+            if (input && trip?.known) paths.push({ kind: 'mammon_unseal', activity: 'crafting',
+                itemId: Number(id), unseal: { sourceId: unseal.sourceId, productId: unseal.productId },
+                costHours: 1 / 3600, town: 'Giran', quoted: true, tripHours: trip.hours, tripFees: trip.fees,
+                grossRequirements: [{ key: input, amount: 1 }] });
+        }
         // A dual sword has one combination per product: the owner's index, not a filter per node.
         const combination = recipes.length ? null : DualSwords.resolveByProductId(id);
         const alternatives = recipes.length ? recipes : combination ? [combination] : [];
-        for (const recipe of alternatives) {
+        for (const recipe of scrapExchange || marketOnly ? [] : alternatives) {
             const craft = craftPath(recipe, id, depth);
             if (craft) paths.push(craft);
         }
-        const exchange = luxury?.get(Number(id));
+        const exchange = scrapExchange || luxury?.get(Number(id));
         if (exchange) {
             const requirements = exchange.materials.map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
             const trip = ctx.trip?.details?.('Giran');
             if (requirements.every(row => row.key) && trip?.known) paths.push({ kind: 'luxury_exchange',
                 activity: 'improving', itemId: Number(id), costHours: 1 / 3600,
                 town: 'Giran', quoted: true, tripHours: trip.hours, tripFees: trip.fees,
-                improvement: { kind: 'luxury_exchange', ...exchange }, grossRequirements: requirements });
+                improvement: { kind: 'luxury_exchange', ...exchange, ...(scrapExchange ? { forCrystals: true } : {}) }, grossRequirements: requirements });
         }
-        if (luxury && Number(id) === 1458) {
+        if ((luxury || crystalSupply) && Number(id) === 1458 || crystalSupply && Number(id) === 1459) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
-            const self = Crystals.canSelf(state);
-            for (const choice of Crystals.choices(state, observedPurchase, trip, ctx.hourAdena, quantityInputs)) {
+            const rank = Number(id) === 1459 ? 'c' : 'd', self = Crystals.canSelf(state, rank);
+            const choices = rank === 'c' ? crystalChoices() : Crystals.choices(state, observedPurchase, trip, ctx.hourAdena, rank, quantityInputs);
+            // A funded C kit has an authored unlimited supplier. Preserve
+            // that chain instead of forecasting thousands of crystals from
+            // one small public lot and repeatedly changing counterparties.
+            if (choices.some(choice => choice.sourceType === 'npc')) paths.length = 0;
+            for (const choice of choices) {
                 const requirements = (choice.inputs || [{ selfId: choice.selfId, amount: 1 }])
                     .map(row => ({ key: itemNode(row.selfId, depth + 1), amount: row.amount }));
                 if (requirements.some(row => !row.key)) continue;
-                paths.push({ kind: 'crystallize', activity: 'improving', itemId: 1458,
+                paths.push({ kind: 'crystallize', activity: 'improving', itemId: Number(id),
                     productCount: choice.net, batchLimit: choice.batchLimit,
                     availableUnits: choice.net * choice.batchLimit,
                     costHours: 1 / 3600, quoted: true,
@@ -590,6 +633,9 @@ function buildProjection(state, ctx, deps) {
             do step = steps.next(); while (!step.done);
             exitValue = step.value;
         }
+        const template = need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
+        if (GEAR_RANKS.indexOf(template?.etc?.rank) >= 3 && Number(template?.etc?.slot) > 0)
+            for (const path of paths) path.acquisitionOrder = ['craft', 'mammon_unseal'].includes(path.kind) ? 1 : path.kind === 'buy' ? 2 : 3;
         const node = { key, object: Number(id), price: price(id), ...(exitValue === undefined ? {} : { exitValue }), paths: paths.slice(0, 4) };
         descriptors.set(key, node);
         if (local) descriptorInputs.set(key, { items: [...local.items], spots: [...local.spots], bag: [...local.bag] });
@@ -802,10 +848,20 @@ function buildProjection(state, ctx, deps) {
     const acquisitionRank = Progression.acquisitionRankFor(planningState, preparation ? undefined : progression);
     const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
     let futureGain;
-    const acquisitionAllowed = id => Sources.hasNonRaidSource(id)
-        || present(id) || !!observedPurchase(id);
+    const acquisitionAllowed = id => {
+        const item = need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
+        if (Progression.marketOnly?.(state, item, progression)) {
+            const offer = observedPurchase(id);
+            if (!offer || !(offer.availableUnits >= 1)) return false;
+            // The wallet threshold this answer turns on, as every cash comparison of the build.
+            ctx.walletBoundary?.(offer.price + offer.tripFees + positive(ctx.survivalReserve));
+            return offer.price + offer.tripFees <= Math.max(0, state.adena - ctx.survivalReserve);
+        }
+        return Sources.hasNonRaidSource(id) || present(id) || !!observedPurchase(id);
+    };
     for (const [slot, items] of gearCandidates(planningState, ctx, wornFor, acquisitionAllowed, progression, luxury)) for (const item of items) {
-        if (!Planner.considerable(item, planningState, Planner.roleFor(planningState), acquisitionRank)) continue;
+        if (!Planner.considerable(item, planningState, Planner.roleFor(planningState),
+            Progression.marketOnly?.(state, item, progression) && acquisitionAllowed(item.selfId) ? Planner.gradeForLevel(state.level) : acquisitionRank)) continue;
         const current = replacementWorn(wornFor, slot);
         if (Number(current?.selfId) === Number(item.selfId)) continue;
         const early = !!preparation && item.etc?.rank === 'c';
@@ -851,7 +907,7 @@ function buildProjection(state, ctx, deps) {
                 object: { itemId: Number(candidate.item.selfId), slot: candidate.slot }, price: price(candidate.item.selfId),
                 valueHours: Math.max(candidate.progressionPriority ? 1 : 0, candidate.value * powerWeight + (candidate === rare ? rare.value * statusWeight : 0)),
                 progressionPriority: candidate.progressionPriority,
-                ...(luxury ? { personalAcquisition: true } : {}),
+                ...(luxury || progression.rank === 3 ? { personalAcquisition: true } : {}),
                 ...(candidate.progressionPriority ? {} : { benefitPerHour }),
                 notBeforeHours: candidate.notBeforeHours,
                 horizonHours: candidate.progressionPriority ? Infinity : candidate.horizonHours,
@@ -1108,6 +1164,14 @@ function buildProjection(state, ctx, deps) {
         values.set(Number(row.candidate.item.selfId), row.candidate.value * powerWeight);
         root(row.node);
     }
+    const paidInputs = state.stats?.equipmentPlan?.crystalPreparation && need('./BotCrystallization').preparation(state);
+    if (paidInputs) {
+        const trip = paidInputs.self ? { known: true, hours: 0, fees: 0 } : ctx.trip?.details?.('Giran');
+        if (trip?.known) root({ key: paidInputs.key, need: 'power', object: { itemId: paidInputs.plan.target.selfId },
+            valueHours: 1, progressionPriority: 3.5,
+            paths: [{ ...paidInputs.path, costHours: 1 / 3600,
+                ...(paidInputs.self ? {} : { town: 'Giran', tripHours: trip.hours, tripFees: trip.fees }) }] });
+    }
     for (const node of deps.nodes || []) { if (node.need) root(node); else add(node); }
     const moneyPaths = ctx.hunt.perHour > 0 ? [{ activity: 'hunting', kind: 'money',
         spotId: ctx.bestSpotId, incomePerHour: ctx.hunt.perHour, riskHours: ctx.expectedDeathHours }] : [];
@@ -1202,6 +1266,8 @@ function knownWorkshop(recipe, state, ctx, deps) {
 // owner. This runs in the worker on the already built graph, not a second plan.
 function personalCraftPlan(state, context) {
     const leaf = context?.network?.activity;
+    const paidInputs = state.stats?.equipmentPlan?.crystalPreparation && need('./BotCrystallization').preparation(state);
+    if (paidInputs && leaf?.rootKey === paidInputs.key) return paidInputs.plan;
     if (!leaf || !leaf.rootKey || !['crafting', 'shopping', 'hunting', 'improving'].includes(leaf.activity)) return null;
     const wish = context.network.queue.find(row => row.key === leaf.rootKey)
         || { object: context.projection?.nodes?.find(row => row.key === leaf.rootKey)?.object,
@@ -1224,12 +1290,16 @@ function personalCraftPlan(state, context) {
         source: 'wish_network'
     };
     const providers = {}, components = {}, visited = new Set(), crystalInputs = new Map();
-    let finalRecipe = null, exchange = leaf.kind === 'luxury_exchange' ? leaf.improvement : null;
+    let finalRecipe = null, crystalExchange = null, unseal = null;
+    let exchange = leaf.kind === 'luxury_exchange' && Number(leaf.improvement?.itemId) === targetId ? leaf.improvement : null;
     const visit = (plan, depth = 0) => {
         if (!plan || depth > 8 || visited.has(plan)) return;
         visited.add(plan);
+        if (plan.kind === 'mammon_unseal' && Number(plan.unseal?.productId) === targetId)
+            unseal = plan.unseal;
         if (plan.kind === 'luxury_exchange' && Number(plan.improvement?.itemId) === targetId)
             exchange = plan.improvement;
+        if (plan.kind === 'luxury_exchange' && plan.improvement?.forCrystals) crystalExchange = plan.improvement;
         if (plan.kind === 'crystallize') {
             const command = plan.execution || plan;
             for (const input of command.improvement.items
@@ -1239,7 +1309,7 @@ function personalCraftPlan(state, context) {
         if (plan.kind === 'craft' && plan.workshop) {
             const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(plan.recipeId);
             if (!recipe) return;
-            if (Number(recipe.productId) === targetId) finalRecipe = recipe;
+            if (Number(recipe.productId) === Number(unseal?.sourceId || targetId)) finalRecipe = recipe;
             components[recipe.productId] = Number(recipe.recipeId);
             providers[recipe.recipeId] = { workshop: true, characterId: Number(plan.workshop.characterId),
                 price: Number(plan.workshop.price),
@@ -1255,13 +1325,17 @@ function personalCraftPlan(state, context) {
         ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
             selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
         valueRate: Number(wish.ratio || 0), source: 'wish_network' };
-    if (!finalRecipe) return null;
+    if (!finalRecipe && !unseal) return null;
     return { strategy: 'craft', status: 'active',
         target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) },
         ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
             selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
-        recipeId: Number(finalRecipe.recipeId), outputAmount: Number(wish.object.amount || 1),
-        materials: finalRecipe.materials.map(row => ({ ...row })), craftProviders: providers,
+        recipeId: Number(finalRecipe?.recipeId) || null, outputAmount: Number(wish.object?.amount || 1),
+        materials: finalRecipe ? finalRecipe.materials.map(row => ({ ...row })) : [{ selfId: unseal.sourceId, amount: 1 }],
+        ...(unseal ? { unseal: { ...unseal } } : {}), craftProviders: providers,
+        ...(crystalInputs.size ? { crystalPreparation: { exchange: crystalExchange,
+            materials: [...(crystalExchange?.materials || []).map(row => ({ ...row })),
+                ...[...crystalInputs].map(([selfId, amount]) => ({ selfId, amount }))] } } : {}),
         componentRecipes: components, valueRate: Number(wish.ratio || 0), source: 'wish_network' };
 }
 function liquidationCandidates(state, ctx) {

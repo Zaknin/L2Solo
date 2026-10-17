@@ -7,6 +7,7 @@ const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const World = invoke('GameServer/World/World');
 const Actor = invoke('GameServer/Actor/Actor');
 const Data = invoke('GameServer/DataCache');
+const Response = invoke('GameServer/Network/Response');
 const Board = require('../src/GameServer/AfkTrade/PlayerBoardWindow');
 const Meetings = require('../src/GameServer/AfkTrade/TradeMeetingService');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
@@ -192,6 +193,11 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
             'native receipt retries repeat neither system status nor pickup packets');
         assert.equal(boughtBucklers(), 1, 'reserved goods do not emit pickup text before arrival');
         assert.equal(status().filter(text => /Goods and payment are reserved/.test(text)).length, 2);
+        // The real worker may also emit ambient merchant chatter while this
+        // integration test waits for travel. Public chat is not another tell.
+        session.dataSendToMe(Response.speak({ fetchId: () => seller, fetchName: () => 'MeetingSeller' },
+            { kind: 1, text: 'Good company makes even a slow run worthwhile.' }));
+        assert.equal(tells().length, 1, 'public merchant chatter is not a private trade acknowledgement');
         Coordinator.setPauseReason('fixture', false);
         await waitFor(async () => (await fixture.amount(buyer, 20)) === 2
             && (await fixture.amount(seller, 57)) === 1000000 + 4079 + 4080, 'rest, native travel and delivery');

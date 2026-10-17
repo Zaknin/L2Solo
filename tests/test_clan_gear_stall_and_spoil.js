@@ -143,6 +143,22 @@ async function main() {
         assert.strictEqual(snapshot.candidates.some((candidate) => candidate.assessment.current), false,
             'a hard-stalled current target must leave the decision set when an executable alternative exists');
         assert.strictEqual(snapshot.deterministicCandidateId, 'equipment:7:2:99102:10');
+        const Policy = require('../src/GameServer/Clan/ClanEquipmentPolicy');
+        const old = { type: 'equipment', status: 'executing', target: { memberId: 1, itemId: 99101, slot: 7 },
+            createdAt: now - 8 * 60 * 60 * 1000, updatedAt: now - 1000 };
+        const rebuilt = Policy.buildGoal(clan, { member: clan.members[0], plan: currentPlan }, old, now);
+        assert.equal(rebuilt.progressAt, old.createdAt, 'a routine review preserves the legacy progress clock');
+        const normalizedLegacy = Policy.buildGoal(clan, { member: { ...clan.members[0], inventory: { 1864: { amount: 5 } } },
+            plan: { ...currentPlan, materials: [{ selfId: 1864, amount: 5 }] } }, { ...old, progressSnapshot: {} }, now);
+        assert.equal(normalizedLegacy.progressAt, old.createdAt, 'initializing a legacy snapshot cannot turn old stock into new progress');
+        assert.equal(CandidateService.goalStallAssessment(clan, rebuilt, [], { now }).reason, 'goal_hard_stalled',
+            'a fresh updatedAt cannot hide eight hours without progress');
+        const advancedMember = { ...clan.members[0], stats: { ...clan.members[0].stats,
+            targetCombat: { targetNpcId: currentPlan.next.npcId, targetKills: 1 } } };
+        const advanced = Policy.buildGoal(clan, { member: advancedMember, plan: currentPlan }, rebuilt, now + 1000);
+        assert.equal(advanced.progressAt, now + 1000, 'a real target kill advances the progress clock');
+        const reviewed = Policy.buildGoal(clan, { member: advancedMember, plan: currentPlan }, advanced, now + 2000);
+        assert.equal(reviewed.progressAt, advanced.progressAt, 'repeated unchanged kills do not advance the clock');
         const reviewGoal = { type: 'equipment', status: 'executing', goalKey: 'event-input',
             target: { memberId: 1, itemId: 99101, slot: 7 }, createdAt: now, updatedAt: now };
         const reviewOptions = { occupancy: {}, now };

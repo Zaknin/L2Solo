@@ -1718,7 +1718,7 @@ function buildForState(state, deps) {
 // npcOwnsPurchase, WishProviders.personalCraftPlan. Shared nodes stay shared.
 // A requirement row without its plan is looked up by key in network.plans
 // (personalCraftPlan); `unresolved` collects those keys for the kept map.
-const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement', 'batches'];
+const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement', 'unseal', 'batches'];
 const NO_REQUIREMENTS = Object.freeze([]);
 function planTrimmer(unresolved = new Set()) {
     const seen = new Map();
@@ -1765,7 +1765,7 @@ function compactNetwork(network) {
         ...(leaf.intentionPath ? { intentionPath: trim(leaf.intentionPath) } : {}) };
     const all = network.plans || new Map(), plans = new Map();
     for (const [key, plan] of all) if (key.startsWith('item:')) plans.set(key, trim(plan));
-    if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange'].includes(leaf.kind)
+    if (leaf?.rootKey?.startsWith('power:') && ['crystallize', 'luxury_exchange', 'mammon_unseal'].includes(leaf.kind)
         && all.has(leaf.rootKey)) plans.set(leaf.rootKey, trim(all.get(leaf.rootKey)));
     for (const key of unresolved) if (!plans.has(key) && all.has(key)) plans.set(key, trim(all.get(key)));
     const craftNeeds = CraftInputReservations.selectedCraftNeeds(network);

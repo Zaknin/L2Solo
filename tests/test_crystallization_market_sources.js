@@ -69,7 +69,7 @@ assert.equal(owned.batchLimit, 2);
     const Network = invoke('GameServer/Bot/Economy/WishNetwork');
     const Providers = invoke('GameServer/Bot/Economy/WishProviders');
     const quantities = Network.createQuantityInputs();
-    const captured = Crystals.choices(held, () => null, station, 0, quantities);
+    const captured = Crystals.choices(held, () => null, station, 0, 'd', quantities);
     assert.deepEqual(captured, Crystals.choices(held, () => null, station),
         'native quantity capture preserves every ranked crystallization choice');
     const proof = quantities.finish();

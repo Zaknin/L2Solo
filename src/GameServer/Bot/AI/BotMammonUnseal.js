@@ -12,6 +12,12 @@ const BUSY_FLAGS = ['marketReturn', 'partyMarketReturn', 'craftReturn', 'craftSt
     'supplyErrand', 'pvpEncounter'];
 
 function recipeFor(selfId, state) {
+    const selected = state.stats?.equipmentPlan;
+    if (Number(selected?.unseal?.sourceId) === Number(selfId)
+        && Number(selected.target?.selfId) === Number(selected.unseal.productId)) {
+        const recipe = Catalog.resolve(selfId, selected.unseal.productId);
+        if (recipe) return recipe;
+    }
     const style = Compatibility.armorStyleFor(Roles.inferRole(state),Roles.classIdOf(state));
     return Catalog.options(selfId).find(r => !r.style || r.style === style) || null;
 }
@@ -55,16 +61,24 @@ async function execute(session,bot,errand) {
 // Cold solo bots use the existing SoE/gatekeeper transit model. Party members
 // wait for a town errand instead of abandoning their group to cross the map;
 // a shopping bot finishes its market steps first.
-function beginTravel(state, timestamp = Date.now()) {
+function beginTravel(state, timestamp = Date.now(), { fromCraft = false } = {}) {
+    const selected = state.stats?.equipmentPlan;
+    const continuation = fromCraft && selected?.strategy === 'craft'
+        && Number(selected.target?.selfId) === Number(selected.unseal?.productId)
+        && Number(state.inventory?.[selected.unseal?.sourceId]?.amount) > 0
+        && Catalog.resolve(selected.unseal.sourceId, selected.unseal.productId);
+    const busyFlags = continuation ? BUSY_FLAGS.filter(key => !['craftReturn', 'marketReturn', 'partyMarketReturn'].includes(key)) : BUSY_FLAGS;
     if (state.phase !== 'cold' || state.activity !== 'hunting'
         || state.party?.partyId || state.partyId || Karma.closesTowns(state.stats?.karma)
-        || BotErrands.busyWith(state, BUSY_FLAGS)
+        || BotErrands.busyWith(state, busyFlags)
         || Number(state.stats?.mammonRetryAt||0)>timestamp || !candidate(state)) return null;
     const nearestTown = TownRespawn.getClosestTown(state.loc?.locX,state.loc?.locY,state.loc?.locZ);
     return invoke('GameServer/Bot/Population/ColdTrip').toTown(state, {to:{...Mammon.loc},
         townName:'Giran',regionName:'Giran',viaTown:nearestTown?.name || null,
         arrivalActivity:'crafting',reason:'mammon_unseal',stationId:'Blacksmith of Mammon'},
-        timestamp, {mammonReturn:{loc:{...state.loc},spotId:state.spotId,regionName:state.currentRegion}});
+        timestamp, { mammonReturn: continuation && state.stats?.craftReturn
+            || {loc:{...state.loc},spotId:state.spotId,regionName:state.currentRegion},
+            ...(continuation ? { craftReturn: null } : {}) });
 }
 async function finish(state,timestamp=Date.now()) {
     if (state.activity !== 'crafting' || !state.stats?.mammonReturn) return null;

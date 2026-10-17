@@ -98,10 +98,22 @@ assert.strictEqual(invalidRaidReview.party.status, 'dissolved',
 assert([...invalidRaidReview.leaving.values()].every((reason) => reason === Recovery.REASON));
 const away = { ...restored, stats: { ...restored.stats, travel: { arrivalAt: timestamp + minute } } };
 assert.strictEqual(Lifecycle.review(away, members, timestamp).leaving.size, 0);
-const afterDowntime = Recovery.record(party, timestamp + 24 * 60 * minute);
+const beforeProcess = { ...party, stats: { ...party.stats, assemblyWait: { ...party.stats.assemblyWait,
+    lastAt: at - Math.ceil(process.uptime() * 1000) - minute } } };
+const afterDowntime = Recovery.record(beforeProcess, timestamp + 24 * 60 * minute);
 assert.strictEqual(afterDowntime.waitedMs, party.stats.assemblyWait.waitedMs, 'offline time must not count as failed assembly');
 const duplicate = Recovery.record(party, timestamp);
 assert.strictEqual(duplicate.waitedMs, party.stats.assemblyWait.waitedMs, 'replayed timestamp adds no wait');
+
+let delayed = original;
+for (let tick = 0; tick <= 5; tick++) {
+    const when = at + tick * 150000;
+    delayed = { ...delayed, stats: { ...delayed.stats, assemblyWait: Recovery.record(delayed, when) } };
+}
+assert.strictEqual(delayed.stats.assemblyWait.waitedMs, 5 * minute);
+assert(Recovery.expired(delayed), 'long scheduler gaps cannot leave an observed assembly wait at zero forever');
+assert(Recovery.expired({ stats: { assemblyWait: { attempts: 17, waitedMs: 0 } } }),
+    'the SHADOWflare legacy wait must recover without waiting for another full timeout');
 
 // A real combat attempt clears old assembly evidence, including an unfinished fight.
 const syntheticSpot = { id: 'assembled', name: 'test', avgLevel: 20, density: 3, npcSelfIds: [],

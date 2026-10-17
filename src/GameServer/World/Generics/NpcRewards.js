@@ -3,6 +3,7 @@ const SpeckMath = invoke('GameServer/SpeckMath');
 const BotLootEtiquette = invoke('GameServer/Bot/AI/BotLootEtiquette');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
+const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 
 function isBotSession(session) {
     return !!(session && (session.constructor.name === 'BotSession' || (session.accountId && session.accountId.startsWith('bot_'))));
@@ -24,10 +25,13 @@ function awardDrop(world, session, npc, selfId, amount) {
 
 function spawnGroundDrop(world, session, npc, selfId, amount) {
     const point = new SpeckMath.Circle(npc.fetchLocX(), npc.fetchLocY(), 50).createPointWithin();
+    const coords = point.toCoords();
+    // Resolve the scattered point on the corpse's floor. Copying NPC Z (or
+    // subtracting from it) leaves loot floating on slopes or below the floor.
+    coords.locZ = GeodataEngine.getHeight(coords.locX, coords.locY, npc.fetchLocZ());
     const leaderSession = PartyCompanionService.groundLootLeader(session);
     world.spawnItem(session, selfId, amount, {
-        ...point.toCoords(),
-        locZ: npc.fetchLocZ() - 10,
+        ...coords,
         // Ground items have no native owner metadata in this runtime. Keep a
         // lightweight provenance marker so an idle party never treats another
         // group's nearby drop as its own recovery work.

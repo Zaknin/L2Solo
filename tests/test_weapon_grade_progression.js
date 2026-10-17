@@ -142,7 +142,7 @@ assert.equal(byId(expensiveC.network.activity?.itemId)?.etc?.rank, 'd',
     'an unaffordable ready C offer does not block the funded D minimum');
 board.remove(776);
 
-// All C slots are required at 40, in weapon -> armour -> jewellery order.
+// Working C slots are required at 40, in weapon -> armour -> jewellery order.
 const progressionState = archer(40);
 delete progressionState.inventory[272];
 progressionState.inventory[275] = { selfId: 275, amount: 1, equipped: true, equippedCount: 1,
@@ -151,7 +151,8 @@ delete progressionState.inventory[847]; // Empty earring must still wait for the
 const cGaps = Progression.assess(progressionState);
 assert.equal(cGaps.gaps.get(14)?.rank, 2);
 assert.equal(cGaps.gaps.get(14)?.priority, 3);
-assert([6, 9, 10, 11, 12].every(slot => cGaps.gaps.get(slot)?.priority === 2));
+assert([9, 10, 11, 12].every(slot => cGaps.gaps.get(slot)?.priority === 2));
+assert.equal(cGaps.gaps.get(6)?.priority, 0, 'the optional helmet must not hold the working C kit');
 assert([1, 2, 3, 4, 5].every(slot => cGaps.gaps.get(slot)?.priority === 1));
 board.put({ id: 772, ownerId: 991772, storeType: 1, kind: 'shop', town: 'Giran',
     lines: [{ lineId: 772, selfId: 281, count: 1, price: 1000000, enchant: 0 },

@@ -916,14 +916,16 @@ const entryWeaponOnly = {
 const afterEntryWeapon = GearAcquisitionPlanner.preferredTarget({ ...mage, inventory: entryWeaponOnly });
 assert(!['Weapon.Etc', 'Weapon.Sword', 'Weapon.Blunt'].includes(afterEntryWeapon.item.template.kind), 'a C-grade mage must gear another slot after its entry weapon instead of crafting alternate weapons');
 let entryBandInventory = {};
-for (;;) {
+for (let acquired = 0; ; acquired++) {
+    assert(acquired < 32, 'entry C acquisition must finish a bounded physical kit');
     const entryBandTarget = GearAcquisitionPlanner.preferredTarget({ ...mage, inventory: entryBandInventory });
     if (!entryBandTarget) break;
     assert(Number(entryBandTarget.item.template.price) <= 2290000, 'level-40 bots must stop after their entry C band instead of falling through to top C gear');
-    entryBandInventory = {
+    entryBandInventory = GearAcquisitionPlanner.equipInventoryUpgrades(mage, {
         ...entryBandInventory,
-        [entryBandTarget.item.selfId]: { selfId: entryBandTarget.item.selfId, amount: 1 }
-    };
+        [entryBandTarget.item.selfId]: { selfId: entryBandTarget.item.selfId,
+            amount: Number(entryBandInventory[entryBandTarget.item.selfId]?.amount || 0) + 1 }
+    });
 }
 const midCMageTarget = GearAcquisitionPlanner.preferredTarget({ ...mage, level: 44 });
 assert(Number(midCMageTarget.item.template.price) <= 2870000, 'mid-C bots must not skip straight to the expensive endgame C weapons');
@@ -1166,7 +1168,7 @@ try {
     const fallbackJewels = Array.from({ length: 6 }, (_, index) => ({
         selfId: 990001 + index,
         template: { name: `Availability Jewel ${index + 1}`, kind: 'Armor.Jewel', price: index + 1 },
-        etc: { rank: 'a', slot: 3 },
+        etc: { rank: 'b', slot: 3 },
         stats: { mDef: 20 + index }
     }));
     const fallbackNpcId = 990100;

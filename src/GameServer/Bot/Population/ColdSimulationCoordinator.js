@@ -1243,6 +1243,13 @@ class ColdSimulationCoordinator {
         const sharedSpot = party?.stats?.objective?.spotId;
         let selected = partyRoute && sharedSpot && !excludedSpotIds.has(String(sharedSpot))
             ? index.spots.get(String(sharedSpot)) || null : wishDestination || fallbackSpot;
+        let materialRoute = null;
+        const materialHunt = partyRoute && require('./CraftMaterialParty').isObjective(party.stats?.objective);
+        if (!selected && materialHunt) {
+            materialRoute = require('./CraftMaterialPartyRoute').select(party, partyMembers,
+                index.profiles || [...index.spots.values()], options);
+            selected = materialRoute?.spot || null;
+        }
         try {
             // A party-mode search of a lone member builds no profiles at all.
             if (!selected) selected = SpotProfiles.findForState(routeState, !partyRoute
@@ -1300,16 +1307,12 @@ class ColdSimulationCoordinator {
                 && !member.stats?.pvpEncounter && !member.stats?.travel)
             && (!invoke('GameServer/Bot/Population/PartyHuntingAssembly').nearby(partyMembers)
                 || partyMembers.some(member => !SpotService.containsLocation(selected, member.loc)));
-        if (String(selected.id) === String(currentId || '') && !repairingPartyPosition
+        const materialReplan = materialRoute || materialHunt && String(selected.id) !== String(sharedSpot);
+        if (String(selected.id) === String(currentId || '') && !repairingPartyPosition && !materialReplan
             && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
 
-        // Coordinate repair may include teammates whose reservation is still
-        // on another spot. Only bypass admission when every member is counted;
-        // reserveCapacity adds missing members without counting existing ones twice.
-        const reservedKeys = index.occupancy?.[selected.id]?.reservedKeys;
-        const repairAlreadyReserved = repairingPartyPosition && reservedKeys instanceof Set
-            && routedMembers.every(member => reservedKeys.has(String(member.characterId)));
-        const reserved = repairAlreadyReserved || SpotProfiles.reserveCapacity(index.occupancy, selected, routedMembers, {
+        const reserved = partyRoute ? SpotProfiles.reservePartyCapacity(index.occupancy, selected, routedMembers)
+            : SpotProfiles.reserveCapacity(index.occupancy, selected, routedMembers, {
             maxOverflowUnits: unsafeSoloGround ? 1 : 0
         });
         if (!reserved) return null;
@@ -1340,7 +1343,9 @@ class ColdSimulationCoordinator {
             ...(spotBackoff ? { cause: 'death_pressure', spotBackoff }
                 : repairingPartyPosition ? { cause: 'position_mismatch' } : {}),
             to: destinations[String(state.characterId)] || null,
-            destinations
+            destinations,
+            ...(materialRoute ? { materialSources: materialRoute.sources }
+                : materialHunt && String(selected.id) !== String(sharedSpot) ? { materialEvacuation: true } : {})
         };
     }
 
@@ -2227,7 +2232,11 @@ class ColdSimulationCoordinator {
             (ms) => this.queue.recordStep(name, ms)));
         const committedPartyRow = committed.partyRow || committed.raidPartyRow;
         await step('partyCache', () => {
-            if (committedPartyRow && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
+            // Every member receives the shared row, but only the group's
+            // publisher owns it. Its postcommit review may already dissolve
+            // the party; a later follower receipt must not resurrect the cache.
+            if (committedPartyRow && entry.proposal.partyResolution?.partyId === committedPartyRow.partyId
+                && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
                 < Number(committedPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committedPartyRow);
         });
         await step('raidCache', () => {

@@ -53,12 +53,23 @@ function proposalFromStates(states = [], options = {}) {
     });
 
     const groups = new Map();
+    const supports = new Map();
     rows.forEach((state) => {
         const objective = objectiveFor(state);
-        if (!objective) return;
+        if (!objective) {
+            const role = PartyComposition.roleForState(state);
+            if (['healer', 'buffer', 'tank'].includes(role)) {
+                const key = `${state.level}:${role}`;
+                if (!supports.has(key)) supports.set(key, []);
+                const pool = supports.get(key);
+                if (pool.length < candidateLimit) pool.push(state);
+            }
+            return;
+        }
         const spotId = spotFor(state, objective);
         if (!spotId) return;
-        const key = objective.clanGoalKey ? `${spotId}:${objective.clanGoalKey}` : spotId;
+        const key = objective.clanGoalKey ? `${spotId}:${objective.clanGoalKey}`
+            : require('./CraftMaterialParty').isObjective(objective) ? `craft-material:${spotId}` : spotId;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push({ state, objective });
     });
@@ -98,6 +109,23 @@ function proposalFromStates(states = [], options = {}) {
                 .filter(({ state }) => Math.abs(Number(state.level || 1) - anchorLevel) <= levelRange)
                 .slice(0, candidateLimit)
                 .map(({ state }) => state);
+            const Material = require('./CraftMaterialParty');
+            if (Material.isObjective(anchor.objective)) {
+                const helpers = [];
+                for (let gap = 0; gap <= Math.min(4, levelRange); gap++) for (const level of gap ? [anchorLevel - gap, anchorLevel + gap] : [anchorLevel])
+                    for (const role of ['healer', 'buffer', 'tank']) {
+                        if (helpers.length >= candidateLimit) break;
+                        helpers.push(...(supports.get(`${level}:${role}`) || []).slice(0, candidateLimit - helpers.length));
+                    }
+                if (compatible.length + helpers.length < minSize) continue;
+                const members = Material.selectMembers([...compatible.slice(0, Material.MAX_CORE), ...helpers],
+                    { minSize, maxSize, levelRange, timestamp });
+                if (members.length < minSize) continue;
+                return { requiredCount, spotId: selectedGroup.spotId, oldestAt: selectedGroup.oldestAt,
+                    minSize, maxSize, levelRange, materialParty: true,
+                    candidates: members.map(state => ({ characterId: Number(state.characterId), updatedAt: Number(state.updatedAt || 0),
+                        simulation: { ownerId: state.simulation?.ownerId || 'legacy_main', revision: Math.max(0, Number(state.simulation?.revision || 0)) } })) };
+            }
             if (require('../../Clan/ClanRaidRoster').selectMembers(compatible, anchor.objective, { minSize, maxSize, levelRange }).length < minSize) continue;
             return {
                 requiredCount,

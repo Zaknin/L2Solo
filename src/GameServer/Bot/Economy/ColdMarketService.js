@@ -284,6 +284,7 @@ function planPurchase(state, selfId, amount, options = {}) {
     // A personal estimate never becomes a second purse held across the trip.
     let fundingContext;
     const accept = line => {
+        if (options.npcOnly) return false;
         const allowed = personalOfferAllowed(line, state);
         if (line?.conditional || line?.custodyPolicy === 1) {
             options.onAdmissionRead?.(Number(line.ownerId ?? line.sourceId), allowed);
@@ -802,7 +803,9 @@ const ColdMarketService = {
             const terms = { ...goalFunding(goal), purpose: goal.plan?.purpose || 'supply',
                 selfId: Number(goal.target.itemId) };
             const plan = planPurchase(state, terms.selfId, arrival.amount, {
-                ...terms, money: purchaseMoney(state, terms), towns: [state.currentRegion], maxPrice: arrival.unitPrice
+                ...terms, money: purchaseMoney(state, terms), towns: [state.currentRegion], maxPrice: arrival.unitPrice,
+                npcOnly: goal.plan?.sourceType === 'npc'
+                    && invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, terms.selfId) > 0
             });
             if (!plan) return missed('no_affordable_offer');
             const snapshot = GoalState.snapshot(state.characterId);

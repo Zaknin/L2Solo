@@ -87,6 +87,41 @@ async function run() {
     assert.strictEqual(Claims.record(a.actor, first, now + 1), false);
     assert.strictEqual(emitted.length, 0, 'native accepted hits after joining are shared hunting');
     now += 120001;
+    const materialRequest = { status: 'open', priority: 'required', materialParty: true, itemId: 4097,
+        targetId: 5726, amount: 12, requiredTotal: 12, spotId: 'field', npcId: 10 };
+    await Database.execute(['UPDATE bot_life_state SET statsJson=? WHERE characterId=?', [JSON.stringify({ partyRequest: materialRequest }), 21]]);
+    Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [21]]))[0]);
+    const materialSolo = actor(21), materialTarget = mob(a);
+    assert(Hot.beforeAttack(materialSolo, materialTarget, now, () => 0)); await materialSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!materialSolo.hotBackgroundPartyId, 'a hot invitation cannot bypass the material agreement');
+    assert.deepStrictEqual(Life.cachedState(21).stats.partyRequest, materialRequest);
+    assert.deepStrictEqual(JSON.parse((await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=?', [21]]))[0].statsJson).partyRequest,
+        materialRequest, 'rejected recruitment preserves the durable material need');
+    assert.strictEqual(Parties.find(partyId).memberIds.length, 2);
+    assert(!materialSolo.hotCompetitionCommit && !a.hotCompetitionCommit && !b.hotCompetitionCommit);
+    now += 120001;
+    const ordinarySolo = actor(22), newPairTarget = mob(ordinarySolo);
+    assert(Hot.beforeAttack(materialSolo, newPairTarget, now, () => 0)); await materialSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!materialSolo.hotBackgroundPartyId && !ordinarySolo.hotBackgroundPartyId,
+        'new hot formation also retains the core material request for canonical admission');
+    const ordinaryParty = Parties.find(partyId);
+    const materialStats = { ...ordinaryParty.stats, objective: materialRequest,
+        agreement: { materialNeeds: [{ ...materialRequest, characterId: 1, quota: 12, collected: 2 }] } };
+    await Database.execute(['UPDATE bot_background_parties SET statsJson=? WHERE partyId=?', [JSON.stringify(materialStats), partyId]]);
+    Parties.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [partyId]]))[0]);
+    now += 120001;
+    const joiningSolo = actor(23), existingMaterialTarget = mob(a);
+    assert(Hot.beforeAttack(joiningSolo, existingMaterialTarget, now, () => 0)); await joiningSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!joiningSolo.hotBackgroundPartyId);
+    assert.deepStrictEqual(Parties.find(partyId).stats.agreement, materialStats.agreement,
+        'an active material contract cannot accept unreviewed hot recruits');
+    assert.strictEqual(Parties.find(partyId).memberIds.length, 2);
+    await Database.execute(['UPDATE bot_background_parties SET statsJson=? WHERE partyId=?', [JSON.stringify(ordinaryParty.stats), partyId]]);
+    Parties.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [partyId]]))[0]);
+    now += 120001;
     const c = actor(3), second = mob(a);
     assert(Hot.beforeAttack(c, second, now, () => 0)); await c.hotCompetitionPending;
     assert.strictEqual(c.hotBackgroundPartyId, partyId, 'a solo can join an existing hot party');

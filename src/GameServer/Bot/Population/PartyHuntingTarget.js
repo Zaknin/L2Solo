@@ -5,6 +5,13 @@ function activePlanTarget(plan) {
 // The shared objective wins; an ordinary hunting party follows its leader's
 // active plan. A randomly selected encounter representative cannot retarget it.
 function npcId(party, leader) {
+    const Material = require('./CraftMaterialParty');
+    if (Material.isObjective(party?.stats?.objective)) {
+        const Life = invoke('GameServer/Bot/Population/BotLifeState');
+        const members = (party.memberIds || []).slice(0, Material.MAX_MEMBERS)
+            .map(id => Number(id) === Number(leader?.characterId) ? leader : Life.cachedState(id)).filter(Boolean);
+        return Material.target(party, members);
+    }
     // A help party agreed to level on its shared spot. The leader's old
     // equipment target may not even spawn there.
     if (party?.stats?.objective?.reason === 'clan_help') {

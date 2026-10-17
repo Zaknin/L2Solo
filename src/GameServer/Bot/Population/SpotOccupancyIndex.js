@@ -20,6 +20,8 @@ function occupiedSpotId(state = {}) {
 
 function farmIntentCandidate(state = {}) {
     if (['merchant', 'shopping', 'crafting', 'dead'].includes(state.activity)) return null;
+    if ((state.party?.partyId || state.partyId) && state.stats?.backgroundPartySpotId)
+        return state.stats.backgroundPartySpotId;
     const clanObjective = state.stats?.clanPartyObjective;
     const request = state.stats?.partyRequest;
     const plan = state.stats?.equipmentPlan;

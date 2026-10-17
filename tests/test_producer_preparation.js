@@ -101,6 +101,7 @@ const provider = load('WishProviders.js' , name => {
         allowsRecipe: recipe => !!recipe };
     if (name === '../AI/PersonalGearProgression') return {
         assess: () => ({ required: false, gaps: new Map() }),
+        isCGradeHelmet: require('../src/GameServer/Bot/AI/PersonalGearProgression').isCGradeHelmet,
         // This fixture has no C-kit gap, so acquisition uses the planner's current grade.
         acquisitionRankFor: state => adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].gradeForLevel(state.level),
         gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false };

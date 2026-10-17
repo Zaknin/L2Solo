@@ -290,6 +290,20 @@ function reserveCapacity(occupancy, spot, states = [], options = {}) {
     return true;
 }
 
+// An allocated whole party keeps its places when surplus intentions make the
+// raw reservation count exceed capacity. Unallocated parties still wait.
+function hasCapacityForParty(spot, states, occupancy) {
+    const entry = occupancy?.[spot?.id];
+    const allocated = states.length > 0 && entry?.reservedKeys instanceof Set && entry?.retained instanceof Set
+        && states.every(state => entry.reservedKeys.has(stateKey(state)) && entry.retained.has(stateKey(state)));
+    return allocated || hasCapacityForStates(spot, states, occupancy);
+}
+
+function reservePartyCapacity(occupancy, spot, states) {
+    return hasCapacityForParty(spot, states, occupancy) && (states.every(state =>
+        occupancy?.[spot.id]?.reservedKeys?.has(stateKey(state))) || reserveCapacity(occupancy, spot, states));
+}
+
 function capacityFingerprint(occupancy = {}, maxUnits = 9, options = {}) {
     const threshold = Math.max(1, Number(maxUnits || 1));
     const maxReservationGroups = Math.max(0, Math.floor(Number(options.maxReservationGroups || 0)));
@@ -645,6 +659,8 @@ SpotProfiles.shouldLeaveOverCapacity = shouldLeaveOverCapacity;
 SpotProfiles.farmIntentSpotId = farmIntentSpotId;
 SpotProfiles.hasCapacityForStates = hasCapacityForStates;
 SpotProfiles.reserveCapacity = reserveCapacity;
+SpotProfiles.hasCapacityForParty = hasCapacityForParty;
+SpotProfiles.reservePartyCapacity = reservePartyCapacity;
 SpotProfiles.capacityFingerprint = capacityFingerprint;
 SpotProfiles.clanEquipmentReservationKey = clanEquipmentReservationKey;
 SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT = MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT;

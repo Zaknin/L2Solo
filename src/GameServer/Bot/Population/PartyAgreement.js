@@ -11,7 +11,9 @@ function propose(leader, members, objective, { persona, rng = Math.random, affin
     const mode = MODES.find((_, index) => (roll -= weights[index]) < 0) || 'turn';
     const help = objective?.helpDeal;
     const fee = Math.floor(positive(help?.fee));
-    return { mode, spoil: 'spoiler', cursor: 0, leaderId: Number(leader.characterId),
+    const Material = require('./CraftMaterialParty');
+    return { mode, spoil: 'spoiler', ...(Material.isObjective(objective) ? Material.agreement(members, objective) : {}),
+        cursor: 0, leaderId: Number(leader.characterId),
         memberIds: members.map(member => Number(member.characterId)),
         ...(fee > 0 && Number(help?.itemId) > 0 ? { help: { payerId: Number(help.payerId),
             itemId: Number(help.itemId), count: Math.max(1, Math.floor(positive(help.count))),
@@ -26,13 +28,40 @@ function allocate(memberResults, agreement, { rng = Math.random, needScore = () 
         materialize: { ...entry.result.materialize, items: [] } } }));
     const projected = new Map(copies.map(entry => [Number(entry.state.characterId), { ...entry.state.inventory }]));
     const transfers = [];
+    const materialNeeds = agreement.materialNeeds?.slice(0, require('./CraftMaterialParty').MAX_MEMBERS).map(row => ({ ...row }));
     let cursor = Math.max(0, Math.floor(positive(agreement.cursor)));
     for (const source of memberResults) for (const item of source.result.materialize?.items || []) {
+        let unassigned = positive(item.amount);
+        // At most one split per member, never a loop per dropped unit. Only
+        // this hunt's declared components override the ordinary loot policy.
+        if (materialNeeds) {
+            const Material = require('./CraftMaterialParty');
+            const goals = materialNeeds
+                .filter(goal => Number(goal.itemId) === Number(item.selfId));
+            for (const goal of goals) {
+                const owner = copies.find(entry => Number(entry.state.characterId) === Number(goal.characterId));
+                if (!owner || !unassigned) continue;
+                const inventory = projected.get(Number(owner.state.characterId));
+                const count = Math.min(unassigned, Material.remaining(owner.state, goal, inventory));
+                if (!(count > 0)) continue;
+                const reward = { ...item, amount: count }; delete reward.partySpoil;
+                owner.result.materialize.items.push(reward);
+                goal.collected = positive(goal.collected) + count;
+                inventory[item.selfId] = { ...inventory[item.selfId], ...reward,
+                    amount: positive(inventory[item.selfId]?.amount) + count };
+                if (Number(owner.state.characterId) !== Number(source.state.characterId))
+                    transfers.push({ from: source.state, to: owner.state, item: reward });
+                unassigned -= count;
+            }
+            if (!unassigned) continue;
+        }
+        const distributedItem = unassigned === positive(item.amount) ? item : { ...item, amount: unassigned };
         let recipient = copies.find(entry => Number(entry.state.characterId) === Number(source.state.characterId));
         const helpOwner = agreement.help?.status === 'funded' && Number(item.selfId) === Number(agreement.help.itemId)
             ? copies.find(entry => Number(entry.state.characterId) === Number(agreement.help.payerId)) : null;
         if (helpOwner) recipient = helpOwner;
-        else if (item.partySpoil && agreement.spoil === 'spoiler') { /* The original spoiler keeps unreserved spoil. */ }
+        else if (item.partySpoil && (agreement.spoil === 'spoiler' || agreement.materialNeeds)) { /* The original spoiler keeps unreserved spoil. */ }
+        else if (agreement.materialNeeds) recipient = copies[cursor++ % copies.length];
         else if (agreement.mode === 'turn') recipient = copies[cursor++ % copies.length];
         else if (agreement.mode === 'random') recipient = copies[Math.min(copies.length - 1, Math.floor(rng() * copies.length))];
         else {
@@ -41,16 +70,16 @@ function allocate(memberResults, agreement, { rng = Math.random, needScore = () 
             const tied = scores.filter(row => Number.isFinite(row.score) && row.score === best);
             if (tied.length) recipient = tied[Math.min(tied.length - 1, Math.floor(rng() * tied.length))].entry;
         }
-        const reward = { ...item }; delete reward.partySpoil;
+        const reward = { ...distributedItem }; delete reward.partySpoil;
         recipient.result.materialize.items.push(reward);
         const inventory = projected.get(Number(recipient.state.characterId));
         inventory[item.selfId] = { ...inventory[item.selfId], ...item,
-            amount: positive(inventory[item.selfId]?.amount) + positive(item.amount) };
+            amount: positive(inventory[item.selfId]?.amount) + positive(distributedItem.amount) };
         if (Number(recipient.state.characterId) !== Number(source.state.characterId)) {
-            transfers.push({ from: source.state, to: recipient.state, item });
+            transfers.push({ from: source.state, to: recipient.state, item: distributedItem });
         }
     }
-    return { memberResults: copies, transfers, agreement: { ...agreement, cursor } };
+    return { memberResults: copies, transfers, agreement: { ...agreement, cursor, ...(materialNeeds ? { materialNeeds } : {}) } };
 }
 
 function feeText(value) {

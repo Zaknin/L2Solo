@@ -92,6 +92,8 @@ function goalComparable(goal) {
     const copy = JSON.parse(JSON.stringify(goal));
     delete copy.createdAt;
     delete copy.updatedAt;
+    delete copy.progressAt;
+    delete copy.progressSnapshot;
     if (copy.plan) delete copy.plan.selectedAt;
     return copy;
 }
@@ -406,9 +408,11 @@ async function resolveClanInternal(clan, options = {}) {
         const changed = JSON.stringify(goalComparable(previous)) !== JSON.stringify(goalComparable(goal));
         let persisted = { ok: true, goal: equipment.persistedGoal ? goal : previous };
         const metadataChanged = equipment.recruitmentScan !== undefined && JSON.stringify(clan.state?.recruitmentScan || null)
-            !== JSON.stringify(equipment.recruitmentScan) || !!clan.state?.recruitmentDemand;
+            !== JSON.stringify(equipment.recruitmentScan) || !!clan.state?.recruitmentDemand
+            || Number(previous?.progressAt) !== Number(goal.progressAt)
+            || JSON.stringify(previous?.progressSnapshot) !== JSON.stringify(goal.progressSnapshot);
         if (!equipment.persistedGoal && (changed || metadataChanged)) {
-            const eventType = !previous ? 'equipment_goal_created'
+            const eventType = !changed ? null : !previous ? 'equipment_goal_created'
                 : equipment.completed ? 'equipment_goal_completed'
                 : equipment.previousFulfilled ? 'equipment_goal_advanced'
                     : 'equipment_goal_updated';

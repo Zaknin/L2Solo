@@ -67,14 +67,17 @@ function evaluate(state = {}, options = {}) {
     if (leaf.activity === 'shopping' && itemId) {
         const gear = need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, itemId);
         const slot = Number(gear?.etc?.slot || 0);
+        const input = String(leaf.rootKey || '').startsWith('power:')
+            && Number(leaf.rootKey.split(':')[1]) !== itemId;
+        const equipment = slot && !input;
         const itemName = state.inventory?.[String(itemId)]?.name
             || gear?.template?.name || `Item ${itemId}`;
         // Town, source and price are the core's (the card); no second quote look.
         const ratio = invoke('GameServer/Bot/Economy/PurchaseFunding').leafRatio(leaf, wish);
-        return [{ ...common, type: slot ? 'upgrade_gear' : 'buy_craft_material',
+        return [{ ...common, type: equipment ? 'upgrade_gear' : 'buy_craft_material',
             target: { itemId, itemName, itemSlot: slot, amount,
                 adena: leaf.unitPrice ?? (leaf.amount > 0 ? leaf.price / leaf.amount : leaf.price) },
-            plan: { ...common.plan, expectedBenefit: slot ? 'market_search_for_gear' : 'market_buy_craft_material',
+            plan: { ...common.plan, expectedBenefit: equipment ? 'market_search_for_gear' : 'market_buy_craft_material',
                 marketTown: leaf.town || state.currentRegion, sourceType: leaf.sourceType || null,
                 ...(leaf.sourceType === 'afk' && leaf.unitPrice > 0 ? { priceSource: 'offer' } : {}),
                 ...(Number.isFinite(leaf.valueHours)

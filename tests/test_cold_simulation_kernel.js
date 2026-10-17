@@ -629,6 +629,41 @@ function claimAck(kernel, payload) {
     assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
     assert(refreshKernel.snapshot().partyRequirementRefreshMaxMs < 20);
 
+    for (const complete of [false, true]) {
+        const materialMessages = [], objective = { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-spot' };
+        const materialParty = { ...refreshParty, partyId: `material-${complete}`, updatedAt: now - 1,
+            stats: { objective, agreement: { mode: 'need', materialNeeds: [{ characterId: 120, collected: 0 }] } } };
+        const materialMembers = refreshMembers.map(member => ({ ...member,
+            party: { partyId: materialParty.partyId }, activity: 'grouped' }));
+        const materialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => complete
+                ? invoke('GameServer/Bot/Population/BackgroundPartyResolver').resolve({ party: materialParty,
+                    members, spot: { id: objective.spotId }, timestamp })
+                : { memberResults: members.map(member => ({ state: member, result: {} })), events: [],
+                    partyPatch: { stats: { agreement: { ...materialParty.stats.agreement,
+                        materialNeeds: [{ characterId: 120, collected: 1 }] } } }, nextResolveAt: timestamp + 45000 },
+            projectResolve: state => ({ state }),
+            planPartyRequirement: () => { throw Error('a material hunt rebuilt its wish plan'); },
+            emit: (type, payload) => materialMessages.push({ type, payload }) });
+        materialKernel.upsert({ state: materialMembers[0], context: { isPartyLeader: true, party: materialParty,
+            partyMembers: materialMembers, spot: { id: objective.spotId }, requirementRefresh: true } });
+        materialKernel.upsert({ state: materialMembers[1], context: {} }); materialKernel.tick();
+        const claim = materialMessages.find(message => message.type === 'claim_request');
+        claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `material-${complete}-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await materialKernel.resolveChain;
+        const proposals = materialMessages.find(message => message.type === 'proposal_batch')?.payload.proposals;
+        assert(proposals?.length === 2, 'material progress and completion both publish all members without a generic requirement refresh');
+        assert(proposals.every(proposal => proposal.atomicGroup?.memberIds.join(',') === '120,121'));
+        const change = proposals[0].atomicGroup.partyChanges[0];
+        assert.equal(change.status, complete ? 'dissolved' : 'active');
+        assert.equal(JSON.parse(change.statsJson).agreement.materialNeeds[0].collected, complete ? 0 : 1);
+        assert.equal(materialKernel.partyRequirementProgress.size, 0);
+        if (complete) assert(proposals.every(proposal => !proposal.nextState.party?.partyId
+            && proposal.nextState.activity === 'hunting'), 'native completion releases every physical state');
+    }
+
     const stalePartyMessages = [];
     let stalePartyNow = now;
     const stalePartyMembers = [
