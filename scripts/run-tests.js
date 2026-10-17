@@ -1094,6 +1094,7 @@ const tests = [
     'tests/test_n53_command_lifetime.js',
     'tests/test_cold_command_identity_runtime.js',
     'tests/test_cold_postcommit_errors.js',
+    'tests/test_cold_commit_held_ack.js',
     'tests/test_cold_command_source_runtime.js',
     'tests/test_cold_command_native_admission.js',
     'tests/test_cold_command_inner_admission.js',
