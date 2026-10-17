@@ -1679,7 +1679,10 @@ function sourceRecordTargetLevel(entry) {
 // The bot's verdict on one non-raid record, as soloSafeForSource gives it
 // for the record's target: solo_ready only.
 function soloSafeAtLevel(readiness, targetLevel) {
-    return targetLevel <= soloLevelBound(readiness);
+    // An unknown (NaN) target level never yields a negative margin: solo,
+    // unless a hard party need (bound -Infinity) rules every level out.
+    const bound = soloLevelBound(readiness);
+    return bound !== -Infinity && !(targetLevel > bound);
 }
 
 // One decision's answer per target level, shared by partyNeedAssessmentForSource
@@ -1698,7 +1701,7 @@ function sourceAssessmentReasonAt(record, readiness, targetLevel) {
 function sourceAssessmentReason(readiness, targetLevel) {
     const hard = hardPartyReason(readiness);
     if (hard) return hard;
-    if (targetLevel <= soloLevelBound(readiness)) return 'solo_ready';
+    if (soloSafeAtLevel(readiness, targetLevel)) return 'solo_ready';
     return readiness.effectiveLevel - targetLevel < -2 ? 'underleveled' : 'tight_level_margin';
 }
 
@@ -1716,7 +1719,7 @@ function hardPartyReason(readiness) {
 // exactly when its level <= this bound (the margin effectiveLevel - level is
 // not negative). -Infinity: a hard party need, nothing is solo. An unknown
 // (NaN) effective level never yields a negative margin: every level is solo.
-// Target levels are never NaN (targetLevelOf falls back to Infinity).
+// A NaN target level (a non-numeric npcLevel) is solo too: soloSafeAtLevel.
 function soloLevelBound(readiness) {
     if (hardPartyReason(readiness)) return -Infinity;
     return Number.isNaN(readiness.effectiveLevel) ? Infinity : readiness.effectiveLevel;
