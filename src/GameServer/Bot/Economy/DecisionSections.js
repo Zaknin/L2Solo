@@ -314,18 +314,10 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     let original;
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before))[key];
     const current = semanticFacts(after);
-    // An occupation change the held decision itself ordered (a trip it
-    // began, or the arrival where its trip led) is its own output, no event.
+    // The round's callers (a hunting round, a rest) hold no leaf to tell an
+    // ordered trip from a flight: a trip begun inside a round is an event.
     return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
-        || !previous.funding && fundingMark(before) !== fundingMark(after), null, plannedOccupation(before, after));
-}
-// The occupation change the held trip describes: a trip begun this round, or
-// the arrival where it led (occupationPlanned against the trip's target).
-function plannedOccupation(before, after) {
-    const trip = before.stats?.travel;
-    if (after.activity === 'traveling') return before.activity !== 'traveling' && !!after.stats?.travel;
-    return before.activity === 'traveling' && !!trip
-        && occupationPlanned(after, { activity: trip.arrivalActivity || 'hunting', spotId: trip.spotId });
+        || !previous.funding && fundingMark(before) !== fundingMark(after));
 }
 // The one reading of an occupation against the held leaf (Recompute: own
 // outputs are not inputs): the trip the leaf ordered under way (to its
@@ -352,7 +344,7 @@ function occupationPlanned(state, leaf) {
 // A reader supplies the baseline facts; money keeps its own soft verdict.
 // facts (diagnostics, optional): an array that receives the name of every
 // raised fact, in this order. planned: the occupation the held decision
-// ordered (occupationPlanned / plannedOccupation), its own output, no event.
+// ordered (occupationPlanned, the verdict's), its own output, no event.
 function factEvents(previousFact, current, after, funding = false, facts = null, planned = false) {
     const sections = new Set();
     const raise = fact => { facts?.push(fact); for (const name of FACT_SECTIONS[fact]) sections.add(name); };
