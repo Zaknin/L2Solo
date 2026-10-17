@@ -171,7 +171,10 @@ function eventInputKey(state, deps = {}, timestamp = Date.now(), activity = null
 }
 function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = null, leaf = null, facts = null) {
     const current = fieldActivity(state, activity, leaf), stats = current.stats || {}, trip = Trip.frame(current);
-    facts ||= Sections.semanticFacts(current);
+    // The occupation is read once, as an event against the baseline (the
+    // verdict's sections: the held leaf's own trip and its arrival are its
+    // output, Sections.occupationPlanned); the key holds the other facts.
+    facts = { ...(facts || Sections.semanticFacts(current)), occupation: null };
     // Position, region, the trip's target point and scroll quantity drift
     // inside one route. Native route and physical-fee checks still run
     // before the held action is permitted.

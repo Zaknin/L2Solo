@@ -743,8 +743,8 @@ try {
         assert(Decisions.refreshAdvisory({ ...next, loc: { ...next.loc, locX: next.loc.locX + 500 } }, accepted,
             at(T + 1000), { afterResult: true }), 'position drift inside one route is not an event (eventInputKey)');
     }
-    // (h) a trip to the held hunting leaf's own spot executes the plan: no
-    // event; a trip to another spot or a town stays exact (lever 2).
+    // (h) a trip to the held hunting leaf's own spot and its arrival there
+    // execute the plan: no event; a trip or an arrival elsewhere stays exact.
     {
         const { state, economy, accepted } = decided(93011);
         const leaf = accepted.card.activity;
@@ -768,9 +768,12 @@ try {
             at(T + 1000)), null, 'a town trip rebuilds');
         assert(Decisions.refreshAdvisory(trip(leaf.spotId, { arrivalAt: T + 500 }), accepted, at(T + 1000)),
             'a due arrival keeps the card before an action: the step resolves the arrival, not a fight');
-        assert.equal(Decisions.refreshAdvisory({ ...own, activity: 'hunting', spotId: leaf.spotId,
-            loc: own.stats.travel.to, stats: { ...own.stats, travel: null } }, accepted, at(T + 1000), { afterResult: true }),
-        null, 'the arrival (location and spot) stays exact');
+        const arrived = { ...own, activity: 'hunting', spotId: leaf.spotId, loc: own.stats.travel.to,
+            stats: { ...own.stats, travel: null } };
+        assert(Decisions.refreshAdvisory(arrived, accepted, at(T + 1000), { afterResult: true }),
+            'the arrival at the leaf\'s own spot is its output: the card holds');
+        assert.equal(Decisions.refreshAdvisory({ ...arrived, spotId: `${leaf.spotId}_other` }, accepted, at(T + 1000),
+            { afterResult: true }), null, 'an arrival elsewhere is an occupation event');
     }
     // (i) shots used between the survival line and the target: noise below
     // the bot's own error; the survival line and any rise stay hard (lever 3).
