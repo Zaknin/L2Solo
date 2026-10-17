@@ -192,6 +192,108 @@ invoke('GameServer/PrivateStore').publishSell = (_session, packaged, rows) => { 
 GameRequest.privateStoreListSell({}, privateStoreSellWithC4Tail);
 invoke('GameServer/PrivateStore').publishSell = originalPublishPrivateStoreSell;
 assert.deepStrictEqual(capturedPrivateStoreSell, { packaged: false, rows: [{ objectId: 70001, count: 1, price: 1000 }] }, 'C4 private sell publish should accept optional trailing fields');
+
+// Exercise the native setup -> title -> publish -> quit requests through real
+// session/socket delivery. C4 needs the owner's store mode before its message.
+{
+    const Session = invoke('GameServer/Session');
+    const SendPacket = invoke('Packet/Send');
+    const ownerPackets = [], observerPackets = [];
+    const socketFor = (packets) => ({ write(packet) {
+        assert.strictEqual(packet.readUInt16LE(0), packet.length, 'shop packets keep their transport framing');
+        packets.push(packet.subarray(2));
+    } });
+    const owner = new Session(socketFor(ownerPackets));
+    const observer = new Session(socketFor(observerPackets));
+    const shopActor = fakeActor();
+    const stock = {
+        fetchId: () => 70001, fetchSelfId: () => 1463, fetchAmount: () => 10,
+        fetchEquipped: () => false, fetchClass2: () => 5,
+        fetchPrice: () => 400, isWearable: () => false
+    };
+    let storeType = 0, store = null, seated = false;
+    Object.assign(shopActor, {
+        fetchTitle: () => 'Crafter',
+        fetchPrivateStoreType: () => storeType,
+        setPrivateStoreType: (value) => { storeType = value; },
+        fetchPrivateStore: () => store,
+        setPrivateStore: (value) => { store = value; }
+    });
+    Object.assign(shopActor.state, {
+        fetchSeated: () => seated,
+        setSeated: (value) => { seated = value; }
+    });
+    Object.assign(shopActor.backpack, {
+        fetchItems: () => [stock],
+        fetchItemRaw: (id) => id === stock.fetchId() ? stock : null,
+        fetchTotalAdena: () => 10000
+    });
+    owner.actor = shopActor;
+    const ownStoreType = (packet) => {
+        assert.strictEqual(packet[0], 0x04, 'the owner receives UserInfo, never its own CharInfo');
+        assert.strictEqual(packet.readInt32LE(17), shopActor.fetchId());
+        const nameEnd = findUtf16Terminator(packet, 21);
+        // C4 UserInfo: stats, two paperdoll arrays, combat/movement fields,
+        // four doubles, and appearance fields precede the character title.
+        const titleStart = nameEnd + 2 + ((19 + 32 + 20 + 4) * 4) + (4 * 8);
+        const titleEnd = findUtf16Terminator(packet, titleStart);
+        assert(titleEnd >= titleStart);
+        assert.strictEqual(packet.toString('ucs2', titleStart, titleEnd), 'Crafter');
+        return packet[titleEnd + 2 + (5 * 4) + 1]; // clan/relation fields, mount, store type
+    };
+    const originalVisiblePlayers = World.fetchVisibleRealPlayers;
+    World.fetchVisibleRealPlayers = () => [observer];
+    try {
+        for (const [type, manageOpcode, titleOpcode, publishOpcode, quitOpcode, messageOpcode, title] of [
+            [1, 0x73, 0x77, 0x74, 0x76, 0x9c, 'Продам Soulshot: D'],
+            [3, 0x90, 0x94, 0x91, 0x93, 0xb9, 'Куплю материалы']
+        ]) {
+            ownerPackets.length = observerPackets.length = 0;
+            GameOpcodes.table[manageOpcode](owner, Buffer.from([manageOpcode]));
+            assert.strictEqual(storeType, type + 1);
+            assert.strictEqual(seated, false);
+            assert.strictEqual(ownStoreType(ownerPackets[1]), type + 1, 'opening setup synchronizes the owner store mode');
+            assert(!observerPackets.some(packet => packet[0] === 0x04), 'private UserInfo never reaches observers');
+            ownerPackets.length = observerPackets.length = 0;
+            GameOpcodes.table[titleOpcode](owner, new SendPacket(titleOpcode).writeS(title).fetchBuffer());
+            assert.strictEqual(store.title, title, 'the client title reaches the authoritative shop');
+            assert.deepStrictEqual(ownerPackets.map(packet => packet[0]), [messageOpcode], 'setup acknowledges the shop title to its owner');
+            assert.strictEqual(observerPackets.length, 0, 'a draft title is not published to observers');
+
+            ownerPackets.length = observerPackets.length = 0;
+            const publish = new SendPacket(publishOpcode);
+            if (type === 1) publish.writeD(0);
+            publish.writeD(1).writeD(type === 1 ? stock.fetchId() : stock.fetchSelfId());
+            if (type === 3) publish.writeH(0).writeH(0);
+            publish.writeD(2).writeD(400);
+            GameOpcodes.table[publishOpcode](owner, publish.fetchBuffer());
+            assert.strictEqual(storeType, type);
+            assert.strictEqual(seated, true);
+            assert.deepStrictEqual(ownerPackets.map(packet => packet[0]), [0x2f, 0x04, messageOpcode],
+                'publishing sends the seated state, own UserInfo store mode, then the shop message as in Lisvus');
+            assert.strictEqual(ownerPackets[0].readInt32LE(5), 0, 'the owner receives the seated state first');
+            assert.strictEqual(ownStoreType(ownerPackets[1]), type, 'the client enters sell/buy mode before receiving its message');
+            const message = ownerPackets[2];
+            assert.strictEqual(message.readInt32LE(1), shopActor.fetchId());
+            assert.strictEqual(message.toString('ucs2', 5, findUtf16Terminator(message, 5)), title);
+            assert.deepStrictEqual(observerPackets.map(packet => packet[0]), [0x2f, 0x03, messageOpcode],
+                'observers receive the seated state, shop CharInfo, and title in order');
+            assert(observerPackets[2].equals(message), 'the owner and observers receive the same shop message');
+            assert.strictEqual(shopActor.fetchTitle(), 'Crafter', 'the shop message stays separate from the character title');
+
+            ownerPackets.length = observerPackets.length = 0;
+            GameOpcodes.table[quitOpcode](owner, Buffer.from([quitOpcode]));
+            assert.strictEqual(storeType, 0);
+            assert.strictEqual(seated, false);
+            assert.deepStrictEqual(ownerPackets.map(packet => packet[0]), [0x2f, 0x04]);
+            assert.strictEqual(ownStoreType(ownerPackets[1]), 0, 'quitting clears the owner store mode');
+            assert.deepStrictEqual(observerPackets.map(packet => packet[0]), [0x2f, 0x03]);
+        }
+    } finally {
+        World.fetchVisibleRealPlayers = originalVisiblePlayers;
+    }
+}
+
 const privateSaleRows = [
     { objectId: 71001, selfId: 1988, count: 1, price: 72863, referencePrice: 9715, enchant: 0 },
     { objectId: 71002, selfId: 4057, count: 1, price: 63635, referencePrice: 8485, enchant: 0 },
