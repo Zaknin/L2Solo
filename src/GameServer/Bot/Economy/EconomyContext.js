@@ -464,7 +464,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
     const facts = Diagnostics.active() ? [] : null;
     // An occupation move the held leaf ordered (its trip, its arrival) is its own output.
-    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current), current, false, facts,
+    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current), false, facts,
         Sections.occupationPlanned(state, options.leaf));
     if (changed.length) return { ...refuse('sections', changed), ...(facts ? { facts: facts.join('+') } : {}) };
     if ((options.currentKey ?? eventInputKey(state, deps, timestamp, options.activity, options.leaf)) !== proof.hard)

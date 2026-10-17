@@ -21,6 +21,7 @@ const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
 const InventoryLimits = invoke('GameServer/Inventory/InventoryLimits');
 const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
+const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 
 const T = 1e12, MINUTE = 60 * 1000;
 const deps = { timestamp: T, knowledgeEnabled: true, board: new BoardIndex(),
@@ -84,6 +85,11 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
         'an arrival elsewhere is an occupation event');
     assert.deepEqual(verdict({ ...arrived, activity: 'resting', spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
         'resting elsewhere (a flight, a pull) is an occupation event');
+    // The round's reconcile reads it the same way: a rest at its spot is none.
+    const rest = spotId => Sections.events(state, after(state, { activity: 'resting', spotId }), T + 1000).includes('occupation');
+    assert.equal(state.activity, 'hunting', 'fixture: the round starts hunting');
+    assert.equal(rest(state.spotId), false, 'a rest where the bot hunted is no reconcile event');
+    assert.equal(rest(`${state.spotId}_other`), true, 'a rest at another spot is a reconcile occupation event');
 }
 // 3. A bag row below a crossing: a new row below the slot limit and loot
 // inside its band keep the build; the row that fills the bag refuses (the bag

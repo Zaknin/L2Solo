@@ -316,7 +316,7 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     const current = semanticFacts(after);
     // The round's callers (a hunting round, a rest) hold no leaf to tell an
     // ordered trip from a flight: a trip begun inside a round is an event.
-    return factEvents(previousFact, current, after, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
+    return factEvents(previousFact, current, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
         || !previous.funding && fundingMark(before) !== fundingMark(after));
 }
 // The one reading of an occupation against the held leaf (Recompute: own
@@ -345,14 +345,16 @@ function occupationPlanned(state, leaf) {
 // facts (diagnostics, optional): an array that receives the name of every
 // raised fact, in this order. planned: the occupation the held decision
 // ordered (occupationPlanned, the verdict's), its own output, no event.
-function factEvents(previousFact, current, after, funding = false, facts = null, planned = false) {
+function factEvents(previousFact, current, funding = false, facts = null, planned = false) {
     const sections = new Set();
     const raise = fact => { facts?.push(fact); for (const name of FACT_SECTIONS[fact]) sections.add(name); };
     if (!previousFact('dead') && current.dead) raise('dead');
     if (previousFact('build') !== current.build) raise('build');
     if (previousFact('relations') !== current.relations) raise('relations');
     if (funding) { facts?.push('funding'); sections.add('funding'); }
-    if (!planned && previousFact('occupation') !== current.occupation && after.activity !== 'resting') raise('occupation');
+    // Resting reads as hunting at its spot: a rest where the bot hunted is
+    // none, a rest at another spot is an occupation event.
+    if (!planned && previousFact('occupation') !== current.occupation) raise('occupation');
     if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
     if (previousFact('supply') !== current.supply) raise('supply');
