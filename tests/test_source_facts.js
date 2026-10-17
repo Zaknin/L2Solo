@@ -260,14 +260,15 @@ try {
     assert.equal(ordered.counts.get('party_needed'), ordered.all.filter(row => row.reason === 'party_needed').length);
     assert(ordered.counts.get('party_needed') >= 4, 'party_needed records on both sides of a later ready spot');
 
-    // A wholly impossible long source list can skip its eligible records in
-    // the wish's synchronous drain. Generic generators keep incremental work.
+    // The wish's synchronous drain skips the records its bot refuses as
+    // party_needed (above its solo level bound) or spoil_skill, on any list.
+    // Generic generators keep incremental work.
     const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
     const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
     const diagnosticsBefore = Config.developerDiagnostics;
     Config.developerDiagnostics = true;
     try {
-        const skipped = () => Diagnostics.metrics().counts?.['source_bound:skip:lists'] || 0;
+        const skipped = () => Diagnostics.metrics().counts?.['source_bound:skip:records'] || 0;
         const below = Math.floor(effective) + 1;
         const longSpots = [...mixedSpots.slice(0, 4),
             ...Array.from({ length: 40 }, (unused, index) => ({ ...mixedSpots[4], id: `bound-${index}` })),
@@ -298,7 +299,7 @@ try {
                 routeAllowed: () => { routes++; return true; },
                 spotValue: spot => { values++; return spotValue(spot); },
                 bestForWish: { hourAdena: 100, ...bestForWish } }));
-            assert.equal(skipped() - before, Number(shouldSkip), 'only a valid long minimum rejects the whole list');
+            assert.equal(skipped() - before > 0, shouldSkip, 'refused records are skipped, safe ones walked');
             assert.deepEqual([...counts], [...expectedCounts], 'same reason totals and first-key order');
             assert.deepEqual(fast.stages, generic.stages, 'same source yield tags and count');
             if (shouldSkip) {
@@ -322,19 +323,22 @@ try {
             }
         }
         // The same cache row follows replaced NPC/spot/rate inputs. The exact
-        // native boundary permits an armed bot, while NaN bounds abstain.
+        // native boundary permits an armed bot; a malformed level is the
+        // Infinity rank, refused like any level above the bound; a short list
+        // and Spoil-only records without Spoil are skipped as well.
         Data.npcRewards = mixedRewards;
         process.env.L2NODE_PROGRESSION_RATE = 'x1';
         checkBound(warsmith, replaceLevels(effective), false);
         checkBound(warsmith, replaceLevels(below), true);
-        checkBound({ ...warsmith, inventory: {} }, replaceLevels(below, true), false);
+        checkBound({ ...warsmith, inventory: {} }, replaceLevels(below, true), true);
+        checkBound(warsmith, replaceLevels(effective, true), true);
         const short = replaceLevels(below).slice(0, 4);
-        checkBound(warsmith, short, false);
+        checkBound(warsmith, short, true);
         Data.npcRewards = mixedRewards.map(reward => ({ ...reward, rewards: [] }));
         const noGearRead = { ...noSpoil };
         Object.defineProperty(noGearRead, 'inventory', { get() { throw new Error('Spoil refusal must not read equipment'); } });
         const spoilSpots = replaceLevels(below);
-        checkBound(noGearRead, [...spoilSpots, ...spoilSpots.map(spot => ({ ...spot, id: `${spot.id}-spoil` }))], false);
+        checkBound(noGearRead, [...spoilSpots, ...spoilSpots.map(spot => ({ ...spot, id: `${spot.id}-spoil` }))], true);
     } finally { Config.developerDiagnostics = diagnosticsBefore; }
     console.log('test_source_facts: ok');
 } finally {

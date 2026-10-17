@@ -23,8 +23,10 @@ const CraftSupplementMaterials = invoke('GameServer/Bot/Economy/CraftSupplementM
 const MAX_RESOLVED_SOURCE_CACHE = 128;
 const MAX_SOURCE_YIELDS = 16384;
 // Rows are as long as an item's index records (up to ~3,300 for a material
-// every monster drops): the bound counts record cells, 9 bytes for rules
-// plus at most 4 bytes for their eligible ordinals (1 MiB of ordinals total).
+// every monster drops): the bound counts cells, one per record (9 bytes for
+// rules plus 4 for its eligible ordinal) and one per eligible record (4 for
+// its level-ordered ordinal): 1 MiB of ordinals in total, plus ~24 bytes per
+// distinct target level of a row.
 const MAX_SOURCE_FACT_RULE_CELLS = 262144;
 let sourceIndexCache = { byItemId: null, resolved: new Map(), yields: new Map(),
     plainYields: new Map(), deepYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
@@ -1675,10 +1677,9 @@ function sourceRecordTargetLevel(entry) {
 }
 
 // The bot's verdict on one non-raid record, as soloSafeForSource gives it
-// for the record's target: solo_ready only. record and readiness are the
-// decision's one readiness record (null outside a scope) and its readiness.
-function soloSafeAtLevel(record, readiness, targetLevel) {
-    return SOURCE_ASSESSMENTS[sourceAssessmentReasonAt(record, readiness, targetLevel)].need === 'solo_ok';
+// for the record's target: solo_ready only.
+function soloSafeAtLevel(readiness, targetLevel) {
+    return targetLevel <= soloLevelBound(readiness);
 }
 
 // One decision's answer per target level, shared by partyNeedAssessmentForSource
@@ -1695,19 +1696,30 @@ function sourceAssessmentReasonAt(record, readiness, targetLevel) {
 }
 
 function sourceAssessmentReason(readiness, targetLevel) {
-    const margin = readiness.effectiveLevel - targetLevel;
+    const hard = hardPartyReason(readiness);
+    if (hard) return hard;
+    if (targetLevel <= soloLevelBound(readiness)) return 'solo_ready';
+    return readiness.effectiveLevel - targetLevel < -2 ? 'underleveled' : 'tight_level_margin';
+}
 
+function hardPartyReason(readiness) {
+    if (!readiness.hasWeapon) return 'missing_weapon';
     // A support with no weapon/armour cannot be treated as a safe solo farmer,
     // even when the level arithmetic happens to look favourable.  This is a
     // hard party need, while a normally equipped bot near the target level can
     // still progress alone and merely advertise a preferred party.
-    const unpreparedSupport = SUPPORT_ROLES.has(readiness.role)
-        && readiness.armorCount < 2;
-    if (!readiness.hasWeapon) return 'missing_weapon';
-    if (unpreparedSupport) return 'unprepared_support';
-    if (margin < -2) return 'underleveled';
-    if (margin < 0) return 'tight_level_margin';
-    return 'solo_ready';
+    if (SUPPORT_ROLES.has(readiness.role) && readiness.armorCount < 2) return 'unprepared_support';
+    return null;
+}
+
+// The highest target level the bot farms alone: a target is solo_ready
+// exactly when its level <= this bound (the margin effectiveLevel - level is
+// not negative). -Infinity: a hard party need, nothing is solo. An unknown
+// (NaN) effective level never yields a negative margin: every level is solo.
+// Target levels are never NaN (targetLevelOf falls back to Infinity).
+function soloLevelBound(readiness) {
+    if (hardPartyReason(readiness)) return -Infinity;
+    return Number.isNaN(readiness.effectiveLevel) ? Infinity : readiness.effectiveLevel;
 }
 
 function partyNeedForSource(state = {}, source = {}) {
@@ -2103,7 +2115,7 @@ function sourceRouteReader(state, options = {}) {
 }
 
 function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
-    const facts = [], ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
+    const ratesKey = sourceYieldRatesKey(), killerLevel = Number(state.level || 0);
     const entries = sourceIndexFor(options.spots || []).get(Number(itemId)) || [];
     const timestamp = options.timestamp ?? Date.now();
     const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
@@ -2115,152 +2127,177 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const spoilOnly = bestForWish?.spoilOnly, progressionRequired = bestForWish?.progressionRequired;
     const hourAdena = bestForWish?.hourAdena;
     const counts = options.counts || null, readyOnly = !!(counts || options.readyOnly || bestForWish);
-    let bestCost;
     let spoiler = options.spoiler;
     // Most records the bot reaches are refused as party_needed. The verdict
     // reads one readiness per call and the record's level; the counts take
     // their tally once at the end (the key keeps its first-seen place).
-    let readinessScoped = null, readiness = null, partyNeeded = 0;
+    let readiness = null;
+    const readReadiness = () => {
+        if (readiness === null) {
+            const scoped = readinessRecord(state);
+            readiness = scoped ? scoped.readiness : computeCombatReadiness(state);
+        }
+        return readiness;
+    };
     const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
     // The full view still reads all rows. Ready readers walk only eligible
     // ordinals; diagnostics merge the few static buckets at their first row.
     // Oversized uncached rows use the full walk without an extra ordinal array.
     const prepared = readyOnly && rules.eligible !== null;
-    const ordinals = prepared ? rules.eligible : null;
-    const buckets = prepared && counts ? rules.staticBuckets : [];
-    const length = prepared ? ordinals.length : entries.length;
-    // Only the wish's synchronous drain may batch the count updates between
-    // yields. Other generators retain their incremental counts and work order.
-    let boundNeedsReadiness = !!(bestForWish && prepared && rules.rejection);
-    if (boundNeedsReadiness && !rules.rejection[1]) {
-        // A Spoil-only list without learned Spoil never read combat readiness.
-        if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
-        boundNeedsReadiness = !!spoiler;
+    // Only the wish's synchronous drain walks the bot's solo-safe records
+    // alone. Other generators retain their incremental counts and work order.
+    if (!bestForWish || !prepared) {
+        return yield* walk(prepared ? rules.eligible : null, prepared && counts ? rules.staticBuckets : [], false, 0);
     }
-    if (boundNeedsReadiness) {
-        readinessScoped = readinessRecord(state);
-        readiness = readinessScoped ? readinessScoped.readiness : computeCombatReadiness(state);
-        if (!soloSafeAtLevel(readinessScoped, readiness, rules.rejection[0])) {
-            // The old prepared loop processes one entry or static bucket per
-            // turn. Keep its source tags/count even though no entry is visited.
-            for (let processed = 0; processed < length + buckets.length; processed += SOURCE_FACT_STEP) yield 'source';
-            if (Diagnostics.active()) {
-                Diagnostics.count('source_bound', 'skip', 'lists');
-                Diagnostics.count('source_bound', 'skip', 'records', length);
-            }
-            if (counts) {
-                let at = 0, next = 0;
-                const [, drops, firstDrop, spoils, firstSpoil] = rules.rejection;
-                const eligibleBuckets = [];
-                if (drops) eligibleBuckets.push({ kind: 'drop', count: drops, firstOrdinal: firstDrop });
-                if (spoils) eligibleBuckets.push({ kind: 'spoil', count: spoils, firstOrdinal: firstSpoil });
-                eligibleBuckets.sort((a, b) => a.firstOrdinal - b.firstOrdinal);
-                while (at < buckets.length || next < eligibleBuckets.length) {
-                    const live = next < eligibleBuckets.length
-                        && (at === buckets.length || eligibleBuckets[next].firstOrdinal < buckets[at].firstOrdinal);
-                    const bucket = live ? eligibleBuckets[next++] : buckets[at++];
-                    let reason = live ? 'party_needed' : FACT_RULE_REASONS[bucket.rule];
+    // The row orders each kind's eligible records by target level: the safe
+    // ones (level <= soloLevelBound) are a prefix, the party_needed ones the
+    // tail. A bot without Spoil refuses every spoil record as spoil_skill.
+    // Neither is visited: both tails are counted as buckets at their first
+    // ordinal, so the reason keys keep the full walk's first-seen order.
+    const { levels, drops, spoils } = rules;
+    if (spoils.count && spoiler === undefined) spoiler = sourceSpoilerFor(state);
+    const walkSpoils = spoils.count > 0 && !!spoiler;
+    let safeRanks = levels.length;
+    if (drops.count || walkSpoils) safeRanks = levelRanksAtMost(levels, soloLevelBound(readReadiness()));
+    const safeDrops = drops.rankStart[safeRanks], safeSpoils = walkSpoils ? spoils.rankStart[safeRanks] : 0;
+    let ordinals = rules.eligible;
+    if (safeDrops + safeSpoils < ordinals.length) {
+        // Back to ordinal order: the walk reads values, trips and ties in it.
+        ordinals = new Uint32Array(safeDrops + safeSpoils);
+        ordinals.set(rules.ranked.subarray(drops.base, drops.base + safeDrops));
+        ordinals.set(rules.ranked.subarray(spoils.base, spoils.base + safeSpoils), safeDrops);
+        ordinals.sort();
+    }
+    let buckets = counts ? rules.staticBuckets : [];
+    if (counts && ordinals !== rules.eligible) {
+        buckets = [...buckets];
+        if (safeDrops < drops.count) buckets.push(sourceTailBucket('party_needed', drops, safeRanks));
+        if (!walkSpoils && spoils.count) buckets.push(sourceTailBucket('spoil_skill', spoils, 0));
+        else if (safeSpoils < spoils.count) buckets.push(sourceTailBucket('party_needed', spoils, safeRanks));
+        buckets.sort((a, b) => a.firstOrdinal - b.firstOrdinal);
+    }
+    // The 'source' steps stay as many as the full walk takes.
+    const facts = yield* walk(ordinals, buckets, true, rules.eligible.length + (counts ? rules.staticBuckets.length : 0));
+    if (Diagnostics.active()) {
+        Diagnostics.count('source_bound', 'skip', 'records', rules.eligible.length - ordinals.length);
+        Diagnostics.count('source_bound', 'walk', 'records', ordinals.length);
+    }
+    return facts;
+
+    // One walk over ordinals (null: every record) merged with refusal buckets.
+    // bounded: the ordinals are the bot's solo-safe records already.
+    function* walk(ordinals, buckets, bounded, plannedTurns) {
+        const facts = [], length = ordinals ? ordinals.length : entries.length;
+        let bestCost, partyNeeded = 0;
+        let cursor = 0, bucketCursor = 0, processed = 0;
+        while (cursor < length || bucketCursor < buckets.length) {
+            if (processed++ % SOURCE_FACT_STEP === 0) yield 'source';
+            const ordinal = cursor < length ? (ordinals ? ordinals[cursor] : cursor) : entries.length;
+            const bucket = buckets[bucketCursor];
+            if (bucket && bucket.firstOrdinal < ordinal) {
+                let reason = bucket.reason;
+                if (!reason) {
+                    reason = FACT_RULE_REASONS[bucket.rule];
+                    // Raid protection precedes Spoil; other static refusals follow it.
                     if (bucket.rule !== FACT_RULE_RAID && bucket.kind === 'spoil') {
                         if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
                         if (!spoiler) reason = 'spoil_skill';
                     }
-                    counts.set(reason, (counts.get(reason) || 0) + bucket.count);
                 }
+                counts.set(reason, (counts.get(reason) || 0) + bucket.count);
+                bucketCursor++;
+                continue;
             }
-            return facts;
-        }
-    }
-    let cursor = 0, bucketCursor = 0, processed = 0;
-    while (cursor < length || bucketCursor < buckets.length) {
-        if (processed++ % SOURCE_FACT_STEP === 0) yield 'source';
-        const ordinal = cursor < length ? (prepared ? ordinals[cursor] : cursor) : entries.length;
-        const bucket = buckets[bucketCursor];
-        if (bucket && bucket.firstOrdinal < ordinal) {
-            let reason = FACT_RULE_REASONS[bucket.rule];
-            // Raid protection precedes Spoil; other static refusals follow it.
-            if (bucket.rule !== FACT_RULE_RAID && bucket.kind === 'spoil') {
+            cursor++;
+            // The fact reads the shared rule row of the record (yield and the
+            // per-level refusals), not a materialized source per entry.
+            const rule = rules.reasons[ordinal];
+            if (rule === FACT_RULE_NO_CHANCE) continue;
+            const entry = entries[ordinal], { spot, kind } = entry, expectedYield = rules.expected[ordinal];
+            let status = 'ineligible', reason = rule === FACT_RULE_RAID ? 'raid' : null;
+            if (!reason && kind === 'spoil') {
+                // The executor's rule: a learned Spoil, not the class (E189).
                 if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
                 if (!spoiler) reason = 'spoil_skill';
             }
-            counts.set(reason, (counts.get(reason) || 0) + bucket.count);
-            bucketCursor++;
-            continue;
-        }
-        cursor++;
-        // The fact reads the shared rule row of the record (yield and the
-        // per-level refusals), not a materialized source per entry.
-        const rule = rules.reasons[ordinal];
-        if (rule === FACT_RULE_NO_CHANCE) continue;
-        const entry = entries[ordinal], { spot, kind } = entry, expectedYield = rules.expected[ordinal];
-        let status = 'ineligible', reason = rule === FACT_RULE_RAID ? 'raid' : null;
-        if (!reason && kind === 'spoil') {
-            // The executor's rule: a learned Spoil, not the class (E189).
-            if (spoiler === undefined) spoiler = sourceSpoilerFor(state);
-            if (!spoiler) reason = 'spoil_skill';
-        }
-        if (!reason && rule) reason = FACT_RULE_REASONS[rule];
-        if (!reason) {
-            // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
-            // still needs its roster, as soloSafeForSource says.
-            // Same raid check as partyNeedAssessmentForSource (kept there too).
-            if (readiness === null) {
-                readinessScoped = readinessRecord(state);
-                readiness = readinessScoped ? readinessScoped.readiness : computeCombatReadiness(state);
+            if (!reason && rule) reason = FACT_RULE_REASONS[rule];
+            if (!reason) {
+                // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
+                // still needs its roster, as soloSafeForSource says.
+                // Same raid check as partyNeedAssessmentForSource (kept there too).
+                if (kind === 'raid' || !bounded && !soloSafeAtLevel(readReadiness(), sourceRecordTargetLevel(entry))) {
+                    if (counts && !partyNeeded++ && !counts.has('party_needed')) counts.set('party_needed', 0);
+                    if (readyOnly) continue;
+                    reason = 'party_needed';
+                } else {
+                    const target = sourceTargetOf(entry);
+                    target.capacity = LevelingRoutes.capacityForSpot(spot);
+                    if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
+                }
+                if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
             }
-            if (kind === 'raid' || !soloSafeAtLevel(readinessScoped, readiness, sourceRecordTargetLevel(entry))) {
-                if (counts && !partyNeeded++ && !counts.has('party_needed')) counts.set('party_needed', 0);
-                if (readyOnly) continue;
-                reason = 'party_needed';
-            } else {
-                const target = sourceTargetOf(entry);
-                target.capacity = LevelingRoutes.capacityForSpot(spot);
-                if (!sourceHasCapacity(target, state, { occupancy: options.occupancy })) reason = 'occupied';
+            let row = null, perHour = 0, trip = null, town = null;
+            if (!reason) {
+                status = 'unknown';
+                row = spotValue(entry.spot);
+                perHour = Number(row?.kills) * expectedYield
+                    * Number(entry.sourceCount || 0) / Math.max(1, Number(entry.totalCount || 0));
+                if (!(perHour > 0)) reason = 'yield';
+                else if (!Number.isFinite(row.valueHours)) reason = 'income';
             }
-            if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
-        }
-        let row = null, perHour = 0, trip = null, town = null;
-        if (!reason) {
-            status = 'unknown';
-            row = spotValue(entry.spot);
-            perHour = Number(row?.kills) * expectedYield
-                * Number(entry.sourceCount || 0) / Math.max(1, Number(entry.totalCount || 0));
-            if (!(perHour > 0)) reason = 'yield';
-            else if (!Number.isFinite(row.valueHours)) reason = 'income';
-        }
-        if (!reason) {
-            trip = { known: true, hours: 0, fees: 0 };
-            if (String(entry.spot.id) !== current) {
-                // A known town is read without a delegated generator per record.
-                town = spotTowns.has(entry.spot) ? spotTowns.get(entry.spot) : yield* spotTown(entry.spot);
-                // A caller with prepared routes (the wish) passes its own reader.
-                if (town && !trips.has(town)) trips.set(town, options.trip ? options.trip.details(town)
-                    : yield* invoke('GameServer/Bot/Economy/EconomicTrip').details(state, town));
-                trip = town ? trips.get(town) : { known: false };
+            if (!reason) {
+                trip = { known: true, hours: 0, fees: 0 };
+                if (String(entry.spot.id) !== current) {
+                    // A known town is read without a delegated generator per record.
+                    town = spotTowns.has(entry.spot) ? spotTowns.get(entry.spot) : yield* spotTown(entry.spot);
+                    // A caller with prepared routes (the wish) passes its own reader.
+                    if (town && !trips.has(town)) trips.set(town, options.trip ? options.trip.details(town)
+                        : yield* invoke('GameServer/Bot/Economy/EconomicTrip').details(state, town));
+                    trip = town ? trips.get(town) : { known: false };
+                }
+                if (!trip?.known) reason = 'route';
             }
-            if (!trip?.known) reason = 'route';
+            if (counts) counts.set(reason || 'ready', (counts.get(reason || 'ready') || 0) + 1);
+            const npcId = Number(entry.reward.selfId);
+            if (reason) {
+                if (!readyOnly) facts.push({ kind, spotId: spot.id, npcId, itemId: Number(itemId), units, expectedYield, status, reason });
+                continue;
+            }
+            const hours = units / perHour, netHourCost = Math.max(0, 1 - row.valueHours);
+            const spotId = spot.id, factItemId = Number(itemId), valueHours = row.valueHours;
+            const tripHours = trip.hours, tripFees = trip.fees, costHours = hours * netHourCost + trip.hours;
+            if (bestForWish) {
+                if (spoilOnly && kind !== 'spoil') continue;
+                const cost = progressionRequired ? hours + tripHours + tripFees / Math.max(1, hourAdena) : costHours;
+                if (facts.length && !(cost < bestCost)) continue;
+                bestCost = cost;
+            }
+            const fact = writeReadySourceFact(bestForWish ? facts[0] || {} : {}, kind, spotId, npcId,
+                factItemId, units, expectedYield, perHour, hours, valueHours, netHourCost, town, tripHours, tripFees, costHours);
+            if (bestForWish) facts[0] = fact;
+            else facts.push(fact);
         }
-        if (counts) counts.set(reason || 'ready', (counts.get(reason || 'ready') || 0) + 1);
-        const npcId = Number(entry.reward.selfId);
-        if (reason) {
-            if (!readyOnly) facts.push({ kind, spotId: spot.id, npcId, itemId: Number(itemId), units, expectedYield, status, reason });
-            continue;
-        }
-        const hours = units / perHour, netHourCost = Math.max(0, 1 - row.valueHours);
-        const spotId = spot.id, factItemId = Number(itemId), valueHours = row.valueHours;
-        const tripHours = trip.hours, tripFees = trip.fees, costHours = hours * netHourCost + trip.hours;
-        if (bestForWish) {
-            if (spoilOnly && kind !== 'spoil') continue;
-            const cost = progressionRequired ? hours + tripHours + tripFees / Math.max(1, hourAdena) : costHours;
-            if (facts.length && !(cost < bestCost)) continue;
-            bestCost = cost;
-        }
-        const fact = writeReadySourceFact(bestForWish ? facts[0] || {} : {}, kind, spotId, npcId,
-            factItemId, units, expectedYield, perHour, hours, valueHours, netHourCost, town, tripHours, tripFees, costHours);
-        if (bestForWish) facts[0] = fact;
-        else facts.push(fact);
+        if (partyNeeded) counts.set('party_needed', counts.get('party_needed') + partyNeeded);
+        for (let step = Math.ceil(processed / SOURCE_FACT_STEP); step < Math.ceil(plannedTurns / SOURCE_FACT_STEP); step++) yield 'source';
+        return facts;
     }
-    if (partyNeeded) counts.set('party_needed', counts.get('party_needed') + partyNeeded);
-    return facts;
+}
+
+// A party_needed or spoil_skill tail of one kind of a fact row, from rank
+// on: one counts bucket at the tail's first ordinal.
+function sourceTailBucket(reason, kind, rank) {
+    return { rule: 0, kind: null, firstOrdinal: kind.tailFirst[rank], count: kind.count - kind.rankStart[rank], reason };
+}
+
+// How many of the ascending levels are <= bound (a binary search).
+function levelRanksAtMost(levels, bound) {
+    let low = 0, high = levels.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (levels[middle] <= bound) low = middle + 1;
+        else high = middle;
+    }
+    return low;
 }
 
 // The per-bot loop of sourceFacts re-derived, for every record, answers that
@@ -2268,14 +2305,18 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
 // yield pair, raid, a huntable NPC and the voluntary level band. One row per
 // item and level holds them, aligned with the index records; it lives with
 // the index (rebuilt with it) and follows the rate profile. Numbers only, no
-// bot references: 9 bytes per record plus at most one 4-byte eligible ordinal.
+// bot references: 9 bytes per record, two 4-byte ordinals per eligible record
+// (in record order and by target level) and ~24 bytes per distinct level.
 // Static refusals use at most six buckets, each retaining its first ordinal,
 // so diagnostic reason keys keep their full-view insertion order. A record
 // with FACT_RULE_NO_CHANCE is never seen or counted by the bot (chance 0).
 const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_LEVEL_BAND = 3, FACT_RULE_NO_CHANCE = 255;
 const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt', 'level_band'];
+const NO_FACT_ORDINAL = 0xFFFFFFFF;
+const NO_RANKED_KIND = { base: 0, count: 0, rankStart: new Uint32Array(1), tailFirst: new Uint32Array([NO_FACT_ORDINAL]) };
 const NO_FACT_RULES = { entries: [], expected: new Float64Array(0), reasons: new Uint8Array(0),
-    eligible: new Uint32Array(0), staticBuckets: [] };
+    eligible: new Uint32Array(0), staticBuckets: [], cells: 0,
+    levels: new Float64Array(0), ranked: new Uint32Array(0), drops: NO_RANKED_KIND, spoils: NO_RANKED_KIND };
 function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLower = false) {
     if (!entries.length) return NO_FACT_RULES;
     if (sourceIndexCache.factRulesKey !== ratesKey) {
@@ -2286,21 +2327,19 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     const cache = sourceIndexCache.factRules, key = `${itemId}:${killerLevel}:${Number(economicLower)}`;
     let rules = cache.get(key);
     if (rules && rules.entries === entries) return rules;
-    if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.entries.length; }
-    const retain = entries.length <= MAX_SOURCE_FACT_RULE_CELLS;
+    if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.cells; }
+    // A retained row counts one cell per record and one per eligible record
+    // (its level-ordered ordinal), so at most two per record.
+    const retain = 2 * entries.length <= MAX_SOURCE_FACT_RULE_CELLS;
     // Make room before allocation: the cache retains <= 1 MiB of ordinal
     // backing. Uncollected evictions or rows held by an active reader can
     // outlive the cache. Oversized rows get no ordinal backing and are not
     // retained; this caller uses their full rule arrays and original walk.
-    if (retain) while (sourceIndexCache.factRuleCells + entries.length > MAX_SOURCE_FACT_RULE_CELLS && cache.size) {
-        const [oldest, row] = cache.entries().next().value;
-        cache.delete(oldest);
-        sourceIndexCache.factRuleCells -= row.entries.length;
-    }
+    if (retain) makeFactRuleRoom(entries.length);
     const expected = new Float64Array(entries.length), reasons = new Uint8Array(entries.length);
     const eligible = retain ? new Uint32Array(entries.length) : null;
     const staticBuckets = [], bucketsByRuleKind = new Map();
-    let eligibleCount = 0, minimum = Infinity, drops = 0, spoils = 0, firstDrop = -1, firstSpoil = -1;
+    let eligibleCount = 0;
     // This shared rule row already has the resolved economic band. Do not
     // re-enter the actor's wish policy (and resolve its module) per record.
     const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
@@ -2316,34 +2355,89 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
                 : killerLevel && npcLevel && npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
         if (!retain) continue;
         const rule = reasons[ordinal];
-        if (!rule) {
-            eligible[eligibleCount++] = ordinal;
-            minimum = Math.min(minimum, sourceRecordTargetLevel(entry));
-            if (entry.kind === 'spoil') { if (!spoils++) firstSpoil = ordinal; }
-            else { if (!drops++) firstDrop = ordinal; }
-        }
+        if (!rule) eligible[eligibleCount++] = ordinal;
         else {
             const bucketKey = rule * 2 + Number(entry.kind === 'spoil');
             let bucket = bucketsByRuleKind.get(bucketKey);
             if (!bucket) {
-                bucket = { rule, kind: entry.kind, firstOrdinal: ordinal, count: 0 };
+                bucket = { rule, kind: entry.kind, firstOrdinal: ordinal, count: 0, reason: null };
                 bucketsByRuleKind.set(bucketKey, bucket);
                 staticBuckets.push(bucket);
             }
             bucket.count++;
         }
     }
-    rules = { entries, expected, reasons, eligible: eligible ? eligible.subarray(0, eligibleCount) : null, staticBuckets };
-    // At most 4096 such summaries under the existing 262144-cell bound.
-    // Small rows add no objects; malformed levels keep the ordinary walk.
-    if (eligibleCount >= SOURCE_FACT_STEP && Number.isFinite(minimum)) {
-        rules.rejection = [minimum, drops, firstDrop, spoils, firstSpoil];
-    }
+    rules = { entries, expected, reasons, eligible: eligible ? eligible.subarray(0, eligibleCount) : null, staticBuckets,
+        cells: entries.length, levels: null, ranked: null, drops: null, spoils: null };
     if (retain) {
-        sourceIndexCache.factRuleCells += entries.length;
+        rankSourceFactRules(rules);
+        rules.cells += eligibleCount;
+        makeFactRuleRoom(eligibleCount);
+        sourceIndexCache.factRuleCells += rules.cells;
         cache.set(key, rules);
+        if (Diagnostics.active()) Diagnostics.count('source_bound', 'row', 'levels', rules.levels.length);
     }
     return rules;
+}
+
+function makeFactRuleRoom(cells) {
+    const cache = sourceIndexCache.factRules;
+    while (sourceIndexCache.factRuleCells + cells > MAX_SOURCE_FACT_RULE_CELLS && cache.size) {
+        const [oldest, row] = cache.entries().next().value;
+        cache.delete(oldest);
+        sourceIndexCache.factRuleCells -= row.cells;
+    }
+}
+
+// Orders a row's eligible records per kind (drops, then spoils, in ranked)
+// by the rank of their target level among the row's distinct levels, ties
+// in record order (a counting sort). For a bot whose solo bound admits the
+// first r levels, rankStart[r] of a kind is its count of safe records and
+// tailFirst[r] the first ordinal of its unsafe rest.
+function rankSourceFactRules(rules) {
+    const { entries, eligible } = rules, count = eligible.length;
+    const targetLevels = new Float64Array(count);
+    for (let index = 0; index < count; index++) targetLevels[index] = sourceRecordTargetLevel(entries[eligible[index]]);
+    const sorted = targetLevels.slice().sort();
+    let distinct = 0;
+    for (let index = 0; index < count; index++) {
+        if (!distinct || sorted[index] !== sorted[distinct - 1]) sorted[distinct++] = sorted[index];
+    }
+    const levels = sorted.slice(0, distinct);
+    const kinds = [rankedKind(distinct), rankedKind(distinct)];
+    const ranks = new Uint32Array(count);
+    for (let index = 0; index < count; index++) {
+        ranks[index] = levelRanksAtMost(levels, targetLevels[index]) - 1;
+        kinds[Number(entries[eligible[index]].kind === 'spoil')].rankStart[ranks[index] + 1]++;
+    }
+    let base = 0;
+    for (const kind of kinds) {
+        for (let rank = 0; rank < distinct; rank++) kind.rankStart[rank + 1] += kind.rankStart[rank];
+        kind.base = base;
+        kind.count = kind.rankStart[distinct];
+        base += kind.count;
+    }
+    const ranked = new Uint32Array(count);
+    const next = kinds.map(kind => kind.rankStart.slice(0, distinct));
+    for (let index = 0; index < count; index++) {
+        const spoil = Number(entries[eligible[index]].kind === 'spoil');
+        ranked[kinds[spoil].base + next[spoil][ranks[index]]++] = eligible[index];
+    }
+    for (const kind of kinds) {
+        kind.tailFirst[distinct] = NO_FACT_ORDINAL;
+        for (let rank = distinct - 1; rank >= 0; rank--) {
+            const first = kind.rankStart[rank] < kind.rankStart[rank + 1] ? ranked[kind.base + kind.rankStart[rank]] : NO_FACT_ORDINAL;
+            kind.tailFirst[rank] = Math.min(first, kind.tailFirst[rank + 1]);
+        }
+    }
+    rules.levels = levels;
+    rules.ranked = ranked;
+    rules.drops = kinds[0];
+    rules.spoils = kinds[1];
+}
+
+function rankedKind(levels) {
+    return { base: 0, count: 0, rankStart: new Uint32Array(levels + 1), tailFirst: new Uint32Array(levels + 1) };
 }
 
 // A drop yield depends only on the reward, the item and the deep-blue level
