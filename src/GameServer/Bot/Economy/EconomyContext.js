@@ -159,7 +159,8 @@ function partyInput(state) {
     return partyId ? { ...state.party, partyId, role: state.party?.role || stats.role || Roles.inferRole(stats.classId || 0) } : null;
 }
 // The key parts in order (diagnostics: context:key_moved:<name> names the
-// first part that moved against the held proof while the digest differs).
+// first part that moved against the held proof while the digest differs,
+// context:key_moved_all:<name> every one).
 const KEY_PART_NAMES = Object.freeze(['version', 'generation', 'facts', 'inventory', 'improvement', 'clan', 'party',
     'visit_every', 'karma', 'race', 'generated_cold', 'persona', 'craft_station', 'soul_crystal_quest', 'shot_recipe_item',
     'shot_recipe_fresh', 'recipes', 'workshop_recipe', 'workshop_product', 'memory_identity', 'relations',
@@ -195,18 +196,21 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
         deps.mode || '', deps.inputKey || '', current.incomingPending === true,
         deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled()];
 }
-// Diagnostics: the first key part that differs between the held proof's
-// parts and this request's ('none' when only the digest differs).
-function movedKeyPart(parts, heldParts) {
-    const at = parts.findIndex((part, i) => JSON.stringify(part) !== heldParts[i]);
-    if (at < 0) return 'none';
-    // An object part (facts, trip) names its first moved field: facts.build, trip.stats.travel.
-    return KEY_PART_NAMES[at] + movedField(parts[at], JSON.parse(heldParts[at] || 'null'), 2);
+// Diagnostics: every key part that differs between the held proof's parts
+// and this request's, in key order (empty when only the digest differs).
+function movedKeyParts(parts, heldParts) {
+    const names = [];
+    for (let at = 0; at < parts.length; at++) if (JSON.stringify(parts[at]) !== heldParts[at])
+        names.push(...movedFields(KEY_PART_NAMES[at], parts[at], JSON.parse(heldParts[at] || 'null'), 2));
+    return names;
 }
-function movedField(part, held, depth) {
-    if (depth === 0 || !part || typeof part !== 'object' || Array.isArray(part)) return '';
-    const key = Object.keys(part).find(name => JSON.stringify(part[name]) !== JSON.stringify(held?.[name]));
-    return key === undefined ? '' : `.${key}${movedField(part[key], held?.[key], depth - 1)}`;
+// An object part (facts, trip) names each moved field: facts.build, trip.stats.travel.
+function movedFields(name, part, held, depth) {
+    if (depth === 0 || !part || typeof part !== 'object' || Array.isArray(part)) return [name];
+    const names = [];
+    for (const key of Object.keys(part)) if (JSON.stringify(part[key]) !== JSON.stringify(held?.[key]))
+        names.push(...movedFields(`${name}.${key}`, part[key], held?.[key], depth - 1));
+    return names.length ? names : [name];
 }
 
 // The fields of the section keys (sectionKeys: the source memo and the
@@ -440,8 +444,10 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const dirty = Number(state.stats?.wishDirty) || 0;
     if (dirty) return { valid: false, reason: 'wish_dirty', touchedSections: dirty };
     const current = fieldActivity(state, options.activity, options.leaf);
-    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current, timestamp), current);
-    if (changed.length) return refuse('sections', changed);
+    // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
+    const facts = Diagnostics.active() ? [] : null;
+    const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current, timestamp), current, false, facts);
+    if (changed.length) return { ...refuse('sections', changed), ...(facts ? { facts: facts.join('+') } : {}) };
     if ((options.currentKey ?? eventInputKey(state, deps, timestamp, options.activity, options.leaf)) !== proof.hard)
         return refuse('event_key', ['sources']);
     const why = [];
@@ -1254,8 +1260,11 @@ function buildForState(state, deps) {
     const key = keyParts ? proofDigest(keyParts) : eventInputKey(state, deps, timestamp, held?.activity, held?.plan.network?.activity);
     let keyMoved = null;
     if (keyParts && key !== held.plan.eventProof?.hard) {
-        keyMoved = movedKeyPart(keyParts, held.plan.keyParts);
+        const moved = movedKeyParts(keyParts, held.plan.keyParts);
+        keyMoved = moved[0] || 'none';
         Diagnostics.count('context', 'key_moved', keyMoved);
+        // Every moved part: the first-only name masks inventory/trip behind facts.
+        for (const name of moved) Diagnostics.count('context', 'key_moved_all', name);
     }
     // The held build's market items and spot crowd still read the same: read once per request.
     let readsHeld = null;
@@ -1587,8 +1596,12 @@ function buildForState(state, deps) {
             // Sampled owners: did the build the verdict refused change the plan?
             // same per refusal reason is the waste the reason's rule costs.
             gateDiff = gatePlanDiff(state, held, context, deps);
-            // An event_key refusal names the moved field: per field, does the key move give another plan?
-        Diagnostics.count('context', 'refused_plan', `${gate === 'event_key' && keyMoved ? `event_key.${keyMoved}` : gate}:${gateDiff === 'same' ? 'same' : 'new'}`);
+            // An event_key refusal names the moved field, a sections refusal
+            // the moved facts: per field, does the move give another plan
+            // (focus or leaf: a real decision change; queue, funded: its order)?
+            const refusal = gate === 'event_key' && keyMoved ? `event_key.${keyMoved}`
+                : gate === 'sections' && eventVerdict.facts ? `sections.${eventVerdict.facts}` : gate;
+            Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
         }
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.

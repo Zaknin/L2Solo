@@ -323,10 +323,11 @@ function plannedOccupation(before, after) {
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.
 // current.kit: read only when the build fact moved (a baseline without one
-// names a build event, as before the split).
-function factEvents(previousFact, current, after, funding = false) {
+// names a build event, as before the split). facts (diagnostics, optional):
+// an array that receives the name of every raised fact, in this order.
+function factEvents(previousFact, current, after, funding = false, facts = null) {
     const sections = new Set();
-    const raise = fact => { for (const name of FACT_SECTIONS[fact]) sections.add(name); };
+    const raise = fact => { facts?.push(fact); for (const name of FACT_SECTIONS[fact]) sections.add(name); };
     if (!previousFact('dead') && current.dead) raise('dead');
     if (previousFact('build') !== current.build) {
         const held = previousFact('kit');
@@ -335,7 +336,7 @@ function factEvents(previousFact, current, after, funding = false) {
         raise(fight ? 'fight' : 'build');
     }
     if (previousFact('relations') !== current.relations) raise('relations');
-    if (funding) sections.add('funding');
+    if (funding) { facts?.push('funding'); sections.add('funding'); }
     if (previousFact('occupation') !== current.occupation && after.activity !== 'resting') raise('occupation');
     if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
