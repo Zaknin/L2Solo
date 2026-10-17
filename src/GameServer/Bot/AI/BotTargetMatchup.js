@@ -1,5 +1,7 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DiagnosticConfig = require('../Population/PopulationConfig');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
+const { fnv1a32 } = require('../Fnv1a');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const WeaponMask = invoke('GameServer/Skills/WeaponMask');
@@ -297,7 +299,7 @@ function stateProfiles(state, options = {}) {
     // Do not invent the other members of an incomplete party projection.
     if (options.mode === 'party' && states.length === 1) return [];
     const Cold = coldCombatProfile();
-    return states.flatMap(member => typeof member.fetchHp === 'function'
+    const profiles = states.flatMap(member => typeof member.fetchHp === 'function'
         ? actorProfiles([member])
         : coldProfiles({ ...Cold.withBuildSite('matchup', () => Cold.profileFor(member, options.timestamp)),
             // Partial route projections must not turn an invented default
@@ -305,6 +307,9 @@ function stateProfiles(state, options = {}) {
             survivalKnown: !!member.stats?.coldCombat
                 || Number.isFinite(Number(member.stats?.classId ?? member.classId))
         }, member, options.timestamp));
+    if (states.length === 1 && profiles.length && Diagnostics.active() && typeof states[0].fetchHp !== 'function'
+        && Number(states[0].characterId) > 0) noteFingerprint(Number(states[0].characterId), profiles);
+    return profiles;
 }
 
 // A spot search checks hundreds of spots with one profile array, and each mob
@@ -367,8 +372,11 @@ function fingerprintValue(value) {
     throw new TypeError('unshareable matchup value');
 }
 
-// Exactly the fields channels() and soloSurvival() read.
-function profileFingerprint(profile) {
+// Exactly the fields channels() and soloSurvival() read: the scalar fields
+// (FINGERPRINT_FIELDS, in this order), the skills, then the solo priority.
+const FINGERPRINT_FIELDS = ['role', 'weaponKind', 'pAtk', 'atkSpd', 'mAtk', 'castSpd', 'maxMp', 'weaponMask',
+    'maxHp', 'pDef', 'survivalKnown', 'soloDamageReceiver'];
+function fingerprintParts(profile) {
     const role = profile.role || Roles.combatRoleFor(profile);
     const parts = [role, profile.equipment?.weaponKind || '', profile.pAtk, profile.atkSpd, profile.mAtk,
         profile.castSpd, profile.maxMp, profile.weaponMask, profile.maxHp, profile.pDef,
@@ -384,7 +392,62 @@ function profileFingerprint(profile) {
         parts.push('solo-priority');
         for (const [id, score] of Object.entries(profile.soloAttackScores)) parts.push(id, fingerprintValue(score));
     }
-    return parts.join(',');
+    return parts;
+}
+function profileFingerprint(profile) {
+    return fingerprintParts(profile).join(',');
+}
+
+// Diagnostics, kept only while they count (the key itself is unchanged).
+// matchup:miss:<evicted|never_seen>: a fingerprint missed in sharedVerdicts
+// that an eviction dropped before, or one not held in that memory. Evicted
+// fingerprints are kept as a 30-bit hash (a small integer; a false 'evicted'
+// about once in 10^5 misses) in insertion order, the oldest dropped past
+// EVICTED_MEMORY: ~30 min of live budget evictions (1,300 per 5 min), ~100 KB.
+// A returning fingerprint leaves the memory.
+const EVICTED_MEMORY = 8192;
+const evictedFingerprints = new Set();
+function rememberEvicted(fingerprint) {
+    evictedFingerprints.add(fnv1a32(fingerprint) >>> 2);
+    if (evictedFingerprints.size > EVICTED_MEMORY) evictedFingerprints.delete(evictedFingerprints.values().next().value);
+}
+function missKind(fingerprint) {
+    return evictedFingerprints.delete(fnv1a32(fingerprint) >>> 2) ? 'evicted' : 'never_seen';
+}
+// matchup:fingerprint_moved:<field>: a solo bot's spot-search profiles
+// (stateProfiles) against its previous ones, the first moved part by name:
+// the summon kind (summon_<from>_to_<to>; active = the saved servitor, kept
+// while expiresAt > timestamp; castable = a summon skill whose mp, reuse and
+// cooldown allow it now), then the bot's FINGERPRINT_FIELDS, skills,
+// solo_priority and the summon profile. matchup:fingerprint:<same|first> are
+// the calls with none moved and the first seen. One hash per part, 16 x 32 bit
+// per owner (~150 B with the map entry), the least recent owner dropped past
+// VERDICT_PROFILE_LIMIT.
+const SUMMON_KINDS = ['none', 'active', 'castable'];
+const MOVED_PARTS = [...FINGERPRINT_FIELDS, 'skills', 'solo_priority', 'summon'];
+const ownerFingerprints = new Map();
+const fingerprintScratch = new Uint32Array(MOVED_PARTS.length + 1);
+function noteFingerprint(owner, profiles) {
+    const current = fingerprintScratch, parts = fingerprintParts(profiles[0]), fields = FINGERPRINT_FIELDS.length;
+    current[0] = profiles.length < 2 ? 0 : profiles[1].active === true ? 1 : 2;
+    for (let index = 0; index < fields; index++) current[index + 1] = fnv1a32(parts[index]);
+    const solo = parts.indexOf('solo-priority', fields);
+    current[fields + 1] = fnv1a32(parts.slice(fields, solo < 0 ? parts.length : solo).join(','));
+    current[fields + 2] = solo < 0 ? 0 : fnv1a32(parts.slice(solo).join(','));
+    current[fields + 3] = profiles.length < 2 ? 0 : fnv1a32(profiles.slice(1).map(profileFingerprint).join('#'));
+    let previous = ownerFingerprints.get(owner), moved = previous ? '' : 'first';
+    if (previous && previous[0] !== current[0]) moved = `summon_${SUMMON_KINDS[previous[0]]}_to_${SUMMON_KINDS[current[0]]}`;
+    for (let index = 1; !moved && index < current.length; index++) {
+        if (previous[index] !== current[index]) moved = MOVED_PARTS[index - 1];
+    }
+    if (previous) ownerFingerprints.delete(owner);
+    else previous = new Uint32Array(current.length);
+    previous.set(current);
+    ownerFingerprints.set(owner, previous);
+    if (ownerFingerprints.size > VERDICT_PROFILE_LIMIT) ownerFingerprints.delete(ownerFingerprints.keys().next().value);
+    if (moved === 'first') Diagnostics.count('matchup', 'fingerprint', 'first');
+    else if (moved) Diagnostics.count('matchup', 'fingerprint_moved', moved);
+    else Diagnostics.count('matchup', 'fingerprint', 'same');
 }
 
 // Verdicts of one profile array: safety options key -> species id -> verdict.
@@ -414,6 +477,7 @@ function verdictsFor(profiles) {
     } else {
         verdicts = new Map();
         DiagnosticConfig.developerDiagnostics && (stats.fingerprintMisses += 1);
+        if (fingerprint !== null && Diagnostics.active()) Diagnostics.count('matchup', 'miss', missKind(fingerprint));
         if (fingerprint !== null) {
             sharedVerdicts.set(fingerprint, { verdicts, usedAt: now });
             entryCounts.set(verdicts, { chars: fingerprint.length, maps: 0, entries: 0, spots: 0, live: true });
@@ -437,6 +501,7 @@ function trimSharedVerdicts(now, keep) {
         }
         sharedVerdicts.delete(key);
         stats.evictions += 1;
+        Diagnostics.active() && rememberEvicted(key);
         const held = entryCounts.get(entry.verdicts);
         if (held?.live) {
             held.live = false;
