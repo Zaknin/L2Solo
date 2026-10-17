@@ -1282,6 +1282,12 @@ function buildForState(state, deps) {
         : deps.withNodes && !held.projection ? null
             : heldReadsHold() || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) ? [] : ['market'];
     if (holdWhy && diagnostic) Hold.check('economy', holdWhy, deps);
+    // The step's second request against the build its first one left: both
+    // requests of a worker step (pre-round lifecycle, post-round result) carry
+    // the step's one timestamp, and every kept request stamps it (askedAt).
+    // The prize of a post-round hold: refused = a second build in the step.
+    const secondAsk = diagnostic && !isMainThread && held?.askedAt === timestamp;
+    if (secondAsk) Hold.count('economy', holdWhy?.length === 0 ? 'post_round:held' : 'post_round:refused');
     if (holdWhy?.length === 0) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
@@ -1294,6 +1300,7 @@ function buildForState(state, deps) {
                 revision: state.simulation?.revision, wallet: positive(state.adena) });
         }
         if (deps.rememberContext !== false) {
+            held.askedAt = timestamp;
             held.gearThreat = gearThreat;
             held.stateRef = new WeakRef(state);
             remember(cache, actorKey, held, RETAIN_LIMIT);
@@ -1603,6 +1610,8 @@ function buildForState(state, deps) {
                 : gate === 'sections' && eventVerdict.facts ? `sections.${eventVerdict.facts}` : gate;
             Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
         }
+        // Sampled owners: what the step's second build changed against the first.
+        if (secondAsk && gateDiff && Diagnostics.enabled(state.characterId)) Hold.count('economy', `post_round:${gateDiff}`);
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
     const mismatch = gateDiff !== null && Diagnostics.isPlanMismatch({ owner: state.characterId, phase: 'wish_context', gate, gateDiff });
@@ -1652,7 +1661,7 @@ function buildForState(state, deps) {
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
         const leaf = plan.network?.activity, own = ColdEconomyDecision.ownItem(leaf);
-        remember(cache, actorKey, { key,
+        remember(cache, actorKey, { key, askedAt: timestamp,
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,

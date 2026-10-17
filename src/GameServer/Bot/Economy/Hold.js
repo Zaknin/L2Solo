@@ -18,9 +18,12 @@ function asked(place, deps = null) { return on(place, deps) || MODE[place] === '
 // why: the verdict's refusals, shared reason names (hold-scheme.md §3).
 // Counts hold:<place>:<held|first refusal>; true only when the place may skip.
 function check(place, why, deps = null) {
-    Diagnostics.count('hold', place, why[0] || 'held');
+    count(place, why[0] || 'held');
     return !why.length && on(place, deps);
 }
+// A place's split of its own requests or refusals beside the verdict's
+// counter: hold:<place>:<outcome> (a shadow sub-verdict, a request kind).
+function count(place, outcome) { Diagnostics.count('hold', place, outcome); }
 // Sampled owners only: one row per recompute the verdict was asked about.
 // moved() names the decision the recompute changed against the held answer
 // ('' when none: outcome same); drift() names an own output that moved with
@@ -34,4 +37,4 @@ function compare(place, state, why, moved, durationMs, drift = null) {
         outcome: change ? 'new' : 'same', ...(change || kept ? { moved: change || kept } : {}), durationMs });
 }
 
-module.exports = { MODE, on, asked, check, compare };
+module.exports = { MODE, on, asked, check, count, compare };
