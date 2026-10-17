@@ -563,12 +563,9 @@ async function reconcileSellShop(state, goal) {
     const signature = stockSignature(state);
     const review = reviewedInventory.get(ownerId);
     if (review?.signature === signature && stock.lines.every(viableSellLine)) return { state, changed: false };
-    const [characters, inventory] = await Promise.all([
-        Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner'),
-        Database.fetchItems(ownerId, 'market_reconcile_shop')
-    ]);
-    const row = characters[0];
-    if (!row || !String(row.username || '').startsWith('bot_')) return { state, changed: false };
+    // The account is on the bot's life state (accountName = characters.username).
+    if (!BoardRules.isBotAccount(state.accountName)) return { state, changed: false };
+    const inventory = await Database.fetchItems(ownerId, 'market_reconcile_shop');
     const sale = sellLines(state, stock, inventory);
     const lines = sale.lines;
     if (!lines.length) {
@@ -580,6 +577,9 @@ async function reconcileSellShop(state, goal) {
     if (sameSellLines(stock, lines)) {
         if (!sameSellOrder(stock, lines)) shop = await repriceSellLines(ownerId, stock, lines) || stock;
     } else {
+        // The shop's look (head, appearance) is the owner's character row: read only to publish.
+        const [row] = await Database.execute(['SELECT * FROM characters WHERE id = ? LIMIT 1', [ownerId]], 'bot-afk:owner');
+        if (!row) return { state, changed: false };
         const published = await publishSellShop(ownerId, state, stock, lines, stock.town, row, inventory);
         if (!published.shop) return { state, changed: false, reason: published.reason };
         shop = published.shop;
