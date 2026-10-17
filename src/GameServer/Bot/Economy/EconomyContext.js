@@ -1113,9 +1113,22 @@ function incomeRouteFor(state, deps, timestamp, price, keep, watchSpot) {
     }) : deps.occupancy;
     const route = IncomeRoute.select(state, { ...deps, timestamp, required, occupancy,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
+    if (Diagnostics.active()) countIncomeRoute(state, deps, timestamp, route);
     keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
         maxChecks: deps.maxChecks, required, reads, spotIds: [...spotIds], route });
     return route;
+}
+// Shadow (no behaviour): would the held build's income route serve this
+// search? The held plan's hunt names the route it was built on (foundation:
+// source 'route'); the same spot and charge policy is 'same'. A held plan of
+// this request's timestamp is the step's own first build: step_<same|new>.
+const routeName = (spotId, useShots) => `${spotId}:${useShots !== false}`;
+function countIncomeRoute(state, deps, timestamp, route) {
+    const plan = cache.get(deps.actorKey || `character:${Number(state.characterId || 0)}`)?.plan;
+    if (!plan) { Diagnostics.count('context', 'income_route', 'no_held'); return; }
+    const before = plan.hunt?.source === 'route' ? routeName(plan.hunt.spotId, plan.hunt.useShots) : 'none';
+    const now = route ? routeName(route.spot.id, route.row.useShots) : 'none';
+    Diagnostics.count('context', 'income_route', `${plan.timestamp === timestamp ? 'step_' : ''}${before === now ? 'same' : 'new'}`);
 }
 function foundation(state, deps, persona, timestamp, price, keepRoute = null, watchSpot = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
