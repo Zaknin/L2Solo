@@ -94,6 +94,7 @@ const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner'
 const GearPlanSelection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
+const PartyRequirementRefresh = invoke('GameServer/Bot/Population/PartyRequirementRefresh');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
@@ -1283,7 +1284,7 @@ function startKernel(config = {}) {
         // projection after it (class training, equipped upgrades) left its kit
         // (the build's baseline build fact); else one build on the same board
         // the step's build reads.
-        planPartyRequirement: ({ state, context, timestamp, economy }) => invoke('GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
+        planPartyRequirement: ({ state, context, timestamp, economy }) => PartyRequirementRefresh.plan(state, {
             spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), timestamp,
             preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
