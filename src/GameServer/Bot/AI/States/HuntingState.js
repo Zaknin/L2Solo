@@ -158,6 +158,23 @@ function startShopping(session, bot, BotAI, reason, townName = null) {
     } : {});
 }
 
+function startWorkshopOrder(session, bot, BotAI, economy) {
+    const leaf = economy?.network?.activity;
+    if (!isSoloHunter(session) || leaf?.activity !== 'crafting' || leaf.kind !== 'craft'
+        || !/^stock:(shots|potions|scrolls)$/.test(String(leaf.rootKey))
+        || BotTownTravel.hasCombatThreat(session, bot) || bot.state?.fetchCasts?.()) return false;
+    // The held activity is compact. Read its existing full wish to retain the
+    // selected dwarf, fee, quantities and funding through the physical visit.
+    const target = invoke('GameServer/Bot/AI/States/ShoppingState').stockWorkshopTarget(session, bot);
+    if (!target) return false;
+    const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned craft order.', target.town);
+    if (trip === 'deferred' || trip === false) return false;
+    session.shoppingTarget = target;
+    session.shoppingServicePhase = 'workshop';
+    session.shoppingDoneAnnounced = false;
+    return true;
+}
+
 function claimedTargetIds(session, sessions = invoke('GameServer/Bot/BotManager').sessions || []) {
     const claimed = new Set();
     sessions.forEach((otherSession) => {
@@ -574,6 +591,7 @@ function targetProgressing(session, bot, target) {
 
 module.exports = {
     leaveShop,
+    startWorkshopOrder,
     economyForHunt,
     sellTripDue,
     pauseSelling,
@@ -631,6 +649,7 @@ module.exports = {
                     .catch(error => utils.infoWarn('BotWealth', '%s', error.message));
                 return;
             }
+            if (startWorkshopOrder(session, bot, BotAI, economy)) return;
             if (economy.network.activity?.activity === 'improving') {
                 const state = MarketListingPolicy.actorState(session);
                 const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');

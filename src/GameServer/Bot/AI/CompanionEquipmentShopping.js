@@ -45,12 +45,13 @@ function affordableOffers(target, state, town, session) {
     // ARCH-NOTE: Player companion errands use the player's choice; autonomous bots spend only on their funded item.
     const budget = PurchaseFunding.spendable(state, 0, session.partyCompanion === true
         ? { upperBound: true } : { itemId: target.selfId });
-    const offer = MarketOpportunity.bestOffer(target.selfId, {
+    const offer = MarketOpportunity.bestHotOffer(target.selfId, {
         town: town.name,
         buyerCharacterId: state.characterId,
         budget,
         accept: (candidate) => candidate.sourceType === 'npc'
             || ['afk_player_store', 'afk_bot_store'].includes(candidate.sourceType)
+            || candidate.sourceType === 'private_store' && candidate.store?.kind === 'player'
     });
     return offer ? [offer] : [];
 }
@@ -87,9 +88,10 @@ function checkedPlan(session, state, town, options = {}) {
         const funding = ratio > 0 ? { valueRate: ratio } : {};
         const budget = Math.min(PurchaseFunding.spendable(fundedState, 0, PurchaseFunding.goalTerms({ plan: funding }, selfId)) / amount,
             economy.worth(selfId) ?? Infinity);
-        const offer = MarketOpportunity.bestOffer(selfId, { town: town.name, buyerCharacterId: state.characterId, budget,
-            ...(leaf.sourceType ? { accept: row => leaf.sourceType === 'npc' ? row.sourceType === 'npc'
-                : ['afk_player_store', 'afk_bot_store'].includes(row.sourceType) } : {}) });
+        const offer = MarketOpportunity.bestHotOffer(selfId, { town: town.name, buyerCharacterId: state.characterId, budget,
+            accept: row => Number(row.count) >= amount && (row.sourceType === 'private_store' && row.store?.kind === 'player'
+                || !leaf.sourceType || (leaf.sourceType === 'npc' ? row.sourceType === 'npc'
+                    : ['afk_player_store', 'afk_bot_store'].includes(row.sourceType))) });
         return { statsPacket: economy.statsPacket, plan: offer ? { status: 'active', strategy: 'market',
             target: { selfId, name: item?.template?.name, slot: Number(item?.etc?.slot || 0) }, amount,
             market: { sourceType: offer.sourceType }, ...funding } : null, offers: offer ? [offer] : [] };
@@ -172,6 +174,7 @@ function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = [], e
         sourceType: offer.sourceType,
         sourceId: offer.sourceId,
         lineId: Number(offer.lineId || 0) || null,
+        objectId: offer.objectId || null,
         itemId: Number(plan.target.selfId),
         itemName: offer.itemName || plan.target.name,
         slot: Number(plan.target.slot || 0),

@@ -289,6 +289,23 @@ assert.deepStrictEqual(capturedPrivateStoreSell, { packaged: false, rows: [{ obj
             assert.strictEqual(ownStoreType(ownerPackets[1]), 0, 'quitting clears the owner store mode');
             assert.deepStrictEqual(observerPackets.map(packet => packet[0]), [0x2f, 0x03]);
         }
+        const Manufacture = invoke('GameServer/Crafting/ManufactureShop');
+        shopActor.backpack.fetchRecipeBook = () => [{ recipeId: 1 }];
+        shopActor.backpack.fetchDwarvenCraftLevel = () => 1;
+        ownerPackets.length = observerPackets.length = 0;
+        assert(Manufacture.open(owner));
+        assert.strictEqual(ownStoreType(ownerPackets.find(packet => packet[0] === 0x04)), 6);
+        assert(!observerPackets.some(packet => packet[0] === 0x04));
+        ownerPackets.length = observerPackets.length = 0;
+        assert(Manufacture.publish(owner, [{ recipeId: 1, price: 100 }]));
+        assert.deepStrictEqual(ownerPackets.map(packet => packet[0]), [0x2f, 0x04, 0xdb]);
+        assert.strictEqual(ownStoreType(ownerPackets[1]), 5, 'native manufacture enters the owner store mode before its message');
+        assert.deepStrictEqual(observerPackets.map(packet => packet[0]), [0x2f, 0x03, 0xdb]);
+        Manufacture.open(owner);
+        ownerPackets.length = observerPackets.length = 0;
+        invoke('GameServer/Network/Request/RecipeShopManageQuit')(owner);
+        assert.strictEqual(ownStoreType(ownerPackets[0]), 0);
+        assert.deepStrictEqual(observerPackets.map(packet => packet[0]), [0x03]);
     } finally {
         World.fetchVisibleRealPlayers = originalVisiblePlayers;
     }

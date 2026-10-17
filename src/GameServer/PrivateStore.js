@@ -83,7 +83,8 @@ function publishSell(session, packageSale, rows) {
         const item = actor.backpack.fetchItemRaw(row.objectId);
         if (!item || item.fetchPetLocked?.() || item.fetchEquipped() || item.fetchSelfId() === 57 || !Number.isSafeInteger(row.count) || row.count < 1 || row.count > item.fetchAmount() || !Number.isSafeInteger(row.price) || row.price < 0 || ids.has(item.fetchId())) return null;
         ids.add(item.fetchId());
-        return { objectId: item.fetchId(), selfId: item.fetchSelfId(), count: row.count, price: row.price };
+        return { objectId: item.fetchId(), selfId: item.fetchSelfId(), count: row.count, price: row.price,
+            enchant: Number(item.fetchEnchantLevel?.() || 0) };
     });
     if (items.some((row) => !row)) return false;
     const current = store(actor, SELL); current.items = items; current.packageSale = !!packageSale;
