@@ -78,6 +78,8 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
     assert.equal(verdict(other, held).kept, false, 'a trip to another spot still refuses');
     assert.deepEqual(verdict({ ...arrived, spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
         'an arrival elsewhere is an occupation event');
+    assert.deepEqual(verdict({ ...arrived, activity: 'resting', spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
+        'resting elsewhere (a flight, a pull) is an occupation event');
 }
 // 3. A bag row below a crossing: loot inside its band keeps the build; a new
 // row takes a bag slot (the bag safety is exact: a crossing, as before).

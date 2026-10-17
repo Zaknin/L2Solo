@@ -300,7 +300,8 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
 // activity) stays exact, so 'to town' never matches 'to a spot'. One trip
 // is the plan itself: leaving for the held leaf's own hunting spot or its
 // own town (Sections.occupationPlanned). Only that trip record is dropped
-// from the comparison; a trip anywhere else, and the arrival, stay exact.
+// from the comparison; a trip anywhere else stays exact. The arrival is the
+// occupation fact, read by the verdict's sections, not by the key.
 const FIELD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling']);
 function fieldActivity(state, activity, leaf = null) {
     if (!activity || activity === state.activity || !FIELD_ACTIVITIES.has(activity) || !FIELD_ACTIVITIES.has(state.activity)) return state;
