@@ -288,15 +288,14 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
 // Only this kind is equalised; location, region and the travel target stay
 // exact inside Trip.key, so 'to town' never matches 'to a spot'. One trip
 // is the plan itself: a hunter or rester leaving for its held hunting
-// leaf's own spot. Only that trip record is dropped from the comparison;
-// a trip to any other spot or a town, and the arrival, stay exact.
+// leaf's own spot (Sections.occupationPlanned). Only that trip record is
+// dropped from the comparison; a trip to any other spot or a town, and the
+// arrival, stay exact.
 const FIELD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling']);
 function fieldActivity(state, activity, leaf = null) {
     if (!activity || activity === state.activity || !FIELD_ACTIVITIES.has(activity) || !FIELD_ACTIVITIES.has(state.activity)) return state;
-    const travel = state.stats?.travel;
-    return travel && state.activity === 'traveling' && leaf?.activity === 'hunting' && leaf.spotId != null
-        && travel.spotId != null && String(travel.spotId) === String(leaf.spotId)
-        && travel.arrivalActivity === 'hunting' && travel.townName == null
+    return state.activity === 'traveling' && leaf?.activity === 'hunting' && leaf.spotId != null
+        && Sections.occupationPlanned(state, leaf)
         ? { ...state, activity, stats: { ...state.stats, travel: null } } : { ...state, activity };
 }
 // The held leaf's own purchase item stays exact: its order counts only the
@@ -447,7 +446,14 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
     const facts = Diagnostics.active() ? [] : null;
     const changed = Sections.factEvents(name => baseline[name], Sections.semanticFacts(current, timestamp), current, false, facts);
-    if (changed.length) return { ...refuse('sections', changed), ...(facts ? { facts: facts.join('+') } : {}) };
+    if (changed.length) {
+        // Hold place economy_occupation (shadow): an occupation move alone that
+        // the held leaf ordered (Sections.occupationPlanned) would not refuse.
+        // The verdict still refuses; only the diagnostics name it.
+        const planned = facts?.length === 1 && facts[0] === 'occupation' && Hold.asked('economy_occupation', deps)
+            && Sections.occupationPlanned(state, options.leaf);
+        return { ...refuse('sections', changed), ...(facts ? { facts: planned ? 'occupation_planned' : facts.join('+') } : {}) };
+    }
     if ((options.currentKey ?? eventInputKey(state, deps, timestamp, options.activity, options.leaf)) !== proof.hard)
         return refuse('event_key', ['sources']);
     const why = [];
@@ -1295,6 +1301,7 @@ function buildForState(state, deps) {
         : deps.withNodes && !held.projection ? null
             : heldReadsHold() || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) ? [] : ['market'];
     if (holdWhy && diagnostic) Hold.check('economy', holdWhy, deps);
+    if (diagnostic && eventVerdict.facts === 'occupation_planned') Hold.count('economy', 'occupation_planned');
     // The step's second request against the build its first one left: both
     // requests of a worker step (pre-round lifecycle, post-round result) carry
     // the step's one timestamp, and every kept request stamps it (askedAt).

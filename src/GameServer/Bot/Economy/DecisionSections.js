@@ -312,13 +312,33 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     return changed;
 }
 // The occupation change the held trip describes: a trip begun this round, or
-// the arrival at its spot in its arrival activity (hunting unless named).
+// the arrival where it led (occupationPlanned against the trip's target).
 function plannedOccupation(before, after) {
     const trip = before.stats?.travel;
     if (after.activity === 'traveling') return before.activity !== 'traveling' && !!after.stats?.travel;
-    if (before.activity !== 'traveling' || !trip) return false;
-    return after.activity === (trip.arrivalActivity || 'hunting')
-        && (trip.spotId == null || String(after.spotId) === String(trip.spotId));
+    return before.activity === 'traveling' && !!trip
+        && occupationPlanned(after, { activity: trip.arrivalActivity || 'hunting', spotId: trip.spotId });
+}
+// The one reading of an occupation against the held leaf (Recompute: own
+// outputs are not inputs): the trip the leaf ordered under way (to its
+// hunting spot arriving to hunt, or to its town), or the arrival where it
+// led (its hunting spot, hunting or resting there; else its own activity).
+// Death, recall, a party pull, a flight or a yield are none of these and
+// stay events. The worker's verdict reads it in shadow (Hold place
+// economy_occupation); its field-trip clause is EconomyContext.fieldActivity's.
+function occupationPlanned(state, leaf) {
+    if (!leaf?.activity) return false;
+    const hunt = leaf.activity === 'hunting';
+    if (state.activity === 'traveling') {
+        const travel = state.stats?.travel;
+        if (!travel) return false;
+        return hunt && leaf.spotId != null ? travel.spotId != null && String(travel.spotId) === String(leaf.spotId)
+            && travel.arrivalActivity === 'hunting' && travel.townName == null
+            : leaf.town != null && travel.townName != null && String(travel.townName) === String(leaf.town);
+    }
+    if (hunt) return (state.activity === 'hunting' || state.activity === 'resting')
+        && (leaf.spotId == null || String(state.spotId) === String(leaf.spotId));
+    return state.activity === leaf.activity;
 }
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.
@@ -344,4 +364,4 @@ function factEvents(previousFact, current, after, funding = false, facts = null)
     return [...sections];
 }
 module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, capability, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, hash, isEmptyWishPlan, decisionRefusal };
+    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
