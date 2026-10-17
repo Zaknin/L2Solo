@@ -37,7 +37,8 @@ function botCombatStats(state, timestamp = Date.now()) {
 function countedBuilds(unit, kind, resolve, options) {
     if (!Diagnostics.active()) return resolve(options);
     const builds = ColdCombatProfile.buildCount(), ms = ColdCombatProfile.buildMs();
-    const result = resolve(options);
+    // The fight's builds count under their own site (combat_profile:build:fight).
+    const result = ColdCombatProfile.withBuildSite(unit === 'fight' ? 'fight' : null, () => resolve(options));
     Diagnostics.count('combat_profile', unit, kind);
     Diagnostics.count('combat_profile', `${unit}_build`, kind, ColdCombatProfile.buildCount() - builds);
     Diagnostics.duration(`combat_profile:${unit}`, ColdCombatProfile.buildMs() - ms);
