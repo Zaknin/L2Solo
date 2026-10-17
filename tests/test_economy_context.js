@@ -298,7 +298,7 @@ async function run() {
         const worn = Object.keys(fixture.inventory).find(id => fixture.inventory[id].equipped);
         const state = { ...fixture, inventory: { ...fixture.inventory, [worn]: { ...fixture.inventory[worn] } } };
         const keyBefore = eventKey(state, deps), buildBefore = Profile.buildInputKey(state, T);
-        const capabilityBefore = Sections.capability(state, T);
+        const kitBefore = Sections.kit(state);
         const bagRead = ctx => { const local = ctx.nodeInputs.begin(); ctx.nodeInputs.bag(worn); ctx.nodeInputs.end();
             return local.bag.get(Number(worn)); };
         let outer = null, nested = null, bagDuring = null;
@@ -307,22 +307,22 @@ async function run() {
                 if (subject === state && outer === null) {
                     outer = ctx; bagDuring = bagRead(ctx);
                     Economy.forState(equippedFixture(1311, 1, 32, 30000), deps);
-                    nested = [eventKey(state, deps), Profile.buildInputKey(state, T), Sections.capability(state, T), bagRead(ctx)];
+                    nested = [eventKey(state, deps), Profile.buildInputKey(state, T), Sections.kit(state), bagRead(ctx)];
                 }
                 return build(subject, ctx, buildDeps);
             };
             Economy.forState(state, deps);
         } finally { ScopedProviders.build = build; }
         assert(outer, 'the build reached its providers');
-        assert.deepEqual(nested, [keyBefore, buildBefore, capabilityBefore, bagDuring],
+        assert.deepEqual(nested, [keyBefore, buildBefore, kitBefore, bagDuring],
             'a nested build of another bot leaves the outer build\'s keys');
         state.inventory[worn].enchant = 3;
         const fresh = structuredClone(state);
         assert.notEqual(eventKey(state, deps), keyBefore);
         assert.equal(eventKey(state, deps), eventKey(fresh, deps), 'the row key reads the changed row');
         assert.notEqual(Profile.buildInputKey(state, T), buildBefore);
-        assert.equal(Sections.capability(state, T), Sections.capability(fresh, T), 'the capability reads the changed row');
-        assert.notEqual(Sections.capability(state, T), capabilityBefore);
+        assert.equal(Sections.kit(state), Sections.kit(fresh), 'the kit reads the changed row');
+        assert.notEqual(Sections.kit(state), kitBefore);
         assert.equal(bagRead(outer), JSON.stringify([state.inventory[worn], 0]), 'a late bag read reads the changed row');
         assert.notEqual(bagRead(outer), bagDuring);
         Economy.forget(state.characterId);

@@ -667,8 +667,6 @@ try {
             Providers.build = (...args) => { builds++; return originalBuild(...args); };
         }
     }
-    assert.equal(Sections.capability(subject(1), T), Sections.capability(subject(1), T + 11 * MINUTE),
-        'fixture: the game day/night build mark does not move inside the test window');
     // A retained build accepts its exact unpublished input or its own output,
     // never another leaf/focus that merely shares the decision sequence.
     {
@@ -902,7 +900,7 @@ try {
             'equal outputs with a foreign newer baseline cannot extend the original market delay');
         const changedCapability = { ...newer, level: newer.level + 1 };
         changedCapability.stats = { ...newer.stats, wishSections: { ...newer.stats.wishSections,
-            build: Sections.capability(changedCapability, T + MINUTE) } };
+            build: Sections.kit(changedCapability) } };
         assert.equal(Decisions.refusal(changedCapability, accepted, at(T + MINUTE)), 'events:sections',
             'a foreign snapshot cannot bless a capability change against an older card');
         assert.equal(Decisions.refreshAdvisory(state, accepted, at(T + 11 * MINUTE)), null, 'after 10 min the card is re-examined');

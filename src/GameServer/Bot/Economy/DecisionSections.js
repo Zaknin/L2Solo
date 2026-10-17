@@ -82,11 +82,6 @@ function sectionNames(bits) {
     for (let at = 0; at < SECTIONS.length; at++) if (bits & 1 << at) names.push(SECTIONS[at]);
     return names;
 }
-function capability(state, timestamp = Date.now()) {
-    const stats = state.stats || {};
-    return hash([CombatProfile.buildInputKey(state, timestamp),
-        state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
-}
 // The build fact: class, level, worn gear, hennas, skills, the hot capture
 // (ColdCombatProfile.kitEvents: holdEvents without its fight part, effects
 // and night) and the craft. Effects and night are no economy input, so a
@@ -371,5 +366,5 @@ function factEvents(previousFact, current, after, funding = false, facts = null,
     if (previousFact('supply') !== current.supply) raise('supply');
     return [...sections];
 }
-module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, capability, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
+module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
     SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

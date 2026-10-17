@@ -100,8 +100,8 @@ try {
     assert.deepEqual(rebuilt.network.focus, acceptedFocus, 'eviction retains the accepted goal');
     assert.equal(rebuilt.statsPacket.activityLeaf, acceptedLeaf, 'eviction retains a still feasible accepted step');
     assert.equal(rebuilt.statsPacket.decisionSeq, state.stats.decisionSeq, 'eviction is not a personality event');
-    assert.equal(Sections.capability({ ...state, inventory: { 1: { ...state.inventory[1], equippedSlots: [7] } } }, deps.timestamp),
-        Sections.capability(state, deps.timestamp), 'publishing an implicit worn slot explicitly is the same build');
+    assert.equal(Sections.kit({ ...state, inventory: { 1: { ...state.inventory[1], equippedSlots: [7] } } }),
+        Sections.kit(state), 'publishing an implicit worn slot explicitly is the same build');
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     let stocked = { ...state, characterId: 92004, stats: { ...state.stats, wishSections: undefined, wishDirty: 0 },
         inventory: Life.inventorySummaryFromItems([
@@ -296,7 +296,7 @@ try {
     assert.equal(levelled.stats.decisionSeq, state.stats.decisionSeq + 1);
     assert.equal(levelled.stats.activityLeaf, state.stats.activityLeaf, 'an event keeps the held activity; the network rerolls only a gone leaf');
     const paired = { ...state, inventory: { ...state.inventory, 1: { ...state.inventory[1], amount: 2 } } };
-    assert.notEqual(Sections.capability(paired, deps.timestamp), Sections.capability(state, deps.timestamp));
+    assert.notEqual(Sections.kit(paired), Sections.kit(state));
     const classAlias = { ...state, classId: state.stats.classId };
     assert.deepEqual(Profile.powerFor(classAlias, deps.timestamp), Profile.powerFor(state, deps.timestamp));
     assert.equal(Profile.buildInputKey(classAlias, deps.timestamp), Profile.buildInputKey(state, deps.timestamp),
@@ -306,15 +306,15 @@ try {
     assert.equal(Profile.buildInputKey(rootClass, deps.timestamp), Profile.buildInputKey(state, deps.timestamp),
         'the native root-class fallback describes the same profession');
     const changedClass = { ...classAlias, stats: { ...state.stats, classId: 2 } };
-    assert.notEqual(Sections.capability(changedClass, deps.timestamp), Sections.capability(state, deps.timestamp),
+    assert.notEqual(Sections.kit(changedClass), Sections.kit(state),
         'an actual current profession change still invalidates the build');
     const changedSnapshotClass = { ...state, stats: { ...state.stats,
         coldCombat: { ...state.stats.coldCombat, classId: 2 } } };
-    assert.notEqual(Sections.capability(changedSnapshotClass, deps.timestamp), Sections.capability(state, deps.timestamp),
+    assert.notEqual(Sections.kit(changedSnapshotClass), Sections.kit(state),
         'a different authoritative combat profession remains an input');
     const skillAuthority = { ...state, stats: { ...state.stats,
         coldCombat: { ...state.stats.coldCombat, skillSource: 'tree' } } };
-    assert.notEqual(Sections.capability(skillAuthority, deps.timestamp), Sections.capability(state, deps.timestamp));
+    assert.notEqual(Sections.kit(skillAuthority), Sections.kit(state));
     const buffed = { ...state, stats: { ...state.stats, coldCombat: { ...state.stats.coldCombat,
         effects: [{ id: 1068, key: 'might', stats: { pAtkMul: 1.1 }, expiresAt: deps.timestamp + 10 }] } } };
     buffed.stats.wishSections = { ...state.stats.wishSections, build: Sections.semanticFacts(buffed).build };

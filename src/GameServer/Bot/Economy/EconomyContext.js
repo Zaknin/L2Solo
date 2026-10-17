@@ -277,7 +277,7 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
         vitals: { ...state.vitals, mp: 0 },
         stats: { ...stats, role, clanId: Number(stats.clanId ?? state.clanId ?? 0),
             karma: stats.karma ?? 0, decisionSeq: 0, activityLeaf: 0, exp: 0, huntEfficiency: [] } };
-    const build = Sections.capability(state, deps.timestamp);
+    const build = Sections.kit(state);
     if (part === 'structural') return { build, structural: `${inputKeyParts(stable, deps).join('|')}|${build}|${JSON.stringify([
         calculationPlan, stats.craftStationId, stats.persona, Number(stats.spotRisk?.windowDeaths || 0),
         state.marketTrades, stats.marketTrades, stats.relations,
