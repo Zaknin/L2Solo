@@ -22,6 +22,7 @@ const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
 const InventoryLimits = invoke('GameServer/Inventory/InventoryLimits');
 const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 
 const T = 1e12, MINUTE = 60 * 1000;
 const deps = { timestamp: T, knowledgeEnabled: true, board: new BoardIndex(),
@@ -32,13 +33,13 @@ Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 Config.developerDiagnostics = true;
 // A held build carries its event proof only beside a ready warehouse source.
 Warehouse.useRowSource(() => null, () => true);
-const bag = (loot = 0, extra = []) => Life.inventorySummaryFromItems([
+const bag = (loot = 0, extra = [], stock = 100000) => Life.inventorySummaryFromItems([
     { id: 1, selfId: 1, amount: 1, equipped: 1, slot: 7 },
-    { id: 2, selfId: 1835, amount: 100000, equipped: 0, slot: 0 },
-    { id: 3, selfId: 1869, amount: 100000 + loot, equipped: 0, slot: 0 }, ...extra]);
-function decided(characterId) {
+    { id: 2, selfId: 1835, amount: stock, equipped: 0, slot: 0 },
+    { id: 3, selfId: 1869, amount: stock + loot, equipped: 0, slot: 0 }, ...extra]);
+function decided(characterId, inventory = bag()) {
     let state = { characterId, level: 35, phase: 'cold', activity: 'hunting', adena: 50, sp: 0,
-        currentRegion: 'Giran', loc: { locX: 80000, locY: 148000, locZ: -3500 }, inventory: bag(),
+        currentRegion: 'Giran', loc: { locX: 80000, locY: 148000, locZ: -3500 }, inventory,
         stats: { classId: 1, exp: Data.experience[34], coldCombat: { classId: 1, skillSource: 'database', skills: [] } },
         timing: { lastResolvedAt: T }, updatedAt: T, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
     const economy = Economy.forState(state, deps);
@@ -104,8 +105,14 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
     const row = amount => ({ 687: { selfId: 687, amount, stackable: false } });
     assert.deepEqual(verdict(after(state, { inventory: { ...bag(), ...row(1) } }), held), { kept: true, reasons: ['held'] },
         'a new bag row below the slot limit keeps the held build');
-    assert.deepEqual(verdict(after(state, { inventory: bag(1) }), held), { kept: true, reasons: ['held'] },
-        'loot inside its band keeps the held build');
+    // Loot inside its band that crosses a weight tier (it was in the bag
+    // safety): a bag just below half its load, then a few units more.
+    const maxLoad = Profile.profileFor(state, T).maxLoad, tier = s => Floor.weightPenalty(Floor.stateInventory(s, Data.items).load, maxLoad);
+    const perUnit = Floor.stateInventory(after(state, { inventory: bag(1) }), Data.items).load - Floor.stateInventory(state, Data.items).load;
+    const light = Math.floor((maxLoad / 2 - Floor.stateInventory({ inventory: bag(0, [], 0) }, Data.items).load) / (perUnit + 4)) - 1;
+    const lean = decided(94002, bag(0, [], light)), loot = after(lean.state, { inventory: bag(4, [], light) });
+    assert.equal(tier(loot), tier(lean.state) + 1, 'fixture: the loot crosses a weight tier');
+    assert.deepEqual(verdict(loot, lean), { kept: true, reasons: ['held'] }, 'loot inside its band keeps the held build across a weight tier');
     const free = InventoryLimits.forState(state) - Floor.stateInventory(state, Data.items).slots;
     assert(free > 1, 'fixture: free slots');
     assert.deepEqual(verdict(after(state, { inventory: { ...bag(), ...row(free) } }), held), { kept: false, reasons: ['bag'] },
