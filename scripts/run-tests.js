@@ -7,15 +7,12 @@ const path = require('node:path');
 const notRunTests = new Map([
     ['tests/test_beginner_shot_policy.js', 'new red 2026-10-14: AssertionError: strictEqual 100 !== 0'],
     ['tests/test_cold_armor_set_effects.js', 'new red 2026-10-14: AssertionError: strictEqual 445 !== 468'],
-    ['tests/test_cold_wish_diagnostics.js', 'E196: base red, first error: Error: ../Economy/ReadyTradeChoice'],
     ['tests/test_finite_market_income.js', 'new red 2026-10-14: AssertionError: a stored shop town is read as its town name'],
     ['tests/test_gear_intermediate_candidates.js', 'new red 2026-10-14: AssertionError: same event reuses the decision and held roll'],
     ['tests/test_npc_purchase_consumers.js', 'E195: base red, first error: AssertionError: cold caller propagates activation after the committed NPC await'],
     ['tests/test_scroll_stock_economy.js', 'E202: base red, first error: AssertionError: strictEqual 1 !== 9'],
     ['tests/test_task4_b5_hot_cold_same.js', 'new red 2026-10-14: AssertionError: cold publishes one buy ad'],
     ['tests/test_task4_survival_tranche.js', 'new red 2026-10-14: AssertionError: the tranche funds a shot bid'],
-    ['tests/test_wish_context_diagnostics.js', 'new red 2026-10-14: AssertionError: technical identity replacement is named separately'],
-    ['tests/test_wish_recipe_authority.js', 'new red 2026-10-14: AssertionError: recipe order and duplicate representations do not cause another decision']
 ]);
 
 const tests = [
