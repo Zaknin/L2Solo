@@ -1,9 +1,6 @@
 'use strict';
 const Station = require('../../World/GiranCrystallizationStation');
 const Index = require('../../Item/ItemTemplateIndex');
-const Wealth = require('./WealthCraftDecision');
-const Disposition = require('./ItemDisposition');
-const InventoryLimits = require('../../Inventory/InventoryLimits');
 const BATCH_LIMIT = 16;
 let Rules, templates, candidates = new Map();
 function canSelf(state, rank = 'd') {
@@ -41,8 +38,8 @@ function spareState(state) {
 }
 function freeReader(state) {
     const source = spareState(state);
-    const freeAmount = Wealth.freeAmount;
-    const reserved = Disposition.reservedEquipmentAmounts(source);
+    const freeAmount = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount;
+    const reserved = invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(source);
     return id => freeAmount(source, source.inventory?.[id] || {}, reserved);
 }
 function free(state, id) {
@@ -54,8 +51,8 @@ function choices(state, purchase, trip, incomePerHour = 0, rank = 'd', quantityI
     const operation = self ? { known: true, hours: 0, fees: 0 } : trip;
     const Data = invoke('GameServer/DataCache');
     const rows = [], seen = new Set(catalog(rank)), bundle = [], readFree = freeReader(state);
-    const capacity = Math.max(0, Math.min(BATCH_LIMIT, InventoryLimits.forState(state)
-        - Disposition.inventorySlotCount(state)));
+    const capacity = Math.max(0, Math.min(BATCH_LIMIT, require('../../Inventory/InventoryLimits').forState(state)
+        - invoke('GameServer/Bot/Economy/ItemDisposition').inventorySlotCount(state)));
     let bundleAmount = 0, bundleNet = 0;
     for (const row of Object.values(state.inventory || {})) if (Index.find(Data.items, row.selfId)?.etc?.rank === rank) seen.add(Number(row.selfId));
     for (const id of seen) {
@@ -162,7 +159,7 @@ function ready(state, quantityInputs = null) {
     }
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active'
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)) return false;
-    const amount = id => Wealth.freeAmount(state, state.inventory?.[id] || {});
+    const amount = id => invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {});
     const cost = plan.exchange?.materials?.find(row => Number(row.selfId) === 1458)?.amount;
     if (Number(cost) > 0 && amount(1458) >= Number(cost)) return true;
     const inputs = (plan.materials || []).filter(row => Number(row.selfId) !== 1458);
@@ -175,7 +172,7 @@ function completionKey(state, quantityInputs = null) {
     const saved = state?.stats?.equipmentPlan;
     if (!saved?.crystalPreparation && saved?.strategy !== 'luxury_exchange'
         && saved?.exchange?.kind !== 'luxury_exchange') return null;
-    const plan = Disposition.equipmentInputPlan(state);
+    const plan = invoke('GameServer/Bot/Economy/ItemDisposition').equipmentInputPlan(state);
     if (plan?.crystalPreparation && plan.status === 'active' && ready(state, quantityInputs)
         && !invoke('GameServer/Bot/AI/GearAcquisitionPlanner').equipmentTargetFulfilled(state, plan))
         return `power:${plan.target.selfId}:${Number(plan.target.slot)}`;
@@ -183,7 +180,7 @@ function completionKey(state, quantityInputs = null) {
     const Luxury = require('./BotLuxuryExchange'), exchange = Luxury.resolve(plan.exchange);
     if (!exchange || Number(plan.target.selfId) !== exchange.itemId || !Luxury.eligible(state, exchange)) return null;
     const freeOf = id => {
-        const amount = Wealth.freeAmount(state, state.inventory?.[id] || {});
+        const amount = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {});
         quantityInputs?.free(id, amount);
         return amount;
     };
