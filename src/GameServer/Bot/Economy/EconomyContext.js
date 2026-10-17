@@ -161,7 +161,7 @@ function partyInput(state) {
 // The key parts in order (diagnostics: context:key_moved:<name> names the
 // first part that moved against the held proof while the digest differs,
 // context:key_moved_all:<name> every one).
-const KEY_PART_NAMES = Object.freeze(['version', 'generation', 'facts', 'inventory', 'improvement', 'clan', 'party',
+const KEY_PART_NAMES = Object.freeze(['version', 'generation', 'facts', 'instances', 'improvement', 'clan', 'party',
     'visit_every', 'race', 'generated_cold', 'persona', 'craft_station', 'soul_crystal_quest', 'shot_recipe_item',
     'shot_recipe_fresh', 'recipes', 'workshop_recipe', 'workshop_product', 'relations',
     'clan_material_demand', 'warehouse', 'clan_supply', 'clan_warehouse', 'gear_threat', 'role', 'account',
@@ -177,17 +177,20 @@ function eventInputParts(state, deps = {}, timestamp = Date.now(), activity = nu
     // before the held action is permitted.
     delete trip.loc; delete trip.inventory; delete trip.currentRegion;
     if (trip.stats.travel) delete trip.stats.travel.to;
-    // The leaf's own item is its progress, not an input: its first unit
-    // (a new bag row) is no event. Capture and verdict pass the same leaf.
-    const own = ColdEconomyDecision.ownItem(leaf);
-    const inventory = Object.values(current.inventory || {}).filter(row => Number(row.selfId) !== 57 && Number(row.selfId) !== own)
-        .map(row => rowKey({ ...canonicalRow(row), amount: 0, starterMobLootAmount: 0, reservedAmount: 0, protectedAmount: 0,
-            instances: row.instances?.map(item => ({ ...item, amount: 0 })) })).sort();
+    // Bag rows are no key part: a row the build read is held by its own proof
+    // rows (bands, quantity, liquidation), the bag's slots and weight tier by
+    // the bag safety, the equipped kit by the build fact. Only the physical
+    // owners stay: a card never authorizes another object of the same item.
+    // The leaf's own item is its progress: its new objects are no event.
+    const own = ColdEconomyDecision.ownItem(leaf), instances = [];
+    for (const row of Object.values(current.inventory || {})) if (Number(row.selfId) !== own)
+        for (const item of row.instances || []) instances.push(`${row.selfId}:${item.id}`);
+    instances.sort();
     // Karma enters through the trip (its town-closing flip, EconomicTrip.frame);
     // frustration through the observation baseline (beyond the bot's error);
     // memory as the friend and enemy the review reads, not its revision.
     const { friend, enemy } = Providers.relationTargets(current, deps);
-    return ['recompute_event_inputs_v5', RecomputeGeneration.current(), facts, inventory, Improvement.targetInputs(current),
+    return ['recompute_event_inputs_v6', RecomputeGeneration.current(), facts, instances, Improvement.targetInputs(current),
         Number(current.clanId ?? stats.clanId ?? 0), partyInput(current) || 0,
         stats.visitEvery, stats.race, stats.generatedCold, stats.persona,
         stats.craftStationId, stats.soulCrystalQuest, stats.shotRecipeDemand?.itemId,
@@ -1283,7 +1286,7 @@ function buildForState(state, deps) {
         const moved = movedKeyParts(keyParts, held.plan.keyParts);
         keyMoved = moved[0] || 'none';
         Diagnostics.count('context', 'key_moved', keyMoved);
-        // Every moved part: the first-only name masks inventory/trip behind facts.
+        // Every moved part: the first-only name masks trip behind facts.
         for (const name of moved) Diagnostics.count('context', 'key_moved_all', name);
     }
     // The held build's market items and spot crowd still read the same: read once per request.
