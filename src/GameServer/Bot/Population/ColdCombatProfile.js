@@ -586,8 +586,11 @@ function profileFor(state = {}, timestamp = Date.now(), options = {}) {
 
 // Profile builds for the live read (combat_profile:build:all and its ms);
 // a fight reads the totals around itself (buildCount, buildMs). Counted only
-// while diagnostics are on.
-let builds = 0, buildTime = 0;
+// while diagnostics are on. combat_profile:build:<site> names who asked: an
+// explicit site set around the call (withBuildSite: gain, matchup; the
+// innermost wins), else own (the state of the open profile scope: the
+// economy build's or the solo step's own bot), else other.
+let builds = 0, buildTime = 0, buildSite = null;
 function countedBuild(state, timestamp, options) {
     const startedAt = performance.now();
     const profile = buildProfile(state, timestamp, options);
@@ -595,8 +598,16 @@ function countedBuild(state, timestamp, options) {
     builds += 1;
     buildTime += ms;
     Diagnostics.count('combat_profile', 'build', 'all');
+    Diagnostics.count('combat_profile', 'build', buildSite
+        || (profileScope !== null && profileScope.state === state ? 'own' : 'other'));
     Diagnostics.duration('combat_profile:build', ms);
     return profile;
+}
+function withBuildSite(site, work) {
+    const outer = buildSite;
+    buildSite = site;
+    try { return work(); }
+    finally { buildSite = outer; }
 }
 function buildCount() { return builds; }
 function buildMs() { return buildTime; }
@@ -1136,7 +1147,10 @@ function gainFor(entry, key, compute) {
             : { attack: entry.gains[(slot - 1) * 2], defence: entry.gains[(slot - 1) * 2 + 1] };
     }
     PopulationConfig.developerDiagnostics && (stats.gainMisses += 1);
-    const effect = compute();
+    const outerSite = buildSite;
+    buildSite = 'gain';
+    let effect;
+    try { effect = compute(); } finally { buildSite = outerSite; }
     const zero = Object.is(effect.attack, 0) && Object.is(effect.defence, 0);
     if (id === undefined || entry.size >= ENTRY_LIMIT || (!zero && entry.gainSize >= NONZERO_LIMIT)) {
         PopulationConfig.developerDiagnostics && (stats.limitMisses += 1);
@@ -1158,7 +1172,7 @@ function gainFor(entry, key, compute) {
 function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
     fightSources, kitEvents, holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,

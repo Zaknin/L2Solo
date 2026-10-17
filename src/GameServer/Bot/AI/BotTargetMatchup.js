@@ -299,7 +299,7 @@ function stateProfiles(state, options = {}) {
     const Cold = coldCombatProfile();
     return states.flatMap(member => typeof member.fetchHp === 'function'
         ? actorProfiles([member])
-        : coldProfiles({ ...Cold.profileFor(member, options.timestamp),
+        : coldProfiles({ ...Cold.withBuildSite('matchup', () => Cold.profileFor(member, options.timestamp)),
             // Partial route projections must not turn an invented default
             // class/build into evidence that the real character is too weak.
             survivalKnown: !!member.stats?.coldCombat
