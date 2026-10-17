@@ -304,7 +304,7 @@ let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 function lifecycleKind(state = {}, context = {}) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
     // Paid personal journeys retain the existing group writer.
-    if (state.partyId || state.party?.partyId) return context.isPartyLeader ? 'party' : 'party_member';
+    if (state.party?.partyId) return context.isPartyLeader ? 'party' : 'party_member';
     if (state.stats?.tradeMeeting) return ['traveling', 'dead', 'resting', 'fighting'].includes(state.activity) ? 'resolver' : 'event_driven';
     // A solo bot washing karma (ColdKarmaPolicy.active) is planned by the
     // resolver. The test is repeated here: ColdKarmaPolicy loads spot modules.

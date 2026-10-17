@@ -3196,13 +3196,15 @@ const BotLifeState = {
             const state = normalize(row);
             state.classId = Number(row.canonicalClassId ?? state.stats?.classId ?? 0);
             state.clanId = Number(row.canonicalClanId || 0);
-            state.partyId = state.party.partyId;
             state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             cache.set(state.characterId, state);
             // The cache feeds cold worker snapshots: an own flat simulationOwner
             // there makes the worker read it as flat wire input and refuse every
-            // command (bot never scheduled again). Clan readers get it on a copy.
-            return { ...state, simulationOwner: state.simulation.ownerId };
+            // command (bot never scheduled again), and an own flat partyId outlives
+            // a party release (the release clears only party.partyId), so the
+            // released bot stays a party member to the due list and the kernel.
+            // Clan readers get both on a copy.
+            return { ...state, partyId: state.party.partyId, simulationOwner: state.simulation.ownerId };
         })).catch((err) => {
             utils.infoWarn('BotLife', 'failed to hydrate %d party candidate(s): %s', ids.length, err.message);
             return [];
@@ -3780,7 +3782,6 @@ const BotLifeState = {
         cache.forEach((state) => {
             if (state.phase !== 'cold'
                 || state.activity === 'pk_hunting'
-                || state.partyId
                 || state.party?.partyId
                 || (state.activity === 'crafting' && state.stats?.craftShop)) {
                 return;
