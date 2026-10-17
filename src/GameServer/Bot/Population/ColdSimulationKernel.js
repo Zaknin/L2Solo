@@ -1916,7 +1916,8 @@ class ColdSimulationKernel {
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
                     const selection = await this.planPartyRequirement({ state: projectedState,
-                        context: this.states.get(id)?.context || {}, timestamp: startedAt });
+                        context: this.states.get(id)?.context || {}, timestamp: startedAt,
+                        economy: projection?.economy });
                     lastRequirementPlanMs = performance.now() - planningStarted;
                     requirementMs += lastRequirementPlanMs;
                     const plan = selection?.acquisitionPlan;

@@ -1267,6 +1267,9 @@ function startKernel(config = {}) {
                 ...(economyPlan ? { economyPlan } : {}),
                 ...(market ? { market } : {}),
                 durable: Object.keys(durable).length ? durable : null,
+                // Worker-local (the kernel picks posted fields one by one): the
+                // party requirement plan reads this build, not a second one.
+                ...(economy ? { economy } : {}),
                 buffOffer: invoke('GameServer/Bot/Economy/ColdBuffOffer').project(projected,
                     kernel.occupancy.members(projected.spotId, 'physical'), timestamp),
                 // Main reads this instead of building the network again.
@@ -1276,9 +1279,14 @@ function startKernel(config = {}) {
                         shot: economyPlan?.shot || null }, projected), key: seenKey } } : {})
             };
         },
-        planPartyRequirement: ({ state, context, timestamp }) => invoke('GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
+        // The member's own build of this step (projectResolve) while the
+        // projection after it (class training, equipped upgrades) left its kit
+        // (the build's baseline build fact); else one build on the same board
+        // the step's build reads.
+        planPartyRequirement: ({ state, context, timestamp, economy }) => invoke('GameServer/Bot/Population/PartyRequirementRefresh').plan(state, {
             spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), timestamp,
-            planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
+            preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
+            planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
         }),
         planLifecycle: async ({ state, context, timestamp }) => {
             if (state.stats?.tradeMeeting) return null;
