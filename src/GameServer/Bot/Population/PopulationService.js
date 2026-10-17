@@ -3926,6 +3926,10 @@ const PopulationService = {
             return await this.resolveColdState(state, request, options);
         } catch (error) {
             if (!(error instanceof WorkerCommandAdmissionRefusal)) throw error;
+            // The row moved past the cache: the next command must carry the row's checkpoint.
+            if (Array.isArray(error.checkpointDrift) && error.checkpointDrift.length) {
+                await LifeState.reloadRow(state?.characterId, error.checkpointDrift);
+            }
             const latest = LifeState.cachedState(state?.characterId);
             return { ok: false, reason: error.message, retryAfterMs: 1000, ...(latest ? { state: latest } : {}) };
         }

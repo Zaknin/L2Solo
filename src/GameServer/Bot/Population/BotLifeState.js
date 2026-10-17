@@ -1818,6 +1818,20 @@ const BotLifeState = {
         return this.acceptLifecycleRow(row);
     },
 
+    // A command refused because the row moved past the cache (NativeWriteCheckpoint
+    // drift): the row is the owner of the checkpoint; read it back so the next
+    // command carries it instead of retrying the same stale copy forever (L127).
+    // A handoff or lease in flight is published by its owner, not here.
+    reloadRow(characterId, drift = []) {
+        const id = Number(characterId);
+        if (drift.some(key => ['phase', 'simulationOwner', 'simulationLeaseId'].includes(key))) return Promise.resolve(null);
+        return Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ? LIMIT 1', [id]], 'bot-life:reload').then(([row]) => {
+            if (!row || row.phase !== 'cold' || row.simulationOwner !== 'legacy_main') return null;
+            if (Diagnostics.active()) Diagnostics.count('command', 'checkpoint_reload', drift.join(','));
+            return this.acceptNewerLifecycleRow(row);
+        });
+    },
+
     acceptLifecycleRow(row) {
         const snapshot = normalize(row);
         const current = cache.get(snapshot.characterId);
