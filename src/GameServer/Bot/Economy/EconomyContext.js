@@ -296,8 +296,9 @@ function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
     return { build, sources: `${sourceParts.join('|')}|${build}|${Sections.hash(sourceTail)}` };
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
-// Only this kind is equalised; the trip record (its town, spot and arrival
-// activity) stays exact, so 'to town' never matches 'to a spot'. One trip
+// Only this kind is equalised; the trip record (EconomicTrip.frame: its
+// town, spot and arrival activity; the key drops its target point) stays
+// exact, so 'to town' never matches 'to a spot', nor one spot another. One trip
 // is the plan itself: leaving for the held leaf's own hunting spot or its
 // own town (Sections.occupationPlanned). Only that trip record is dropped
 // from the comparison; a trip anywhere else stays exact. The arrival is the

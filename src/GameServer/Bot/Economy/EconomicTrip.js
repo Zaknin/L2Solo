@@ -155,6 +155,7 @@ function frame(state) {
         stats: { karma: Number(Karma.closesTowns(state?.stats?.karma)),
             marketReturn: state?.stats?.marketReturn?.loc ? { loc: point(state.stats.marketReturn.loc) } : null,
             travel: travel ? { townName: travel.townName == null ? null : String(travel.townName),
+                spotId: travel.spotId == null ? null : String(travel.spotId),
                 arrivalActivity: travel.arrivalActivity == null ? null : String(travel.arrivalActivity), to: point(travel.to) } : null } };
 }
 function key(state) { return JSON.stringify([Trip.honest(), frame(state)]); }

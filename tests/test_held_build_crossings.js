@@ -18,6 +18,7 @@ const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const { BoardIndex } = invoke('GameServer/AfkTrade/BoardIndex');
 const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
 const InventoryLimits = invoke('GameServer/Inventory/InventoryLimits');
 const Floor = invoke('GameServer/Bot/Population/SurvivalFloor');
 
@@ -78,6 +79,7 @@ assert.deepEqual(verdict(after(state), held), { kept: true, reasons: ['held'] },
     assert.deepEqual(verdict(arrived, held), { kept: true, reasons: ['held'] }, 'an arrived own trip keeps the held build');
     const other = after(state, { activity: 'traveling', stats: { travel: { ...travel, spotId: `${leaf.spotId}_other` } } });
     assert.equal(verdict(other, held).kept, false, 'a trip to another spot still refuses');
+    assert.notDeepEqual(Trip.frame(started), Trip.frame(other), 'the trip record names its spot');
     assert.deepEqual(verdict({ ...arrived, spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
         'an arrival elsewhere is an occupation event');
     assert.deepEqual(verdict({ ...arrived, activity: 'resting', spotId: `${leaf.spotId}_other` }, held), { kept: false, reasons: ['sections'] },
