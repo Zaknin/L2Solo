@@ -256,12 +256,6 @@ function deriveTags(spot) {
     return uniq(tags);
 }
 
-function occupancyForSpot(occupancy, spotId) {
-    const entry = occupancy instanceof Map ? occupancy.get(spotId) : occupancy?.[spotId];
-    if (entry && typeof entry === 'object') return Math.max(0, Number(entry.count || 0));
-    return Math.max(0, Number(entry || 0));
-}
-
 function capacityForSpot(spot = {}) {
     const explicit = Number(spot.capacity || 0);
     if (explicit > 0) return explicit;
@@ -512,7 +506,6 @@ module.exports = {
     targetLevelForState,
     tagsForSpot,
     capacityForSpot,
-    occupancyForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
     spotAllowedReaderFor,

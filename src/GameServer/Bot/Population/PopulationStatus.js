@@ -24,6 +24,8 @@ const HistoryDatabase = invoke('HistoryDatabase');
 const CheckpointCoordinator = invoke('DatabaseCheckpointCoordinator');
 const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool');
+const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
+const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 let lastMoneyPacketMissing = 0;
 
 function isBotSession(session) {
@@ -180,25 +182,10 @@ const PopulationStatus = {
         const lodSubsystems = Object.entries(hotLod.subsystems || {})
             .map(([name, value]) => `${name}:${value.count || 0}/${value.p95Ms || 0}/${value.items || 0}`)
             .join('|') || 'none';
-        const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
-        const farmOccupancy = SpotProfiles.currentOccupancy(SpotProfiles.ensure());
-        const farmCapacity = Object.entries(farmOccupancy || {}).reduce((result, [spotId, entry]) => {
-            const reserved = Math.max(0, Number(entry?.reservedCount ?? entry?.count ?? 0));
-            const capacity = Math.max(1, Number(entry?.capacity || 1));
-            result.spots += 1;
-            result.maxReserved = Math.max(result.maxReserved, reserved);
-            if (reserved > capacity) {
-                result.violations += 1;
-                result.maxExcess = Math.max(result.maxExcess, reserved - capacity);
-                if (reserved - capacity > result.worstExcess) {
-                    result.worstSpot = spotId;
-                    result.worstReserved = reserved;
-                    result.worstCapacity = capacity;
-                    result.worstExcess = reserved - capacity;
-                }
-            }
-            return result;
-        }, {
+        // Per occupied spot of the world index: the bots standing or
+        // travelling there against the spot's capacity.
+        const farmIndex = LifeState.occupancyIndex();
+        const farmCapacity = {
             spots: 0,
             violations: 0,
             maxReserved: 0,
@@ -207,7 +194,25 @@ const PopulationStatus = {
             worstReserved: 0,
             worstCapacity: 0,
             worstExcess: 0
-        });
+        };
+        for (const spotId of farmIndex.spotIds()) {
+            const spot = SpotProfiles.findById(spotId);
+            const present = spot ? farmIndex.physicalCount(spotId) : 0;
+            if (!present) continue;
+            const capacity = Math.max(1, LevelingRoutes.capacityForSpot(spot));
+            farmCapacity.spots += 1;
+            farmCapacity.maxReserved = Math.max(farmCapacity.maxReserved, present);
+            if (present > capacity) {
+                farmCapacity.violations += 1;
+                farmCapacity.maxExcess = Math.max(farmCapacity.maxExcess, present - capacity);
+                if (present - capacity > farmCapacity.worstExcess) {
+                    farmCapacity.worstSpot = spotId;
+                    farmCapacity.worstReserved = present;
+                    farmCapacity.worstCapacity = capacity;
+                    farmCapacity.worstExcess = present - capacity;
+                }
+            }
+        }
 
         const summary = {
             ...counts,
