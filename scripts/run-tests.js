@@ -795,6 +795,7 @@ const tests = [
     'tests/test_npc_sell_shop.js',
     'tests/test_sell_junk_packet_bounds.js',
     'tests/test_personal_warehouse.js',
+    'tests/test_account_warehouse.js',
     'tests/test_clan_player_warehouse.js',
     'tests/test_clan_warehouse_equipment_exchange.js',
     'tests/test_clan_warehouse_gear_shots.js',

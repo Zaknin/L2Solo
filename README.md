@@ -197,6 +197,15 @@ Committed defaults live in `config/default.ini`.
 
 Private local overrides go in ignored `config/local.ini`. This is where API keys and a machine-specific SQLite path belong.
 
+Players' personal warehouses are shared by all characters on the same account.
+On startup, existing player warehouse items move to account ownership, preserving
+equipment enchantments and pet data. Bots retain their character warehouses.
+Deleting a character leaves the account warehouse intact. The shared capacity is
+300 item stacks or individual equipment rows for every player character, regardless
+of race or Expand Storage skill. Override `[GameServer] playerWarehouseSlots`
+(1..1000) to change it; restart to apply. Existing stock above a reduced limit
+remains withdrawable, and deposits into existing stacks remain available.
+
 Example:
 
 ```ini

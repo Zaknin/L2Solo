@@ -38,6 +38,7 @@ async function worldTotals() {
         SELECT selfId, SUM(amount) AS amount FROM (
             SELECT selfId, amount FROM items
             UNION ALL SELECT selfId, amount FROM warehouse_items
+            UNION ALL SELECT selfId, amount FROM account_warehouse_items
             UNION ALL SELECT selfId, amount FROM clan_warehouse_items
             UNION ALL SELECT 57, escrowAdena FROM afk_trade_shops
             UNION ALL SELECT lines.selfId, lines.count FROM afk_trade_lines lines
@@ -81,6 +82,14 @@ function sumBy(rows, keyOf) {
     await Database.setItem(customerId, item(57, 1000, 'Adena'));
     await Database.setItem(ownerId, item(57, 100, 'Adena'));
 
+    const materialId = Number((await Database.setItem(ownerId, item(1864, 10, 'Stem'))).insertId);
+    const [deposited] = await Database.transferPlayerWarehouseBatch(ownerId, 'journal_owner', [
+        { id: materialId, selfId: 1864, amount: 6, stackable: true }
+    ], 'deposit');
+    await Database.transferPlayerWarehouseBatch(ownerId, 'journal_owner', [
+        { id: deposited.warehouseId, selfId: 1864, amount: 2, stackable: true }
+    ], 'withdraw');
+
     const sale = await Database.createAfkTradeShop(ownerId, {
         storeType: 1, title: 'Sale', town: 'Giran', locX: 83000, locY: 148000, locZ: -3400,
         appearance: { model: { name: 'JournalOwner' } },
@@ -119,6 +128,12 @@ function sumBy(rows, keyOf) {
     const rows = await journalRows();
     const journaled = sumBy(rows, (row) => Number(row.selfId));
     baseline.forEach((delta, selfId) => journaled.set(selfId, (journaled.get(selfId) || 0) - delta));
+    for (const operation of ['warehouse:player-deposit', 'warehouse:player-withdraw']) {
+        const transfers = rows.filter(row => row.operation === operation && Number(row.selfId) === 1864);
+        assert.ok(transfers.some(row => row.store === 'account_warehouse'), 'account stock must be journaled');
+        assert.equal(transfers.reduce((total, row) => total + Number(row.delta), 0), 0,
+            `${operation} must conserve value across inventory and account warehouse`);
+    }
     new Set([...before.keys(), ...after.keys(), ...journaled.keys()]).forEach((selfId) => {
         const worldChange = (after.get(selfId) || 0) - (before.get(selfId) || 0);
         assert.strictEqual(journaled.get(selfId) || 0, worldChange, `journal must close for item ${selfId}`);

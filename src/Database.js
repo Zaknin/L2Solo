@@ -1706,6 +1706,7 @@ function applySchemaMigrations() {
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
     migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
+    migrations.push([67, () => require('./DatabasePlayerWarehouse').migrate(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -4176,6 +4177,7 @@ function publishClanMembership(result) {
 
 
 const Database = {
+    ...require('./DatabasePlayerWarehouse').create({ one, all, write, inTransaction, withCharacterFlush }),
     openClanRaidPartyAtImpact(request) {
         // The offensive callback cannot await our queue: its registered roster
         // could change meanwhile. Abort this native action when another write

@@ -45,7 +45,7 @@ module.exports = async function warehouse(session, parts) {
     }
 
     if (mode === 'withdraw') {
-        const items = await Warehouse.list(session.actor.fetchId());
+        const items = await Warehouse.list(session);
         session.dataSendToMe(ServerResponse.wareHouseWithdrawalList(
             items, session.actor.backpack.fetchTotalAdena()
         ));
