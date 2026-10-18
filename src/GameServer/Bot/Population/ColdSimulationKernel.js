@@ -6,6 +6,7 @@ const { isMainThread } = require('node:worker_threads');
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
+const PartyGoalCalculation = require('./PartyGoalCalculation');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
@@ -545,6 +546,9 @@ class ColdSimulationKernel {
         this.resolveSolo = options.resolveSolo;
         this.resolveParty = typeof options.resolveParty === 'function' ? options.resolveParty : null;
         this.planPartyRequirement = options.planPartyRequirement || null;
+        // The recruit check of a pending join, run at the leader's step
+        // (PartyGoalCalculation.recruitCheck in the worker).
+        this.reviewRecruits = options.reviewRecruits || null;
         // Numeric member ids only, bounded by active party rosters (<=9 each); dropped at completion, release or dissolve.
         this.partyRequirementProgress = new Map();
         this.planLifecycle = typeof options.planLifecycle === 'function' ? options.planLifecycle : null;
@@ -1904,6 +1908,24 @@ class ColdSimulationKernel {
                 stats: { ...(run.party.stats || {}), ...(resolution.partyPatch?.stats || {}) },
                 nextResolveAt: resolution.nextResolveAt
             };
+            // The pending join main recorded (recruitBackgroundMembers): the
+            // recruit check runs here on this thread's copies of the recruits;
+            // the answer rides the leader's proposal (main commits a join) and
+            // the party row leaves this step without it either way.
+            let recruitCheck = null;
+            const pendingRecruits = run.party.stats?.pendingRecruits;
+            if (pendingRecruits && !meetingPending && resolvedParty.status !== 'dissolved') {
+                delete resolvedParty.stats.pendingRecruits;
+                const recruits = (pendingRecruits.ids || []).map(id => this.states.get(Number(id))?.state);
+                const free = recruits.length > 0 && recruits.every(recruit => recruit?.phase === 'cold'
+                    && !recruit.party?.partyId && !recruit.partyId);
+                const checked = free && this.reviewRecruits
+                    ? this.reviewRecruits({ party: run.party, members: [...run.members, ...recruits], timestamp: startedAt }) : null;
+                recruitCheck = checked ? { outcome: 'accepted', memberIds: run.party.memberIds,
+                    recruitIds: recruits.map(recruit => Number(recruit.characterId)),
+                    sources: PartyGoalCalculation.sources(recruits), joint: checked }
+                    : { outcome: free ? 'declined' : 'unavailable' };
+            }
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
             const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
             // Collection quotas and their physical receipts share the same
@@ -2008,7 +2030,8 @@ class ColdSimulationKernel {
                     partyResolution: id === Number(run.party.leaderId) ? {
                         partyId: run.party.partyId,
                         reviewGoals: !meetingPending,
-                        party: resolvedParty
+                        party: resolvedParty,
+                        ...(recruitCheck ? { recruitCheck } : {})
                     } : null
                 };
                 proposals.push(proposal);

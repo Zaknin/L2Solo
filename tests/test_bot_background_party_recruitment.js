@@ -204,9 +204,18 @@ async function run() {
     // Native physical preparation ends here; the original ownership checks
     // below use mocked assignments, not persisted cold-life membership rows.
     await Database.close();
-    ColdSimulationCoordinator.requestPartyGoals = async (party, selected, options) => ({ ok: true,
-        sources: require('../src/GameServer/Bot/Population/PartyGoalCalculation').sources(selected),
-        joint: require('../src/GameServer/Bot/Population/PartyGoalPolicy').recruitment(party, selected, { timestamp: options.timestamp }) });
+    // A far party (cold leader): the pass records the pending join for the
+    // leader's step and joins nobody itself.
+    const originalFind = PartyState.find;
+    PartyState.find = () => ({ ...party, status: 'active' });
+    const pendingPass = await PopulationService.recruitBackgroundMembers(candidates);
+    PartyState.find = originalFind;
+    assert.deepStrictEqual([...pendingPass], [3, 4], 'a far party claims its recruits for this pass');
+    assert.deepStrictEqual(saved.stats.pendingRecruits, { ids: [3, 4] }, 'a far party records the pending join');
+    assert.deepStrictEqual(saved.memberIds, [1, 2]);
+    assert.deepStrictEqual(assigned, [], 'a far party joins nobody before its leader\'s check');
+    // A party near the player (hot leader): the check runs here and joins.
+    members[0] = { ...members[0], phase: 'hot' };
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);
@@ -241,7 +250,7 @@ async function run() {
     const sharedMembers = new Map(sharedParties.map((sharedParty) => [
         sharedParty.partyId,
         sharedParty.memberIds.map((characterId, index) => ({
-            ...nativeRows[index], characterId,
+            ...nativeRows[index], characterId, phase: 'hot',
             name: `Member${characterId}`,
         }))
     ]));

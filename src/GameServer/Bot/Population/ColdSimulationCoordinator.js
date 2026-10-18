@@ -2407,6 +2407,11 @@ class ColdSimulationCoordinator {
                 BackgroundPartyState.find(entry.proposal.partyResolution.partyId) || entry.proposal.partyResolution.party,
                 entry.proposal.partyResolution));
         }
+        // The recruit check the leader's step ran on the party's pending join.
+        if (entry.proposal.partyResolution?.recruitCheck && this.population?.applyWorkerPartyJoin) {
+            later('partyJoin', () => this.population.applyWorkerPartyJoin(entry.proposal.partyResolution.partyId,
+                entry.proposal.partyResolution.recruitCheck));
+        }
         if (entry.proposal.buffOffer) {
             await step('buff', () => invoke('GameServer/Bot/Economy/ColdBuffService')
                 .applyOffer(entry.proposal.buffOffer, { beforeWrite }));

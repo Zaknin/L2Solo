@@ -51,6 +51,9 @@ const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const WAREHOUSE_CLEANUP_KEY = Symbol('warehouse-cleanup');
 const STATE_RETENTION_KEY = Symbol('state-retention');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
+const PartyGoalCalculation = invoke('GameServer/Bot/Population/PartyGoalCalculation');
+const PartyGoalPolicy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
+const CraftMaterialParty = invoke('GameServer/Bot/Population/CraftMaterialParty');
 const RequiredPartyFormation = invoke('GameServer/Bot/Population/RequiredPartyFormation');
 const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
 const CLEANUP_BUSY_FLAGS = ['marketReturn'];
@@ -433,8 +436,6 @@ function requiresClanEquipmentParty(state) {
 
 async function jointPartyGoals(party, members, timestamp, options = {}) {
     const Policy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
-    if (!members.some(member => member.phase === 'cold') && party.stats?.recruitmentReview)
-        return Policy.recruitment(party, members, { timestamp, spots: SpotProfiles.ensure() });
     if (!members.some(member => member.phase === 'cold') && require('./CraftMaterialParty').isObjective(party.stats?.objective))
         return Policy.joint(party, members, { timestamp, spots: SpotProfiles.ensure() });
     if (!members.some(member => member.phase === 'cold'))
@@ -444,7 +445,7 @@ async function jointPartyGoals(party, members, timestamp, options = {}) {
     // Two other parties hold the worker's goal slots: keep the current
     // objective now; the next party resolve reviews the goals again.
     if (result.reason === 'party_goal_busy') return Policy.pending(party, members);
-    return result.ok && invoke('GameServer/Bot/Population/PartyGoalCalculation').matches(members, result.sources) ? result.joint : null;
+    return result.ok && PartyGoalCalculation.matches(members, result.sources) ? result.joint : null;
 }
 
 async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
@@ -748,6 +749,77 @@ function fittingMaterialCandidates(candidates, objective, retained = []) {
         selected.splice(index, 1);
     }
     return selected;
+}
+
+// Writes recruits into a party: the leader elected over the whole roster, the
+// recruit check's answer (joint: member goals, income reviews; null for a clan
+// or raid objective, which joins without one), the pending join cleared, one
+// fenced transaction with every member (commitPartyMembership). The updated
+// party, or null when the fence refused it.
+function joinPartyRecruits(party, members, recruits, joint) {
+    const allMembers = [...members, ...recruits];
+    const electedLeaderId = leaderIdForMembers(party, members) || Number(recruits[0]?.characterId || 0);
+    const finalLeaderId = leaderIdForMembers({ ...party, leaderId: electedLeaderId }, allMembers);
+    const objective = party.stats?.objective || null;
+    const agreement = joint ? joint.agreement
+        : CraftMaterialParty.isObjective(objective) ? CraftMaterialParty.agreement(allMembers, objective, party.stats.agreement)
+            : party.stats?.agreement;
+    const stats = {
+        ...(party.stats || {}),
+        memberNames: allMembers.map((member) => member.name),
+        ...(joint ? { lastIncomeReviewAt: joint.lastIncomeReviewAt, incomeReviews: joint.incomeReviews } : {}),
+        memberGoals: joint?.memberGoals || allMembers.map(PartyGoalPolicy.declaration),
+        agreement: agreement ? { ...agreement, memberIds: allMembers.map(member => member.characterId) } : null,
+        lastRecruitAt: Date.now()
+    };
+    delete stats.pendingRecruits;
+    const nextParty = {
+        ...party,
+        leaderId: finalLeaderId,
+        memberIds: allMembers.map((member) => member.characterId),
+        roleCoverage: PartyComposition.roleCoverage(allMembers),
+        stats
+    };
+    const recruitEvent = {
+        characterId: finalLeaderId,
+        eventType: 'party_recruit',
+        summary: `${members[0].name} recruited ${recruits.map((recruit) => recruit.name).join(', ')} near ${party.spotId}`,
+        meta: {
+            partyId: party.partyId,
+            recruitIds: recruits.map((recruit) => recruit.characterId),
+            spotId: party.spotId
+        },
+        weight: 1,
+        createdAt: Date.now()
+    };
+    // Validate and persist the complete resulting membership in one
+    // transaction, including retained members. This makes recruitment
+    // resilient to a simultaneous party release.
+    const changedMembers = [
+        ...(Number(finalLeaderId) !== Number(party.leaderId)
+            ? members.filter((member) => Number(member.party?.leaderId || 0) !== Number(finalLeaderId))
+            : []),
+        ...recruits
+    ];
+    const commitMembers = Database.isReady() ? allMembers : changedMembers;
+    return commitPartyMembership(nextParty, commitMembers, recruitEvent, { expectedPartyUpdatedAt: party.updatedAt })
+        .then(({ party: updatedParty, failed, eventCommitted }) => {
+            if (!updatedParty || failed.length) return null;
+            const eventWrite = eventCommitted
+                ? Promise.resolve()
+                : LifeEvents.record(
+                    recruitEvent.characterId,
+                    recruitEvent.eventType,
+                    recruitEvent.summary,
+                    recruitEvent.meta,
+                    recruitEvent.weight
+                );
+            return eventWrite.then(() => {
+                Config.developerDiagnostics && Metrics.recordPartyRecruit(recruits.length);
+                Config.developerDiagnostics && console.info('BotPopulation :: recruited %d bot(s) into %s near %s', recruits.length, party.partyId, party.spotId || 'none');
+                return updatedParty;
+            });
+        });
 }
 
 function commitPartyMembership(party, members = [], event = null, options = {}) {
@@ -1540,7 +1612,9 @@ const PopulationService = {
 
     // Trigger 1 of the party re-plan (the second is a member's kit, at the
     // party's step in the background thread): a published party row whose
-    // members, objective or pending join moved against the previous row. The
+    // members or objective moved against the previous row. A pending join
+    // marks nothing: the leader's step reads it from the party row itself
+    // (ColdSimulationKernel), and the join it answers moves the members. The
     // apply's own writes mark here too; it clears the mark after its last
     // write (applyWorkerPartyRequirements), so they open nothing.
     markPartyRequirementsDue(party, previous) {
@@ -1550,11 +1624,10 @@ const PopulationService = {
             return;
         }
         if (BackgroundPartyLifecycle.raidStarted(party)) return;
-        const pending = party.stats?.pendingRecruits;
         if (!previous
             || (party.memberIds || []).join(',') !== (previous.memberIds || []).join(',')
-            || partyObjectiveGroupingKey(party.stats?.objective) !== partyObjectiveGroupingKey(previous.stats?.objective)
-            || pending && pending.at !== previous.stats?.pendingRecruits?.at) this.partyRequirementRefreshDue.add(id);
+            || partyObjectiveGroupingKey(party.stats?.objective) !== partyObjectiveGroupingKey(previous.stats?.objective))
+            this.partyRequirementRefreshDue.add(id);
     },
 
     partyAssemblyInput(state, timestamp = Date.now()) {
@@ -1591,7 +1664,7 @@ const PopulationService = {
         // Keep the need until that worker publishes its retry; main must not
         // erase it or rebuild wishes (it builds no economy for a far bot).
         if (state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil || 0) <= timestamp
-            && require('./CraftMaterialParty').requestOf(state)) return { deferred: true };
+            && CraftMaterialParty.requestOf(state)) return { deferred: true };
         return state;
     },
 
@@ -2479,6 +2552,25 @@ const PopulationService = {
         return changed || departures.length ? [party.partyId] : [];
     },
 
+    // The answer of a pending join's recruit check, from the leader's step
+    // (ColdSimulationCoordinator, after the party row write). It joins the
+    // recruits only while the party keeps the members the check saw and each
+    // recruit is still the state the check read.
+    async applyWorkerPartyJoin(partyId, check) {
+        const count = outcome => Config.developerDiagnostics && Diagnostics.count('party_assembly', 'recruit_join', outcome);
+        if (check?.outcome !== 'accepted') return count(check?.outcome || 'declined');
+        const party = BackgroundPartyState.find(partyId);
+        if (party?.status !== 'active' || (party.memberIds || []).join(',') !== (check.memberIds || []).join(','))
+            return count('stale_party');
+        const members = (await LifeState.cachedStatesForParties([party])).get(String(partyId)) || [];
+        const recruits = await hydratePartyCandidates((check.recruitIds || []).map(id => LifeState.cachedState(id)).filter(Boolean));
+        if (recruits.length !== (check.recruitIds || []).length || !PartyGoalCalculation.matches(recruits, check.sources))
+            return count('stale_recruit');
+        const current = BackgroundPartyState.find(partyId);
+        if (current?.updatedAt !== party.updatedAt) return count('stale_party');
+        return count(await joinPartyRecruits(party, members, recruits, check.joint) ? 'joined' : 'refused');
+    },
+
     recruitBackgroundMembers(candidates = [], options = {}) {
         const deadlineAt = Number(options.deadlineAt || Infinity);
         const budgetReached = () => {
@@ -2517,6 +2609,9 @@ const PopulationService = {
                 const limits = partyLimitsForObjective(party?.stats?.objective || null);
                 if (party.stats?.travel || party.stats?.pveEncounter
                     || PartyMarketBreak.pending(party).length || (party.memberIds || []).length >= limits.maxSize) return false;
+                // A pending join waits for its far leader's step; a leader near
+                // the player has none, so the check runs here again.
+                if (party.stats?.pendingRecruits && LifeState.cachedState(party.leaderId)?.phase === 'cold') return false;
                 const pool = candidates.filter(state => matches(party, state));
                 if (!pool.length) { skipped++; return false; }
                 matched.set(party, pool);
@@ -2569,99 +2664,32 @@ const PopulationService = {
                     levelRange: partyLimits.levelRange
                 }), partyObjective, members);
                 if (!recruits.length) return null;
-                return hydratePartyCandidates(recruits).then(async (hydratedRecruits) => {
+                return hydratePartyCandidates(recruits).then((hydratedRecruits) => {
                     if (hydratedRecruits.length !== recruits.length) return null;
-                    // Elect an attached leader before the atomic write. If the
-                    // persisted leader departed, retained members and recruits
-                    // receive the replacement in the same transaction.
-                    const electedLeaderId = leaderIdForMembers(party, members)
-                        || Number(hydratedRecruits[0]?.characterId || 0);
-                    const assignmentParty = { ...party, leaderId: electedLeaderId };
-                    const allMembers = [...members, ...hydratedRecruits];
-                    const finalLeaderId = leaderIdForMembers(assignmentParty, allMembers);
-                    const materialParty = Material.isObjective(partyObjective);
-                    const agreement = materialParty ? Material.agreement(allMembers, partyObjective, party.stats.agreement)
-                        : party.stats?.agreement;
-                    let joint = null;
-                    if (!partyObjective?.clanGoalKey && partyObjective?.sourceKind !== 'raid') {
-                        const reviewParty = { ...party, leaderId: finalLeaderId,
-                            memberIds: allMembers.map(member => member.characterId),
-                            stats: { ...party.stats, agreement, recruitmentReview: true } };
-                        joint = await jointPartyGoals(reviewParty, allMembers, Date.now());
-                        if (joint?.incomeReviews?.length !== allMembers.length) {
-                            this.partyFormationPending = true;
-                            return null;
-                        }
-                        const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
-                        if (allMembers.some(member => (materialParty ? Progression.adventurer(member) : Progression.personal(member))
-                            && !joint.incomeReviews.find(row => row.characterId === Number(member.characterId))?.accept)) return null;
-                        if (Database.isReady()) {
-                            const current = BackgroundPartyState.find(party.partyId);
-                            const Calculation = require('./PartyGoalCalculation');
-                            if (current?.status !== 'active' || current.updatedAt !== party.updatedAt
-                                || allMembers.some(member => !LifeState.cachedState(member.characterId)
-                                    || !Calculation.sameSource(member, LifeState.cachedState(member.characterId)))) {
-                                this.partyFormationPending = true;
-                                return null;
-                            }
-                        }
+                    const claim = joined => {
+                        if (joined) hydratedRecruits.forEach((recruit) => claimed.add(Number(recruit.characterId)));
+                        return joined;
+                    };
+                    if (partyObjective?.clanGoalKey || partyObjective?.sourceKind === 'raid')
+                        return joinPartyRecruits(party, members, hydratedRecruits, null).then(claim);
+                    // The recruit check runs where the party steps: for a far
+                    // party at its leader's step in the background thread (the
+                    // pending join below, answered by applyWorkerPartyJoin), for
+                    // a party near the player here.
+                    const leader = members.find(member => Number(member.characterId) === Number(party.leaderId));
+                    if (leader?.phase === 'cold' && hydratedRecruits.every(recruit => recruit.phase === 'cold')) {
+                        const current = BackgroundPartyState.find(party.partyId);
+                        if (current?.status !== 'active' || current.updatedAt !== party.updatedAt) return null;
+                        claim(true);
+                        Config.developerDiagnostics && Diagnostics.count('party_assembly', 'recruit_join', 'pending');
+                        return BackgroundPartyState.createOrUpdate({ ...current, stats: { ...(current.stats || {}),
+                            pendingRecruits: { ids: hydratedRecruits.map(recruit => Number(recruit.characterId)) } } });
                     }
-                    const nextParty = {
-                        ...party,
-                        leaderId: finalLeaderId,
-                        memberIds: allMembers.map((member) => member.characterId),
-                        roleCoverage: PartyComposition.roleCoverage(allMembers),
-                        stats: {
-                            ...(party.stats || {}),
-                            memberNames: allMembers.map((member) => member.name),
-                            ...(joint ? { lastIncomeReviewAt: joint.lastIncomeReviewAt, incomeReviews: joint.incomeReviews } : {}),
-                            memberGoals: joint?.memberGoals || allMembers.map(invoke('GameServer/Bot/Population/PartyGoalPolicy').declaration),
-                            agreement: agreement ? { ...agreement,
-                                memberIds: allMembers.map(member => member.characterId) } : null,
-                            lastRecruitAt: Date.now()
-                        }
-                    };
-                    const recruitEvent = {
-                        characterId: finalLeaderId,
-                        eventType: 'party_recruit',
-                        summary: `${members[0].name} recruited ${hydratedRecruits.map((recruit) => recruit.name).join(', ')} near ${party.spotId}`,
-                        meta: {
-                            partyId: party.partyId,
-                            recruitIds: hydratedRecruits.map((recruit) => recruit.characterId),
-                            spotId: party.spotId
-                        },
-                        weight: 1,
-                        createdAt: Date.now()
-                    };
-                    // Validate and persist the complete resulting membership in
-                    // one transaction, including retained members. This makes
-                    // recruitment resilient to a simultaneous party release.
-                    const changedMembers = [
-                        ...(Number(finalLeaderId) !== Number(party.leaderId)
-                            ? members.filter((member) => Number(member.party?.leaderId || 0) !== Number(finalLeaderId))
-                            : []),
-                        ...hydratedRecruits
-                    ];
-                    const commitMembers = Database.isReady() ? allMembers : changedMembers;
-                    return commitPartyMembership(nextParty, commitMembers, recruitEvent, { expectedPartyUpdatedAt: party.updatedAt })
-                        .then(({ party: updatedParty, failed, eventCommitted }) => {
-                            if (!updatedParty || failed.length) return null;
-                            hydratedRecruits.forEach((recruit) => claimed.add(Number(recruit.characterId)));
-                            const eventWrite = eventCommitted
-                                ? Promise.resolve()
-                                : LifeEvents.record(
-                                    recruitEvent.characterId,
-                                    recruitEvent.eventType,
-                                    recruitEvent.summary,
-                                    recruitEvent.meta,
-                                    recruitEvent.weight
-                                );
-                            return eventWrite.then(() => {
-                                Config.developerDiagnostics && Metrics.recordPartyRecruit(hydratedRecruits.length);
-                                Config.developerDiagnostics && console.info('BotPopulation :: recruited %d bot(s) into %s near %s', hydratedRecruits.length, party.partyId, party.spotId || 'none');
-                                return updatedParty;
-                            });
-                        });
+                    const allMembers = [...members, ...hydratedRecruits];
+                    const joint = PartyGoalCalculation.recruitCheck(
+                        { ...party, leaderId: leaderIdForMembers(party, members) || Number(hydratedRecruits[0]?.characterId || 0) },
+                        allMembers, { spots: SpotProfiles.ensure(), timestamp: Date.now() });
+                    return joint ? joinPartyRecruits(party, members, hydratedRecruits, joint).then(claim) : null;
                 });
             }), Promise.resolve())).then(() => claimed);
     },

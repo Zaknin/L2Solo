@@ -112,6 +112,7 @@ const RequiredPartyFormation = require('./RequiredPartyFormation');
 const { ColdCompetitionMonitor } = require('./ColdCompetitionMonitor');
 const ColdCompetitionCandidates = require('./ColdCompetitionCandidates');
 const { ColdSimulationKernel } = require('./ColdSimulationKernel');
+const PartyGoalCalculation = require('./PartyGoalCalculation');
 const { beginHuntingTrip } = require('./HuntingTravel');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableMirror = require('./TableMirror');
@@ -1225,6 +1226,8 @@ function startKernel(config = {}) {
             preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
         }),
+        reviewRecruits: ({ party, members, timestamp }) => PartyGoalCalculation.recruitCheck(party, members,
+            { spots: planningSpots, timestamp }),
         planLifecycle: async ({ state, context, timestamp }) => {
             if (state.stats?.tradeMeeting) return null;
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
