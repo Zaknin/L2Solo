@@ -882,7 +882,7 @@ function roomAtArrival(spotId, arriving, overflow = 0) {
     const spot = SpotIndex.spotById(planningSpots, spotId);
     if (!spot || spot.raidBoss === true) return true;
     const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
-    return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
+    return standing + arriving.size <= LevelingRoutes.roomForSpot(spot) + overflow;
 }
 
 // A solo trip ends on a full spot: the bot stands there with a "was full"
