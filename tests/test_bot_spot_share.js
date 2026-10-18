@@ -79,4 +79,24 @@ const alone = Resolver.resolveSolo({ state: hunter(), spot: gremlins(), spotHunt
 assert.strictEqual(alone.debug.wins, 1);
 assert.strictEqual(alone.debug.shareCut, 0);
 
+// The bots that split a spot: the index counts the bots on it and the ones
+// on their way there; a gear plan or a party request elsewhere holds no place
+// (ARCH-08-c), and a bot in town counts on no spot.
+const { SpotOccupancyIndex } = invoke('GameServer/Bot/Population/SpotOccupancyIndex');
+const occupancy = new SpotOccupancyIndex();
+for (const state of [
+    { characterId: 1, activity: 'hunting', spotId: 'A' },
+    { characterId: 2, activity: 'hunting', spotId: 'A' },
+    { characterId: 3, activity: 'traveling', spotId: 'B', stats: { travel: { spotId: 'A' } } },
+    { characterId: 4, activity: 'shopping', spotId: 'A' },
+    { characterId: 5, activity: 'hunting', spotId: 'B',
+        stats: { equipmentPlan: { status: 'active', next: { spotId: 'A' } }, partyRequest: { status: 'open', spotId: 'A' } } }
+]) occupancy.update(state);
+assert.strictEqual(occupancy.physicalCount('A'), 3, 'two hunters and one arriving bot split the spot');
+assert.strictEqual(occupancy.physicalCount('A', { standingOnly: true }), 2);
+assert.strictEqual(occupancy.physicalCount('B'), 1, 'an intent elsewhere holds no place');
+assert.deepStrictEqual([...occupancy.spotIds()].sort(), ['A', 'B']);
+occupancy.update({ characterId: 1, activity: 'merchant', spotId: 'A' });
+assert.strictEqual(occupancy.physicalCount('A'), 2, 'a bot that leaves for town frees its place at once');
+
 console.log('Bot spot share checks passed');
