@@ -1,5 +1,13 @@
 const CreatureModel = invoke('GameServer/Model/Creature');
 const Formulas = invoke('GameServer/Formulas');
+const locationBatchDepth = new WeakMap();
+
+function publishLocation(actor) {
+    if (!locationBatchDepth.has(actor) && actor.session?.actor === actor) {
+        invoke('GameServer/World/World').updateUserLocation?.(actor.session, actor);
+        if (actor.session.tradeMeetingPresence) require('../AfkTrade/TradeMeetingService').presenceChanged(actor.session);
+    }
+}
 
 class ActorModel extends CreatureModel {
     fetchCollectivePAtk() { return invoke('GameServer/Pets/PetMount').stats(this)?.pAtk ?? super.fetchCollectivePAtk(); }
@@ -8,6 +16,43 @@ class ActorModel extends CreatureModel {
     fetchCollectiveWalkSpd() { return invoke('GameServer/Pets/PetMount').stats(this)?.walk ?? super.fetchCollectiveWalkSpd(); }
 
     // Set
+
+    setLocX(data) {
+        super.setLocX(data);
+        publishLocation(this);
+    }
+
+    setDestId(id) {
+        super.setDestId(id);
+        invoke('GameServer/World/World').updateUserPresence?.(this.session, this);
+    }
+
+    clearDestId() {
+        super.clearDestId();
+        invoke('GameServer/World/World').updateUserPresence?.(this.session, this);
+    }
+
+    setLocY(data) {
+        super.setLocY(data);
+        publishLocation(this);
+    }
+
+    setLocZ(data) {
+        super.setLocZ(data);
+        publishLocation(this);
+    }
+
+    setLocXYZ(coords) {
+        const previousDepth = locationBatchDepth.get(this) || 0;
+        locationBatchDepth.set(this, previousDepth + 1);
+        try {
+            super.setLocXYZ(coords);
+        } finally {
+            if (previousDepth === 0) locationBatchDepth.delete(this);
+            else locationBatchDepth.set(this, previousDepth);
+        }
+        publishLocation(this);
+    }
 
     canReplenishVitals() {
         return this.model.isOnline === true
@@ -36,6 +81,7 @@ class ActorModel extends CreatureModel {
     setHp(data) {
         const wasLow = this.fetchHp() <= this.fetchMaxHp() * 0.6;
         super.setHp(data);
+        if (this.session?.tradeMeetingPresence) require('../AfkTrade/TradeMeetingService').presenceChanged(this.session);
         const isLow = this.fetchHp() <= this.fetchMaxHp() * 0.6;
         if (wasLow !== isLow && invoke('GameServer/Items/C4WeaponSA').hasRisk(this)) {
             invoke('GameServer/Actor/Generics/CalculateStats').refreshConditionalCombatStats(this);
@@ -63,7 +109,9 @@ class ActorModel extends CreatureModel {
     }
 
     setSp(data) {
+        const previous = this.model.sp;
         this.model.sp = data;
+        require('../Clan/ClanReviewEvents').leaderSpChanged(this.fetchId(), previous, data);
     }
 
     setCp(data) {
@@ -122,6 +170,13 @@ class ActorModel extends CreatureModel {
 
     setIsOnline(data) {
         this.model.isOnline = data;
+        if (this.session?.actor === this) {
+            const World = invoke('GameServer/World/World');
+            World.updateUserLocation?.(this.session, this);
+            // SQLite's numeric flag and EnterWorld's boolean can share the
+            // same location-cache key. Presence still owns this transition.
+            World.updateUserPresence?.(this.session, this);
+        }
     }
 
     setPrivateStoreType(data) {
@@ -165,7 +220,10 @@ class ActorModel extends CreatureModel {
     }
 
     setClanId(data) {
+        const previous = this.model.clanId;
         this.model.clanId = data;
+        const events = require('../Clan/ClanReviewEvents');
+        events.changed(previous, 'membership'); events.changed(data, 'membership');
     }
 
     setClanPrivileges(data) {

@@ -3,9 +3,15 @@ const TownRespawn = invoke('GameServer/World/TownRespawn');
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
+const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
+const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
+const CombinedErrands = require('../Population/CombinedErrandPolicy');
+// Other errands are excluded by the activity check and the goal planner.
+const MARKET_TRIP_BUSY_FLAGS = ['partyMarketReturn'];
 
-const MARKET_TRAVEL_MS = 25 * 1000;
-const GATEKEEPER_SPOT_TRAVEL_MS = 25 * 1000;
+const MARKET_TRAVEL_MS = ColdTrip.AUTHOR_TRIP_MS;
+const GATEKEEPER_SPOT_TRAVEL_MS = ColdTrip.AUTHOR_TRIP_MS;
 
 function marketTown(name = 'Giran') {
     const town = Object.values(TownRespawn.towns).find((candidate) => candidate.name === name);
@@ -15,62 +21,80 @@ function marketTown(name = 'Giran') {
         || null;
 }
 
-function beginMarketTravel(state, goal, timestamp = Date.now()) {
-    if (Number(state?.stats?.karma || 0) > 0) return null;
+// A bot with karma travels only to Floran: ColdTrip.townPlan refuses the
+// other towns. economy: the caller's economy of this same state, if it has one.
+function beginMarketTravel(state, goal, timestamp = Date.now(), { economy = null } = {}) {
     if (!state || !goal || ['traveling', 'shopping', 'merchant', 'crafting'].includes(state.activity)) return null;
-    if (state.stats?.partyMarketReturn) return null;
+    if (BotErrands.busyWith(state, MARKET_TRIP_BUSY_FLAGS)) return null;
     const buyingGear = goal.type === 'upgrade_gear'
         && ['market_search_for_weapon', 'market_search_for_gear'].includes(goal.plan?.expectedBenefit);
     const buyingMaterial = goal.type === 'buy_craft_material' && goal.plan?.expectedBenefit === 'market_buy_craft_material';
+    // An errand: a purchase another job planned in its town (ColdMarketService.acquire).
+    const buyingErrand = goal.type === 'market_errand' && !!goal.plan?.marketTown;
     const sellingInventory = goal.type === 'sell_inventory' && goal.plan?.expectedBenefit === 'market_sale_inventory';
-    const forcedInventoryCleanup = sellingInventory && !!(goal.target?.cleanupReason || goal.plan?.cleanupReason);
-    if (!buyingGear && !buyingMaterial && !sellingInventory) return null;
-    if (invoke('GameServer/Bot/Economy/BotAfkMarketService').canTradeRemotely(state, goal)) return null;
+    const cleanupReason = goal.target?.cleanupReason || goal.plan?.cleanupReason;
+    const forcedInventoryCleanup = sellingInventory && !!cleanupReason && cleanupReason !== 'inventory_half_full';
+    const improving = goal.type === 'improving' && goal.target?.improvement?.kind !== 'enchant';
+    if (!buyingGear && !buyingMaterial && !buyingErrand && !sellingInventory && !improving) return null;
+    if (!improving && invoke('GameServer/Bot/Economy/BotAfkMarketService').canTradeRemotely(state, goal)) return null;
     if ((buyingGear || buyingMaterial) && Number(state.stats?.marketRetryAfter || 0) > timestamp) return null;
     if (sellingInventory && !forcedInventoryCleanup && Number(state.stats?.marketSellRetryAfter || 0) > timestamp) return null;
 
-    const town = sellingInventory
-        ? marketTown(MarketTownPolicy.targetTownForSale(state))
-        : marketTown(goal.plan?.marketTown || 'Giran');
+    if (buyingGear || buyingMaterial || buyingErrand) {
+        const selfId = Number(goal.target?.itemId);
+        const errand = buyingErrand ? CombinedErrands.pending(state, timestamp)
+            .find(row => Number(row.selfId) === selfId && row.town === goal.plan.marketTown) : null;
+        const request = { ...(errand || {}), selfId, amount: Number(goal.target?.amount || 1),
+            town: goal.plan.marketTown, purpose: errand?.purpose || goal.plan?.purpose };
+        for (const field of ['valueHours', 'survivalCost']) {
+            if (goal.plan?.[field] !== undefined) request[field] = goal.plan[field];
+        }
+        if (goal.plan?.valueRate !== undefined) request.r = goal.plan.valueRate;
+        if (!invoke('GameServer/Bot/Economy/ColdMarketService').canTravelForPurchase(state, request,
+            economy ? { timestamp, economy } : { timestamp })) return null;
+    }
+
+    // A sale goes where its goal says (the town the shop opens in), else to
+    // the sale town; a new decision of the shop town travels with the bot.
+    const sale = sellingInventory && !goal.plan?.marketTown ? MarketTownPolicy.saleTown(state, timestamp) : null;
+    const town = marketTown(sale?.town || goal.plan?.marketTown || 'Giran');
     if (!town) return null;
     const from = { ...state.loc };
     const nearestTown = TownRespawn.getClosestTown(from.locX, from.locY, from.locZ);
-    const to = { ...town.center };
-    return {
-        ...state,
-        activity: 'traveling',
-        stats: {
-            ...(state.stats || {}),
-            marketReturn: {
-                loc: from,
-                regionName: state.currentRegion || null,
-                spotId: state.spotId || null
-            },
-            travel: {
-                reason: buyingGear || buyingMaterial ? goal.plan.expectedBenefit : 'market_sale_inventory',
-                from,
-                to,
-                townName: town.name,
-                viaTown: nearestTown.name,
-                method: 'soe_gatekeeper',
-                arrivalActivity: 'shopping',
-                arrivalEvent: 'arrived_town',
-                startedAt: timestamp,
-                arrivalAt: timestamp + MARKET_TRAVEL_MS
-            }
-        },
-        timing: {
-            ...(state.timing || {}),
-            activityStartedAt: timestamp,
-            // Travel is a finite transition.  There is no state to simulate
-            // while a cold bot is casting SoE / waiting for gatekeeper travel.
-            nextResolveAt: timestamp + MARKET_TRAVEL_MS
-        }
-    };
+    const trip = (destination, shopTown = null) => ColdTrip.toTown(CombinedErrands.visit(state, destination.name, timestamp, goal.type), {
+        reason: buyingGear || buyingMaterial || buyingErrand || improving ? goal.plan.expectedBenefit : 'market_sale_inventory',
+        from,
+        to: { ...destination.center },
+        townName: destination.name,
+        viaTown: nearestTown.name,
+        arrivalActivity: 'shopping',
+        arrivalEvent: 'arrived_town'
+    }, timestamp, {
+        marketReturn: { loc: from, regionName: state.currentRegion || null, spotId: state.spotId || null },
+        ...(shopTown ? { shopTown } : {})
+    });
+    const travel = trip(town, sale?.shopTown);
+    if (travel || !sellingInventory) return travel;
+    // A bot that cannot pay the gatekeeper to its sale town sells in the town
+    // its Scroll of Escape reaches, as a player short of Adena would.
+    const local = marketTown(TravelRoutes.landingTown(from).name);
+    return local && local.name !== town.name ? trip(local) : null;
 }
 
+// A finished visit is the bot's look at the market: the board reviews its
+// buy ads on it through the shared hot/cold BoardLook. `n` counts visits;
+// the existing bounded look owner consumes each new observation once.
 function finishMarketVisit(state, timestamp = Date.now(), options = {}) {
+    const next = finishVisit(state, timestamp, options);
+    if (!next) return next;
+    return { ...next, stats: { ...(next.stats || {}),
+        townLook: { at: timestamp, n: Number(state.stats?.townLook?.n || 0) + 1 } } };
+}
+
+function finishVisit(state, timestamp, options) {
     if (!state || !['shopping', 'merchant'].includes(state.activity)) return null;
+    if (CombinedErrands.pending(state, timestamp, state.currentRegion).length
+        || (state.stats?.townVisit && state.stats.townVisit.completed !== true)) return null;
     let destination = state.stats?.marketReturn;
     const returningParty = state.stats?.partyMarketReturn
         ? invoke('GameServer/Bot/Population/BackgroundPartyState').find(state.stats.partyMarketReturn.partyId) : null;
@@ -127,35 +151,19 @@ function finishMarketVisit(state, timestamp = Date.now(), options = {}) {
     const routedState = spotBackoff
         ? SpotRiskPolicy.withBackoff(state, spotBackoff, timestamp)
         : state;
-    return {
-        ...routedState,
-        activity: 'traveling',
-        stats: {
-            ...(routedState.stats || {}),
-            ...(clanReturn ? {} : { partyMarketReturn: null }),
-            travel: {
-                reason: spotBackoff ? 'death_pressure_replan' : 'return_after_market',
-                from,
-                to,
-                regionName,
-                spotId,
-                townName: destinationTown?.name || regionName || 'Hunting Ground',
-                viaTown: destinationTown?.name || null,
-                method: 'gatekeeper_spot',
-                arrivalActivity: clanReturn ? 'party_wait' : 'hunting',
-                arrivalEvent: spotBackoff ? 'arrived_hunting_ground' : 'returned_to_spot',
-                ...(spotBackoff ? { cause: 'death_pressure' } : {}),
-                clearMarketReturn: true,
-                startedAt: timestamp,
-                arrivalAt: timestamp + GATEKEEPER_SPOT_TRAVEL_MS
-            }
-        },
-        timing: {
-            ...(state.timing || {}),
-            activityStartedAt: timestamp,
-            nextResolveAt: timestamp + GATEKEEPER_SPOT_TRAVEL_MS
-        }
-    };
+    return ColdTrip.toSpot(routedState, {
+        reason: spotBackoff ? 'death_pressure_replan' : 'return_after_market',
+        from,
+        to,
+        regionName,
+        spotId,
+        townName: destinationTown?.name || regionName || 'Hunting Ground',
+        viaTown: destinationTown?.name || null,
+        arrivalActivity: clanReturn ? 'party_wait' : 'hunting',
+        arrivalEvent: spotBackoff ? 'arrived_hunting_ground' : 'returned_to_spot',
+        ...(spotBackoff ? { cause: 'death_pressure' } : {}),
+        clearMarketReturn: true
+    }, timestamp, { extraStats: clanReturn ? { shopTown: null } : { partyMarketReturn: null, shopTown: null } });
 }
 
 module.exports = { MARKET_TRAVEL_MS, GATEKEEPER_SPOT_TRAVEL_MS, beginMarketTravel, finishMarketVisit, marketTownForSale: MarketTownPolicy.targetTownForSale };

@@ -79,9 +79,7 @@ function deliver(clanId, candidate, text) {
 function botSummary(candidate) {
     const source = candidate.source;
     const actor = source.actor;
-    const persona = source.persona || Persona.snapshot(candidate.id) || Persona.generate({
-        ...source, characterId: candidate.id, stats: source.coldLifeState?.stats || source.stats
-    });
+    const persona = source.persona || Persona.of(candidate.id);
     return {
         id: candidate.id, name: candidate.name, role: candidate.role,
         level: actor?.fetchLevel?.() || source.level,
@@ -141,7 +139,7 @@ async function reply(playerSession, clanId, text, state) {
             source: 'clan_chat'
         });
         response = actionResult.reply;
-        console.info(
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
             'BotParty :: clan join request player=%s speaker=%s party=%s result=%s applied=%s',
             playerSession.actor.fetchName?.() || 'unknown',
             candidate.name,
@@ -191,6 +189,11 @@ async function reply(playerSession, clanId, text, state) {
             });
         } finally { Budget.settle(reservation, result?.usage || result?.telemetry?.usage); }
         if (!result?.ok) return { ok: false, reason: result?.reason || 'provider_error' };
+        // The sender or speaker may have left while the model was busy; check before any action runs.
+        if (!isPlayer(playerSession, clanId)) return { ok: false, reason: 'membership_changed' };
+        if (!candidatesFor(clanId, playerSession).some(entry => entry.id === candidate.id)) {
+            return { ok: false, reason: 'speaker_unavailable' };
+        }
         let action = result.data?.action;
         if (isPlayerJoinRequest(text)) action = 'request_player_join_party';
         if (action === 'request_player_join_party') {

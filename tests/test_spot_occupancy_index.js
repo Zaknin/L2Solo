@@ -38,6 +38,7 @@ function randomState(characterId) {
     if (random() < 0.4) {
         stats.capacityBackoffs = [{ spotId: intentSpot, until: clock + Math.floor(random() * 3000) - 1000 }];
     }
+    if (random() < 0.3) stats.backgroundPartySpotId = pick(spotIds);
     return { characterId, activity, spotId: pick(spotIds), updatedAt: clock - Math.floor(random() * 50),
         party: random() < 0.3 ? { partyId: pick(['p1', 'p2', 'p3']) } : {}, stats };
 }
@@ -99,6 +100,22 @@ assertSame(lifeOccupancy(), SpotProfiles.occupancySnapshot(profiles, LifeState.a
 assert(!lifeOccupancy().a, 'no longer counted at the old destination');
 cache.clear();
 assertSame(SpotProfiles.indexedOccupancy(cache.occupancy, profiles), {}, 'cleared');
+
+const strictProfiles = [{ id: 's', capacity: 2 }, { id: 's', capacity: 7 }, { id: '7', capacity: 4 }, { id: 7, capacity: 11 }];
+const strictStates = [{ characterId: 81001, activity: 'hunting', spotId: 's' },
+    { characterId: 81002, activity: 'hunting', spotId: '7' }];
+assert.strictEqual(SpotProfiles.occupancySnapshot(strictProfiles, strictStates).s.capacity, 7,
+    'the full snapshot retains the last strict profile ID');
+assert.strictEqual(SpotProfiles.occupancySnapshot(strictProfiles, strictStates)['7'].capacity, 4,
+    'a later numeric profile does not replace a string-ID profile in a snapshot');
+assertSame(SpotProfiles.occupancySnapshot([{ id: 7, capacity: 11 }], [strictStates[1]]), {},
+    'a string state ID cannot join a numeric profile ID');
+strictProfiles[1].capacity = 8;
+assert.strictEqual(SpotProfiles.occupancySnapshot(strictProfiles, strictStates).s.capacity, 8,
+    'profile payload edits remain fresh through the borrowed strict view');
+strictProfiles.push({ id: 's', capacity: 9 });
+assert.strictEqual(SpotProfiles.occupancySnapshot(strictProfiles, strictStates).s.capacity, 9,
+    'worker-style catalog growth refreshes the strict ID view');
 
 Date.now = realNow;
 console.log('Spot occupancy index matches the full rebuild');

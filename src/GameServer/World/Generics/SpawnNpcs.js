@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Npc       = invoke('GameServer/Npc/Npc');
 const DataCache = invoke('GameServer/DataCache');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -5,8 +6,9 @@ const NpcVisibility = invoke('GameServer/World/NpcVisibility');
 const NpcAggro = invoke('GameServer/Npc/NpcAggro');
 const RaidBossState = invoke('GameServer/World/RaidBossState');
 const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
+const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 
-const VISIBILITY_RADIUS = 6000;
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 
 function distanceSquared(first, second) {
     const dx = first.fetchLocX() - second.fetchLocX();
@@ -16,7 +18,7 @@ function distanceSquared(first, second) {
 
 function notifyNearby(world, npc, response = ServerResponse) {
     if (!world?.user?.sessions || !npc) return;
-    const radiusSquared = VISIBILITY_RADIUS * VISIBILITY_RADIUS;
+    const radiusSquared = CLIENT_VISIBILITY_RADIUS * CLIENT_VISIBILITY_RADIUS;
     const packet = response.npcInfo(npc);
 
     world.user.sessions.forEach((session) => {
@@ -77,7 +79,10 @@ function randomCoords(definition) {
 
     const polygon = bounds.map((bound) => [bound.locX, bound.locY]);
     const pos = require('random-point-in-shape')(polygon);
-    return { locX: pos[0], locY: pos[1], locZ: bounds[0].maxZ, head: utils.randomNumber(65536) };
+    // A territory's maxZ is a layer hint, not the surface at every XY.
+    // Keep explicit datapack coordinates above unchanged (towns/dungeon floors).
+    const locZ = GeodataEngine.getHeight(pos[0], pos[1], bounds[0].maxZ);
+    return { locX: pos[0], locY: pos[1], locZ, head: utils.randomNumber(65536) };
 }
 
 function isRaidBossDefinition(definition) {
@@ -142,9 +147,8 @@ function spawnDefinition(world, definition, coords, { ignoreRaidBossState = fals
     }
 
     const npc = createNpc(world, definition.npc, coords, definition);
-    if (isRaidBossDefinition(definition)) {
-        MinionManager.attachBoss(world, npc);
-    }
+    // Raid bosses and ordinary group leaders bring their minion groups.
+    MinionManager.attachBoss(world, npc);
     if (isRaidBossDefinition(definition) && RaidBossState.get(raidBossId(definition))) {
         RaidBossState.markSpawned(raidBossId(definition));
     }
@@ -167,7 +171,7 @@ function spawnNpc(world, definition, options = {}) {
 
 function templateFor(selfId) {
     const id = Number(selfId);
-    const template = DataCache.npcs?.find((npc) => Number(npc.selfId) === id);
+    const template = ItemTemplateIndex.find(DataCache.npcs, id);
     return template ? structuredClone(template) : null;
 }
 
@@ -234,10 +238,15 @@ function despawnQuestNpc(world, npc, sourceSession = null) {
 
 function spawnNpcs() {
     this.npc.periodDefinitions = [];
+    // These templates are created only by the quest encounter handler. Keeping
+    // C4's old shared duel spawns would duplicate a player's personal opponent.
+    const exclusive = new Set(invoke('GameServer/Quest/QuestService').quests()
+        .flatMap(quest => quest.exclusiveSpawns || []));
     DataCache.npcSpawns.forEach((item) => {
         const bounds = item.bounds;
 
         item.spawns.forEach((spawn) => {
+            if (exclusive.has(Number(spawn.selfId))) return;
             DataCache.fetchNpcFromSelfId(spawn.selfId, (npc) => {
                 const definition = { npc, spawn: structuredClone(spawn), bounds: structuredClone(bounds) };
 

@@ -1,6 +1,10 @@
 const assert = require('assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -17,6 +21,25 @@ const saved = [], allSessions = [];
 const revengeMode = process.argv.includes('--revenge');
 const extensionMode = process.argv.includes('--extension');
 const Budget = require('../src/GameServer/Bot/Population/PvpEncounterBudget');
+// The PvP journal keeps its rows in memory until the database flush; the test
+// takes them itself so a flush or a reopen cannot carry them off.
+const Journal = require('../src/PvpJournal');
+const takeJournal = Journal.drain, journal = [];
+const journalRows = key => { journal.push(...takeJournal()); return journal.filter(r => r.conflictKey === key); };
+function assertClosingRow(key, encounter, outcome) {
+    const rows = journalRows(key);
+    assert.strictEqual(rows.length, 1, `one closing journal row per fight: ${JSON.stringify(rows)}`);
+    const [row] = rows;
+    assert.strictEqual(row.outcome, outcome);
+    assert.strictEqual(row.pvp, 1);
+    assert.strictEqual(row.durationMs, encounter.expiresAt - encounter.startedAt, 'the row carries the whole fight, not its last step');
+    assert.strictEqual(row.actions, encounter.actions, 'the row carries the actions of every step');
+    assert.strictEqual(row.losingSide, null, 'a fight that runs out of time has no losing side');
+    assert.strictEqual(row.kills, 0);
+    return row;
+}
+// The extension counters are developer diagnostics (off by default since c656911d).
+invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true;
 const telemetry = new (require('../src/GameServer/Bot/Population/ColdCompetitionActions').ColdCompetitionActions)({});
 const patch = (o, k, v) => { const old = o[k]; saved.push(() => { o[k] = old; }); o[k] = v; };
 let clock = Date.now(), failSpawn = 0, spawned = 0, expectedCount = 0;
@@ -29,7 +52,8 @@ function event(a, b, key = `handoff:${a}:${b}`) {
     const p = id => { const s = state(id), party = Parties.find(s.party?.partyId); return { id,
         partyId: party?.partyId || null, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1,
         revision: s.simulation.revision, memoryRevision: Memory.snapshot(id).revision }; };
-    return { key, at: clock, pressure: 3, spotId: 'test', npcId: 10, actor: p(a), peer: p(b), action: 'contest', pvpIntent: true };
+    // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
+    return { key, at: clock, pressure: 3, spotId: 'test', npcId: 10, actor: p(a), peer: p(b), action: 'contest', pvpIntent: true, willing: [true, true] };
 }
 async function party(ids) {
     const p = Parties.prepareCommit({ partyId: `enc-party-${ids[0]}`, leaderId: ids[0], memberIds: ids,
@@ -40,6 +64,7 @@ async function party(ids) {
 }
 async function main() {
     patch(Date, 'now', () => clock);
+    patch(Journal, 'drain', () => []);
     invoke('GameServer/DataCache').init(); DB.init();
     for (let id = 1; id <= 12; id++) {
         const stats = { classId: 0, equipmentPlan: { status: 'active', next: { npcId: 10, spotId: 'test' } },
@@ -100,12 +125,13 @@ async function main() {
     const started = await Conflict.apply({ ...base, event: { ...event(1, 3),
         ...(revengeMode ? { action: 'revenge', revengeRoll: 0, npcId: 0, pressure: 0 } : {}) } });
     assert(started.ok && started.encounter && started.pvp, JSON.stringify(started));
-    let e = started.encounter;
+    let e = started.encounter, steps = 1;
+    assert.strictEqual(journalRows(e.key).length, 0, 'an ongoing fight writes no journal row');
     assert.strictEqual(state(revengeMode ? 3 : 1).stats.coldPvp.flagUntil, 0, 'receiving an attack does not flag the victim');
     assert(state(revengeMode ? 1 : 3).stats.coldPvp.flagUntil > clock, 'the initiator flags on the first accepted hostile action');
     clock += 1000;
     const secondStep = await Conflict.apply({ ...base, event: event(1, 3, e.key), resume: e });
-    assert(secondStep.encounter); e = secondStep.encounter;
+    assert(secondStep.encounter); e = secondStep.encounter; steps++;
     if (extensionMode) {
         const deadline = e.expiresAt;
         while (clock < e.startedAt + 26000) {
@@ -113,7 +139,7 @@ async function main() {
             const step = await Conflict.apply({ ...base, event: event(1, 3, e.key), resume: e });
             assert(step.ok && step.encounter, JSON.stringify(step));
             telemetry.recordPvpStep(step);
-            e = step.encounter;
+            e = step.encounter; steps++;
         }
         assert.strictEqual(e.expiresAt, deadline + 15000, 'real ongoing attacks extend the persisted encounter');
         assert.strictEqual(e.extensions, 1);
@@ -138,10 +164,14 @@ async function main() {
         const completions = [];
         await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => completions.push(r) });
         assert.strictEqual(completions.length, 1, 'expiry during hot-to-cold handoff is counted');
+        const row = assertClosingRow(e.key, e, 'pvp_expired');
+        assert.strictEqual(row.sideSizes, '2:2');
+        assert.strictEqual(row.matchup, 'party_vs_party');
         assert([1,2,3,4].every(id => !state(id).stats.pvpEncounter && state(id).stats.coldCompetition.outcome === 'pvp_expired'));
         assert.strictEqual(Parties.find('enc-party-1').stats.coldCompetition.outcome, 'pvp_expired');
         await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => completions.push(r) });
         assert.strictEqual(completions.length, 1);
+        assert.strictEqual(journalRows(e.key).length, 1, 'cleanup cannot journal the same fight again');
         console.log('Expiry during hot-to-cold handoff finalized once');
         return;
     }
@@ -202,7 +232,7 @@ async function main() {
     assert.strictEqual(state(2).stats.supplyErrand.reason, 'pending_supplies', 'pending errands survive but do not veto an active fight');
     assert.strictEqual(JSON.stringify([1,2,3,4].map(n => Memory.snapshot(n))), initialMemory, 'cold continuation does not duplicate memory');
     assert(!(await Conflict.apply({ ...base, event: event(1, 3, e.key), resume: e })).ok, 'stale encounter sequence is rejected');
-    e = resumed.encounter;
+    e = resumed.encounter; steps++;
     if (extensionMode) {
         const originalStart = e.startedAt;
         while (clock < originalStart + Budget.MAX_MS - 2000) {
@@ -210,7 +240,7 @@ async function main() {
             const step = await Conflict.apply({ ...base, event: event(1, 3, e.key), resume: e });
             assert(step.ok && step.encounter, JSON.stringify(step));
             telemetry.recordPvpStep(step);
-            e = step.encounter;
+            e = step.encounter; steps++;
         }
         assert.strictEqual(e.expiresAt, originalStart + Budget.MAX_MS);
         assert.strictEqual(e.extensions, 2, 'ongoing attacks cannot extend beyond one minute');
@@ -229,6 +259,8 @@ async function main() {
     clock = e.expiresAt + 1000;
     const ended = await Conflict.apply({ ...base, event: event(1, 3, e.key), resume: e });
     assert(ended.ok && !ended.encounter, JSON.stringify(ended));
+    if (extensionMode) assert(steps >= 30, `a long fight: ${steps} steps`);
+    assert.strictEqual(assertClosingRow(e.key, e, 'pvp_disengaged').initiatorId, 1);
     assert.strictEqual(ended.combat.actions, 0, 'an expired encounter cannot produce catch-up damage');
     assert.strictEqual(state(1).stats.pvpEncounter, null);
     assert(!require('../src/GameServer/Bot/Population/ColdCompetitionWait').consume(state(1), 1000, clock + 1000).waiting);
@@ -244,17 +276,20 @@ async function main() {
     assert(running.encounter);
     Runtime.encounters.clear(); Runtime.register(running.encounter);
     clock += 1100;
-    const steps = [];
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => steps.push(r) });
-    assert.strictEqual(steps.length, 1, 'normal runtime timer advances an indexed encounter');
+    const ticks = [];
+    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
+    assert.strictEqual(ticks.length, 1, 'normal runtime timer advances an indexed encounter');
     assert(state(7).stats.pvpEncounter.sequence > running.encounter.sequence);
+    const lastStep = state(7).stats.pvpEncounter;
     clock = running.encounter.expiresAt + 2000;
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => steps.push(r) });
+    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
     assert.strictEqual(state(7).stats.pvpEncounter, null);
     assert.strictEqual(state(7).stats.coldCompetition.outcome, 'pvp_expired');
-    assert.strictEqual(steps.filter(r => !r.encounter).length, 1, 'expiry counts one completion');
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => steps.push(r) });
-    assert.strictEqual(steps.filter(r => !r.encounter).length, 1, 'cleanup cannot count the same encounter again');
+    assert.strictEqual(ticks.filter(r => !r.encounter).length, 1, 'expiry counts one completion');
+    assert.strictEqual(assertClosingRow(running.encounter.key, lastStep, 'pvp_expired').matchup, 'solo_vs_solo');
+    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
+    assert.strictEqual(ticks.filter(r => !r.encounter).length, 1, 'cleanup cannot count the same encounter again');
+    assert.strictEqual(journalRows(running.encounter.key).length, 1, 'cleanup cannot journal the same fight again');
     await party([9, 10]); await party([11, 12]);
     const split = await Conflict.apply({ ...base, event: event(9, 11) });
     assert(split.encounter);
@@ -264,16 +299,18 @@ async function main() {
     clock = split.encounter.expiresAt + 2000;
     const { grants } = await Owner.claimBatch([state(9)], { timestamp: clock, allowParty: true, allowLifecycle: true });
     assert.strictEqual(grants.length, 1);
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => steps.push(r) });
+    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
     assert(Runtime.encounters.has(split.encounter.key), 'cleanup waits for an outstanding writer lease');
-    assert.strictEqual(steps.filter(r => !r.encounter).length, 1, 'partial cleanup is not a completed encounter');
+    assert.strictEqual(ticks.filter(r => !r.encounter).length, 1, 'partial cleanup is not a completed encounter');
+    assert.strictEqual(journalRows(split.encounter.key).length, 0, 'partial cleanup writes no journal row');
     await Owner.releaseBatch(grants);
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => steps.push(r) });
+    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
     assert(!Runtime.encounters.has(split.encounter.key));
     assert([9, 10, 11, 12].every(id => !state(id).stats.pvpEncounter));
     assert.strictEqual(Parties.find('enc-party-9').stats.coldCompetition.outcome, 'pvp_expired');
     assert.strictEqual(Parties.find('enc-party-11').stats.coldCompetition.wait, null);
-    assert.strictEqual(steps.filter(r => !r.encounter).length, 2, 'mixed-state expiry counts once after all writes settle');
+    assert.strictEqual(ticks.filter(r => !r.encounter).length, 2, 'mixed-state expiry counts once after all writes settle');
+    assertClosingRow(split.encounter.key, split.encounter, 'pvp_expired');
     await DB.close(); DB.init();
     const closed = (await DB.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=9', []]))[0];
     assert.strictEqual(JSON.parse(closed.statsJson).coldCompetition.outcome, 'pvp_expired', 'final outcome survives SQLite reopen');

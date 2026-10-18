@@ -125,6 +125,10 @@ function receivedHit(session, actor, hit, options = {}) {
         EffectRestrictions.wakeOnDamage(actor, victimSession || session);
     }
     const hpBefore = actor.fetchHp();
+    if (Number(hit) > 0 && source && !source.fetchKind && !actor.fetchKind) {
+        const Knowledge = require('../../Social/PeopleKnowledge');
+        Knowledge.recordActor(actor, source); Knowledge.recordActor(source, actor);
+    }
     actor.setHp(Math.max(0, hpBefore - hpDamage)); // HP bar would disappear if less than zero
     invoke('GameServer/Social/CombatHelpMemory').recordDamage(source, actor, hpBefore - actor.fetchHp());
     actor.statusUpdateVitals(actor);
@@ -147,6 +151,16 @@ function receivedHit(session, actor, hit, options = {}) {
             const attackerSession = attacker.session || session;
             const Database = invoke('Database');
             const ServerResponse = invoke('GameServer/Network/Response');
+            const isBotSession = invoke('GameServer/World/World').isBotSession;
+            const isPlayer = (character) => !!character.session && !isBotSession(character.session);
+            invoke('PvpJournal').hotKill({
+                attacker,
+                victim,
+                pk: !(victim.fetchPvpFlag() === 1 || victim.fetchKarma() > 0),
+                attackerKarma: attacker.fetchKarma(),
+                playerInvolved: isPlayer(attacker) || isPlayer(victim),
+                at: Date.now()
+            });
 
             if (victim.fetchPvpFlag() === 1 || victim.fetchKarma() > 0) {
                 // Legitimate PvP or PK-hunting kill

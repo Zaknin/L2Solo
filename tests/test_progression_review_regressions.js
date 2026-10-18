@@ -1,14 +1,17 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const { createRequire } = require('node:module');
+require('./helpers/databaseIsolation');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache');
 Data.init();
 const Cap = invoke('GameServer/Progression/ProgressionCap');
 function load(file, dependencies, extra = '', globals = {}) {
     const box = { exports: {} };
-    vm.runInNewContext(fs.readFileSync(require.resolve('../src/' + file), 'utf8') + extra, {
-        module: box, invoke: name => dependencies[name] || {}, require,
+    const filename = require.resolve('../src/' + file);
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8') + extra, {
+        module: box, invoke: name => dependencies[name] || {}, require: createRequire(filename),
         path: { actor: 'generics' }, options, utils: { infoWarn() {} }, ...globals
     });
     return box.exports;
@@ -99,7 +102,7 @@ function load(file, dependencies, extra = '', globals = {}) {
             updateCharacterExperience: async (_id, l, e, sp) => { Object.assign(character, { level: l, exp: e, sp }); events.push('saved'); }
         },
         'GameServer/Progression/ProgressionCap': Cap,
-        'GameServer/Bot/Economy/CraftShopService': { CraftStations: [] },
+        'GameServer/Bot/Economy/CraftShopService': { CraftStations: [], STATION_CRAFTER: { classId: 57, level: 70 } },
         'GameServer/DataCache': Data
     }, `\nprofileForIndex = () => ({ level: 40 });\nensureBaseLoadout = async (_id, _class, _adena, level) => { probe(level); };\nmodule.exports = ensureCharacter;`, {
         require: () => ({}), probe: l => { assert.equal(l, 40); assert.equal(character.level, 40); events.push('loadout'); }

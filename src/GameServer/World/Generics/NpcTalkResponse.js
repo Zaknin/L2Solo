@@ -2,8 +2,9 @@ const ServerResponse = invoke('GameServer/Network/Response');
 
 function npcTalkResponse(session, data) {
     let parts = data.link.split(' ') ?? [];
-    console.log("npcTalkResponse link:", data.link, "parts:", parts);
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.log("npcTalkResponse link:", data.link, "parts:", parts);
     if (parts.length === 0 || !parts[0]) return;
+    if (!['multisell', 'exchange-shop'].includes(parts[0])) session.activeMultiSell = null;
 
     if (parts[0] === 'quest') {
         const QuestService = invoke('GameServer/Quest/QuestService');
@@ -57,7 +58,11 @@ function npcTalkResponse(session, data) {
 
     try {
         const handler = invoke(`GameServer/World/Generics/NpcBypasses/${handlerName}`);
-        handler(session, parts);
+        const result = handler(session, parts);
+        // Async bypasses (BotFriends) fail the same way as sync ones, not as an unhandled rejection.
+        if (result && typeof result.catch === 'function') {
+            result.catch((err) => utils.infoWarn('GameServer', 'Unhandled bypass command: %s, error: %s', parts[0], err?.message));
+        }
     } catch (err) {
         utils.infoWarn('GameServer', 'Unhandled bypass command: %s, error: %s', parts[0], err.message);
     }

@@ -1,9 +1,11 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
 require('../src/Global');
+invoke('GameServer/DataCache').init();
 
 const rootDir = path.resolve(__dirname, '..');
 const databasePath = path.join(rootDir, 'tmp', 'test-clan-action-queue.sqlite');
@@ -115,6 +117,7 @@ async function verifyQueueStats(clanId) {
 async function main() {
     seedDatabase();
     options.default.Database.path = path.relative(rootDir, databasePath);
+    options.default.Database.historyPath = `${databasePath}.history`;
     Database.init();
     try {
         const created = await Database.createAutonomousClan({
@@ -178,7 +181,7 @@ async function main() {
             result: oversizedResult
         });
         assert.strictEqual(durableResolution.ok, true);
-        const [durableAction] = await Database.execute([
+        const [durableAction] = await Database.readHistory([
             'SELECT resultJson FROM clan_actions WHERE id = ?',
             [durableFixture.actionId]
         ]);
@@ -189,7 +192,7 @@ async function main() {
             'large runtime arrays retain useful cardinality without member snapshots');
         assert.strictEqual(durableResult.goal.target.itemId, 1419,
             'the compact result must retain the selected progression target');
-        const [durableEvent] = await Database.execute([
+        const [durableEvent] = await Database.readHistory([
             `SELECT payloadJson FROM clan_goal_events
              WHERE clanId = ? AND eventType = 'action_succeeded'
              ORDER BY id DESC LIMIT 1`,
@@ -214,7 +217,7 @@ async function main() {
             status: 'succeeded',
             result: flatOversizedResult
         });
-        const [flatBoundaryAction] = await Database.execute([
+        const [flatBoundaryAction] = await Database.readHistory([
             'SELECT resultJson FROM clan_actions WHERE id = ?',
             [flatBoundaryFixture.actionId]
         ]);
@@ -238,7 +241,38 @@ async function main() {
         });
         assert.strictEqual(compatibilityRelease.ok, true);
 
-        await ClanActionService.bootstrap();
+        // A failed first bootstrap must leave recovery to a later pass, not
+        // mark it done for the rest of the process, nor stop the queued actions.
+        const originalEnsurePlayerManaged = Database.ensurePlayerManagedClans;
+        const originalClaim = Database.claimClanAction;
+        const nativeNow = Date.now;
+        let bootstrapReads = 0;
+        let claimsDuringFailedBootstrap = 0;
+        Database.ensurePlayerManagedClans = async () => { bootstrapReads += 1; throw new Error('injected bootstrap failure'); };
+        Database.claimClanAction = async () => { claimsDuringFailedBootstrap += 1; return { action: null }; };
+        try {
+            const failedBootstrapBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
+            assert.strictEqual(failedBootstrapBatch.bootstrap.error, 'injected bootstrap failure');
+            assert.strictEqual(claimsDuringFailedBootstrap, 1, 'a failed bootstrap must not stop the action queue');
+            // A lasting fault is retried once per normal clan interval, not on
+            // every continuation pass.
+            const heldBatch = await ClanActionService.resolveBatch({ limit: 1, budgetMs: 2000 });
+            assert.strictEqual(bootstrapReads, 1, 'a pass right after the failure must not rerun the bootstrap');
+            assert.strictEqual(heldBatch.bootstrap.error, undefined);
+            assert.strictEqual(claimsDuringFailedBootstrap, 2);
+            const failedAt = nativeNow();
+            Date.now = () => failedAt + ClanActionService.config.resolveIntervalMs;
+            await assert.rejects(ClanActionService.bootstrap(), /injected bootstrap failure/);
+            assert.strictEqual(bootstrapReads, 2, 'a pass after the retry time must rerun the bootstrap');
+            Date.now = () => failedAt + 2 * ClanActionService.config.resolveIntervalMs + 1;
+            Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
+            const retriedBootstrap = await ClanActionService.bootstrap();
+            assert(Object.hasOwn(retriedBootstrap, 'playerManaged'), 'the retried bootstrap must run in full');
+        } finally {
+            Date.now = nativeNow;
+            Database.ensurePlayerManagedClans = originalEnsurePlayerManaged;
+            Database.claimClanAction = originalClaim;
+        }
         const originalClaimClanAction = Database.claimClanAction;
         Database.claimClanAction = async (options) => {
             const claim = await originalClaimClanAction.call(Database, options);
@@ -278,7 +312,13 @@ async function main() {
         } finally {
             Database.claimClanAction = originalClaimClanAction;
         }
-        assert.strictEqual(first.claimed >= 2, true, 'planner and first executable action must be claimed');
+        const firstActions = (await Database.fetchClanActions({ clanId: created.clanId, limit: 20 })).map(action => {
+            const result = JSON.parse(action.resultJson || '{}');
+            return { type: action.actionType, status: action.status, reason: result.reason || result.code,
+                goal: result.goal && { type: result.goal.type, status: result.goal.status, target: result.goal.target } };
+        });
+        assert.strictEqual(first.claimed >= 2, true,
+            `planner and first executable action must be claimed: ${JSON.stringify({ first, actions: firstActions })}`);
         assert.strictEqual(first.succeeded >= 2, true, 'claimed actions must resolve');
         assert.strictEqual(first.resolved, 2, 'each admitted claim must reach a terminal state');
         assert.strictEqual(first.leftRunning, 0);
@@ -292,6 +332,11 @@ async function main() {
             [created.clanId]
         ]);
 
+        const waiting = await Database.fetchClanActions({ clanId: created.clanId, limit: 20 });
+        assert(!waiting.some(action => action.actionType === 'contribution' && action.status === 'pending'),
+            'unchanged autonomous contributions wait for a wealth event');
+        await Database.enqueueClanAction({ clanId: created.clanId, actionType: 'goal_plan',
+            actionKey: `test:${created.clanId}:recovery-fixture`, priority: 75, payload: { reason: 'recovery_fixture' } });
         const actionsAfterFirst = await Database.fetchClanActions({ clanId: created.clanId, limit: 20 });
         assert(actionsAfterFirst.some((action) => action.actionType === 'contribution' && action.status === 'succeeded'));
         assert(actionsAfterFirst.some((action) => action.status === 'pending' || action.status === 'running'));
@@ -430,7 +475,6 @@ async function main() {
         const [claimedParty] = await Database.claimClanActions({ limit: 1 });
         assert.strictEqual(claimedParty.id, transientPartyAction.actionId);
         const actionCountBeforeDeferral = (await Database.fetchClanActions({ clanId: replanCreated.clanId, limit: 20 })).length;
-        const deferStartedAt = Date.now();
         const originalResolveClanParty = ClanPartyService.resolveClan;
         let deferredParty;
         try {
@@ -443,21 +487,17 @@ async function main() {
         } finally {
             ClanPartyService.resolveClan = originalResolveClanParty;
         }
-        assert.strictEqual(deferredParty.deferred, true, 'party readiness must defer the durable action instead of failing it');
-        assert.strictEqual(deferredParty.status, 'pending');
+        assert.strictEqual(deferredParty.deferred, undefined, 'autonomous readiness waits for an addressed member event');
+        assert.strictEqual(deferredParty.status, 'succeeded');
         const actionsAfterDeferral = await Database.fetchClanActions({ clanId: replanCreated.clanId, limit: 20 });
         assert.strictEqual(actionsAfterDeferral.length, actionCountBeforeDeferral, 'transient readiness must not append another action row');
         const samePartyAction = actionsAfterDeferral.find((action) => Number(action.id) === Number(claimedParty.id));
-        assert.strictEqual(samePartyAction.status, 'pending');
-        assert(Number(samePartyAction.availableAt) >= deferStartedAt + ClanActionService.config.actionRetryMs,
-            'the same party action must retain the configured retry delay');
+        assert.strictEqual(samePartyAction.status, 'succeeded');
         assert.strictEqual(
             actionsAfterDeferral.some((action) => action.actionType === 'party' && action.status === 'failed'),
             false,
             'party_not_ready is a transient state, not a terminal failure'
         );
-        assert(ClanActionService.metrics().deferred >= 1, 'transient action deferrals must be observable');
-        assert(ClanActionService.metrics().stages.defer.count >= 1, 'defer settlement latency must be observable');
         assert(ClanActionService.metrics().stages['execute:party'].count >= 1,
             'party execution latency must remain separately observable');
         const retryPlan = await Database.enqueueClanAction({
@@ -476,6 +516,45 @@ async function main() {
         } finally { goalService.resolveClan = originalResolveGoal; }
         assert.strictEqual(deferredWorkerPlan.deferred, true, 'worker failure/staleness must retry the same durable action');
         assert.strictEqual(deferredWorkerPlan.status, 'pending');
+        assert(ClanActionService.metrics().deferred >= 1, 'operational worker deferrals must be observable');
+        assert(ClanActionService.metrics().stages.defer.count >= 1, 'defer settlement latency must be observable');
+
+        // A follow-up failure after the settle must not report the settled
+        // action as failed.
+        const followUpAction = await Database.enqueueClanAction({
+            clanId: replanCreated.clanId,
+            actionKey: `test:${replanCreated.clanId}:follow-up-failure`,
+            actionType: 'party', priority: 1000, payload: { reason: 'test_follow_up_failure' }
+        });
+        const [claimedFollowUp] = await Database.claimClanActions({ limit: 1 });
+        assert.strictEqual(claimedFollowUp.id, followUpAction.actionId);
+        const originalResolveClanAction = Database.resolveClanAction;
+        const originalProjection = goalService.clanProjectionById;
+        let settled = false;
+        let followUpResult;
+        try {
+            ClanPartyService.resolveClan = async () => ({ ok: true });
+            Database.resolveClanAction = async (...args) => {
+                const resolved = await originalResolveClanAction.apply(Database, args);
+                settled = true;
+                return resolved;
+            };
+            goalService.clanProjectionById = async (...args) => {
+                if (settled) throw new Error('injected follow-up failure');
+                return originalProjection.apply(goalService, args);
+            };
+            followUpResult = await ClanActionService.resolveAction(claimedFollowUp);
+        } finally {
+            ClanPartyService.resolveClan = originalResolveClanParty;
+            Database.resolveClanAction = originalResolveClanAction;
+            goalService.clanProjectionById = originalProjection;
+        }
+        const storedFollowUp = (await Database.fetchClanActions({ clanId: replanCreated.clanId, limit: 30 }))
+            .find((action) => Number(action.id) === Number(claimedFollowUp.id));
+        assert.strictEqual(storedFollowUp.status, 'succeeded');
+        assert.notStrictEqual(followUpResult.ok, false, `a settled action must keep its status: ${JSON.stringify(followUpResult)}`);
+        assert.strictEqual(followUpResult.status, 'succeeded');
+        assert.strictEqual(followUpResult.followUpError, 'injected follow-up failure');
         assert.strictEqual(
             ClanActionService.reviewDelayFor('goal_plan', { type: 'equipment' }, { changed: false }),
             ClanActionService.config.equipmentReviewMs,

@@ -1,6 +1,10 @@
 const assert = require('assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -33,7 +37,8 @@ function event(a, b, key = `cold-pvp:${a}:${b}`) {
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
             partyId: p?.partyId, partyUpdatedAt: p?.updatedAt, size: p?.memberIds.length || 1 };
     };
-    return { key, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest', pvpIntent: true,
+    // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
+    return { key, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest', pvpIntent: true, willing: [true, true],
         actor: participant(a), peer: participant(b) };
 }
 async function party(members) {
@@ -97,12 +102,17 @@ async function main() {
     function firstModeAction(fighter, inParty = false) {
         const opponent = { ...structuredClone(fighter), characterId: 95 };
         const companion = { ...structuredClone(fighter), characterId: 90 };
+        // A caster at its last MP is clearly weaker at the U26 start gate; this checks
+        // its first action, so the gate's rare exception lets it open (roll under 0.02).
+        const Tendency = require('../src/GameServer/Bot/AI/TendencyRoll');
+        Tendency.roll = () => 0.01;
         const result = Pvp.resolve({
             sides: [{ principal: fighter, members: inParty ? [fighter, companion] : [fighter] },
                 { principal: opponent, members: [opponent] }],
             roles: new Map([[90, 'support']]), timestamp: at, rng: seeded('class-mode'), personaFor,
             openingSide: 0, step: { until: at + 1, expiresAt: at + 30000, maxActions: 1 }
         });
+        Tendency.roll = () => 0.49;
         assert(result.started && result.actions === 1, 'resolve exactly one hostile action');
         return result.fighters.find(f => f.id === fighter.characterId);
     }
@@ -294,9 +304,29 @@ async function main() {
         event: { ...revengeEvent(29, 32), at: at + 1000 }, resume: JSON.parse(JSON.stringify(initial.encounter)), incrementalPvp: true });
     assert(continued.ok, JSON.stringify(continued));
     assert(continued.encounter?.reason === 'revenge' || !continued.encounter);
+    // The fight writes one journal row, when it ends: its whole length and every step's actions.
+    const PvpJournal = require('../src/PvpJournal');
+    const fightRows = () => PvpJournal.drain().filter(row => row.conflictKey === 'revenge-test:29:32');
+    let resumed = initial.encounter, last = continued, stepAt = at + 1000;
+    while (last.encounter) {
+        assert.strictEqual(fightRows().length, 0, 'a fight still going writes no journal row');
+        resumed = last.encounter; stepAt += 1000;
+        const t = stepAt;
+        last = await Conflict.apply({ ...base, now: () => t, event: { ...revengeEvent(29, 32), at: t },
+            resume: JSON.parse(JSON.stringify(resumed)), incrementalPvp: true });
+        assert(last.ok && stepAt < at + 120000, JSON.stringify(last));
+    }
+    const [fightRow, ...extraRows] = fightRows();
+    assert(fightRow && !extraRows.length, 'one journal row per fight');
+    assert.strictEqual(fightRow.action, 'revenge');
+    assert.strictEqual(fightRow.outcome, last.outcome);
+    assert.strictEqual(fightRow.actions, resumed.actions + last.combat.actions);
+    assert.strictEqual(fightRow.durationMs, Math.min(Math.max(resumed.stepAt, stepAt - 1000) + last.combat.durationMs,
+        resumed.expiresAt) - resumed.startedAt, 'the row spans the fight from its first step to its end');
 
     // A real accepted cold heal commits the grievance with its HP/MP outcome.
     await party([35, 36]);
+    for (const skill of healer.stats.coldCombat.skills) await Database.setSkill({ ...skill, name: skill.name || '' }, 35);
     for (const id of [35, 36]) {
         const s = state(id);
         await Life.upsertState({ ...s, vitals: { ...s.vitals, hp: id === 36 ? 350 : 1000 },

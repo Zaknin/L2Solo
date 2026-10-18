@@ -36,7 +36,12 @@ function findCompanion(session, botName) {
     )) || null;
 }
 
+// Returns false when the companion is not held: one on a hidden supply errand
+// keeps its errand (a Hold would store the hidden town position as the anchor
+// and the errand's return would never clear it), as at summonNear.
 function stayHere(targetSession) {
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
+    if (SupplyErrand.ownsCompanion(targetSession)) return false;
     const bot = targetSession.actor;
     targetSession.botStay = true;
     targetSession.stayLocation = {
@@ -44,6 +49,7 @@ function stayHere(targetSession) {
         locY: bot.fetchLocY(),
         locZ: bot.fetchLocZ()
     };
+    return true;
 }
 
 function followLeader(targetSession) {
@@ -87,7 +93,12 @@ function clearAssignedPuller(session, { nextPullMode = 'auto' } = {}) {
     return true;
 }
 
+// Returns false when the companion is not moved: one on a hidden supply
+// errand stays on it (the errand's return places it beside the leader), as at
+// the leader's teleport (TeleportTo.syncPartyCompanions).
 function summonNear(session, targetSession, offset = 60) {
+    const SupplyErrand = invoke('GameServer/Bot/AI/BotSupplyErrand');
+    if (SupplyErrand.ownsCompanion(targetSession)) return false;
     const actor = session.actor;
     const bot = targetSession.actor;
     const loc = {
@@ -99,6 +110,7 @@ function summonNear(session, targetSession, offset = 60) {
     if (targetSession.botStay) {
         targetSession.stayLocation = loc;
     }
+    return true;
 }
 
 function setMovementMode(session, mode) {
@@ -159,8 +171,9 @@ function setMemberPuller(session, targetSession) {
 }
 
 function regroup(session) {
-    companionSessions(session).forEach((memberSession, index) => {
-        summonNear(session, memberSession, 60 + (index * 20));
+    let slot = 0;
+    companionSessions(session).forEach((memberSession) => {
+        if (summonNear(session, memberSession, 60 + (slot * 20))) slot += 1;
     });
 }
 
@@ -173,12 +186,13 @@ function handleMemberCommand(session, subCommand, botName) {
         followLeader(targetSession);
         BotManager.botSay(targetSession, "Following you again!");
     } else if (subCommand === 'stay') {
+        if (invoke('GameServer/Bot/AI/BotSupplyErrand').ownsCompanion(targetSession)) return;
         if (isAssignedPuller(targetSession)) clearAssignedPuller(session);
-        stayHere(targetSession);
-        BotManager.botSay(targetSession, "Holding this position.");
+        if (stayHere(targetSession)) BotManager.botSay(targetSession, "Holding this position.");
     } else if (subCommand === 'summon') {
-        summonNear(session, targetSession);
-        BotManager.botSay(targetSession, "Summoned to your side!");
+        if (summonNear(session, targetSession)) {
+            BotManager.botSay(targetSession, "Summoned to your side!");
+        }
     } else if (subCommand === 'dismiss') {
         PartyCompanionService.detach(session, targetSession, {
             event: 'party_kicked',

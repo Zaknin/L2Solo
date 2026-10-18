@@ -13,6 +13,10 @@ async function recruit({ participants, event, parties, life, memory, composition
         || forecast.size !== party.memberIds.length) return { rejected: 'party_changed' };
     const objective = party.stats?.objective;
     if (objective?.clanGoalKey || objective?.clanOperation || participants.some(clanReserved)) return { rejected: 'clan_objective' };
+    // Material hunters join through background recruitment, which merges their
+    // needs and obtains worker consent for the complete prospective roster.
+    const Material = require('./CraftMaterialParty');
+    if (Material.isObjective(objective) || Material.requestOf(solo)) return { rejected: 'material_party_requires_review' };
     const target = require('./PartyHuntingTarget').competitionNpcId(party, life.cachedState(party.leaderId));
     if (target !== event.npcId) return { rejected: 'party_target_changed' };
     const limits = limitsFor(objective);

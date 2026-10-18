@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Rules = require('./PetRules');
 const { gear } = require('../../../data/Pets/c4-gear.json');
 const Database = invoke('Database');
@@ -49,6 +50,7 @@ async function apply(pet, command) {
     await runtime().persist(pet);
     const result = await Database.transferPetInventory(actor.fetchId(), pet.fetchPetControlItemObjectId(), command);
     pet.petData.inventory = result.inventory;
+    if (result.currentFeed !== undefined) pet.setCurrentFeed(result.currentFeed);
     const row = result.playerItem;
     if (row) {
         const existing = actor.backpack.fetchItemRaw(row.id);
@@ -79,7 +81,7 @@ function transfer(session, itemId, amount, direction) {
 function foodValue(itemId) {
     const itemSkill = invoke('GameServer/Items/C4ItemSkills').resolve(itemId);
     if (!itemSkill) return 0;
-    const template = DataCache.skills.find(skill => skill.selfId === itemSkill.skillId);
+    const template = ItemTemplateIndex.findStrictRequired(DataCache.skills, itemSkill.skillId);
     if (!template) return 0;
     const Skill = invoke('GameServer/Model/Skill');
     return Number(new Skill({ ...utils.crushOb(template), ...template.levels[0] }).fetchSemantic().feed) || 0;
@@ -87,9 +89,8 @@ function foodValue(itemId) {
 async function consumeFood(pet, item) {
     const feed = foodValue(item.fetchSelfId());
     if (feed <= 0) throw new Error('Unknown pet food');
-    await apply(pet, { direction: 'consume', itemId: item.fetchId(), amount: 1 });
-    pet.setCurrentFeed(pet.fetchCurrentFeed() + feed);
-    await runtime().persist(pet);
+    // The transfer writes the feed with the food; apply sets it in memory.
+    await apply(pet, { direction: 'consume', itemId: item.fetchId(), amount: 1, feed });
     pet.ownerSession.dataSendToMe?.(Response.consoleText(1527, [{ kind: 3, value: item.fetchSelfId() }]));
     runtime().publish(pet);
 }

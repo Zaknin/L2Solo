@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 // Only active encounters are indexed. No per-tick scan of the population.
 const encounters = new Map();
 const pending = new Set();
@@ -35,13 +36,24 @@ async function finish(e, actions, reason = 'pvp_interrupted') {
     if (result.complete) {
         encounters.delete(e.key);
         actions.recordPvpStep({ ok: true, key: e.key, encounter: null, outcome: reason });
+        // The fight's journal row: it ends here without a losing side or a kill
+        // (a kill ends it in a step), at its deadline or earlier.
+        const at = Date.now();
+        require('../../../PvpJournal').coldConflict({ key: e.key, revenge: e.reason === 'revenge',
+            reason: e.reason === 'revenge' ? 'revenge' : 'contest', spotId: e.spotId, npcId: e.npcId,
+            partyIds: e.sides.map(s => s.partyId), sideSizes: e.sides.map(s => s.memberIds.length),
+            outcome: reason, fought: true, principals: e.sides.map(s => actions.life.cachedState(s.principalId) || { characterId: s.principalId }),
+            durationMs: Math.min(at, e.expiresAt) - e.startedAt, actions: e.actions, personaFor: actions.personaFor, at });
+        const changedSessions = [];
         for (const session of sessions(e).filter(Boolean)) {
             if (session.pvpEncounter?.key === e.key) delete session.pvpEncounter;
             if (session.pvpRevenge?.reason === 'continued_encounter') delete session.pvpRevenge;
             if (session.coldLifeState?.stats?.pvpEncounter?.key === e.key) {
                 session.coldLifeState = actions.life.cachedState(Number(session.actor.fetchId()));
+                changedSessions.push(session);
             }
         }
+        refreshPartyMemberships(changedSessions, invoke);
     }
 }
 function tick(actions) {
@@ -70,7 +82,7 @@ function tick(actions) {
                         partyUpdatedAt: p?.updatedAt };
                 };
                 const event = { key: e.key, at, pressure: 3, spotId: e.spotId, npcId: e.npcId,
-                    actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true };
+                    actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true, willing: e.willing };
                 const result = await require('./ColdPartyConflict').apply({ ...actions, event, resume: e,
                     incrementalPvp: true, onEncounter: register, waitMs: 15000, cooldownMs: 600000,
                     rng: require('./ColdCompetitionMonitor').seeded(`${e.key}:${e.sequence}`) });

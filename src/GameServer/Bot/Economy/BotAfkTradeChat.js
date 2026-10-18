@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Negotiation = invoke('GameServer/Bot/Economy/BotNegotiationService');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
@@ -131,7 +132,7 @@ function intentForAction(state, playerSession, action, data = {}) {
 }
 
 function buyPriceLimit(line) {
-    const template = DataCache.items.find((item) => Number(item.selfId) === Number(line.selfId));
+    const template = ItemTemplateIndex.findRequired(DataCache.items, line.selfId);
     const reference = BotMarketPricing.referencePrice({
         selfId: line.selfId, basePrice: Number(template?.template?.price || line.price),
         enchant: line.enchant
@@ -218,8 +219,8 @@ async function handle(playerSession, state, intent) {
         const lots = invoke('GameServer/Bot/Economy/BotAfkMarketService');
         if (line && (!Number.isSafeInteger(unitPrice)
             || !lots.viableSellLine({ ...line, count: quantity, price: unitPrice }))) {
-            return { handled: true, ok: false, reason: 'resource_lot_too_small', action: 'shop_quote',
-                reply: `I list materials in lots worth at least ${lots.minimumResourceLotValue()} Adena. Offer a larger batch.` };
+            return { handled: true, ok: false, reason: 'invalid_shop_offer', action: 'shop_quote',
+                reply: 'Offer a positive whole quantity and a whole Adena price per item.' };
         }
     }
     let result;

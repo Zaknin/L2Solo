@@ -1,11 +1,22 @@
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Policy = require('./Policy');
+const ReviewEvents = require('../Clan/ClanReviewEvents');
 const HOUR = 60 * 60 * 1000;
 let halls = [],
     timer = null,
     running = false,
-    clanOffset = 0;
+    unsubscribe = null;
+const financeDirty = new Set();
+const duesClans = new Set();
+let nextDuesAt = 0;
 // Hourly dues pass per clan: when it is due and how far it got (4 members per tick).
 const duesPasses = new Map();
+const financeSamples = [];
+function financeSummary() {
+    if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
+    const sorted = [...financeSamples].sort((a, b) => a - b);
+    return { samples: sorted.length, p95Ms: sorted.length ? sorted[Math.ceil(sorted.length * 0.95) - 1] : 0 };
+}
 function applyRows(rows) {
     halls = rows.map((h) => ({ ...Policy.definition(h.id), ...h, functions: JSON.parse(h.functionsJson || '{}') }));
 }
@@ -17,7 +28,12 @@ function forActor(actor) {
 }
 function refresh(rows) {
     const before = new Map(halls.map((h) => [h.id, h.ownerId]));
+    const rounds = new Map(halls.map(h => [h.id, h.round]));
     applyRows(rows);
+    // A real auction round changes the offers available to known clans.
+    if (halls.some(h => rounds.has(h.id) && rounds.get(h.id) !== h.round)) {
+        for (const id of duesClans) ReviewEvents.changed(id, 'auction_round');
+    }
     const World = invoke('GameServer/World/World'),
         response = invoke('GameServer/Network/Response');
     for (const h of halls) {
@@ -78,7 +94,7 @@ async function settleDues(db, id, level) {
             clanId: id,
             characterId,
             rate: DuesPolicy.memberRate(clanRate, traits, state),
-            investFraction: DuesPolicy.investFraction(traits)
+            investFraction: DuesPolicy.investFraction(traits, state)
         });
         life.acceptNewerLifecycleRow(result.row);
     }
@@ -104,22 +120,31 @@ async function tick() {
         const db = invoke('Database');
         refresh(await db.tickClanHalls());
         if (!invoke('GameServer/Clan/ClanSimulationConfig').enabled) return;
-        const clans = await db.execute(
-            [
-                `SELECT c.id, c.level FROM clans c JOIN clan_simulation_clans s ON s.clanId=c.id
-            WHERE s.mode='autonomous' ORDER BY c.id`,
-                []
-            ],
-            'clan-hall:bot-clans'
-        );
         const deadline = Date.now() + 40;
-        let count = 0;
-        while (clans.length && count < clans.length && Date.now() < deadline) {
-            const { id, level } = clans[clanOffset % clans.length];
-            clanOffset++;
-            count++;
-            if (Number(level) >= 2) await db.planClanHallFinance(id);
-            await settleDues(db, id, Number(level));
+        const financeStarted = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
+        try {
+            await db.planClanHallFinanceBatch([...financeDirty].slice(0, 4), {
+                deadline,
+                before: id => { financeDirty.delete(id); },
+                settled: (id, result) => { if (result?.staleFinance) financeDirty.add(id); },
+                failed: id => { financeDirty.add(id); }
+            });
+        } finally {
+            if (DiagnosticConfig.developerDiagnostics) financeSamples.push(performance.now() - financeStarted);
+            if (financeSamples.length > 128) financeSamples.shift();
+        }
+        // Hourly dues are a real payment deadline, independent of planning.
+        if (Date.now() >= nextDuesAt) {
+            for (const id of duesClans) {
+                if (Date.now() >= deadline) break;
+                if (Date.now() < (duesPasses.get(id)?.nextAt || 0)) continue;
+                const [clan] = await db.execute([`SELECT c.level FROM clans c
+                    JOIN clan_simulation_clans s ON s.clanId=c.id WHERE c.id=? AND s.mode='autonomous'`, [id]], 'clan-hall:due-clan');
+                if (!clan) { duesClans.delete(id); duesPasses.delete(id); continue; }
+                await settleDues(db, id, Number(clan.level));
+            }
+            nextDuesAt = Infinity;
+            for (const id of duesClans) nextDuesAt = Math.min(nextDuesAt, duesPasses.get(id)?.nextAt || 0);
         }
         refresh(await db.fetchClanHallAuctions());
     } finally {
@@ -132,10 +157,18 @@ module.exports = {
     owned,
     forActor,
     tick,
+    financeSummary,
     all: () => halls,
     async start() {
         this.stop();
         applyRows(await invoke('Database').initClanHalls());
+        const clans = await invoke('Database').execute([`SELECT clanId FROM clan_simulation_clans
+            WHERE mode='autonomous' ORDER BY clanId`, []], 'clan-hall:initial-clans');
+        for (const { clanId } of clans) { duesClans.add(clanId); financeDirty.add(clanId); }
+        unsubscribe = ReviewEvents.subscribe(id => {
+            financeDirty.add(id);
+            if (!duesClans.has(id)) { duesClans.add(id); nextDuesAt = 0; }
+        });
         require('./Doors').start(invoke('GameServer/World/World'));
         timer = setInterval(
             () => tick().catch((e) => utils.infoWarn('ClanHall', 'finance tick: %s', e.message)),
@@ -146,6 +179,9 @@ module.exports = {
     stop() {
         if (timer) clearInterval(timer);
         timer = null;
+        unsubscribe?.(); unsubscribe = null;
+        financeDirty.clear(); duesClans.clear(); duesPasses.clear(); nextDuesAt = 0;
+        financeSamples.length = 0;
     },
     async refresh() {
         refresh(await invoke('Database').fetchClanHallAuctions());

@@ -1,9 +1,15 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
+const { fnv1a32 } = require('../Fnv1a');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const Formulas = invoke('GameServer/Formulas');
-const ClassProgression = invoke('GameServer/ClassProgression');
+const { skillTreeEntries, learnedTreeRow, treeSkillLevel } = require('./ColdSkillTree');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
+const SkillRequirements = invoke('GameServer/Skills/SkillRequirements');
+const GameTime = invoke('GameServer/World/GameTime');
 const EffectStore = invoke('GameServer/Effects/EffectStore');
+const C4ArmorSets = invoke('GameServer/Items/C4ArmorSets');
 const BuffCatalog = invoke('GameServer/Effects/BuffCatalog');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
@@ -11,8 +17,8 @@ const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy'
 const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 
-// Rebuild database-derived snapshots that omitted template magic/cast/reuse metadata.
-const PROFILE_VERSION = 5;
+// Rebuild persisted kits that could have been overwritten by an older resolve.
+const PROFILE_VERSION = 6;
 const npcCombatCache = new WeakMap();
 
 const WEAPON_MASK_BY_KIND = Object.freeze({
@@ -34,16 +40,70 @@ function number(value, fallback = 0) {
 }
 
 function classTemplate(classId) {
-    return (DataCache.classTemplates || []).find((entry) => Number(entry.classId) === Number(classId)) || {};
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId) || {};
 }
 
 function itemTemplate(selfId) {
     return ItemTemplateIndex.find(DataCache.items, selfId) || null;
 }
 
+// A synchronous wish review compares many bags that keep most worn items.
+// Prepare each unchanged item once within that call, then discard the scope.
+// Combat/passive/buff calculations still run for every hypothetical build.
+const EQUIPMENT_PREPARATION_LIMIT = 512;
+let equipmentPreparation = null;
+function withEquipmentPreparation(work) {
+    if (equipmentPreparation) return work();
+    equipmentPreparation = { rows: new Map(), size: 0 };
+    try { return work(); }
+    finally { equipmentPreparation = null; }
+}
+
+function copyEquipmentEffect(effect) {
+    if (!effect) return effect;
+    const copy = { ...effect };
+    if (effect.stats) copy.stats = { ...effect.stats };
+    if (Array.isArray(effect.conditionalStats)) copy.conditionalStats = effect.conditionalStats
+        .map(entry => ({ ...entry, stats: { ...entry.stats } }));
+    return copy;
+}
+
+function preparedEquipment(template, selfId, objectId, enchant, slot) {
+    const rules = invoke('GameServer/Items/C4EnchantRules');
+    const effects = invoke('GameServer/Items/C4EquipmentItemSkills');
+    const scope = equipmentPreparation;
+    if (scope && (scope.items !== DataCache.items || scope.statBonus !== rules.statBonus
+        || scope.effectForItem !== effects.effectForItem)) {
+        scope.rows.clear(); scope.size = 0;
+        scope.items = DataCache.items; scope.statBonus = rules.statBonus; scope.effectForItem = effects.effectForItem;
+    }
+    const key = scope ? `${slot}:${enchant}:${objectId}` : null;
+    let prepared = scope?.rows.get(template)?.get(key);
+    if (!prepared) {
+        const adapter = { fetchSelfId: () => selfId, fetchId: () => objectId,
+            fetchEnchantLevel: () => enchant, fetchRank: () => template.etc?.rank,
+            fetchKind: () => template.template?.kind, fetchSlot: () => slot,
+            isWeapon: () => String(template.template?.kind || '').startsWith('Weapon.'),
+            isArmor: () => String(template.template?.kind || '').startsWith('Armor.') };
+        const stats = { ...template.stats };
+        for (const stat of ['pAtk', 'mAtk', 'pDef', 'mDef']) stats[stat] = number(stats[stat]) + rules.statBonus(adapter, stat);
+        prepared = { ...template, stats, etc: { ...(template.etc || {}), slot }, equipmentEffect: effects.effectForItem(adapter) };
+        if (scope && scope.size < EQUIPMENT_PREPARATION_LIMIT) {
+            if (!scope.rows.has(template)) scope.rows.set(template, new Map());
+            scope.rows.get(template).set(key, prepared); scope.size++;
+        }
+    }
+    // These rows stay private to profile construction. Only the effect enters
+    // the returned profile, and that boundary gives it an independent copy.
+    return prepared;
+}
+
 function equippedTemplates(state = {}) {
     return Object.values(state.inventory || {})
         .flatMap((item) => {
+            // Unequipped rows always produced no slots. Do not resolve their
+            // templates on every hypothetical gear/skill profile calculation.
+            if (!item?.equipped) return [];
             const template = itemTemplate(item?.selfId);
             if (!template) return [];
             const amount = Math.max(0, number(item.amount, item?.equipped ? 1 : 0));
@@ -59,7 +119,12 @@ function equippedTemplates(state = {}) {
                         return pair.slice(0, Math.min(amount, pair.length));
                     })()
                     : [];
-            return slots.map((slot) => ({ ...template, etc: { ...(template.etc || {}), slot } }));
+            return slots.map((slot) => {
+                const instance = item.instances?.find(row => row.equipped && number(row.slot) === slot);
+                const enchant = number(instance?.enchant, number(item.enchant));
+                const selfId = number(item.selfId), objectId = number(instance?.id, selfId);
+                return preparedEquipment(template, selfId, objectId, enchant, slot);
+            });
         })
         .filter(Boolean);
 }
@@ -90,7 +155,8 @@ function equipmentFromTemplates(items = [], spellcaster = false, fallback = {}) 
         bonusMp: armor.reduce((sum, item) => sum + number(item.stats?.maxMp), 0),
         shieldPDef: number(armorAt(8)?.stats?.pDef),
         shieldRate: number(armorAt(8)?.stats?.shieldRate, armorAt(8) ? 20 : 0),
-        armorKinds: armor.map((item) => item.template?.kind).filter(Boolean)
+        armorKinds: armor.map((item) => item.template?.kind).filter(Boolean),
+        setKind: SkillRequirements.wornSetKind(fullBody?.template?.kind, armorAt(10)?.template?.kind, armorAt(11)?.template?.kind)
     };
 }
 
@@ -107,28 +173,32 @@ function effectStats(effect = {}) {
     return legacy?.stats || structured;
 }
 
-function statSources(profile, timestamp) {
-    const effects = activeEffects(profile.effects, timestamp).map(effectStats);
-    const passives = (profile.skills || [])
-        .filter((skill) => skill.passive)
-        .map((skill) => C4SkillRules.resolveCached({ selfId: skill.selfId, level: skill.level }))
-        .filter((semantic) => passiveRequirementsMatch(profile, semantic.requires))
-        .map((semantic) => semantic.stats);
-    return [...effects, ...passives];
+// Passives follow the hot rule (SkillRequirements). A cold fight is judged
+// once, at its start: the bot at full HP (HP-threshold passives off), not
+// moving or seated, night from the game clock at `timestamp`.
+function statSources(profile, timestamp, options = {}) {
+    const equipment = profile.equipment || {};
+    const gear = {
+        weaponKind: equipment.weaponKind || '',
+        armorKinds: equipment.armorKinds || [],
+        setKind: equipment.setKind || '',
+        shield: number(equipment.shieldPDef) > 0
+    };
+    const situation = {
+        hp: 1, maxHp: 1, moving: false, walking: false, seated: false,
+        get night() { options.onNightRead?.(); return options.night ?? GameTime.isNight(timestamp); }
+    };
+    const sources = activeEffects(profile.effects, timestamp).map(effectStats);
+    for (const skill of profile.skills || []) {
+        if (!skill.passive) continue;
+        const semantic = C4SkillRules.resolveCached({ selfId: skill.selfId, level: skill.level });
+        sources.push(...SkillRequirements.passiveStats(semantic, gear, situation));
+    }
+    return sources;
 }
 
 function statValues(profile, stat, timestamp, sources = statSources(profile, timestamp)) {
     return sources.map((stats) => number(stats?.[stat], NaN)).filter(Number.isFinite);
-}
-
-function passiveRequirementsMatch(profile, requires = {}) {
-    if (!requires) return true;
-    const weaponMask = WEAPON_MASK_BY_KIND[profile.equipment?.weaponKind] || 0;
-    if (requires.weaponsAllowed && (number(requires.weaponsAllowed) & weaponMask) === 0) return false;
-    if (requires.weaponKinds && !requires.weaponKinds.includes(profile.equipment?.weaponKind)) return false;
-    if (requires.armorKind && !(profile.equipment?.armorKinds || []).includes(requires.armorKind)) return false;
-    if (requires.shield && number(profile.equipment?.shieldPDef) <= 0) return false;
-    return true;
 }
 
 function add(profile, stat, timestamp, sources) {
@@ -226,44 +296,11 @@ function effectiveBase(profile, stat, timestamp, sources) {
 }
 
 function skillDefinition(selfId, level) {
-    const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(selfId));
+    const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], selfId);
     if (!skill) return null;
-    const definition = (skill.levels || []).find((row) => number(row.level) === number(level))
-        || (skill.levels || []).filter((row) => number(row.level) <= number(level)).at(-1)
+    const definition = SkillRankIndex.findFiniteOrLastEligible(skill.levels || [], level)
         || null;
     return definition ? { ...skill.template, ...skill.time, ...definition } : null;
-}
-
-const FIRST_CLASS_TO_BASE = new Map(
-    Object.entries(ClassProgression.firstProfMap)
-        .flatMap(([baseClassId, classIds]) => classIds.map((classId) => [number(classId), number(baseClassId)]))
-);
-const SECOND_CLASS_TO_FIRST = new Map(
-    Object.entries(ClassProgression.secondProfMap)
-        .flatMap(([firstClassId, classIds]) => classIds.map((classId) => [number(classId), number(firstClassId)]))
-);
-
-function parentClassId(classId) {
-    const normalized = number(classId);
-    const thirdParent = number(ClassProgression.getThirdClass(normalized)?.parentClassId, NaN);
-    if (Number.isFinite(thirdParent)) return thirdParent;
-    return SECOND_CLASS_TO_FIRST.get(normalized)
-        ?? FIRST_CLASS_TO_BASE.get(normalized)
-        ?? null;
-}
-
-function classProgressionIds(classId) {
-    const ids = [];
-    const seen = new Set();
-    let current = number(classId);
-    while (Number.isFinite(current) && current >= 0 && !seen.has(current)) {
-        seen.add(current);
-        ids.unshift(current);
-        const parent = parentClassId(current);
-        if (parent === null || parent === current) break;
-        current = parent;
-    }
-    return ids;
 }
 
 function summonFields(definition = {}) {
@@ -306,42 +343,11 @@ function skillSnapshot(skill) {
     };
 }
 
-function skillTreeEntries(classId) {
-    const entries = new Map();
-    classProgressionIds(classId).forEach((id) => {
-        const tree = (DataCache.skillTree || []).find((entry) => number(entry.classId) === id);
-        (tree?.skills || []).forEach((entry) => {
-            const selfId = number(entry.selfId);
-            const previous = entries.get(selfId);
-            if (!previous) {
-                entries.set(selfId, entry);
-                return;
-            }
-
-            const levels = new Map((previous.levels || []).map((row) => [number(row.level), row]));
-            (entry.levels || []).forEach((row) => levels.set(number(row.level), row));
-            entries.set(selfId, { ...previous, ...entry, levels: [...levels.values()] });
-        });
-    });
-    return [...entries.values()];
-}
-
-// The highest level row of a tree entry that a character of `level` has learned.
-function learnedTreeRow(entry, level) {
-    return (entry.levels || []).filter((row) => number(row.pLevel) <= level).at(-1);
-}
-
-// The level of one skill a class line knows at a character level, 0 if none.
-function treeSkillLevel(classId, level, skillId) {
-    const entry = skillTreeEntries(classId).find((candidate) => number(candidate.selfId) === number(skillId));
-    return entry ? number(learnedTreeRow(entry, number(level))?.level) : 0;
-}
-
 function skillsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
         const definition = skillDefinition(entry.selfId, learned.level) || {};
         return {
             selfId: number(entry.selfId), level: number(learned.level, 1), passive: skill?.template?.passive === true,
@@ -356,7 +362,7 @@ function skillSnapshotsFromRecords(records = []) {
     return records.map((record) => {
         const selfId = number(record.selfId);
         const requestedLevel = number(record.level, 1);
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === selfId);
+        const skill = ItemTemplateIndex.findNumericRowRequired(DataCache.skills || [], selfId);
         if (!skill) return null;
         const definition = skillDefinition(selfId, requestedLevel);
         if (!definition) return null;
@@ -393,9 +399,8 @@ function skillRecordsFromTree(classId, level) {
     return skillTreeEntries(classId).map((entry) => {
         const learned = learnedTreeRow(entry, level);
         if (!learned) return null;
-        const skill = (DataCache.skills || []).find((candidate) => Number(candidate.selfId) === Number(entry.selfId));
-        const definition = (skill?.levels || []).find((row) => number(row.level) === number(learned.level))
-            || (skill?.levels || []).filter((row) => number(row.level) <= number(learned.level)).at(-1);
+        const skill = ItemTemplateIndex.findRequired(DataCache.skills || [], entry.selfId);
+        const definition = SkillRankIndex.findFiniteOrLastEligible(skill?.levels || [], learned.level);
         if (!skill || !definition) return null;
         return {
             selfId: number(entry.selfId),
@@ -411,23 +416,47 @@ function treeSnapshot(state = {}, timestamp = Date.now()) {
     const classId = number(state.stats?.classId, number(state.classId));
     // Learning at a lower level after a death must not erase previously
     // learned skills or lower their ranks (including Expertise).
-    const skills = new Map((existing.skills || []).map((skill) => [number(skill.selfId), skill]));
-    for (const skill of skillsFromTree(classId, Math.max(1, number(state.level, 1)))) {
-        if (number(skills.get(skill.selfId)?.level) < number(skill.level)) skills.set(skill.selfId, skill);
-    }
+    const authoritative = existing.skillSource === 'database' || existing.skillSource === 'hot';
+    // Eligibility is not learning. Legacy tree kits are hydrated from the
+    // learned rows before startup readiness; a projector cannot pay for ranks.
+    const skills = authoritative ? existing.skills || [] : [];
     return {
         ...existing,
         version: PROFILE_VERSION,
-        skillSource: 'tree',
+        skillSource: authoritative ? existing.skillSource : 'unresolved',
         capturedAt: timestamp,
         classId,
         effects: existing.effects || [],
-        skills: [...skills.values()]
+        skills: [...skills]
+    };
+}
+
+// The servitor goes with the bot into cold combat, which keeps it between
+// fights (BackgroundResolver.persistedSummon). Item pets (actor.pet) are not
+// cold summons. Remaining life is counted at the idle loss rate, as cold does.
+function summonSnapshot(actor, timestamp) {
+    const summon = actor.summon;
+    if (!summon || summon.isDead?.() === true || summon.state?.fetchDead?.() === true) return null;
+    const skillId = number(summon.fetchSummonSkillId?.());
+    if (!skillId) return null;
+    // startLifetime set both from the skill; a servitor without a lifetime
+    // gets cold's default 20 minutes (BackgroundResolver.startColdSummon).
+    const remaining = Number(summon.summonTimeRemaining);
+    const idleLoss = Number(summon.summonTimeLostIdle);
+    return {
+        active: true,
+        skillId,
+        hp: number(summon.fetchHp?.()),
+        expiresAt: Number.isFinite(remaining) && idleLoss > 0
+            ? timestamp + Math.max(0, remaining) * 1000 / idleLoss
+            : timestamp + 1200000
     };
 }
 
 function capture(actor, timestamp = Date.now()) {
     const backpack = actor.backpack;
+    const armors = backpack?.fetchEquippedArmors?.() || [];
+    const armorKindAt = (slot) => armors.find((item) => Number(item.fetchSlot?.()) === slot)?.fetchKind?.();
     const equipment = {
         weaponKind: backpack?.fetchTotalWeaponKind?.() || '',
         attackReuseDelay: backpack?.fetchEquippedWeapon?.()?.fetchAttackReuseDelay?.() ?? 1500,
@@ -443,7 +472,8 @@ function capture(actor, timestamp = Date.now()) {
         bonusMp: number(backpack?.fetchTotalArmorBonusMp?.()),
         shieldPDef: number(backpack?.fetchTotalShieldPDef?.()),
         shieldRate: number(backpack?.fetchTotalShieldRate?.()),
-        armorKinds: (backpack?.fetchEquippedArmors?.() || []).map((item) => item.fetchKind?.()).filter(Boolean)
+        armorKinds: armors.map((item) => item.fetchKind?.()).filter(Boolean),
+        setKind: SkillRequirements.wornSetKind(armorKindAt(15), armorKindAt(10), armorKindAt(11))
     };
     return {
         version: PROFILE_VERSION,
@@ -452,7 +482,11 @@ function capture(actor, timestamp = Date.now()) {
         cp: number(actor.fetchCp?.()),
         cpAt: timestamp,
         cooldowns: Object.fromEntries([...(actor.skillReuseUntil || [])].filter(([, until]) => until > timestamp)),
+        summon: summonSnapshot(actor, timestamp),
+        charges: number(actor.fetchCharges?.()),
+        chargeExpiresAt: Number(actor.chargeExpiresAt) > timestamp ? Number(actor.chargeExpiresAt) : null,
         classId: number(actor.fetchClassId?.()),
+        henna: { ...(actor.hennaStats || {}) },
         base: {
             str: number(actor.fetchStr?.(), 1), dex: number(actor.fetchDex?.(), 1), con: number(actor.fetchCon?.(), 1),
             int: number(actor.fetchInt?.(), 1), wit: number(actor.fetchWit?.(), 1), men: number(actor.fetchMen?.(), 1),
@@ -472,7 +506,59 @@ function needsDatabaseBackfill(snapshot = {}) {
         && (snapshot?.skillSource !== 'database' || number(snapshot?.version) < PROFILE_VERSION);
 }
 
-function profileFor(state = {}, timestamp = Date.now()) {
+function hasInventory(state) {
+    return !!state.inventory && typeof state.inventory === 'object';
+}
+
+function capturedEquipmentEffect(effect, state) {
+    return effect.category === 'equipment_item_skill'
+        || (effect.category === C4ArmorSets.CATEGORY && hasInventory(state));
+}
+
+// The skills a cold profile carries, readable without building the profile.
+// An empty saved kit is still empty. Only class-only hypothetical estimates
+// (without a character owner) may use the eligibility tree.
+function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId, number(state.stats?.classId, number(state.classId))),
+    level = Math.max(1, number(state.level, 1))) {
+    const saved = state.stats?.coldCombat;
+    return Array.isArray(saved?.skills) && saved.skillSource !== 'tree' && saved.skillSource !== 'unresolved' ? saved.skills
+        : state.characterId || saved ? [] : skillsFromTree(classId, level);
+}
+
+// One economy build (EconomyContext.forState) is synchronous and reads the
+// bot's own profile at one timestamp several times: the income route's
+// target matchup, the gear source facts and skill gains (with their own
+// build's night flag) and a repeated bag safety (L75). Nothing in the build
+// writes the profile's inputs (inventory rows, coldCombat, level, class,
+// hennas); the planners work on copies. The scope holds that one profile
+// until the build returns. Options only feed the night of statSources, so a
+// night flag equal to the timestamp's own night is the same profile; another
+// state, timestamp, night or option (a night probe) builds as before.
+// Equipment preparation only shares item rows and never changes a profile's
+// values. Each caller gets its own top-level copy, as from a fresh build.
+let profileScope = null;
+function withProfileScope(state, work) {
+    const outer = profileScope;
+    profileScope = { state, timestamp: NaN, profile: null };
+    try { return work(); }
+    finally { profileScope = outer; }
+}
+function sharedOptions(options, timestamp) {
+    for (const key in options) if (key !== 'night' || options.night !== GameTime.isNight(timestamp)) return false;
+    return true;
+}
+
+function profileFor(state = {}, timestamp = Date.now(), options = {}) {
+    const scope = profileScope !== null && profileScope.state === state && sharedOptions(options, timestamp) ? profileScope : null;
+    if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
+    const profile = buildProfile(state, timestamp, options);
+    if (scope === null) return profile;
+    scope.timestamp = timestamp;
+    scope.profile = profile;
+    return { ...profile };
+}
+
+function buildProfile(state, timestamp, options) {
     const saved = state.stats?.coldCombat;
     const classId = number(saved?.classId, number(state.stats?.classId, number(state.classId)));
     const template = classTemplate(classId);
@@ -486,19 +572,29 @@ function profileFor(state = {}, timestamp = Date.now()) {
         capturedAt: number(saved?.capturedAt, timestamp),
         classId,
         base: { ...(template.base || {}), ...(template.stats || {}), ...(saved?.base || {}) },
-        // Inventory is authoritative for a cold bot too: a completed market
-        // purchase or craft must alter its next fight without waiting for a
-        // hot materialisation. The hot snapshot fills only legacy states that
-        // have no persisted equipped items yet.
+        // ARCH-NOTE: Restore snapshot gear for legacy bags with no equipped rows;
+        // selling the last weapon keeps that snapshot until the next hot capture.
+        // Equipped rows still override it immediately after purchases and crafts.
         equipment: equipped.length
             ? { ...(saved?.equipment || {}), ...legacyEquipment }
             : { ...legacyEquipment, ...(saved?.equipment || {}) },
-        effects: saved?.effects || [],
-        skills: Array.isArray(saved?.skills) && saved.skills.length ? saved.skills : skillsFromTree(classId, level)
+        // Set bonuses follow the current worn parts, including hypothetical swaps.
+        // Only legacy states without inventory still depend on captured bonuses.
+        effects: [...(saved?.effects || []).filter(effect => !capturedEquipmentEffect(effect, state)),
+            ...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))),
+            ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)],
+        skills: skillsFor(state, classId, level)
     };
+    const henna = invoke('GameServer/Henna/HennaRules').totals(state.stats?.hennas || []);
+    // Captured hot base stats already include the same paid symbols. Only
+    // the delta from that capture is added when the cold inventory changes.
+    for (const stat of ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN']) {
+        const captured = number(saved?.henna?.[stat]);
+        profile.base[stat.toLowerCase()] = number(profile.base[stat.toLowerCase()], 1) + henna[stat] - captured;
+    }
     // Resolve effects and passive requirements once for this calculation.
     // A later profile rebuild gets fresh sources after gear, skill or buff changes.
-    const sources = statSources(profile, timestamp);
+    const sources = statSources(profile, timestamp, options);
     const equipment = profile.equipment;
     const str = effectiveBase(profile, 'STR', timestamp, sources);
     const dex = effectiveBase(profile, 'DEX', timestamp, sources);
@@ -532,10 +628,19 @@ function profileFor(state = {}, timestamp = Date.now()) {
     const atkSpd = Math.round(Formulas.calcAtkSpd(dex, number(equipment.atkSpd, number(profile.base.atkSpd)))
         * multiplier(profile, 'pAtkSpdMul', timestamp, sources));
     const castSpd = Math.round(Formulas.calcCastSpd(wit) * multiplier(profile, 'castSpdMul', timestamp, sources));
+    const mCritRate = Formulas.magicCriticalRate({
+        multiplier: multiplier(profile, 'mCritRateMul', timestamp, sources),
+        add: add(profile, 'mCritRateAdd', timestamp, sources),
+        wit,
+        weapon: !!equipment.weaponKind
+    });
     return {
-        ...profile, level, maxCp, cp, maxHp: Math.max(1, maxHp), maxMp: Math.max(1, maxMp), pAtk: Math.max(1, pAtk), mAtk: Math.max(1, mAtk),
+        ...profile, level, race: number(template.template?.race),
+        maxLoad: Math.max(0, Formulas.calcMaxLoad(con) * multiplier(profile, 'maxLoadMul', timestamp, sources)
+            + add(profile, 'maxLoad', timestamp, sources)),
+        maxCp, cp, maxHp: Math.max(1, maxHp), maxMp: Math.max(1, maxMp), pAtk: Math.max(1, pAtk), mAtk: Math.max(1, mAtk),
         pDef: Math.max(1, pDef), mDef: Math.max(1, mDef), accur: Math.max(1, accur), evasion: Math.max(0, evasion),
-        critical: Math.max(0, critical), atkSpd: Math.max(1, atkSpd), castSpd: Math.max(1, castSpd),
+        critical: Math.max(0, critical), mCritRate, atkSpd: Math.max(1, atkSpd), castSpd: Math.max(1, castSpd),
         weaponMask: (WEAPON_MASK_BY_KIND[equipment.weaponKind] || 0) | (number(equipment.shieldPDef) > 0 ? 1048576 : 0)
     };
 }
@@ -589,14 +694,21 @@ function partyMusicEffect(skill, timestamp = Date.now()) {
     };
 }
 
+const ATTACK_SKILL_TYPES = new Set([C4SkillRules.DAMAGE, C4SkillRules.DAMAGE_EFFECT, C4SkillRules.DEATH_LINK,
+    C4SkillRules.FATAL, C4SkillRules.DRAIN, C4SkillRules.BLOW, C4SkillRules.AGGRO_DAMAGE]);
+
+function isAttackSkill(skill = {}) {
+    if (skill.passive) return false;
+    const semantic = C4SkillRules.resolveCached(skill);
+    return semantic.target === 'enemy' && ATTACK_SKILL_TYPES.has(semantic.skillType) && !semantic.notUsedInC4;
+}
+
 function offensiveSkills(profile) {
-    const allowed = new Set([C4SkillRules.DAMAGE, C4SkillRules.DAMAGE_EFFECT, C4SkillRules.DEATH_LINK, C4SkillRules.FATAL, C4SkillRules.DRAIN, C4SkillRules.BLOW, C4SkillRules.AGGRO_DAMAGE]);
     return (profile.skills || []).filter((skill) => {
-        if (skill.passive) return false;
-        const semantic = C4SkillRules.resolve(skill);
+        if (!isAttackSkill(skill)) return false;
+        const semantic = C4SkillRules.resolveCached(skill);
         const required = number(semantic.requires?.weaponsAllowed);
-        return semantic.target === 'enemy' && allowed.has(semantic.skillType) && !semantic.notUsedInC4
-            && (!required || (required & profile.weaponMask) !== 0);
+        return !required || (required & profile.weaponMask) !== 0;
     });
 }
 
@@ -641,10 +753,18 @@ function corpseSummonSkills(profile = {}) {
             || Number(b.level || 0) - Number(a.level || 0));
 }
 
+function spotSpawns(spot = {}, npcId) {
+    const id = Number(npcId);
+    if (!(id > 0)) return false;
+    return Array.isArray(spot.npcEntries) && spot.npcEntries.length
+        ? spot.npcEntries.some(entry => Number(entry.selfId) === id)
+        : (spot.npcSelfIds || []).some(selfId => Number(selfId) === id);
+}
+
 function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     const rawEntries = Array.isArray(spot.npcEntries) && spot.npcEntries.length ? spot.npcEntries : (spot.npcSelfIds || []).map((selfId) => ({ selfId, count: 1 }));
     let entries = rawEntries.filter((entry) => {
-        const npc = (DataCache.npcs || []).find((candidate) => number(candidate.selfId) === number(entry.selfId));
+        const npc = ItemTemplateIndex.find(DataCache.npcs, entry.selfId);
         const explicitRaid = options.allowRaid === true && spot.raidBoss === true
             && BotRaidSafety.isRaidBoss(npc)
             && number(spot.raidBossTemplateId) === number(npc.selfId);
@@ -657,18 +777,19 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     if (options.matchupProfiles?.length) {
         let resisted = 0;
         entries = entries.map(entry => {
-            const npc = (DataCache.npcs || []).find(n => number(n.selfId) === number(entry.selfId));
+            const npc = ItemTemplateIndex.find(DataCache.npcs, entry.selfId);
             const target = npcCombatStats(npc);
             const match = Matchup.evaluate(options.matchupProfiles, target);
             if (!match.eligible) resisted += 1;
             if (options.soloSafety) {
-                match.eligible &&= Matchup.soloSurvival(options.matchupProfiles, target).eligible
-                    && (!options.maxTargetLevel || Number(npc.template?.level || 0) <= options.maxTargetLevel);
+                match.eligible = Matchup.soloCanHunt(options.matchupProfiles, target,
+                    { maxTargetLevel: options.maxTargetLevel, npcLevel: Number(npc.template?.level || 0) }).eligible;
             }
             return { ...entry, match };
         }).filter(entry => entry.match.eligible);
         if (!entries.length) return { avoided: true,
-            reason: resisted === encounterEntries.length ? 'target_resistance' : 'no_safe_solo_target' };
+            reason: options.soloSafety ? 'no_safe_solo_target'
+                : resisted === encounterEntries.length ? 'target_resistance' : 'no_safe_solo_target' };
     }
     const pickEntry = (candidates) => {
         const weight = entry => Math.max(1, number(entry.count, 1)) * Math.min(1, entry.match?.efficiency ?? 1) ** 2;
@@ -688,13 +809,13 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     // making the bot immune to the rest of the encounter table.
     const aggressive = preferred
         ? encounterEntries.filter((entry) => number(entry.selfId) !== preferredNpcId
-            && (DataCache.npcs || []).find((npc) => number(npc.selfId) === number(entry.selfId))?.template?.hostile === true)
+            && ItemTemplateIndex.find(DataCache.npcs, entry.selfId)?.template?.hostile === true)
         : [];
     const interruptionChance = Math.max(0, Math.min(1, number(options.aggressiveInterruptionChance, 0.25)));
     const selected = preferred && (!aggressive.length || rng() >= interruptionChance)
         ? preferred
         : pickEntry(aggressive.length ? aggressive : entries);
-    const npc = (DataCache.npcs || []).find((entry) => Number(entry.selfId) === Number(selected?.selfId));
+    const npc = ItemTemplateIndex.find(DataCache.npcs, selected?.selfId);
     if (!npc) return null;
     const combat = npcCombatStats(npc);
     const explicitRaid = options.allowRaid === true && spot.raidBoss === true;
@@ -702,7 +823,7 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
         ? RAID_MINIONS.filter((row) => number(row.bossId) === number(npc.selfId))
         : [];
     const minionPressure = minionRows.reduce((pressure, row) => {
-        const minion = (DataCache.npcs || []).find((candidate) => number(candidate.selfId) === number(row.minionId));
+        const minion = ItemTemplateIndex.find(DataCache.npcs, row.minionId);
         const profile = npcCombatStats(minion);
         const count = Math.max(0, number(row.max, row.min));
         if (!profile || !count) return pressure;
@@ -732,9 +853,157 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     };
 }
 
+// ARCH-NOTE: Float32 changed queue/focus for 15 of 300 saved builds.
+// Float64 preserves every nonzero and signed-zero result; exact +0/+0 uses
+// one slot marker. 256 Uint16 IDs share a buffer with 128 Float64 pairs.
+// Native 1,000-owner strong dominators: max entry 3,560 B including buffers,
+// plus amortized build/owner tables, key boxes and night markers 148.32 B.
+// The resulting 3,708.32 B remains below the 4 KB per-owner budget.
+// Shared candidate names are interned once; a build keeps only numeric hashes,
+// power numbers and packed gains. Owners release both variants and night markers.
+const buildGains = new Map();
+const ownerBuilds = new Map();
+const candidateIndex = new Map();
+const POWER_FIELDS = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
+const CANDIDATE_LIMIT = 65536, ENTRY_LIMIT = 256, NONZERO_LIMIT = 128;
+function ownerLimit() {
+    return Math.ceil(1.25 * Math.max(256, Number(invoke('GameServer/Bot/Population/PopulationConfig').maxPlayingPopulation) || 0));
+}
+function releaseBuild(key) {
+    const entry = buildGains.get(key);
+    if (!entry) return;
+    if (--entry.owners <= 0) buildGains.delete(key);
+    if (entry.night === 1) {
+        const marker = buildGains.get(entry.baseKey);
+        if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
+    }
+}
+function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
+    const saved = state.stats?.coldCombat || {};
+    const currentClassId = number(state.stats?.classId, number(state.classId));
+    const worn = state.inventory && typeof state.inventory === 'object'
+        ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
+            row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
+                .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
+        : 'no-inventory';
+    const effects = activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
+        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
+    // Main publishes the current class in stats; worker hydration may also
+    // carry its alias at the root. Both forms have the same native build.
+    return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
+        Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
+        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null]), effects].join('|');
+}
+function buildHash(text) {
+    return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
+}
+function buildInputKey(state = {}, timestamp = Date.now()) {
+    // Lifecycle may publish the implicit worn slot explicitly. That is the
+    // same build, although the internal raw cache key can be reconstructed.
+    const text = powerKey(state, timestamp, true), entry = buildGainsFor(state, timestamp);
+    return entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
+}
+function powerFor(state = {}, timestamp = Date.now(), options = {}) {
+    const profile = profileFor(state, timestamp, options);
+    return Object.fromEntries(POWER_FIELDS.map(field => [field, profile[field]]));
+}
+// ARCH-NOTE: Existing callers need named numbers transiently; packed entries
+// never retain that object or a per-candidate string/array.
+function powerNumbers(entry) {
+    return Object.fromEntries(POWER_FIELDS.map((field, index) => [field, entry.power[index]]));
+}
+function buildOptions(entry, timestamp) {
+    return { night: entry.night === 0 ? false : GameTime.isNight(timestamp) };
+}
+function resizeGains(entry, idCapacity, gainCapacity) {
+    const buffer = new ArrayBuffer(idCapacity * 3 + gainCapacity * 16);
+    const ids = new Uint16Array(buffer, 0, idCapacity), slots = new Uint8Array(buffer, idCapacity * 2, idCapacity);
+    const gains = new Float64Array(buffer, idCapacity * 3, gainCapacity * 2);
+    if (entry.ids) { ids.set(entry.ids); slots.set(entry.slots); gains.set(entry.gains); }
+    entry.ids = ids; entry.slots = slots; entry.gains = gains;
+    return entry;
+}
+function newEntry(power, night, baseKey) {
+    return resizeGains({ power: Float64Array.from(POWER_FIELDS.map(field => power[field])),
+        size: 0, gainSize: 0, owners: 0, night, baseKey }, 32, 32);
+}
+function buildGainsFor(state = {}, timestamp = Date.now()) {
+    const text = powerKey(state, timestamp), baseKey = buildHash(text);
+    const owner = Number(state.characterId) || 0;
+    let key = baseKey, entry = buildGains.get(baseKey);
+    if (!entry) {
+        let readsNight = false;
+        const power = powerFor(state, timestamp, { onNightRead: () => { readsNight = true; } });
+        if (readsNight) {
+            entry = { night: 2, owners: 0 };
+            if (owner) buildGains.set(baseKey, entry);
+            key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
+            entry = newEntry(power, 1, baseKey);
+        } else entry = newEntry(power, 0, baseKey);
+        if (owner) buildGains.set(key, entry);
+    } else if (entry.night === 2) {
+        key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
+        entry = buildGains.get(key);
+        if (!entry) {
+            entry = newEntry(powerFor(state, timestamp), 1, baseKey);
+            if (owner) buildGains.set(key, entry);
+        }
+    }
+    if (!owner) return entry;
+    const held = ownerBuilds.get(owner);
+    if (held !== key) {
+        entry.owners++;
+        if (entry.night === 1) buildGains.get(baseKey).owners++;
+        if (held !== undefined) releaseBuild(held);
+    }
+    ownerBuilds.delete(owner);
+    ownerBuilds.set(owner, key);
+    while (ownerBuilds.size > ownerLimit()) {
+        const [oldest, oldKey] = ownerBuilds.entries().next().value;
+        ownerBuilds.delete(oldest);
+        releaseBuild(oldKey);
+    }
+    return entry;
+}
+function forgetBuild(characterId) {
+    const key = ownerBuilds.get(Number(characterId));
+    if (key === undefined) return;
+    ownerBuilds.delete(Number(characterId));
+    releaseBuild(key);
+}
+function gainFor(entry, key, compute) {
+    let id = candidateIndex.get(key);
+    if (id === undefined && candidateIndex.size < CANDIDATE_LIMIT) {
+        id = candidateIndex.size;
+        candidateIndex.set(key, id);
+    }
+    for (let index = 0; id !== undefined && index < entry.size; index++) {
+        if (entry.ids[index] !== id) continue;
+        const slot = entry.slots[index];
+        return slot === 0 ? { attack: 0, defence: 0 }
+            : { attack: entry.gains[(slot - 1) * 2], defence: entry.gains[(slot - 1) * 2 + 1] };
+    }
+    const effect = compute();
+    const zero = Object.is(effect.attack, 0) && Object.is(effect.defence, 0);
+    if (id === undefined || entry.size >= ENTRY_LIMIT || (!zero && entry.gainSize >= NONZERO_LIMIT)) return effect;
+    const idCapacity = entry.size === entry.ids.length ? Math.min(ENTRY_LIMIT, entry.ids.length * 2) : entry.ids.length;
+    const gainCapacity = !zero && entry.gainSize * 2 === entry.gains.length
+        ? Math.min(NONZERO_LIMIT, entry.gains.length) : entry.gains.length / 2;
+    if (idCapacity !== entry.ids.length || gainCapacity * 2 !== entry.gains.length) resizeGains(entry, idCapacity, gainCapacity);
+    const index = entry.size++;
+    entry.ids[index] = id;
+    if (zero) { entry.slots[index] = 0; return { attack: 0, defence: 0 }; }
+    const slot = entry.gainSize++;
+    entry.slots[index] = slot + 1;
+    entry.gains[slot * 2] = effect.attack;
+    entry.gains[slot * 2 + 1] = effect.defence;
+    return { attack: entry.gains[slot * 2], defence: entry.gains[slot * 2 + 1] };
+}
+function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, candidateIndex: candidateIndex.size }; }
+
 module.exports = {
-    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor,
-    offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
-    npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
+    PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size,
+    isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
+    spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add
 };

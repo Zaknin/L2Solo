@@ -32,9 +32,12 @@ async function run() {
         await DB.execute(['INSERT INTO accounts(username,password) VALUES (?,?)', [`bot_revive_${id}`, 'test']]);
         await DB.execute([`INSERT INTO characters(id,username,name,classId,race,level,hp,maxHp,mp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
             VALUES (?,?,?,0,0,20,?,1000,500,500,0,0,0,0,50000,15000,-5000)`, [id, `bot_revive_${id}`, `Revive${id}`, id === 1 ? 0 : 1000]]);
+        // Learned skill rows are the cold combat authority: startup hydrates the
+        // provider's Resurrection (1016) from them with its datapack MP cost (47).
+        if (id === 2) await DB.execute(['INSERT INTO skills (selfId, name, passive, level, characterId) VALUES (?,?,?,?,?)',
+            [1016, 'Resurrection', 0, 1, id]]);
         const stats = { deaths: id === 1 ? 1 : 0, coldPvp: { recoverUntil: id === 1 ? at + 90000 : 0 },
-            coldCombat: { version: 1, classId: 0, skills: id === 2
-                ? [{ selfId: 1016, level: 1, spell: true, passive: false, power: 0, mp: 50, hitTime: 4000, reuse: 10000 }] : [] } };
+            coldCombat: { version: 1, classId: 0, skills: [] } };
         await DB.execute([`INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,spotId,hp,maxHp,mp,maxMp,level,
             locX,locY,locZ,nextResolveAt,lastResolvedAt,updatedAt,statsJson)
             VALUES (?,?,?,'cold',?,'test',?,1000,500,500,20,50000,15000,-5000,?,?,?,?)`,
@@ -48,7 +51,7 @@ async function run() {
     const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
     const messages = [];
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: () => { throw Error('party must remain together'); }, resolveParty: input => Party.resolve(input),
-        emit: (type, payload) => messages.push({ type, payload }) });
+        emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
     const roster = states(), expired = { ...party, stats: { ...party.stats, sessionExpiresAt: at - 1 } };
     roster.forEach(s => kernel.upsert({ state: s, context: s.characterId === 2
         ? { isPartyLeader: true, party: expired, partyMembers: roster, spot: { id: 'test' } } : {} }));
@@ -56,7 +59,7 @@ async function run() {
     const claim = messages.find(m => m.type === 'claim_request'); assert(claim);
     kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
         ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1, leaseId: `revival-${c.characterId}`,
-        leaseUntil: at + 30000, purpose: c.purpose })) });
+        leaseUntil: at + 30000, purpose: c.purpose })) }, claim.msgId);
     await kernel.resolveChain;
     const batch = messages.find(m => m.type === 'proposal_batch'); assert(batch, JSON.stringify(messages));
     assert(batch.payload.proposals.every(p => p.atomicGroup?.memberIds.length === 2), 'the real worker groups revival and MP writes even without gratitude');
@@ -84,7 +87,7 @@ async function run() {
     assert.strictEqual(Life.cachedState(1).vitals.hp, 0, 'rejected action cannot revive');
     assert.strictEqual((await Repository.load(1)).relations.length, 0, 'rejected action cannot leave gratitude');
     const accepted = await commit(resolve()); assert(accepted.every(r => r.ok), JSON.stringify(accepted));
-    assert.strictEqual(Life.cachedState(2).vitals.mp, 450);
+    assert.strictEqual(Life.cachedState(2).vitals.mp, 453);
     assert.strictEqual(Life.cachedState(1).vitals.hp, 1);
     assert(states().every(s => !Object.hasOwn(s.stats, 'coldRevival')), 'the outcome creates no intermediate cast state');
     assert.strictEqual(Life.cachedState(1).stats.coldPvp.recoverUntil, 0);
@@ -94,7 +97,7 @@ async function run() {
     await DB.close(); DB.init();
     assert.deepStrictEqual(await Repository.load(1), memory);
     const rows = await DB.execute(['SELECT id,hp,mp FROM characters WHERE id IN (1,2) ORDER BY id', []]);
-    assert.strictEqual(rows[0].hp, 1); assert.strictEqual(rows[1].mp, 450, 'one committed outcome survives SQLite reopen');
+    assert.strictEqual(rows[0].hp, 1); assert.strictEqual(rows[1].mp, 453, 'one committed outcome survives SQLite reopen');
     console.log('Cold resurrection: one atomic outcome, actual skill/MP, recovery pause, rejected ownership and persisted gratitude passed');
 }
 run().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {

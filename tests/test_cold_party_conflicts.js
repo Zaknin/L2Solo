@@ -1,6 +1,10 @@
 const assert = require('assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -40,7 +44,7 @@ const apply = (a, b, overrides = {}) => Conflict.apply({ ...base, event: event(a
 async function run() {
     Database.init();
     const stats = { equipmentPlan: { status: 'active', next: { npcId: 10, spotId: 'test' } } };
-    for (const id of range(1, 64)) {
+    for (const id of range(1, 68)) {
         await Database.execute(['INSERT INTO accounts(username,password) VALUES (?,?)', [`bot_conflict_${id}`, 'test']]);
         await Database.execute([`INSERT INTO characters(id,username,name,classId,race,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
             VALUES (?,?,?,0,0,100,100,0,0,0,0,0,0,0)`, [id, `bot_conflict_${id}`, `Conflict${id}`]]);
@@ -51,7 +55,7 @@ async function run() {
     }
     await Life.init();
     await Party.init();
-    await Memory.ensureMany(range(1, 64));
+    await Memory.ensureMany(range(1, 68));
     await createParty([1, 2, 3]);
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 3]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [3]]))[0]);
@@ -65,6 +69,7 @@ async function run() {
     assert.strictEqual(Party.find('party-1').stats.coldCompetition.conflictUntil, at + 180000);
     assert.strictEqual(state(4).stats.coldCompetition.conflictUntil, at + 180000);
     assert.deepStrictEqual(first.affectedIds, [4]);
+    assert.strictEqual(first.outcome, 'displaced', 'a party of three pushes a solo off the spot');
     assert.strictEqual(first.memoryEvents, 3, 'a nearby recovering teammate can support the dispute without invalidating the roster');
     assert.strictEqual(state(4).timing.nextResolveAt, at + 60000 + WAIT_MS);
     assert.strictEqual(Party.find('party-1').nextResolveAt, at + 45000);
@@ -73,10 +78,13 @@ async function run() {
     assert.strictEqual((await Conflict.apply({ ...base, event: firstEvent })).ok, false, 'duplicate delivery cannot repeat the episode');
 
     await createParty([6, 7, 8]);
-    const soloParty = await apply(5, 6);
+    // U26: the party of three is willing and the solo is not, so the solo pushes it off
+    // only on a roll under 0.1 (the old level + log2 size rule gave 0.34).
+    const soloParty = await apply(5, 6, { rng: () => 0.05 });
     assert(soloParty.ok, JSON.stringify(soloParty));
     assert.strictEqual(soloParty.matchup, 'solo_vs_party');
     assert.deepStrictEqual(soloParty.affectedIds, [6, 7, 8]);
+    assert.strictEqual(soloParty.outcome, 'displaced', 'a solo pushes a party of three off on a roll under 0.1');
     const pausedParty = Party.find('party-6'), pausedMembers = [6, 7, 8].map(state);
     assert.strictEqual(pausedParty.nextResolveAt, at + 45000 + WAIT_MS);
     assert(pausedMembers.every(s => s.timing.nextResolveAt === pausedParty.nextResolveAt));
@@ -125,6 +133,23 @@ async function run() {
     const bystander = await apply(31, 33, { rng: () => 0.95 });
     assert(bystander.ok, JSON.stringify(bystander));
     assert.strictEqual(bystander.outcome, 'held_ground');
+    const evenPair = await apply(65, 66, { rng: () => 0.45 });
+    assert.strictEqual(evenPair.outcome, 'displaced', 'two equal solos: a coin flip (chance 0.5)');
+    {
+        // One decision per encounter (user, 2026-10-05; was: three can-I-win rolls). Character
+        // decided at the escalation (the PvP intent); give-way reads the willingness carried
+        // from the dispute; the start gate (choice B) rolls once, on the event key, only for
+        // its rare exception.
+        const Tendency = require('../src/GameServer/Bot/AI/TendencyRoll');
+        const labels = [];
+        Tendency.roll = (...key) => { labels.push(key.join(':')); return 0.99; };
+        const chained = await apply(67, 68, { pvpEnabled: () => true, event: { ...event(67, 68), pvpIntent: true, willing: [true, false] } });
+        Tendency.roll = () => 0.49;
+        assert(chained.ok, JSON.stringify(chained));
+        assert.deepStrictEqual(labels, ['competition:67:68:open'], 'one gate roll on the event key, no can-I-win reroll');
+        assert.strictEqual(chained.pvpReason, 'pvp_outmatched', 'an even look declines only on the rare roll (0.99 >= 0.98)');
+        assert.strictEqual(chained.outcome, 'displaced', 'the willing actor pushes the unwilling peer (0.9 > 0.2 roll)');
+    }
     assert.strictEqual(bystander.participants.find(p => p.id === 32).role, 'stand_aside');
     assert.strictEqual(bystander.memoryEvents, 1);
     assert.deepStrictEqual(Memory.snapshot(33).relations.map(r => r.targetId), [31]);

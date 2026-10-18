@@ -8,23 +8,23 @@ function charDelete(session, buffer) {
     packet
         .readD(); // Character Slot
 
-    consume(session, {
+    return consume(session, {
         characterSlot: packet.data[0]
     });
 }
 
 function consume(session, data) {
-    Shared.fetchCharacters(session.accountId).then((characters) => {
+    return Shared.fetchCharacters(session.accountId).then((characters) => {
         const character = characters[data.characterSlot];
 
-        Database.deleteCharacter(session.accountId, character.name).then(() => {
-
-            // Clear database from all actor created content
-            Database.deleteSkills   (character.id);
-            Database.deleteItems    (character.id);
-            Database.deleteShortcuts(character.id);
-            Database.deleteMacros   (character.id);
-
+        // The leave rule (design 2.7, E49): the character's board records
+        // close first, so the board in memory and its index drop them.
+        return invoke('GameServer/AfkTrade/AfkTradeService').leave(character.id).catch((error) => {
+            utils.infoWarn('CharDelete', 'board leave failed for %s: %s', character.name, error.message);
+        }).then(() => Database.deleteCharacter(session.accountId, character.name)).then(() => {
+            // The character's items, skills, shortcuts and macros go with its
+            // row: every table references characters(id) ON DELETE CASCADE and
+            // the game connection enables foreign keys (U53).
             characters.splice(data.characterSlot, 1);
             Shared.enterCharacterHall(session, characters);
         });

@@ -126,6 +126,29 @@ const entries = [
     [422, "Q422_RepentYourSins"],
     [634, "Q634_InSearchOfFragmentsOfDimension"],
     [635, "Q635_IntoTheDimensionalRift"],
+    [211, "Q211_TrialOfChallenger"],
+    [212, "Q212_TrialOfDuty"],
+    [213, "Q213_TrialOfSeeker"],
+    [214, "Q214_TrialOfScholar"],
+    [224, "Q224_TestOfSagittarius"],
+    [228, "Q228_TestOfMagus"],
+    [229, "Q229_TestOfWitchcraft"],
+    [230, "Q230_TestOfSummoner"],
+    [217, "Q217_TestimonyOfTrust"],
+    [222, "Q222_TestOfDuelist"],
+    [220, "Q220_TestimonyOfGlory"],
+    [223, "Q223_TestOfChampion"],
+    [215, "Q215_TrialOfPilgrim"],
+    [233, "Q233_TestOfWarspirit"],
+    [232, "Q232_TestOfLord"],
+    [226, "Q226_TestOfHealer"],
+    [227, "Q227_TestOfReformer"],
+    [218, "Q218_TestimonyOfLife"],
+    [219, "Q219_TestimonyOfFate"],
+    [216, "Q216_TrialOfGuildsman"],
+    [221, "Q221_TestimonyOfProsperity"],
+    [225, "Q225_TestOfSearcher"],
+    [231, "Q231_TestOfMaestro"],
   ].map(([id, name]) => ({
     id,
     modulePath: `./quests/${name}`,
@@ -138,6 +161,18 @@ const entries = [
   { modulePath: "./quests/TravelerRoute", status: "helper" },
 ];
 
+// Temporary equipment supplied and later taken by these native quests. Keep
+// this passive metadata apart from handlers: the bot worker never loads quest
+// execution or the world database just to decide whether an item is tradable.
+const equipmentToolsByQuest = new Map([
+  [104, [748]], [401, [1142]], [403, [1181, 1182]], [407, [1213]],
+  [212, [3027]], [224, [3028]], [229, [3029]], [218, [3026]],
+]);
+function equipmentTools() {
+  return entries.filter(entry => entry.status === "active")
+    .flatMap(entry => equipmentToolsByQuest.get(entry.id) || []);
+}
+
 function activeQuests() {
   return entries
     .filter((entry) => entry.status === "active")
@@ -146,4 +181,4 @@ function activeQuests() {
       : require(entry.modulePath));
 }
 
-module.exports = { entries, activeQuests };
+module.exports = { entries, activeQuests, equipmentTools };

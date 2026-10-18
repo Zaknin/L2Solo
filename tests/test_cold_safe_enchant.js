@@ -1,14 +1,10 @@
 const assert = require('assert');
 const fs = require('fs');
-const path = require('path');
 
+require('./helpers/databaseIsolation');
+const isolated = require('./helpers/isolatedSocialDatabase')('cold-safe-enchant');
 require('../src/Global');
-
-const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-safe-enchant.sqlite');
-fs.rmSync(databasePath, { force: true });
-fs.rmSync(`${databasePath}-wal`, { force: true });
-fs.rmSync(`${databasePath}-shm`, { force: true });
-options.default.Database.path = path.relative(process.cwd(), databasePath);
+isolated.assertConfigured(options.default);
 
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
@@ -98,6 +94,7 @@ function fixture(predicate, description) {
     const hydrated = await LifeState.refreshInventory(base);
     const persistedBase = await LifeState.upsertState(hydrated, 'cold_safe_enchant_inventory');
 
+    // ARCH-NOTE: FX-F1 retains the original guaranteed safe-batch contract.
     const result = await ColdSafeEnchantService.enchantSafe(persistedBase);
     assert.strictEqual(result.enchanted, true);
     assert.strictEqual(result.operations.length, 8,
@@ -119,7 +116,17 @@ function fixture(predicate, description) {
     assert.strictEqual(result.state.stats.lastSafeEnchant.operations, 8);
 
     const weaponRow = physical.find((row) => Number(row.selfId) === Number(weapon.selfId));
-    const deposited = await BotWarehouseService.depositCold(second.state);
+    assert.deepStrictEqual(invoke('GameServer/Bot/Economy/ItemDisposition').warehouseCandidates(second.state), [],
+        'ordinary safe-enchanted stock is not a warehouse deposit');
+    const station = invoke('GameServer/Bot/Economy/CraftShopService').stationForSlot(0);
+    const warehouseOwner = await LifeState.upsertState({ ...second.state,
+        stats: { ...second.state.stats, craftStationId: station.id }
+    }, 'cold_safe_enchant_infrastructure_owner');
+    assert.strictEqual(warehouseOwner.characterId, character.id,
+        'the warehouse lifecycle keeps the same physical inventory owner');
+    assert.strictEqual(LifeState.cachedState(character.id).stats.craftStationId, station.id,
+        'the native persisted owner, including its current revision, carries the infrastructure role');
+    const deposited = await BotWarehouseService.depositCold(warehouseOwner);
     assert(deposited.items.some((item) => item.selfId === 955 && item.amount === 2),
         'unused D weapon scrolls should enter the normal warehouse lifecycle');
     await Database.execute(['UPDATE items SET enchant = 0 WHERE id = ? AND characterId = ?', [weaponRow.id, character.id]]);
@@ -129,14 +136,52 @@ function fixture(predicate, description) {
         activity: 'hunting',
         timing: { ...(resetState.timing || {}), nextResolveAt: Date.now() }
     }, 'cold_safe_enchant_warehouse_fixture');
-    const released = await BotWarehouseService.releaseCold(huntingState);
-    assert.strictEqual(released.released, true);
-    assert.deepStrictEqual(released.items.map((item) => [item.selfId, item.amount, item.reason]), [[955, 2, 'enchant']],
-        'warehouse scrolls must return only for an actual safe enchant need');
+    // ARCH-NOTE: C1 withdraws only the worker's exact decided materials.
+    // This unfunded fixture has no decided scroll need; the common E market
+    // choice may keep or release its stock. Preserve physical conservation
+    // and the guaranteed batch instead of pinning the retired forced choice.
+    const native = await require('./helpers/workerEconomyDecision')(huntingState);
+    assert.deepStrictEqual(native.materials, []);
+    const decisions = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions;
+    decisions.accept(character.id, native.decision);
+    const beforeWarehouse = await Database.fetchWarehouseItems(character.id);
+    assert.deepStrictEqual(ColdSafeEnchantService.warehouseRequests(huntingState, beforeWarehouse), []);
+    // C2a requires explicit town access before a physical withdrawal.
+    const released = await BotWarehouseService.releaseCold(huntingState, { inTown: true });
+    decisions.forget(character.id);
+    assert.strictEqual(released.released, released.items.length > 0);
+    assert.deepStrictEqual(released.items.filter(item => item.reason !== 'market'), [],
+        'no missing worker material may be replaced by a main-thread enchant request');
+    assert(released.items.every(item => [955, 956].includes(item.selfId) && item.amount > 0));
+    assert.strictEqual(released.state.adena, huntingState.adena, 'warehouse release must not create a direct NPC payout');
     const afterRelease = await Database.fetchItems(character.id);
-    assert.strictEqual(Number(afterRelease.find((row) => Number(row.selfId) === Number(weapon.selfId))?.enchant || 0), 2,
-        'released warehouse scrolls must be consumed immediately without a second town loop');
-    assert.strictEqual(afterRelease.some((row) => Number(row.selfId) === 955), false);
+    const remainingWarehouse = await Database.fetchWarehouseItems(character.id);
+    const count = (items, selfId) => items.filter(row => Number(row.selfId) === selfId)
+        .reduce((total, row) => total + Number(row.amount), 0);
+    assert.strictEqual(count([...afterRelease, ...remainingWarehouse], 955), 2);
+    assert.strictEqual(count([...afterRelease, ...remainingWarehouse], 956), 3);
+    assert.strictEqual(Number(afterRelease.find(row => Number(row.selfId) === Number(weapon.selfId))?.enchant || 0), 0,
+        'a deferred worker wish cannot silently become an enchant operation');
+    for (const selfId of [955, 956]) {
+        const moved = released.items.filter(item => item.selfId === selfId).reduce((total, item) => total + item.amount, 0);
+        assert.strictEqual(count(afterRelease, selfId), moved);
+        assert.strictEqual(count(remainingWarehouse, selfId), count(beforeWarehouse, selfId) - moved);
+    }
+    const [savedAfterRelease] = await Database.execute(['SELECT adena, inventorySummary FROM bot_life_state WHERE characterId = ?', [character.id]]);
+    assert.strictEqual(savedAfterRelease.adena, huntingState.adena);
+    for (const selfId of [955, 956]) assert.strictEqual(Number(JSON.parse(savedAfterRelease.inventorySummary)[selfId]?.amount || 0),
+        count(afterRelease, selfId), 'the saved summary matches the exact native physical withdrawal');
+    assert.strictEqual(released.state.stats.lastSafeEnchant.operations, 8);
+    // The guaranteed batch uses only scrolls physically delivered to the bag.
+    // Native decided withdrawal/immediate enchant is covered separately.
+    const ownWeaponScrolls = count(afterRelease, 955);
+    const resumed = await ColdSafeEnchantService.enchantSafe(released.state);
+    assert.strictEqual(resumed.operations.length, ownWeaponScrolls);
+    const afterBatch = await Database.fetchItems(character.id);
+    assert.strictEqual(Number(afterBatch.find(row => Number(row.selfId) === Number(weapon.selfId))?.enchant || 0), ownWeaponScrolls);
+    assert.strictEqual(count(afterBatch, 955), 0);
+    assert.strictEqual(count([...afterBatch, ...await Database.fetchWarehouseItems(character.id)], 956), 3);
+    assert.strictEqual(resumed.state.adena, huntingState.adena);
 
     console.log('Cold safe enchant checks passed');
 })().catch((error) => {
@@ -144,7 +189,5 @@ function fixture(predicate, description) {
     process.exitCode = 1;
 }).finally(async () => {
     await Database.close().catch(() => null);
-    fs.rmSync(databasePath, { force: true });
-    fs.rmSync(`${databasePath}-wal`, { force: true });
-    fs.rmSync(`${databasePath}-shm`, { force: true });
+    fs.rmSync(isolated.directory, { recursive: true, force: true });
 });

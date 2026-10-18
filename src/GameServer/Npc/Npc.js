@@ -11,6 +11,7 @@ const ManorData      = invoke('GameServer/Manor/ManorData');
 const NpcSkills      = invoke('GameServer/Npc/NpcSkills');
 const EffectStats    = invoke('GameServer/Effects/EffectStats');
 const EffectStore    = invoke('GameServer/Effects/EffectStore');
+const EffectTicker   = invoke('GameServer/Effects/EffectTicker');
 const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const TownGuard = invoke('GameServer/Npc/TownGuard');
 const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool');
@@ -51,10 +52,9 @@ class Npc extends NpcModel {
         // Parent inheritance
         super(data);
 
-        // NOTE: Do NOT snap spawn Z to geodata here.
-        // Coordinates in spawns.json are already correct (taken from authentic L2J data).
-        // Applying GeodataEngine.getHeight() overwrites them with inaccurate geodata values
-        // causing NPCs to spawn under terrain in Dion, Gludio, Dark Elf Village, etc.
+        // Explicit datapack coordinates must retain their authored Z (towns
+        // and dungeon floors). SpawnNpcs resolves terrain only for random
+        // territory positions before constructing the NPC.
 
         // Local
         this.automation = new Automation();
@@ -97,6 +97,9 @@ class Npc extends NpcModel {
         this.timer.petFeed = undefined;
         this.automation.stopReplenish();
         this.attack.clearTimers?.();
+        // Despawn without death (quest NPC, minion, day/night, unsummon) must
+        // not leave effect timers that later refresh a removed NPC.
+        EffectTicker.clearAll(this);
         this.abortCombatState(session);
     }
 

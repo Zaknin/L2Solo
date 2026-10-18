@@ -23,7 +23,14 @@ assert.strictEqual(NpcShopBuyLists.fetchForNpc(7315).find((row) => row.selfId ==
     600, 'the taxed Gludio Soul Ore price should double at x10');
 
 const dwarf = { characterId: 100, classId: 57, level: 60, adena: 1000000,
+    phase: 'cold', activity: 'shopping', currentRegion: 'Giran',
+    loc: { locX: 83396, locY: 147904, locZ: -3400 },
     stats: { classId: 57 }, inventory: {}, vitals: { mp: 1000 } };
+// A real own sample prices this fixture's labour; the x10 table fallback is
+// millions/hour and correctly refuses a low-yield D-grade craft.
+const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+dwarf.stats.huntEfficiency = [{ signature: Hunt.signature(dwarf), spotId: 'fixture',
+    at: Date.now(), samples: 3, cycleMs: 3600000, adena: 77000, loot: 0, exp: 100000, kills: 1 }];
 const dRecipeItem = { selfId: 1804, name: 'Recipe: Soulshot: D-Grade', amount: 1 };
 assert.strictEqual(ItemDisposition.canLearnRecipe(dwarf, dRecipeItem), true,
     'a high-level crafter should still learn a D-grade shot recipe');
@@ -49,25 +56,12 @@ assert.strictEqual(signal.amount, 1000);
 assert.strictEqual(signal.budget, 90000);
 assert.strictEqual(signal.source, 'shots');
 
+// A shot lot and a shot recipe are the market's like any item (group E):
+// no floor to match, no demand count to fill; the expected value decides.
 const shotLot = { selfId: 1463, name: 'Soulshot: D-grade', kind: 'Other.Shot',
     count: 10000, price: 90, basePrice: 10 };
-const shotCompetition = count => new Map([[1463, [{ characterId: 301, count, price: 60 }]]]);
-const remainderDecision = MarketListingPolicy.classify(dwarf, shotLot, {
-    now, states: [buyer], signals: [signal], supplyByItem: shotCompetition(78)
-});
-assert.strictEqual(remainderDecision.action, 'list', 'a tiny floor-priced remainder must not block funded shot demand');
-assert.strictEqual(remainderDecision.listCount, 922, 'list only the demand not covered by existing supply');
-assert.strictEqual(MarketListingPolicy.listingPrice(shotLot, remainderDecision), 60,
-    'match the permitted floor instead of requiring an impossible undercut');
-assert.notStrictEqual(MarketListingPolicy.classify(dwarf, shotLot, {
-    now, states: [buyer], signals: [signal], supplyByItem: shotCompetition(1000)
-}).action, 'list', 'fully supplied demand must still stop additional shot listings');
-assert.notStrictEqual(MarketListingPolicy.classify(dwarf, shotLot, {
-    now, states: [buyer], signals: [{ ...signal, budget: 60 * 78 }], supplyByItem: shotCompetition(78)
-}).action, 'list', 'unfunded demand cannot justify matching the floor');
-assert.strictEqual(MarketListingPolicy.listingPrice(shotLot, { market: remainderDecision.market }), null,
-    'matching the floor requires an active-demand decision');
-
+assert.strictEqual(MarketListingPolicy.classify(dwarf, shotLot).action, 'market');
+assert.strictEqual(MarketListingPolicy.listingPrice, undefined, 'no listing floor');
 const recipeSeller = { characterId: 201, name: 'LootSeller', level: 50, classId: 28,
     adena: 100000, stats: {}, inventory: { '1805': {
         selfId: 1805, name: 'Recipe: Soulshot: C-Grade', amount: 1, kind: 'Other.Recipe'
@@ -76,23 +70,30 @@ const recipeItem = ItemDisposition.saleCandidates(recipeSeller, { unlimited: tru
     .find((item) => item.selfId === 1805);
 assert(recipeItem, 'a non-crafter holding a shot recipe should be able to sell it');
 assert.strictEqual(recipeItem.rank, 'c', 'C-grade shot recipes belong in Giran');
-const recipeBuyer = { characterId: 202, name: 'DwarfBuyer', adena: 10000000,
-    stats: { shotRecipeDemand: { itemId: 1805, amount: 1, maxSpend: 1000000, at: now } } };
-const recipeDemand = MarketDemandIndex.demandSignal(recipeBuyer, 1805, now);
-const recipeDecision = MarketListingPolicy.classify(recipeSeller, recipeItem, {
-    now, states: [recipeBuyer], signals: [recipeDemand], supplyByItem: new Map()
-});
-assert.strictEqual(recipeDecision.action, 'list',
-    'funded shot-recipe demand should turn an owned recipe into an actual listing');
+assert.strictEqual(MarketListingPolicy.classify(recipeSeller, recipeItem).action, 'market');
 
+const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const index = {
+    // ARCH-NOTE: C2c supplies offer lookup with the immutable market view.
+    offersFor(id, type, exclude) {
+        if (type === 3 && this.shotDemand.has(Number(id))) return this.shotDemand.get(Number(id))
+            .map(row => ({ sourceId: row.characterId, count: row.amount, price: row.maxPrice, town: 'Giran' }))
+            .filter(row => Number(row.sourceId) !== Number(exclude));
+        if (type === 1 && Number(this.shotSupply.get(Number(id))) > 0) return [{ sourceId: 501,
+            count: Number(this.shotSupply.get(Number(id))), price: 1, town: 'Giran' }];
+        if (type === 1 && [1804, 1805].includes(Number(id))) return [{ sourceId: 201, count: 1, price: 1, town: 'Giran' }];
+        return Afk.offers(id, type).filter(offer => Number(offer.sourceId) !== Number(exclude));
+    },
+    context: { hourAdena: 77000, mpPerHour: 12000, price: () => 100 },
+    planPurchase(id, amount) { const price = Number(this.npcPrice.get(id)); return price > 0
+        ? { town: 'Giran', units: amount, whole: true, cost: amount * price, landed: amount * price, npc: amount } : null; },
     itemTemplates: new Map(DataCache.items.map((item) => [Number(item.selfId), item])),
     npcPrice: new Map([[1785, 550]]),
     gear: new Map([
-        ['d', [{ selfId: 45, price: 22324, crystals: 56, source: 'afk', count: 1, ownerId: 201 }]],
-        ['c', [{ selfId: 325, price: 100000, crystals: 1148, source: 'afk', count: 1, ownerId: 202 }]]
+        ['d', [{ selfId: 45, price: 22324, crystals: 56, source: 'afk', town: 'Giran', count: 1, ownerId: 201 }]],
+        ['c', [{ selfId: 325, price: 100000, crystals: 1148, source: 'afk', town: 'Giran', count: 1, ownerId: 202 }]]
     ]),
-    shotDemand: new Map([[1463, [{ characterId: 200, amount: 1000, budget: 1000000 }]]]),
+    shotDemand: new Map([[1463, [{ characterId: 200, amount: 1000, budget: 1000000, maxPrice: 1000, origin: 'public_bid' }]]]),
     shotSupply: new Map()
 };
 const recipe = Recipes.resolveByRecipeId(20);
@@ -102,27 +103,26 @@ assert.strictEqual(ItemDisposition.priceFor({ ...dwarf, stats: {
     ...dwarf.stats, shotCraft: { productId: 1463, unitPrice: candidate.salePrice }
 } }, { selfId: 1463, amount: recipe.productCount }, index.itemTemplates.get(1463)),
 candidate.salePrice, 'the published shot price must match the profitable route calculation');
-assert.strictEqual(Shots.recipeTarget(dwarf, 7, { ...index, recipeStock: new Map([[1805, 1]]),
-    shotDemand: new Map([[1464, [{ characterId: 200, amount: 1000, budget: 1000000 }]]]), shotSupply: new Map() })?.recipeItemId, 1805,
-    'a crafter should ask for a recipe that somebody actually holds');
-assert.strictEqual(Shots.recipeTarget(dwarf, 7, { ...index, recipeStock: new Map([[1805, 1]]),
+assert.strictEqual(Shots.recipeTarget(dwarf, { ...index, recipeStock: new Map([[1805, 1]]),
+    shotDemand: new Map([[1464, [{ characterId: 200, amount: 1000, budget: 1000000, maxPrice: 1000, origin: 'public_bid' }]]]), shotSupply: new Map() })?.recipe.recipeItemId, 1805,
+    'a crafter should ask for a recipe with a finite public scroll offer and output bid');
+assert.strictEqual(Shots.recipeTarget(dwarf, { ...index, recipeStock: new Map([[1805, 1]]),
     shotDemand: new Map(), shotSupply: new Map() }), null,
     'a crafter should not buy a recipe for a shot with no market demand');
-assert.strictEqual(Shots.recipeTarget(dwarf, 7, { ...index, recipeStock: new Map([[1805, 1]]) })?.recipeItemId,
-    1804, 'a viable D-grade route should create recipe demand even before somebody lists the recipe');
-assert.strictEqual(Shots.recipeTarget(dwarf, 7, { ...index, recipeStock: new Map([[1805, 1]]) }, [318])?.recipeItemId,
+assert.strictEqual(Shots.recipeTarget(dwarf, { ...index, recipeStock: new Map([[1805, 1]]) })?.recipe.recipeItemId,
+    1804, 'the finite D-grade route can repay a quoted one-Adena scroll');
+assert.strictEqual(Shots.recipeTarget(dwarf, { ...index, recipeStock: new Map([[1805, 1]]) }, [318])?.recipe.recipeItemId,
     1804, 'knowing a higher-grade recipe must not prevent a profitable D-grade route');
 assert.strictEqual(candidate.requiredCrystals, 1);
 assert.strictEqual(candidate.ore.selfId, 1785);
 assert(candidate.profit > 100);
-const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const originalOffers = Afk.offers;
 try {
     Afk.offers = id => Number(id) === 1458
-        ? [{ sourceId: 500, price: 50, count: 100 }] : [];
+        ? [{ sourceId: 500, town: 'Giran', price: 50, count: 100 }] : [];
     assert.strictEqual(Shots.craftCandidate(dwarf, recipe, index).gear.source, 'crystals',
         'cheap actual crystal offers should beat buying and breaking equipment');
-    Afk.offers = () => [{ sourceId: 500, price: 1, count: 1000 }];
+    Afk.offers = () => [{ sourceId: 500, town: 'Giran', price: 1, count: 1000 }];
     const routes = Shots.scrapCraftRoutes(dwarf, [{ recipeId: 44 }], index);
     assert.strictEqual(routes.length, 1, 'a learned guaranteed equipment recipe can source crystals');
     assert.strictEqual(routes[0].cash, 25);
@@ -151,15 +151,17 @@ try {
 } finally { MarketOpportunity.hotOffers = originalHotOffers; }
 const ownSupply = { ...dwarf, inventory: { '129': {
     selfId: 129, amount: 1, equipped: true, slot: 7
-}, '1463': { selfId: 1463, amount: 1156, kind: 'Other.Shot' } } };
-assert(Shots.hasShotSurplus({ ...ownSupply, stats: { shotCraft: { productId: 1463 } } }),
+}, '1463': { selfId: 1463, amount: ShotStock.PURCHASE_TARGET_AMOUNT + 156, kind: 'Other.Shot' } } };
+const ownShotTarget = invoke('GameServer/Bot/Economy/EconomyContext').basics(ownSupply).stock('shots').target;
+ownSupply.inventory['1463'].amount = ownShotTarget + 156;
+assert(Shots.hasShotSurplus({ ...ownSupply, stats: { ...ownSupply.stats, shotCraft: { productId: 1463 } } }),
     'leftover crafted shots must be admitted for a listing review');
-assert(!Shots.hasShotSurplus({ ...ownSupply, stats: { shotCraft: { productId: 1463 } },
-    inventory: { ...ownSupply.inventory, 1463: { selfId: 1463, amount: 1000 } } }),
+assert(!Shots.hasShotSurplus({ ...ownSupply, stats: { ...ownSupply.stats, shotCraft: { productId: 1463 } },
+    inventory: { ...ownSupply.inventory, 1463: { selfId: 1463, amount: ownShotTarget } } }),
     'the personal reserve alone must not trigger a surplus listing review');
 assert.strictEqual(ItemDisposition.saleCandidates(ownSupply, { unlimited: true })
     .find((item) => item.selfId === 1463)?.count, 156,
-    'a shot seller must keep enough stock for their own weapon');
+    'a shot seller must keep enough stock for their own weapon: what its restock fills it to');
 index.shotSupply.set(1463, 1000);
 assert.strictEqual(Shots.craftCandidate(dwarf, recipe, index), null,
     'existing shot supply must close the speculative crafting route');

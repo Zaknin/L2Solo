@@ -7,7 +7,14 @@ function nearby(members) {
         && Math.abs(member.loc.locZ - anchor.locZ) <= 200);
 }
 
+function meetingPending(members) {
+    return members.some(member => !!member.stats?.tradeMeeting);
+}
+
 function ready(party, members, spot) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (Roster.markerFor(party) && !Roster.held(party, spot)
+        && !Roster.exact(members.map(member => Number(member.characterId)), Roster.markerFor(party).memberIds)) return false;
     // Non-grid profiles have caller-defined geometry. Production hunting
     // sectors use the shared grid and dungeon partition classification.
     if (!/^(-?\d+)_(-?\d+)(?::.+)?$/.test(String(spot?.id || '')) && spot?.raidBoss !== true) return true;
@@ -16,4 +23,4 @@ function ready(party, members, spot) {
         && !member.stats?.travel && SpotService.containsLocation(spot, member.loc));
 }
 
-module.exports = { ready, nearby };
+module.exports = { ready, nearby, meetingPending };

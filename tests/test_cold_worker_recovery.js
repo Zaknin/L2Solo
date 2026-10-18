@@ -1,3 +1,4 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const EventEmitter = require('events');
 
@@ -44,6 +45,8 @@ function wait(ms) {
         const firstEpoch = coordinator.workerEpoch;
         assert(first, 'coordinator must create one long-lived worker');
         assert.strictEqual(first.options.name, 'l2node-cold-simulation');
+        assert.strictEqual(first.options.resourceLimits.maxOldGenerationSizeMb, 512,
+            'the full-world worker must leave headroom above its retained state and caches');
 
         first.emit('exit', 1);
         assert.strictEqual(coordinator.snapshot().workerRestarts, 1);
@@ -56,6 +59,9 @@ function wait(ms) {
         const results = Array.from({ length: 20 }, (_, index) => ({
             ok: true,
             characterId: index + 1,
+            inputToken: { characterId: index + 1, ownerId: 'cold_simulation_owner', revision: 1,
+                leaseId: `lease-${index + 1}`, leaseUntil: Date.now() + 30000 },
+            proposalId: `proposal-${index + 1}`,
             state: { characterId: index + 1, stats: { padding: 'x'.repeat(40000) } },
             context: {}
         }));
@@ -89,6 +95,14 @@ function wait(ms) {
         assert.strictEqual(second.messages.at(-1).type, 'resume',
             'worker must resume once every pause reason has cleared');
 
+        coordinator.lastHeartbeatAt = Date.now() - 37000;
+        coordinator.lastWatchdogAt = Date.now() - 37000;
+        coordinator.watchdog();
+        assert.notStrictEqual(second.terminated, true,
+            'a main thread that slept with the Mac must not count its own sleep against the worker');
+        assert(Date.now() - coordinator.lastHeartbeatAt < 2000, 'the stall is credited to the heartbeat clock');
+
+        coordinator.lastWatchdogAt = 0;
         coordinator.lastHeartbeatAt = Date.now() - 20000;
         coordinator.watchdog();
         assert.strictEqual(second.terminated, true, 'a dead worker must be terminated so the restart path can recover leases');

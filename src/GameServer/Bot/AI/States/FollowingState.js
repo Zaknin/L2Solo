@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const World          = invoke('GameServer/World/World');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -54,6 +55,7 @@ const SUPPORT_APPROACH_REPATH_MS = 1500;
 const SUPPORT_TARGET_DRIFT = 120;
 
 function timedFollowingStage(name, callback, items = 1) {
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics !== true) return callback();
     const startedAt = performance.now();
     try {
         return callback();
@@ -215,17 +217,10 @@ function companionTownErrand(session, bot, player, BotAI) {
     });
     const afkBuyer = TradeService.findAfkBuyerForActor(bot, town, session.coldLifeState);
     if (afkBuyer && (!buyer || Number(afkBuyer.score) >= Number(buyer.preview?.totalAdena || 0))) {
-        const offer = afkBuyer.offer;
         return {
             kind: 'sell_resources',
-            target: {
-                actorId: offer.projection.actor.fetchId(),
-                name: offer.sourceName,
-                locX: offer.locX,
-                locY: offer.locY,
-                locZ: offer.locZ,
-                town: offer.town || town.name
-            }
+            target: { ...invoke('GameServer/Bot/Economy/MarketOpportunity').offerTarget(afkBuyer.offer, town.name),
+                sale: afkBuyer.sale }
         };
     }
     if (buyer) {
@@ -373,6 +368,7 @@ function recordRoleDecision(session, bot, action, reason, extra = {}) {
 
     session.roleDecision = current;
 
+    if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return;
     const signature = roleDecisionSignature(current);
     const shouldLog = !previous ||
         roleDecisionSignature(previous) !== signature ||
@@ -386,7 +382,7 @@ function recordRoleDecision(session, bot, action, reason, extra = {}) {
             current.threatSource && `source=${current.threatSource}`,
             current.phase && `phase=${current.phase}`
         ].filter(Boolean).join(' ');
-        console.info("BotRole :: %s %s/%s (%s)%s", bot.fetchName(), action, reason, role, details ? ` ${details}` : '');
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("BotRole :: %s %s/%s (%s)%s", bot.fetchName(), action, reason, role, details ? ` ${details}` : '');
     }
 }
 
@@ -829,7 +825,7 @@ function deliverPurchasedResources(session, bot, playerSession) {
             key: `resource-delivery-failed:${bot.fetchId()}:${delivery.purchasedAt}`,
             templates: [`I brought ${delivery.itemName}, but could not open trade (${trade.reason}).`]
         });
-        WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
             botId: bot.fetchId(),
             playerId: delivery.playerId,
             amount: delivery.amount
@@ -843,7 +839,7 @@ function deliverPurchasedResources(session, bot, playerSession) {
         key: `resource-delivery:${bot.fetchId()}:${delivery.purchasedAt}`,
         templates: [`I brought ${delivery.amount} ${delivery.itemName}. Please confirm the trade.`]
     });
-    WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) WorkflowTelemetry.recordSupply(delivery.workflowId, 'trade', {
         botId: bot.fetchId(),
         playerId: delivery.playerId,
         amount: delivery.amount,
@@ -853,29 +849,57 @@ function deliverPurchasedResources(session, bot, playerSession) {
     return true;
 }
 
-module.exports = {
+const FollowingState = {
     deliverPurchasedResources,
     canRefreshPartyMusicDuringCombat,
     canAttemptPartyCorpseSummon,
 
     tick(session, bot, Generics, BotAI) {
+        // One companion tick: the phases below run in this order and share
+        // the per-call ctx. A phase that returns true has ended the tick.
+        const ctx = { session, bot, Generics, BotAI };
+        if (FollowingState.tickLeaderPresence(ctx)) return;
+        if (FollowingState.tickLeaderRevival(ctx)) return;
+        if (FollowingState.tickPartyContext(ctx)) return;
+        if (FollowingState.tickCorpseSummonAndDisable(ctx)) return;
+        if (FollowingState.tickTravel(ctx)) return;
+        if (FollowingState.tickPendingSupport(ctx)) return;
+        if (FollowingState.tickRest(ctx)) return;
+        if (FollowingState.tickBuffsAndErrands(ctx)) return;
+        if (FollowingState.tickSupportAndHealing(ctx)) return;
+        if (FollowingState.tickDefenseAndPull(ctx)) return;
+        FollowingState.tickCombat(ctx);
+        FollowingState.tickLootAndLeaderTarget(ctx);
+        FollowingState.tickIdleFollow(ctx);
+    },
+
+    // The companion still belongs to a party with an online leader.
+    tickLeaderPresence(ctx) {
+        const { session, BotAI } = ctx;
         const playerSession = session.followPlayerSession;
         if (session.partyCompanion !== true) {
             session.plan = 'hunting';
             session.followPlayerSession = null;
             session.roleDecision = null;
-            return;
+            refreshPartyMemberships([session], invoke);
+            return true;
         }
 
         if (!playerSession || !playerSession.actor || !playerSession.actor.fetchIsOnline()) {
             session.plan = 'hunting';
             session.roleDecision = null;
             BotAI.say(session, "My companion has disconnected. Heading back to hunt.");
-            return;
+            return true;
         }
+        Object.assign(ctx, { playerSession });
+        return false;
+    },
 
+    // Party raid hand-off, leader resurrection, waiting for it, purchased-resource delivery.
+    tickLeaderRevival(ctx) {
+        const { session, bot, Generics, BotAI, playerSession } = ctx;
         const player = playerSession.actor;
-        if (invoke('GameServer/Bot/AI/PlayerPartyRaid').tick(session, bot, Generics, BotAI)) return;
+        if (invoke('GameServer/Bot/AI/PlayerPartyRaid').tick(session, bot, Generics, BotAI)) return true;
         if (player.isDead?.()) {
             // Do this before the provider is selected: a solo healer can be
             // the first and only companion tick after the leader dies.
@@ -891,7 +915,7 @@ module.exports = {
             recordRoleDecision(session, bot, 'resurrect_party', revival.source || 'waiting', {
                 targetId: revival.target?.fetchId?.() || revival.targetId || null
             });
-            return;
+            return true;
         }
         if (player.isDead?.()) {
             if (!revival.blockedBy) {
@@ -913,9 +937,16 @@ module.exports = {
             // During an actual fight, leave the normal combat branch active
             // so the living party can finish it. Once it clears, the next tick
             // immediately schedules the prioritized leader resurrection.
-            if (!revival.blockedBy) return;
+            if (!revival.blockedBy) return true;
         }
-        if (!player.isDead?.() && deliverPurchasedResources(session, bot, playerSession)) return;
+        if (!player.isDead?.() && deliverPurchasedResources(session, bot, playerSession)) return true;
+        Object.assign(ctx, { player });
+        return false;
+    },
+
+    // Role, distance, party settings, pull state and the threat this companion answers; protected raid retreat.
+    tickPartyContext(ctx) {
+        const { session, bot, playerSession, player } = ctx;
         const role = BotRoles.inferRole(bot);
         const distance = point(bot).distance(point(player));
         const leaderSeated = player.state?.fetchSeated?.() === true;
@@ -970,7 +1001,7 @@ module.exports = {
                     protectedId: rawPartyThreat.targetId || null
                 });
             }
-            return;
+            return true;
         }
         if (rawPartyThreat?.type === 'raid') {
             // Engagement may have become authoritative after threat discovery.
@@ -1007,6 +1038,13 @@ module.exports = {
         const leaderTargetId = partyRaid?.phase === 'combat'
             ? Number(partyRaid.targetId || partyRaid.bossId)
             : (pulling.enabled ? undefined : configuredLeaderTargetId);
+        Object.assign(ctx, { role, distance, leaderSeated, restFormationDistance, partySettings, partyRaid, pulling, personalSupportThreat, rawThreatOnlyTargetsTravellingPuller, partyThreat, currentPartyAggroMonsters, leaderTargetId });
+        return false;
+    },
+
+    // Necromancer corpse summon, unexpected-add announcement, hard disable.
+    tickCorpseSummonAndDisable(ctx) {
+        const { session, bot, Generics, BotAI, playerSession, partyThreat, leaderTargetId } = ctx;
         // A necromancer may need one quiet tick after the party kills a mob:
         // the corpse is no longer a live party threat, but it is still a valid
         // TARGET_CORPSE_MOB for the next summon cast.
@@ -1020,7 +1058,7 @@ module.exports = {
                     targetId: corpse.fetchId(),
                     skillId: session.lastCombatDecision?.skillId || null
                 });
-                return;
+                return true;
             }
         }
         announceUnexpectedNpcAdd(session, bot, playerSession, partyThreat, leaderTargetId);
@@ -1031,9 +1069,15 @@ module.exports = {
             session.currentTargetId = undefined;
             bot.unselect();
             recordRoleDecision(session, bot, 'disabled', 'debuff_control');
-            return;
+            return true;
         }
+        Object.assign(ctx, { impairments });
+        return false;
+    },
 
+    // Stuck sampling, standing up, rooted hold, karma town wait, gatekeeper transit, catch-up teleport.
+    tickTravel(ctx) {
+        const { session, bot, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId, impairments } = ctx;
         const currentLoc = { x: bot.fetchLocX(), y: bot.fetchLocY() };
         if (!session.lastTickLoc) {
             session.lastTickLoc = currentLoc;
@@ -1067,12 +1111,12 @@ module.exports = {
                 partyThreat || leaderTargetId ? assistActionForRole(role) : 'follow_leader',
                 partyThreat ? 'party_under_attack' : (leaderTargetId ? assistReasonForRole(role) : 'leader_moved')
             );
-            return;
+            return true;
         }
 
         if (impairments.rooted && !partyThreat && !leaderTargetId && distance > FOLLOW_RUN_DISTANCE) {
             recordRoleDecision(session, bot, 'hold_position', 'rooted');
-            return;
+            return true;
         }
 
         // Pulling has its own route recovery.  Generic stuck samples must not
@@ -1080,7 +1124,18 @@ module.exports = {
         // report no movement even though its server-stepped route is healthy.
         // A truly distant puller may still use the normal catch-up teleport.
         const pullerTravelling = activeBotPullTravel(session, pulling);
-        if (session.companionTownTransit || distance > FOLLOW_TELEPORT_DISTANCE) {
+        // Neither a gatekeeper transit nor a catch-up teleport takes a
+        // companion with karma into a town; it waits where it is.
+        const waitsOutsideTown = PartyCompanionService.staysOutOfTown(bot, loc(player));
+        if (waitsOutsideTown && !partyThreat) {
+            if (session.lastFollowMoveTarget) {
+                bot.automation?.abortAll?.(bot);
+                session.lastFollowMoveTarget = null;
+            }
+            recordRoleDecision(session, bot, 'hold_position', 'karma_keeps_out_of_town');
+            return true;
+        }
+        if (!waitsOutsideTown && (session.companionTownTransit || distance > FOLLOW_TELEPORT_DISTANCE)) {
             const transit = CompanionTownTransit.tick(session, bot, player);
             if (transit.handled) {
                 session.stuckTicks = 0;
@@ -1088,12 +1143,13 @@ module.exports = {
                     sourceTown: transit.transit?.sourceTown || null,
                     targetTown: transit.transit?.targetTown || null
                 });
-                return;
+                return true;
             }
         }
         const separatedInsideTown = distance > FOLLOW_TELEPORT_DISTANCE
             && CompanionTownTransit.sameTown(bot, player);
-        if (!pullerTravelling && (session.stuckTicks >= 3 || (distance > FOLLOW_TELEPORT_DISTANCE && !separatedInsideTown))) {
+        if (!waitsOutsideTown && !pullerTravelling
+            && (session.stuckTicks >= 3 || (distance > FOLLOW_TELEPORT_DISTANCE && !separatedInsideTown))) {
             session.stuckTicks = 0;
             recordRoleDecision(session, bot, 'follow_leader', distance > FOLLOW_TELEPORT_DISTANCE ? 'catch_up' : 'unstuck');
             const TeleportTo = invoke('GameServer/Actor/Generics/TeleportTo');
@@ -1108,9 +1164,14 @@ module.exports = {
                     templates: ['Caught up.']
                 });
             }
-            return;
+            return true;
         }
+        return false;
+    },
 
+    // A support approach or cast already in progress.
+    tickPendingSupport(ctx) {
+        const { session, bot, Generics, playerSession, pulling, partyThreat, leaderTargetId } = ctx;
         if (pendingSupportShouldYield(session, bot, playerSession, pulling.puller?.actor, partyThreat || leaderTargetId)) {
             clearPendingSupportApproach(session, bot, { abortMove: true });
             BotSupportPlanner.cancelSupportCast(session, bot);
@@ -1129,9 +1190,14 @@ module.exports = {
                 pendingIsBuff ? pendingKind.slice('buff:'.length) : pendingSupport.kind,
                 { targetId: pendingSupport.target.fetchId(), skillId: pendingSupport.skill.fetchSelfId() }
             );
-            return;
+            return true;
         }
+        return false;
+    },
 
+    // Vitals, return after support, resting with the leader, low HP/MP recovery.
+    tickRest(ctx) {
+        const { session, bot, BotAI, playerSession, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId } = ctx;
         const botVitals = {
             hpRatio: ratio(bot.fetchHp(), bot.fetchMaxHp()),
             mpRatio: ratio(bot.fetchMp(), bot.fetchMaxMp())
@@ -1154,7 +1220,7 @@ module.exports = {
             if (distance > FOLLOW_RUN_DISTANCE) {
                 moveToFollowTarget(session, bot, player);
                 recordRoleDecision(session, bot, 'follow_leader', 'return_after_support');
-                return;
+                return true;
             }
         }
 
@@ -1168,19 +1234,19 @@ module.exports = {
                 if (!shouldKeepCurrentFollowMove(session, bot, player, distance)) {
                     moveToFollowTarget(session, bot, player);
                 }
-                return;
+                return true;
             }
 
             session.lastFollowMoveTarget = null;
             sitDown(session, bot);
             recordRoleDecision(session, bot, 'rest_with_leader', 'leader_sitting');
-            return;
+            return true;
         }
 
         if (!partyThreat && !leaderTargetId && bot.state.fetchSeated() && !leaderSeated && !botRecovering) {
             standUp(session, bot);
             recordRoleDecision(session, bot, 'follow_leader', 'leader_stood_ready');
-            return;
+            return true;
         }
 
         const isActiveBotPuller = pulling.enabled &&
@@ -1212,7 +1278,7 @@ module.exports = {
                         'Low on resources — heading to the guide for a brief recovery.'
                     ]
                 });
-                return;
+                return true;
             }
 
             session.plan = 'resting';
@@ -1226,9 +1292,15 @@ module.exports = {
                 key: `recover-sit:${bot.fetchId()}`,
                 templates: ['HP/MP is low. Sitting to recover.', 'Need a short sit for HP/MP.']
             });
-            return;
+            return true;
         }
+        Object.assign(ctx, { botVitals, partyVitals, hotTownRebuffVisit });
+        return false;
+    },
 
+    // Newbie buff refresh, town errands, town-visit rebuff, support loadout.
+    tickBuffsAndErrands(ctx) {
+        const { session, bot, BotAI, playerSession, player, role, pulling, partyThreat, currentPartyAggroMonsters, leaderTargetId, hotTownRebuffVisit } = ctx;
         let acted = false;
         let keepRoleDecision = false;
 
@@ -1275,7 +1347,7 @@ module.exports = {
                         'Buff check failed; getting a new blessing before I come back.'
                     ]
                 });
-                return;
+                return true;
             }
         }
 
@@ -1289,7 +1361,7 @@ module.exports = {
                     town: errand.target.town,
                     itemId: errand.itemId || null
                 });
-                return;
+                return true;
             }
         }
 
@@ -1313,13 +1385,21 @@ module.exports = {
                     'Quick visit to the guide, then town business is finished.'
                 ]
             });
-            return;
+            return true;
         }
 
         if (!partyThreat && !leaderTargetId && !isBusy(bot)) {
             BotSupportPlanner.reconcileLoadout(partySupportMembers(playerSession,pulling.puller),
                 PartyPulling.supportProviders(playerSession));
         }
+        Object.assign(ctx, { acted, keepRoleDecision });
+        return false;
+    },
+
+    // Support plan, heal choice, rebuff requests, party buffs, healer actions.
+    tickSupportAndHealing(ctx) {
+        const { session, bot, Generics, playerSession, player, role, partyRaid, pulling, partyThreat, currentPartyAggroMonsters, leaderTargetId, impairments, botVitals, partyVitals } = ctx;
+        let { acted, keepRoleDecision } = ctx;
         const supportBuffTarget = timedFollowingStage('supportPlan', () => (
             BotSupportPlanner.nextAction(
                 bot,
@@ -1483,7 +1563,14 @@ module.exports = {
                 keepRoleDecision = true;
             }
         }
+        Object.assign(ctx, { acted, keepRoleDecision });
+        return false;
+    },
 
+    // Self-defense, critical-HP retreat, the bot puller, holding for a pull.
+    tickDefenseAndPull(ctx) {
+        const { session, bot, Generics, BotAI, playerSession, player, role, partySettings, personalSupportThreat, rawThreatOnlyTargetsTravellingPuller, impairments, botVitals, acted } = ctx;
+        let { pulling, partyThreat, keepRoleDecision } = ctx;
         // Defense is distinct from routine assist and does not wait for 25% HP.
         // Priority heals above keep their action; an in-flight cast must finish
         // before control/escape, and repeated hit wakeups keep the escape route.
@@ -1496,14 +1583,14 @@ module.exports = {
                     targetId: personalSupportThreat.fetchId(), skillId: control.skill.fetchSelfId()
                 });
                 castSkillOn(session, bot, Generics, control.target, control.skill, true);
-                return;
+                return true;
             }
             if (BotRoles.usesCasterWeaponCombat(bot) || !supportCanMeleeAssist(bot, role)) {
                 const moved = retreatFromThreat(session, bot, personalSupportThreat, player, impairments.rooted);
                 recordRoleDecision(session, bot, 'retreat', impairments.rooted ? 'personal_attack_rooted' : 'personal_attack_no_control', {
                     targetId: personalSupportThreat.fetchId(), moved
                 });
-                return;
+                return true;
             }
         }
 
@@ -1524,7 +1611,7 @@ module.exports = {
                 hpRatio: botVitals.hpRatio,
                 moved
             });
-            return;
+            return true;
         }
 
         if (!acted && pulling.enabled && pulling.puller?.session === session && pulling.puller.kind === 'bot') {
@@ -1541,7 +1628,7 @@ module.exports = {
                 // the ordinary party-assist branch below attack the current
                 // threat; once the last mob dies, tickBotPuller resumes from
                 // the preserved pull configuration on the following tick.
-                if (pullAction.paused !== 'party_under_attack' || !partyThreat?.actor) return;
+                if (pullAction.paused !== 'party_under_attack' || !partyThreat?.actor) return true;
             }
         }
 
@@ -1582,7 +1669,14 @@ module.exports = {
             });
             keepRoleDecision = true;
         }
+        Object.assign(ctx, { pulling, partyThreat, keepRoleDecision });
+        return false;
+    },
 
+    // Class tactics, tank protection and auto pull, crowd control, combat loot window, party assist.
+    tickCombat(ctx) {
+        const { session, bot, Generics, BotAI, playerSession, player, role, partySettings, partyRaid, pulling, partyThreat, currentPartyAggroMonsters, leaderTargetId, botVitals, partyVitals } = ctx;
+        let { acted, keepRoleDecision } = ctx;
         const activePartyThreats = partyThreat ? currentPartyAggroMonsters() : [];
         const protectedSession = partyThreat?.targetId
             ? PartyAwareness.partySessions(playerSession).find((memberSession) => (
@@ -1763,7 +1857,13 @@ module.exports = {
                 }
             }
         }
+        Object.assign(ctx, { acted, keepRoleDecision });
+    },
 
+    // Pending sweep loot and the leader's selected target (asynchronous lookup).
+    tickLootAndLeaderTarget(ctx) {
+        const { session, bot, Generics, BotAI, playerSession, player, role, partyThreat, leaderTargetId } = ctx;
+        let { acted, keepRoleDecision } = ctx;
         if (!acted && !partyThreat
             && invoke('GameServer/Bot/AI/PendingSweep').tick(session, bot, Generics, BotAI)) acted = true;
 
@@ -1859,7 +1959,12 @@ module.exports = {
                 bot.unselect();
             }
         }
+        Object.assign(ctx, { acted, keepRoleDecision });
+    },
 
+    // Stay order, keeping formation range, ready stance.
+    tickIdleFollow(ctx) {
+        const { session, bot, playerSession, player, role, distance, impairments, acted, keepRoleDecision } = ctx;
         if (!session.currentTargetId && !acted) {
             if (session.botStay && session.stayLocation) {
                 session.lastFollowMoveTarget = null;
@@ -1880,7 +1985,7 @@ module.exports = {
             } else if (distance > FOLLOW_RUN_DISTANCE || PartyCompanionService.regroupActive(playerSession)) {
                 if (impairments.rooted) {
                     recordRoleDecision(session, bot, 'hold_position', 'rooted');
-                    return;
+                    return true;
                 }
                 if (!keepRoleDecision) {
                     recordRoleDecision(session, bot, 'follow_leader', 'keep_range');
@@ -1891,7 +1996,7 @@ module.exports = {
                 } else {
                     if (shouldKeepCurrentFollowMove(session, bot, player, distance)) {
                         session.lastFollowMoveHeldAt = Date.now();
-                        return;
+                        return true;
                     }
                     moveToFollowTarget(session, bot, player);
                 }
@@ -1904,3 +2009,5 @@ module.exports = {
         }
     }
 };
+
+module.exports = FollowingState;

@@ -3,27 +3,13 @@ const World          = invoke('GameServer/World/World');
 const DataCache      = invoke('GameServer/DataCache');
 const Item           = invoke('GameServer/Item/Item');
 const SummonControl  = invoke('GameServer/Npc/SummonControl');
-
-function merchantPurchaseItems(store) {
-    const items = [];
-
-    store.items.forEach((storeItem) => {
-        DataCache.fetchItemFromSelfId(storeItem.selfId, (item) => {
-            items.push(new Item(storeItem.objectId, {
-                ...utils.crushOb(item),
-                amount: storeItem.count,
-                price: storeItem.price
-            }));
-        });
-    });
-
-    return items;
-}
+const TradeService   = invoke('GameServer/Bot/TradeService');
+const merchantPurchaseItems = invoke('GameServer/Network/MerchantPurchaseItems');
 
 function merchantDemandRows(actor, store) {
     const rows = [];
 
-    store.items.forEach((storeItem) => {
+    TradeService.nativeStoreItems(store).forEach((storeItem) => {
         const inventoryItem = actor.backpack.fetchItems().find((item) => (
             item.fetchSelfId() === storeItem.selfId &&
             !item.fetchEquipped() &&
@@ -31,10 +17,11 @@ function merchantDemandRows(actor, store) {
         ));
 
         if (inventoryItem) {
+            const quote = TradeService.storeSaleQuote(store, storeItem, actor, inventoryItem);
             rows.push({
                 item: inventoryItem,
-                amount: Math.min(inventoryItem.fetchAmount(), storeItem.count),
-                price: storeItem.price
+                amount: Math.min(inventoryItem.fetchAmount(), quote.count),
+                price: quote.price
             });
             return;
         }
@@ -63,12 +50,13 @@ function openMerchantTradeWindow(session, merchant) {
         return;
     }
 
+    TradeService.refreshStorePrices(store, session.actor);
     store.revision = Math.max(1, Number(store.revision || 1));
     session.activeMerchantTrade = {
         merchant,
         store,
         revision: store.revision,
-        prices: Object.fromEntries(store.items.map((line) => [Number(line.selfId), Number(line.price)]))
+        prices: Object.fromEntries(TradeService.nativeStoreItems(store).map((line) => [Number(line.selfId), Number(line.price)]))
     };
     session.viewedPrivateStoreSeller = merchant;
 
@@ -84,19 +72,22 @@ function openMerchantTradeWindow(session, merchant) {
     }
 
     if (store.storeType === 3) {
+        const rows = merchantDemandRows(session.actor, store);
+        session.activeMerchantTrade.saleQuotes = new Map(rows.map(row => [row.item.fetchId(),
+            { selfId: row.item.fetchSelfId(), price: row.price, amount: row.amount }]));
         // Finish the interaction before opening WTB so the C4 client can move
         // while keeping the buyer targeted, as with manufacture windows.
         session.dataSendToMe(ServerResponse.actionFailed());
         session.dataSendToMe(ServerResponse.privateStoreListBuy(
             merchant,
-            merchantDemandRows(session.actor, store),
+            rows,
             session.actor.backpack.fetchTotalAdena()
         ));
     }
 }
 
 function privateStoreTitle(actor) {
-    return actor.fetchPrivateStore?.()?.title || actor.fetchTitle();
+    return actor.fetchPrivateStore?.()?.title || actor.fetchTitle() || '';
 }
 
 function sendPrivateStoreMessage(session, actor) {

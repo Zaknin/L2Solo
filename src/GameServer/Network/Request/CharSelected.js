@@ -8,16 +8,22 @@ function charSelected(session, buffer) {
     packet
         .readD(); // Character Slot
 
-    consume(session, {
+    return consume(session, {
         characterSlot: packet.data[0]
     });
 }
 
 function consume(session, data) {
-    Shared.fetchCharacters(session.accountId).then((characters) => {
+    // The reads below finish later. By then a newer selection may have
+    // started or the connection may be gone; this one then creates nothing.
+    const selection = session.characterSelection = (session.characterSelection || 0) + 1;
+
+    return Shared.fetchCharacters(session.accountId).then((characters) => {
         const character = characters[data.characterSlot];
 
-        Shared.fetchClassInformation(character.classId).then((classInfo) => {
+        return Shared.fetchClassInformation(character.classId).then((classInfo) => {
+            if (session.characterSelection !== selection || session.socket?.destroyed) return;
+
             // Create a new actor instance with info
             session.setActor({
                 ...character, ...utils.crushOb(classInfo)

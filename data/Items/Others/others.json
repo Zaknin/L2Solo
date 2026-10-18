@@ -13025,723 +13025,723 @@
 },{
     "selfId": 4445,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 5100 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4446,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4447,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 5100 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4448,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4449,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4450,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4451,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 5100 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4452,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 5100 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4453,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4454,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4455,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4456,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4457,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4458,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4459,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4460,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4461,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4462,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4463,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4464,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4465,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4466,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4467,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4468,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4469,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Con-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4470,
     "template": { "kind": "Other.Tattoo", "name": "Dye of STR (Str+1 Dex-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4471,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Str-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4472,
     "template": { "kind": "Other.Tattoo", "name": "Dye of CON (Con+1 Dex-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4473,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Str-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4474,
     "template": { "kind": "Other.Tattoo", "name": "Dye of DEX (Dex+1 Con-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4475,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Men-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4476,
     "template": { "kind": "Other.Tattoo", "name": "Dye of INT (Int+1 Wit-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4477,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Int-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4478,
     "template": { "kind": "Other.Tattoo", "name": "Dye of MEN (Men+1 Wit-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4479,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Int-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4480,
     "template": { "kind": "Other.Tattoo", "name": "Dye of WIT (Wit+1 Men-1)", "class1": 4, "class2": 5, "mass": 150, "price": 42000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4481,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4482,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4483,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON(Con+1 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4484,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON(Con+1 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4485,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4486,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4487,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4488,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4489,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4490,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4491,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4492,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 12000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4493,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 21000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4494,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 21000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4495,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+1 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4496,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+1 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4497,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 21000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4498,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 21000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4499,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4500,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4501,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4502,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 21000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4503,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4504,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4505,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4506,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4507,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4508,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4509,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4510,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4511,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4512,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4513,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4514,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 24600 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4515,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4516,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4517,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4518,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4519,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4520,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4521,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4522,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4523,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4524,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4525,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4526,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4527,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 27000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4528,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4529,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Con-5)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4530,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Dex-5)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4531,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Str-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4532,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Dex-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4533,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Str-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4534,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Con-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4535,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Men-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4536,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Wit-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4537,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Int-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4538,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Wit-5)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4539,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Int-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4540,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Men-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4541,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4542,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4543,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4544,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4545,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4546,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4547,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4548,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4549,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4550,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4551,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4552,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 30000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4553,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Con-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4554,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+1 Dex-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4555,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+1 Str-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4556,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+1 Dex-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4557,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Str-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4558,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+1 Con-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4559,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Men-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4560,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+1 Wit-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4561,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Int-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4562,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+1 Wit-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4563,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Int-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4564,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+1 Men-1)", "class1": 4, "class2": 5, "mass": 150, "price": 60000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4565,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Con-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4566,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Dex-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4567,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Str-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4568,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Dex-6)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4569,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Str-6)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4570,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Con-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4571,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Men-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4572,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Wit-6)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4573,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Int-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4574,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Wit-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4575,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Int-6)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4576,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Men-6)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4577,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Con-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4578,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Dex-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4579,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Str-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4580,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Dex-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4581,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Str-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4582,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Con-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4583,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Men-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4584,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Wit-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4585,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Int-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4586,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Wit-5)", "class1": 4, "class2": 5, "mass": 150, "price": 0 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4587,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Int-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4588,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Men-5)", "class1": 4, "class2": 5, "mass": 150, "price": 36000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4589,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4590,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+2 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4591,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4592,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+2 Dex-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4593,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Str-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4594,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+2 Con-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4595,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4596,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+2 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4597,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4598,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+2 Wit-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4599,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Int-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4600,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+2 Men-2)", "class1": 4, "class2": 5, "mass": 150, "price": 72000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4601,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4602,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+3 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4603,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4604,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+3 Dex-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4605,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Str-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4606,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+3 Con-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4607,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4608,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+3 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4609,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4610,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+3 Wit-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4611,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Int-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4612,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+3 Men-3)", "class1": 4, "class2": 5, "mass": 150, "price": 108000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4613,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4614,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of STR (Str+4 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4615,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4616,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of CON (Con+4 Dex-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4617,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Str-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4618,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of DEX (Dex+4 Con-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4619,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4620,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of INT (Int+4 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4621,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4622,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of MEN (Men+4 Wit-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4623,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Int-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4624,
     "template": { "kind": "Other.Tattoo", "name": "Greater Dye of WIT (Wit+4 Men-4)", "class1": 4, "class2": 5, "mass": 150, "price": 174000 },
-    "etc": { "stackable": false, "consumable": false }
+    "etc": { "stackable": true, "consumable": false }
 },{
     "selfId": 4625,
     "template": { "kind": "Other.None", "name": "Dice (Heart)", "class1": 4, "class2": 5, "mass": 0, "price": 500 },
@@ -14155,6 +14155,30 @@
     "template": { "kind": "Other.Quest", "name": "Roselyn's Note", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
     "etc": { "stackable": true, "consumable": false }
 },{
+    "selfId": 7574,
+    "template": { "kind": "Other.Quest", "name": "Very Expensive Necklace", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 7528,
+    "template": { "kind": "Other.Quest", "name": "Spinneret", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 7161,
+    "template": { "kind": "Other.Quest", "name": "Skein of Yarn", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 7076,
+    "template": { "kind": "Other.Quest", "name": "Mysterious Cloth", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 7163,
+    "template": { "kind": "Other.Quest", "name": "Piece of Reinforced Steel", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 7078,
+    "template": { "kind": "Other.Quest", "name": "Sewing kit", "class1": 4, "class2": 3, "mass": 0, "price": 0 },
+    "etc": { "stackable": true, "consumable": false }
+},{
     "selfId": 7554,
     "template": {"kind": "Other.Scroll", "name": "Scroll of Escape to Talking Island", "class1": 4, "class2": 5, "mass": 30, "price": 400},
     "etc": {"stackable": true, "consumable": true}
@@ -14333,5 +14357,49 @@
         "stackable": true,
         "consumable": false
     }
+},{
+    "selfId": 990,
+    "template": {"kind": "Other.Quest", "name": "Mandragora Essence", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 991,
+    "template": {"kind": "Other.Quest", "name": "Royen's Key", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 992,
+    "template": {"kind": "Other.Quest", "name": "Shilen's 1st Mark", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 993,
+    "template": {"kind": "Other.Quest", "name": "Shilen's 2nd Mark", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 994,
+    "template": {"kind": "Other.Quest", "name": "Eye of Abyss", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 995,
+    "template": {"kind": "Other.Quest", "name": "Wanted Poster", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 996,
+    "template": {"kind": "Other.Quest", "name": "Alex's Dagger", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 997,
+    "template": {"kind": "Other.Quest", "name": "Pinter's Bill", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 998,
+    "template": {"kind": "Other.Quest", "name": "Book of Aklantoth - Part 1", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 999,
+    "template": {"kind": "Other.Quest", "name": "Book of Aklantoth - Part 2", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
+},{
+    "selfId": 1000,
+    "template": {"kind": "Other.Quest", "name": "Book of Aklantoth - Part 3", "class1": 4, "class2": 3, "mass": 0, "price": 0},
+    "etc": { "stackable": true, "consumable": false }
 }
 ]

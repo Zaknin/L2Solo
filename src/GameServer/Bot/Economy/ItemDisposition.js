@@ -1,17 +1,20 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const BeginnerShots = require('../../Items/C4BeginnerShots');
 const ClanCrafting = require('../../Clan/ClanCraftingPolicy');
 const DataCache = invoke('GameServer/DataCache');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 const C4EnchantScrolls = invoke('GameServer/Items/C4EnchantScrolls');
+const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const { CRYSTAL_IDS } = invoke('GameServer/Items/C4EnchantRules');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
 
 const SELLABLE_KINDS = ['Weapon.', 'Armor.', 'Other.Material', 'Other.Shot'];
 const NPC_ONLY_KINDS = ['Other.Recipe', 'Other.Spellbook'];
 const NPC_LIQUIDATION_MAX_UNIT_PRICE = 1000;
 const WAREHOUSE_GEAR_MIN_BASE_PRICE = 1000;
-const TRADE_MIN_LEVEL = 10;
 const INVENTORY_SLOT_LIMIT = 80;
 // A forced trip to town starts at 20 slots of either kind (the author: 3 junk, 6
 // gear): a gear replacement or a purchase leaves the old piece in the bag, and
@@ -31,16 +34,15 @@ const SHOT_PRODUCT_RANK = Object.freeze({
     3948: 'd', 3949: 'c', 3950: 'b', 3951: 'a', 3952: 's'
 });
 
-let templateIndexSource = null;
-let templateIndex = new Map();
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (templateIndexSource !== items) {
-        templateIndexSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
+}
+
+// Canonical quest classification cannot be overridden by a saved gear kind.
+function isQuestItem(item, template = templateFor(item?.selfId)) {
+    return template?.template?.kind === 'Other.Quest'
+        || item?.kind === 'Other.Quest' || item?.template?.kind === 'Other.Quest';
 }
 
 function priceFor(state, item, template) {
@@ -50,10 +52,11 @@ function priceFor(state, item, template) {
     if (String(template?.template?.kind || '') === 'Other.Shot'
         && Number(crafted?.productId) === Number(item.selfId)
         && Number(crafted?.unitPrice || 0) > 0) return Number(crafted.unitPrice);
+    // A nominal value of the bag's item (sorting, lot sizes, summaries); a
+    // board line's ask is the bot's belief (MarketListingPolicy.evaluate).
     const seed = (Number(state.characterId || 0) * 31) + (Number(item.selfId || 0) * 17);
     const percent = 70 + (Math.abs(seed) % 21);
-    const adjustment = Math.max(50, Math.min(100, Number(state?.stats?.marketPricing?.[Number(item.selfId)]?.percent || 100)));
-    return BotMarketPricing.priceAt({ ...item, basePrice, enchant: saleEnchant(item) }, percent * adjustment / 10000);
+    return BotMarketPricing.priceAt({ ...item, basePrice, enchant: saleEnchant(item) }, percent / 100);
 }
 
 function saleEnchant(item) {
@@ -103,6 +106,14 @@ function isEquipmentItem(item, template) {
         value.startsWith('Weapon.') || value.startsWith('Armor.'));
 }
 
+let StarterItemCatalog = null; // loaded on first use, as the inline require did, then kept
+
+function isStarterEquipment(item, template = templateFor(item?.selfId)) {
+    StarterItemCatalog ||= require('../../Knowledge/StarterItemCatalog');
+    const starterItemIds = StarterItemCatalog.snapshotIds(DataCache.newbieItems, isStarterEquipment);
+    return starterItemIds.has(Number(item?.selfId)) && isEquipmentItem(item, template);
+}
+
 function isSkillBookItem(item, template = templateFor(item?.selfId)) {
     const kind = kindFor(item, template);
     const name = String(item?.name || template?.template?.name || '').toLowerCase();
@@ -131,56 +142,75 @@ function isShotRecipeItem(item) {
 
 function isMarketRecipeItem(item) {
     const info = recipeInfo(item);
-    return !!info && info.recipe.type === 'dwarven' && isRecipeItem(item)
-        && gradeIndex(recipeProductRank(item)) >= gradeIndex('d');
+    return !!info && info.recipe.type === 'dwarven' && isRecipeItem(item);
 }
 
 const CRYSTALS = new Set(Object.values(CRYSTAL_IDS));
 
-// A bot's NPC junk sale keeps what the cold disposition never sells to the
-// NPC for a crafter: a D-grade or higher dwarven recipe is listed or held in
-// the bag for a crafter who can learn it, crystals are the shot crafters'
-// input (ColdShotEconomyService), and the bot keeps a recipe it will learn
-// itself (`state`: its class and level; `knowsRecipe`: what it has learned),
-// by the same rule as the cold disposition.
-function isKeptFromNpcJunk(item, state = null, knowsRecipe = () => false) {
-    const selfId = Number(actorItemValue(item, 'selfId', 'fetchSelfId') || 0);
-    if (CRYSTALS.has(selfId) || isMarketRecipeItem({ selfId })) return true;
-    const recipeId = state ? recipeInfo({ selfId })?.recipe.recipeId : null;
-    return !!recipeId
-        && recipeDisposition(state, { selfId }, knowsRecipe(recipeId) ? [recipeId] : [])?.action === 'learn';
+// Consumables a bot sells to the NPC beyond what its class keeps: arrows (a
+// bot's bow spends none, Actor/BowResources), scrolls other than enchant
+// scrolls (the Scrolls of Escape a bot reads for town trips are reserved up to
+// their restock target in saleCandidates; no bot reads a scroll of
+// resurrection, a party revival casts without an item), potions (the healing
+// stock is reserved up to its restock target in saleCandidates), keys, seal
+// stones and the like.
+// Not spare: Adena, crystals (the shot crafters' input), clan items, any
+// recipe material (a crafter's input, e.g. Rope of Magic), and an item the NPC
+// pays nothing for (soul crystals, Ancient Adena): those are not bot junk.
+const CONSUMABLE_KINDS = new Set(['Other', 'Other.None', 'Other.Arrow', 'Other.Potion', 'Other.Scroll', 'Other.Tattoo']);
+let recipeMaterialSource = null;
+let recipeMaterialIds = new Set();
+
+function recipeMaterials() {
+    const source = C4RecipeItems.loadRecipeItems();
+    if (recipeMaterialSource !== source) {
+        recipeMaterialSource = source;
+        recipeMaterialIds = new Set(Object.values(source || {})
+            .flatMap((recipe) => (recipe.materials || []).map((material) => Number(material.selfId))));
+    }
+    return recipeMaterialIds;
 }
 
-function isNpcOnlyItem(item, template = templateFor(item?.selfId)) {
+function isSpareConsumable(item, template = templateFor(item?.selfId)) {
+    const selfId = Number(actorItemValue(item, 'selfId', 'fetchSelfId') || 0);
+    if (!selfId || selfId === 57 || CRYSTALS.has(selfId) || isEnchantScroll({ selfId })
+        || CLAN_PROGRESSION_ITEM_IDS.has(selfId) || recipeMaterials().has(selfId)) return false;
+    if (!CONSUMABLE_KINDS.has(kindFor(item, template))) return false;
+    return basePrice(item, template) > 0;
+}
+
+function isNpcOnlyItem(item, template = templateFor(item?.selfId), state = null) {
+    if (isQuestItem(item, template)) return false;
+    if (isStarterEquipment(item, template)) return true;
     if (isEquipmentItem(item, template)) return false;
+    if (isSkillBookItem(item, template)
+        || invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(item?.selfId))) return true;
     if (isMarketRecipeItem(item)) return false;
     const kind = kindFor(item, template);
-    return NPC_ONLY_KINDS.some((prefix) => kind.startsWith(prefix))
+    return kind === 'Other.Tattoo'
+        || NPC_ONLY_KINDS.some((prefix) => kind.startsWith(prefix))
+        || isSpareConsumable(item, template)
         || isRecipeItem(item, template)
         // Some later C4 skill books lost their canonical Other.Spellbook
         // kind in the source datapack. Orc skill books are named Amulet.
-        // Neither is useful bot inventory: every class liquidates them at an
-        // NPC shop instead of listing or warehousing them.
+        // Bots receive skills for free, so all books are NPC cleanup.
         || isSkillBookItem(item, template);
-}
-
-// Materials feed every craft: a dwarf learns their recipes although the
-// products are no-grade. Other no-grade recipes stay NPC junk.
-function isMaterialRecipe(info) {
-    return String(info?.product?.template?.kind || '').startsWith('Other.Material');
 }
 
 // A bot learns a recipe it can craft (crafter class, craft level).
 function canLearnRecipe(state, item) {
     const info = recipeInfo(item);
-    if (!info || info.recipe.type !== 'dwarven') return false;
-    if (gradeIndex(recipeProductRank(item)) < gradeIndex('d') && !isMaterialRecipe(info)) return false;
+    if (!info || info.recipe.type !== 'dwarven'
+        || !invoke('GameServer/Items/ItemAcquisitionCatalog').allowsRecipe(info.recipe)) return false;
     return CraftShopService.canCraft(state, info.recipe);
 }
 
 function recipeDisposition(state, item, knownRecipeIds = []) {
     const info = recipeInfo(item);
     if (!info || !isRecipeItem(item)) return null;
+    if (!invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(item.selfId)
+        || !invoke('GameServer/Items/ItemAcquisitionCatalog').allowsRecipe(info.recipe))
+        return { action: 'keep', reason: 'no_acquisition_source' };
     const known = new Set((knownRecipeIds || []).map((value) => Number(value)));
     if (!canLearnRecipe(state, item)) return isMarketRecipeItem(item)
         ? { action: 'market', reason: 'recipe_not_learnable' }
@@ -213,11 +243,17 @@ function liquidationSlotCount(state, predicate, candidates = saleCandidates(stat
 }
 
 function npcOnlySlotCount(state = {}, candidates) {
-    return liquidationSlotCount(state, isNpcOnlyItem, candidates);
+    return liquidationSlotCount(state, item => isNpcOnlyItem(item, undefined, state), candidates);
 }
 
 function skillBookSlotCount(state = {}, candidates) {
-    return liquidationSlotCount(state, isSkillBookItem, candidates);
+    return liquidationSlotCount(state, (item) => isSkillBookItem(item) && isNpcOnlyItem(item, undefined, state), candidates);
+}
+
+function soloSaleSlotLimit(state = {}, timestamp = Date.now()) {
+    return !(state.party?.partyId || state.partyId)
+        && !(Number(state.stats?.marketSellRetryAfter || 0) > timestamp)
+        ? HALF_FULL_CLEANUP_SLOTS : null;
 }
 
 function inventoryCleanupNeed(state = {}, options = {}) {
@@ -227,10 +263,12 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     const candidates = saleCandidates(state, { unlimited: true });
     const npcOnlySlots = npcOnlySlotCount(state, candidates);
     const skillBookSlots = skillBookSlotCount(state, candidates);
-    const overCapacity = slots > INVENTORY_SLOT_LIMIT;
-    const accumulatedNpcOnly = isTradeEligible(state)
-        && (skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS);
-    const surplusGearSlots = isTradeEligible(state) && slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
+    // Spare creation gear is sold during a town visit, but one unequipped
+    // starter weapon must not send a newly spawned hunter straight to town.
+    const limit = InventoryLimits.forState(state);
+    const overCapacity = slots > limit;
+    const accumulatedNpcOnly = skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
+    const surplusGearSlots = slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
         ? candidates.reduce((total, item) => {
             const lowGradeGear = (String(item.kind || '').startsWith('Weapon.')
                 || String(item.kind || '').startsWith('Armor.'))
@@ -242,13 +280,12 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     // Solo bots only: a party member sells from the field (AFK listing) and leaves its
     // party for the market only with a full bag (PartyMarketBreak); and only with
     // something to sell, else the trip would repeat every retry period.
-    const halfFull = isTradeEligible(state) && !(state.party?.partyId || state.partyId)
-        && slots >= HALF_FULL_CLEANUP_SLOTS && candidates.length > 0;
+    const soloLimit = soloSaleSlotLimit(state, timestamp);
+    const halfFull = soloLimit !== null && slots >= soloLimit && candidates.length > 0;
     // A normal market retry cooldown prevents pointless town loops. Residual
     // NPC-only books/recipes become deterministic cleanup work once a
-    // generated character reaches its trading phase. Before that point they
-    // are deferred instead of creating a market trip that cannot execute.
-    // A genuinely full inventory remains actionable at every level.
+    // character has enough to clean up. A genuinely full inventory remains
+    // actionable regardless of level.
     if (Number(state.stats?.marketSellRetryAfter || 0) > timestamp
         && !overCapacity
         && !accumulatedNpcOnly) return null;
@@ -260,12 +297,26 @@ function inventoryCleanupNeed(state = {}, options = {}) {
         slots,
         npcOnlySlots,
         ...(overCapacity || accumulatedNpcOnly || halfFull ? {} : { surplusGearSlots }),
-        limit: INVENTORY_SLOT_LIMIT
+        limit
     };
 }
 
-function reservedCraftAmounts(state) {
-    const plan = state?.stats?.equipmentPlan;
+// A restock pauses execution, not ownership of inputs already collected for
+// the unfinished kit. Legacy paused plans retain their exchange/recipe/combine
+// metadata even though GearPlanSelection records strategy='none'. Resolve a
+// reservation-only view; never reactivate their travel or crafting action.
+function equipmentInputPlan(state, plan = state?.stats?.equipmentPlan) {
+    if (plan?.status !== 'deferred' || plan.reason !== 'wish_focus') return plan;
+    const strategy = plan.exchange?.kind === 'luxury_exchange' ? 'luxury_exchange'
+        : plan.recipeId ? 'craft' : plan.combine ? 'market' : null;
+    if (!strategy || !Number(plan.target?.selfId)) return plan;
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+    const target = templateFor(plan.combine?.resultId || plan.target.selfId);
+    if (!target || !Planner.considerable(target, state) || Planner.equipmentTargetFulfilled(state, plan)) return plan;
+    return { ...plan, strategy, status: 'active' };
+}
+
+function reservedCraftAmounts(state, plan = equipmentInputPlan(state)) {
     if (!['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) || plan.strategy !== 'craft') return {};
     if (plan.clanGoal?.clanId && plan.recipeId) return Object.fromEntries(ClanCrafting.requirements(
         ClanCrafting.resolveRecipe(plan.recipeId), state.inventory, null, 1, plan.craftProviders, plan.componentRecipes));
@@ -287,8 +338,7 @@ function reservedCraftAmounts(state) {
     return reserved;
 }
 
-function reservedCombinationAmounts(state) {
-    const plan = state?.stats?.equipmentPlan;
+function reservedCombinationAmounts(state, plan = equipmentInputPlan(state)) {
     if (!plan?.combine || !['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)) return {};
     return (plan.combine.requirements || []).reduce((reserved, requirement) => {
         const selfId = Number(requirement.selfId || 0);
@@ -299,6 +349,21 @@ function reservedCombinationAmounts(state) {
         reserved[selfId] = Math.max(Number(reserved[selfId] || 0), Number(requirement.amount || 0));
         return reserved;
     }, {});
+}
+
+// A lower-grade bridge can replace the executable goal while its later kit
+// still owns collected inputs. Only one retained personal goal is permitted.
+function retainedEquipmentAmounts(state) {
+    const owner = state?.stats?.equipmentPlan;
+    const retained = owner?.inputPreparation;
+    if (!retained || owner.reason === 'cancelled') return {};
+    const plan = equipmentInputPlan(state, retained);
+    if (plan?.strategy === 'none' || plan?.status !== 'active') return {};
+    const craft = reservedCraftAmounts(state, plan), combine = reservedCombinationAmounts(state, plan);
+    const exchange = plan.strategy === 'luxury_exchange' ? Object.fromEntries(
+        (plan.materials || []).map(row => [row.selfId, Number(row.amount)])) : {};
+    return Object.fromEntries([...new Set([...Object.keys(craft), ...Object.keys(combine), ...Object.keys(exchange)])]
+        .map(id => [id, Math.max(Number(craft[id] || 0), Number(combine[id] || 0), Number(exchange[id] || 0))]));
 }
 
 function reservedUpgradeAmounts(state) {
@@ -340,19 +405,75 @@ function reservedUpgradeAmounts(state) {
     return reserved;
 }
 
-function reservedEquipmentAmounts(state) {
+function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
-    const craft = reservedCraftAmounts(state);
-    const combination = reservedCombinationAmounts(state);
+    const exchange = equipmentInputPlan(state);
+    const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
+    const combination = reservedCombinationAmounts(state, exchange);
     const upgrades = reservedUpgradeAmounts(state);
+    const unseal = exchange?.unseal;
+    if (unseal && Number(exchange.target?.selfId) === Number(unseal.productId)
+        && invoke('GameServer/Items/C4Unseal').resolve(unseal.sourceId, unseal.productId)
+        && ['active', 'component_ready', 'ready_to_craft', 'deferred'].includes(exchange.status))
+        upgrades[unseal.sourceId] = Math.max(Number(upgrades[unseal.sourceId] || 0), 1);
+    for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
+    for (const [id, amount] of Object.entries(retainedEquipmentAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
+    if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
+        for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
+    if (exchange?.status === 'active') for (const row of exchange.crystalPreparation?.materials || [])
+        upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
+    for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
+        upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
+    for (const book of invoke('GameServer/Skills/SkillBookCatalog').requiredBooks(state)) {
+        upgrades[book.selfId] = Math.max(Number(upgrades[book.selfId] || 0), 1);
+    }
     const targetId = Number(state?.stats?.equipmentPlan?.target?.selfId || 0);
     if (targetId && Number(state?.inventory?.[targetId]?.amount || 0) > 0
         && !state.inventory[targetId].equipped) upgrades[targetId] = 1;
-    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades)])].reduce((reserved, selfId) => {
+    const clan = options.clan === false ? {} : invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades), ...Object.keys(clan)])].reduce((reserved, selfId) => {
         reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0),
-            Number(upgrades[selfId] || 0));
+            Number(upgrades[selfId] || 0)) + Number(clan[selfId] || 0);
         return reserved;
     }, {});
+}
+
+// Only the selected, still drawable symbol owns dye inputs. Keeping every
+// usable dye would fill the bag again even though the bot can wear three symbols.
+function reservedHennaAmounts(state = {}) {
+    const key = state.stats?.wishFocus?.[0];
+    const match = typeof key === 'string' && /^henna:(\d+)$/.exec(key);
+    if (!match) return {};
+    const Henna = invoke('GameServer/Henna/HennaRules');
+    const classId = state.stats?.classId || state.classId;
+    const slots = state.stats?.hennas || [];
+    const symbol = Henna.symbol(Number(match[1]));
+    if (!symbol || slots.includes(symbol.id) || slots.filter(Boolean).length >= Henna.slotsForClass(classId)
+        || !Henna.availableForClass(classId).some(row => row.id === symbol.id)) return {};
+    return { [symbol.dyeSelfId]: Number(symbol.dyeAmount) };
+}
+
+// Only fields read by the reservation owners above. Plan descriptions,
+// observed prices, travel, progress and timestamps cannot change this input.
+function reservationInputKey(state = {}) {
+    const plan = equipmentInputPlan(state);
+    const craft = ['active', 'component_ready', 'ready_to_craft'].includes(plan?.status)
+        && plan.strategy === 'craft';
+    const quantities = rows => (rows || []).map(row => [Number(row.selfId || 0), Number(row.amount || 0)]);
+    const clanCraft = craft && plan.clanGoal?.clanId && plan.recipeId;
+    const craftInputs = !craft ? null : clanCraft
+        ? [Number(plan.recipeId), Object.entries(plan.craftProviders || {})
+            .map(([id, provider]) => [Number(id), !!provider && !provider.known]).sort((a, b) => a[0] - b[0]),
+        Object.entries(plan.componentRecipes || {}).map(([id, recipe]) => [Number(id), Number(recipe)]).sort((a, b) => a[0] - b[0])]
+        : (plan.materials || []).map(row => [Number(row.selfId || 0), Number(row.amount || 0),
+            state.inventory?.[row.selfId]?.amount == null ? Number(row.owned || 0) : null]);
+    const combine = plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)
+        ? quantities(plan.combine.requirements) : null;
+    return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
+        plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state), reservedHennaAmounts(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -380,19 +501,10 @@ function unreservedActorItems(state, items = []) {
     });
 }
 
-function isTradeEligible(state = {}) {
-    // Purpose-built static merchant/craft services are not adventurers and
-    // retain their normal storefronts. Generated characters start selling
-    // only once their first leveling/gear loop has had time to produce useful
-    // surplus.
-    if (!state.stats?.generatedCold) return true;
-    return Number(state.level || 1) >= TRADE_MIN_LEVEL;
-}
-
 function protectedStarterLootAmount(item, kind) {
     const kindName = String(kind || '');
     // Low-level resources and surplus NG/D gear remain sellable once the
-    // character reaches the trading phase. Market policy later admits the
+    // market evaluates the sale. Market policy later admits the
     // gear only for exact funded demand on the supported rate presets.
     if (kindName.startsWith('Other.Material')
         || ((kindName.startsWith('Weapon.') || kindName.startsWith('Armor.'))
@@ -400,44 +512,70 @@ function protectedStarterLootAmount(item, kind) {
     return Math.max(0, Math.min(Number(item?.amount || 0), Number(item?.starterMobLootAmount || 0)));
 }
 
+function saleFreeAmount(state, item, reserved = {}) {
+    if (!item) return 0;
+    const template = templateFor(item.selfId), kind = kindFor(item, template);
+    const protectedAmount = isNpcOnlyItem(item, template, state) ? 0 : protectedStarterLootAmount(item, kind);
+    const rawEquippedCount = Number(item.equippedCount ?? (item.equipped ? 1 : 0));
+    const equippedCount = Math.max(0, Number.isFinite(rawEquippedCount) ? rawEquippedCount : 0);
+    // Sale-specific starter cleanup is preserved; customer, clan and explicit
+    // physical reservations use the same stock guard as production.
+    return Math.min(Math.max(0, Number(item.amount || 0) - equippedCount
+        - Number(reserved[item.selfId] || 0) - protectedAmount),
+    invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, { ...item,
+        equippedCount, starterMobLootAmount: protectedAmount }, reserved));
+}
+
+const { selectedCraftAmounts } = require('./CraftInputReservations');
 function saleCandidates(state, options = {}) {
-    if (!isTradeEligible(state) && !options.allowPreTradeCleanup) return [];
     const limit = options.unlimited
         ? Number.MAX_SAFE_INTEGER
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
-    const reserved = { ...reservedEquipmentAmounts(state), ...(options.reserved || {}) };
-    const ownShot = invoke('GameServer/Inventory/ShotStock').planForRows(
-        Object.values(state?.inventory || {}).map((item) => ({ ...item,
-            equipped: item.equipped === true || Number(item.equippedCount || 0) > 0
-        })), Number(state?.stats?.classId || state?.classId || 0));
-    if (Number(state?.inventory?.[String(ownShot.selfId)]?.amount || 0) > 0) {
-        reserved[ownShot.selfId] = Math.max(Number(reserved[ownShot.selfId] || 0),
-            invoke('GameServer/Inventory/ShotStock').DEFAULT_TARGET_AMOUNT);
+    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)) };
+    const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
+    for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
+        reserved[id] = Math.max(Number(reserved[id] || 0), amount + Number(clan[id] || 0));
+    for (const [id, amount] of Object.entries(options.reserved || {}))
+        reserved[id] = Math.max(Number(reserved[id] || 0), Number(amount) + Number(clan[id] || 0));
+    // Potions, crafter ammunition and travel scrolls use restock reserves:
+    // the held plan's published targets (L72), else the foundation.
+    // Ordinary bots retain their current ammunition independently of forecasts.
+    const targets = options.keptAmounts ? null
+        : invoke('GameServer/Bot/Economy/EconomyContext').keptTargets(state, { saleReservations: reserved });
+    const kept = options.keptAmounts || {
+        ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: targets.potions }),
+        ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, null, targets.shots),
+        ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) };
+    for (const [selfId, amount] of Object.entries(kept)) {
+        reserved[selfId] = Math.max(Number(reserved[selfId] || 0), amount + Number(clan[selfId] || 0));
     }
-    return Object.values(state?.inventory || {}).flatMap((item) => {
+    const candidatesFor = (item) => {
         const selfId = Number(item?.selfId || 0);
-        if (ClanCrafting.clanIdFor(state) && (ClanCrafting.isResource(selfId)
-            || Number(state.stats?.clanMaterialDemand?.[selfId] || 0) > 0)) return [];
-        const amount = Number(item?.amount || 0);
-        const rawEquippedCount = Number(item?.equippedCount ?? (item?.equipped ? 1 : 0));
-        const equippedCount = Math.max(0, Number.isFinite(rawEquippedCount) ? rawEquippedCount : 0);
-        const sellableAmount = Math.max(0, amount - equippedCount - Number(reserved[selfId] || 0));
-        if (!selfId || selfId === 57 || sellableAmount <= 0) return [];
+        // Prepared reserves can describe only the bag while this projection
+        // also includes warehouse or escrow stock. Personal shots stay owned.
+        if (invoke('GameServer/Inventory/ShotStock').isPersonalShot(state, selfId)) return [];
+        const sellableAmount = saleFreeAmount(state, item, reserved);
+        if (!selfId || selfId === 57 || BeginnerShots.isRestricted(selfId) || sellableAmount <= 0) return [];
 
         const template = templateFor(selfId);
+        // Unsupported stock stays owned; neither a board sale nor NPC cleanup
+        // may turn a service item's nominal price into bot income.
+        if (isQuestItem(item, template)
+            || !invoke('GameServer/Items/ItemAcquisitionCatalog').hasSource(selfId)) return [];
         const kind = kindFor(item, template);
-        const npcOnly = isNpcOnlyItem(item, template);
+        const npcOnly = isNpcOnlyItem(item, template, state);
         if (options.onlyNpc === true && !npcOnly) return [];
         const clanProgression = isClanProgressionItem(item);
         if (!npcOnly && !clanProgression && !isMarketRecipeItem(item)
+            && !invoke('GameServer/Skills/SkillBookCatalog').isBook(selfId)
             && !isEnchantScroll(item)
+            && !CRYSTALS.has(selfId)
             && !SELLABLE_KINDS.some((prefix) => kind.startsWith(prefix))) return [];
 
-        // Recipes and spellbooks are explicit NPC-only cleanup targets. They
+        // NPC-only recipes and unmapped books are explicit cleanup targets. They
         // must not inherit the generic starter-loot protection, otherwise a
         // generated bot can carry the same book forever after a market visit.
-        const protectedAmount = npcOnly ? 0 : protectedStarterLootAmount(item, kind);
-        const sellableCount = Math.max(0, sellableAmount - protectedAmount);
+        const sellableCount = sellableAmount;
         const base = basePrice(item, template);
         // Recipes and spellbooks must still be liquidatable when their datapack
         // price is zero. The NPC path applies its own minimum price of one.
@@ -448,27 +586,43 @@ function saleCandidates(state, options = {}) {
             : 0;
         const price = clanProgression
             ? clanPrice
-            : npcOnly ? Math.max(1, priceFor(state, item, template), Math.floor(base * 0.5)) : priceFor(state, item, template);
+            : npcOnly ? Math.max(priceFor(state, item, template), NpcSellRules.npcBuyPrice(base)) : priceFor(state, item, template);
         if (price <= 0 || sellableCount <= 0) return [];
-        return [{
+        if (options.presenceOnly) return [true];
+        const candidate = {
             selfId,
             name: item.name || template?.template?.name || `Item ${selfId}`,
             kind,
             rank: isMarketRecipeItem(item)
                 ? recipeProductRank(item) : item.rank || template?.etc?.rank || 'none',
             count: sellableCount,
-            // A stack can mix enchant levels; do not advertise its highest
-            // enchant as if every instance had it. Only mark comparability.
-            npcComparable: saleEnchant(item) === 0,
+            enchant: 0, npcComparable: true,
             price,
             basePrice: base
-        }];
-    }).sort((a, b) => {
-        const recipePriority = options.recipeFirst
-            ? Number(isMarketRecipeItem(b)) - Number(isMarketRecipeItem(a)) : 0;
+        };
+        if (!Array.isArray(item.instances) || !item.instances.length) return [{ ...candidate,
+            enchant:Number(item.enchant || 0),npcComparable:Number(item.enchant || 0)===0 }];
+        const groups = new Map();
+        let left = sellableCount;
+        for (const instance of item.instances) {
+            if (instance.equipped || left <= 0) continue;
+            const count = Math.min(left, Number(instance.amount || 1));
+            const enchant = Number(instance.enchant || 0);
+            const row = groups.get(enchant) || { ...candidate,count:0,enchant,npcComparable:enchant===0,
+                objectId:Number(instance.id),objectIds:[] };
+            row.count += count;row.objectIds.push(Number(instance.id));groups.set(enchant,row);left -= count;
+        }
+        if (left > 0) { const row = groups.get(0) || {...candidate,count:0};row.count += left;groups.set(0,row); }
+        return [...groups.values()];
+    };
+    if (options.presenceOnly) {
+        for (const item of Object.values(state?.inventory || {})) if (candidatesFor(item).length) return true;
+        return false;
+    }
+    return Object.values(state?.inventory || {}).flatMap(candidatesFor).sort((a, b) => {
         const craftedShotId = Number(state?.stats?.shotCraft?.productId || 0);
         const craftedPriority = Number(b.selfId === craftedShotId) - Number(a.selfId === craftedShotId);
-        return craftedPriority || recipePriority || b.price - a.price || a.selfId - b.selfId;
+        return craftedPriority || b.price - a.price || a.selfId - b.selfId;
     }).slice(0, limit);
 }
 
@@ -482,14 +636,13 @@ function npcLiquidationCandidates(state, options = {}) {
         unlimited: true,
         allowPreTradeCleanup: options.allowPreTradeCleanup === true
     }).filter((item) => {
-        if (isMarketRecipeItem(item)) return false;
         if (isClanProgressionItem(item)) return false;
         const gear = String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
         const lowGradeGear = gear && gradeIndex(item.rank) < gradeIndex('c');
         return isNpcOnlyItem(item) || lowGradeGear || item.basePrice <= maxUnitPrice;
     }).map((item) => ({
         ...item,
-        npcPrice: Math.max(1, Math.floor(item.basePrice * 0.5))
+        npcPrice: NpcSellRules.npcBuyPrice(item.basePrice)
     }));
 }
 
@@ -497,6 +650,7 @@ function npcLiquidationCandidates(state, options = {}) {
 // value. Gear is worth retaining only once it has crossed out of the starter
 // trash band, leaving cheap no-grade drops for liquidation.
 function isWarehouseCandidate(item, template = templateFor(item?.selfId)) {
+    if (isQuestItem(item, template)) return false;
     const selfId = Number(item?.selfId || 0);
     const amount = Number(item?.amount || 0);
     const kind = item?.kind || template?.template?.kind || '';
@@ -507,14 +661,16 @@ function isWarehouseCandidate(item, template = templateFor(item?.selfId)) {
     // Many C4 enchant scrolls are intentionally non-stackable. Preserve
     // valuable surplus in the warehouse so it cannot permanently consume
     // backpack capacity while the peer market has no ready buyer. Other
-    // scrolls remain in inventory because bots consume them for travel and
-    // party resurrection.
+    // scrolls are no bot's consumables: the NPC buys them (isSpareConsumable).
     if (isEnchantScroll(item)) return true;
     return (kind.startsWith('Weapon.') || kind.startsWith('Armor.'))
         && basePrice(item, template) > WAREHOUSE_GEAR_MIN_BASE_PRICE;
 }
 
 function warehouseCandidates(state) {
+    // Personal surplus finances equipment. Craft inputs and accepted native
+    // obligations are already protected by reservations, not spare storage.
+    if (invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return [];
     const reserved = reservedEquipmentAmounts(state);
     return Object.values(state?.inventory || {}).flatMap((item) => {
         const equipped = Math.max(0, Number(item.equippedCount ?? (item.equipped ? 1 : 0)) || 0);
@@ -542,23 +698,24 @@ module.exports = {
     NPC_LIQUIDATION_MAX_UNIT_PRICE,
     NPC_ONLY_KINDS,
     CLAN_PROGRESSION_ITEM_IDS,
-    TRADE_MIN_LEVEL,
     WAREHOUSE_GEAR_MIN_BASE_PRICE,
     basePrice,
     canLearnRecipe,
     craftLevelFor: CraftShopService.craftLevelFor,
     gradeIndex,
-    isTradeEligible,
     isBelowCGrade,
     isClanProgressionItem,
     isNpcOnlyItem,
+    isQuestItem,
     isRecipeItem,
     recipeProductRank,
     isMarketRecipeItem,
     isShotRecipeItem,
     isSkillBookItem,
+    isStarterEquipment,
     inventoryCleanupNeed,
     inventorySlotCount,
+    soloSaleSlotLimit,
     npcOnlySlotCount,
     skillBookSlotCount,
     isWarehouseCandidate,
@@ -570,9 +727,14 @@ module.exports = {
     reservedCombinationAmounts,
     reservedCraftAmounts,
     reservedEquipmentAmounts,
+    equipmentInputPlan,
+    retainedEquipmentAmounts,
+    reservationInputKey,
     saleCandidates,
+    selectedCraftAmounts,
+    saleFreeAmount,
     saleSummary,
-    isKeptFromNpcJunk,
+    isSpareConsumable,
     unreservedActorItems,
     warehouseCandidates
 };

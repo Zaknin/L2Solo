@@ -108,9 +108,12 @@ function spoilRecipientSession(session, npc, selfId) {
     const leaderSession = session?.partyCompanion === true && session.followPlayerSession
         ? session.followPlayerSession
         : session;
+    if (leaderSession?.hotBackgroundPartyId) {
+        return PartyCompanionService.resolveLootSession(session, selfId, npc, { spoil: true });
+    }
     const distribution = PartyCompanionService.distributionForLeader(leaderSession);
     if (distribution === 2 || distribution === 4) {
-        return PartyCompanionService.resolveLootSession(session, selfId, npc);
+        return PartyCompanionService.resolveLootSession(session, selfId, npc, { spoil: true });
     }
     return session;
 }
@@ -144,12 +147,12 @@ function markSpoiled(session, actor, npc, skill, { announce = false, festival = 
     return true;
 }
 
-function spoilCrushLands(actor, npc, skill, rng = Math.random) {
-    const semantic = skill?.fetchSemantic?.() || {};
-    return Formulas.calcMagicSuccess({
+function spoilLands(actor, npc, skill, rng = Math.random) {
+    return Formulas.calcSpoilSuccess({
+        skillId: skill?.fetchSelfId?.(),
+        skillLevel: skill?.fetchLevel?.(),
         attackerLevel: actor?.fetchLevel?.(),
-        targetLevel: npc?.fetchLevel?.(),
-        magicLevel: semantic.magicLevel
+        targetLevel: npc?.fetchLevel?.()
     }, rng);
 }
 
@@ -176,7 +179,7 @@ const SpoilSweep = {
 
     trySpoilCrush(session, actor, npc, skill, rng = Math.random) {
         if (!npc?.fetchAttackable?.() || npc.isDead?.() || !hasSpoils(npc) || npc.model?.spoil?.spoiled) return false;
-        if (!spoilCrushLands(actor, npc, skill, rng)) return false;
+        if (!spoilLands(actor, npc, skill, rng)) return false;
         return markSpoiled(session, actor, npc, skill, { announce: true });
     },
 
@@ -206,9 +209,19 @@ const SpoilSweep = {
             }
 
             const festival = Number(skill.fetchSelfId?.()) === SPOIL_FESTIVAL_SKILL_ID;
-            spoiled.forEach((npc) => markSpoiled(session, actor, npc, skill, { festival }));
-            console.info('SpoilSweep :: %s spoiled %d targets with %s', actor.fetchName(), spoiled.length, skill.fetchName());
-            ConsoleText.transmit(session, ConsoleText.caption.spoilActivated);
+            let landed = 0;
+            spoiled.forEach((npc) => {
+                // Like Lisvus Spoil.java, a failed spoil still draws the target into combat.
+                if (!spoilLands(actor, npc, skill)) {
+                    npc.enterCombatState?.(session, actor);
+                    return;
+                }
+                if (markSpoiled(session, actor, npc, skill, { festival })) landed += 1;
+            });
+            for (const npc of spoiled) invoke('GameServer/Quest/QuestService').onSkillSee(session, npc, skill, actor)
+                .catch(error => utils.infoWarn('Quest', 'skill callback failed: %s', error.message));
+            if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('SpoilSweep :: %s spoiled %d of %d targets with %s', actor.fetchName(), landed, spoiled.length, skill.fetchName());
+            if (landed > 0) ConsoleText.transmit(session, ConsoleText.caption.spoilActivated);
         });
     },
 
@@ -253,7 +266,7 @@ const SpoilSweep = {
                     item.amount > 1
                         ? ConsoleText.transmit(recipientSession, ConsoleText.caption.pickupAmountOf, [textName, textAmount])
                         : ConsoleText.transmit(recipientSession, ConsoleText.caption.pickup, [textName]);
-                    console.info('SpoilSweep :: %s swept %d %s from %s', actor.fetchName(), item.amount, item.name, npc.fetchName());
+                    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('SpoilSweep :: %s swept %d %s from %s', actor.fetchName(), item.amount, item.name, npc.fetchName());
                 });
             }
 

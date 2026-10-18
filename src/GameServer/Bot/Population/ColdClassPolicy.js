@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const Utility = invoke('GameServer/Bot/AI/BotCombatUtility');
 const ClassPolicy = invoke('GameServer/Bot/AI/BotClassPolicy');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
@@ -6,25 +8,32 @@ const DataCache = invoke('GameServer/DataCache');
 
 // A cold fight has no pathfinding geometry. Reuse class/skill validity and
 // intent while keeping its existing damage, time and outcome abstraction.
-// Adapters are built once per immutable combat profile, not per attack.
+// Adapters are built once per combat profile, not per attack. Every fight
+// builds a new profile object, so the skill models, which depend only on the
+// skill record, are shared by record content across fights and bots.
 const adapters = new WeakMap();
+const skillModels = new Map();
 const activeServitor = Object.freeze({ isDead: () => false });
+function skillModel(record) {
+    const key=JSON.stringify(record);
+    if (skillModels.has(key)) return skillModels.get(key);
+    const source=ItemTemplateIndex.findStrictRequired(DataCache.skills ?? [], record.selfId);
+    const definition=SkillRankIndex.findStrict(source?.levels ?? [], record.level) || {};
+    const skill=new SkillModel({...utils.crushOb(source || {}),...definition,...record,
+        spell:definition.spell??source?.template?.spell??record.spell,
+        hitTime:record.hitTime||definition.hitTime||source?.time?.hitTime||0,
+        reuse:record.reuse||definition.reuse||source?.time?.reuse||0,
+        distance:record.distance??definition.distance??source?.template?.distance??0});
+    skill.model.distance=skill.fetchSemantic().castRange??skill.model.distance;
+    skill.coldRecord={...record,mp:skill.fetchConsumedMp(),hp:skill.fetchConsumedHp(),
+        power:skill.fetchPower(),hitTime:skill.fetchHitTime(),reuse:skill.fetchReuseTime(),spell:skill.fetchSpell()};
+    skillModels.set(key,skill);
+    return skill;
+}
 function adapter(profile) {
     if (adapters.has(profile)) return adapters.get(profile);
     const state={};
-    const skills=(profile.skills||[]).map(record=>{
-        const source=DataCache.skills?.find(s=>s.selfId===record.selfId);
-        const definition=source?.levels?.find(s=>s.level===record.level) || {};
-        const skill=new SkillModel({...utils.crushOb(source || {}),...definition,...record,
-            spell:definition.spell??source?.template?.spell??record.spell,
-            hitTime:record.hitTime||definition.hitTime||source?.time?.hitTime||0,
-            reuse:record.reuse||definition.reuse||source?.time?.reuse||0,
-            distance:record.distance??definition.distance??source?.template?.distance??0});
-        skill.model.distance=skill.fetchSemantic().castRange??skill.model.distance;
-        skill.coldRecord={...record,mp:skill.fetchConsumedMp(),hp:skill.fetchConsumedHp(),
-            power:skill.fetchPower(),hitTime:skill.fetchHitTime(),reuse:skill.fetchReuseTime(),spell:skill.fetchSpell()};
-        return skill;
-    });
+    const skills=(profile.skills||[]).map(skillModel);
     const actor={
         fetchClassId:()=>profile.classId,fetchLevel:()=>profile.level,
         fetchHp:()=>state.hp,fetchMaxHp:()=>profile.maxHp,
@@ -49,4 +58,20 @@ function select(profile,{hp,mp,cooldowns,time,charges=0,mob,party=false,pvp=fals
     return selected?{skill:selected.skill.coldRecord,magic:selected.skill.fetchSpell()===true,
         reasons:selected.reasons,score:selected.score}:null;
 }
-module.exports={select};
+// Compile full-health solo priorities once per hunting profile. Matchup scans
+// apply each target's resistance to these scores without rebuilding native
+// skill adapters for every species. This is transient planning data.
+function soloAttackScores(profile, { summon = false } = {}) {
+    const cached = adapter(profile);
+    Object.assign(cached.state, { hp: profile.maxHp, mp: profile.maxMp, cooldowns: {}, time: 0, charges: 0 });
+    cached.actor.summon = summon ? activeServitor : null;
+    const policy = { mode: 'solo_pve', classProfile: ClassPolicy.profileFor(cached.actor, { mode: 'solo_pve' }),
+        matchupTarget: { vulnerabilities: {}, undead: true } };
+    const target = { fetchHp: () => 1, fetchUndead: () => true, matchupTarget: policy.matchupTarget };
+    const role = Roles.combatRoleFor(cached.actor);
+    return Object.fromEntries(cached.actor.skillset.skills.map(skill => {
+        const verdict = Utility.evaluate(cached.actor, target, skill, role, policy);
+        return verdict && [skill.fetchSelfId(), verdict.score];
+    }).filter(Boolean));
+}
+module.exports={select,soloAttackScores};

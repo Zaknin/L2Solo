@@ -1,5 +1,12 @@
 const DEFAULTS = {
     enabled: true,
+    staticBuyersDisabled: false,
+    staticShotsDisabled: false,
+    developerDiagnostics: false,
+    economyDiagnostics: false,
+    economyDiagnosticsBotIds: '',
+    // Personal knowledge errors and learning by own actions share one switch.
+    knowledgeErrorsEnabled: true,
     backgroundResolverEnabled: true,
     backgroundPartyEnabled: true,
     phasePolicyEnabled: true,
@@ -52,7 +59,9 @@ const DEFAULTS = {
     coldWorkerSnapshotLagAbortMs: 120,
     coldWorkerQueueMaxEntries: 1024,
     coldWorkerQueueMaxBytes: 4 * 1024 * 1024,
-    coldWorkerHeapMb: 256,
+    // A full 1,700-bot world with warm economic caches exceeds 256 MiB
+    // after major GC. Leave headroom for transient planning/clone allocations.
+    coldWorkerHeapMb: 512,
     // Protect the player-facing loop immediately and keep it protected for a
     // short window after disconnect/relog. SimPlayer/BotSession instances do
     // not contribute to this signal.
@@ -78,12 +87,6 @@ const DEFAULTS = {
     classProgressionMigrationBatchSize: 5,
     coldCombatProfileMigrationIntervalMs: 10000,
     coldCombatProfileMigrationBatchSize: 5,
-    // One-off migration for stores created before market towns were split.
-    // It is deliberately independent from the normal cold-resolve budget.
-    marketTownMigrationIntervalMs: 10000,
-    marketTownMigrationBatchSize: 10,
-    marketExpiryCleanupIntervalMs: 10000,
-    marketExpiryCleanupBatchSize: 10,
     partyFormationIntervalMs: 45000,
     // A protected player session may replenish only required parties. The
     // worker finds candidates; the main loop performs one guarded atomic write.
@@ -151,6 +154,10 @@ const DEFAULTS = {
     coldCompetitionConflictsEnabled: true,
     coldCompetitionPvpEnabled: true,
     pvpAggression: 0.5,
+    // Honest cold travel (step 3.2): off = the author's trip times (a 25 s
+    // transit); on = scroll cast + gatekeeper hops + run time by distance, and
+    // a bot running to a spot is a walker that appears near the player.
+    coldHonestTravel: false,
     partyMinSize: 2,
     partyMaxSize: 5,
     // Shared safety ceiling for every background party. Admission never
@@ -224,6 +231,10 @@ const DEFAULTS = {
 };
 
 const ENV_KEYS = {
+    developerDiagnostics: 'BOT_DEVELOPER_DIAGNOSTICS',
+    staticBuyersDisabled: 'BOT_STATIC_BUYERS_DISABLED',
+    staticShotsDisabled: 'BOT_STATIC_SHOTS_DISABLED',
+    knowledgeErrorsEnabled: 'BOT_KNOWLEDGE_ERRORS_ENABLED',
     pvpAggression: 'BOT_PVP_AGGRESSION',
     enabled: 'BOT_POPULATION_ENABLED',
     backgroundResolverEnabled: 'BOT_BACKGROUND_RESOLVER_ENABLED',

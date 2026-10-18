@@ -1,49 +1,116 @@
+const { isDeepStrictEqual } = require('node:util');
+const DiagnosticConfig = require('./PopulationConfig');
+const CharacterStateSources = require('../../World/CharacterStateSources');
+const SparseNumericStorage = require('./SparseNumericStorage');
+const { isMainThread } = require('node:worker_threads');
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
-const HUNTING_TRAVEL_MS = 25000;
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
-const SpotRiskPolicy = require('./SpotRiskPolicy');
+const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
+const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
+const BotErrands = require('./BotErrands');
+const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 
 class DueHeap {
     constructor() {
         this.values = [];
+        this.positions = new WeakMap();
+        this.decisionHeads = [];
+        this.playerHeads = [];
+        this.meetingHeads = [];
+    }
+
+    set(index, entry) {
+        this.values[index] = entry;
+        this.positions.set(entry, index);
+        this.refreshDecision(index);
+    }
+
+    // A derived minimum on the SAME heap nodes; normal heads never hide a
+    // decision deadline when actor admission is full or paused.
+    refreshDecision(index) {
+        while (index >= 0) {
+            let best = this.values[index]?.alarmKind === 'decision' ? this.values[index] : null;
+            let player = this.values[index]?.playerWaiting ? this.values[index] : null;
+            let meeting = this.values[index]?.meetingTravel ? this.values[index] : null;
+            for (const child of [index * 2 + 1, index * 2 + 2]) {
+                const candidate = child < this.values.length ? this.decisionHeads[child] : null;
+                if (candidate && (!best || this.compare(candidate, best) < 0)) best = candidate;
+                const waiting = child < this.values.length ? this.playerHeads[child] : null;
+                if (waiting && (!player || this.compare(waiting, player) < 0)) player = waiting;
+                const transit = child < this.values.length ? this.meetingHeads[child] : null;
+                if (transit && (!meeting || this.compare(transit, meeting) < 0)) meeting = transit;
+            }
+            this.decisionHeads[index] = best;
+            this.playerHeads[index] = player;
+            this.meetingHeads[index] = meeting;
+            if (!index) break;
+            index = Math.floor((index - 1) / 2);
+        }
+    }
+
+    peekDecision() { return this.decisionHeads[0] || null; }
+    peekPlayer() { return this.playerHeads[0] || null; }
+    peekMeeting() { return this.meetingHeads[0] || null; }
+
+    up(index) {
+        const entry = this.values[index];
+        while (index > 0) {
+            const parent = Math.floor((index - 1) / 2);
+            if (this.compare(this.values[parent], entry) <= 0) break;
+            this.set(index, this.values[parent]);
+            index = parent;
+        }
+        this.set(index, entry);
+    }
+
+    down(index) {
+        const entry = this.values[index];
+        while (true) {
+            const left = index * 2 + 1;
+            const right = left + 1;
+            if (left >= this.values.length) break;
+            let next = left;
+            if (right < this.values.length && this.compare(this.values[right], this.values[left]) < 0) next = right;
+            if (this.compare(entry, this.values[next]) <= 0) break;
+            this.set(index, this.values[next]);
+            index = next;
+        }
+        this.set(index, entry);
     }
 
     push(entry) {
         this.values.push(entry);
-        let index = this.values.length - 1;
-        while (index > 0) {
-            const parent = Math.floor((index - 1) / 2);
-            if (this.compare(this.values[parent], entry) <= 0) break;
-            this.values[index] = this.values[parent];
-            index = parent;
-        }
-        this.values[index] = entry;
+        this.up(this.values.length - 1);
     }
 
     pop() {
         if (!this.values.length) return null;
         const first = this.values[0];
-        const last = this.values.pop();
-        if (this.values.length && last) {
-            let index = 0;
-            while (true) {
-                const left = index * 2 + 1;
-                const right = left + 1;
-                if (left >= this.values.length) break;
-                let next = left;
-                if (right < this.values.length && this.compare(this.values[right], this.values[left]) < 0) next = right;
-                if (this.compare(last, this.values[next]) <= 0) break;
-                this.values[index] = this.values[next];
-                index = next;
-            }
-            this.values[index] = last;
-        }
+        this.remove(first);
         return first;
+    }
+
+    remove(entry) {
+        const index = this.positions.get(entry);
+        if (index === undefined) return false;
+        const last = this.values.pop();
+        this.positions.delete(entry);
+        this.refreshDecision(this.values.length);
+        this.decisionHeads.length = this.values.length;
+        this.playerHeads.length = this.values.length;
+        this.meetingHeads.length = this.values.length;
+        if (index < this.values.length) {
+            this.set(index, last);
+            const parent = Math.floor((index - 1) / 2);
+            if (index > 0 && this.compare(last, this.values[parent]) < 0) this.up(index);
+            else this.down(index);
+        }
+        return true;
     }
 
     peek() {
@@ -57,6 +124,25 @@ class DueHeap {
 
     get size() {
         return this.values.length;
+    }
+}
+
+// Active leases by bot. set() keeps checkAt at or below every positive
+// leaseUntil, so the 20 ms tick skips the expiry scan until a lease can be
+// due. Renewal only raises leaseUntil (onLeaseRenewal) and delete only raises
+// the minimum, so neither has to touch it; a grant's leaseUntil is never
+// lowered in place.
+class InFlightLeases extends Map {
+    constructor() {
+        super();
+        this.checkAt = Infinity;
+    }
+
+    set(id, active) {
+        super.set(id, active);
+        const until = Number(active?.grant?.leaseUntil || 0);
+        if (until > 0 && until < this.checkAt) this.checkAt = until;
+        return this;
     }
 }
 
@@ -114,8 +200,16 @@ function partyIntegrityInvalid(context = {}, partySession = {}) {
     return attachedCount < minSize || attachedCount !== declaredMemberIds.length;
 }
 
-function nextDueAt(state = {}, timestamp = Date.now(), context = {}, partySession = {}) {
+function nextDueAt(state = {}, timestamp = Date.now(), context = {}, partySession = {}, meetingPending = false) {
     const stateDue = Number(state.timing?.nextResolveAt || 0);
+    // Shared hunt/review snapshots may have advanced the personal timer.
+    // An accepted obligation keeps its own physical transition deadline,
+    // including when the merchant is also the party leader.
+    if (state.stats?.tradeMeeting) {
+        const transitionDue = state.activity === 'traveling' ? Number(state.stats.travel?.arrivalAt || 0)
+            : state.activity === 'resting' ? Number(state.stats.restUntil || 0) : 0;
+        return transitionDue > 0 ? transitionDue : stateDue > 0 ? stateDue : timestamp;
+    }
     // The party row is the durable scheduling authority for a party resolve.
     // A freshly assigned leader can briefly carry no personal due time, and
     // later leader snapshots can also lag behind an advanced party schedule.
@@ -124,62 +218,9 @@ function nextDueAt(state = {}, timestamp = Date.now(), context = {}, partySessio
         : 0;
     const due = partyDue > 0 ? partyDue : stateDue;
     if (partyIntegrityInvalid(context, partySession)) return timestamp;
-    const sessionExpiry = partySessionExpiryAt(state, context, partySession);
+    const sessionExpiry = meetingPending ? 0 : partySessionExpiryAt(state, context, partySession);
     if (sessionExpiry > 0) return due > 0 ? Math.min(due, sessionExpiry) : sessionExpiry;
     return due > 0 ? due : Math.max(0, Number(state.updatedAt || timestamp));
-}
-
-function hasFiniteCoordinate(value) {
-    return value !== null
-        && value !== undefined
-        && String(value).trim() !== ''
-        && Number.isFinite(Number(value));
-}
-
-function routeDestination(state = {}, route = {}) {
-    return route?.destinations?.[String(state.characterId)] || route?.to || null;
-}
-
-function beginRouteTravelState(state = {}, route = null, timestamp = Date.now(), options = {}) {
-    if (!state || !route?.needed || state.activity === 'traveling') return null;
-    const destination = routeDestination(state, route);
-    const from = { ...(state.loc || {}) };
-    if (!destination || !hasFiniteCoordinate(from.locX) || !hasFiniteCoordinate(from.locY)) return null;
-    const arrivalAt = timestamp + Math.max(1000, Number(route.travelMs) || HUNTING_TRAVEL_MS);
-    const isPartyRoute = route.mode === 'party';
-    const routedState = route.spotBackoff && !isPartyRoute
-        ? SpotRiskPolicy.withBackoff(state, route.spotBackoff, timestamp)
-        : state;
-    return {
-        ...routedState,
-        activity: 'traveling',
-        timing: {
-            ...(state.timing || {}),
-            activityStartedAt: timestamp,
-            nextResolveAt: arrivalAt
-        },
-        stats: {
-            ...(routedState.stats || {}),
-            pveEncounter: null,
-            travel: {
-                from,
-                to: { ...destination },
-                startedAt: timestamp,
-                arrivalAt,
-                regionName: route.regionName || state.currentRegion || 'Hunting Ground',
-                method: Number(state.stats?.karma || 0) > 0 ? 'walk' : 'gatekeeper_spot',
-                spotId: route.spotId,
-                arrivalActivity: isPartyRoute ? 'grouped' : 'hunting',
-                arrivalEvent: isPartyRoute ? 'party_arrived_hunting_ground' : 'arrived_hunting_ground',
-                reason: isPartyRoute
-                    ? 'party_spot_replan'
-                    : route.reason || (state.stats?.equipmentPlan?.status === 'active'
-                        ? 'equipment_source_replan'
-                        : 'level_replan'),
-                ...(route.cause ? { cause: route.cause } : {})
-            }
-        }
-    };
 }
 
 function finishPartyRouteTravelState(state = {}, timestamp = Date.now()) {
@@ -214,6 +255,16 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
         id: `party:${party.partyId}:${timestamp}:${activity}`,
         memberIds: memberStates.map((state) => Number(state.characterId)).filter(Boolean)
     };
+    // Material travel changes the collection contract, and evacuation returns
+    // funded help. Fence that party row in the same transaction as every leg.
+    if (require('./CraftMaterialParty').isObjective(run.party.stats?.objective)
+        && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
+        party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
+        atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
+            expectedUpdatedAt: run.party.updatedAt, updatedAt: party.updatedAt,
+            nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
+            cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
+    }
     return memberStates.map((state) => {
         const id = Number(state.characterId);
         const events = event && id === resolutionMemberId
@@ -250,11 +301,14 @@ let C4Unseal, PartyMarketBreak, ClanPartyDuty;
 
 function lifecycleKind(state = {}, context = {}) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
-    if (Number(state.stats?.karma || 0) > 0 && !state.party?.partyId && !state.partyId) return 'resolver';
+    // Paid personal journeys retain the existing group writer.
+    if (state.partyId || state.party?.partyId) return context.isPartyLeader ? 'party' : 'party_member';
+    if (state.stats?.tradeMeeting) return ['traveling', 'dead', 'resting', 'fighting'].includes(state.activity) ? 'resolver' : 'event_driven';
+    // A solo bot washing karma (ColdKarmaPolicy.active) is planned by the
+    // resolver. The test is repeated here: ColdKarmaPolicy loads spot modules.
+    if (Number(state.stats?.karma || 0) > 0) return 'resolver';
     if (context.isPartyLeader) return 'party';
-    if (state.partyId || state.party?.partyId) return 'party_member';
-    if ((state.activity === 'merchant' && state.stats?.marketStore)
-        || (state.activity === 'crafting' && state.stats?.craftShop)) return 'event_driven';
+    if (state.activity === 'crafting' && state.stats?.craftShop) return 'event_driven';
     const stats = state.stats || {};
     const plan = stats.equipmentPlan || {};
     if (context.clanHallServices || stats.clanHallVisit) return 'command';
@@ -268,19 +322,20 @@ function lifecycleKind(state = {}, context = {}) {
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
     if (['shopping', 'crafting', 'merchant'].includes(state.activity)) return 'command';
+    if (require('../Economy/BotCrystallization').ready(state)) return 'command';
     if (String(plan.strategy || '') === 'market') {
         const price = Math.max(0, Number(plan.market?.price || 0));
         const reserve = Math.max(0, Number(plan.market?.reserve || 0));
         if (state.activity !== 'hunting'
-            || (price > 0 && PurchaseFunding.shortfall(state, price, reserve,
-                PurchaseFunding.tripEscrow(plan, context.buyOrderEscrow)) === 0)) return 'command';
+            || (price > 0 && (plan.weaponBridge ? PurchaseFunding.budget(state, PurchaseFunding.tripEscrow(plan, context.buyOrderEscrow))
+                : PurchaseFunding.spendable(state, PurchaseFunding.tripEscrow(plan, context.buyOrderEscrow),
+                    { itemId: plan.target?.selfId })) >= price)) return 'command';
     }
     if ((ClanPartyDuty ||= require('./ClanPartyDuty')).waiting(state)) return 'resolver';
     if (!SIMPLE_ACTIVITIES.has(String(state.activity || ''))) return 'command';
     // craftReturn is a saved destination, not an outstanding crafting action.
     // Actual crafting is routed by activity, shop/station and plan readiness.
-    if (stats.warehouseWorkflow || stats.warehouseErrand || stats.marketStore || stats.marketReturn
-        || stats.craftShop || stats.craftStationId || stats.supplyErrand) return 'command';
+    if (BotErrands.busyWith(state, BotErrands.COLD_CLAIM)) return 'command';
     if (stats.mammonReturn || (Number(stats.mammonRetryAt || 0) <= Date.now()
         && Object.values(state.inventory || {}).some(item => Number(item.amount)>0
             && (C4Unseal ||= invoke('GameServer/Items/C4Unseal')).options(item.selfId).length))) return 'command';
@@ -299,11 +354,22 @@ function isSchedulableKind(kind) {
     return kind !== 'inactive' && kind !== 'event_driven' && kind !== 'party_member';
 }
 
+function playerWaitingTransition(state, context) {
+    return context?.playerWaiting === true && !!state?.stats?.tradeMeeting
+        && lifecycleKind(state, context) === 'resolver';
+}
+
+function meetingTravelTransition(state, context) {
+    return state?.activity === 'traveling' && !!state.stats?.tradeMeeting
+        && lifecycleKind(state, context) === 'resolver';
+}
+
 function priorityForResult(state, result) {
     const activity = String(result?.patch?.activity || state?.activity || '');
     if (activity === 'dead' || state?.activity === 'dead' || (result?.events || []).some((event) => (
         ['death', 'respawn', 'resurrection'].includes(String(event?.type || ''))
     ))) return 'P0';
+    if (state?.stats?.tradeMeeting) return 'P1';
     if ((result?.materialize?.items || []).some((item) => Number(item.selfId) !== 57 && Number(item.amount || 0) !== 0)) {
         return 'P1';
     }
@@ -342,9 +408,120 @@ function compactProposal(proposal = {}, includeInventory = true) {
         result: {
             events: Array.isArray(result.events) ? result.events : [],
             ...(result.memoryEvents ? { memoryEvents: result.memoryEvents } : {}),
-            debug: result.debug || {}
+            debug: result.debug || {},
+            ...(DiagnosticConfig.developerDiagnostics === true && result.consumptionDiagnostics
+                ? { consumptionDiagnostics: result.consumptionDiagnostics } : {})
         }
     };
+}
+
+// Stable membership of the same authoritative states, not another state
+// snapshot or due queue. Producer writes keep traversal O(1) under churn.
+class RetainedStateMap extends Map {
+    // ARCH-NOTE: ALT: Authorized M6 sharing keeps only frozen exact primitive
+    // skill DTOs after native canonical publication. Per-owner mutable arrays
+    // and protocol fields remain unchanged; 4096 records bound the Worker pool.
+    // Delete/fence/clear synchronously retire captured acquired-slot ledgers.
+    // Scoped native 400/1000 saved-wire proof saves 6.432/7.647 KiB per owner,
+    // including pool/owner headers and backing; whole default 256 fit is separate.
+    #skillDtos;
+    #sharingFailures = 0;
+
+    constructor(sources, shotIndex = null) {
+        super();
+        this.shotIndex = shotIndex;
+        this.#skillDtos = require('worker_threads').isMainThread ? null
+            : new (require('./SkillDtoInterner').SkillDtoInterner)();
+        Object.defineProperty(this, 'locationIndex', { value: sources.index, enumerable: true });
+        this.sources = sources;
+    }
+
+    get(id) { return this.sources.get(id); }
+    has(id) { return this.sources.has(id); }
+    get size() { return this.sources.size(); }
+    keys() { return this.sources.keys(); }
+    values() { return this.sources.values(); }
+    entries() { return this.sources.entries(); }
+    [Symbol.iterator]() { return this.entries(); }
+    forEach(callback, thisArg) {
+        if (typeof callback !== 'function') throw new TypeError('invalid_retained_state_callback');
+        for (const [id, packet] of this.entries()) Reflect.apply(callback, thisArg, [packet, id, this]);
+    }
+
+    set(id, entry) {
+        const current = this.get(id);
+        if (current?.state !== entry.state && typeof invoke === 'function') {
+            invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication');
+        }
+        this.shotIndex?.update(entry.state);
+        try { this.sources.publish(id, entry); }
+        catch (error) {
+            // Preserve native publication/error semantics, including a publisher
+            // that throws after setting its input. Such an input is never interned.
+            if (this.#skillDtos) {
+                try { if (this.get(id)?.state !== current?.state) this.#skillDtos.remove(id); }
+                catch (sharingError) {
+                    this.#sharingFailures++;
+                    try { global.utils?.infoWarn?.('ColdWorker', 'skill sharing release failed for %s: %s', id,
+                        sharingError?.message || sharingError); } catch (_) { /* preserve native publication error */ }
+                }
+            }
+            throw error;
+        }
+        // Worker calculation advice belongs to this existing native owner.
+        // Publication replaces transport context, but is not a new decision.
+        // Keep advice off enumerable state/context DTOs; readers still prove
+        // every dependency before reuse, and retirement releases the owner.
+        const publishedContext = this.get(id)?.context;
+        const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
+        const wishAdvisory = supplied ? entry.context.wishAdvisory : current?.context?.wishAdvisory;
+        if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
+            && Object.isExtensible(publishedContext)) {
+            Reflect.defineProperty(publishedContext, 'wishAdvisory', {
+                value: entry.state?.phase === 'cold' ? wishAdvisory : null,
+                writable: true, configurable: true, enumerable: false
+            });
+        }
+        if (this.#skillDtos) {
+            let staged;
+            try {
+                const state = this.get(id)?.state;
+                SparseNumericStorage.compactState(state);
+                staged = this.#skillDtos.prepare(id, state?.phase === 'cold' ? state.stats?.coldCombat?.skills : null);
+                this.#skillDtos.commit(staged);
+            } catch (error) {
+                this.#sharingFailures++;
+                let rollbackFailure;
+                try { if (staged) this.#skillDtos.rollback(staged); } catch (failure) { rollbackFailure = failure; }
+                try { if (this.get(id)?.state !== current?.state) this.#skillDtos.remove(id); }
+                catch (failure) { rollbackFailure ||= failure; }
+                try { global.utils?.infoWarn?.('ColdWorker', 'skill sharing skipped for %s: %s; rollback: %s', id,
+                    error?.message || error, rollbackFailure?.message || rollbackFailure || 'ok'); }
+                catch (_) { /* sharing does not change native publication success */ }
+            }
+        }
+        return this;
+    }
+    delete(id) {
+        this.#skillDtos?.remove(id);
+        const current = this.get(id);
+        if (!current) return false;
+        if (typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'owner_release');
+        this.shotIndex?.remove(id);
+        return this.sources.remove(id, current.state);
+    }
+    clear() {
+        this.#skillDtos?.clear();
+        for (const id of this.keys()) {
+            if (typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'owner_release');
+            this.shotIndex?.remove(id);
+        }
+        this.sources.clear();
+    }
+
+    skillDtoSize() { return { ...(this.#skillDtos?.size() || { owners: 0, unique: 0, buckets: 0, acquiredSlots: 0 }),
+        sharingFailures: this.#sharingFailures }; }
+
 }
 
 class ColdSimulationKernel {
@@ -352,6 +529,9 @@ class ColdSimulationKernel {
         if (typeof options.resolveSolo !== 'function') throw new Error('resolveSolo is required');
         this.resolveSolo = options.resolveSolo;
         this.resolveParty = typeof options.resolveParty === 'function' ? options.resolveParty : null;
+        this.planPartyRequirement = options.planPartyRequirement || null;
+        // Numeric member ids only, bounded by active party rosters (<=9 each); dropped at completion, release or dissolve.
+        this.partyRequirementProgress = new Map();
         this.planLifecycle = typeof options.planLifecycle === 'function' ? options.planLifecycle : null;
         this.requiresWeaponBridge = typeof options.requiresWeaponBridge === 'function'
             ? options.requiresWeaponBridge
@@ -376,9 +556,15 @@ class ColdSimulationKernel {
             this.partyMinSize,
             Math.min(this.maxBatch, Number(options.maxAtomicPartySize) || 5)
         );
-        this.states = new Map();
-        this.occupancy = new SpotOccupancyIndex();
+        // ARCH-NOTE: M6: the matched 20m native snapshot attributes 78.590
+        // KiB/bot to canonical states (d05b2f66: 78.308; task estimate: 66).
+        // These are the original shared state objects. Shrinking their shape
+        // or the coldCombat packet requires a shared-state task, not another
+        // detached copy or an unmeasured fixed-memory subtraction.
+        this.states = new RetainedStateMap(CharacterStateSources.attachKernel(options.stateSources || CharacterStateSources.standalone()), options.shotIndex);
+        this.occupancy = new SpotOccupancyIndex({ locationIndex: this.states.locationIndex });
         this.interactionMemory = new (require('../../Social/InteractionMemory'))();
+        this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
         this.interactionMemory.clanSocial = new (require('../../Clan/ClanSocialView'))();
         this.versions = new Map();
         this.heap = new DueHeap();
@@ -386,14 +572,27 @@ class ColdSimulationKernel {
         this.nextScheduleToken = 1;
         this.claiming = new Set();
         this.claimStartedAt = new Map();
-        this.inFlight = new Map();
+        this.claimAttempts = new Map();
+        this.nextClaimRequest = 1;
+        this.alarms = new Map();
+        this.operationalAlarms = new Map();
+        this.earliestOperationalAlarm = null;
+        this.decisionAlarms = new Map();
+        this.decisionEvents = null;
+        this.buyerEvents = null;
+        this.buyerWakeups = new Set();
+        // Own line observations: <=8 numeric {deals, at} rows per claimed bot.
+        // Release, hot handoff/remove and shutdown discard them; never saved.
+        this.lookSeen = new Map();
+        this.nextAlarmToken = 1;
+        this.inFlight = new InFlightLeases();
+        this.pendingReleases = new Map();
+        this.nextReleaseRequest = 1;
         this.partyRuns = new Map();
         this.dirty = new Map();
         this.commanding = new Set();
         this.commandStartedAt = new Map();
-        this.lastOrphanSweepAt = 0;
-        this.orphanSweepIntervalMs = Math.max(1000, Number(options.orphanSweepIntervalMs) || 30000);
-        this.orphanRecoveryLimit = Math.max(1, Math.min(64, Number(options.orphanRecoveryLimit) || 64));
+        this.nextCommandRequest = 1;
         this.paused = false;
         this.stopping = false;
         this.resolveChain = Promise.resolve();
@@ -428,31 +627,101 @@ class ColdSimulationKernel {
         };
     }
 
+    dueAt(state, context = {}, timestamp = this.now()) {
+        // Compact catalog members carry no stats. Read the current roster
+        // locally; no additional snapshot fields or population scan.
+        const meetingPending = !!state.stats?.tradeMeeting
+            || (context.party?.memberIds || []).some(id => this.states.get(Number(id))?.state.stats?.tradeMeeting);
+        if (meetingPending && context.isPartyLeader) {
+            if (context.party?.stats?.objective?.sourceKind === 'raid'
+                && context.party.stats?.raidEncounter?.status === 'defeated') return timestamp;
+            // Existing accepted meetings keep the group writer. Its deadline
+            // is the next physical transition, not a later hunt/review timer.
+            let transitionDue = Infinity;
+            for (const id of context.party?.memberIds || []) {
+                const member = Number(id) === Number(state.characterId) ? state : this.states.get(Number(id))?.state;
+                if (!member || !(member.stats?.tradeMeeting || ['resting', 'dead'].includes(member.activity))) continue;
+                if (!['traveling', 'resting', 'dead', 'fighting'].includes(member.activity)) continue;
+                const due = nextDueAt(member, timestamp, {}, this.partySession, true);
+                if (due > 0) transitionDue = Math.min(transitionDue, due);
+            }
+            if (Number.isFinite(transitionDue)) return transitionDue;
+        }
+        return nextDueAt(state, timestamp, context, this.partySession, meetingPending);
+    }
+
+    refreshPartyMeetingLeader(characterId, previous) {
+        const current = this.states.get(characterId);
+        // Followers receive no party context: their native membership points
+        // to the already indexed leader. Never scan the population to find it.
+        const membership = current?.state?.party;
+        const leaderId = Number(membership?.leaderId || current?.context?.party?.leaderId);
+        if (!leaderId || leaderId === characterId) return;
+        const leader = this.states.get(leaderId), party = leader?.context?.party;
+        if (!party || String(membership?.partyId || '') !== String(party.partyId || '')
+            || !(party.memberIds || []).some(id => Number(id) === characterId)) return;
+        if (previous && current.state.activity === previous.state.activity
+            && !!current.state.stats?.tradeMeeting === !!previous.state.stats?.tradeMeeting
+            && nextDueAt(current.state, this.now(), {}, this.partySession, true)
+                === nextDueAt(previous.state, this.now(), {}, this.partySession, true)) return;
+        if (this.busy(leaderId) || lifecycleKind(leader.state, leader.context) !== 'party') return;
+        const due = this.dueAt(leader.state, leader.context), scheduled = this.scheduleTokens.get(leaderId);
+        if (scheduled?.version === leader.version && scheduled.dueAt === due
+            && scheduled.heapEntry.playerWaiting === playerWaitingTransition(leader.state, leader.context)) return;
+        this.schedule(leaderId, leader.version, due);
+    }
+
     upsert(entry = {}) {
-        const state = entry.state || entry;
+        let state = entry.state || entry;
         const characterId = Number(state?.characterId || 0);
         if (!characterId) return false;
+        const previousRecord = this.states.locationIndex.getSource(characterId, 'state');
+        const current = this.states.get(characterId);
+        // Only an active bilateral preparation needs stable object identity.
+        // Repeated structured-clone snapshots of identical physical state are
+        // not new consent. Changed bags/timing/ownership still invalidate it.
+        if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
+            && current && isDeepStrictEqual(current.state, state)) state = current.state;
+        if (entry.context?.requirementRefresh === false) {
+            this.partyRequirementProgress.delete(String(entry.context?.party?.partyId || current?.context?.party?.partyId || ''));
+        }
+        let memoryChanged = false;
         if (entry.context?.interactionMemory) {
             if (entry.context.interactionMemory.ownerId !== characterId) throw new Error('interaction memory: wrong snapshot owner');
-            this.interactionMemory.accept(entry.context.interactionMemory);
+            memoryChanged = this.interactionMemory.accept(entry.context.interactionMemory);
             const { interactionMemory, ...context } = entry.context;
             entry = { ...entry, context };
         }
-        const current = this.states.get(characterId);
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
+        const retainedState = current && incomingRevision < currentRevision ? current.state : state;
+        const membership = retainedState.party?.partyId || retainedState.partyId;
+        // A departure snapshot can be prepared before the old party dissolves.
+        // Its catalog context must not turn the now-solo former leader back
+        // into a party writer and strand a paid town trip behind old members.
+        if (entry.context?.isPartyLeader && (!membership
+            || String(membership) !== String(entry.context.party?.partyId || ''))) {
+            entry = { ...entry, context: { ...entry.context, isPartyLeader: false,
+                party: null, partyMembers: [], requirementRefresh: false, targetNpcId: null,
+                raidOwner: null, route: entry.context.route?.mode === 'party' ? null : entry.context.route } };
+        }
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
             // ownership state when an older page arrives out of order, while
             // still accepting refreshed routing/party context.
             if (entry.context) this.states.set(characterId, { ...current, context: entry.context });
+            this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
+            if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
+            this.refreshCommandSource(characterId);
+            this.buyerStateChanged(characterId);
             this.ensureScheduled(characterId);
+            this.refreshPartyMeetingLeader(characterId, current);
             return false;
         }
         if (current && incomingRevision === currentRevision
-            && nextDueAt(current.state, this.now(), current.context, this.partySession)
-                === nextDueAt(state, this.now(), entry.context || {}, this.partySession)
+            && this.dueAt(current.state, current.context)
+                === this.dueAt(state, entry.context || {})
             && lifecycleKind(current.state, current.context) === lifecycleKind(state, entry.context || {})) {
             // A full catalog refresh normally changes only context. Keep the
             // existing heap version so ten-second refreshes do not accumulate
@@ -463,16 +732,26 @@ class ColdSimulationKernel {
                 context: entry.context || {}
             });
             this.occupancy.update(state);
-            this.stats.snapshots += 1;
+            this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
+            if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
+            DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
+            this.refreshCommandSource(characterId);
+            this.buyerStateChanged(characterId);
             this.ensureScheduled(characterId);
+            this.refreshPartyMeetingLeader(characterId, current);
             return true;
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
         this.states.set(characterId, { state, context: entry.context || {}, version });
         this.occupancy.update(state);
-        this.stats.snapshots += 1;
+        this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
+        if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
+        DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
+        this.refreshCommandSource(characterId);
+        this.buyerStateChanged(characterId);
         this.ensureScheduled(characterId);
+        this.refreshPartyMeetingLeader(characterId, current);
         return true;
     }
 
@@ -483,12 +762,38 @@ class ColdSimulationKernel {
 
     remove(characterId) {
         const id = Number(characterId);
+        this.pendingReleases.delete(id);
+        // Standalone kernels cannot have game economy entries before Global loads.
+        if (typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forget(id);
+        if (!isMainThread && typeof invoke === 'function') invoke('GameServer/Bot/AI/BotPersona').forget(id);
         const current = this.states.get(id);
+        const partyId = String(this.inFlight.get(id)?.partyId || this.claimAttempts.get(id)?.partyId
+            || current?.context?.party?.partyId || current?.state?.party?.partyId || '');
+        if (partyId && typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forgetGroup(partyId);
+        this.partyRequirementProgress.delete(partyId);
+        const run = this.partyRuns.get(partyId);
+        if (run?.purpose.memberIds.includes(id)) {
+            // Retire the captured party before any pending resolver continues.
+            // Its remaining native leases use the existing release/ACK path.
+            this.partyRuns.delete(partyId);
+            for (const memberId of run.purpose.memberIds) this.cancelClaimAttempt(memberId);
+            this.requestRelease([...run.grants.values()].filter(token => token.characterId !== id)
+                .map(token => ({ token, reason: 'party_member_removed' })));
+        }
+        this.inFlight.delete(id);
+        this.dirty.delete(id);
+        const previousRecord = this.states.locationIndex.getSource(id, 'state');
         if (current?.state) this.occupancy.remove(stateKey(current.state));
         this.states.delete(id);
+        this.buyerEvents?.remove(id);
+        this.buyerWakeups.delete(id);
+        this.lookSeen.delete(id);
+        this.decisionEvents?.ownerRemoved(id, previousRecord, current);
         this.interactionMemory.forget(id);
         this.versions.set(id, Number(this.versions.get(id) || 0) + 1);
+        this.heap.remove(this.scheduleTokens.get(id)?.heapEntry);
         this.scheduleTokens.delete(id);
+        this.cancelClaimAttempt(id);
         this.claiming.delete(id);
         this.claimStartedAt.delete(id);
         this.commanding.delete(id);
@@ -497,9 +802,145 @@ class ColdSimulationKernel {
 
     schedule(characterId, version, dueAt) {
         const id = Number(characterId);
+        // Replacing a token also removes its actual indexed node; otherwise a
+        // long future deadline keeps every superseded token until it is due.
+        this.heap.remove(this.scheduleTokens.get(id)?.heapEntry);
         const token = this.nextScheduleToken++;
-        this.scheduleTokens.set(id, { token, version: Number(version), dueAt: Number(dueAt || this.now()) });
-        this.heap.push({ characterId: id, version: Number(version), dueAt: Number(dueAt || this.now()), scheduleToken: token });
+        const heapEntry = { characterId: id, version: Number(version),
+            dueAt: Number(dueAt || this.now()), scheduleToken: token,
+            playerWaiting: playerWaitingTransition(this.states.get(id)?.state, this.states.get(id)?.context),
+            meetingTravel: meetingTravelTransition(this.states.get(id)?.state, this.states.get(id)?.context) };
+        this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
+        this.heap.push(heapEntry);
+    }
+
+    storeSizes() {
+        const skillDtos = this.states.skillDtoSize();
+        return {
+            skillDtoOwners: skillDtos.owners, skillDtoRows: skillDtos.unique,
+            skillDtoAcquisitions: skillDtos.acquiredSlots, skillDtoSharingFailures: skillDtos.sharingFailures,
+            states: this.states.size, contexts: this.states.size,
+            locationStates: this.states.locationIndex.sourceSize('state'),
+            occupancy: this.occupancy.size().owners,
+            scheduleTokens: this.scheduleTokens.size, ownerHeapNodes: this.heap.size - this.alarms.size,
+            claiming: this.claiming.size, claimStartedAt: this.claimStartedAt.size, claimAttempts: this.claimAttempts.size,
+            inFlight: this.inFlight.size, dirty: this.dirty.size, pendingReleases: this.pendingReleases.size,
+            commanding: this.commanding.size, commandStartedAt: this.commandStartedAt.size,
+            partyRuns: this.partyRuns.size, partyRequirementProgress: this.partyRequirementProgress.size,
+            buyerWakeups: this.buyerWakeups.size, lookSeen: this.lookSeen.size
+        };
+    }
+
+    armAlarm(kind, key, dueAt, options = {}) {
+        if (kind !== 'claim_ack' || options.operational !== true) throw new Error('unsupported_alarm');
+        if (!Number.isSafeInteger(dueAt) || dueAt < 0) throw new RangeError('invalid_alarm_deadline');
+        const id = Number(options.characterId);
+        if (typeof options.stamp !== 'string' || !options.stamp || Number(key) !== id
+            || (kind === 'claim_ack' && (!Number.isSafeInteger(id) || id <= 0 || !this.claiming.has(id)))) {
+            throw new Error('invalid_alarm_owner');
+        }
+        const alarmKey = `${kind}:${id}`;
+        const previous = this.alarms.get(alarmKey);
+        if (previous?.stamp === options.stamp && previous.dueAt === dueAt) return previous.alarmToken;
+        if (previous) this.cancelAlarm(kind, key, previous.alarmToken);
+        const entry = { kind: 'alarm', alarmKind: kind, alarmKey, key, dueAt, stamp: options.stamp,
+            characterId: id, alarmToken: this.nextAlarmToken++ };
+        this.alarms.set(alarmKey, entry);
+        this.operationalAlarms.set(alarmKey, entry);
+        this.heap.push(entry);
+        if (!this.earliestOperationalAlarm || this.heap.compare(entry, this.earliestOperationalAlarm) < 0) {
+            this.earliestOperationalAlarm = entry;
+        }
+        return entry.alarmToken;
+    }
+
+    armDecisionDeadline(key, dueAt, stamp, callback) {
+        if (key == null || !Number.isSafeInteger(dueAt) || dueAt < 0 || typeof callback !== 'function') {
+            throw new RangeError('invalid_decision_deadline');
+        }
+        const previous = this.decisionAlarms.get(key);
+        if (previous?.stamp === stamp && previous.dueAt === dueAt) return previous.alarmToken;
+        if (previous) this.cancelDecisionDeadline(key, previous.alarmToken);
+        const entry = { kind: 'alarm', alarmKind: 'decision', alarmKey: {}, key, dueAt,
+            stamp, callback, characterId: 0, alarmToken: this.nextAlarmToken++ };
+        this.decisionAlarms.set(key, entry);
+        this.alarms.set(entry.alarmKey, entry);
+        this.heap.push(entry);
+        return entry.alarmToken;
+    }
+
+    cancelDecisionDeadline(key, expectedToken) {
+        const entry = this.decisionAlarms.get(key);
+        if (!entry || entry.alarmToken !== expectedToken) return false;
+        this.heap.remove(entry);
+        this.decisionAlarms.delete(key);
+        this.alarms.delete(entry.alarmKey);
+        return true;
+    }
+
+    drainDecisionDeadlines(timestamp, budget) {
+        let fired = 0;
+        while (budget.remaining > 0) {
+            const entry = this.heap.peekDecision();
+            if (!entry || entry.dueAt > timestamp) break;
+            budget.remaining--;
+            this.cancelDecisionDeadline(entry.key, entry.alarmToken);
+            entry.callback(entry.stamp);
+            fired++;
+        }
+        return fired;
+    }
+
+    cancelAlarm(kind, key, expectedToken) {
+        const alarmKey = `${kind}:${Number(key)}`;
+        const entry = this.alarms.get(alarmKey);
+        if (!entry || entry.alarmToken !== expectedToken) return false;
+        this.heap.remove(entry);
+        this.alarms.delete(alarmKey);
+        this.operationalAlarms.delete(alarmKey);
+        if (this.earliestOperationalAlarm === entry) {
+            this.earliestOperationalAlarm = null;
+            // Outstanding claims plus one worker safety cycle, bounded by
+            // normal/atomic ownership admission + 1; never all bot alarms.
+            for (const candidate of this.operationalAlarms.values()) {
+                if (!this.earliestOperationalAlarm || this.heap.compare(candidate, this.earliestOperationalAlarm) < 0) {
+                    this.earliestOperationalAlarm = candidate;
+                }
+            }
+        }
+        return true;
+    }
+
+    cancelClaimAttempt(characterId) {
+        const id = Number(characterId);
+        const attempt = this.claimAttempts.get(id);
+        if (attempt) this.cancelAlarm('claim_ack', id, attempt.alarmToken);
+        this.claimAttempts.delete(id);
+        this.claiming.delete(id);
+        this.claimStartedAt.delete(id);
+    }
+
+    drainOperationalAlarms(timestamp = this.now()) {
+        let fired = 0;
+        while (this.earliestOperationalAlarm && this.earliestOperationalAlarm.dueAt <= timestamp) {
+            const entry = this.earliestOperationalAlarm;
+            this.cancelAlarm(entry.alarmKind, entry.key, entry.alarmToken);
+            const id = entry.characterId;
+            if (this.claimAttempts.get(id)?.requestId !== entry.stamp || !this.claiming.has(id)) continue;
+            const run = [...this.partyRuns.values()].find(party => party.purpose.memberIds.includes(id));
+            if (run) {
+                run.purpose.memberIds.forEach(memberId => this.cancelClaimAttempt(memberId));
+                this.partyRuns.delete(String(run.purpose.partyId));
+                this.requeue(run.purpose.leaderId, timestamp + 1000);
+                DiagnosticConfig.developerDiagnostics && (this.stats.claimRecoveries += run.purpose.memberIds.length);
+            } else {
+                this.cancelClaimAttempt(id);
+                this.requeue(id, timestamp + 1000);
+                DiagnosticConfig.developerDiagnostics && (this.stats.claimRecoveries += 1);
+            }
+            fired++;
+        }
+        return fired;
     }
 
     busy(characterId) {
@@ -507,13 +948,58 @@ class ColdSimulationKernel {
         return this.claiming.has(id) || this.inFlight.has(id) || this.commanding.has(id);
     }
 
+    hasNormalCoverage(characterId) {
+        const id = Number(characterId), current = this.states.get(id), scheduled = this.scheduleTokens.get(id);
+        return !!current && scheduled?.version === current.version
+            && scheduled.heapEntry?.scheduleToken === scheduled.token
+            && scheduled.heapEntry?.version === current.version
+            && this.heap.positions.has(scheduled.heapEntry);
+    }
+
+    // Matching partial party ACKs already own native leases before the whole
+    // party enters inFlight. Inspect this bounded alias set only after the
+    // healthy token/busy fast paths, never classify it as lost work.
+    hasAcceptedPartyGrant(characterId) {
+        for (const run of this.partyRuns.values()) if (run.grants?.has(Number(characterId))) return true;
+        return false;
+    }
+
+    needsNormalSchedule(characterId) {
+        const entry = this.states.get(Number(characterId));
+        return !!entry && isSchedulableKind(lifecycleKind(entry.state, entry.context));
+    }
+
+    buyerStateChanged(characterId) {
+        this.buyerEvents?.ownerChanged(characterId, this.now());
+        if (!eligibleBuyer(this.states.get(characterId)?.state)) this.buyerWakeups.delete(characterId);
+    }
+
+    wakeBuyer(characterId, timestamp = this.now()) {
+        const id = Number(characterId);
+        if (this.stopping || !eligibleBuyer(this.states.get(id)?.state) || this.buyerWakeups.has(id)) return false;
+        this.buyerWakeups.add(id);
+        if (!this.busy(id)) this.requeue(id, timestamp);
+        return true;
+    }
+
     ensureScheduled(characterId, dueAt = null) {
         const id = Number(characterId);
         const current = this.states.get(id);
-        if (!current || this.busy(id) || !isSchedulableKind(lifecycleKind(current.state, current.context))) return false;
-        const scheduled = this.scheduleTokens.get(id);
-        if (scheduled?.version === current.version) return false;
-        this.schedule(id, current.version, dueAt ?? nextDueAt(current.state, this.now(), current.context, this.partySession));
+        if (!current || this.busy(id)) return false;
+        if (this.buyerWakeups.has(id) && eligibleBuyer(current.state)) {
+            if (!this.hasNormalCoverage(id) || this.scheduleTokens.get(id).dueAt > this.now()) this.requeue(id, this.now());
+            return true;
+        }
+        if (this.hasNormalCoverage(id)) {
+            const scheduled = this.scheduleTokens.get(id);
+            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context)
+                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context)) {
+                this.schedule(id, current.version, scheduled.dueAt);
+            }
+            return false;
+        }
+        if (this.hasAcceptedPartyGrant(id) || !isSchedulableKind(lifecycleKind(current.state, current.context))) return false;
+        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state, current.context));
         return true;
     }
 
@@ -528,19 +1014,41 @@ class ColdSimulationKernel {
         if (this.scheduleTokens.get(id)?.token === entry?.scheduleToken) this.scheduleTokens.delete(id);
     }
 
-    dueCandidates(timestamp = this.now(), capacity = this.maxBatch) {
+    dueCandidates(timestamp = this.now(), capacity = this.maxBatch, decisionBudget = { remaining: 64 }) {
         this.partyCapacityBlocked = false;
+        this.duePicked = 0;
         const limit = Math.max(0, Math.min(this.maxBatch, Number(capacity) || 0));
         const candidates = [];
         let commandsSelected = 0;
+        let meetingSelected = false;
         while (candidates.length + commandsSelected < limit && this.heap.size > 0) {
-            const head = this.heap.peek();
+            const waiting = this.heap.peekPlayer();
+            const transit = !meetingSelected && this.heap.peekMeeting();
+            // One due paid arrival goes ahead of the ordinary hunt backlog;
+            // the rest of this batch keeps its existing deadline order.
+            const head = waiting && waiting.dueAt <= timestamp ? waiting
+                : transit && transit.dueAt <= timestamp ? transit : this.heap.peek();
+            if (head.kind === 'alarm') {
+                if (head.dueAt > timestamp) break;
+                if (head.alarmKind === 'decision') {
+                    if (decisionBudget.remaining <= 0) break;
+                    DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
+                    this.drainDecisionDeadlines(timestamp, decisionBudget);
+                    continue;
+                }
+                DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
+                this.drainOperationalAlarms(timestamp);
+                continue;
+            }
             if (!this.validHeapEntry(head)) {
-                this.heap.pop();
+                this.heap.remove(head);
                 continue;
             }
             if (Number(head.dueAt || 0) > timestamp) break;
-            const entry = this.heap.pop();
+            const entry = head;
+            if (entry.meetingTravel) meetingSelected = true;
+            this.heap.remove(entry);
+            DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
             this.consumeHeapEntry(entry);
             const id = Number(entry.characterId);
             // A catalog page may race an ACK and carry a newer revision while
@@ -554,7 +1062,8 @@ class ColdSimulationKernel {
                 this.requeue(id, Math.max(timestamp + 1000, encounter.expiresAt + 1000));
                 continue;
             }
-            const kind = lifecycleKind(current.state, current.context);
+            const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
+                ? 'command' : lifecycleKind(current.state, current.context);
             if (kind === 'resolver') {
                 this.claiming.add(id);
                 this.claimStartedAt.set(id, this.now());
@@ -593,6 +1102,8 @@ class ColdSimulationKernel {
                 const attachedMembers = members.filter((member) => (
                     String(member.party?.partyId || member.partyId || '') === String(party?.partyId || '')
                 ));
+                // Existing accepted meetings advance through the same atomic
+                // group lifecycle; their finite transitions never enter hunt.
                 if (members.some(member => member.stats?.pvpEncounter)) {
                     this.requeue(id, timestamp + 1000);
                     continue;
@@ -618,7 +1129,7 @@ class ColdSimulationKernel {
                     && occupiedOwnership === 0;
                 if (candidateMemberIds.length > this.maxInFlight && !atomicCapacityBurst) {
                     this.partyCapacityBlocked = true;
-                    this.stats.partyCapacityDeferrals += 1;
+                    DiagnosticConfig.developerDiagnostics && (this.stats.partyCapacityDeferrals += 1);
                     if (candidateMemberIds.length <= this.maxAtomicPartySize) {
                         // Let current owners drain so the oldest valid party
                         // gets its bounded atomic turn even under player limits.
@@ -641,7 +1152,7 @@ class ColdSimulationKernel {
                     this.schedule(id, current.version, entry.dueAt);
                     break;
                 }
-                if (atomicCapacityBurst) this.stats.partyCapacityBursts += 1;
+                if (atomicCapacityBurst) DiagnosticConfig.developerDiagnostics && (this.stats.partyCapacityBursts += 1);
                 const purpose = {
                     kind: 'party',
                     partyId: party.partyId,
@@ -651,6 +1162,7 @@ class ColdSimulationKernel {
                 };
                 this.partyRuns.set(String(party.partyId), {
                     purpose,
+                    requirementRefresh: current.context.requirementRefresh === true,
                     party,
                     members: partyMembers,
                     spot: current.context.spot,
@@ -672,20 +1184,137 @@ class ColdSimulationKernel {
                     });
                 });
             } else if (kind === 'command') {
+                const attempt = this.beginCommand(id);
+                if (!attempt) continue;
                 commandsSelected += 1;
-                this.commanding.add(id);
-                this.commandStartedAt.set(id, this.now());
-                this.stats.commands += 1;
-                this.resolveChain = this.resolveChain.then(() => this.resolveCommand(id));
+                DiagnosticConfig.developerDiagnostics && (this.stats.commands += 1);
+                this.resolveChain = this.resolveChain.then(() => this.resolveCommand(id, attempt));
             }
         }
         return candidates;
     }
 
-    async resolveCommand(characterId) {
+    receiveMeetingPage(request) {
+        const identity = Protocol.meetingIdentity(request), id = identity?.characterId;
+        if (!identity || !request.frame || this.stopping) return false;
+        let attempt = this.commandStartedAt.get(id);
+        if (attempt && (attempt.kind !== 'meeting' || attempt.commandId !== identity.commandId)) return false;
+        if (!attempt) {
+            const current = this.states.get(id);
+            // Bilateral consent reads a separate, bounded owner slot. A full
+            // combat/commit window must not make every other merchant busy.
+            // The same owner's active writer remains fenced out.
+            if (!current || this.busy(id)
+                || [...this.commandStartedAt.values()].filter(value => value.kind === 'meeting').length >= 16) return false;
+            attempt = { kind: 'meeting', commandId: identity.commandId, state: current.state,
+                version: current.version, frames: [], frameHashes: [], sent: false, startedAt: this.now() };
+            this.commandStartedAt.set(id, attempt); this.commanding.add(id);
+        }
+        try {
+            const fingerprint = JSON.stringify(request.frame);
+            const oldHash = attempt.frameHashes[request.frame[2]];
+            const hash = require('../Fnv1a').fnv1a32(fingerprint);
+            if (oldHash !== undefined && oldHash !== hash) throw Error('trade_meeting_consent_changed');
+            attempt.frameHashes[request.frame[2]] = hash;
+            const old = attempt.frames[request.frame[2]];
+            if (old && JSON.stringify(old) !== JSON.stringify(request.frame)) throw Error('trade_meeting_consent_changed');
+            if (attempt.sent) {
+                // A duplicate original packet resends the held result pages.
+                for (const frame of attempt.output || []) this.emit('command_request', { requests: [
+                    { ...identity, frame }] }, `meeting-result:${id}:${identity.commandId}:${frame[2]}`);
+                return true;
+            }
+            attempt.frames[request.frame[2]] = request.frame;
+            if (attempt.preparing || attempt.frames.filter(Boolean).length !== request.frame[3]) return true;
+            const input = require('../../AfkTrade/TradeMeetingCodec').fromPages(attempt.frames);
+            attempt.frames = []; attempt.preparing = true;
+            Promise.resolve(this.prepareMeeting?.(id, input, attempt)).then(result => {
+                if (this.commandStartedAt.get(id) !== attempt) return;
+                if (!result || this.states.get(id)?.state !== attempt.state) throw Error('trade_meeting_stale_worker');
+                const frames = this.meetingResultPages(result, id, identity.commandId);
+                attempt.output = frames; attempt.acked = new Set(); attempt.sent = true;
+                for (const frame of frames) if (this.emit('command_request', { requests: [{ ...identity, frame }] },
+                    `meeting-result:${id}:${identity.commandId}:${frame[2]}`) === false)
+                    throw Error('trade_meeting_send_failed');
+            }).catch(error => {
+                if (!this.cancelCommand(id, attempt)) return;
+                this.emit('command_ack', { results: [{ ...identity, pageIndex: -1, ok: false,
+                    reason: String(error.message || error) }] });
+            });
+            return true;
+        } catch (error) {
+            this.cancelCommand(id, attempt);
+            this.emit('command_ack', { results: [{ ...identity, pageIndex: -1, ok: false, reason: error.message }] });
+            return true;
+        }
+    }
+
+    completeMeetingPage(payload) {
+        const identity = Protocol.meetingIdentity(payload);
+        if (!identity) return false;
+        const attempt = this.commandStartedAt.get(identity.characterId);
+        if (attempt?.kind !== 'meeting' || attempt.commandId !== identity.commandId) return false;
+        if (payload.ok === false) return this.cancelCommand(identity.characterId, attempt);
+        if (!attempt.sent || !attempt.output?.some(frame => frame[2] === payload.pageIndex)) return false;
+        attempt.acked.add(payload.pageIndex);
+        // Prefix acknowledgements never release the sole preparation owner.
+        if (attempt.acked.size === attempt.output.length) this.cancelCommand(identity.characterId, attempt);
+        return true;
+    }
+
+    beginCommand(characterId, kind = 'lifecycle') {
+        const id = Number(characterId), current = this.states.get(id);
+        if (!Number.isSafeInteger(id) || id <= 0 || kind !== 'lifecycle'
+            || this.stopping || !current || current.state.phase !== 'cold' || this.busy(id)
+            || this.claiming.size + this.inFlight.size + this.commanding.size >= this.maxInFlight) return null;
+        const checkpoint = Protocol.commandCheckpoint(current.state);
+        if (!checkpoint) return null;
+        const attempt = { startedAt: this.now(), commandId: `${kind}:${id}:${this.nextCommandRequest++}`,
+            kind, checkpoint, context: current.context, version: current.version, sent: false };
+        if (kind === 'lifecycle' && this.buyerWakeups.delete(id)) attempt.marketWakeup = true;
+        this.commandStartedAt.set(id, attempt);
+        this.commanding.add(id);
+        return attempt;
+    }
+
+    cancelCommand(characterId, attempt) {
+        const id = Number(characterId);
+        if (!attempt || this.commandStartedAt.get(id) !== attempt) return false;
+        this.commandStartedAt.delete(id);
+        this.commanding.delete(id);
+        // The due heap may have consumed this owner's token while consent
+        // held it. ACK, rejection and expiry must all restore its lifecycle.
+        if (attempt.kind === 'meeting' && !this.stopping) this.ensureScheduled(id);
+        return true;
+    }
+
+    refreshCommandSource(characterId) {
+        const id = Number(characterId), attempt = this.commandStartedAt.get(id), current = this.states.get(id);
+        if (!attempt || typeof attempt !== 'object') return;
+        if (attempt.kind === 'meeting') {
+            if (current?.state !== attempt.state) {
+                this.cancelCommand(id, attempt);
+                this.emit('command_ack', { results: [{ kind: 'meeting', characterId: id, commandId: attempt.commandId,
+                    pageIndex: -1, ok: false, reason: 'trade_meeting_owner_changed' }] });
+            }
+            return;
+        }
+        if (current?.state.phase !== 'cold' || !Protocol.commandCheckpoint(current.state)) this.cancelCommand(id, attempt);
+        else if (Protocol.sameCommandCheckpoint(current.state, attempt.checkpoint)) attempt.version = current.version;
+        else if (!attempt.sent) this.cancelCommand(id, attempt);
+    }
+
+    currentCommand(characterId, attempt) {
+        const id = Number(characterId), current = this.states.get(id);
+        return !this.stopping && !!attempt && this.commandStartedAt.get(id) === attempt
+            && this.commanding.has(id) && current?.state.phase === 'cold' && current.version === attempt.version
+            && Protocol.sameCommandCheckpoint(current.state, attempt.checkpoint);
+    }
+
+    async resolveCommand(characterId, attempt) {
         const id = Number(characterId);
         const current = this.states.get(id);
-        if (!current || this.stopping) return;
+        if (!this.currentCommand(id, attempt)) return;
         const timestamp = this.now();
         try {
             const elapsedMs = current.state.timing?.lastResolvedAt
@@ -698,6 +1327,7 @@ class ColdSimulationKernel {
                     timestamp
                 })
                 : null;
+            if (!this.currentCommand(id, attempt)) return;
             const resolveState = lifecyclePlan?.plannedState || current.state;
             const result = current.context.clanHallServices || current.state.stats?.clanHallVisit
                 ? { patch: {}, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000 }
@@ -706,61 +1336,55 @@ class ColdSimulationKernel {
                 state: resolveState,
                 spot: current.context.spot || null,
                 pressure: current.context.pressure || {},
-                targetNpcId: Number(current.context.targetNpcId || 0),
+                targetNpcId: Number(current.context.targetNpcId || lifecyclePlan?.targetNpcId ||
+                    (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
                 elapsedMs,
                 rng: deterministicRandom(current.state),
                 timestamp
             });
-            this.stats.resolved += 1;
-            this.emit('command_request', {
+            if (!this.currentCommand(id, attempt)) return;
+            DiagnosticConfig.developerDiagnostics && (this.stats.resolved += 1);
+            attempt.sent = true;
+            const sent = this.emit('command_request', {
                 requests: [{
                     characterId: id,
                     kind: 'lifecycle',
+                    commandId: attempt.commandId,
+                    commandCheckpoint: attempt.checkpoint,
                     state: current.state,
                     context: current.context,
                     precomputedPlan: lifecyclePlan,
                     precomputedResult: result,
-                    computedAt: timestamp
+                    computedAt: timestamp,
+                    ...(attempt.marketWakeup ? { marketWakeup: true } : {})
                 }]
             });
+            if (sent === false && this.cancelCommand(id, attempt)) {
+                if (attempt.marketWakeup) this.buyerWakeups.add(id);
+                this.requeue(id, this.now() + 5000);
+            }
         } catch (error) {
-            this.stats.errors += 1;
-            this.commanding.delete(id);
-            this.commandStartedAt.delete(id);
+            if (!this.currentCommand(id, attempt)) return;
+            DiagnosticConfig.developerDiagnostics && (this.stats.errors += 1);
+            this.cancelCommand(id, attempt);
+            if (attempt.marketWakeup) this.buyerWakeups.add(id);
             this.requeue(id, this.now() + 5000);
         }
     }
 
     recoverStalled(timestamp = this.now()) {
-        const expiredClaims = [...this.claimStartedAt.entries()]
-            .filter(([, startedAt]) => timestamp - Number(startedAt || timestamp) >= this.claimAckTimeoutMs)
-            .map(([characterId]) => Number(characterId));
-        const handledParties = new Set();
-        for (const id of expiredClaims) {
-            const partyRun = [...this.partyRuns.values()].find((run) => run.purpose.memberIds.includes(id));
-            if (partyRun) {
-                const partyId = String(partyRun.purpose.partyId);
-                if (handledParties.has(partyId)) continue;
-                handledParties.add(partyId);
-                partyRun.purpose.memberIds.forEach((memberId) => {
-                    this.claiming.delete(Number(memberId));
-                    this.claimStartedAt.delete(Number(memberId));
-                });
-                this.partyRuns.delete(partyId);
-                this.requeue(partyRun.purpose.leaderId, timestamp + 1000);
-                this.stats.claimRecoveries += partyRun.purpose.memberIds.length;
-            } else {
-                this.claiming.delete(id);
-                this.claimStartedAt.delete(id);
-                this.requeue(id, timestamp + 1000);
-                this.stats.claimRecoveries += 1;
-            }
-        }
+        this.drainOperationalAlarms(timestamp);
+        if (this.inFlight.checkAt > timestamp) return;
 
-        const expiredLeases = [...this.inFlight.entries()].filter(([, active]) => (
-            Number(active?.grant?.leaseUntil || 0) > 0
-            && Number(active.grant.leaseUntil) <= timestamp
-        ));
+        let expiredLeases = null, checkAt = Infinity;
+        for (const entry of this.inFlight) {
+            const until = Number(entry[1]?.grant?.leaseUntil || 0);
+            if (!(until > 0)) continue;
+            if (until <= timestamp) (expiredLeases ||= []).push(entry);
+            else if (until < checkAt) checkAt = until;
+        }
+        this.inFlight.checkAt = checkAt;
+        if (!expiredLeases) return;
         const expiredParties = new Set(expiredLeases.map(([, active]) => active.partyId).filter(Boolean).map(String));
         for (const partyId of expiredParties) {
             const members = [...this.inFlight.entries()].filter(([, active]) => String(active.partyId || '') === partyId);
@@ -772,67 +1396,95 @@ class ColdSimulationKernel {
                 entry.context?.isPartyLeader && String(entry.context?.party?.partyId || '') === partyId
             ));
             if (leader) this.requeue(leader[0], timestamp + 1000);
-            this.stats.leaseRecoveries += members.length;
+            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += members.length);
         }
         expiredLeases.filter(([, active]) => !active.partyId).forEach(([id]) => {
             this.inFlight.delete(Number(id));
             this.dirty.delete(Number(id));
             this.requeue(Number(id), timestamp + 1000);
-            this.stats.leaseRecoveries += 1;
+            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += 1);
         });
     }
 
-    recoverOrphanedSchedules(timestamp = this.now()) {
-        if (this.lastOrphanSweepAt && timestamp - this.lastOrphanSweepAt < this.orphanSweepIntervalMs) return 0;
-        this.lastOrphanSweepAt = timestamp;
-        let recovered = 0;
-        for (const [id, entry] of this.states.entries()) {
-            if (recovered >= this.orphanRecoveryLimit) break;
-            if (!isSchedulableKind(lifecycleKind(entry.state, entry.context))
-                || this.scheduleTokens.has(id)
-                || this.busy(id)) continue;
-            this.schedule(id, entry.version, nextDueAt(entry.state, timestamp, entry.context, this.partySession));
-            recovered += 1;
-        }
-        this.stats.orphanRecoveries += recovered;
-        return recovered;
+    // Diagnostics only: why a scheduler tick sent no claim. `no_claim`: the tick
+    // still took due work (a command, a busy or requeued bot, an alarm). For a
+    // not-yet-due head, how far away the next heap entry (bot or alarm) is: how
+    // often a wake at the earliest entry would fire instead of the 20 ms poll.
+    countEmptyTick(timestamp) {
+        if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
+        const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
+        if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        EconomyDiagnostics.count('worker_tick', 'empty', 'not_due');
+        EconomyDiagnostics.count('worker_tick_gap', gap < 20 ? 'lt20ms' : gap < 100 ? 'lt100ms' : gap < 1000 ? 'lt1s' : 'ge1s');
     }
 
     tick() {
-        this.stats.loopRuns += 1;
+        DiagnosticConfig.developerDiagnostics && (this.stats.loopRuns += 1);
         this.stats.lastLoopAt = this.now();
+        const decisionBudget = { remaining: 64 };
+        this.drainDecisionDeadlines(this.stats.lastLoopAt, decisionBudget);
         this.recoverStalled(this.stats.lastLoopAt);
-        this.recoverOrphanedSchedules(this.stats.lastLoopAt);
-        if (this.paused || this.stopping) return;
+        if (this.paused || this.stopping) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'paused');
+            return;
+        }
         const capacity = this.maxInFlight - this.claiming.size - this.inFlight.size - this.commanding.size;
         if (capacity <= 0) {
+            DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'no_capacity');
             // Completed work owns these slots until main acknowledges its
             // commit. Drain it on the scheduler tick instead of leaving a
             // full (especially player-sized) window idle until the flush timer.
             this.flushDue();
             return;
         }
-        const candidates = this.dueCandidates(this.now(), capacity);
+        const timestamp = this.now();
+        const candidates = this.dueCandidates(timestamp, capacity, decisionBudget);
         if (this.partyCapacityBlocked) this.flushDue();
-        if (!candidates.length) return;
-        this.stats.selected += candidates.length;
-        this.emit('claim_request', { candidates: candidates.map(({ state, context, ...candidate }) => candidate) });
+        if (!candidates.length) {
+            DiagnosticConfig.developerDiagnostics && this.countEmptyTick(timestamp);
+            return;
+        }
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'claimed');
+        DiagnosticConfig.developerDiagnostics && (this.stats.selected += candidates.length);
+        const requestId = `claim:${this.nextClaimRequest++}`;
+        for (const candidate of candidates) {
+            const id = Number(candidate.characterId);
+            this.pendingReleases.delete(id);
+            const alarmToken = this.armAlarm('claim_ack', id,
+                this.claimStartedAt.get(id) + this.claimAckTimeoutMs,
+                { stamp: requestId, characterId: id, operational: true });
+            const partyId = candidate.purpose?.kind === 'party' ? String(candidate.purpose.partyId) : null;
+            this.claimAttempts.set(id, { requestId, alarmToken, partyId });
+            if (partyId) {
+                const run = this.partyRuns.get(partyId);
+                if (run) run.requestId = requestId;
+            }
+        }
+        this.emit('claim_request', { candidates: candidates.map(({ state, context, ...candidate }) => candidate) }, requestId);
     }
 
-    onClaimAck(payload = {}) {
-        (payload.rejected || []).forEach((result) => {
+    onClaimAck(payload = {}, requestId) {
+        if (this.stopping || typeof requestId !== 'string' || !requestId) return;
+        const matches = result => this.claiming.has(Number(result.characterId))
+            && this.claimAttempts.get(Number(result.characterId))?.requestId === requestId;
+        // Unmatched grants stay inert. An abandoned native lease is cleaned
+        // by existing expiry/recovery; releasing an ACK replay could instead
+        // release the exact currently accepted solo/partial-party grant.
+        const rejected = (payload.rejected || []).filter(matches);
+        const grants = (payload.grants || []).filter(matches);
+        rejected.forEach((result) => {
             const id = Number(result.characterId);
-            this.claiming.delete(id);
-            this.claimStartedAt.delete(id);
+            this.cancelClaimAttempt(id);
             // A rejected claim carries the main process' current ownership
             // snapshot. Party claims must absorb it just like solo claims do;
             // otherwise the next party attempt repeats the same stale revision
             // forever and creates a CAS/IPC retry storm.
             if (result.state) {
                 this.upsert(result);
-                if (Number(result.retryAfterMs) > 0) {
-                    this.requeue(id, this.now() + Math.max(1000, Number(result.retryAfterMs)));
-                }
+                // Partition refusals can carry the same overdue row forever.
+                // Give other owners their turn instead of retrying every tick.
+                this.requeue(id, this.now() + Math.max(1000, Number(result.retryAfterMs) || 1000));
             }
             if (result.purpose?.kind === 'party') {
                 const run = this.partyRuns.get(String(result.purpose.partyId));
@@ -841,10 +1493,9 @@ class ColdSimulationKernel {
             }
             if (!result.state) this.requeue(id, this.now() + 1000);
         });
-        (payload.grants || []).forEach((grant) => {
+        grants.forEach((grant) => {
             const id = Number(grant.characterId);
-            this.claiming.delete(id);
-            this.claimStartedAt.delete(id);
+            this.cancelClaimAttempt(id);
             if (grant.purpose?.kind === 'party') {
                 const run = this.partyRuns.get(String(grant.purpose.partyId));
                 if (run) run.grants.set(id, grant);
@@ -852,13 +1503,14 @@ class ColdSimulationKernel {
             }
             const entry = this.states.get(id);
             if (!entry) return;
-            this.inFlight.set(id, { grant, state: entry.state, context: entry.context, startedAt: this.now() });
-            this.stats.claimed += 1;
-            this.resolveChain = this.resolveChain.then(() => this.resolveGrant(id));
+            this.inFlight.set(id, { grant, state: entry.state, context: entry.context, startedAt: this.now(), claimRequestId: requestId });
+            DiagnosticConfig.developerDiagnostics && (this.stats.claimed += 1);
+            const source = this.captureResolverSource(id);
+            this.resolveChain = this.resolveChain.then(() => this.resolveGrant(id, source));
         });
         const touchedParties = new Set([
-            ...(payload.grants || []).map((entry) => entry.purpose?.partyId),
-            ...(payload.rejected || []).map((entry) => entry.purpose?.partyId)
+            ...grants.map((entry) => entry.purpose?.partyId),
+            ...rejected.map((entry) => entry.purpose?.partyId)
         ].filter(Boolean).map(String));
         touchedParties.forEach((partyId) => {
             const run = this.partyRuns.get(partyId);
@@ -867,10 +1519,9 @@ class ColdSimulationKernel {
             if (!complete) return;
             if (run.rejected) {
                 const releases = [...run.grants.values()].map((token) => ({ token, reason: 'party_claim_partial' }));
-                if (releases.length) this.emit('release_request', { releases });
+                if (releases.length) this.requestRelease(releases);
                 run.purpose.memberIds.forEach((id) => {
-                    this.claiming.delete(Number(id));
-                    this.claimStartedAt.delete(Number(id));
+                    this.cancelClaimAttempt(id);
                 });
                 this.partyRuns.delete(partyId);
                 this.requeue(run.purpose.leaderId, this.now() + 1000);
@@ -879,42 +1530,116 @@ class ColdSimulationKernel {
             run.purpose.memberIds.forEach((id) => {
                 const state = run.members.find((member) => Number(member.characterId) === Number(id));
                 this.inFlight.set(Number(id), {
-                    grant: run.grants.get(Number(id)), state, context: {}, startedAt: this.now(), partyId
+                    grant: run.grants.get(Number(id)), state, context: {}, startedAt: this.now(), partyId, claimRequestId: requestId
                 });
             });
-            this.stats.claimed += run.purpose.memberIds.length;
-            this.resolveChain = this.resolveChain.then(() => this.resolvePartyGrant(partyId));
+            DiagnosticConfig.developerDiagnostics && (this.stats.claimed += run.purpose.memberIds.length);
+            const source = this.capturePartyResolverSource(partyId);
+            this.resolveChain = this.resolveChain.then(() => this.resolvePartyGrant(partyId, source));
         });
     }
 
+    livePartialRun(run) {
+        return !!run && !run.rejected && this.partyRuns.get(String(run.purpose.partyId)) === run
+            && run.purpose.memberIds.some(id => this.claiming.has(Number(id))
+                && this.claimAttempts.get(Number(id))?.requestId === run.requestId
+                && this.claimAttempts.get(Number(id))?.partyId === String(run.purpose.partyId));
+    }
+
+    renewalHolder(token, liveRuns = new Map()) {
+        if (this.stopping || !Protocol.leaseRenewalToken(token)) return null;
+        const id = token.characterId, entry = this.states.get(id);
+        if (entry?.state.phase !== 'cold') return null;
+        const same = grant => grant && grant.ownerId === token.ownerId && grant.revision === token.revision
+            && grant.leaseId === token.leaseId && grant.characterId === id;
+        const active = this.inFlight.get(id);
+        if (active) return same(active.grant) ? active : null;
+        const partyId = entry.state.party?.partyId || entry.state.partyId || entry.context?.party?.partyId;
+        const run = this.partyRuns.get(String(partyId || ''));
+        if (!liveRuns.has(run)) liveRuns.set(run, this.livePartialRun(run));
+        return liveRuns.get(run) && same(run.grants.get(id)) ? run : null;
+    }
+
+    *leaseRenewalPages({ replyBy } = {}) {
+        if (!Number.isSafeInteger(replyBy) || replyBy <= this.now() || this.stopping) return;
+        const runs = new Set();
+        for (const [id, attempt] of this.claimAttempts) {
+            if (!attempt.partyId || !this.claiming.has(id)) continue;
+            const run = this.partyRuns.get(attempt.partyId);
+            if (run?.requestId === attempt.requestId && !run.rejected) runs.add(run);
+        }
+        const activeHolders = [];
+        for (const active of this.inFlight.values()) activeHolders.push(active);
+        const holders = function* (kernel) {
+            // Capture only the bounded ownership window. New holders arriving
+            // during page ACK waits belong to the next renewal round.
+            for (const active of activeHolders) yield active.grant;
+            for (const run of runs) if (kernel.livePartialRun(run)) yield* run.grants.values();
+        }(this);
+        const seen = new Set();
+        let page = [], liveRuns = new Map();
+        for (const grant of holders) {
+            if (this.stopping || this.now() >= replyBy) return;
+            const token = Protocol.leaseRenewalToken(grant);
+            if (!token || token.leaseUntil <= this.now() || seen.has(token.characterId) || !this.renewalHolder(token, liveRuns)) continue;
+            seen.add(token.characterId); page.push(token);
+            if (page.length === Protocol.MAX_BATCH) { yield page; page = []; liveRuns = new Map(); }
+        }
+        if (page.length && !this.stopping && this.now() < replyBy) yield page;
+    }
+
     onLeaseRenewal(payload = {}) {
+        const liveRuns = new Map();
         (payload.renewals || []).forEach((renewal) => {
             const id = Number(renewal.characterId);
+            const holder = this.renewalHolder(renewal, liveRuns);
             const active = this.inFlight.get(id);
-            const grant = active?.grant;
-            if (!active || !grant
-                || String(grant.leaseId || '') !== String(renewal.leaseId || '')
-                || Number(grant.revision) !== Number(renewal.revision)) {
-                this.stats.leaseRenewalMisses += 1;
+            const grant = active?.grant || holder?.grants.get(id);
+            if (!holder || !grant) {
+                DiagnosticConfig.developerDiagnostics && (this.stats.leaseRenewalMisses += 1);
                 return;
             }
             const leaseUntil = Number(renewal.leaseUntil || 0);
             if (!Number.isFinite(leaseUntil) || leaseUntil <= Number(grant.leaseUntil || 0)) return;
-            active.grant = { ...grant, leaseUntil };
-            if (active.partyId) {
-                const run = this.partyRuns.get(String(active.partyId));
+            if (active) active.grant = { ...grant, leaseUntil };
+            if (!active || active.partyId) {
+                const run = !active ? holder : this.partyRuns.get(String(active.partyId));
                 const partyGrant = run?.grants.get(id);
                 if (partyGrant) run.grants.set(id, { ...partyGrant, leaseUntil });
             }
-            this.stats.leaseRenewals += 1;
+            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRenewals += 1);
         });
     }
 
-    async resolvePartyGrant(partyId) {
+    captureResolverSource(characterId) {
+        const id = Number(characterId), active = this.inFlight.get(id);
+        return { id, active, token: Protocol.leaseRenewalToken(active?.grant), requestId: active?.claimRequestId };
+    }
+
+    resolverSourceCurrent(source) {
+        return !this.stopping && !!source.token && typeof source.requestId === 'string' && !!source.requestId
+            && this.inFlight.get(source.id) === source.active && source.active.claimRequestId === source.requestId
+            && this.sameLease(source.active.grant, source.token)
+            && this.states.get(source.id)?.state.phase === 'cold'
+            && Number(source.active.grant.leaseUntil) > this.now();
+    }
+
+    capturePartyResolverSource(partyId) {
         const run = this.partyRuns.get(String(partyId));
-        if (!run || this.stopping) return;
+        return run ? { run, requestId: run.requestId,
+            sources: run.members.map(member => this.captureResolverSource(member.characterId)) } : null;
+    }
+
+    async resolvePartyGrant(partyId, captured = this.capturePartyResolverSource(partyId)) {
+        if (!captured || this.stopping) return;
+        const { run, requestId, sources } = captured;
+        const current = () => this.partyRuns.get(String(partyId)) === run && run.requestId === requestId
+            && sources.every(source => source.requestId === requestId && this.resolverSourceCurrent(source)
+                && this.sameLease(run.grants.get(source.id), source.token));
+        if (!current()) return;
         const startedAt = this.now();
         let raidStepId = null;
+        let published = false, handled = false;
         try {
             if (run.invalidReason) {
                 const releasedMembers = run.members.map((state) => (
@@ -950,16 +1675,19 @@ class ColdSimulationKernel {
                     },
                     'party_invalid_size'
                 );
+                published = handled = true;
                 proposals.forEach((proposal) => this.dirty.set(proposal.characterId, proposal));
-                this.stats.resolved += proposals.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
                 this.flush(null, true);
                 return;
             }
 
+            const meetingPending = require('./PartyHuntingAssembly').meetingPending(run.members);
             const rescuing = run.members.some(s => s.vitals?.hp <= 0);
-            const equipmentBridgeReview = !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
+            const equipmentBridgeReview = !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
-            if (!rescuing && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
+            if (!meetingPending && !rescuing && !require('./CraftMaterialPartyRoute').evacuating(run.party)
+                && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
                 || require('./ClanEquipmentPartyPolicy').needsReview(run.party, run.members, startedAt)
                 || equipmentBridgeReview)) {
                 const review = BackgroundPartyLifecycle.review(run.party, run.members, startedAt, {
@@ -967,7 +1695,7 @@ class ColdSimulationKernel {
                     assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                     chooseLeader: states => typeof invoke === 'function' ? invoke('GameServer/Bot/Population/BackgroundPartyComposition').chooseLeader(states) : states[0],
                     roleCoverage: states => typeof invoke === 'function' ? invoke('GameServer/Bot/Population/BackgroundPartyComposition').roleCoverage(states) : run.party.roleCoverage,
-                    personaFor: state => typeof invoke === 'function' ? invoke('GameServer/Bot/AI/BotPersona').generate(state) : state.persona,
+                    personaFor: state => typeof invoke === 'function' ? invoke('GameServer/Bot/AI/BotPersona').of(state) : state.persona,
                     requiresWeaponBridge: this.requiresWeaponBridge,
                     equipmentBridgeReason: this.equipmentBridgeReason,
                     spot: run.spot
@@ -976,14 +1704,15 @@ class ColdSimulationKernel {
                     type: 'party_session_review', summary: `Party ${run.party.partyId} reviewed its shared hunt`, weight: 1,
                     meta: { partyId: run.party.partyId, departed: [...review.leaving.keys()], decisions: review.decisions }
                 }, 'party_session_review');
+                published = handled = true;
                 proposals.forEach(proposal => this.dirty.set(proposal.characterId, proposal));
-                this.stats.resolved += proposals.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
                 this.flush(null, true);
                 return;
             }
 
             const partyTravel = run.party.stats?.travel;
-            if (partyTravel?.reason === 'party_spot_replan') {
+            if (!meetingPending && partyTravel?.reason === 'party_spot_replan') {
                 const arrivalAt = Number(partyTravel.arrivalAt || 0);
                 if (arrivalAt > startedAt) {
                     const waitingMembers = run.members.map((state) => ({
@@ -999,8 +1728,9 @@ class ColdSimulationKernel {
                         null,
                         'party_travel_wait'
                     );
+                    published = handled = true;
                     proposals.forEach((proposal) => this.dirty.set(proposal.characterId, proposal));
-                    this.stats.resolved += proposals.length;
+                    DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
                     this.flush(null, true);
                     return;
                 }
@@ -1012,7 +1742,7 @@ class ColdSimulationKernel {
                         timing: { ...(state.timing || {}), nextResolveAt: startedAt + 1000 }
                     }
                 ));
-                const arrivedParty = {
+                let arrivedParty = {
                     ...run.party,
                     nextResolveAt: startedAt + 1000,
                     stats: {
@@ -1021,6 +1751,11 @@ class ColdSimulationKernel {
                         travel: null
                     }
                 };
+                const materialArrival = require('./CraftMaterialPartyRoute').arrived(run.party, arrivedMembers, startedAt);
+                if (materialArrival) {
+                    arrivedMembers.splice(0, arrivedMembers.length, ...materialArrival.members);
+                    arrivedParty = materialArrival.party;
+                }
                 const proposals = partyTransitionProposals(
                     run,
                     arrivedMembers,
@@ -1034,16 +1769,17 @@ class ColdSimulationKernel {
                     },
                     'party_arrival'
                 );
+                published = handled = true;
                 proposals.forEach((proposal) => this.dirty.set(proposal.characterId, proposal));
-                this.stats.resolved += proposals.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
                 this.flush(null, true);
                 return;
             }
 
-            if (!rescuing && run.route?.needed) {
+            if (!meetingPending && !rescuing && run.route?.needed) {
                 const arrivalAt = startedAt + Math.max(1000, Number(run.route.travelMs) || HUNTING_TRAVEL_MS);
                 const travellingMembers = run.members.map((state) => (
-                    beginRouteTravelState(state, run.route, startedAt)
+                    beginHuntingTrip(state, run.route, startedAt)
                     || {
                         ...state,
                         timing: { ...(state.timing || {}), nextResolveAt: arrivalAt }
@@ -1054,14 +1790,17 @@ class ColdSimulationKernel {
                     spotId: run.route.spotId,
                     nextResolveAt: arrivalAt,
                     stats: {
-                        ...(require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt).stats || {}),
+                        ...(require('./CraftMaterialPartyRoute').retarget(
+                            require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt),
+                            run.route.materialSources).stats || {}),
                         pveEncounter: null,
                         travel: {
                             reason: 'party_spot_replan',
                             regionName: run.route.regionName,
                             spotId: run.route.spotId,
                             startedAt,
-                            arrivalAt
+                            arrivalAt,
+                            ...(run.route.materialEvacuation ? { materialEvacuation: true } : {})
                         }
                     }
                 };
@@ -1073,8 +1812,9 @@ class ColdSimulationKernel {
                     null,
                     'party_travel'
                 );
+                published = handled = true;
                 proposals.forEach((proposal) => this.dirty.set(proposal.characterId, proposal));
-                this.stats.resolved += proposals.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
                 this.flush(null, true);
                 return;
             }
@@ -1085,6 +1825,7 @@ class ColdSimulationKernel {
                 episodeId: run.grants.get(Number(run.party.leaderId))?.leaseId,
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 party: run.party,
+                raidOwner: this.states.get(Number(run.party.leaderId))?.context?.raidOwner || null,
                 members: run.members,
                 spot: run.spot,
                 pressure: run.pressure,
@@ -1094,14 +1835,16 @@ class ColdSimulationKernel {
                 timestamp: startedAt
             };
             const raids = require('./ColdRaidEncounter');
-            const raid = run.spot?.raidBoss === true;
+            const raid = !meetingPending && run.spot?.raidBoss === true;
             let staged = null;
             if (raid) {
                 raidStepId = `raid:${run.grants.get(Number(run.party.leaderId))?.leaseId}`;
                 staged = await raids.stage({ key: raids.keyFor(run.spot, run.targetNpcId), id: raidStepId,
                     memberIds: run.members.map(member => Number(member.characterId)) }, () => this.resolveParty(resolveOptions));
+                if (!current()) return;
             }
             const resolution = staged ? staged.result : await this.resolveParty(resolveOptions);
+            if (!current()) return;
             const proposals = [];
             const resolvedParty = {
                 ...run.party,
@@ -1109,15 +1852,22 @@ class ColdSimulationKernel {
                 stats: { ...(run.party.stats || {}), ...(resolution.partyPatch?.stats || {}) },
                 nextResolveAt: resolution.nextResolveAt
             };
-            const memoryGroup = raid || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
+            const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
+            const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
+            // Collection quotas and their physical receipts share the same
+            // commit, including completion with no funded helper contract.
+            const atomicParty = raid || paidHelp || materialHunt || resolvedParty.status === 'dissolved';
+            const memoryGroup = atomicParty || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
                 ? { id: `hunt:${run.grants.get(Number(run.party.leaderId))?.leaseId}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
-            if (raid) {
+            if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
                     expectedUpdatedAt: run.party.updatedAt, updatedAt: resolvedParty.updatedAt,
                     nextResolveAt: resolvedParty.nextResolveAt, statsJson: JSON.stringify(resolvedParty.stats),
                     status: resolvedParty.status, cohesion: resolvedParty.cohesion, risk: resolvedParty.risk }];
+            }
+            if (raid) {
                 // Even a preparation or unavailable-boss result is atomic.
                 const snapshot = staged.snapshot || run.spot.raidAuthority || {
                     key: raids.keyFor(run.spot, run.targetNpcId), raidInstanceId: run.spot.raidInstanceId,
@@ -1128,11 +1878,19 @@ class ColdSimulationKernel {
                     expectedRevision: Number(run.spot.raidAuthorityRevision || 0),
                     revision: Number(run.spot.raidAuthorityRevision || 0) + 1, snapshot };
             }
+            let requirementMs = 0, lastRequirementPlanMs = 0;
+            let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
+            if (!meetingPending && run.requirementRefresh && !requirementProgress && !materialHunt) {
+                requirementProgress = new Set();
+                this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
+            }
+            const memberPlans = [];
             for (const { state, result } of resolution.memberResults || []) {
                 const id = Number(state.characterId);
                 const projection = this.projectResolve
                     ? await this.projectResolve(state, result, startedAt)
                     : null;
+                if (!current()) return;
                 let projectedState = projection?.state || projection;
                 if (resolvedParty.status === 'dissolved') {
                     projectedState = BackgroundPartyLifecycle.releaseMember(
@@ -1141,6 +1899,24 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.partyBreakReason || 'party_dissolved',
                         resolvedParty.stats?.objective
                     );
+                }
+                if (!meetingPending && run.requirementRefresh && this.planPartyRequirement && projectedState
+                    && !materialHunt
+                    && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
+                    && requirementMs + lastRequirementPlanMs < 20) {
+                    const planningStarted = performance.now();
+                    const selection = await this.planPartyRequirement({ state: projectedState,
+                        context: this.states.get(id)?.context || {}, timestamp: startedAt });
+                    lastRequirementPlanMs = performance.now() - planningStarted;
+                    requirementMs += lastRequirementPlanMs;
+                    const plan = selection?.acquisitionPlan;
+                    if (require('./PartyRequirementRefresh').acquisitionRequirementKey(state.stats?.equipmentPlan)
+                        !== require('./PartyRequirementRefresh').acquisitionRequirementKey(plan)) {
+                        memberPlans.push({ characterId: id, plan });
+                        if (selection.replanContext?.failure) result.events = [...(result.events || []),
+                            require('./PartyRequirementRefresh').acquisitionFallbackEvent(state, state.stats?.equipmentPlan, selection.replanContext.failure, plan)];
+                    }
+                    requirementProgress.add(id);
                 }
                 const proposal = {
                     proposalId: `${run.grants.get(id)?.leaseId}:${run.grants.get(id)?.revision}`,
@@ -1153,6 +1929,14 @@ class ColdSimulationKernel {
                     baseState: state,
                     nextState: projectedState,
                     durable: projection?.durable || null,
+                    ...(projection?.market ? { market: projection.market } : {}),
+                    // A member released by a dissolved party: its decision was
+                    // made on its party state, so main decides on the solo one.
+                    ...(projection?.economyDecision && resolvedParty.status !== 'dissolved'
+                        ? { economyDecision: projection.economyDecision } : {}),
+                    economyEdges: resolvedParty.status === 'dissolved' ? 0 : Number(projection?.economyEdges || 0),
+                    ...(projection?.economyPlan && resolvedParty.status !== 'dissolved'
+                        ? { economyPlan: projection.economyPlan } : {}),
                     result: {
                         ...result,
                         events: [
@@ -1163,37 +1947,63 @@ class ColdSimulationKernel {
                     options: { allowParty: true, allowLifecycle: true },
                     partyResolution: id === Number(run.party.leaderId) ? {
                         partyId: run.party.partyId,
-                        reviewGoals: true,
+                        reviewGoals: !meetingPending,
                         party: resolvedParty
                     } : null
                 };
-                this.dirty.set(id, proposal);
                 proposals.push(proposal);
             }
-            this.stats.resolved += proposals.length;
+            if (!meetingPending && run.requirementRefresh && !materialHunt) {
+                const leader = proposals.find(proposal => proposal.partyResolution);
+                if (leader) {
+                    leader.partyResolution.memberPlans = memberPlans;
+                    if (run.members.every(member => requirementProgress.has(Number(member.characterId)))) {
+                        leader.partyResolution.requirementRefreshedAt = startedAt;
+                        this.partyRequirementProgress.delete(String(run.party.partyId));
+                    }
+                }
+                if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
+                // Preserve the first-refresh key shape used for byte admission.
+                for (const key of ['partyRequirementRefreshes', 'partyRequirementRefreshMs', 'partyRequirementRefreshMaxMs']) {
+                    if (!Object.hasOwn(this.stats, key)) this.stats[key] = 0;
+                }
+                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshes = Number(this.stats.partyRequirementRefreshes || 0) + 1);
+                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMs = requirementMs);
+                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMaxMs = Math.max(Number(this.stats.partyRequirementRefreshMaxMs || 0), requirementMs));
+            }
+            if (!current()) return;
+            published = handled = true;
+            proposals.forEach(proposal => this.dirty.set(proposal.characterId, proposal));
+            DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
             this.flush(null, true);
         } catch (error) {
             if (raidStepId) require('./ColdRaidEncounter').abort(raidStepId);
-            for (const [id, proposal] of this.dirty) if (proposal.raidStepId === raidStepId && raidStepId) this.dirty.delete(id);
+            if (!current()) return;
+            handled = true;
+            for (const source of sources) {
+                if (raidStepId && this.dirty.get(source.id)?.raidStepId === raidStepId) this.dirty.delete(source.id);
+            }
             if (error?.message !== 'raid_step_pending') {
-                this.stats.errors += 1;
+                DiagnosticConfig.developerDiagnostics && (this.stats.errors += 1);
                 this.emit('fault', { reason: error?.message || 'party_resolver_error', stage: 'party_project' });
             }
-            this.emit('release_request', {
-                releases: [...run.grants.values()].map((token) => ({ token, reason: error?.message || 'party_resolver_error' }))
-            });
+            this.requestRelease([...run.grants.values()].map((token) => ({ token, reason: error?.message || 'party_resolver_error' })));
         } finally {
-            this.partyRuns.delete(String(partyId));
-            const elapsed = this.now() - startedAt;
-            this.stats.lastResolveMs = elapsed;
-            this.stats.maxResolveMs = Math.max(this.stats.maxResolveMs, elapsed);
+            if (raidStepId && !published) require('./ColdRaidEncounter').abort(raidStepId);
+            if (this.partyRuns.get(String(partyId)) === run) this.partyRuns.delete(String(partyId));
+            if (handled) {
+                const elapsed = DiagnosticConfig.developerDiagnostics ? this.now() - startedAt : 0;
+                DiagnosticConfig.developerDiagnostics && (this.stats.lastResolveMs = elapsed);
+                DiagnosticConfig.developerDiagnostics && (this.stats.maxResolveMs = Math.max(this.stats.maxResolveMs, elapsed));
+            }
         }
     }
 
-    async resolveGrant(characterId) {
-        const active = this.inFlight.get(Number(characterId));
-        if (!active || this.stopping) return;
+    async resolveGrant(characterId, source = this.captureResolverSource(characterId)) {
+        const active = source.active;
+        if (source.id !== Number(characterId) || !this.resolverSourceCurrent(source)) return;
         const startedAt = this.now();
+        let handled = false;
         try {
             const timestamp = startedAt;
             const elapsedMs = active.state.timing?.lastResolvedAt
@@ -1202,25 +2012,28 @@ class ColdSimulationKernel {
             const lifecyclePlan = this.planLifecycle
                 ? await this.planLifecycle({ state: active.state, context: active.context, timestamp })
                 : null;
+            if (!this.resolverSourceCurrent(source)) return;
             const resolveState = lifecyclePlan?.plannedState || active.state;
             const result = await this.resolveSolo({
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 state: resolveState,
                 spot: resolveState.activity === 'traveling' ? null : lifecyclePlan?.spot || active.context.spot || null,
                 pressure: active.context.pressure || {},
-                targetNpcId: Number(lifecyclePlan?.targetNpcId
-                    ?? lifecyclePlan?.acquisitionPlan?.next?.npcId
-                    ?? active.context.targetNpcId
-                    ?? 0),
+                targetNpcId: Number(lifecyclePlan?.targetNpcId || lifecyclePlan?.acquisitionPlan?.next?.npcId ||
+                    (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) ||
+                    active.context.targetNpcId || 0),
                 elapsedMs,
                 rng: deterministicRandom(active.state),
                 timestamp
             });
+            if (!this.resolverSourceCurrent(source)) return;
             const projection = this.projectResolve
                 ? await this.projectResolve(resolveState, result, timestamp)
                 : null;
+            if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;
-            const priority = projection?.durable ? 'P1' : priorityForResult(active.state, result);
+            const priority = playerWaitingTransition(active.state, active.context) ? 'P0'
+                : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
                 proposalId: `${active.grant.leaseId}:${active.grant.revision}`,
                 characterId: Number(characterId),
@@ -1230,25 +2043,36 @@ class ColdSimulationKernel {
                 baseState: resolveState,
                 nextState: projectedState,
                 durable: projection?.durable || null,
+                ...(projection?.market ? { market: projection.market } : {}),
+                ...(projection?.economyDecision ? { economyDecision: projection.economyDecision } : {}),
+                economyEdges: Number(projection?.economyEdges || 0),
+                ...(projection?.economyPlan ? { economyPlan: projection.economyPlan } : {}),
+                // The projected state precedes claim; main commits one revision
+                // after this grant before consuming the offer.
+                ...(projection?.buffOffer ? { buffOffer: { ...projection.buffOffer,
+                    providerRevision: active.grant.revision } } : {}),
                 result,
-                options: { allowLifecycle: true }
+                options: { allowLifecycle: true, allowParty: !!active.state.stats?.tradeMeeting }
             };
+            handled = true;
             this.dirty.set(Number(characterId), proposal);
-            this.stats.resolved += 1;
+            DiagnosticConfig.developerDiagnostics && (this.stats.resolved += 1);
             if (priority !== 'P2' || this.dirty.size >= this.maxBatch) {
                 this.flush(priority, false, { reason: priority !== 'P2' ? 'priority' : 'batch' });
             }
         } catch (error) {
-            this.stats.errors += 1;
+            if (!this.resolverSourceCurrent(source)) return;
+            handled = true;
+            DiagnosticConfig.developerDiagnostics && (this.stats.errors += 1);
             this.emit('fault', { reason: error?.message || 'resolver_error', stage: 'solo_project', characterId: Number(characterId) });
             this.inFlight.delete(Number(characterId));
-            this.emit('release_request', {
-                releases: [{ token: active.grant, reason: error?.message || 'resolver_error' }]
-            });
+            this.requestRelease([{ token: active.grant, reason: error?.message || 'resolver_error' }]);
         } finally {
-            const elapsed = this.now() - startedAt;
-            this.stats.lastResolveMs = elapsed;
-            this.stats.maxResolveMs = Math.max(this.stats.maxResolveMs, elapsed);
+            if (handled) {
+                const elapsed = DiagnosticConfig.developerDiagnostics ? this.now() - startedAt : 0;
+                DiagnosticConfig.developerDiagnostics && (this.stats.lastResolveMs = elapsed);
+                DiagnosticConfig.developerDiagnostics && (this.stats.maxResolveMs = Math.max(this.stats.maxResolveMs, elapsed));
+            }
         }
     }
 
@@ -1278,8 +2102,12 @@ class ColdSimulationKernel {
             group.forEach(entry => visited.add(entry.characterId));
             let transportGroup = group;
             let transportSizes = proposalSizes(group);
+            if (DiagnosticConfig.developerDiagnostics === true && groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
+                group.forEach(entry => require('../Economy/ConsumptionDiagnostics').drop(entry));
+                transportSizes = proposalSizes(group);
+            }
             if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
-                this.stats.proposalOversize += group.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversize += group.length);
                 transportGroup = group.map(entry => compactProposal(entry, true));
                 transportSizes = proposalSizes(transportGroup);
                 if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
@@ -1299,10 +2127,23 @@ class ColdSimulationKernel {
                     oversized.push(...group);
                     continue;
                 }
-                this.stats.proposalCompactions += group.length;
+                DiagnosticConfig.developerDiagnostics && (this.stats.proposalCompactions += group.length);
             }
-            const candidateItemBytes = transportSizes.reduce((sum, size) => sum + size, itemBytes);
+            let candidateItemBytes = transportSizes.reduce((sum, size) => sum + size, itemBytes);
             const candidateCount = proposals.length + transportGroup.length;
+            if (DiagnosticConfig.developerDiagnostics === true && proposalPayloadBytes(candidateCount, candidateItemBytes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
+                const consumption = require('../Economy/ConsumptionDiagnostics');
+                let dropped = false;
+                for (const entry of proposals) dropped = consumption.drop(entry) || dropped;
+                for (const entry of transportGroup) dropped = consumption.drop(entry) || dropped;
+                if (dropped) {
+                    const priorSizes = proposalSizes(proposals);
+                    proposalBytes.splice(0, proposalBytes.length, ...priorSizes);
+                    itemBytes = priorSizes.reduce((sum, size) => sum + size, 0);
+                    transportSizes = proposalSizes(transportGroup);
+                    candidateItemBytes = transportSizes.reduce((sum, size) => sum + size, itemBytes);
+                }
+            }
             if (proposalPayloadBytes(candidateCount, candidateItemBytes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) break;
             proposals.push(...transportGroup);
             proposalBytes.push(...transportSizes);
@@ -1311,21 +2152,22 @@ class ColdSimulationKernel {
         oversized.forEach((proposal) => {
             if (proposal.raidStepId) require('./ColdRaidEncounter').abort(proposal.raidStepId);
             this.dirty.delete(Number(proposal.characterId));
-            this.stats.proposalOversizeRejected += 1;
-            this.emit('release_request', {
-                releases: [{ token: proposal.token, reason: 'proposal_too_large' }]
-            });
+            DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversizeRejected += 1);
+            this.requestRelease([{ token: proposal.token, reason: 'proposal_too_large' }]);
             this.requeue(Number(proposal.characterId), timestamp + 5000);
         });
         if (!proposals.length) return 0;
         proposals.forEach((proposal) => this.dirty.delete(Number(proposal.characterId)));
-        this.stats.proposals += proposals.length;
-        this.stats.flushes += 1;
-        this.stats.flushRows += proposals.length;
-        this.stats.lastFlushRows = proposals.length;
-        this.stats.maxFlushRows = Math.max(this.stats.maxFlushRows, proposals.length);
+        DiagnosticConfig.developerDiagnostics && (this.stats.proposals += proposals.length);
+        DiagnosticConfig.developerDiagnostics && (this.stats.flushes += 1);
+        DiagnosticConfig.developerDiagnostics && (this.stats.flushRows += proposals.length);
+        DiagnosticConfig.developerDiagnostics && (this.stats.lastFlushRows = proposals.length);
+        DiagnosticConfig.developerDiagnostics && (this.stats.maxFlushRows = Math.max(this.stats.maxFlushRows, proposals.length));
         const reason = String(options.reason || (force ? 'forced' : 'direct'));
-        this.stats.flushReasons[reason] = Number(this.stats.flushReasons[reason] || 0) + 1;
+        // Numeric key presence is operational: FrameSizer expands any value
+        // to 32 characters, so off need only preserve the original shape.
+        if (!Object.hasOwn(this.stats.flushReasons, reason)) this.stats.flushReasons[reason] = 0;
+        DiagnosticConfig.developerDiagnostics && (this.stats.flushReasons[reason] = Number(this.stats.flushReasons[reason] || 0) + 1);
         // Sent proposals keep their ownership slots until the commit ACK.
         // Priority and party flushes can fill that window just like a timer flush.
         const capacityBlocked = this.partyCapacityBlocked === true
@@ -1333,7 +2175,19 @@ class ColdSimulationKernel {
         // Each proposal's measured size travels with it, so the main commit
         // queue need not serialise it again (the list fits the 16 KiB left
         // between the payload limit and the message limit).
-        this.emit('proposal_batch', { proposals, proposalBytes, capacityBlocked });
+        // The payload's JSON size follows from the sizes already counted:
+        // { proposals } and { proposalBytes, capacityBlocked } joined by a
+        // comma, less the brace each drops. send() need not serialise it again.
+        const tail = { proposalBytes, capacityBlocked };
+        const payloadBytes = proposalPayloadBytes(proposals.length, itemBytes) + Protocol.byteLength(tail) - 1;
+        for (const proposal of proposals) {
+            const active = this.inFlight.get(Number(proposal.characterId));
+            if (this.sameLease(active?.grant, proposal.token)) {
+                active.pendingCommitId = proposal.proposalId;
+                active.pendingRaidStepId = proposal.raidStepId;
+            }
+        }
+        this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes);
         return proposals.length;
     }
 
@@ -1362,15 +2216,48 @@ class ColdSimulationKernel {
         return 0;
     }
 
+    sameLease(left, right) {
+        return !!left && !!right && left.characterId === right.characterId && left.ownerId === right.ownerId
+            && left.revision === right.revision && left.leaseId === right.leaseId;
+    }
+
+    requestRelease(releases = []) {
+        if (this.stopping) return 0;
+        const accepted = releases.filter(entry => Protocol.leaseRenewalToken(entry?.token));
+        if (!accepted.length) return 0;
+        const requestId = `release:${this.nextReleaseRequest++}`;
+        for (const entry of accepted) {
+            const token = Protocol.leaseRenewalToken(entry.token), id = token.characterId;
+            this.pendingReleases.delete(id);
+            if (this.pendingReleases.size >= 128 * Protocol.MAX_BATCH) {
+                // Forget admission only; the native requested release still
+                // runs, and existing snapshots/lease expiry cover a lost ACK.
+                this.pendingReleases.delete(this.pendingReleases.keys().next().value);
+            }
+            this.pendingReleases.set(id, { token, requestId, version: this.versions.get(id) || 0 });
+        }
+        this.emit('release_request', { releases: accepted }, requestId);
+        return accepted.length;
+    }
+
     onCommitAck(payload = {}) {
+        const accepted = [];
+        if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
-            if (result.raidStepId) require('./ColdRaidEncounter').acknowledge(result.raidStepId, result.characterId, result.ok);
+            const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
+            if (!identity) return;
             const id = Number(result.characterId);
+            const active = this.inFlight.get(id);
+            if (!this.sameLease(active?.grant, identity.token) || active.pendingCommitId !== identity.key
+                || this.states.get(id)?.state.phase !== 'cold'
+                || Number(active.grant.leaseUntil) <= this.now()) return;
+            if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
             if (result.ok && result.state) {
                 this.upsert({ state: result.state, context: result.context || this.states.get(id)?.context || {} });
             } else {
-                if (String(result.reason || '').includes('stale')) this.stats.stale += 1;
+                this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
+                if (String(result.reason || '').includes('stale')) DiagnosticConfig.developerDiagnostics && (this.stats.stale += 1);
                 if (result.state) this.upsert({
                     state: {
                         ...result.state,
@@ -1383,24 +2270,66 @@ class ColdSimulationKernel {
                 });
                 else this.requeue(id, this.now() + 1000);
             }
+            accepted.push(result);
         });
+        return accepted;
     }
 
     onReleaseAck(payload = {}) {
+        const accepted = [];
+        if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
+            const identity = Protocol.leaseAckIdentity(result, 'release_ack');
+            if (!identity) return;
             const id = Number(result.characterId);
+            const pending = this.pendingReleases.get(id), active = this.inFlight.get(id);
+            if (!pending || pending.requestId !== identity.key || !this.sameLease(pending.token, identity.token)
+                || this.claiming.has(id) || this.states.get(id)?.state.phase !== 'cold'
+                || (active && !this.sameLease(active.grant, identity.token))
+                || (!active && pending.version !== this.versions.get(id))
+                || Number(active?.grant.leaseUntil || pending.token.leaseUntil) <= this.now()) return;
+            this.pendingReleases.delete(id);
+            this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || this.states.get(id)?.context?.party?.partyId || ''));
+            this.lookSeen.delete(id);
             this.inFlight.delete(id);
             if (result.state) this.upsert(result);
             else this.requeue(id, this.now() + 1000);
+            accepted.push(result);
         });
+        return accepted;
     }
 
     completeCommand(payload = {}) {
-        const id = Number(payload.characterId);
-        this.commanding.delete(id);
-        this.commandStartedAt.delete(id);
-        if (payload.state) {
-            this.upsert({ state: payload.state, context: payload.context || {} });
+        if (payload.kind === 'meeting') return this.completeMeetingPage(payload);
+        const identity = Protocol.commandIdentity(payload);
+        if (!identity || typeof payload.ok !== 'boolean' || this.stopping) return false;
+        const id = identity.characterId, attempt = this.commandStartedAt.get(id), current = this.states.get(id);
+        if (!attempt?.sent || !this.commanding.has(id) || current?.state.phase !== 'cold'
+            || attempt.commandId !== identity.commandId
+            || !Protocol.sameCommandCheckpoint(attempt.checkpoint, identity.checkpoint)) return false;
+        this.cancelCommand(id, attempt);
+        let output = payload.state;
+        if (output) {
+            const outputCheckpoint = Protocol.commandCheckpoint(output), latest = Protocol.commandCheckpoint(current.state);
+            // A command may publish its native catalog before its receipt. Admit
+            // the original receipt, but keep any known newer retained state.
+            if (!outputCheckpoint || outputCheckpoint.simulationRevision < latest.simulationRevision
+                || (outputCheckpoint.simulationRevision === latest.simulationRevision
+                    && outputCheckpoint.updatedAt < latest.updatedAt)
+                || (!Protocol.sameCommandCheckpoint(latest, attempt.checkpoint)
+                    && !Protocol.sameCommandCheckpoint(outputCheckpoint, latest)
+                    && outputCheckpoint.simulationRevision === latest.simulationRevision
+                    && outputCheckpoint.updatedAt <= latest.updatedAt)) output = current.state;
+            if (output !== current.state && outputCheckpoint.simulationOwner === latest.simulationOwner
+                && outputCheckpoint.simulationRevision === latest.simulationRevision
+                && outputCheckpoint.simulationLeaseId === latest.simulationLeaseId
+                && Number(output.simulation?.leaseUntil || 0) < Number(current.state.simulation?.leaseUntil || 0)) {
+                output = { ...output, simulation: { ...output.simulation, leaseUntil: current.state.simulation.leaseUntil } };
+            }
+            const context = current.context === attempt.context
+                && Protocol.sameCommandCheckpoint(current.state, attempt.checkpoint)
+                ? payload.context || current.context : current.context;
+            this.upsert({ state: output, context });
             // Rejected commands often return the unchanged overdue state. Do
             // not let that timestamp immediately re-enter the head of the queue.
             if ((payload.ok === false || Number(payload.retryAfterMs) > 0) && this.scheduleTokens.has(id)) {
@@ -1408,6 +2337,7 @@ class ColdSimulationKernel {
                     this.now() + Math.max(1000, Number(payload.retryAfterMs) || 5000)));
             }
         } else this.requeue(id, this.now() + Math.max(1000, Number(payload.retryAfterMs) || 5000));
+        return true;
     }
 
     requeue(characterId, dueAt) {
@@ -1419,12 +2349,8 @@ class ColdSimulationKernel {
 
     fence(characterId) {
         const id = Number(characterId);
-        this.claiming.delete(id);
-        this.commanding.delete(id);
         const proposal = this.dirty.get(id) || null;
-        if (proposal) this.dirty.delete(id);
         const active = this.inFlight.get(id) || null;
-        this.inFlight.delete(id);
         this.remove(id);
         return { characterId: id, proposal, token: active?.grant || proposal?.token || null };
     }
@@ -1444,25 +2370,76 @@ class ColdSimulationKernel {
 
     async shutdown() {
         this.stopping = true;
+        this.partyRequirementProgress.clear();
+        this.buyerEvents?.clear();
+        this.buyerWakeups.clear();
+        this.lookSeen.clear();
+        this.pendingReleases.clear();
+        this.commanding.clear();
+        this.commandStartedAt.clear();
+        for (const id of this.claimAttempts.keys()) this.cancelClaimAttempt(id);
+        for (const entry of this.alarms.values()) {
+            if (entry.alarmKind === 'decision') this.cancelDecisionDeadline(entry.key, entry.alarmToken);
+            else this.cancelAlarm(entry.alarmKind, entry.key, entry.alarmToken);
+        }
         await this.resolveChain.catch(() => null);
         this.flush(null, true);
-        return this.snapshot();
+        return this.heartbeatSnapshot();
+    }
+
+    heartbeatSnapshot(forSizing = false) {
+        const now = this.now(), head = this.heap.peek();
+        const scheduled = head && head.kind !== 'alarm' ? this.scheduleTokens.get(Number(head.characterId)) : null;
+        const current = !!head && (head.kind === 'alarm'
+            ? this.alarms.get(head.alarmKey) === head
+            : this.validHeapEntry(head) && scheduled?.version === head.version && scheduled.heapEntry === head);
+        const dueAt = head ? Number(head.dueAt) : null;
+        const oldestDirtyAt = [...this.dirty.values()].reduce((oldest, proposal) => (
+            Math.min(oldest, Number(proposal.enqueuedAt || now))
+        ), now);
+        const oldestCommandAt = [...this.commandStartedAt.values()].reduce((oldest, startedAt) => (
+            Math.min(oldest, Number((typeof startedAt === 'object' ? startedAt.startedAt : startedAt) || now))
+        ), now);
+        return {
+            ...(forSizing || DiagnosticConfig.developerDiagnostics ? this.stats : { diagnosticsEnabled: false }),
+            states: this.states.size,
+            heap: this.heap.size,
+            queueHead: {
+                kind: !head ? 'empty' : head.kind === 'alarm' ? 'alarm' : 'normal',
+                ...(head?.kind === 'alarm' ? { alarmKind: head.alarmKind } : {}),
+                dueAt,
+                overdue: !!head && dueAt <= now,
+                ageMs: head ? Math.max(0, now - dueAt) : 0,
+                current
+            },
+            claiming: this.claiming.size,
+            inFlight: this.inFlight.size,
+            dirty: this.dirty.size,
+            dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
+            commanding: this.commanding.size,
+            commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
+            maxInFlight: this.maxInFlight,
+            maxAtomicPartySize: this.maxAtomicPartySize,
+            paused: this.paused,
+            stopping: this.stopping
+        };
     }
 
     snapshot() {
+        if (!DiagnosticConfig.developerDiagnostics) return this.heartbeatSnapshot();
         const now = this.now();
         const due = [...this.states.values()].filter((entry) => (
             isSchedulableKind(lifecycleKind(entry.state, entry.context))
-            && nextDueAt(entry.state, now, entry.context, this.partySession) <= now
+            && this.dueAt(entry.state, entry.context, now) <= now
         ));
         const oldestDueAt = due.reduce((oldest, entry) => (
-            Math.min(oldest, nextDueAt(entry.state, now, entry.context, this.partySession))
+            Math.min(oldest, this.dueAt(entry.state, entry.context, now))
         ), now);
         const oldestDirtyAt = [...this.dirty.values()].reduce((oldest, proposal) => (
             Math.min(oldest, Number(proposal.enqueuedAt || now))
         ), now);
         const oldestCommandAt = [...this.commandStartedAt.values()].reduce((oldest, startedAt) => (
-            Math.min(oldest, Number(startedAt || now))
+            Math.min(oldest, Number((typeof startedAt === 'object' ? startedAt.startedAt : startedAt) || now))
         ), now);
         const dueFences = due.reduce((counts, entry) => {
             const id = Number(entry.state.characterId);
@@ -1474,7 +2451,7 @@ class ColdSimulationKernel {
             return counts;
         }, { scheduled: 0, claiming: 0, inFlight: 0, commanding: 0, orphaned: 0 });
         return {
-            ...this.stats,
+            ...(DiagnosticConfig.developerDiagnostics ? this.stats : { diagnosticsEnabled: false }),
             states: this.states.size,
             heap: this.heap.size,
             due: due.length,
@@ -1498,7 +2475,6 @@ module.exports = {
     ColdSimulationKernel,
     DueHeap,
     deterministicRandom,
-    beginRouteTravelState,
     finishPartyRouteTravelState,
     lifecycleKind,
     priorityForResult,

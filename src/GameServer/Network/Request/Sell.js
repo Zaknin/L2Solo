@@ -7,16 +7,19 @@ const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 
 function merchantSellRows(actor, store) {
+    TradeService.refreshStorePrices(store, actor);
+    const nativeItems = TradeService.nativeStoreItems(store);
     return actor.backpack.fetchItems()
         .filter(TradeService.isSellableInventoryItem)
         .map((item) => {
-            const wanted = store.items.find((storeItem) => storeItem.selfId === item.fetchSelfId() && storeItem.count > 0);
+            const wanted = nativeItems.find((storeItem) => storeItem.selfId === item.fetchSelfId() && storeItem.count > 0);
             if (!wanted) return null;
 
+            const quote = TradeService.storeSaleQuote(store, wanted, actor, item);
             return {
                 item,
-                amount: Math.min(item.fetchAmount(), wanted.count),
-                price: wanted.price
+                amount: Math.min(item.fetchAmount(), quote.count),
+                price: quote.price
             };
         })
         .filter((row) => row && row.amount > 0);
@@ -52,23 +55,44 @@ async function consumeMerchant(session, list, { native = false } = {}) {
     const trade = session.activeMerchantTrade;
     const store = trade && trade.store;
 
+    // A shop on the board trades only through the board (PrivateStoreSell):
+    // its window's store is a projection of the record (E43).
+    if (store?.afkTrade === true) {
+        session.dataSendToMe(ServerResponse.actionFailed());
+        return;
+    }
     if (!store || store.storeType !== 3) {
         return sellToNpcShop(session, list);
     }
 
+    const sold = [];
+    let socialRecorded = false;
+    // One social event for the lines that completed, whether the list ended
+    // whole or a later line failed (E253); never one event per line.
+    const recordSold = () => {
+        if (socialRecorded || sold.length === 0) return;
+        socialRecorded = true;
+        const detail = sold.map((item) => `${item.qty} ${item.name}`).join(', ');
+        BotSocialMemory.recordTradeCompleted(session, trade.merchant, `sold ${detail}`);
+    };
     try {
-        const sold = [];
+        TradeService.refreshStorePrices(store, session.actor);
+        const nativeItems = TradeService.nativeStoreItems(store);
         const objectIds = new Set();
         const requested = list.map((line) => {
             const item = line.objectId ? TradeService.sellableCopy(session.actor, line.selfId, line.objectId) : null;
-            const wanted = store.items.find((storeItem) => storeItem.selfId === line.selfId && storeItem.count > 0);
+            const wanted = nativeItems.find((storeItem) => storeItem.selfId === line.selfId && storeItem.count > 0);
             const amount = Number(line.amount);
-            const matchesPrice = line.price === undefined || Number(line.price) === Number(wanted?.price);
+            const quote = item && wanted ? TradeService.storeSaleQuote(store, wanted, session.actor, item) : null;
+            const saved = trade.saleQuotes?.get(item?.fetchId());
+            const expectedUnitPrice = line.price ?? saved?.price ?? trade.prices?.[line.selfId] ?? quote?.price;
+            const matchesPrice = Number(expectedUnitPrice) === Number(quote?.price);
             if (!item || !wanted ||
-                !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount() || amount > wanted.count || !matchesPrice ||
+                !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount() || amount > quote.count || !matchesPrice ||
+                (saved && (saved.selfId !== line.selfId || amount > saved.amount || Number(expectedUnitPrice) !== saved.price)) ||
                 objectIds.has(item.fetchId())) return null;
             objectIds.add(item.fetchId());
-            return { item, amount };
+            return { item, amount, expectedUnitPrice };
         });
         if (requested.length !== list.length || requested.some((line) => line === null)) {
             session.dataSendToMe(ServerResponse.actionFailed());
@@ -79,18 +103,17 @@ async function consumeMerchant(session, list, { native = false } = {}) {
             const result = await TradeService.sellToStore(session.actor, store, line.item.fetchSelfId(), line.amount, {
                 objectId: line.item.fetchId(),
                 buyerActor: trade.merchant,
-                afterTrade: store.budgetBacked === true && trade.merchant?.session?.coldMarketState
-                    ? () => invoke('GameServer/Bot/Population/BotLifeState').syncMarketSession(trade.merchant.session, 'hot_market_buy_fill')
-                    : null
+                expectedUnitPrice: line.expectedUnitPrice
             });
             sold.push(result);
-            MarketTelemetry.recordTrade({
+            const recordedQty = result.npcQty ?? result.qty;
+            if (recordedQty > 0) MarketTelemetry.recordTrade({
                 channel: 'wtb',
                 sourceType: 'private_buy_store_player_sale',
                 selfId: line.item.fetchSelfId(),
                 itemName: result.name,
-                quantity: result.qty,
-                unitPrice: result.qty ? result.totalAdena / result.qty : 0,
+                quantity: recordedQty,
+                unitPrice: (result.npcAdena ?? result.totalAdena) / recordedQty,
                 town: store.town || trade.merchant?.session?.coldMarketState?.currentRegion,
                 sellerCharacterId: session.actor.fetchId(),
                 sellerName: session.actor.fetchName(),
@@ -99,23 +122,21 @@ async function consumeMerchant(session, list, { native = false } = {}) {
             });
         }
 
-        if (sold.length > 0) {
-            const detail = sold.map((item) => `${item.qty} ${item.name}`).join(', ');
-            BotSocialMemory.recordTradeCompleted(session, trade.merchant, `sold ${detail}`);
-        }
+        recordSold();
 
         session.dataSendToMe(ServerResponse.userInfo(session.actor));
         session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
         const soldOut = !store.items.some((item) => Number(item.count || 0) > 0);
         if (soldOut) {
-            trade.merchant.setPrivateStoreType(0);
-            trade.merchant.setPrivateStore({ ...store, items: [] });
-            trade.merchant.session?.dataSendToOthers?.(ServerResponse.charInfo(trade.merchant), trade.merchant);
+            invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService').closeSoldOutStore(trade.merchant, store);
             session.activeMerchantTrade = null;
             session.dataSendToMe(ServerResponse.actionFailed());
             return;
         }
         const rows = merchantSellRows(session.actor, store);
+        trade.prices = Object.fromEntries(TradeService.nativeStoreItems(store).map(line => [Number(line.selfId), Number(line.price)]));
+        trade.saleQuotes = new Map(rows.map(row => [row.item.fetchId(),
+            { selfId: row.item.fetchSelfId(), price: row.price, amount: row.amount }]));
         if (native) {
             session.dataSendToMe(ServerResponse.privateStoreListBuy(
                 trade.merchant,
@@ -128,6 +149,7 @@ async function consumeMerchant(session, list, { native = false } = {}) {
     } catch (err) {
         utils.infoWarn('Sell', 'merchant sell error: %s', err.message || err);
         session.dataSendToMe(ServerResponse.actionFailed());
+        recordSold();
     }
 }
 
@@ -201,3 +223,4 @@ async function sellToNpcShop(session, list) {
 
 module.exports = sell;
 module.exports.consumeMerchant = consumeMerchant;
+module.exports.merchantSellRows = merchantSellRows;

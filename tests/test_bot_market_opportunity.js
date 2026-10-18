@@ -1,16 +1,27 @@
 const assert = require('assert');
 
+require('./helpers/databaseIsolation');
+const fixture = require('./helpers/isolatedSocialDatabase')('fx-market-case');
+const fixtureFs = require('node:fs');
 require('../src/Global');
+fixture.assertConfigured(options.default);
+process.on('exit', () => fixtureFs.rmSync(fixture.directory, { recursive: true, force: true }));
 
 const DataCache = invoke('GameServer/DataCache');
 const World = invoke('GameServer/World/World');
 DataCache.init();
 
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
-const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+// Every offer the one query weighs, in the order it meets them (an accept
+// that takes none).
+const candidates = (selfId, options = {}) => {
+    const seen = [];
+    MarketOpportunity.bestOffer(selfId, { ...options, accept: (offer) => { seen.push(offer); return false; } });
+    return seen;
+};
 const originalUser = World.user;
-const originalAllStates = LifeState.allStates;
 
+async function run() {
 try {
     const playerStore = {
         storeType: 1,
@@ -25,88 +36,67 @@ try {
         }
     }] };
 
-    const offers = MarketOpportunity.findOffers(2, { town: 'Giran' });
-    assert(offers.some((offer) => offer.sourceType === 'private_store'));
+    // A player's live store trades face to face (E14): a hot bot sees it, a
+    // cold buyer does not.
+    const offers = candidates(2, { town: 'Giran' });
+    assert(!offers.some((offer) => offer.sourceType === 'private_store'), 'a cold buyer never buys from a live player store');
     assert(offers.some((offer) => offer.sourceType === 'npc'), 'Giran NPC shop should remain a valid source');
-    assert.strictEqual(MarketOpportunity.bestOffer(2, { town: 'Giran', budget: 999 }), null);
-    assert.strictEqual(MarketOpportunity.bestOffer(2, { town: 'Giran', budget: 1000 }).sourceName, 'PlayerSeller');
+    const hot = MarketOpportunity.hotOffers(2, { town: 'Giran' });
+    assert(hot.some((offer) => offer.sourceType === 'private_store' && offer.sourceName === 'PlayerSeller'));
 
-    const reserved = MarketOpportunity.bestOffer(2, { town: 'Giran', budget: 1000 });
+    const reserved = hot.find((offer) => offer.sourceType === 'private_store');
     assert.strictEqual(MarketOpportunity.reserve(reserved), true);
     assert.strictEqual(playerStore.items[0].count, 1);
     MarketOpportunity.release(reserved);
     assert.strictEqual(playerStore.items[0].count, 2);
 
     playerStore.items[0].count = 0;
-    assert(!MarketOpportunity.findOffers(2, { town: 'Giran' }).some((offer) => offer.sourceType === 'private_store'));
+    assert(!MarketOpportunity.hotOffers(2, { town: 'Giran' }).some((offer) => offer.sourceType === 'private_store'));
 
     playerStore.items[0].count = 1;
     World.user.sessions[0].accountId = 'bot_islandmats';
     World.user.sessions[0].actor.fetchName = () => 'IslandMats';
-    assert.strictEqual(
-        MarketOpportunity.findOffers(2, { town: 'Giran' }).find((offer) => offer.sourceType === 'private_store').sellerKind,
-        'fixed',
-        'configured liquidity merchants must not be counted as peer bots'
-    );
+    // ARCH-NOTE: Group F retires configured non-shot stock; E14 excludes live stores for cold buyers.
+    assert(!candidates(2, { town: 'Giran' }).some(offer => offer.sourceType === 'private_store'),
+        'a configured Long Sword cannot reenter the cold query through its live store');
+    assert(!MarketOpportunity.hotOffers(2, { town: 'Giran' }).some(offer => offer.sourceType === 'private_store'),
+        'configured non-shot supply is also rejected on execution-facing hot discovery');
     World.user.sessions[0].name = 'IslandMats';
     World.user.sessions[0].actor.fetchName = () => undefined;
-    assert.strictEqual(
-        MarketOpportunity.findOffers(2, { town: 'Giran' }).find((offer) => offer.sourceType === 'private_store').sellerKind,
-        'fixed',
-        'session identity must keep configured merchants fixed when the actor name is temporarily unavailable'
-    );
+    assert(!candidates(2, { town: 'Giran' }).some(offer => offer.sourceType === 'private_store'),
+        'session identity cannot turn a retired non-shot merchant into a peer offer');
+    const Database = invoke('Database'), Afk = invoke('GameServer/AfkTrade/AfkTradeService');
+    const native = require('./helpers/nativeMarketFixture');
+    Database.init();
+    await native.character(Database, 9001, 'PlayerSeller', 'bot_market_fixture9001');
+    const stockId = Number((await Database.setItem(9001, { selfId: 2, name: 'Long Sword', amount: 1 })).insertId);
+    const shop = await Afk.publishBot(9001, { kind: 'shop', storeType: 1, town: 'Giran', title: 'Long Sword',
+        locX: 83000, locY: 148000, locZ: -3400, appearance: { model: { name: 'PlayerSeller' } },
+        lines: [{ objectId: stockId, selfId: 2, name: 'Long Sword', count: 1, price: 1000, stackable: false }] });
+    const boardOffer = candidates(2, { town: 'Giran' }).find(offer => offer.recordId === shop.id);
+    assert(boardOffer, 'the same Long Sword is a genuine public cold offer');
+    assert.deepStrictEqual([boardOffer.selfId, boardOffer.price, boardOffer.count, boardOffer.sourceId], [2, 1000, 1, 9001]);
+    assert.equal(native.amount(await Database.fetchItems(9001), 2), 0, 'public stock is physically escrowed');
+    await Afk.closeBotRecord(9001, shop.id);
+    assert.equal(native.amount(await Database.fetchItems(9001), 2), 1, 'closing returns the exact physical sword');
+    console.log('Native public counterpart: one Long Sword escrowed and returned, price1000/owner9001');
 
+    // The budget-backed buy stores are gone (E24): a bot asks on the board
+    // with escrow; a live store's budget is no demand.
     const budgetStore = { storeType: 3, budgetBacked: true, items: [{ selfId: 1864, price: 100, count: 3 }] };
-    const budgetBuyer = { characterId: 9200, adena: 150, stats: { marketStore: budgetStore } };
     World.user.sessions = [{
         actor: { fetchId: () => 9200, fetchPrivateStore: () => budgetStore },
-        coldMarketState: budgetBuyer
+        coldMarketState: { characterId: 9200, adena: 150, stats: { marketStore: budgetStore } }
     }];
-    assert.deepStrictEqual(MarketOpportunity.activeBuyDemandSelfIds(), [1864],
-        'budget-backed live WTB demand must participate in warehouse admission');
-    const firstBudgetOffer = { sourceType: 'cold_buy_store', selfId: 1864, price: 100, count: 1, buyerState: budgetBuyer, store: budgetStore, storeItem: budgetStore.items[0] };
-    const overlappingBudgetOffer = { ...firstBudgetOffer };
-    assert.strictEqual(MarketOpportunity.reserveBuy(firstBudgetOffer, 1), true);
-    assert.strictEqual(MarketOpportunity.reserveBuy(overlappingBudgetOffer, 1), false, 'in-flight WTB demand must reserve buyer Adena as well as stock');
-    MarketOpportunity.releaseBuy(firstBudgetOffer, 1);
-    assert.strictEqual(MarketOpportunity.reserveBuy(overlappingBudgetOffer, 1), true, 'releasing a failed settlement must return its budget reservation');
-    const purchasedBuyer = { ...budgetBuyer, adena: 50 };
-    MarketOpportunity.commitBuy(overlappingBudgetOffer, 1, purchasedBuyer);
-    const exhaustedBudgetOffer = { sourceType: 'cold_buy_store', selfId: 1864, price: 100, count: 1, buyerState: purchasedBuyer, store: budgetStore, storeItem: budgetStore.items[0] };
-    assert.strictEqual(MarketOpportunity.reserveBuy(exhaustedBudgetOffer, 1), false, 'a committed purchase must expose the reduced buyer balance');
-
-    playerStore.items[0].count = 0;
-    MarketOpportunity.indexColdStore({
-        characterId: 9100,
-        name: 'ExpiredSeller',
-        activity: 'merchant',
-        stats: { marketStore: { storeType: 1, town: 'Giran', expiresAt: Date.now() - 1, items: [{ selfId: 2, price: 900, count: 1 }] } }
-    });
-    assert(!MarketOpportunity.findOffers(2, { town: 'Giran' }).some((offer) => offer.sourceName === 'ExpiredSeller'), 'expired cold WTS listings must not remain buyable');
-
-    const persistedStore = {
-        characterId: 9300,
-        name: 'PersistedSeller',
-        activity: 'merchant',
-        stats: { marketStore: { storeType: 1, town: 'Giran', expiresAt: Date.now() + 60000, items: [{ selfId: 2, price: 950, count: 1 }] } }
-    };
-    const updatedStore = {
-        ...persistedStore,
-        name: 'UpdatedSeller',
-        stats: { marketStore: { ...persistedStore.stats.marketStore, items: [{ selfId: 2, price: 850, count: 1 }] } }
-    };
-    LifeState.allStates = () => [persistedStore];
-    MarketOpportunity.resetColdStores();
-    MarketOpportunity.indexColdStore(updatedStore);
-    assert.strictEqual(MarketOpportunity.coldOffers(2, 'Giran')[0].sourceName, 'UpdatedSeller',
-        'a live index update must win over the one-time persisted snapshot');
-    MarketOpportunity.resetColdStores();
-    MarketOpportunity.removeColdStore(persistedStore.characterId);
-    assert.deepStrictEqual(MarketOpportunity.coldOffers(2, 'Giran'), [],
-        'removing a store before the first lookup must not let hydration resurrect it');
+    assert.deepStrictEqual(MarketOpportunity.activeBuyDemandSelfIds(), [],
+        'a budget-backed live WTB is not board demand');
+    assert.deepStrictEqual(MarketOpportunity.findBuyOffers(1864, { town: 'Giran' }), [],
+        'only board buy records are sold into');
     console.log('Bot market opportunity checks passed');
 } finally {
     World.user = originalUser;
-    LifeState.allStates = originalAllStates;
-    MarketOpportunity.resetColdStores();
+    invoke('GameServer/AfkTrade/AfkTradeService')._resetForTests();
+    await invoke('Database').close();
 }
+}
+run().catch(error => { console.error(error); process.exitCode = 1; });

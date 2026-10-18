@@ -2,7 +2,9 @@
 const VERSION = 1;
 const Help = require('./CombatHelpPolicy');
 const Aid = require('./OpponentAidPolicy');
+const Layers = require('./RelationshipLayers');
 const LIMITS = Object.freeze({ character: 32, clan: 8, alliance: 8 });
+const PROTECTED_LIMIT = 16;
 const RECENT_LIMIT = 128;
 const REASON_LIMIT = 3;
 const DAY = 86400000;
@@ -19,7 +21,13 @@ const EVENTS = Object.freeze({
     mob_contested: [-2, -1, 3, 0, 1],
     attacked: [-4, -4, 6, 2, 1],
     killed: [-8, -8, 12, 6, 2],
-    aided_opponent: [-3, -3, 4, 0, 1]
+    aided_opponent: [-3, -3, 4, 0, 1],
+    invite_attempt: [0, 0, 0, 0, 1], party_formed: [2, 2, 0, 0, 2], party_refused: [0, 0, 0, 0, 1],
+    party_dismissed: [-1, -1, 0, 0, 0], party_kicked: [-3, -3, 3, 0, 0], party_wiped: [-2, -2, 0, 0, 1],
+    chat: [0, 0, 0, 0, 1], supported_party: [1, 1, 0, 0, 1], trade_completed: [1, 1, 0, 0, 1],
+    gave_useful_loot: [3, 3, 0, 0, 0], ignored_loot_request: [-1, -1, 1, 0, 0], insulted: [-3, -3, 3, 0, 0],
+    crafted_for: [3, 4, 0, 0, 1], buff_service: [2, 3, 0, 0, 1], gift: [2, 3, 0, 0, 1],
+    loot_taken: [-2, -2, 0, 0, 1]
 });
 
 function id(value) {
@@ -42,7 +50,7 @@ function validate(snapshot) {
     if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0
         || !Number.isSafeInteger(snapshot.replayFloor) || snapshot.replayFloor < -1
         || !Array.isArray(snapshot.relations) || !Array.isArray(snapshot.recent)
-        || snapshot.relations.length > 48 || snapshot.recent.length > RECENT_LIMIT) {
+        || snapshot.recent.length > RECENT_LIMIT) {
         throw new Error('interaction memory: invalid snapshot');
     }
     const targets = new Set(), keys = new Set(), counts = {};
@@ -64,9 +72,14 @@ function validate(snapshot) {
                 if (!Help.TYPES.includes(type) || at > row.at) throw Error('interaction memory: invalid help clock');
             }
         }
+        if (['grudge', 'gratitude', 'gameAt'].some(field => row[field] !== undefined && (!Number.isFinite(row[field]) || row[field] < 0))
+            || (row.player !== undefined && typeof row.player !== 'boolean')
+            || (row.social && Object.entries(row.social).some(([type, count]) => !Object.hasOwn(EVENTS, type) || !Number.isSafeInteger(count) || count < 0))) {
+            throw Error('interaction memory: invalid relation layers');
+        }
         const key = `${row.kind}:${row.targetId}`;
-        counts[row.kind] = (counts[row.kind] || 0) + 1;
-        if (targets.has(key) || counts[row.kind] > LIMITS[row.kind]
+        counts[row.kind] = (counts[row.kind] || 0) + (row.player ? 0 : 1);
+        if (targets.has(key) || counts[row.kind] > LIMITS[row.kind] + PROTECTED_LIMIT
             || (row.order !== undefined && (!Number.isSafeInteger(row.order) || row.order < 0 || row.order > snapshot.revision))
             || (row.kind === 'character' && row.targetId === snapshot.ownerId)
             || FIELDS.some(field => !Number.isFinite(row[field]) || row[field] > 100
@@ -97,30 +110,62 @@ function event(input) {
     if (typeof input.type !== 'string' || !Object.hasOwn(EVENTS, input.type)) throw new Error('interaction memory: invalid event');
     const sourceId = id(input.sourceId), targetId = id(input.targetId);
     if (kind === 'character' && sourceId === targetId) throw new Error('interaction memory: self interaction');
+    if (input.hours !== undefined && (!Number.isFinite(input.hours) || input.hours < 0)) throw Error('interaction memory: invalid loss hours');
+    if (input.playedHours !== undefined && (!Number.isFinite(input.playedHours) || input.playedHours < 0)) throw Error('interaction memory: invalid playing hours');
+    if (input.traits && ['loyalty', 'resilience'].some(key => !Number.isFinite(Number(input.traits[key] ?? 0.5)))) throw Error('interaction memory: invalid traits');
     return { key: input.key, sourceId, targetId, kind, type: input.type, at: time(input.at),
+        ...(input.hours !== undefined ? { hours: input.hours } : {}),
+        ...(input.playedHours !== undefined ? { playedHours: input.playedHours } : {}),
+        ...(input.player === true ? { player: true } : {}),
+        ...(input.traits ? { traits: { loyalty: Number(input.traits.loyalty ?? 0.5), resilience: Number(input.traits.resilience ?? 0.5) } } : {}),
         ...(input.clan ? { clan: require('../Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
 }
 
-function decayed(relation, at) {
-    const factor = Math.pow(0.5, Math.max(0, at - relation.at) / (7 * DAY));
+// The share of a feeling left after `elapsed` ms; nothing grows before its time.
+function halfLife(elapsed, halfLifeMs) {
+    return 0.5 ** (Math.max(0, elapsed) / halfLifeMs);
+}
+
+function decayed(relation, at, playedHours) {
+    const factor = playedHours !== undefined && relation.gameAt !== undefined
+        ? halfLife(Math.max(0, playedHours - relation.gameAt), Layers.durations(relation.traits).long)
+        : halfLife(at - relation.at, 7 * DAY);
     return Object.fromEntries(FIELDS.map(field => [field, relation[field] * factor]));
 }
 
-function strength(relation, at) {
-    const values = decayed(relation, at);
+function strength(relation, at, playedHours) {
+    const values = decayed(relation, at, playedHours);
     return Math.max(...FIELDS.filter(field => field !== 'familiarity').map(field => Math.abs(values[field])));
 }
 
-function bound(relations, at) {
+function protectedRelation(row, at, playedHours) {
+    const values = decayed(row, at, playedHours);
+    return row.player === true || values.trust >= 10 || values.hostility >= 10;
+}
+
+function bound(relations, at, playedHours) {
     return Object.entries(LIMITS).flatMap(([kind, limit]) => {
-        const candidates = relations.filter(row => row.kind === kind);
-        const strong = candidates.slice().sort((a, b) => strength(b, at) - strength(a, at)
-            || b.at - a.at || (b.order || 0) - (a.order || 0) || a.targetId - b.targetId).slice(0, limit / 2);
+        const ranked = (a, b) => strength(b, at, playedHours) - strength(a, at, playedHours)
+            || b.at - a.at || (b.order || 0) - (a.order || 0) || a.targetId - b.targetId;
+        const rows = relations.filter(row => row.kind === kind);
+        const players = rows.filter(row => row.player === true);
+        const protectedRows = rows.filter(row => !row.player && protectedRelation(row, at, playedHours))
+            .sort(ranked).slice(0, PROTECTED_LIMIT);
+        const protectedIds = new Set(protectedRows.map(row => row.targetId));
+        // ARCH-NOTE: strong overflow joins the ordinary pool without changing feelings;
+        // counting raw trust/hostility >= 10 therefore does not measure the protected-pool cap.
+        const candidates = rows.filter(row => !row.player && !protectedIds.has(row.targetId));
+        const strong = candidates.slice().sort(ranked).slice(0, limit / 2);
         const kept = new Set(strong.map(row => row.targetId));
         const recent = candidates.filter(row => !kept.has(row.targetId))
             .sort((a, b) => b.at - a.at || (b.order || 0) - (a.order || 0) || a.targetId - b.targetId).slice(0, limit - strong.length);
-        return [...strong, ...recent];
+        return [...players, ...protectedRows, ...strong, ...recent];
     });
+}
+
+function trim(snapshot, at, playedHours) {
+    time(at);
+    return { ...snapshot, relations: bound(snapshot.relations, at, playedHours) };
 }
 
 function apply(snapshot, input, now) {
@@ -140,15 +185,19 @@ function apply(snapshot, input, now) {
     if (Help.TYPES.includes(e.type) && !Help.eligible(old, e.type, e.at)) return { status: 'rate_limited', snapshot };
     if (e.kind === 'character' && e.type === 'aided_opponent' && !Aid.eligible(old, e.at)) return { status: 'rate_limited', snapshot };
     const at = Math.max(e.at, old?.at || 0);
-    const values = old ? decayed(old, at) : Object.fromEntries(FIELDS.map(field => [field, 0]));
-    const factor = Math.pow(0.5, (at - e.at) / (7 * DAY));
+    const values = old ? decayed(old, at, e.playedHours) : Object.fromEntries(FIELDS.map(field => [field, 0]));
+    const factor = halfLife(at - e.at, 7 * DAY);
     FIELDS.forEach((field, index) => {
         const min = ['hostility', 'fear', 'familiarity'].includes(field) ? 0 : -100;
         values[field] = Math.max(min, Math.min(100, values[field] + EVENTS[e.type][index] * factor));
     });
     const reasons = [{ type: e.type, at: e.at }, ...(old?.reasons || [])]
         .sort((a, b) => b.at - a.at).slice(0, REASON_LIMIT);
-    const relation = { kind: e.kind, targetId: e.targetId, at, order: snapshot.revision + 1, ...values, reasons };
+    const relation = { kind: e.kind, targetId: e.targetId, at, order: snapshot.revision + 1, ...values, reasons,
+        ...(e.playedHours !== undefined ? Layers.apply(old, e) : {}),
+        ...(old?.player || e.player ? { player: true } : {}),
+        social: { ...(old?.social || {}), [e.type]: Number(old?.social?.[e.type] || 0) + 1 },
+        ...(e.type === 'party_kicked' || e.type === 'party_dismissed' ? { abandonedAt: e.at } : old?.abandonedAt ? { abandonedAt: old.abandonedAt } : {}) };
     if (e.type === 'hunted_together') relation.lastHuntAt = e.at;
     else if (old?.lastHuntAt !== undefined) relation.lastHuntAt = old.lastHuntAt;
     const helpClocks = Object.fromEntries(Help.TYPES.map(type => [type, Help.lastAt(old, type)]).filter(([, at]) => at >= 0));
@@ -156,7 +205,7 @@ function apply(snapshot, input, now) {
     if (Object.keys(helpClocks).length) relation.lastHelpAt = helpClocks;
     const aidAt = e.kind === 'character' && e.type === 'aided_opponent' ? e.at : Aid.lastAt(old);
     if (aidAt >= 0) relation.lastAidAt = aidAt;
-    const relations = bound([...snapshot.relations.filter(row => row !== old), relation], now);
+    const relations = bound([...snapshot.relations.filter(row => row !== old), relation], now, e.playedHours);
     const ordered = [...snapshot.recent, e].sort((a, b) => b.at - a.at || a.key.localeCompare(b.key));
     const removed = ordered.slice(RECENT_LIMIT);
     const replayFloor = Math.max(snapshot.replayFloor, now - ACCEPT_WINDOW_MS - 1, ...removed.map(row => row.at));
@@ -166,17 +215,23 @@ function apply(snapshot, input, now) {
     return { status: 'applied', snapshot: { ...snapshot, revision: snapshot.revision + 1, replayFloor, relations, recent } };
 }
 
-function view(snapshot) {
-    const rows = new Map((snapshot?.relations || []).map(row => [`${row.kind}:${row.targetId}`, row]));
+function view(snapshot, playingHours = () => undefined, fastLayers = null, rowSource = null) {
+    const rows = rowSource ? null : new Map((snapshot?.relations || []).map(row => [`${row.kind}:${row.targetId}`, row]));
     return Object.freeze({
         ownerId: snapshot?.ownerId || null,
         revision: snapshot?.revision || 0,
         ready: !!snapshot,
-        characterIds: Object.freeze((snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId)),
+        characterIds: Object.freeze(rowSource ? rowSource.characterIds
+            : (snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId)),
         relation(kind, targetId, at) {
             time(at);
-            const row = rows.get(`${kind}:${targetId}`);
-            return row ? { ...decayed(row, at), ...(row.lastHuntAt !== undefined ? { lastHuntAt: row.lastHuntAt } : {}),
+            const row = rowSource ? rowSource.row(kind, targetId) : rows.get(`${kind}:${targetId}`);
+            const gameAt = playingHours();
+            return row ? { ...decayed(row, at, gameAt),
+                ...Layers.persistent(row, gameAt ?? row.gameAt ?? 0),
+                irritation: Layers.fastValue(fastLayers?.get(`${kind}:${targetId}`), gameAt ?? row.gameAt ?? 0),
+                social: { ...(row.social || {}) }, ...(row.abandonedAt ? { abandonedAt: row.abandonedAt } : {}),
+                ...(row.lastHuntAt !== undefined ? { lastHuntAt: row.lastHuntAt } : {}),
                 ...(row.lastHelpAt ? { lastHelpAt: { ...row.lastHelpAt } } : {}),
                 ...(row.lastAidAt !== undefined ? { lastAidAt: row.lastAidAt } : {}),
                 reasons: row.reasons.map(reason => ({ ...reason })) } : null;
@@ -212,5 +267,5 @@ function assess(memory, source, target, context, now) {
         immediateThreat: context.attackingMe === true, reasons };
 }
 
-module.exports = { VERSION, LIMITS, RECENT_LIMIT, REASON_LIMIT, ACCEPT_WINDOW_MS, MAX_BATCH, HUNT_COOLDOWN_MS, FIELDS,
-    empty, event, apply, view, assess, id, validate };
+module.exports = { VERSION, LIMITS, PROTECTED_LIMIT, RECENT_LIMIT, REASON_LIMIT, ACCEPT_WINDOW_MS, MAX_BATCH, HUNT_COOLDOWN_MS, FIELDS,
+    empty, event, apply, view, assess, id, validate, halfLife, trim, strength, protectedRelation };

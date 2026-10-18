@@ -1,3 +1,4 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -139,7 +140,7 @@ function state(characterId, revision, activity = 'hunting') {
     });
     assert.strictEqual(invalidPatch.reason, 'invalid_patch', 'gateway must reject fields outside the explicit bridge protocol');
 
-    const renewed = await Owner.renewActiveLeases({ timestamp: 2000, leaseMs: 5000 });
+    const renewed = await Owner.renewActiveLeases([first], { now: () => 2000, leaseMs: 5000, canRenew: () => true });
     assert.strictEqual(renewed.length, 1, 'active cold ownership must be renewable before its lease expires');
     assert.strictEqual(renewed[0].ok, true);
     assert.strictEqual(renewed[0].leaseUntil, 7000, 'renewal must extend the lease from the renewal timestamp');
@@ -334,6 +335,10 @@ function state(characterId, revision, activity = 'hunting') {
     assert(!(await Owner.releaseBatch([inventoryRace], { timestamp: 6600, releaseInvalidated: true }))[0].ok,
         'a late rejection must not release a newer lease');
     assert((await Owner.release(freshClaim, { timestamp: 6600 })).ok);
+
+    // Developer diagnostics: an item read counts under its call-site tag.
+    await Database.fetchItems(characterId, 'owner_probe');
+    assert.strictEqual(invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts['item_list:call:owner_probe'], 1);
 
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');

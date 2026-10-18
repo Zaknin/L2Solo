@@ -5,18 +5,7 @@ const tree = require('../../../../data/Skills/Tree/tree.json');
 
 // Mechanics come from the C4 tree. These small preferences are tunable bot
 // decisions, not claims about an optimal player rotation. No SA assumptions.
-const trees = new Map(tree.map(entry => [entry.classId, entry.skills]));
-const learning = new Map();
-for (const id of trees.keys()) {
-    const skills = new Map();
-    for (const current of Progression.lineage(id)) {
-        for (const skill of trees.get(current) || []) {
-            skills.set(skill.selfId, Math.min(skills.get(skill.selfId) ?? Infinity,
-                ...skill.levels.map(rank => rank.pLevel)));
-        }
-    }
-    learning.set(id, skills);
-}
+const learning = Progression.learningLevels(tree);
 
 function classIdOf(actor) {
     const raw = Roles.classIdOf(actor) ?? actor?.template?.classId;

@@ -36,6 +36,11 @@ function syncColdRaidHp(party) {
 function captureHotRaidHp(party, timestamp = Date.now()) {
     const objective = raidObjective(party);
     if (!objective) return party;
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (Roster.markerFor(party) && !Roster.held(party)) {
+        if (!Roster.nativeHotStarted(party)) return party;
+        party = { ...party, stats: { ...party.stats, raidAdmission: { ...party.stats.raidAdmission, startedAt: timestamp } } };
+    }
     const previous = party.stats?.raidEncounter || {};
     if (['failed', 'defeated'].includes(previous.status)) return party;
     const boss = raidBossForParty(party);
@@ -237,6 +242,9 @@ async function failRaidOnDeath(session, timestamp = Date.now()) {
 function readinessReason(party, states, timestamp = Date.now()) {
     if (party?.status !== 'active') return 'party_not_active';
     if (!states) return 'invalid_membership';
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (Roster.markerFor(party) && !Roster.held(party)
+        && !Roster.exact(states.map(state => state.characterId), Roster.markerFor(party).memberIds)) return 'raid_roster_incomplete';
     if (party.stats?.travel) return 'party_traveling';
     const objective = party.stats?.objective;
     const unsafeRaidMember = states.find((state) => (
@@ -417,7 +425,7 @@ async function activate(partyId, reason = 'near_player', options = {}) {
         ({ party, states } = await transition(Parties.find(partyId), states, prepared, 'hot', reason));
         publish(sessions, states, party);
         for (const state of states) invoke('GameServer/Bot/Population/PopulationMetrics').recordActivation();
-        console.info('BotPopulation :: activated party %s members=%d reason=%s', partyId, states.length, reason);
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotPopulation :: activated party %s members=%d reason=%s', partyId, states.length, reason);
         if (raidObjective(party) && options.raidFanout !== false) {
             const bossTemplateId = Number(raidObjective(party).raidBossTemplateId || raidObjective(party).npcId);
             const competitors = Parties.active().filter((candidate) => candidate.partyId !== party.partyId
@@ -510,7 +518,7 @@ async function cooldown(partyId, reason = 'policy', options = {}) {
         }
         result.states.forEach(state => Coordinator.notifyState(state));
         for (const state of result.states) invoke('GameServer/Bot/Population/PopulationMetrics').recordCooldown();
-        console.info('BotPopulation :: cooled party %s members=%d reason=%s', partyId, next.length, reason);
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotPopulation :: cooled party %s members=%d reason=%s', partyId, next.length, reason);
         return { ok: true, ...result, count: next.length };
     } catch (error) {
         if (stopped && !committed) sessions.filter(s => s?.actor).forEach(s => {
@@ -521,7 +529,128 @@ async function cooldown(partyId, reason = 'policy', options = {}) {
     } finally { pending.delete(partyId); }
 }
 
+function markedHotStates(party, sessions) {
+    const states = sessions.map(session => {
+        const current = Life.cachedState(id(session));
+        if (!current) return null;
+        const actor = session.actor;
+        // Only native assessment inputs, no wallet, wish, inventory or full
+        // stats serialization. Full lifecycle snapshots belong to its CAS.
+        const items = (actor.backpack?.fetchItems?.() || []).filter(item => item.fetchEquipped?.() ?? item.equipped);
+        return { ...current, classId: Number(actor.fetchClassId()), clanId: Number(actor.fetchClanId()), level: Number(actor.fetchLevel()),
+            partyId: current.party?.partyId, simulationOwner: current.simulation?.ownerId || 'legacy_main',
+            loc: { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() },
+            vitals: { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp() },
+            inventory: Life.inventorySummaryFromItems(items),
+            stats: { ...current.stats, coldCombat: invoke('GameServer/Bot/Population/ColdCombatProfile').capture(actor), hennas: session.hennas || [] } };
+    });
+    return states.every(Boolean) ? states : [];
+}
+
+async function openMarkedRaid(party, sessions, timestamp = Date.now()) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (!Roster.markerFor(party) || Roster.held(party)) return { ok: true, party };
+    if (pending.has(party.partyId)) return { ok: false, reason: 'party_transition_pending' };
+    pending.add(party.partyId);
+    let cancellation = null;
+    try {
+        const marker = Roster.markerFor(party);
+        const spot = invoke('GameServer/RaidBoss/RaidEncounterScope').projectSource(
+            invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId));
+        const owner = invoke('Database').clanRaidOwner(marker);
+        const current = await Life.statesByIds(marker.memberIds);
+        if (current.length !== 9 || current.some(state => state.phase !== 'hot' || state.partyId !== party.partyId))
+            return { ok: false, reason: 'raid_roster_member_changed' };
+        const states = markedHotStates(party, sessions);
+        const arrived = Roster.exact(sessions.map(id), marker.memberIds)
+            && sessions.every(session => World.registeredActorById(id(session))?.session === session
+                && session.hotBackgroundPartyId === party.partyId && !session.partyCompanion)
+            && require('./PartyHuntingAssembly').nearby(states)
+            && states.every(state => !state.stats?.travel && invoke('GameServer/Bot/AI/SpotService').containsLocation(spot, state.loc));
+        // A compact eligibility pass is cheap. The native gear/power assessor
+        // runs in the already admitted clan planning worker, once on opening.
+        const early = Roster.admission(party, states, spot, { owner, arrived, timestamp, phase: 'hot',
+            assessment: { ready: true, eligible: states } });
+        if (!early.ok) { cancellation = early.reason; return early; }
+        const Planning = require('../../Clan/ClanPlanningCoordinator');
+        if (!Planning.enabled()) return { ok: false, reason: 'worker_not_ready' };
+        const deadlineAt = Date.now() + 5000;
+        const prepared = await Planning.withJob(deadlineAt, async jobKey => Planning.prepareRaids({ jobKey, deadlineAt,
+            clan: { id: marker.clanId, level: owner.level, physicalMemberCount: 40, state: { mode: 'autonomous' },
+                members: Roster.assessmentMembers(states).map(state => ({ ...state, clanId: marker.clanId })) },
+            spots: [spot], prospects: [], previousGoal: { assignedMemberIds: marker.memberIds } }));
+        const team = prepared.teams?.[spot.id];
+        if (!team?.actualReady || !Roster.exact(team.memberIds, marker.memberIds)) return { ok: false, reason: 'raid_roster_composition' };
+        const fresh = markedHotStates(party, sessions);
+        if (fresh.some(state => Roster.inputFingerprint(state) !== Roster.inputFingerprint(states.find(before => before.characterId === state.characterId))))
+            return { ok: false, reason: 'raid_roster_member_changed' };
+        const freshArrived = sessions.every(session => World.registeredActorById(id(session))?.session === session
+            && session.hotBackgroundPartyId === party.partyId && !session.partyCompanion)
+            && require('./PartyHuntingAssembly').nearby(fresh)
+            && fresh.every(state => !state.stats?.travel && invoke('GameServer/Bot/AI/SpotService').containsLocation(spot, state.loc));
+        const checked = Roster.admission(party, fresh, spot, { owner: invoke('Database').clanRaidOwner(marker), arrived: freshArrived, timestamp, phase: 'hot',
+            assessment: { ready: true, eligible: fresh } });
+        if (!checked.ok) { cancellation = checked.reason; return checked; }
+        const next = { ...party, stats: { ...party.stats, raidAdmission: checked.proof } };
+        const snapshots = sessions.map(session => Life.partySessionSnapshot(session,
+            current.find(state => state.characterId === id(session)), 'hot', 'clan_equipment_goal'));
+        return { ok: true, ...(await transition(next, current, snapshots, 'hot', 'clan_equipment_goal')) };
+    } catch (error) { return { ok: false, reason: error.message }; }
+    finally {
+        pending.delete(party.partyId);
+        if (['raid_roster_owner_changed', 'raid_roster_source_changed'].includes(cancellation)) {
+            const result = await cooldown(party.partyId, cancellation, { ignoreVisibility: true });
+            if (result.ok) await require('../../Clan/ClanRaidRoster').cancelUnopened(result.party || Parties.find(party.partyId), cancellation);
+        }
+    }
+}
+
+function markedAttackInputs(party, sessions) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (!Roster.admitted(party)) return [];
+    const marker = Roster.markerFor(party);
+    const spot = invoke('GameServer/RaidBoss/RaidEncounterScope').projectSource(
+        invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId));
+    const states = markedHotStates(party, sessions);
+    const arrived = Roster.exact(sessions.map(id), marker.memberIds)
+        && sessions.every(session => World.registeredActorById(id(session))?.session === session
+            && session.hotBackgroundPartyId === party.partyId && !session.partyCompanion)
+        && require('./PartyHuntingAssembly').nearby(states)
+        && states.every(state => !state.stats?.travel && invoke('GameServer/Bot/AI/SpotService').containsLocation(spot, state.loc));
+    return arrived && states.length === 9 && states.every(state => state.phase === 'hot' && state.partyId === party.partyId
+        && state.vitals.hp > 0 && !state.stats?.playerPartyTakeover && !state.stats?.tradeMeeting
+        && Roster.inputFingerprint(state) === party.stats.raidAdmission.members.find(row => row[0] === state.characterId)?.[3]) ? states : [];
+}
+function markedAttackReady(party, sessions) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    return !Roster.markerFor(party) || Roster.held(party) || markedAttackInputs(party, sessions).length === 9;
+}
+function openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    if (!Roster.isNativeImpact(nativeImpact) || pending.has(party.partyId) || party.status !== 'hot' || actor !== session.actor
+        || !Roster.markerFor(party).memberIds.includes(id(session))) return false;
+    const sessions = party.memberIds.map(memberId => World.registeredActorById(memberId)?.session).filter(Boolean);
+    const members = markedAttackInputs(party, sessions);
+    if (members.length !== 9) return false;
+    const result = invoke('Database').openClanRaidPartyAtImpact({ partyId: party.partyId, expectedUpdatedAt: party.updatedAt,
+        attackerId: id(session), targetId: Number(target.fetchId()), bossId: Number(boss.fetchId()),
+        raidInstanceId: invoke('GameServer/RaidBoss/RaidEncounterScope').instanceId(boss), members, nativeImpact });
+    if (!result.ok) return false;
+    Parties.acceptRow(result.party);
+    return true;
+}
+async function confirmMarkedRaidStart(party) {
+    const Roster = require('../../Clan/ClanRaidRoster');
+    // Compatibility reader: opening is now committed at the executor impact,
+    // before the hit, rather than promoted asynchronously on a later AI tick.
+    return Roster.nativeHotStarted(party);
+}
+
 module.exports = {
+    openMarkedRaid,
+    openMarkedRaidAtImpact,
+    markedAttackReady,
+    confirmMarkedRaidStart,
     RAID_FAILURE_RETREAT_MS,
     activate,
     cooldown,

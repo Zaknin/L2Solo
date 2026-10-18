@@ -1,6 +1,13 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // Fixture inspects developer action histories.
 const assert = require('assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+// Load native data before the first economic route or combat profile check.
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -99,6 +106,21 @@ async function run() {
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 4]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [4]]))[0]);
     const joinStates = [Life.cachedState(7), Life.cachedState(3)];
+    const materialRequest = { materialParty: true, status: 'open', spotId: 'test', itemId: 4097, amount: 12 };
+    const materialSolo = { ...joinStates[0], stats: { ...joinStates[0].stats, partyRequest: materialRequest } };
+    const untouchedParty = Party.find('competition-party');
+    const noMaterialCommit = () => { throw Error('competition bypassed material contract and worker review'); };
+    assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: [materialSolo, joinStates[1]],
+        event: join, commit: noMaterialCommit })).rejected, 'material_party_requires_review');
+    assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,
+        parties: { find: () => ({ ...untouchedParty, stats: { objective: materialRequest } }) },
+        commit: noMaterialCommit })).rejected, 'material_party_requires_review');
+    assert.strictEqual((await invoke('GameServer/Bot/Population/PopulationService').formCompetitionParty(
+        [materialSolo, Life.cachedState(8)], event(7, 8, 'offer_party'))).rejected, 'material_party_requires_review',
+    'a new shared-target pair cannot clear an outstanding material request either');
+    assert.strictEqual(Party.find('competition-party'), untouchedParty);
+    assert.strictEqual(materialSolo.stats.partyRequest, materialRequest);
+    assert(!Life.cachedState(7).party?.partyId);
     assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,
         participantAllowed: id => id !== 4 })).rejected, 'party_member_busy', 'a fenced retained member blocks the entire invitation');
     assert.strictEqual((await Recruitment.recruit({ ...recruitOptions, participants: joinStates, event: join,
@@ -145,9 +167,17 @@ async function run() {
     const Population = invoke('GameServer/Bot/Population/PopulationService');
     const Spots = invoke('GameServer/Bot/Population/SpotProfiles');
     const originalFind = Spots.findById;
+    // Cold members' party goals come from the cold worker (absent here); answer
+    // as the worker does so formation runs its real path to the commit.
+    const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+    const GoalPolicy = require('../src/GameServer/Bot/Population/PartyGoalPolicy');
+    const GoalCalculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
+    const originalPartyGoals = Coordinator.requestPartyGoals;
     let socialParty;
     try {
         Spots.findById = id => id === 'test' ? { id: 'test' } : originalFind.call(Spots, id);
+        Coordinator.requestPartyGoals = async (party, selected) => ({ ok: true,
+            sources: GoalCalculation.sources(selected), joint: GoalPolicy.joint(party, selected) });
         socialParty = await Population.formCompetitionParty([Life.cachedState(9), Life.cachedState(10)], { spotId: 'test', npcId: 10 });
         assert(socialParty?.partyId, 'real population formation must create a social party');
         assert.strictEqual(socialParty.stats.capacityPool, undefined);
@@ -157,7 +187,7 @@ async function run() {
         assert.strictEqual(reviewed.ok, true, JSON.stringify(reviewed));
         assert.strictEqual(reviewed.party.status, 'active', 'legacy runtime must review rather than expire a new productive goal');
         assert(reviewed.party.stats.sessionReview.nextAt > Date.now());
-    } finally { Spots.findById = originalFind; }
+    } finally { Spots.findById = originalFind; Coordinator.requestPartyGoals = originalPartyGoals; }
     const runtimeMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
     await runtimeMemory.ensureMany([13, 14, 15, 16, 17, 18]);
     const contestNow = Date.now();
@@ -249,7 +279,7 @@ async function run() {
     const bounded = new ColdCompetitionActions({ now: () => now, budgetNow: () => clock, conflictsEnabled: () => true });
     const attempts = [];
     bounded.apply = async e => { attempts.push(e.key); return { ok: attempts.length > 2, reason: 'state_changed_or_busy' }; };
-    const batch = Array.from({ length: 12 }, (_, i) => ({ ...yieldEvent, key: `batch-${i}`, at: now }));
+    const batch = Array.from({ length: 12 }, (_, i) => ({ ...partyEvent, key: `batch-${i}`, at: now }));
     batch[11] = { ...dispute, key: 'pvp-first', at: now };
     bounded.submit({ at: now, recent: batch.slice(0, 2), events: batch }); await bounded.running;
     assert.strictEqual(attempts[0], 'pvp-first');
@@ -261,6 +291,27 @@ async function run() {
     failures.apply = async () => ({ ok: false, reason: 'stale' });
     failures.submit({ at: now, recent: batch.slice(0, 11) }); await failures.running;
     assert.strictEqual(failures.report.attempted, 8, 'failed attempts have their own hard bound');
+    // One scan with six PvP contests, an invitation and five departures: fights
+    // keep their four slots (PvP first), departures have their own two, and every
+    // forecast skipped by the budget is handed back so its pair re-decides next
+    // scan. The next scan carries only its own forecasts: no backlog.
+    const released = [], order = [];
+    const mixed = new ColdCompetitionActions({ now: () => now, budgetNow: () => 0, conflictsEnabled: () => true,
+        releaseForecasts: events => released.push(events.map(e => e.key)) });
+    mixed.apply = async e => { order.push(e.key); return { ok: true }; };
+    const scan = (n, at) => [...['avoid', 'yield', 'avoid', 'yield', 'avoid'].map((action, i) => ({ ...yieldEvent, action, key: `leave-${n}-${i}`, at })),
+        { ...partyEvent, key: `offer-${n}`, at }, ...Array.from({ length: 6 }, (_, i) => ({ ...dispute, key: `pvp-${n}-${i}`, at }))];
+    mixed.submit({ at: now, events: scan(0, now) }); await mixed.running;
+    assert.deepStrictEqual(order, ['pvp-0-0', 'pvp-0-1', 'pvp-0-2', 'pvp-0-3', 'leave-0-0', 'leave-0-1'],
+        'two departures still apply next to four PvP fights');
+    assert.strictEqual(mixed.report.avoids + mixed.report.yields, 2);
+    assert.deepStrictEqual(released, [['pvp-0-4', 'pvp-0-5', 'offer-0', 'leave-0-2', 'leave-0-3', 'leave-0-4']],
+        'every forecast skipped by the budget releases its pair cooldown');
+    mixed.submit({ at: now + 30000, events: [...scan(0, now), ...scan(1, now + 30000)] }); await mixed.running;
+    assert.deepStrictEqual(order.slice(6), ['pvp-1-0', 'pvp-1-1', 'pvp-1-2', 'pvp-1-3', 'leave-1-0', 'leave-1-1'],
+        'skipped forecasts are not replayed on the next scan');
+    assert.strictEqual(released[1].length, 6);
+    assert.strictEqual(mixed.report.budgetSkipped, 12, 'the skipped count does not grow across scans');
     const slow = new ColdCompetitionActions({ now: () => now, budgetNow: () => clock });
     slow.apply = async () => { clock += 80; return { ok: true }; };
     slow.submit({ at: now, recent: batch.slice(0, 11) }); await slow.running;

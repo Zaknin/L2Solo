@@ -1,5 +1,10 @@
 const assert = require('assert');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const World = invoke('GameServer/World/World');
 const Defense = invoke('GameServer/Bot/AI/BotPvpDefense');
 const Threats = invoke('GameServer/Bot/AI/BotPvpThreats');
@@ -45,7 +50,8 @@ function actor(id, options = {}) {
             fetchCombats: () => true },
         automation: { abortAll() { value.moving = false; }, replenishVitals() {} },
         skillset: { fetchSkills: () => value.skills, get skills() { return value.skills; }, fetchSkill: id => value.skills.find(skill => skill.fetchSelfId() === id) },
-        backpack: { fetchItems: () => [{ fetchSelfId: () => 999999, fetchPrice: () => value.gear, fetchEquipped: () => true }],
+        backpack: { fetchItems: () => [{ fetchSelfId: () => 999999, fetchPrice: () => value.gear, fetchEquipped: () => true,
+            fetchSlot: () => 7, fetchRank: () => value.rank || 'none' }],
             fetchEquippedArmors: () => [] }
     });
 }
@@ -53,7 +59,9 @@ function actor(id, options = {}) {
 function session(actor, options = {}) {
     const session = { actor, accountId: `bot_${actor.id}`, aiActive: true, plan: 'hunting', packets: [],
         persona: { traits: { caution: 0.3, assertiveness: 0.8, empathy: 0.4, resilience: 0.8 } }, ...options,
+        fetchAccountId() { return this.accountId; },
         dataSendToOthers(packet) { this.packets.push(packet); } };
+    if (session.accountId === 'player') session.accountId = `player_${actor.id}`;
     actor.session = session;
     return session;
 }
@@ -65,7 +73,8 @@ function setup(options = {}, mode = 'hunting') {
     const own = session(bot, { plan: mode });
     const enemy = actor(nextId++, { flag: 1 });
     const attacker = session(enemy, { accountId: 'player', aiActive: false });
-    World.user = { sessions: [own, attacker] };
+    World.user = { sessions: [], revision: 0 };
+    World.insertUser(own); World.insertUser(attacker);
     World.npc = { spawns: [] };
     World.fetchNpcsInRadius = () => [];
     return { bot, own, enemy, attacker };
@@ -84,17 +93,20 @@ assert.strictEqual(GearValue.equipmentValue([{ selfId: 999999, price: 123 }]), O
 {
     const { own, bot, enemy } = setup();
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'fight');
-    enemy.gear = 100000000;
+    // U26: the price of his kit and his level are hidden; his weapon grade shows.
+    enemy.gear = 100000000; enemy.level = 60;
+    assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'fight');
+    enemy.rank = 'c'; enemy.backpack.visibleLook = null;
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'flee');
-    enemy.gear = bot.gear; enemy.level = 60;
-    assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'flee');
-    enemy.level = bot.level; bot.hp = 20;
+    enemy.gear = bot.gear; enemy.level = bot.level; enemy.rank = 'none'; enemy.backpack.visibleLook = null;
+    bot.hp = 20;
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'flee');
     bot.hp = 100; bot.classId = 10; bot.mp = 5;
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'flee');
     bot.mp = 100;
+    // No never-fight trio (user, 2026-10-05): a cautious, meek, empathic bot follows the threshold.
     own.persona.traits = { caution: 0.9, assertiveness: 0.1, empathy: 0.9, resilience: 0.5 };
-    assert.strictEqual(Risk.defenseDecision(own, [enemy]).reasons[0], 'avoids_pvp');
+    assert.strictEqual(Risk.defenseDecision(own, [enemy]).reasons[0], 'outmatched');
 }
 
 // Real damage through CP wakes defenders. All idle/travel plans use the same
@@ -187,7 +199,7 @@ for (const hp of [100, 20]) {
     });
     const weak = actor(nextId++, { level: 10, flag: 1 });
     const bystander = actor(nextId++, { level: 1, flag: 1 });
-    World.user.sessions.push(companion, session(weak, { aiActive: false }), session(bystander, { aiActive: false }));
+    [companion, session(weak, { aiActive: false }), session(bystander, { aiActive: false })].forEach(s => World.insertUser(s));
     const wakeCount = wakes.length;
     Threats.record(bot, enemy, now);
     assert.strictEqual(wakes.length - wakeCount, 2);
@@ -219,13 +231,13 @@ function skill(id, type, target, effect, power = 100) {
     const healer = session(actor(nextId++, { classId: 15, skills: [skill(1011, Rules.HEAL, 'friendly', 'heal')] }), {
         partyCompanion: true, followPlayerSession: own
     });
-    World.user.sessions.push(healer);
+    World.insertUser(healer);
     bot.hp = 25;
     Threats.record(bot, enemy, now); tick(healer);
     assert.deepStrictEqual(casts.at(-1), { id: bot.id, selfId: 1011, ctrl: false });
     bot.hp = 100;
     const extra = actor(nextId++, { level: 60, flag: 1 });
-    World.user.sessions.push(session(extra, { aiActive: false }));
+    World.insertUser(session(extra, { aiActive: false }));
     Threats.record(bot, extra, now);
     healer.actor.skills = [skill(1069, Rules.EFFECT, 'enemy', 'sleep')];
     tick(healer);
@@ -331,7 +343,7 @@ function skill(id, type, target, effect, power = 100) {
     const { own, bot, enemy } = setup();
     own.coldLifeState = { party: { partyId: 'background_test', leaderId: bot.id } };
     const ally = session(actor(nextId++), { coldLifeState: { party: { partyId: 'background_test', leaderId: bot.id } } });
-    World.user.sessions.push(ally);
+    World.insertUser(ally);
     Threats.record(bot, enemy, now);
     tick(ally);
     assert.strictEqual(ally.currentTargetId, enemy.id, 'materialized autonomous party members also defend one another');

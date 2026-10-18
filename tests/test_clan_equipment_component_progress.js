@@ -1,19 +1,30 @@
 const assert = require('assert');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
 const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Policy = invoke('GameServer/Clan/ClanEquipmentPolicy');
 const Planner = require('../src/GameServer/Clan/ClanEquipmentPlanner');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Database = invoke('Database');
+const kitInventory = {};
+for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 34, level: 40 }).items) {
+    const old = kitInventory[entry.selfId], equippedSlots = [...(old?.equippedSlots || []), entry.slot];
+    kitInventory[entry.selfId] = { ...entry, amount: Number(old?.amount || 0) + 1,
+        equipped: true, equippedCount: equippedSlots.length, equippedSlots };
+}
+assert(!kitInventory[72] && !kitInventory[75], 'worn C duals are distinct from the loose combine blades');
 const plan = { status: 'active', strategy: 'market', grade: 'b', target: { selfId: 72, slot: 7, name: 'Stormbringer' },
     combine: { type: 'dual_sword', resultId: 2566, requirements: [{ selfId: 72, amount: 1 }, { selfId: 75, amount: 1 }] },
     clanGoal: { clanId: 77, goalKey: 'clan-equipment:77:1:72:7' },
     rateModelVersion: Gear.RATE_MODEL_VERSION, rateProfileSignature: Gear.rateProfileSignature() };
 const member = { characterId: 1, name: 'Buyer', phase: 'cold', level: 56,
-    inventory: { 72: { selfId: 72, amount: 1, equipped: false, slot: 7 } }, stats: { equipmentPlan: plan } };
+    inventory: { ...kitInventory, 72: { selfId: 72, amount: 1, equipped: false, slot: 7 } },
+    stats: { classId: 34, equipmentPlan: plan } };
+assert.strictEqual(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(member).required, false,
+    'B dual component acquisition starts after the full usable C kit');
 (async () => {
     assert.strictEqual(Gear.clanGoalPlanLocked(member, plan), false, 'owned component must unlock the next acquisition step');
-    assert.strictEqual(Gear.clanGoalPlanLocked({ ...member, inventory: {} }, plan), true);
+    assert.strictEqual(Gear.clanGoalPlanLocked({ ...member, inventory: kitInventory }, plan), true);
     const regular = { ...plan, combine: undefined };
     assert.strictEqual(Gear.clanGoalPlanLocked(member, regular), true, 'ordinary unequipped gear is not fulfilled');
     const goal = Policy.buildGoal({ id: 77 }, { member, plan }, null, 123);
@@ -42,7 +53,7 @@ const member = { characterId: 1, name: 'Buyer', phase: 'cold', level: 56,
         assert.strictEqual(actions.length, 1);
         assert.strictEqual(actions[0].actionType, 'goal_plan');
         assert.strictEqual(actions[0].payload.goalKey, plan.clanGoal.goalKey);
-        await Life.enqueueEquipmentGoalAdvanceForState({ ...member, inventory: {} });
+        await Life.enqueueEquipmentGoalAdvanceForState({ ...member, inventory: kitInventory });
         assert.strictEqual(actions.length, 1, 'unbought component must not advance the goal');
     } finally { Database.enqueueClanAction = enqueue; }
     console.log('Clan component acquisition: owned blade unlocks planning, persists progress and queues goal advancement');

@@ -21,7 +21,12 @@ async function main() {
         nativeItemsView: { tab: 'map', places: [{ id: 1 }] }, nativeItemsOpen: true,
         nativeFinderVisible: ['OldBot'], nativeFriendsVisible: [{ id: 9 }], nativeStatusView: { name: 'OldBot' },
         nativeMenuVersion: 1, nativeArenaOpen: true, nativePartyUiOpen: true,
-        botFriendsView: { mode: 'add' }, botStatusName: 'OldBot', botPartyCatalogState: { page: 9 } });
+        nativeBoardVersion: 1, nativeBoardEpoch: 6, nativeBoardRevision: 12, nativeBoardOpen: true,
+        nativeBoardActions: [{ command: 'board agree' }], nativeBoardModel: { title: 'Old trade' }, nativeBoardBusy: {},
+        botFriendsView: { mode: 'add' }, botStatusName: 'OldBot', botPartyCatalogState: { page: 9 },
+        playerBoardView: { town: 'Giran', selfId: 57 }, playerBoardNavigation: { cursors: [{ selfId: 57, n: 1 }] },
+        playerBoardSearch: 'Shield', playerBoardWaypoint: { x: 7, y: 8, z: 9 },
+        playerBoardPreparation: { preparationId: 'stale-board-consent' } });
     session.questWaypoints.set('old', [1, 2, 3]);
     Locations.track(session, { x: 4, y: 5, z: 6 }); Menu.open(session);
     const epoch = session.nativeMenuEpoch;
@@ -29,9 +34,12 @@ async function main() {
     select(2);
     assert.equal(session.nativeItemsVersion, 1); assert.equal(session.nativeMenuVersion, 1);
     assert.equal(session.nativeItemsEpoch, 4); assert.equal(session.nativeItemsRevision, 8);
+    assert.equal(session.nativeBoardVersion, 1); assert.equal(session.nativeBoardEpoch, 6); assert.equal(session.nativeBoardRevision, 12);
     for (const field of ['nativeItemsWaypoint', 'nativeItemsView', 'nativeItemsOpen', 'nativeFinderVisible',
         'nativeFriendsVisible', 'nativeStatusView', 'nativeMenuOpen', 'nativeArenaOpen', 'nativePartyUiOpen',
-        'botFriendsView', 'botStatusName', 'botPartyCatalogState']) assert.equal(session[field], undefined, field);
+        'botFriendsView', 'botStatusName', 'botPartyCatalogState', 'playerBoardView', 'playerBoardNavigation',
+        'playerBoardSearch', 'playerBoardWaypoint', 'playerBoardPreparation', 'nativeBoardOpen', 'nativeBoardActions',
+        'nativeBoardModel', 'nativeBoardBusy']) assert.equal(session[field], undefined, field);
     assert.equal(session.questWaypoints.size, 0);
     const consume = Speak.consume;
     let executed = 0;
@@ -68,6 +76,59 @@ async function main() {
         assert.equal(packets.at(-1)[0], 0xeb);
         assert.equal(packets.at(-1).readInt32LE(1), 2, 'leaving world clears the actual client arrow too');
     } finally { Friends.selected = selected; World.inviteFriendByName = invite; FriendsMenu.renderNative = render; Requests.cancel(session); }
+    // E252: the legacy friend request waits for the bot lookup, then for the
+    // friendship write. A character selected meanwhile neither owns the friendship
+    // nor gets the result page.
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const originals = { find: LifeState.findByName, request: Friends.request, candidates: Friends.listCandidates, count: Friends.selectedCount };
+    try {
+        const owners = []; let pages = 0, releaseLookup, releaseRequest;
+        LifeState.findByName = () => new Promise((resolve) => { releaseLookup = () => resolve({ characterId: 900, name: 'Held' }); });
+        let holdRequest = false;
+        Friends.request = (player) => {
+            owners.push(player.actor.fetchId());
+            return holdRequest ? new Promise((resolve) => { releaseRequest = () => resolve({ ok: true }); }) : Promise.resolve({ ok: true });
+        };
+        Friends.listCandidates = async () => { pages++; return []; };
+        Friends.selectedCount = async () => 0;
+        select(5);
+        const lookup = FriendsMenu(session, ['bot-friends', 'request', 'Held', '0']);
+        select(6); releaseLookup(); await lookup;
+        assert.deepEqual(owners, [], 'a character selected during the lookup does not send the friend request');
+        assert.equal(pages, 0);
+        holdRequest = true; owners.length = 0;
+        select(5);
+        const write = FriendsMenu(session, ['bot-friends', 'request', 'Held', '0']);
+        for (let i = 0; i < 3 && !releaseRequest; i++) await new Promise((resolve) => setImmediate(resolve));
+        releaseLookup(); for (let i = 0; i < 3 && owners.length === 0; i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(owners, [5], 'the request is owned by the character that asked');
+        select(6); releaseRequest(); await write;
+        assert.equal(pages, 0, 'the result page does not reach another character');
+        // Same rule for the legacy remove and const pages (legacy HTML client).
+        let releaseRemove, releaseConst;
+        const nativeVersion = session.nativeFriendsVersion;
+        const originalRemove = Friends.remove, originalToggle = Friends.toggleConst, originalFriends = Friends.listFriends;
+        try {
+            Friends.remove = () => new Promise((resolve) => { releaseRemove = () => resolve({ ok: true }); });
+            Friends.toggleConst = () => new Promise((resolve) => { releaseConst = () => resolve({ ok: true, selected: true }); });
+            Friends.listFriends = async () => { pages++; return []; };
+            session.nativeFriendsVersion = 0;
+            select(5); const removing = FriendsMenu(session, ['bot-friends', 'remove', '900', '0']);
+            select(6); releaseRemove(); await removing;
+            assert.equal(pages, 0, 'the remove page does not reach another character');
+            assert.equal(session.botFriendsView, undefined, 'the new character keeps its own friends view');
+            select(5); const toggling = FriendsMenu(session, ['bot-friends', 'const', '900', '0']);
+            select(6); releaseConst(); await toggling;
+            assert.equal(pages, 0, 'the const page does not reach another character');
+            assert.equal(session.botFriendsView, undefined, 'the new character keeps its own friends view');
+        } finally {
+            Friends.remove = originalRemove; Friends.toggleConst = originalToggle; Friends.listFriends = originalFriends;
+            session.nativeFriendsVersion = nativeVersion;
+        }
+    } finally {
+        LifeState.findByName = originals.find; Friends.request = originals.request;
+        Friends.listCandidates = originals.candidates; Friends.selectedCount = originals.count;
+    }
     console.log('Native UI character switch: real Session/Actor, Track reset, capability retention, stale menu/queued work and async party isolation passed');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

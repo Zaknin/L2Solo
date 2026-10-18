@@ -43,13 +43,25 @@ class Server {
         // Generates a new `Session` for the respective `Server`. Either `AuthSession` or `GameSession`
         const session = this.callback(socket);
         socket.on('data', packetReceiver((packet) => {
+            // One TCP chunk can carry several packets. Once a handler error
+            // has closed the connection, the rest of that chunk belongs to a
+            // client we already dropped.
+            if (socket.destroyed) return undefined;
+
             // A throwing handler used to take the whole process with it, so a
             // malformed packet only ever costs the connection that sent it.
-            try {
-                return session.dataReceive(packet);
-            } catch (err) {
-                utils.infoWarn(this.name, 'dropped a packet from %s:%d: %s', socket.remoteAddress, socket.remotePort, err.stack || err.message || err);
+            // A handler that fails later, through the Promise it returns, is
+            // dropped the same way: an unobserved rejection ends the server.
+            const drop = (err) => {
+                utils.infoWarn(this.name, 'dropped a packet from %s:%d: %s', socket.remoteAddress, socket.remotePort, err?.stack || err?.message || err);
                 socket.destroy();
+            };
+            try {
+                const result = session.dataReceive(packet);
+                if (result && typeof result.then === 'function') result.then(null, drop);
+                return result;
+            } catch (err) {
+                drop(err);
             }
         }, (packetSize) => {
             utils.infoWarn(this.name, 'invalid packet size %d from %s:%d', packetSize, socket.remoteAddress, socket.remotePort);

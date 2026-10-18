@@ -1,15 +1,18 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
+require('../src/Global');
+invoke('GameServer/DataCache').init();
 
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const {
     ColdSimulationKernel,
-    beginRouteTravelState,
     deterministicRandom,
     finishPartyRouteTravelState,
     lifecycleKind,
     nextDueAt,
     partyTransitionProposals
 } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
 
 function state(characterId = 1, overrides = {}) {
     return {
@@ -25,7 +28,92 @@ function state(characterId = 1, overrides = {}) {
     };
 }
 
+
+// Capture the actual emitted request id; manual ACKs use the same wire
+// correlation as the worker instead of a missing-id compatibility path.
+const claimRequestIds = new WeakMap();
+const sentProposals = new WeakMap();
+const sentCommands = new WeakMap();
+function recordingKernel(options) {
+    let kernel;
+    const requests = new Map();
+    const proposals = new Map();
+    const commands = new Map();
+    kernel = new ColdSimulationKernel({ ...options, emit: (type, payload, msgId, ...rest) => {
+        if (type === 'claim_request') for (const candidate of payload.candidates) requests.set(candidate.characterId, msgId);
+        if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
+        if (type === 'command_request') for (const request of payload.requests) commands.set(request.characterId, request);
+        return options.emit?.(type, payload, msgId, ...rest);
+    } });
+    claimRequestIds.set(kernel, requests);
+    sentProposals.set(kernel, proposals);
+    sentCommands.set(kernel, commands);
+    return kernel;
+}
+function commandAck(kernel, payload) {
+    const request = sentCommands.get(kernel).get(payload.characterId);
+    assert(request, 'fixture command ACK echoes an actual sent input');
+    return kernel.completeCommand({ ok: true, ...payload, commandId: request.commandId,
+        commandCheckpoint: request.commandCheckpoint });
+}
+function commitAck(kernel, payload) {
+    kernel.onCommitAck({ results: payload.results.map(result => {
+        const proposal = sentProposals.get(kernel).get(result.characterId);
+        assert(proposal, 'fixture commit ACK echoes an actual sent proposal');
+        return { ...result, inputToken: proposal.token, proposalId: proposal.proposalId };
+    }) });
+}
+function claimAck(kernel, payload) {
+    const rows = [...(payload.grants || []), ...(payload.rejected || [])];
+    const ids = rows.map(row => claimRequestIds.get(kernel).get(row.characterId));
+    assert(ids.length && ids.every(id => typeof id === 'string' && id === ids[0]), 'fixture ACK echoes one captured request id');
+    kernel.onClaimAck(payload, ids[0]);
+}
+
 (async () => {
+    {
+        // Developer diagnostics: every scheduler tick is counted as claimed or
+        // as empty with its reason; a not-yet-due head records its distance.
+        const PopulationConfig = require('../src/GameServer/Bot/Population/PopulationConfig');
+        const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
+        const wasOn = PopulationConfig.developerDiagnostics;
+        PopulationConfig.developerDiagnostics = true;
+        const counts = () => Diagnostics.metrics().counts;
+        const before = { ...counts() };
+        const added = (key) => (counts()[key] || 0) - (before[key] || 0);
+        let at = 1000;
+        const probe = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:heap_empty'), 1);
+        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:not_due'), 1);
+        assert.strictEqual(added('worker_tick_gap:lt1s:unknown'), 1);
+        at = 2000;
+        probe.tick();
+        assert.strictEqual(added('worker_tick:claimed:unknown'), 1);
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:no_capacity'), 1);
+        probe.paused = true;
+        probe.tick();
+        assert.strictEqual(added('worker_tick:empty:paused'), 1);
+        // A due bot inside a PvP encounter is requeued past it: the tick took due
+        // work but sent no claim, so it is not idle even though the head is not due.
+        const encounter = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
+        encounter.upsert({ state: state(93, { stats: { pvpEncounter: { expiresAt: at + 5000 } },
+            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        encounter.tick();
+        assert.strictEqual(added('worker_tick:empty:no_claim'), 1);
+        assert.strictEqual(added('worker_tick:empty:not_due'), 1, 'a requeued bot is not counted as an idle tick');
+        const off = { ...counts() };
+        PopulationConfig.developerDiagnostics = false;
+        probe.paused = false;
+        probe.tick();
+        PopulationConfig.developerDiagnostics = true;
+        assert.deepStrictEqual(counts(), off, 'no tick is counted with developer diagnostics off');
+        PopulationConfig.developerDiagnostics = wasOn;
+    }
+
     const valid = Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', { candidates: [] }), 'worker', { workerEpoch: 'epoch' });
     assert.strictEqual(valid.ok, true);
     assert.strictEqual(Protocol.validateEnvelope(null, 'worker').reason, 'invalid_envelope');
@@ -48,7 +136,7 @@ function state(characterId = 1, overrides = {}) {
         nextResolveAt: timestamp + 30000,
         debug: { activity: current.activity }
     });
-    const kernel = new ColdSimulationKernel({
+    const kernel = recordingKernel({
         resolveSolo: resolver,
         emit: (type, payload) => emitted.push({ type, payload }),
         now: () => now,
@@ -60,7 +148,7 @@ function state(characterId = 1, overrides = {}) {
     const claimRequest = emitted.shift();
     assert.strictEqual(claimRequest.type, 'claim_request');
     assert.strictEqual(claimRequest.payload.candidates[0].expectedRevision, 3);
-    kernel.onClaimAck({ grants: [{
+    claimAck(kernel, { grants: [{
         ok: true,
         characterId: 1,
         ownerId: 'cold_simulation_owner',
@@ -110,7 +198,7 @@ function state(characterId = 1, overrides = {}) {
         { type: 'party_invalid_size', characterId: 1 }
     ], 'the fallback attached member must receive the party lifecycle event');
 
-    kernel.onCommitAck({ results: [{
+    commitAck(kernel, { results: [{
         ok: true,
         characterId: 1,
         state: state(1, {
@@ -141,7 +229,7 @@ function state(characterId = 1, overrides = {}) {
         travelMs: 25000,
         to: { locX: 125000, locY: -176000, locZ: -1000 }
     };
-    const travelState = beginRouteTravelState(state(70, {
+    const travelState = beginHuntingTrip(state(70, {
         level: 16,
         spotId: 'starter-field',
         loc: { locX: 115000, locY: -176000, locZ: -1000 },
@@ -166,7 +254,7 @@ function state(characterId = 1, overrides = {}) {
             until: 3605000
         }
     };
-    const backedOffTravelState = beginRouteTravelState(state(72, {
+    const backedOffTravelState = beginHuntingTrip(state(72, {
         spotId: 'starter-field',
         loc: { locX: 115000, locY: -176000, locZ: -1000 }
     }), deathPressureRoute, 5000);
@@ -192,7 +280,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(arrivedPartyMember.stats.travel, null);
 
     const routeStates = [];
-    const routeKernel = new ColdSimulationKernel({
+    const routeKernel = recordingKernel({
         resolveSolo: ({ state: current }) => {
             routeStates.push(current);
             return {
@@ -204,7 +292,7 @@ function state(characterId = 1, overrides = {}) {
             };
         },
         planLifecycle: ({ state: current, context, timestamp }) => ({
-            plannedState: beginRouteTravelState(current, context.route, timestamp) || current
+            plannedState: beginHuntingTrip(current, context.route, timestamp) || current
         }),
         emit: () => {},
         now: () => 5000
@@ -219,7 +307,7 @@ function state(characterId = 1, overrides = {}) {
         context: { spot: { id: 'starter-field' }, route }
     });
     routeKernel.tick();
-    routeKernel.onClaimAck({ grants: [{
+    claimAck(routeKernel, { grants: [{
         ok: true, characterId: 71, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'route-lease', leaseUntil: 35000
     }] });
@@ -258,14 +346,30 @@ function state(characterId = 1, overrides = {}) {
     })), 'command');
     assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), { isPartyLeader: true }), 'party');
 
+    // An absent main decision sends target 0; the worker's own hunting pick
+    // remains the target for the native solo resolver.
+    let pickedTarget = 0;
+    const pickKernel = recordingKernel({ now: () => 5000,
+        resolveSolo: input => { pickedTarget = input.targetNpcId; return resolver(input); },
+        planLifecycle: ({ state }) => ({ plannedState: state, targetNpcId: 0,
+            activityPick: { activity: 'hunting', npcId: 20101, spotId: 'worker-ground' } }) });
+    pickKernel.upsert({ state: state(79), context: { targetNpcId: 0, spot: { id: 'worker-ground' } } });
+    pickKernel.tick();
+    claimAck(pickKernel, { grants: [{ ok: true, characterId: 79, ownerId: 'cold_simulation_owner', revision: 4,
+        leaseId: 'pick-lease', leaseUntil: 35000 }] });
+    await pickKernel.resolveChain;
+    assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses worker activityPick when main target is absent');
+
     const commandMessages = [];
     let plannedOnWorker = 0;
-    const commandKernel = new ColdSimulationKernel({
-        resolveSolo: resolver,
+    const commandKernel = recordingKernel({
+        resolveSolo: input => { assert.strictEqual(input.targetNpcId, 20101, 'command uses worker hunting pick'); return resolver(input); },
         planLifecycle: ({ state: commandState }) => {
             plannedOnWorker += 1;
             return {
                 previousPlan: null,
+                targetNpcId: 0, activityPick: { activity: 'hunting', npcId: 20101 },
+                statsPacket: { money: [30000, .00001, 1000, 0], wishFocus: ['worker', 1], decisionSeq: 5, activityLeaf: 19, dormantWishes: [] },
                 acquisitionPlan: { strategy: 'direct_drop', status: 'active' },
                 plannedState: { ...commandState, stats: { ...commandState.stats, workerPlanned: true } }
             };
@@ -279,6 +383,7 @@ function state(characterId = 1, overrides = {}) {
     const commandRequest = commandMessages.find((entry) => entry.type === 'command_request');
     assert.strictEqual(plannedOnWorker, 1, 'lifecycle planning must execute in the cold kernel');
     assert.strictEqual(commandRequest.payload.requests[0].precomputedPlan.plannedState.stats.workerPlanned, true);
+    assert.strictEqual(commandRequest.payload.requests[0].precomputedPlan.statsPacket.activityLeaf, 19, 'kernel forwards whole packet');
     assert(commandRequest.payload.requests[0].precomputedResult, 'main command gateway must receive worker-computed lifecycle output');
     assert.strictEqual(commandRequest.payload.requests[0].computedAt, now);
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
@@ -289,13 +394,13 @@ function state(characterId = 1, overrides = {}) {
     commandKernel.upsert({ state: { ...commandState }, context: { refreshed: true } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
         'a catalog refresh must not create a second writer while the command is in flight');
-    commandKernel.completeCommand({ characterId: 3, state: { ...commandState }, context: { refreshed: true } });
+    commandAck(commandKernel, { characterId: 3, state: { ...commandState }, context: { refreshed: true } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), true,
         'a same-revision command ACK must restore the consumed due token');
     assert.strictEqual(commandKernel.snapshot().commanding, 0);
 
     const commandPressureMessages = [];
-    const commandPressureKernel = new ColdSimulationKernel({ resolveSolo: resolver, now: () => now,
+    const commandPressureKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
         maxInFlight: 2, maxAtomicPartySize: 9,
         emit: (type, payload) => commandPressureMessages.push({ type, payload }) });
     const blockedCommands = [710, 711, 712].map(id => state(id, { activity: 'shopping',
@@ -311,7 +416,7 @@ function state(characterId = 1, overrides = {}) {
         'lifecycle commands must share the ownership limit with combat claims');
     await commandPressureKernel.resolveChain;
     for (const s of blockedCommands.slice(0, 2)) {
-        commandPressureKernel.completeCommand({ characterId: s.characterId, ok: false,
+        commandAck(commandPressureKernel, { characterId: s.characterId, ok: false,
             reason: 'missing_spot', retryAfterMs: 30000, state: s, context: {} });
         commandPressureKernel.upsert({ state: s, context: { refreshed: true } });
         assert.strictEqual(commandPressureKernel.scheduleTokens.get(s.characterId).dueAt, now + 30000,
@@ -319,14 +424,14 @@ function state(characterId = 1, overrides = {}) {
     }
     commandPressureKernel.tick();
     await commandPressureKernel.resolveChain;
-    commandPressureKernel.completeCommand({ characterId: 712, ok: false, reason: 'missing_spot',
+    commandAck(commandPressureKernel, { characterId: 712, ok: false, reason: 'missing_spot',
         retryAfterMs: 30000, state: blockedCommands[2], context: {} });
     commandPressureKernel.tick();
     const resumedParty = commandPressureMessages.find(m => m.type === 'claim_request');
     assert.deepStrictEqual(resumedParty?.payload.candidates.map(c => c.characterId), [720, 721, 722],
         'rejected commands must drain so an overdue atomic party can progress');
 
-    const transitionKernel = new ColdSimulationKernel({
+    const transitionKernel = recordingKernel({
         resolveSolo: resolver,
         planLifecycle: () => null,
         emit: () => {},
@@ -344,19 +449,20 @@ function state(characterId = 1, overrides = {}) {
     transitionKernel.tick();
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), false,
         'an interim durable refresh can be consumed while the lifecycle ACK is pending');
-    transitionKernel.completeCommand({ characterId: 5, state: transitioned, context: {} });
+    commandAck(transitionKernel, { characterId: 5, state: transitioned, context: {} });
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), true,
         'the lifecycle ACK must restore a transition node consumed during the command');
 
-    const memberOnlyKernel = new ColdSimulationKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
+    const memberOnlyKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
     memberOnlyKernel.upsert({ state: state(4, { party: { partyId: 'member-only' } }), context: {} });
-    assert.strictEqual(memberOnlyKernel.heap.size, 0,
+    assert.strictEqual(memberOnlyKernel.heap.values.filter(entry => entry.kind !== 'alarm').length, 0,
         'party members must be scheduled only through their leader');
+    assert.strictEqual([...memberOnlyKernel.alarms.values()].filter(entry => entry.alarmKind === 'worker_safety').length, 0);
     assert.strictEqual(memberOnlyKernel.snapshot().due, 0,
         'party members must not inflate independent worker due-age telemetry');
 
     let recoveryNow = now;
-    const recoveryKernel = new ColdSimulationKernel({
+    const recoveryKernel = recordingKernel({
         resolveSolo: resolver,
         emit: () => {},
         now: () => recoveryNow,
@@ -374,7 +480,7 @@ function state(characterId = 1, overrides = {}) {
 
     recoveryNow += 1000;
     recoveryKernel.tick();
-    recoveryKernel.onClaimAck({ grants: [{
+    claimAck(recoveryKernel, { grants: [{
         ok: true, characterId: 6, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'lost-commit-ack', leaseUntil: recoveryNow + 1000
     }] });
@@ -389,41 +495,47 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(recoveryKernel.snapshot().leaseRecoveries, 1);
     assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
 
-    const orphanKernel = new ColdSimulationKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
+    const orphanKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
     orphanKernel.upsert({
-        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 30000 } }),
+        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 3600000 } }),
         context: { spot: { id: 'spot' } }
     });
-    const orphanedEntry = orphanKernel.heap.pop();
+    const orphanedEntry = orphanKernel.heap.values.find(entry => entry.kind !== 'alarm' && entry.characterId === 7);
+    assert.strictEqual(orphanKernel.heap.remove(orphanedEntry), true);
     orphanKernel.consumeHeapEntry(orphanedEntry);
     assert.strictEqual(orphanKernel.scheduleTokens.has(7), false);
     orphanKernel.tick();
-    assert.strictEqual(orphanKernel.scheduleTokens.has(7), true,
-        'the periodic invariant sweep must restore an orphaned schedulable state');
-    assert.strictEqual(orphanKernel.snapshot().orphanRecoveries, 1);
+    assert.strictEqual(orphanKernel.scheduleTokens.has(7), false, 'safety has no startup/full-population pass');
+    recoveryNow += 30 * 60000;
+    orphanKernel.pause(); orphanKernel.tick();
+    assert.equal(orphanKernel.scheduleTokens.has(7), false, 'there is no autonomous second safety sweep');
+    assert.equal(orphanKernel.states.safetyNodes, undefined);
+    assert.equal(typeof orphanKernel.recoverOrphanedSchedules, 'undefined');
+    assert.equal(orphanKernel.ensureScheduled(7), true, 'the addressed main sweep restores a local orphan');
+    assert.equal(orphanKernel.ensureScheduled(7), false, 'a healthy scheduled state is not repaired twice');
 
-    const ackRaceKernel = new ColdSimulationKernel({
+    const ackRaceKernel = recordingKernel({
         resolveSolo: resolver,
         emit: () => {},
-        now: () => recoveryNow,
-        orphanSweepIntervalMs: 1000
+        now: () => recoveryNow
     });
     ackRaceKernel.upsert({ state: state(8, {
         timing: { lastResolvedAt: recoveryNow - 1000, nextResolveAt: recoveryNow }
     }), context: { spot: { id: 'spot' } } });
     ackRaceKernel.tick();
-    ackRaceKernel.onClaimAck({ grants: [{
+    claimAck(ackRaceKernel, { grants: [{
         ok: true, characterId: 8, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'catalog-before-ack', leaseUntil: recoveryNow + 30000
     }] });
     await ackRaceKernel.resolveChain;
+    ackRaceKernel.flush(null, true);
     ackRaceKernel.upsert({ state: state(8, {
         timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
         simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
     }), context: { spot: { id: 'newer-catalog' } } });
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), false,
         'a newer catalog snapshot must not schedule a second writer while the prior revision is in flight');
-    ackRaceKernel.onCommitAck({ results: [{
+    commitAck(ackRaceKernel, { results: [{
         ok: true,
         characterId: 8,
         state: state(8, {
@@ -445,7 +557,7 @@ function state(characterId = 1, overrides = {}) {
         state(21, { party: { partyId: 'party-20' } })
     ];
     const party = { partyId: 'party-20', leaderId: 20, memberIds: [20, 21], stats: {}, nextResolveAt: 2000 };
-    const partyKernel = new ColdSimulationKernel({
+    const partyKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: ({ members: partyMembers, timestamp }) => ({
             memberResults: partyMembers.map((member) => ({ state: member, result: resolver({ state: member, rng: () => 0.5, timestamp }) })),
@@ -472,7 +584,7 @@ function state(characterId = 1, overrides = {}) {
     assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.expectedRevision), [3, 9],
         'party claims must use current member revisions instead of the leader context snapshot');
     assert(partyClaim.payload.candidates.every((candidate) => candidate.purpose.kind === 'party'));
-    partyKernel.onClaimAck({
+    claimAck(partyKernel, {
         grants: partyClaim.payload.candidates.map((candidate) => ({
             ok: true,
             characterId: candidate.characterId,
@@ -491,6 +603,67 @@ function state(characterId = 1, overrides = {}) {
         'the leader proposal must carry the party durable update');
     assert(!partyMessages.some((entry) => entry.type === 'command_request'), 'party combat compute must never fall back to main');
 
+    const refreshMessages = [], refreshed = [];
+    const refreshMembers = [state(120, { party: { partyId: 'refresh-party' }, stats: { equipmentPlan: { status: 'active', strategy: 'direct_drop', target: { selfId: 55 } } } }),
+        state(121, { party: { partyId: 'refresh-party' }, stats: { equipmentPlan: { status: 'active', strategy: 'market', target: { selfId: 56 } } } })];
+    const refreshParty = { partyId: 'refresh-party', status: 'active', leaderId: 120, memberIds: [120, 121], stats: {}, nextResolveAt: now };
+    const refreshKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+        resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+            partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+        projectResolve: state => ({ state }),
+        planPartyRequirement: ({ state }) => { refreshed.push(state.characterId); return { acquisitionPlan: state.characterId === 120
+            ? { status: 'active', strategy: 'market', target: { selfId: 55 } } : state.stats.equipmentPlan }; },
+        emit: (type, payload) => refreshMessages.push({ type, payload }) });
+    refreshKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
+        partyMembers: refreshMembers, spot: { id: 'refresh-spot' }, requirementRefresh: true } });
+    refreshKernel.upsert({ state: refreshMembers[1], context: {} }); refreshKernel.tick();
+    const refreshClaim = refreshMessages.find(message => message.type === 'claim_request');
+    claimAck(refreshKernel, { grants: refreshClaim.payload.candidates.map(candidate => ({ ok: true,
+        characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+        leaseId: `refresh-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+    await refreshKernel.resolveChain;
+    const refreshProposal = refreshMessages.find(message => message.type === 'proposal_batch').payload.proposals.find(proposal => proposal.partyResolution);
+    assert.deepStrictEqual(refreshed, [120, 121], 'the party resolve refreshes each member after its projection');
+    assert.deepStrictEqual(refreshProposal.partyResolution.memberPlans.map(row => row.characterId), [120], 'only changed requirement keys cross the worker boundary');
+    assert.strictEqual(refreshProposal.partyResolution.requirementRefreshedAt, now);
+    assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
+    assert(refreshKernel.snapshot().partyRequirementRefreshMaxMs < 20);
+
+    for (const complete of [false, true]) {
+        const materialMessages = [], objective = { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-spot' };
+        const materialParty = { ...refreshParty, partyId: `material-${complete}`, updatedAt: now - 1,
+            stats: { objective, agreement: { mode: 'need', materialNeeds: [{ characterId: 120, collected: 0 }] } } };
+        const materialMembers = refreshMembers.map(member => ({ ...member,
+            party: { partyId: materialParty.partyId }, activity: 'grouped' }));
+        const materialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => complete
+                ? invoke('GameServer/Bot/Population/BackgroundPartyResolver').resolve({ party: materialParty,
+                    members, spot: { id: objective.spotId }, timestamp })
+                : { memberResults: members.map(member => ({ state: member, result: {} })), events: [],
+                    partyPatch: { stats: { agreement: { ...materialParty.stats.agreement,
+                        materialNeeds: [{ characterId: 120, collected: 1 }] } } }, nextResolveAt: timestamp + 45000 },
+            projectResolve: state => ({ state }),
+            planPartyRequirement: () => { throw Error('a material hunt rebuilt its wish plan'); },
+            emit: (type, payload) => materialMessages.push({ type, payload }) });
+        materialKernel.upsert({ state: materialMembers[0], context: { isPartyLeader: true, party: materialParty,
+            partyMembers: materialMembers, spot: { id: objective.spotId }, requirementRefresh: true } });
+        materialKernel.upsert({ state: materialMembers[1], context: {} }); materialKernel.tick();
+        const claim = materialMessages.find(message => message.type === 'claim_request');
+        claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `material-${complete}-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await materialKernel.resolveChain;
+        const proposals = materialMessages.find(message => message.type === 'proposal_batch')?.payload.proposals;
+        assert(proposals?.length === 2, 'material progress and completion both publish all members without a generic requirement refresh');
+        assert(proposals.every(proposal => proposal.atomicGroup?.memberIds.join(',') === '120,121'));
+        const change = proposals[0].atomicGroup.partyChanges[0];
+        assert.equal(change.status, complete ? 'dissolved' : 'active');
+        assert.equal(JSON.parse(change.statsJson).agreement.materialNeeds[0].collected, complete ? 0 : 1);
+        assert.equal(materialKernel.partyRequirementProgress.size, 0);
+        if (complete) assert(proposals.every(proposal => !proposal.nextState.party?.partyId
+            && proposal.nextState.activity === 'hunting'), 'native completion releases every physical state');
+    }
+
     const stalePartyMessages = [];
     let stalePartyNow = now;
     const stalePartyMembers = [
@@ -504,10 +677,10 @@ function state(characterId = 1, overrides = {}) {
         stats: {},
         nextResolveAt: stalePartyNow
     };
-    const stalePartyKernel = new ColdSimulationKernel({
+    const stalePartyKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('partial stale party claim must not resolve'); },
-        emit: (type, payload) => stalePartyMessages.push({ type, payload }),
+        emit: (type, payload, msgId) => stalePartyMessages.push({ type, payload, msgId }),
         now: () => stalePartyNow
     });
     stalePartyKernel.upsert({
@@ -523,7 +696,7 @@ function state(characterId = 1, overrides = {}) {
         ...stalePartyMembers[1],
         simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
     };
-    stalePartyKernel.onClaimAck({
+    claimAck(stalePartyKernel, {
         grants: [{
             ok: true,
             characterId: 220,
@@ -552,6 +725,8 @@ function state(characterId = 1, overrides = {}) {
     stalePartyKernel.onReleaseAck({ results: [{
         ok: true,
         characterId: 220,
+        inputToken: partialRelease.payload.releases[0].token,
+        releaseRequestId: partialRelease.msgId,
         state: {
             ...stalePartyMembers[0],
             simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
@@ -591,7 +766,7 @@ function state(characterId = 1, overrides = {}) {
         startedAt: now - 120000,
         stats: { sessionExpiresAt: now - 1 }
     };
-    const expiredPartyKernel = new ColdSimulationKernel({
+    const expiredPartyKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('expired party must not enter combat'); },
         emit: (type, payload) => expiredPartyMessages.push({ type, payload }),
@@ -605,7 +780,7 @@ function state(characterId = 1, overrides = {}) {
     expiredPartyKernel.tick();
     const expiredClaim = expiredPartyMessages.shift();
     assert.strictEqual(expiredClaim.type, 'claim_request');
-    expiredPartyKernel.onClaimAck({
+    claimAck(expiredPartyKernel, {
         grants: expiredClaim.payload.candidates.map((candidate) => ({
             ok: true,
             characterId: candidate.characterId,
@@ -647,7 +822,7 @@ function state(characterId = 1, overrides = {}) {
         nextResolveAt: expiryScheduleNow + 60000,
         stats: { sessionExpiresAt: expiryScheduleNow + 5000 }
     };
-    const expiryScheduleKernel = new ColdSimulationKernel({
+    const expiryScheduleKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: resolver,
         emit: (type, payload) => expiryScheduleMessages.push({ type, payload }),
@@ -704,7 +879,7 @@ function state(characterId = 1, overrides = {}) {
         nextResolveAt: expiryScheduleNow
     };
     const priorityContext = { ...partyDueContext, party: priorityParty };
-    const partyCapacityKernel = new ColdSimulationKernel({ now: () => expiryScheduleNow, resolveSolo: resolver });
+    const partyCapacityKernel = recordingKernel({ now: () => expiryScheduleNow, resolveSolo: resolver });
     partyCapacityKernel.upsert({ state: partyDueLeader, context: priorityContext });
     partyCapacityKernel.upsert({ state: partyDueMember, context: {} });
     assert.deepStrictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 1), [],
@@ -727,7 +902,7 @@ function state(characterId = 1, overrides = {}) {
         nextResolveAt: singletonNow + 60000,
         stats: { sessionExpiresAt: singletonNow + 5000 }
     };
-    const singletonKernel = new ColdSimulationKernel({
+    const singletonKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('singleton party must be cleaned up before combat'); },
         emit: (type, payload) => singletonMessages.push({ type, payload }),
@@ -747,7 +922,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(singletonClaim.type, 'claim_request', 'invalid singleton must enter the cleanup path immediately');
     assert.deepStrictEqual(singletonClaim.payload.candidates.map((candidate) => candidate.characterId), [24]);
     assert.strictEqual(singletonClaim.payload.candidates[0].purpose.invalidReason, 'party_min_size');
-    singletonKernel.onClaimAck({
+    claimAck(singletonKernel, {
         grants: singletonClaim.payload.candidates.map((candidate) => ({
             ok: true,
             characterId: candidate.characterId,
@@ -805,7 +980,7 @@ function state(characterId = 1, overrides = {}) {
             31: { locX: 125100, locY: -176100, locZ: -1000 }
         }
     };
-    const partyRouteKernel = new ColdSimulationKernel({
+    const partyRouteKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('party combat must not run during route travel'); },
         emit: (type, payload) => partyRouteMessages.push({ type, payload }),
@@ -824,7 +999,7 @@ function state(characterId = 1, overrides = {}) {
     partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });
     partyRouteKernel.tick();
     const partyRouteClaim = partyRouteMessages.shift();
-    partyRouteKernel.onClaimAck({
+    claimAck(partyRouteKernel, {
         grants: partyRouteClaim.payload.candidates.map((candidate) => ({
             ok: true,
             characterId: candidate.characterId,
@@ -845,7 +1020,7 @@ function state(characterId = 1, overrides = {}) {
         .partyResolution.party.stats.travel.spotId, 'mid-level-field');
 
     const compactFallbackMessages = [];
-    const compactFallbackKernel = new ColdSimulationKernel({
+    const compactFallbackKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('compact party fallback must wait for the authoritative member state'); },
         emit: (type, payload) => compactFallbackMessages.push({ type, payload }),
@@ -874,7 +1049,7 @@ function state(characterId = 1, overrides = {}) {
         'a compact party reference must wait until its full authoritative state is loaded');
 
     const burstMessages = [];
-    const burstKernel = new ColdSimulationKernel({
+    const burstKernel = recordingKernel({
         resolveSolo: resolver,
         emit: (type, payload) => burstMessages.push({ type, payload }),
         now: () => now,
@@ -890,7 +1065,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(burstClaim.payload.candidates.length, 3,
         'a catch-up tick must honor the smaller in-flight burst even when the protocol batch is larger');
 
-    const renewalKernel = new ColdSimulationKernel({ resolveSolo: resolver, now: () => now });
+    const renewalKernel = recordingKernel({ resolveSolo: resolver, now: () => now });
     const renewalGrant = {
         ok: true,
         characterId: 90,
@@ -899,6 +1074,7 @@ function state(characterId = 1, overrides = {}) {
         leaseId: 'renewal-lease',
         leaseUntil: now + 1000
     };
+    renewalKernel.upsert({ state: state(90), context: {} });
     renewalKernel.inFlight.set(90, {
         grant: renewalGrant,
         state: state(90),
@@ -915,6 +1091,27 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0,
         'a renewed claim must not be recovered using its old deadline');
     assert.strictEqual(renewalKernel.inFlight.get(90).grant.leaseUntil, now + 10000);
+    // The tick skips the expiry scan until the earliest lease can be due; a
+    // lease added later with an earlier deadline lowers that bound.
+    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
+    renewalKernel.upsert({ state: state(92), context: {} });
+    renewalKernel.inFlight.set(92, {
+        grant: { ...renewalGrant, characterId: 92, leaseId: 'early-lease', leaseUntil: now + 4000 },
+        state: state(92),
+        context: {},
+        startedAt: now
+    });
+    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 4000);
+    renewalKernel.recoverStalled(now + 3999);
+    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0);
+    renewalKernel.recoverStalled(now + 4000);
+    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 1, 'the early lease expires at its own deadline');
+    assert.deepStrictEqual([...renewalKernel.inFlight.keys()], [90]);
+    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
+    renewalKernel.recoverStalled(now + 10000);
+    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 2, 'the renewed lease expires at its new deadline');
+    assert.strictEqual(renewalKernel.inFlight.size, 0);
+    assert.strictEqual(renewalKernel.inFlight.checkAt, Infinity);
 
     const oversizedInventory = Object.fromEntries(Array.from({ length: 1200 }, (_, index) => [
         String(index), {
@@ -930,7 +1127,7 @@ function state(characterId = 1, overrides = {}) {
         simulation: { ownerId: 'cold_simulation_owner', revision: 5, leaseId: 'oversized-lease', leaseUntil: now + 30000 }
     });
     const oversizedEmitted = [];
-    const oversizedKernel = new ColdSimulationKernel({
+    const oversizedKernel = recordingKernel({
         resolveSolo: resolver,
         emit: (type, payload) => oversizedEmitted.push({ type, payload }),
         now: () => now + 10000
@@ -1008,7 +1205,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(oversizedKernel.snapshot().proposalOversizeRejected, 0);
 
     const capacityFlushMessages = [];
-    const capacityFlushKernel = new ColdSimulationKernel({
+    const capacityFlushKernel = recordingKernel({
         resolveSolo: resolver,
         emit: (type, payload) => capacityFlushMessages.push({ type, payload }),
         now: () => now,
@@ -1025,7 +1222,7 @@ function state(characterId = 1, overrides = {}) {
     capacityFlushKernel.tick();
     const capacityFlushClaim = capacityFlushMessages.shift();
     assert.strictEqual(capacityFlushClaim.payload.candidates.length, 8);
-    capacityFlushKernel.onClaimAck({
+    claimAck(capacityFlushKernel, {
         grants: capacityFlushStates.map((entry) => ({
             ok: true,
             characterId: entry.characterId,
@@ -1060,7 +1257,7 @@ function state(characterId = 1, overrides = {}) {
     // An atomic clan party needs the entire small player window. A few free
     // slots must not leave the completed owners waiting for the ordinary timer.
     const partialMessages = [];
-    const partialKernel = new ColdSimulationKernel({ resolveSolo: resolver, now: () => now,
+    const partialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
         maxInFlight: 8, maxAtomicPartySize: 9, emit: (type, payload) => partialMessages.push({ type, payload }) });
     const clanMembers = Array.from({ length: 9 }, (_, i) => state(500 + i, { party: { partyId: 'nine' } }));
     clanMembers.forEach((s, i) => partialKernel.upsert({ state: s, context: { isPartyLeader: i === 0,
@@ -1068,6 +1265,7 @@ function state(characterId = 1, overrides = {}) {
     for (let id = 600; id < 605; id++) {
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
             token: { ...oversizedProposal.token, characterId: id }, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
+        partialKernel.upsert({ state: pending.baseState, context: {} });
         partialKernel.inFlight.set(id, { state: pending.baseState, grant: pending.token });
         partialKernel.dirty.set(id, pending);
     }
@@ -1076,12 +1274,12 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(drained.payload.proposals.length, 5, 'an atomic capacity wait must drain completed owners despite free slots');
     assert.strictEqual(drained.payload.capacityBlocked, true, 'main must receive the atomic capacity pressure');
     assert.strictEqual(partialKernel.inFlight.size, 5, 'slots remain owned until the commit acknowledgement');
-    partialKernel.onCommitAck({ results: drained.payload.proposals.map(p => ({ ok: true, characterId: p.characterId,
+    commitAck(partialKernel, { results: drained.payload.proposals.map(p => ({ ok: true, characterId: p.characterId,
         state: state(p.characterId, { timing: { nextResolveAt: now + 60000 } }), context: {} })) });
     assert.strictEqual(partialKernel.dueCandidates(now + 1000, 8).length, 9, 'the complete clan party can run after the owners commit');
 
     const throttledPartyMessages = [];
-    const throttledPartyKernel = new ColdSimulationKernel({
+    const throttledPartyKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: now + 60000 }),
         emit: (type, payload) => throttledPartyMessages.push({ type, payload }),
@@ -1119,7 +1317,7 @@ function state(characterId = 1, overrides = {}) {
     assert.deepStrictEqual(throttledPartyKernel.dueCandidates(now, 4).map(c => c.characterId), [40, 41, 42, 43, 44]);
 
     const atomicBurstMessages = [];
-    const atomicBurstKernel = new ColdSimulationKernel({
+    const atomicBurstKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: now + 60000 }),
         emit: (type, payload) => atomicBurstMessages.push({ type, payload }),
@@ -1148,7 +1346,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(atomicBurstKernel.snapshot().partyCapacityDeferrals, 0);
 
     const boundedBurstMessages = [];
-    const boundedBurstKernel = new ColdSimulationKernel({
+    const boundedBurstKernel = recordingKernel({
         resolveSolo: resolver,
         emit: (type, payload) => boundedBurstMessages.push({ type, payload }),
         now: () => now,
@@ -1182,7 +1380,7 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(boundedBurstKernel.snapshot().partyCapacityDeferrals, 1);
 
     const capacityMessages = [];
-    const capacityKernel = new ColdSimulationKernel({
+    const capacityKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: now + 60000 }),
         emit: (type, payload) => capacityMessages.push({ type, payload }),
@@ -1207,10 +1405,10 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(capacityMessages.find((entry) => entry.type === 'claim_request').payload.candidates.length, 5,
         'the next eligible tick must admit the entire party atomically');
 
-    const fenceKernel = new ColdSimulationKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
+    const fenceKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
     fenceKernel.upsert({ state: state(9), context: { spot: { id: 'spot' } } });
     fenceKernel.tick();
-    fenceKernel.onClaimAck({ grants: [{
+    claimAck(fenceKernel, { grants: [{
         ok: true, characterId: 9, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'fence-lease', leaseUntil: now + 30000
     }] });
     await fenceKernel.resolveChain;
@@ -1220,14 +1418,14 @@ function state(characterId = 1, overrides = {}) {
     assert.strictEqual(fenceKernel.snapshot().inFlight, 0);
 
     const errorMessages = [];
-    const errorKernel = new ColdSimulationKernel({
+    const errorKernel = recordingKernel({
         resolveSolo: () => { throw new Error('synthetic_resolver_error'); },
         emit: (type, payload) => errorMessages.push({ type, payload }),
         now: () => now
     });
     errorKernel.upsert({ state: state(30), context: { spot: { id: 'spot' } } });
     errorKernel.tick();
-    errorKernel.onClaimAck({ grants: [{
+    claimAck(errorKernel, { grants: [{
         ok: true, characterId: 30, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'error-lease', leaseUntil: now + 30000
     }] });
@@ -1235,6 +1433,40 @@ function state(characterId = 1, overrides = {}) {
     const release = errorMessages.find((entry) => entry.type === 'release_request');
     assert.strictEqual(release.payload.releases[0].token.leaseId, 'error-lease', 'resolver errors must release the exact lease');
     assert.strictEqual(errorKernel.snapshot().errors, 1);
+
+    // The bot's look at its board lines (group E) leaves the worker with its
+    // proposal: the main thread applies the new asks after the commit.
+    const marketMessages = [];
+    const marketKernel = recordingKernel({
+        resolveSolo: resolver,
+        projectResolve: async (current) => ({ state: current,
+            market: { reprices: [{ recordId: 5, lineId: 6, selfId: 1864, price: 990,
+                pricing: { seenCounter: 3, seenAt: now } }], withdrawals: [] } }),
+        emit: (type, payload) => marketMessages.push({ type, payload }),
+        now: () => now
+    });
+    marketKernel.upsert({ state: state(40), context: { spot: { id: 'spot', rewards: {} } } });
+    marketKernel.tick();
+    claimAck(marketKernel, { grants: [{
+        ok: true, characterId: 40, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'market-lease', leaseUntil: now + 30000
+    }] });
+    await marketKernel.resolveChain;
+    marketKernel.flush(null, true);
+    const marketProposal = marketMessages.find((entry) => entry.type === 'proposal_batch').payload.proposals[0];
+    assert.deepStrictEqual(marketProposal.market.reprices, [{ recordId: 5, lineId: 6, selfId: 1864, price: 990,
+        pricing: { seenCounter: 3, seenAt: now } }]);
+    assert.strictEqual(marketProposal.market.updates, undefined, 'unchanged quotes send no metadata update');
+    assert.strictEqual(marketProposal.nextState.stats.priceBeliefs, undefined, 'line knowledge does not ride in bot stats');
+    assert.strictEqual(marketKernel.beginCommand(40, 'market_review'), null, 'board review command kind is retired');
+    marketKernel.lookSeen.set(40, new Map([[6, { deals: 3, at: now }]]));
+    marketKernel.fence(40);
+    assert.strictEqual(marketKernel.lookSeen.has(40), false, 'hot handoff deletes worker line observations');
+    marketKernel.upsert({ state: state(41), context: {} });
+    marketKernel.lookSeen.set(41, new Map([[7, { deals: 3, at: now }]]));
+    marketKernel.remove(41);
+    assert.strictEqual(marketKernel.lookSeen.has(41), false);
+    await marketKernel.shutdown();
+    assert.strictEqual(marketKernel.lookSeen.size, 0);
 
     console.log('Cold worker protocol, deterministic kernel, scheduling, and fence checks passed');
 })().catch((error) => {

@@ -6,6 +6,7 @@ async function restart(session, buffer) {
 
     invoke('GameServer/World/ArenaDuelService').release(session, 'restart');
     await session.persistCharacterStatus?.();
+    invoke('GameServer/World/World').retireUserActor(session, session.actor);
     if (session.actor) invoke('GameServer/Effects/EffectTicker').clearAll(session.actor);
     session.actor?.destructor();
 
@@ -13,7 +14,7 @@ async function restart(session, buffer) {
         ServerResponse.restart()
     );
 
-    Shared.fetchCharacters(session.accountId).then((characters) => {
+    return Shared.fetchCharacters(session.accountId).then((characters) => {
         Shared.enterCharacterHall(session, characters);
     });
 }

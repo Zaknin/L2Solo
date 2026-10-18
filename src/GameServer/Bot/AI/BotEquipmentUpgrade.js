@@ -4,6 +4,7 @@ const BotEquipmentCompatibility = invoke('GameServer/Bot/AI/BotEquipmentCompatib
 const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const ArmorPolicy = invoke('GameServer/Bot/AI/BotArmorPolicy');
+const { gradeForLevel } = invoke('GameServer/Bot/AI/GearGradeRule');
 
 const ARMOR_SLOTS = {
     earringRight: 1,
@@ -30,16 +31,6 @@ function isBotSession(session) {
         session.constructor.name === 'BotSession' ||
         String(session.accountId || '').startsWith('bot_')
     );
-}
-
-function gradeForLevel(level) {
-    const value = Number(level || 1);
-    if (value >= 76) return 's';
-    if (value >= 61) return 'a';
-    if (value >= 52) return 'b';
-    if (value >= 40) return 'c';
-    if (value >= 20) return 'd';
-    return 'none';
 }
 
 function rankAllowed(item, actor) {
@@ -261,9 +252,18 @@ function bestUpgradeSlot(actor, item, plannedScores) {
     }, null)?.slot || null;
 }
 
+// A worn item is never hidden; an unworn one reserved as a luxury-exchange
+// material must stay in the backpack for the exchange.
+function isReservedExchangeMaterial(session, item) {
+    if (item.fetchEquipped()) return false;
+    const plan = session?.coldLifeState?.stats?.equipmentPlan;
+    return plan?.strategy === 'luxury_exchange'
+        && Boolean(plan.materials?.some(row => Number(row.selfId) === Number(item.fetchSelfId())));
+}
+
 function findBestUpgrades(session) {
     const actor = session?.actor;
-    const items = actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : [];
+    const items = (actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : []).filter(item => !isReservedExchangeMaterial(session, item));
     const suitableItems = items.filter((item) => isSuitableItem(actor, item));
     const torsoUpgrades = findTorsoUpgrades(actor, suitableItems);
     const plannedScores = new Map();
@@ -320,6 +320,7 @@ function safeCandidate(session, itemId) {
     const items = actor?.backpack?.fetchItems ? actor.backpack.fetchItems() : [];
     const item = items.find((candidate) => Number(candidate.fetchId?.()) === Number(itemId || 0));
     if (!item) return { item: null, slot: null, reason: 'item_not_found' };
+    if (isReservedExchangeMaterial(session, item)) return { item, slot: null, reason: 'reserved_exchange_material' };
     if (!isSuitableItem(actor, item)) return { item, slot: null, reason: 'incompatible_item' };
     if (ArmorPolicy.ARMOR_SLOTS.has(Number(item.fetchSlot()))
         && ArmorPolicy.completeSets(items.filter(candidate => isSuitableItem(actor,candidate,true))).length) {
@@ -361,7 +362,7 @@ function refreshAfterEquipment(session, upgrades) {
         session.dataSendToMe(ServerResponse.itemsList(actor.backpack.fetchItems()));
     }
 
-    console.info(
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
         "BotGear :: %s equipped upgrades: %s",
         actor.fetchName(),
         upgrades.map(({ item }) => item.fetchName()).join(', ')

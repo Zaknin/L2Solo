@@ -1,14 +1,23 @@
 const ClanMembershipPolicy = require('../../Clan/ClanMembershipPolicy');
 const LifeStateCache = require('./LifeStateCache');
+const CharacterLocationRuntime = require('../../World/CharacterLocationRuntime');
+const RefreshPartyMemberships = require('../../World/PartyMembershipPublication');
+const ShopPlaces = require('../Economy/ShopPlaces');
+const { isMainThread } = require('node:worker_threads');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
+const { CLIENT_VISIBILITY_RADIUS } = invoke('GameServer/World/WorldConstants');
 const Metrics  = invoke('GameServer/Bot/Population/PopulationMetrics');
 const DataCache = invoke('GameServer/DataCache');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Consumption = require('../Economy/ConsumptionDiagnostics');
+const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
+const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
+const NativeWriteCheckpoint = require('./NativeWriteCheckpoint');
 
 const TABLE = 'bot_life_state';
 const GearSkillHints = invoke('GameServer/Bot/AI/GearSkillHints');
@@ -21,17 +30,51 @@ const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const ProgressionCap = invoke('GameServer/Progression/ProgressionCap');
-const cache = new LifeStateCache();
+const workerProjectorRole = CharacterLocationRuntime.workerProjectorRole();
+const cache = new LifeStateCache({ locationIndex: CharacterLocationRuntime.index, workerProjectorRole });
+const marketCounts = new Map();
 
 function recentLimit(limit) {
     return Math.max(1, Math.min(2000, Number(limit) || 500));
 }
 const pendingWrites = new Map();
 const changeListeners = new Set();
+const marketReviewListeners = new Set();
+// Pending ids only: each initial/new cold cache entry is examined once.
+const classMigrationCandidates = new Map();
+const classMigrationListeners = new Set();
+function notifyClassMigrationPending() {
+    for (const listener of classMigrationListeners) listener(classMigrationCandidates.size);
+}
+cache.subscribePublications(({ characterId, state, previousState }) => {
+    if (workerProjectorRole) return;
+    const id = Number(characterId);
+    if (state?.phase !== 'cold') {
+        if (classMigrationCandidates.delete(id)) notifyClassMigrationPending();
+        return;
+    }
+    if (previousState?.phase === 'cold') return;
+    if (classProgressionNeeded(state, Number(state.stats?.classId || 0), Number(state.level || 1))) {
+        classMigrationCandidates.set(id, Number(state.updatedAt || 0));
+        notifyClassMigrationPending();
+    }
+});
 let initialized = false;
 let initStarted = false;
 let initPromise = null;
 let marketGoalCursor = { updatedAt: 0, characterId: 0 };
+
+function notifyMarketReviewState(state, previous) {
+    if (!state?.characterId) return;
+    const left = previous?.simulation || {};
+    const right = state.simulation || {};
+    if (previous?.phase === state.phase && left.ownerId === right.ownerId
+        && left.revision === right.revision && left.leaseId === right.leaseId) return;
+    for (const listener of marketReviewListeners) {
+        try { listener(state.characterId); }
+        catch (error) { utils.infoWarn('BotLife', 'market lifecycle listener failed: %s', error.message); }
+    }
+}
 
 function isCriticalSnapshotReason(reason = '', state = null) {
     if (state?.activity === 'dead') return true;
@@ -77,6 +120,7 @@ function hasStaleRateModelPlan(state) {
 function safeJson(value) {
     return JSON.stringify(value || {});
 }
+function statsJson(value) { return safeJson(require('../SavedStats').compact(value)); }
 
 function parseJson(raw, fallback = {}) {
     if (!raw) return fallback;
@@ -130,10 +174,17 @@ function itemStackable(selfId, item = {}) {
 }
 
 function normalizeInventoryStackability(inventory = {}) {
-    return Object.fromEntries(Object.entries(InventorySummary.canonicalize(inventory)).map(([key, item]) => {
+    const normalizedInventory = Object.fromEntries(Object.entries(inventory || {}).map(([key, item]) => {
+        if (!item) return [key, item];
         const selfId = Number(item?.selfId || key);
-        return [key, { ...(item || {}), stackable: itemStackable(selfId, item) }];
+        const normalized = { ...(item || {}), stackable: itemStackable(selfId, item) };
+        // A formerly non-stackable type (dyes, recipes) now has one physical
+        // stack. Old per-copy identities must not keep counting as bag slots.
+        if (normalized.stackable) delete normalized.instances;
+        return [key, normalized];
     }));
+    // Repair legacy flags before completion can expand a count into copies.
+    return InventorySummary.canonicalize(normalizedInventory);
 }
 
 function inventorySummaryFromItems(items = []) {
@@ -237,7 +288,7 @@ function equipmentTargetFulfilled(stats = {}, inventory = {}) {
 }
 
 function reconcileFulfilledEquipmentPlan(state = {}) {
-    const progress = require('../AI/EquipmentAcquisitionProgress');
+    const progress = invoke('GameServer/Bot/AI/EquipmentAcquisitionProgress');
     const plan = state.stats?.equipmentPlan;
     if (plan?.clanGoal?.goalKey && progress.componentAcquired(state, plan)) {
         state = { ...state, stats: { ...state.stats, clanEquipmentAcquisition: {
@@ -247,6 +298,11 @@ function reconcileFulfilledEquipmentPlan(state = {}) {
     }
     if (!equipmentTargetFulfilled(state.stats, state.inventory)) return state;
     const stats = { ...(state.stats || {}) };
+    if (Number(stats.marketWanted?.itemId || 0) === Number(plan?.target?.selfId || 0)) {
+        stats.marketWanted = null;
+        stats.marketRetryAfter = null;
+        stats.marketLead = null;
+    }
     delete stats.equipmentPlan;
     delete stats.partyRequest;
     delete stats.clanPartyObjective;
@@ -292,7 +348,7 @@ function equipmentCompletionSignal(state = {}) {
     const clanGoal = state.stats?.equipmentPlan?.clanGoal;
     if (!clanGoal?.clanId || !clanGoal?.goalKey) return null;
     if (!equipmentTargetFulfilled(state.stats, state.inventory)
-        && !require('../AI/EquipmentAcquisitionProgress').componentAcquired(state)) return null;
+        && !invoke('GameServer/Bot/AI/EquipmentAcquisitionProgress').componentAcquired(state)) return null;
     return {
         clanId: Number(clanGoal.clanId),
         goalKey: String(clanGoal.goalKey)
@@ -342,6 +398,18 @@ function hasIncompatibleShield(state = {}) {
     return incompatiblePlan || incompatibleEquippedShield;
 }
 
+function hasConflictingWeapons(state = {}) {
+    let weapons = 0;
+    for (const item of Object.values(state.inventory || {})) {
+        const template = itemTemplate(item?.selfId);
+        if (!String(template?.template?.kind || item?.kind || '').startsWith('Weapon.')) continue;
+        weapons += GearAcquisitionPlanner.equippedSlotsFor(item, template?.etc?.slot || item.slot)
+            .filter((slot) => slot === 7 || slot === 14).length;
+        if (weapons > 1) return true;
+    }
+    return false;
+}
+
 function reconcileIncompatibleShieldState(state = {}) {
     const reconciledEquipment = reconcileEquipmentInventory(state);
     const stats = { ...(reconciledEquipment.stats || {}) };
@@ -368,10 +436,14 @@ function marketPurchaseBlocker(state = {}, offer = {}, qty = 1) {
     const combinationAmount = (state.stats?.equipmentPlan?.combine?.requirements || [])
         .filter((requirement) => Number(requirement.selfId) === selfId)
         .reduce((sum, requirement) => sum + Number(requirement.amount || 0), 0);
-    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount);
+    const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+    const crystalWorn = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(state.inventory?.[String(selfId)] || {}, slot).length : 0;
+    const capacity = Math.max([1, 2, 4, 5].includes(slot) ? 2 : 1, combinationAmount, crystalInput + crystalWorn);
     const owned = Math.max(0, Number(state.inventory?.[String(selfId)]?.amount || 0));
     if (owned + count > capacity) return 'already_owned';
-    if (slot === 8 && hasEquippedTwoHandedWeapon(state)) return 'incompatible_loadout';
+    const loadout = template.etc?.rank === 'c' && Number(state.level) < 40
+        ? invoke('GameServer/Bot/AI/PersonalGearProgression').preparation(state) || state : state;
+    if (!crystalInput && slot === 8 && hasEquippedTwoHandedWeapon(loadout)) return 'incompatible_loadout';
     return null;
 }
 
@@ -385,11 +457,22 @@ function refreshCraftShop(state = {}) {
     };
 }
 
-function syncInventorySummary(characterId, inventory) {
-    return Database.syncInventorySummary(characterId, inventory);
+// reason names the action for the economy journal.
+function syncInventorySummary(characterId, inventory, reason = null, options) {
+    return Database.syncInventorySummary(characterId, inventory, reason, options);
+}
+
+// A town trip is paid when it starts (a Scroll of Escape, a gatekeeper fee:
+// ColdTrip.toTown debits the stored inventory); its items follow the first
+// time the trip is written.
+function syncNewTripPayment(state, previous) {
+    const travel = state?.stats?.travel;
+    if (!travel?.paid || Number(previous?.stats?.travel?.startedAt) === Number(travel.startedAt)) return Promise.resolve();
+    return syncInventorySummary(state.characterId, state.inventory || {}, 'trip_payment');
 }
 
 function targetCombatTelemetry(previous = {}, debug = {}, timestamp = now()) {
+    if (debug?.targetOnSpot !== 1) return null;
     const targetNpcId = Number(debug?.targetNpcId || 0);
     if (targetNpcId <= 0) return null;
     const targetKey = String(targetNpcId);
@@ -430,6 +513,7 @@ function targetCombatTelemetry(previous = {}, debug = {}, timestamp = now()) {
 }
 
 function compactResolveDebug(debug = {}) {
+    if (Config.developerDiagnostics !== true) return null;
     return {
         route: debug.route || null,
         partyId: debug.partyId || null,
@@ -443,6 +527,8 @@ function compactResolveDebug(debug = {}) {
 
 function normalize(row) {
     const stats = parseJson(row.statsJson, {});
+    delete stats.marketTrades;
+    delete stats.priceBeliefs;
     const inventory = normalizeInventoryStackability(parseJson(row.inventorySummary, {}));
 
     return ClanMembershipPolicy.reconcileState({
@@ -482,7 +568,10 @@ function normalize(row) {
             leaderId: stats.leaderId || null
         },
         stats,
+        marketTrades: marketCounts.get(Number(row.characterId)) || {},
         inventory,
+        ...(row.acceptedIncoming === undefined ? {} : { acceptedIncoming: row.acceptedIncoming || {} }),
+        ...(row.incomingPending ? { incomingPending: true } : {}),
         simulation: {
             ownerId: row.simulationOwner || 'legacy_main',
             revision: Math.max(0, Number(row.simulationRevision || 0)),
@@ -491,6 +580,30 @@ function normalize(row) {
         },
         updatedAt: Number(row.updatedAt || 0)
     });
+}
+
+// A market purchase that failed after its save writes the bot's state from
+// before it back (applyMarketPurchase's own compensation; NPC and configured
+// merchant purchases only, board deals are one transaction).
+function rewriteMarketState(state, reason) {
+    if (!state?.characterId || !state.inventory) return Promise.resolve(null);
+    const nextState = {
+        ...state,
+        stats: { ...(state.stats || {}), lastReason: reason },
+        updatedAt: now()
+    };
+    const row = rowFromState(nextState);
+    return save(row)
+        .then(() => syncInventorySummary(row.characterId, nextState.inventory, 'market_restore'))
+        .then(() => {
+            const snapshot = normalize(row);
+            cache.set(snapshot.characterId, snapshot);
+            notifyColdSnapshot(snapshot, 'market_sale', { critical: true });
+            return snapshot;
+        }).catch((error) => {
+            utils.infoWarn('BotLife', 'failed market rollback for %s: %s', state.name, error?.message || String(error));
+            return null;
+        });
 }
 
 function recordFromSession(session, phase, reason = '') {
@@ -502,6 +615,12 @@ function recordFromSession(session, phase, reason = '') {
     const characterId = Number(actor.fetchId());
     const inventory = inventorySummaryFromItems(actor.backpack?.fetchItems ? actor.backpack.fetchItems() : []);
     const stats = {
+        tradeMeeting: cache.get(characterId)?.stats?.tradeMeeting || null,
+        ...Object.fromEntries(['playedHours', 'economyClock', 'frustration', 'lifelongKills', 'peoplePoints'].map(key => [key, session.coldLifeState?.stats?.[key] ?? cache.get(characterId)?.stats?.[key] ?? 0])),
+        peopleEpisode: session.coldLifeState?.stats?.peopleEpisode ?? cache.get(characterId)?.stats?.peopleEpisode ?? null,
+        ...(session.peopleKnowledge || {}),
+        playedHours: invoke('GameServer/Social/RelationshipContext').playedHours(session, timestamp),
+        pk: Number(actor.fetchPk?.() || 0),
         role: session.botStatus?.role || null,
         deathExperience: actor.deathExperience ? { ...actor.deathExperience } : null,
         karma: Number(actor.fetchKarma?.() || 0),
@@ -535,10 +654,14 @@ function recordFromSession(session, phase, reason = '') {
         // The resolver rebuilds those values deterministically after effects
         // expire, rather than retaining a stale buffed total indefinitely.
         coldCombat: ColdCombatProfile.capture(actor, timestamp),
+        hennas: [...(session.hennas || [])],
+        soulCrystalQuest: session.questStates?.get(350)?.isStarted() === true,
         leaderId: session.followPlayerSession?.actor?.fetchId ? Number(session.followPlayerSession.actor.fetchId()) : null,
         supplyErrand: session.companionShopping?.kind === 'player_resource_purchase'
             ? {
                 workflowId: session.companionShopping.workflowId || null,
+                meetingToken: typeof session.companionShopping.meetingToken === 'string'
+                    && session.companionShopping.meetingToken.length <= 80 ? session.companionShopping.meetingToken : null,
                 itemSelfId: Number(session.companionShopping.itemId || 0) || null,
                 amount: Number(session.companionShopping.amount || 0) || null,
                 phase: session.supplyErrandPhase || 'cold',
@@ -578,7 +701,7 @@ function recordFromSession(session, phase, reason = '') {
         deathCount: 0,
         partyId: null,
         inventorySummary: safeJson(inventory),
-        statsJson: safeJson(stats),
+        statsJson: statsJson(stats),
         updatedAt: timestamp
     };
 }
@@ -619,7 +742,7 @@ function rowFromState(state) {
         deathCount: persistedState.stats?.deaths || 0,
         partyId: persistedState.party?.partyId || null,
         inventorySummary: safeJson(persistedState.inventory || {}),
-        statsJson: safeJson(persistedState.stats || {}),
+        statsJson: statsJson(persistedState.stats || {}),
         // Legacy lifecycle writes are fenced in SQLite by simulationOwner, but
         // `save()` intentionally does not rewrite the ownership columns. Keep
         // the authoritative ownership snapshot on the transient row as well,
@@ -651,8 +774,34 @@ function preserveVersionedAppearanceForSave(row) {
     return row;
 }
 
-function save(row) {
-    const proposed = { activity: row.activity, stats: parseJson(row.statsJson, {}) };
+// The session's own snapshots carry the phase of its row: after markHot what
+// the actor writes from them (a hot merchant's sale, its haggling) keeps the
+// row hot, while a cold job's older snapshot is still rejected by save(); after
+// the hand-back a late write that copies the phase from them stays cold.
+function setSessionSnapshotsPhase(session, phase) {
+    for (const key of ['coldLifeState', 'coldMarketState', 'coldCraftState']) {
+        if (session?.[key]) session[key] = { ...session[key], phase };
+    }
+    RefreshPartyMemberships([session], invoke);
+}
+
+function save(row, options = {}) {
+    // ARCH-NOTE: strip retired counters even when an old caller supplies them on a new row.
+    const proposedStats = parseJson(row.statsJson, {});
+    if (proposedStats.marketTrades || proposedStats.priceBeliefs) {
+        delete proposedStats.marketTrades;
+        delete proposedStats.priceBeliefs;
+        row.statsJson = safeJson(proposedStats);
+    }
+    // A hot row belongs to the actor in the world; only markCold hands it back
+    // to the cold population. A cold row proposed over it comes from a job that
+    // started while the bot was cold: reject it like the stale writers below.
+    if (cache.get(Number(row.characterId))?.phase === 'hot' && row.phase !== 'hot' && options.releaseHot !== true) {
+        const error = new Error(`stale cold state over the hot row of ${row.characterId}`);
+        error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
+        return Promise.reject(error);
+    }
+    const proposed = { activity: row.activity, stats: proposedStats };
     const reconciled = ClanMembershipPolicy.reconcileState(ClanMembershipPolicy.preserveGoalInvalidation(
         proposed, cache.get(Number(row.characterId))?.stats));
     if (reconciled !== proposed) {
@@ -681,7 +830,9 @@ function save(row) {
         row.characterName = current.name;
         row.statsJson = safeJson({ ...incomingStats, nameGeneratorVersion: current.stats.nameGeneratorVersion });
     }
-    return Database.execute([
+    const beforeWrite = Object.getOwnPropertyDescriptor(options, 'beforeWrite');
+    const databaseOptions = beforeWrite ? Object.defineProperty({}, 'beforeWrite', beforeWrite) : undefined;
+    const statement = [
         `INSERT INTO ${TABLE} (
             characterId, accountName, characterName, level, exp, sp, adena, homeRegion, currentRegion,
             spotId, activity, phase, activityStartedAt, nextResolveAt,
@@ -715,7 +866,17 @@ function save(row) {
             deathCount = excluded.deathCount,
             partyId = excluded.partyId,
             inventorySummary = excluded.inventorySummary,
-            statsJson = excluded.statsJson,
+            -- Native takeover/release/restore owns player membership. A late
+            -- actor snapshot cannot revive or remove that ownership marker.
+            statsJson = json_set(json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
+                THEN json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs', '$.economyCommit')
+                ELSE json_set(json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs'),
+                    '$.economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')) END, '$.playerPartyTakeover'),
+                json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
+                '$.hennas', json_array(
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
+                    (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 3))),
             updatedAt = excluded.updatedAt
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
@@ -755,7 +916,9 @@ function save(row) {
             row.statsJson,
             row.updatedAt
         ]
-    ]).then((result) => {
+    ];
+    NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
+    return Database.saveBotLifeState(statement, databaseOptions, row.characterId).then((result) => {
         if (result && typeof result.affectedRows === 'number' && result.affectedRows !== 1) {
             const error = new Error(`bot life state ownership conflict for ${row.characterId}`);
             error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
@@ -763,19 +926,62 @@ function save(row) {
             throw error;
         }
         Metrics.recordDbFlush();
+        row.statsJson = result.statsJson;
+        // The UPSERT preserves native ownership columns. A retained session
+        // may carry an older revision, so publish the same queued ROW's actual
+        // ownership rather than rewinding cache authority after a valid save.
+        for (const key of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
+            if (Object.prototype.hasOwnProperty.call(result, key)) row[key] = result[key];
+        }
         return enqueueEquipmentGoalAdvance(row.equipmentAdvance).then(() => result);
     });
 }
 
 function hydrateCache() {
     return Database.execute([
-        `SELECT * FROM ${TABLE}`,
+        `SELECT states.*, (SELECT spotId FROM bot_background_parties party
+            WHERE party.partyId = states.partyId AND party.status IN ('active', 'hot')) AS nativePartySpotId,
+            (SELECT json_group_array(json_object('slot', slot, 'symbolId', symbolId))
+            FROM character_hennas WHERE characterId = states.characterId) AS nativeHennas,
+            EXISTS(SELECT 1 FROM character_quests WHERE characterId = states.characterId AND questId = 350 AND state = 'started') AS nativeCrystalQuest,
+            CASE WHEN COALESCE(json_extract(states.statsJson, '$.coldCombat.skillSource'), '') NOT IN ('hot', 'database')
+                OR (json_extract(states.statsJson, '$.coldCombat.skillSource') = 'database'
+                    AND COALESCE(json_extract(states.statsJson, '$.coldCombat.version'), 0) < ${ColdCombatProfile.PROFILE_VERSION})
+                THEN (SELECT json_group_array(json_object('selfId', selfId, 'level', level))
+                    FROM skills WHERE characterId = states.characterId) END AS nativeLearnedSkills
+            FROM ${TABLE} states`,
         []
-    ]).then((rows) => {
-        rows.forEach((row) => {
-            const state = normalize(row);
+    ]).then(async (rows) => {
+        for (const row of rows) {
+            let state = normalize(row);
+            // Persist the old party's destination before a claim can reload
+            // its row. This uses the existing one-time startup repair pass.
+            const partySpotRepair = row.nativePartySpotId && state.stats.backgroundPartySpotId !== row.nativePartySpotId;
+            if (row.nativePartySpotId) state.stats.backgroundPartySpotId = row.nativePartySpotId;
+            const storedHennas = state.stats.hennas;
+            state.stats.hennas = [null,null,null];
+            for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
+            const hennaRepair = JSON.stringify(storedHennas) !== JSON.stringify(state.stats.hennas);
+            if (row.nativeLearnedSkills != null) {
+                state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, parseJson(row.nativeLearnedSkills, []), now());
+            }
+            if (row.nativeLearnedSkills != null || hennaRepair || partySpotRepair) {
+                // Startup repair precedes cache publication and worker reads.
+                // Use the existing guarded save; do not learn/spend here.
+                if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
+                    const repaired = rowFromState(state);
+                    await save(repaired);
+                    state = normalize(repaired);
+                }
+            }
+            delete row.nativeLearnedSkills;
+            state.stats.soulCrystalQuest = !!row.nativeCrystalQuest;
             cache.set(state.characterId, state);
-        });
+            invoke('GameServer/Bot/Economy/CraftWorkshopService').register(state);
+        }
+        const ordered = [...classMigrationCandidates].sort((a, b) => a[1] - b[1]);
+        classMigrationCandidates.clear();
+        for (const [id, at] of ordered) classMigrationCandidates.set(id, at);
         return rows.length;
     });
 }
@@ -794,7 +1000,8 @@ function preserveStarterLootProvenance(previousInventory = {}, observedInventory
 function classProgressionNeeded(state, classId, level) {
     const knownLevel = Number(state.stats?.classProgressionLevel || 0);
     const knownClassId = Number(state.stats?.classProgressionClassId ?? state.stats?.classId);
-    return knownLevel < Number(level || 1) || knownClassId !== Number(classId);
+    return knownLevel < Number(level || 1) || knownClassId !== Number(classId)
+        || invoke('GameServer/Skills/SkillBookCatalog').needsTraining(state);
 }
 
 function refreshColdCombatProfile(state) {
@@ -852,7 +1059,8 @@ function applyClassProgression(state, profile = {}) {
             }
         };
         if (resolved.transitions?.length) delete progressedState.stats.equipmentPlan;
-        return refreshColdCombatProfile(reconcileEquipmentInventory(progressedState));
+        return refreshColdCombatProfile(reconcileEquipmentInventory(
+            invoke('GameServer/Skills/SkillBookCatalog').applyTraining(progressedState, resolved)));
     });
 }
 
@@ -983,20 +1191,8 @@ function mergeSessionIntoLifeState(session, state, phase, reason = '', options =
 // A stale cold snapshot can retain the previous hunting region while its
 // physical coordinate is still on the Giran trading square.  Coordinates are
 // authoritative here: currentRegion is plan context, not a location proof.
-const GIRAN_MARKET_PLAZA = Object.freeze({
-    minX: 80911,
-    // Public stations and the north-east edge of the actual trading square
-    // extend beyond the conservative stall-placement rectangle.
-    maxX: 83750,
-    minY: 147662,
-    maxY: 149550
-});
-
 function isOnGiranMarketPlaza(loc = {}) {
-    return Number(loc.locX) >= GIRAN_MARKET_PLAZA.minX
-        && Number(loc.locX) <= GIRAN_MARKET_PLAZA.maxX
-        && Number(loc.locY) >= GIRAN_MARKET_PLAZA.minY
-        && Number(loc.locY) <= GIRAN_MARKET_PLAZA.maxY;
+    return ShopPlaces.isOnSquare('Giran', loc);
 }
 
 function shouldRecoverOrphanedGiranState(state = {}) {
@@ -1180,11 +1376,21 @@ function clearPassivePartyRequests() {
     });
 }
 
+// RETURNING couples publication to the rows actually changed, including native
+// revisions. A claim already in transit must fail its old revision even before
+// the critical snapshot reaches the worker.
+function publishDeferredPartyRequests(rows) {
+    for (const row of rows) {
+        const snapshot = module.exports.acceptNewerLifecycleRow(row);
+        if (snapshot) notifyColdSnapshot(snapshot, 'party_request_deferred', { critical: true });
+    }
+}
+
 function expireStalePartyRequests(limit = 0) {
     const timestamp = now();
-    const requiredMaxAge = Math.max(30000, Number(Config.partyRequestMaxAgeMs) || 15 * 60 * 1000);
-    const preferredMaxAge = Math.max(30000, Number(Config.partyPreferredMaxAgeMs) || 5 * 60 * 1000);
-    const cooldownMs = Math.max(30000, Number(Config.partyRequestCooldownMs) || 5 * 60 * 1000);
+    const requiredMaxAge = PartyRequestPlanner.maxAgeMs('required');
+    const preferredMaxAge = PartyRequestPlanner.maxAgeMs('preferred');
+    const cooldownMs = PartyRequestPlanner.cooldownMs();
     // Spread the next eligible formation attempts over at most two minutes so
     // a restart cannot turn one historical queue into a new SQLite spike.
     const staggerMs = Math.min(120000, Math.max(0, Math.floor(cooldownMs / 2)));
@@ -1212,8 +1418,9 @@ function expireStalePartyRequests(limit = 0) {
                 '$.partyRequest.expiredAt', ?,
                 '$.partyRequest.attempts', COALESCE(CAST(json_extract(statsJson, '$.partyRequest.attempts') AS INTEGER), 0) + 1
             ),
+            simulationRevision = COALESCE(simulationRevision, 0) + 1,
             updatedAt = ?
-        WHERE ${target}`;
+        WHERE ${target} RETURNING *`;
     const params = [
         timestamp + cooldownMs,
         Math.max(1, staggerMs),
@@ -1224,47 +1431,21 @@ function expireStalePartyRequests(limit = 0) {
     ];
     const staleParams = [timestamp - preferredMaxAge, timestamp - requiredMaxAge];
     const selectStale = () => Database.execute([
-        `SELECT characterId, statsJson FROM ${TABLE} WHERE ${target}`,
+        `SELECT characterId FROM ${TABLE} WHERE ${target}`,
         staleParams
     ]);
-    const updateCache = (rows) => {
-        (rows || []).forEach((row) => {
-            const characterId = Number(row.characterId || 0);
-            const cached = cache.get(characterId);
-            if (!cached) return;
-            const request = parseJson(row.statsJson, {}).partyRequest;
-            if (request?.status !== 'open') return;
-            if (cached.stats?.partyRequest?.status !== 'open') return;
-            cache.set(characterId, {
-                ...cached,
-                updatedAt: timestamp,
-                stats: {
-                    ...(cached.stats || {}),
-                    partyRequest: {
-                        ...request,
-                        status: 'deferred',
-                        deferredUntil: timestamp + cooldownMs + (Math.abs(characterId) % Math.max(1, staggerMs)),
-                        expiredAt: timestamp,
-                        attempts: Number(request.attempts || 0) + 1
-                    }
-                }
-            });
-        });
-    };
     const waitForPending = (rows) => Promise.all((rows || [])
         .map((row) => pendingWrites.get(Number(row.characterId || 0)))
         .filter(Boolean)
         .map((pending) => pending.catch(() => null)));
     return selectStale()
-        .then((rows) => waitForPending(rows).then(() => selectStale()))
-        .then((rows) => Database.execute([sql, params]).then((result) => {
-            if (Number(result?.affectedRows || 0) > 0) updateCache(rows);
-            const expired = Number(result?.affectedRows || 0);
-            if (expired > 0) {
-                utils.infoWarn('BotLife', 'deferred %d stale party requests', expired);
-            }
-            return expired;
-        }));
+        .then(waitForPending)
+        .then(() => Database.execute([sql, params, { read: true }]))
+        .then((rows) => {
+            publishDeferredPartyRequests(rows);
+            if (rows.length) utils.infoWarn('BotLife', 'deferred %d stale party requests', rows.length);
+            return rows.length;
+        });
 }
 
 function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible_level_match') {
@@ -1272,7 +1453,7 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
     if (!ids.length) return Promise.resolve(0);
 
     const timestamp = now();
-    const cooldownMs = Math.max(30000, Number(Config.partyRequestCooldownMs) || 5 * 60 * 1000);
+    const cooldownMs = PartyRequestPlanner.cooldownMs();
     const staggerMs = Math.min(120000, Math.max(0, Math.floor(cooldownMs / 2)));
     const placeholders = ids.map(() => '?').join(', ');
     const selection = `characterId IN (${placeholders})
@@ -1283,7 +1464,7 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
         AND partyRequestStatus = 'open'
         AND partyRequestPriority = 'required'`;
     const selectCurrent = () => Database.execute([
-        `SELECT characterId, statsJson FROM ${TABLE} WHERE ${selection}`,
+        `SELECT characterId FROM ${TABLE} WHERE ${selection}`,
         ids
     ]);
     const waitForPending = (rows) => Promise.all((rows || [])
@@ -1299,8 +1480,9 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
                 '$.partyRequest.attempts', COALESCE(CAST(json_extract(statsJson, '$.partyRequest.attempts') AS INTEGER), 0) + 1,
                 '$.partyRequest.lastReason', ?
             ),
+            simulationRevision = COALESCE(simulationRevision, 0) + 1,
             updatedAt = ?
-        WHERE ${selection}`;
+        WHERE ${selection} RETURNING *`;
     const params = [
         timestamp + cooldownMs,
         Math.max(1, staggerMs),
@@ -1309,45 +1491,22 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
         timestamp,
         ...ids
     ];
-    const updateCache = (rows) => {
-        (rows || []).forEach((row) => {
-            const characterId = Number(row.characterId || 0);
-            const cached = cache.get(characterId);
-            if (!cached) return;
-            const request = parseJson(row.statsJson, {}).partyRequest;
-            if (request?.status !== 'open' || request.priority !== 'required') return;
-            cache.set(characterId, {
-                ...cached,
-                updatedAt: timestamp,
-                stats: {
-                    ...(cached.stats || {}),
-                    partyRequest: {
-                        ...request,
-                        status: 'deferred',
-                        deferredUntil: timestamp + cooldownMs + (Math.abs(characterId) % Math.max(1, staggerMs)),
-                        expiredAt: timestamp,
-                        attempts: Number(request.attempts || 0) + 1,
-                        lastReason: String(reason || 'no_compatible_level_match')
-                    }
-                }
-            });
-        });
-    };
-
     return selectCurrent()
-        .then((rows) => waitForPending(rows).then(() => selectCurrent()))
-        .then((rows) => Database.execute([sql, params]).then((result) => {
-            const deferred = Number(result?.affectedRows || 0);
-            if (deferred > 0) {
-                updateCache(rows);
-                utils.infoWarn('BotLife', 'deferred %d unformable party requests reason=%s', deferred, String(reason || 'unknown'));
-            }
-            return deferred;
-        }));
+        .then(waitForPending)
+        .then(() => Database.execute([sql, params, { read: true }]))
+        .then((rows) => {
+            publishDeferredPartyRequests(rows);
+            if (rows.length) utils.infoWarn('BotLife', 'deferred %d unformable party requests reason=%s', rows.length, String(reason || 'unknown'));
+            return rows.length;
+        });
 }
 
 function discardInvalidEquipmentPlans() {
     const timestamp = now();
+    // Wish-network plans persist identity and slot, not redundant catalog
+    // labels. A missing saved name must not erase a valid goal and its inputs.
+    const validTargets = (DataCache.items || []).filter(GearAcquisitionPlanner.isRealCatalogItem)
+        .map(item => Number(item.selfId));
     return Database.execute([
         `UPDATE ${TABLE}
         SET statsJson = json_remove(COALESCE(statsJson, '{}'), '$.equipmentPlan', '$.partyRequest', '$.clanPartyObjective'),
@@ -1355,7 +1514,6 @@ function discardInvalidEquipmentPlans() {
         WHERE json_extract(statsJson, '$.equipmentPlan.target') IS NOT NULL
         AND (
             COALESCE(CAST(json_extract(statsJson, '$.equipmentPlan.target.selfId') AS INTEGER), 0) <= 0
-            OR TRIM(COALESCE(json_extract(statsJson, '$.equipmentPlan.target.name'), '')) IN ('', '0')
             OR (
                 json_extract(statsJson, '$.equipmentPlan.status') = 'active'
                 AND json_extract(statsJson, '$.equipmentPlan.expectedKills') IS NOT NULL
@@ -1365,8 +1523,10 @@ function discardInvalidEquipmentPlans() {
                     OR COALESCE(CAST(json_extract(statsJson, '$.equipmentPlan.clanGoal.clanId') AS INTEGER), 0) > 0
                 )
             )
+            OR CAST(json_extract(statsJson, '$.equipmentPlan.target.selfId') AS INTEGER)
+                NOT IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
         )`,
-        [timestamp, GearAcquisitionPlanner.RATE_MODEL_VERSION]
+        [timestamp, GearAcquisitionPlanner.RATE_MODEL_VERSION, JSON.stringify(validTargets)]
     ]).then((result) => {
         const discarded = Number(result?.affectedRows || 0);
         if (discarded > 0) {
@@ -1422,40 +1582,59 @@ function discardFulfilledEquipmentPlans() {
     });
 }
 
-function reconcileIncompatibleShields() {
-    const affected = [...cache.values()].filter(hasIncompatibleShield);
+function reconcilePersistedLoadouts() {
+    // Startup runs before workers/actors publish: repair legacy hand conflicts
+    // through the same class-aware optimizer used by normal cold equipment.
+    const affected = [...cache.values()].filter((state) => hasIncompatibleShield(state) || hasConflictingWeapons(state));
     let reconciledCount = 0;
     return affected.reduce((chain, state) => chain.then(() => {
         const reconciled = reconcileIncompatibleShieldState(state);
         const row = rowFromState(reconciled);
         return save(row)
-            .then(() => syncInventorySummary(row.characterId, reconciled.inventory))
+            .then(() => syncInventorySummary(row.characterId, reconciled.inventory, 'loadout_reconcile'))
             .then(() => {
                 cache.set(row.characterId, normalize(row));
                 reconciledCount += 1;
             })
             .catch((err) => {
-                utils.infoWarn('BotLife', 'failed shield reconciliation for %d: %s', row.characterId, err.message);
+                utils.infoWarn('BotLife', 'failed loadout reconciliation for %d: %s', row.characterId, err.message);
             });
     }), Promise.resolve()).then(() => {
         if (reconciledCount > 0) {
-            utils.infoWarn('BotLife', 'reconciled %d incompatible persisted shield loadouts or plans on startup', reconciledCount);
+            utils.infoWarn('BotLife', 'reconciled %d conflicting persisted weapons or incompatible shield loadouts on startup', reconciledCount);
         }
         return reconciledCount;
     });
 }
 
 const BotLifeState = {
+    passiveWorkerStateSources(role) {
+        if (!workerProjectorRole || role !== workerProjectorRole || initialized || initStarted) {
+            throw new TypeError('invalid_worker_projector_role');
+        }
+        return cache.passiveWorkerStateSources(role);
+    },
+
     init() {
+        if (workerProjectorRole) return Promise.reject(new TypeError('worker_projector_lifecycle_init'));
         if (initialized) return Promise.resolve(true);
         if (initStarted) return initPromise;
         initStarted = true;
 
         initPromise = Database.execute(['SELECT 1', []], 'schema:bot-life')
+            .then(() => Database.fetchBotMarketCounts()).then((rows) => {
+                marketCounts.clear();
+                for (const row of rows) {
+                    const counts = marketCounts.get(Number(row.characterId)) || {};
+                    counts[row.counter] = Number(row.deals);
+                    marketCounts.set(Number(row.characterId), counts);
+                }
+            })
             // A process restart invalidates every in-process logical owner,
             // even when its wall-clock lease had time remaining. Reclaim the
             // rows before any legacy startup repair can touch them.
             .then(() => invoke('GameServer/Bot/Population/ColdSimulationOwner').recoverStartupLeases())
+            .then(() => invoke('GameServer/Clan/ClanSupplyPolicy').init())
             .then(() => Database.reconcileBotClanMembership()).then(({ repairedMembers, repairedParties }) => {
                 if (repairedMembers || repairedParties) {
                     utils.infoWarn('BotLife', 'reconciled clan membership and crafting goals: bots=%d parties=%d', repairedMembers, repairedParties);
@@ -1483,10 +1662,13 @@ const BotLifeState = {
                         locZ: row.locZ
                     }))
                     .then(() => {
-                        cache.set(state.characterId, state);
+                        // Publish the saved checkpoint, including its new
+                        // updatedAt. The pre-save state makes every native
+                        // worker command stale against the repaired SQL row.
+                        cache.set(state.characterId, normalize(row));
                     });
             }), Promise.resolve())
-                .then(() => reconcileIncompatibleShields())
+                .then(() => reconcilePersistedLoadouts())
                 .then(() => count);
         }).then((count) => {
             initialized = true;
@@ -1504,6 +1686,39 @@ const BotLifeState = {
         await Promise.all(ids.map(id => pendingWrites.get(Number(id)) || Promise.resolve()));
     },
 
+    releasePlayerPartyTakeover(session) {
+        const id = Number(session?.actor?.fetchId?.());
+        const takeover = session?.coldLifeState?.stats?.playerPartyTakeover
+            || cache.get(id)?.stats?.playerPartyTakeover;
+        if (!takeover?.playerId || session.partyCompanion || session.followPlayerSession) return Promise.resolve(null);
+        // Later hot/cold snapshots must not revive an ownership marker whose
+        // departure is already queued. Earlier writes settle before the patch.
+        for (const key of ['coldLifeState', 'coldMarketState', 'coldCraftState']) {
+            if (!session[key]?.stats?.playerPartyTakeover) continue;
+            const stats = { ...session[key].stats, leaderId: null };
+            delete stats.playerPartyTakeover;
+            session[key] = { ...session[key], stats };
+        }
+        const previous = pendingWrites.get(id) || Promise.resolve();
+        const next = previous.then(() => Database.releasePlayerPartyTakeover({
+            characterId: id, playerId: takeover.playerId, partyId: takeover.partyId,
+            isDetached: () => !session.partyCompanion && !session.followPlayerSession && !session.hotBackgroundPartyId
+        })).then((row) => {
+            if (!row) return null;
+            const snapshot = this.acceptLifecycleRow(row);
+            if (!session.partyCompanion && !session.followPlayerSession) session.coldLifeState = snapshot;
+            return snapshot;
+        }).catch((error) => {
+            utils.infoWarn('BotLife', 'failed to release player party for %s: %s', id, error.message);
+            return null;
+        });
+        const tracked = next.finally(() => {
+            if (pendingWrites.get(id) === tracked) pendingWrites.delete(id);
+        });
+        pendingWrites.set(id, tracked);
+        return next;
+    },
+
     // Accept a row another transaction wrote for this bot, unless the cache already
     // holds a newer cold revision of it.
     acceptNewerLifecycleRow(row) {
@@ -1516,9 +1731,71 @@ const BotLifeState = {
     acceptLifecycleRow(row) {
         const snapshot = normalize(row);
         const current = cache.get(snapshot.characterId);
+        if (Number(current?.simulation?.revision || 0) > Number(snapshot.simulation?.revision || 0)) return current;
+        if (row.acceptedIncoming === undefined && current?.acceptedIncoming) {
+            snapshot.acceptedIncoming = current.acceptedIncoming;
+            if (current.incomingPending) snapshot.incomingPending = true;
+        }
         if (Number(current?.stats?.clanLevelSpVersion || 0) > Number(snapshot.stats?.clanLevelSpVersion || 0)) return current;
         cache.set(snapshot.characterId, snapshot);
+        notifyMarketReviewState(snapshot, current);
+        if (snapshot.incomingPending !== current?.incomingPending || JSON.stringify(snapshot.acceptedIncoming) !== JSON.stringify(current?.acceptedIncoming || {}))
+            notifyColdSnapshot(snapshot, 'trade_incoming', { critical: true });
         invoke('GameServer/Clan/ClanService').syncColdMember(snapshot);
+        return snapshot;
+    },
+
+    // Warehouse transfers patch the physical projection repeatedly; their stats
+    // stay untouched until the one final metadata patch.
+    acceptInventoryProjection(row) {
+        const current = cache.get(Number(row?.characterId));
+        if (!current || !row?.inventoryPatch || current.phase !== row.phase
+            || current.simulation?.ownerId !== row.simulationOwner
+            || Number(current.simulation?.revision || 0) >= Number(row.simulationRevision)) return current || null;
+        const inventory = { ...current.inventory };
+        for (const [id, item] of Object.entries(row.inventoryPatch)) {
+            if (item) inventory[id] = item;
+            else delete inventory[id];
+        }
+        const snapshot = { ...current, inventory, adena: Number(row.adena),
+            ...(row.acceptedIncoming !== undefined ? { acceptedIncoming: row.acceptedIncoming || {} } : {}),
+            vitals: { ...current.vitals, mp: Number(row.mp) }, updatedAt: Number(row.updatedAt),
+            simulation: { ...current.simulation, revision: Number(row.simulationRevision) } };
+        if (row.acceptedIncoming !== undefined) {
+            if (row.incomingPending) snapshot.incomingPending = true;
+            else delete snapshot.incomingPending;
+        }
+        cache.set(snapshot.characterId, snapshot);
+        notifyMarketReviewState(snapshot, current);
+        invoke('GameServer/Clan/ClanService').syncColdMember(snapshot);
+        return snapshot;
+    },
+
+    acceptWarehouseWithdrawal(row) {
+        const current = cache.get(Number(row?.characterId));
+        if (!current) return null;
+        if (Number(current.stats?.lastWarehouseWithdrawal?.at || 0) > Number(row.withdrawal.at)) return current;
+        const newerTiming = Number(current.simulation?.revision || 0) > Number(row.simulationRevision)
+            || Number(current.updatedAt || 0) > Number(row.updatedAt);
+        const snapshot = { ...current, stats: { ...current.stats, lastWarehouseWithdrawal: row.withdrawal,
+            ...(row.market ? { marketSellRetryAfter: null } : {}) },
+            timing: newerTiming ? current.timing : { ...current.timing, nextResolveAt: row.nextResolveAt ? Number(row.nextResolveAt) : null } };
+        cache.set(snapshot.characterId, snapshot);
+        notifyColdSnapshot(snapshot, 'cold_warehouse_withdrawal');
+        return snapshot;
+    },
+
+    // A committed deal publishes only learning here. A cold worker keeps its
+    // inventory/lease; delayed postcommit handlers cannot rewind later counts.
+    acceptMarketTrades(characterId, counts) {
+        const id = Number(characterId);
+        const merged = { ...(marketCounts.get(id) || {}) };
+        for (const [key, value] of Object.entries(counts)) merged[key] = Math.max(Number(merged[key] || 0), Number(value));
+        marketCounts.set(id, merged);
+        const current = cache.get(id);
+        if (!current) return null;
+        const snapshot = { ...current, marketTrades: merged };
+        cache.set(id, snapshot);
         return snapshot;
     },
 
@@ -1542,16 +1819,8 @@ const BotLifeState = {
                 loc: preservedState.loc
             }))
             : recordFromSession(session, 'hot', reason);
-        const marketState = session.coldMarketState;
         const craftState = refreshCraftShop(session.coldCraftState);
-        if (marketState?.stats?.marketStore) {
-            row.activity = 'merchant';
-            row.currentRegion = marketState.currentRegion || row.currentRegion;
-            row.spotId = marketState.spotId || row.spotId;
-            row.inventorySummary = safeJson(InventorySummary.canonicalize(marketState.inventory));
-            row.adena = Number(marketState.adena || row.adena || 0);
-            row.statsJson = safeJson({ ...(marketState.stats || {}), pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session), lastReason: reason });
-        } else if (craftState?.stats?.craftShop) {
+        if (craftState?.stats?.craftShop) {
             row.activity = 'crafting';
             row.currentRegion = craftState.currentRegion || row.currentRegion;
             row.spotId = craftState.spotId || row.spotId;
@@ -1567,7 +1836,10 @@ const BotLifeState = {
             return save(row);
         }).then(() => {
             const snapshot = normalize(row);
+            const current = cache.get(characterId);
             cache.set(characterId, snapshot);
+            setSessionSnapshotsPhase(session, 'hot');
+            notifyMarketReviewState(snapshot, current);
             return snapshot;
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to mark %s hot: %s', row.characterName, err.message);
@@ -1584,6 +1856,14 @@ const BotLifeState = {
     },
 
     markCold(session, reason = 'cooldown') {
+        return this.writeColdRow(session, reason).then((saved) => {
+            if (saved) setSessionSnapshotsPhase(session, 'cold');
+            return saved;
+        });
+    },
+
+    // markCold's write: the next cold row built from the actor or its craft state.
+    writeColdRow(session, reason = 'cooldown') {
         if (!session || !session.actor) return Promise.resolve(null);
 
         const membership = cache.get(Number(session.actor.fetchId()))?.stats;
@@ -1592,42 +1872,7 @@ const BotLifeState = {
             clanMembershipVersion: membership.clanMembershipVersion,
             clanDiscipline: membership.clanDiscipline
         } : {};
-        const marketState = session.coldMarketState;
         const craftState = refreshCraftShop(session.coldCraftState);
-        if (marketState?.stats?.marketStore) {
-            const actor = session.actor;
-            const store = actor.fetchPrivateStore?.();
-            const timestamp = now();
-            const storeLoc = marketState.stats.marketStore.loc || marketState.loc;
-            const persistedItems = new Map((marketState.stats.marketStore.items || []).map((item) => [Number(item.selfId), item]));
-            const nextState = {
-                ...marketState,
-                phase: 'cold',
-                activity: 'merchant',
-                loc: { ...storeLoc },
-                timing: {
-                    ...(marketState.timing || {}),
-                    activityStartedAt: timestamp,
-                    nextResolveAt: Number(marketState.stats?.marketStore?.expiresAt || 0) || timestamp + 60000
-                },
-                stats: {
-                    ...(marketState.stats || {}),
-                    ...membershipStats,
-                    pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session),
-                    marketStore: {
-                        ...(marketState.stats.marketStore || {}),
-                        loc: { ...storeLoc },
-                        items: (store?.items || []).map((item) => ({
-                            ...(persistedItems.get(Number(item.selfId)) || {}),
-                            selfId: Number(item.selfId), price: Number(item.price), count: Number(item.count), name: item.name || itemName(item.selfId),
-                            rank: item.rank || persistedItems.get(Number(item.selfId))?.rank || itemTemplate(item.selfId)?.etc?.rank || 'none'
-                        }))
-                    }
-                }
-            };
-            return this.upsertState(nextState, reason);
-        }
-
         if (craftState?.stats?.craftShop) {
             const row = recordFromSession(session, 'cold', reason);
             const craftShop = craftState.stats.craftShop;
@@ -1650,7 +1895,7 @@ const BotLifeState = {
                 stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session), lastReason: reason },
                 inventory: parseJson(row.inventorySummary, {})
             };
-            return this.upsertState(nextState, reason);
+            return this.upsertState(nextState, reason, { releaseHot: true });
         }
 
         if (session.coldLifeState) {
@@ -1662,7 +1907,8 @@ const BotLifeState = {
                 nextResolveAt: now() + 30000 + Math.round(Math.random() * 90000)
             });
             session.coldLifeState = nextState;
-            return this.upsertState(nextState, reason);
+            RefreshPartyMemberships([session], invoke);
+            return this.upsertState(nextState, reason, { releaseHot: true });
         }
 
         const row = {
@@ -1676,7 +1922,7 @@ const BotLifeState = {
             if (!isReady) {
                 throw new Error('state table unavailable');
             }
-            return save(row);
+            return save(row, { releaseHot: true });
         }).then(() => Database.updateCharacterLocation(row.characterId, {
             locX: row.locX,
             locY: row.locY,
@@ -1685,7 +1931,9 @@ const BotLifeState = {
             .then(() => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp))
             .then(() => {
                 const snapshot = normalize(row);
+                const current = cache.get(characterId);
                 cache.set(characterId, snapshot);
+                notifyMarketReviewState(snapshot, current);
                 return snapshot;
             }).catch((err) => {
                 utils.infoWarn('BotLife', 'failed to mark %s cold: %s', row.characterName, err.message);
@@ -1751,9 +1999,19 @@ const BotLifeState = {
 
     coldNear(loc, radius, limit = 10) {
         if (!initialized || !loc) return Promise.resolve([]);
-        const safeRadius = Math.max(1, Number(radius) || 6000);
+        const safeRadius = Math.max(1, Number(radius) || CLIENT_VISIBILITY_RADIUS);
         const safeLimit = Math.max(1, Math.min(100, Number(limit) || 10));
         return Promise.resolve(cache.near(loc, safeRadius, safeLimit));
+    },
+
+    // Cold walkers near a point (honest travel): LifeStateCache.walkersNear.
+    walkersNear(loc, radius, at = now()) {
+        if (!initialized || !loc) return [];
+        return cache.walkersNear(loc, Math.max(1, Number(radius) || CLIENT_VISIBILITY_RADIUS), at);
+    },
+
+    walkerCount() {
+        return cache.walkers.size;
     },
 
     dueCold(limit = 10, at = now()) {
@@ -1777,10 +2035,8 @@ const BotLifeState = {
             AND activity <> 'pk_hunting'
             AND (partyId IS NULL OR partyId = '')
             AND simulationOwner = 'legacy_main'
-            -- Cold stores settle on trade/expiry events, and craft-service
-            -- stations are materialized on demand.  Neither belongs in the
-            -- combat scheduler's periodic queue.
-            AND NOT (activity = 'merchant' AND json_extract(statsJson, '$.marketStore') IS NOT NULL)
+            -- Craft-service stations are materialized on demand: they do
+            -- not belong in the combat scheduler's periodic queue.
             AND NOT (activity = 'crafting' AND json_extract(statsJson, '$.craftShop') IS NOT NULL)
             AND (
                 nextResolveAt IS NULL OR nextResolveAt <= ?
@@ -1819,104 +2075,24 @@ const BotLifeState = {
         });
     },
 
-    legacyMarketTownCandidates(limit = 10, routingVersion = 1) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
-        const version = Math.max(1, Number(routingVersion) || 1);
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE phase = 'cold'
-            AND activity = 'merchant'
-            AND json_extract(statsJson, '$.marketStore') IS NOT NULL
-            AND COALESCE(CAST(json_extract(statsJson, '$.marketStore.marketTownRoutingVersion') AS INTEGER), 0) < ?
-            AND COALESCE(CAST(json_extract(statsJson, '$.marketStore.expiresAt') AS INTEGER), 0) > ?
-            ORDER BY updatedAt ASC
-            LIMIT ${safeLimit}`,
-            [version, Date.now()]
-        ]).then((rows) => rows.map((row) => {
-            const state = normalize(row);
-            cache.set(state.characterId, state);
-            return state;
-        })).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch legacy market-town candidates: %s', err.message);
-            return [];
-        });
-    },
+    pendingClassProgressionMigration() { return classMigrationCandidates.size; },
 
-    expiredMarketStoreCandidates(limit = 10, timestamp = Date.now()) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE phase = 'cold'
-            AND activity = 'merchant'
-            AND json_extract(statsJson, '$.marketStore') IS NOT NULL
-            AND COALESCE(CAST(json_extract(statsJson, '$.marketStore.expiresAt') AS INTEGER), 0) <= ?
-            ORDER BY updatedAt ASC
-            LIMIT ${safeLimit}`,
-            [Number(timestamp) || Date.now()]
-        ]).then((rows) => rows.map((row) => {
-            const state = normalize(row);
-            cache.set(state.characterId, state);
-            return state;
-        })).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch expired market stores: %s', err.message);
-            return [];
-        });
-    },
-
-    marketStoreMaintenanceCandidates(limit = 10, timestamp = Date.now()) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(25, Number(limit) || 10));
-        const at = Number(timestamp) || Date.now();
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE phase = 'cold'
-            AND activity = 'merchant'
-            AND json_extract(statsJson, '$.marketStore') IS NOT NULL
-            AND (
-                COALESCE(CAST(json_extract(statsJson, '$.marketStore.expiresAt') AS INTEGER), 0) <= ?
-                OR (
-                    COALESCE(CAST(json_extract(statsJson, '$.marketStore.storeType') AS INTEGER), 1) = 1
-                    AND COALESCE(
-                        CAST(json_extract(statsJson, '$.marketStore.nextReviewAt') AS INTEGER),
-                        CAST(json_extract(statsJson, '$.marketStore.openedAt') AS INTEGER),
-                        0
-                    ) <= ?
-                )
-            )
-            ORDER BY CASE
-                WHEN COALESCE(CAST(json_extract(statsJson, '$.marketStore.expiresAt') AS INTEGER), 0) <= ? THEN 0
-                ELSE 1
-            END ASC,
-            updatedAt ASC
-            LIMIT ${safeLimit}`,
-            [at, at, at]
-        ]).then((rows) => rows.map((row) => {
-            const state = normalize(row);
-            cache.set(state.characterId, state);
-            return state;
-        })).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch market maintenance candidates: %s', err.message);
-            return [];
-        });
+    subscribeClassProgressionMigration(listener) {
+        classMigrationListeners.add(listener);
+        return () => classMigrationListeners.delete(listener);
     },
 
     migrateLegacyClassProgression(limit = 5) {
         if (!initialized) return Promise.resolve([]);
         const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
-        const candidates = Array.from(cache.values())
-            // Hot bots own a live Actor instance. Their class is reconciled
-            // through activation/level-up, not behind that actor's back.
-            .filter((state) => state.phase === 'cold')
-            .filter((state) => !pendingWrites.has(state.characterId))
-            .filter((state) => classProgressionNeeded(
-                state,
-                Number(state.stats?.classId || 0),
-                Number(state.level || 1)
-            ))
-            .sort((a, b) => Number(a.updatedAt || 0) - Number(b.updatedAt || 0))
-            .slice(0, safeLimit);
+        const ids = [];
+        for (const id of classMigrationCandidates.keys()) { ids.push(id); if (ids.length >= safeLimit) break; }
+        // A pending native write is not an attempted migration. Keep that
+        // candidate for the next bounded pass after its write settles.
+        for (const id of ids) if (!pendingWrites.has(id)) classMigrationCandidates.delete(id);
+        notifyClassMigrationPending();
+        const candidates = ids.map(id => cache.get(id))
+            .filter(state => state?.phase === 'cold' && !pendingWrites.has(state.characterId));
 
         return candidates.reduce((chain, state) => chain.then((migrated) => (
             Database.execute([
@@ -2058,31 +2234,12 @@ const BotLifeState = {
         });
     },
 
-    statesForParties(partyIds = []) {
-        const ids = [...new Set((partyIds || []).map((partyId) => String(partyId || '')).filter(Boolean))];
-        if (!initialized || !ids.length) return Promise.resolve(new Map());
-
-        const placeholders = ids.map(() => '?').join(', ');
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE phase = 'cold'
-            AND partyId IN (${placeholders})
-            ORDER BY partyId ASC, level DESC, characterId ASC`,
-            ids
-        ]).then((rows) => {
-            const grouped = new Map(ids.map((partyId) => [partyId, []]));
-            rows.forEach((row) => {
-                const state = normalize(row);
-                cache.set(state.characterId, state);
-                const partyId = String(row.partyId || '');
-                if (!grouped.has(partyId)) grouped.set(partyId, []);
-                grouped.get(partyId).push(state);
-            });
-            return grouped;
-        }).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch %d parties: %s', ids.length, err.message);
-            return new Map(ids.map((partyId) => [partyId, []]));
-        });
+    cachedStatesForParties(parties = []) {
+        // The write-behind cache owns the newest member state. No publication or database read occurs here.
+        return new Map(parties.map(party => [String(party.partyId), (party.memberIds || [])
+            .map(id => cache.get(Number(id)))
+            .filter(state => state?.phase === 'cold' && String(state.party?.partyId || '') === String(party.partyId))
+            .sort((a, b) => Number(b.level) - Number(a.level) || Number(a.characterId) - Number(b.characterId))]));
     },
 
     coldPartyCandidateCount(partyRequiredOnly = false) {
@@ -2186,7 +2343,7 @@ const BotLifeState = {
             expectedPartyId: state.party.partyId };
     },
 
-    preparePartyAssignment(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null) {
+    preparePartyAssignment(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null, partySpotId = null) {
         if (!state || !partyId) return null;
         const hasPartyRequest = state.stats?.partyRequest?.status === 'open';
         const wasWaitingForParty = state.activity === 'party_wait'
@@ -2208,6 +2365,7 @@ const BotLifeState = {
                 role,
                 leaderId,
                 backgroundPartyId: partyId,
+                backgroundPartySpotId: partySpotId,
                 partyWaitUntil: null,
                 restUntil: wasWaitingForParty ? null : state.stats?.restUntil || null,
                 lastReason: wasWaitingForParty ? 'party_assigned' : state.stats?.lastReason,
@@ -2231,8 +2389,11 @@ const BotLifeState = {
         };
     },
 
-    acceptPartyAssignments(prepared = []) {
-        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((snapshot) => {
+    acceptPartyAssignments(prepared = [], committedRows = []) {
+        const rows = new Map((committedRows || []).map(row => [Number(row.characterId), row]));
+        return (prepared || []).map((entry) => entry?.snapshot).filter(Boolean).map((planned) => {
+            const row = rows.get(planned.characterId);
+            const snapshot = row ? normalize(row) : planned;
             cache.set(snapshot.characterId, snapshot);
             // Party membership changes the worker scheduling partition. Push
             // the committed state immediately instead of waiting for the old
@@ -2243,11 +2404,12 @@ const BotLifeState = {
         });
     },
 
-    assignParty(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null) {
-        const prepared = this.preparePartyAssignment(state, partyId, role, leaderId, partyNextResolveAt);
+    assignParty(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null, partySpotId = null) {
+        const prepared = this.preparePartyAssignment(state, partyId, role, leaderId, partyNextResolveAt, partySpotId);
         if (!prepared) return Promise.resolve(null);
 
         return save(prepared.row).then(() => {
+            prepared.snapshot = normalize(prepared.row);
             this.acceptPartyAssignments([prepared]);
             return prepared.snapshot;
         }).catch((err) => {
@@ -2297,8 +2459,13 @@ const BotLifeState = {
         });
     },
 
-    prepareResolve(state, result, options = {}) {
+    async prepareResolve(state, result, options = {}) {
         if (!state || !result) return Promise.resolve(null);
+        if (workerProjectorRole && (options.persist !== false || options.projectClassProgression !== true)) {
+            return Promise.reject(new TypeError('worker_projector_projection_required'));
+        }
+        const workerOptions = Object.prototype.hasOwnProperty.call(options, 'workerAdmission')
+            ? { workerAdmission: options.workerAdmission } : null;
 
         const timestamp = Number(options.timestamp || now());
         const experienceAward = ProgressionCap.applyAward(state.exp, result.materialize?.exp);
@@ -2392,6 +2559,24 @@ const BotLifeState = {
             ...(targetCombat ? { targetCombat } : {})
         };
         const inventory = { ...(state.inventory || {}) };
+        // ARCH-NOTE: the resolver already consumed authored summon materials
+        // from its private combat inventory. Lifecycle normally rebuilds from
+        // the input (shots/potions have separate counters), so carry only these
+        // native cast-cost decreases before adding this round's loot.
+        const summonClass = Number(state.stats?.classId || 0);
+        if (result.patch?.inventory && (BotRoles.isSummoner(summonClass) || BotRoles.isNecromancer(summonClass))) {
+            const summonProfile = { ...(result.patch.stats?.coldCombat || state.stats?.coldCombat || {}), classId: summonClass };
+            const materialIds = new Set([...ColdCombatProfile.summonSkills(summonProfile),
+                ...ColdCombatProfile.corpseSummonSkills(summonProfile)]
+                .filter(skill => Number(skill.itemId) > 0 && Number(skill.itemCount) > 0)
+                .map(skill => String(skill.itemId)));
+            for (const id of materialIds) {
+                const stock = inventory[id], remaining = Number(result.patch.inventory[id]?.amount);
+                if (stock && Number.isFinite(remaining) && remaining >= 0 && remaining < Number(stock.amount)) {
+                    inventory[id] = { ...stock, amount: remaining };
+                }
+            }
+        }
         materializedItems.filter((item) => Number(item.selfId) !== 57).forEach((item) => {
             const key = String(item.selfId);
             const amount = Number(item.amount || 0);
@@ -2425,27 +2610,42 @@ const BotLifeState = {
 
         // Cold combat spends the same persisted shot stock that hot combat uses.
         // Resolve telemetry is already available here, so this adds no market
-        // lookup or extra inventory query to the simulation tick.
-        // Aggregate actions include enemy turns and, for parties, other members.
+        // lookup or extra inventory query to the simulation tick. shotActions
+        // counts the shots this bot's own casts, skills and landed normal
+        // attacks loaded from this stock (BackgroundResolver.coldShotSupply).
+        const consumeFacts = Config.developerDiagnostics === true ? [] : null;
         const shotActions = Math.max(0, Number(result.debug?.shotActions || 0));
         if (shotActions > 0) {
-            const shot = invoke('GameServer/Inventory/ShotStock').planForRows(
-                Object.values(inventory).map((item) => ({ ...item,
-                    equipped: item.equipped === true || Number(item.equippedCount || 0) > 0
-                })), Number(state.stats?.classId || state.classId || 0));
-            const weapon = Object.values(inventory).find((item) =>
-                item.equipped && [7, 14].includes(Number(item.slot || 0)));
-            const weaponTemplate = weapon ? itemTemplate(weapon.selfId) : null;
-            const perAction = Math.max(1, Number(weaponTemplate?.etc?.[
-                shot.kind === 'spiritshot' ? 'spiritshot' : 'soulshot'
-            ] || 1));
-            const stock = inventory[String(shot.selfId)];
-            if (stock && Number(stock.amount || 0) > 0) {
-                inventory[String(shot.selfId)] = { ...stock,
-                    amount: Math.max(0, Number(stock.amount) - Math.ceil(shotActions) * perAction) };
+            const Shots = invoke('GameServer/Inventory/ShotStock');
+            const shot = Shots.planForState(state);
+            const beginnerId = invoke('GameServer/Items/C4BeginnerShots').selfIdFor(shot.kind, shot.rank);
+            // The private combat inventory already contains exact consumption,
+            // including beginner exhaustion followed by ordinary charges. Carry
+            // only those decreases, preserving this resolve's new loot.
+            for (const selfId of [shot.selfId, beginnerId].filter(Boolean)) {
+                const stock = inventory[String(selfId)], original = state.inventory?.[selfId];
+                if (!stock || !original) continue;
+                const remaining = result.patch?.inventory?.[selfId]?.amount;
+                const spent = Number.isFinite(remaining)
+                    ? Math.max(0, Number(original.amount) - remaining)
+                    : selfId === shot.selfId ? shotActions * shot.perAction : 0;
+                inventory[String(selfId)] = { ...stock, amount: Math.max(0, Number(stock.amount) - spent) };
+                if (consumeFacts && spent > 0) Consumption.fact(consumeFacts, selfId, Number(stock.amount),
+                    inventory[String(selfId)].amount, 0);
             }
         }
+        // Cold combat drinks healing potions from the same stock. The fight
+        // debits only its own copy; drunkPotions counts the bottles by selfId
+        // (BackgroundResolver.startColdPotion).
+        for (const [selfId, count] of Object.entries(result.debug?.drunkPotions || {})) {
+            const stock = inventory[String(selfId)];
+            if (!stock || Number(stock.amount || 0) <= 0) continue;
+            inventory[String(selfId)] = { ...stock, amount: Math.max(0, Number(stock.amount) - Number(count || 0)) };
+            if (consumeFacts) Consumption.fact(consumeFacts, selfId, Number(stock.amount),
+                inventory[String(selfId)].amount, 1);
+        }
 
+        if (consumeFacts) Consumption.attach(result, consumeFacts);
         const equippedInventory = GearAcquisitionPlanner.equipInventoryUpgrades({
             ...state,
             level,
@@ -2492,17 +2692,14 @@ const BotLifeState = {
                         wins: Number(result.debug?.wins || 0), exp,
                         expBeforeDeath: experienceAward.totalExp,
                         pressure: soloPressure
-                    }),
-                    ...(Number(result.debug?.combatMs) > 0 ? {
-                        // The lifecycle owns actual death penalties and capped XP.
-                        // Replace the resolver's provisional gross reward sample.
-                        huntEfficiency: invoke('GameServer/Bot/AI/BotHuntEfficiency').record(state, {
-                            spotId: nextSpotId, timestamp, exp: exp - Number(state.exp || 0),
-                            combatMs: result.debug.combatMs,
-                            recoveryMs: Math.max(0, Number(result.patch?.stats?.restUntil || timestamp) - timestamp)
-                        })
-                    } : {})
+                    })
                 } : {}),
+                // The one record of a hunting round, solo or a party member's
+                // own share; the lifecycle owns actual death penalties and
+                // capped XP, so the sample takes the net exp.
+                ...invoke('GameServer/Bot/AI/BotHuntEfficiency').recordRound(state, result, {
+                    spotId: nextSpotId, timestamp, exp: exp - Number(state.exp || 0)
+                }),
                 // Party combat carries a projected combat snapshot in patch.stats.
                 // Keep lifecycle telemetry from this resolve authoritative over
                 // that snapshot, which still contains the previous tick's data.
@@ -2514,10 +2711,44 @@ const BotLifeState = {
             inventory: equippedInventory,
             updatedAt: timestamp
         };
+        // ARCH-NOTE: C1 lifecycle packets precede their fight; accept the
+        // worker's focus event before classifying actual changed sections.
+        // Direct projections receive an already projected packet as before.
+        const beforeResolvePacket = isMainThread && options.statsPacketBeforeResolve === true && options.statsPacket;
+        if (beforeResolvePacket) Object.assign(nextState.stats, beforeResolvePacket);
+        if (state.activity === 'hunting') {
+            // A round records its rewards/resources/sample immediately. It
+            // renews the decision only for a meaningful dependent event; a
+            // retry derives that one event from the same accepted input.
+            invoke('GameServer/Bot/AI/DecisionEvents').reconcile(state, nextState, timestamp);
+        }
+        if (!isMainThread && !state.stats?.tradeMeeting) {
+            const economyDeps = typeof options.economyDepsFor === 'function'
+                ? await options.economyDepsFor(nextState) : options.economyDeps || {};
+            const calculationDeps = { ...economyDeps, timestamp };
+            const advised = typeof options.economyFor === 'function' ? await options.economyFor(nextState, calculationDeps) : null;
+            const economy = advised || invoke('GameServer/Bot/Economy/EconomyContext').forState(nextState, calculationDeps);
+            Object.assign(nextState.stats, economy.statsPacket);
+            if (typeof options.onEconomy === 'function') options.onEconomy(economy, nextState);
+        } else if (options.statsPacket && !beforeResolvePacket) Object.assign(nextState.stats, options.statsPacket);
         const knownProfileLevel = Number(nextState.stats?.classProgressionLevel || 0);
         const knownProfileClassId = Number(nextState.stats?.classProgressionClassId ?? nextState.stats?.classId);
         const currentClassId = Number(nextState.stats?.classId || 0);
-        const needsClassProgression = knownProfileLevel < level || knownProfileClassId !== currentClassId;
+        const needsClassProgression = knownProfileLevel < level || knownProfileClassId !== currentClassId
+            || invoke('GameServer/Skills/SkillBookCatalog').needsTraining(nextState);
+        const characterId = nextState.characterId;
+        // The cached input remains current until this resolve publishes its
+        // own snapshot. Recheck that capability at assigned native writers.
+        const nativeWriteOptions = options.persist !== false && workerOptions ? {
+            beforeWrite: NativeWriteCheckpoint.create(characterId, workerOptions)
+        } : undefined;
+        // ARCH-NOTE: Automatic skill/class writes keep private ROW version floors.
+        // Training wraps the original native capability only; ROW/after-writers keep their advancing original proof.
+        const trainingWriteOptions = nativeWriteOptions && needsClassProgression && options.projectClassProgression !== true
+            ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}, nativeWriteOptions.beforeWrite) }
+            : nativeWriteOptions || (options.persist !== false && options.projectClassProgression !== true && needsClassProgression
+                && state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main'
+                ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}) } : undefined);
         const progression = needsClassProgression
             ? (options.projectClassProgression === true ? Promise.resolve(BotClassProgression.plan({
                 classId: currentClassId,
@@ -2528,10 +2759,10 @@ const BotLifeState = {
                 classId: currentClassId,
                 level,
                 seed: nextState.characterId
-            }))
+            }, trainingWriteOptions))
             : Promise.resolve({ classId: currentClassId, transitions: [] });
 
-        return progression.then((resolved) => {
+        const prepared = progression.then((resolved) => {
             const classId = Number(resolved.classId || currentClassId);
             const role = BotRoles.inferRole(classId);
             const progressedState = {
@@ -2550,7 +2781,8 @@ const BotLifeState = {
                 }
             };
             if (resolved.transitions?.length) delete progressedState.stats.equipmentPlan;
-            const equippedProgressedState = reconcileEquipmentInventory(progressedState);
+            const equippedProgressedState = reconcileEquipmentInventory(
+                invoke('GameServer/Skills/SkillBookCatalog').applyTraining(progressedState, resolved));
             const profileReady = needsClassProgression
                 ? (options.projectClassProgression === true
                     ? projectColdCombatProfile(equippedProgressedState, timestamp)
@@ -2565,7 +2797,8 @@ const BotLifeState = {
                     };
                 }
                 const row = rowFromState(profiledState);
-                return save(row)
+                const characterId = row.characterId;
+                return save(row, nativeWriteOptions)
                     .then(() => {
                         const deathRecord = profiledState.stats?.deathExperience;
                         if (newDeath && deathRecord?.pendingRestoration) {
@@ -2579,43 +2812,90 @@ const BotLifeState = {
                                 penaltyAppliedAt: deathRecord.penaltyAppliedAt,
                                 karma: profiledState.stats?.karma,
                                 sp: row.sp
-                            });
+                            }, nativeWriteOptions);
                         }
                         if (result.patch?.restoreExpPercent !== undefined) {
-                            return Database.restoreCharacterDeathExperience(row.characterId, result.patch.restoreExpPercent, timestamp)
-                                .then((restored) => restored || Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp));
+                            return Database.restoreCharacterDeathExperience(row.characterId, result.patch.restoreExpPercent, timestamp, nativeWriteOptions)
+                                .then((restored) => restored || Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp, nativeWriteOptions));
                         }
                         if (result.patch?.clearDeathExperience) {
-                            return Database.clearCharacterDeathExperience(row.characterId, result.patch.clearDeathExperience, timestamp)
-                                .then(() => Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp));
+                            return Database.clearCharacterDeathExperience(row.characterId, result.patch.clearDeathExperience, timestamp, nativeWriteOptions)
+                                .then(() => Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp, nativeWriteOptions));
                         }
                         return Number(state.stats?.karma || 0) > 0
-                            ? Database.updateColdCharacterExperience(row.characterId, row.level, row.exp, row.sp)
-                            : Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp);
+                            ? Database.updateColdCharacterExperience(row.characterId, row.level, row.exp, row.sp, nativeWriteOptions)
+                            : Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp, nativeWriteOptions);
                     })
-                    .then(() => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp))
-                    .then(() => syncInventorySummary(row.characterId, profiledState.inventory))
-                    .then(() => {
-                        const snapshot = normalize(row);
-                        cache.set(snapshot.characterId, snapshot);
-                        notifyColdSnapshot(snapshot, nextActivity === 'dead' ? 'death' : 'resolve', {
-                            critical: nextActivity === 'dead'
-                                || materializedItems.length > 0
-                                || Number(result.materialize?.adena || 0) > 0
-                                || (result.events || []).length > 0
-                        });
-                        return snapshot;
+                    .then(() => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp, nativeWriteOptions))
+                    .then(() => result.soulCrystals?.length
+                        ? Database.applyColdSoulCrystalResults(row.characterId, result.soulCrystals, nativeWriteOptions || {}) : null)
+                    .then(() => syncInventorySummary(row.characterId, profiledState.inventory, newDeath ? 'resolve_death' : 'resolve', nativeWriteOptions))
+                    .then((deathDrop) => {
+                        if (deathDrop?.inventory) {
+                            row.inventorySummary = safeJson(deathDrop.inventory);
+                            row.statsJson = safeJson({ ...parseJson(row.statsJson, {}), pkDropDeathSequence: deathDrop.deathSequence });
+                            invoke('GameServer/Actor/Generics/PkDeathDrop').spawn(row.characterId, profiledState.loc, deathDrop.drops);
+                        }
+                        const publish = () => {
+                            const snapshot = normalize(row);
+                            cache.set(snapshot.characterId, snapshot);
+                            notifyColdSnapshot(snapshot, nextActivity === 'dead' ? 'death' : 'resolve', {
+                                critical: nextActivity === 'dead'
+                                    || materializedItems.length > 0
+                                    || Number(result.materialize?.adena || 0) > 0
+                                    || (result.events || []).length > 0
+                            });
+                            if (consumeFacts) Consumption.publish(snapshot.characterId, consumeFacts, { source: 'cold_commit', commandId: options.workerAdmission?.commandId, revision: snapshot.simulation?.revision });
+                            return snapshot;
+                        };
+                        return nativeWriteOptions ? Database.publishBotResolvedState(characterId, nativeWriteOptions, publish) : publish();
                     })
                     .catch((err) => {
+                        if (err instanceof WorkerCommandAdmissionRefusal) throw err;
                         utils.infoWarn('BotLife', 'failed to apply resolve for %s: %s', state.name, err.message);
                         return null;
                     });
             });
         });
+        // Projections and commands without skill grants keep their existing promise/handler path.
+        if (trainingWriteOptions === nativeWriteOptions) return prepared;
+        return prepared.catch(error => {
+            if (Database.isColdTrainingSourceRetired(error)) return null;
+            throw error;
+        });
     },
 
-    applyResolve(state, result) {
-        return this.serializeClanLevelUp(state.characterId, () => this.prepareResolve(state, result, { persist: true }));
+    applyResolve(state, result, options = {}) {
+        return this.serializeClanLevelUp(state.characterId, () => {
+            checkWorkerCommandAdmission(state, options);
+            const preparedOptions = { persist: true };
+            if (Object.prototype.hasOwnProperty.call(options, 'workerAdmission')) {
+                preparedOptions.workerAdmission = options.workerAdmission;
+            }
+            // ARCH-NOTE: C1/E3 lifecycle commands carry the worker's money queue;
+            // main preparation must retain that packet without rebuilding it.
+            if (Object.prototype.hasOwnProperty.call(options, 'statsPacket')) {
+                preparedOptions.statsPacket = options.statsPacket;
+                preparedOptions.statsPacketBeforeResolve = true;
+            }
+            return this.prepareResolve(state, result, preparedOptions);
+        });
+    },
+
+    reviewTrainingAfterCommit(state, options = {}) {
+        if (!state || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.activity === 'dead') return Promise.resolve(state);
+        return this.serializeClanLevelUp(state.characterId, async () => {
+            if (cache.get(state.characterId) !== state) return cache.get(state.characterId) || state;
+            if (!classProgressionNeeded(state, state.stats?.classId, state.level)) return state;
+            const beforeWrite = Database.createColdTrainingGuard(state, () => {
+                options.beforeWrite?.();
+                if (cache.get(state.characterId) !== state) throw Error('cold_training_source_retired');
+            });
+            const resolved = await BotClassProgression.reconcile({ characterId: state.characterId,
+                classId: state.stats?.classId || 0, level: state.level, seed: state.characterId }, { beforeWrite });
+            const row = await Database.publishColdTraining(state.characterId, resolved, { beforeWrite });
+            return this.acceptLifecycleRow(row, 'automatic_skills');
+        });
     },
 
     syncResolvedState(state) {
@@ -2623,12 +2903,14 @@ const BotLifeState = {
         const row = rowFromState(state);
         return this.serializeClanLevelUp(row.characterId, () => Database.updateColdCharacterProgression(row.characterId, state)
             .then(() => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp))
-            .then(() => syncInventorySummary(row.characterId, state.inventory || {}))
+            .then(() => syncInventorySummary(row.characterId, state.inventory || {}, 'resolve_sync'))
             .then(() => enqueueEquipmentGoalAdvance(row.equipmentAdvance))
             .then(() => state));
     },
 
     enqueueEquipmentGoalAdvanceForState,
+
+    shouldRecoverOrphanedGiranState,
 
     marketGoalCandidates(limit = 8, timestamp = now(), options = {}) {
         if (!initialized) return Promise.resolve([]);
@@ -2638,7 +2920,7 @@ const BotLifeState = {
         const fetchAfter = (cursor) => Database.execute([
             `WITH candidates AS MATERIALIZED (
                 SELECT states.characterId, states.updatedAt FROM ${TABLE} states
-                INDEXED BY bot_life_state_market_review
+                INDEXED BY bot_life_state_market_page
                 WHERE states.phase = 'cold'
                 AND (states.partyId IS NULL OR states.partyId = '')
                 AND states.activity NOT IN ('traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting')
@@ -2660,7 +2942,7 @@ const BotLifeState = {
                 Number(cursor?.updatedAt || 0),
                 Number(cursor?.characterId || 0)
             ],
-            { read: true, onTiming: options.onTiming }
+            { read: true, onTiming: Config.developerDiagnostics === true ? options.onTiming : undefined }
         ], 'bot-life:market-goal-candidates');
         return fetchAfter(marketGoalCursor).then(async (rows) => {
             if (!rows.length && (marketGoalCursor.updatedAt > 0 || marketGoalCursor.characterId > 0)) {
@@ -2674,7 +2956,7 @@ const BotLifeState = {
                     characterId: Math.max(0, Number(last.characterId || 0))
                 };
             }
-            const startedAt = now();
+            const startedAt = Config.developerDiagnostics === true ? now() : null;
             const states = rows.map((row) => {
                 const state = normalize(row);
                 if (row.currentGoalJson) {
@@ -2687,7 +2969,7 @@ const BotLifeState = {
                 cache.set(state.characterId, state);
                 return state;
             });
-            options.onStage?.('hydrate', now() - startedAt);
+            if (Config.developerDiagnostics === true) options.onStage?.('hydrate', now() - startedAt);
             return states;
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to fetch market-goal candidates: %s', err.message);
@@ -2702,7 +2984,7 @@ const BotLifeState = {
         // objective grouping, composition, persona intent and affinity. The
         // full inventory/cold-combat payload is hydrated after selection.
         return Database.execute([
-            `SELECT characterId, characterName, level, activity, spotId,
+            `SELECT characterId, characterName, bot_life_state.level, activity, spotId,
                 activityStartedAt, updatedAt, simulationOwner, simulationRevision,
                 payloadJson
             FROM ${TABLE} INDEXED BY bot_life_state_party_candidate_projection
@@ -2766,6 +3048,9 @@ const BotLifeState = {
 
     clanOperationCandidates(options = {}) {
         if (!initialized) return Promise.resolve([]);
+        if (['classIds', 'maxLevel', 'unclanned', 'cursor'].some(key => Object.hasOwn(options, key))) {
+            return this.clanRecruitmentCandidates(options);
+        }
         const targetClanId = Math.max(0, Number(options.targetClanId) || 0);
         const minimumLevel = Math.max(1, Math.floor(Number(options.minLevel) || 1));
         const targetLevel = Math.max(minimumLevel, Math.floor(Number(options.targetLevel) || minimumLevel));
@@ -2822,6 +3107,49 @@ const BotLifeState = {
         });
     },
 
+    clanRecruitmentCandidates(options = {}) {
+        if (!initialized) return Promise.resolve([]);
+        const classIds = options.classIds === undefined ? null
+            : [...new Set((options.classIds || []).map(Number).filter(id => Number.isSafeInteger(id) && id >= 0))];
+        if (classIds && !classIds.length) return Promise.resolve([]);
+        const minLevel = Math.max(1, Math.floor(Number(options.minLevel) || 1));
+        const maxLevel = Math.min(100, Math.floor(Number(options.maxLevel) || 100));
+        if (maxLevel < minLevel) return Promise.resolve([]);
+        const limit = Math.max(1, Math.min(64, Math.floor(Number(options.limit) || 64)));
+        const targetClanId = Math.max(0, Number(options.targetClanId) || 0);
+        const cursor = options.cursor;
+        if (cursor && ![cursor.classId, cursor.level, cursor.characterId].every(value => Number.isSafeInteger(value) && value >= 0)) return Promise.resolve([]);
+        const unclanned = options.unclanned !== false;
+        const classClause = classIds ? `AND candidate.classId IN (${classIds.map(() => '?').join(',')})` : '';
+        const cursorClause = cursor ? 'AND (candidate.classId,candidate.level,candidate.characterId) > (?,?,?)' : '';
+        const params = [unclanned ? 0 : targetClanId, ...(classIds || []), minLevel, maxLevel,
+            ...(cursor ? [cursor.classId, cursor.level, cursor.characterId] : [])];
+        return Database.execute([
+            `SELECT states.*, candidate.classId AS candidateClassId, candidate.clanId AS candidateClanId
+            FROM bot_party_candidate_projection candidate INDEXED BY bot_party_candidate_recruitment
+            CROSS JOIN ${TABLE} states ON states.characterId = candidate.characterId
+            WHERE candidate.joinAvailability = 1 AND candidate.clanId ${unclanned ? '=' : '<>'} ?
+            ${classClause} AND candidate.level BETWEEN ? AND ? ${cursorClause}
+            AND NOT EXISTS (SELECT 1 FROM clan_operation_members reserved
+                WHERE reserved.characterId = candidate.characterId AND reserved.status = 'active')
+            ${options.excludeTradeMeetings ? 'AND NOT EXISTS (SELECT 1 FROM board_trade_participants t WHERE t.characterId=candidate.characterId AND t.meetingId IS NOT NULL)' : ''}
+            ORDER BY candidate.classId,candidate.level,candidate.characterId LIMIT ${limit}`,
+            params, { read: true }
+        ], 'bot-life:clan-recruitment-candidates').then(rows => rows.map(row => {
+            const state = normalize(row);
+            state.classId = Number(row.candidateClassId);
+            state.clanId = Number(row.candidateClanId);
+            state.simulationOwner = state.simulation.ownerId;
+            state.partyId = state.party.partyId;
+            state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
+            state.candidateCursor = { classId: state.classId, level: state.level, characterId: state.characterId };
+            return state;
+        })).catch(err => {
+            utils.infoWarn('BotLife', 'failed to fetch clan recruitment candidates: %s', err.message);
+            return [];
+        });
+    },
+
     statesByIds(characterIds = [], options = {}) {
         if (!initialized) return Promise.resolve([]);
         const ids = [...new Set((characterIds || []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
@@ -2839,7 +3167,8 @@ const BotLifeState = {
         const params = [...ids, ...(ownerId ? [ownerId] : [])];
 
         return Database.execute([
-            `SELECT * FROM ${TABLE}
+            `SELECT ${TABLE}.*, c.classId AS canonicalClassId, c.clanId AS canonicalClanId FROM ${TABLE}
+            INNER JOIN characters c ON c.id = ${TABLE}.characterId
             WHERE characterId IN (${placeholders})
             ${ownerClause}
             ${unassignedClause}`,
@@ -2847,8 +3176,15 @@ const BotLifeState = {
             { read: true }
         ], 'bot-life:states-by-id').then((rows) => rows.map((row) => {
             const state = normalize(row);
+            state.classId = Number(row.canonicalClassId ?? state.stats?.classId ?? 0);
+            state.clanId = Number(row.canonicalClanId || 0);
+            state.partyId = state.party.partyId;
+            state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             cache.set(state.characterId, state);
-            return state;
+            // The cache feeds cold worker snapshots: an own flat simulationOwner
+            // there makes the worker read it as flat wire input and refuse every
+            // command (bot never scheduled again). Clan readers get it on a copy.
+            return { ...state, simulationOwner: state.simulation.ownerId };
         })).catch((err) => {
             utils.infoWarn('BotLife', 'failed to hydrate %d party candidate(s): %s', ids.length, err.message);
             return [];
@@ -2878,9 +3214,9 @@ const BotLifeState = {
             INNER JOIN bot_goal_state goals USING (characterId)
             ORDER BY goals.updatedAt ASC, states.updatedAt ASC`,
             [Number(timestamp) || now()],
-            { read: true, onTiming: options.onTiming }
+            { read: true, onTiming: Config.developerDiagnostics === true ? options.onTiming : undefined }
         ], 'bot-life:stale-goal-candidates').then((rows) => {
-            const startedAt = now();
+            const startedAt = Config.developerDiagnostics === true ? now() : null;
             const states = rows.map((row) => {
                 const state = normalize(row);
                 invoke('GameServer/Bot/Goals/GoalState').prime(
@@ -2891,7 +3227,7 @@ const BotLifeState = {
                 cache.set(state.characterId, state);
                 return state;
             });
-            options.onStage?.('hydrate', now() - startedAt);
+            if (Config.developerDiagnostics === true) options.onStage?.('hydrate', now() - startedAt);
             return states;
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to fetch stale goal candidates: %s', err.message);
@@ -2901,7 +3237,7 @@ const BotLifeState = {
 
     refreshInventory(state, options = {}) {
         if (!state?.characterId) return Promise.resolve(state || null);
-        return Database.fetchItems(state.characterId).then((items) => {
+        return Database.fetchItems(state.characterId, 'life_refresh_inventory').then((items) => {
             // Cold progression owns virtual item counts between hot
             // materializations. The character inventory remains authoritative
             // for equip flags, so a stale snapshot cannot sell worn gear.
@@ -2936,7 +3272,7 @@ const BotLifeState = {
                 }
             };
             return options.equip === true
-                ? syncInventorySummary(state.characterId, equipped).then(() => refreshed)
+                ? syncInventorySummary(state.characterId, equipped, 'refresh').then(() => refreshed)
                 : refreshed;
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to refresh inventory for %s: %s', state.name, err.message);
@@ -2946,8 +3282,9 @@ const BotLifeState = {
 
     leaveParty(state, reason = 'party_break', options = {}) {
         if (!state?.characterId) return Promise.resolve(null);
-        if (require('./RaidSoloBoundary').stale(state)) state = require('./RaidSoloBoundary').clear(state);
+        if (invoke('GameServer/Bot/Population/RaidSoloBoundary').stale(state)) state = invoke('GameServer/Bot/Population/RaidSoloBoundary').clear(state);
         const timestamp = now();
+        const cached = cache.get(Number(state.characterId));
         const partyTravel = state.stats?.travel?.reason === 'party_spot_replan';
         // `grouped` and party-route travel are not valid solo lifecycle
         // states. Every detachment reason must return them to an actionable
@@ -2977,7 +3314,7 @@ const BotLifeState = {
                 timestamp,
                 allowParty: true,
                 allowLifecycle: true
-            }).then((result) => {
+            }).then((result) => (result?.ok ? syncNewTripPayment(nextState, cached).then(() => result) : result)).then((result) => {
                 if (!result?.ok) {
                     utils.infoWarn('BotLife', 'failed owner handoff while removing %s from party: %s', state.name, result?.reason || 'unknown');
                     return null;
@@ -2997,7 +3334,7 @@ const BotLifeState = {
                 return null;
             });
         }
-        return save(row).then(() => {
+        return save(row).then(() => syncNewTripPayment(nextState, cached)).then(() => {
             const snapshot = normalize(row);
             cache.set(snapshot.characterId, snapshot);
             // Without this transition snapshot the worker retains the old
@@ -3011,51 +3348,11 @@ const BotLifeState = {
         });
     },
 
-    syncMarketSession(session, reason = 'hot_market_sync') {
-        const state = session?.coldMarketState;
-        const actor = session?.actor;
-        if (!state || !actor?.backpack?.fetchItems) return Promise.resolve(null);
-        const inventory = inventorySummaryFromItems(actor.backpack.fetchItems());
-        const liveStore = actor.fetchPrivateStore?.();
-        const hasLines = liveStore && (liveStore.items || []).some((item) => Number(item.count || 0) > 0);
-        const persistedItems = new Map((state.stats?.marketStore?.items || []).map((item) => [Number(item.selfId), item]));
-        const marketStore = hasLines ? {
-            ...(state.stats?.marketStore || {}),
-            storeType: Number(liveStore.storeType || state.stats?.marketStore?.storeType || 1),
-            budgetBacked: liveStore.budgetBacked === true || state.stats?.marketStore?.budgetBacked === true,
-            items: (liveStore.items || []).map((item) => ({
-                ...(persistedItems.get(Number(item.selfId)) || {}),
-                ...item
-            }))
-        } : null;
-        const nextState = {
-            ...state,
-            phase: 'hot',
-            activity: marketStore ? 'merchant' : 'shopping',
-            adena: inventoryAdena(inventory),
-            inventory,
-            stats: {
-                ...(state.stats || {}),
-                marketStore,
-                marketWanted: marketStore ? state.stats?.marketWanted || null : null,
-                equipment: equipmentSummaryFromInventory(inventory)
-            },
-            timing: {
-                ...(state.timing || {}),
-                nextResolveAt: marketStore ? Number(marketStore.expiresAt || 0) || null : now()
-            }
-        };
-        return this.upsertState(nextState, reason).then((saved) => {
-            if (saved) session.coldMarketState = saved;
-            return saved;
-        });
-    },
-
     syncExternalInventory(characterId, reason = 'external_inventory_sync', previousState = null, options = {}) {
         const id = Number(characterId);
         const state = previousState || cache.get(id);
         if (!id || !state) return Promise.resolve(null);
-        return Database.fetchItems(id).then((items) => {
+        return Database.fetchItems(id, 'life_sync_external_inventory').then((items) => {
             const inventory = inventorySummaryFromItems(items || []);
             const refreshed = {
                 ...state,
@@ -3073,7 +3370,7 @@ const BotLifeState = {
                 !== JSON.stringify(reconciled.stats.equipment);
             return this.upsertState(reconciled, reason).then((saved) => (
                 saved && equipmentChanged
-                    ? syncInventorySummary(id, saved.inventory).then(() => saved)
+                    ? syncInventorySummary(id, saved.inventory, 'external').then(() => saved)
                     : saved
             ));
         });
@@ -3090,15 +3387,17 @@ const BotLifeState = {
         const template = itemTemplate(selfId);
         if (!template) return Promise.resolve(null);
         const slot = Number(template.etc?.slot || 0);
+        const crystalInput = invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(state, selfId);
+        const wearable = !crystalInput && GearAcquisitionPlanner.equipmentCandidate(template, state);
         const pairSlots = [1, 2].includes(slot) ? [1, 2] : [4, 5].includes(slot) ? [4, 5] : [];
-        if (slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
+        if (!crystalInput && slot > 0 && count > 1 && (!pairSlots.length || count > 2)) return Promise.resolve(null);
         if (marketPurchaseBlocker(state, offer, count)) return Promise.resolve(null);
         const inventory = Object.fromEntries(Object.entries(state.inventory || {}).map(([key, item]) => [key, {
             ...item,
             ...(Array.isArray(item?.equippedSlots) ? { equippedSlots: [...item.equippedSlots] } : {})
         }]));
-        let purchaseSlots = [];
-        if (pairSlots.length) {
+        let purchaseSlots = crystalInput ? GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot) : [];
+        if (wearable && pairSlots.length) {
             const requestedSlot = Number(offer?.equipSlot || 0);
             const existingSlots = GearAcquisitionPlanner.equippedSlotsFor(inventory[String(selfId)] || {}, slot);
             const occupied = new Set(Object.values(inventory).flatMap((item) => GearAcquisitionPlanner.equippedSlotsFor(item, item.slot)));
@@ -3121,7 +3420,7 @@ const BotLifeState = {
                 };
             }));
             purchaseSlots = [...new Set([...existingSlots, ...purchaseSlots])].slice(0, pairSlots.length).sort((a, b) => a - b);
-        } else if (slot) {
+        } else if (wearable && slot) {
             Object.keys(inventory).forEach((key) => {
                 if (GearAcquisitionPlanner.equippedSlotsFor(inventory[key], inventory[key]?.slot).includes(slot)) {
                     inventory[key] = { ...inventory[key], equipped: false, equippedCount: 0, equippedSlots: [] };
@@ -3134,9 +3433,9 @@ const BotLifeState = {
             selfId,
             name: template.template?.name || offer.itemName || itemName(selfId),
             amount: Number(inventory[String(selfId)]?.amount || 0) + count,
-            equipped: pairSlots.length ? purchaseSlots.length > 0 : slot > 0,
-            equippedCount: pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0,
-            equippedSlots: pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [],
+            equipped: crystalInput ? purchaseSlots.length > 0 : wearable && (pairSlots.length ? purchaseSlots.length > 0 : slot > 0),
+            equippedCount: crystalInput ? purchaseSlots.length : wearable ? pairSlots.length ? purchaseSlots.length : slot > 0 ? 1 : 0 : 0,
+            equippedSlots: crystalInput ? purchaseSlots : wearable ? pairSlots.length ? purchaseSlots : slot > 0 ? [slot] : [] : [],
             stackable: slot === 0 || !!inventory[String(selfId)]?.stackable,
             slot,
             rank: template.etc?.rank || 'none',
@@ -3168,7 +3467,7 @@ const BotLifeState = {
         const nextState = slot > 0 ? reconcileEquipmentInventory(purchasedState) : purchasedState;
         const row = rowFromState(nextState);
         return save(row)
-            .then(() => syncInventorySummary(row.characterId, nextState.inventory))
+            .then(() => syncInventorySummary(row.characterId, nextState.inventory, 'market_purchase'))
             .then(() => {
                 const snapshot = normalize(row);
                 cache.set(snapshot.characterId, snapshot);
@@ -3176,117 +3475,34 @@ const BotLifeState = {
                 return snapshot;
             }).catch(async (err) => {
                 utils.infoWarn('BotLife', 'failed market purchase for %s: %s', state.name, err.message);
-                const restored = await this.restoreMarketState(state, 'market_purchase_persist_rollback');
+                const restored = await rewriteMarketState(state, 'market_purchase_persist_rollback');
                 if (!restored) utils.infoWarn('BotLife', 'failed to compensate market purchase for %s', state.name);
                 return null;
             });
     },
 
-    restoreMarketState(state, reason = 'market_transaction_rollback') {
-        if (!state?.characterId || !state.inventory) return Promise.resolve(null);
-        const nextState = {
-            ...state,
-            stats: { ...(state.stats || {}), lastReason: reason },
-            updatedAt: now()
-        };
-        const row = rowFromState(nextState);
-        return save(row)
-            .then(() => syncInventorySummary(row.characterId, nextState.inventory))
-            .then(() => {
-                const snapshot = normalize(row);
-                cache.set(snapshot.characterId, snapshot);
-                notifyColdSnapshot(snapshot, 'market_sale', { critical: true });
-                return snapshot;
-            }).catch((error) => {
-                utils.infoWarn('BotLife', 'failed market rollback for %s: %s', state.name, error?.message || String(error));
-                return null;
-            });
-    },
-
-    applyMarketSale(state, offer, qty = 1) {
-        const selfId = Number(offer?.selfId || 0);
-        const count = Math.max(1, Number(qty) || 1);
-        const price = Number(offer?.price || 0);
-        const currentItem = state?.inventory?.[String(selfId)];
-        if (!state || !selfId || price <= 0) return Promise.resolve(null);
-        const equippedCount = Math.max(0, Number(currentItem?.equippedCount ?? (currentItem?.equipped ? 1 : 0)));
-        if (currentItem && Number(currentItem.amount || 0) - equippedCount < count) return Promise.resolve(null);
-
-        const inventory = { ...(state.inventory || {}) };
-        // A hot private store can sell before an older cold snapshot has been
-        // refreshed from the character inventory. The store is authoritative
-        // for the transaction, otherwise sold stock returns after a restart.
-        inventory[String(selfId)] = {
-            ...(currentItem || {}),
-            selfId,
-            name: currentItem?.name || offer?.storeItem?.name || itemName(selfId),
-            amount: Math.max(0, Number(currentItem?.amount || 0) - count)
-        };
-        inventory['57'] = {
-            ...(inventory['57'] || {}),
-            selfId: 57,
-            name: 'Adena',
-            amount: Number(state.adena || 0) + (price * count)
-        };
-        const marketStore = state.stats?.marketStore;
-        const marketItems = (marketStore?.items || []).map((item) => {
-            if (Number(item.selfId) !== selfId) return item;
-            const remaining = offer?.storeItem && Number.isFinite(Number(offer.storeItem.count))
-                ? Math.max(0, Number(offer.storeItem.count))
-                : Math.max(0, Number(item.count || 0) - count);
-            return { ...item, count: remaining };
-        });
-        const nextState = {
-            ...state,
-            adena: Number(state.adena || 0) + (price * count),
-            inventory,
-            stats: {
-                ...(state.stats || {}),
-                ...(marketStore ? { marketStore: { ...marketStore, items: marketItems } } : {}),
-                lastMarketSale: {
-                    selfId,
-                    qty: count,
-                    price,
-                    buyerCharacterId: Number(offer.buyerCharacterId || 0) || null,
-                    at: now()
-                }
-            },
-            updatedAt: now()
-        };
-        const row = rowFromState(nextState);
-        return save(row)
-            .then(() => syncInventorySummary(row.characterId, inventory))
-            .then(() => {
-                const snapshot = normalize(row);
-                cache.set(snapshot.characterId, snapshot);
-                notifyColdSnapshot(snapshot, 'npc_liquidation', { critical: true });
-                return snapshot;
-            }).catch(async (err) => {
-                utils.infoWarn('BotLife', 'failed market sale for %s: %s', state.name, err.message);
-                const restored = await this.restoreMarketState(state, 'market_sale_persist_rollback');
-                if (!restored) utils.infoWarn('BotLife', 'failed to compensate market sale for %s', state.name);
-                return null;
-            });
-    },
-
-    applyNpcLiquidation(state, candidates = [], options = {}) {
+    applyNpcLiquidation(state, candidates = []) {
         if (!state || !Array.isArray(candidates) || !candidates.length) return Promise.resolve(state);
+        const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+        const reserved = Disposition.reservedEquipmentAmounts(state);
         const inventory = { ...(state.inventory || {}) };
         let payout = 0;
         const sold = [];
         candidates.forEach((candidate) => {
             const selfId = Number(candidate.selfId || 0);
             const existing = inventory[String(selfId)];
+            if (!existing || selfId === 57 || invoke('GameServer/Items/C4BeginnerShots').isRestricted(selfId)) return;
+            const free = Disposition.saleFreeAmount(state, existing, reserved);
             const equippedCount = Math.max(0, Number(existing?.equippedCount ?? (existing?.equipped ? 1 : 0)));
             const amount = Math.min(
                 Math.max(0, Number(existing?.amount || 0) - equippedCount),
-                Math.max(0, Number(candidate.count || 0))
+                Math.max(0, Number(candidate.count || 0)), free
             );
             const price = Math.max(0, Number(candidate.npcPrice || 0));
-            if (!selfId || amount <= 0 || price <= 0) return;
+            if (!selfId || !Number.isFinite(amount) || !Number.isFinite(price) || amount <= 0 || price <= 0) return;
             inventory[String(selfId)] = { ...existing, amount: Number(existing.amount) - amount };
             payout += amount * price;
-            sold.push({ selfId, amount, price });
+            sold.push([selfId, amount, price]);
         });
         if (!sold.length) return Promise.resolve(state);
 
@@ -3302,13 +3518,13 @@ const BotLifeState = {
             inventory,
             stats: {
                 ...(state.stats || {}),
-                lastNpcLiquidation: { payout, sold, at: now(), ...options }
+                lastNpcLiquidation: invoke('GameServer/Bot/LastOperations').compact({ at: now(), payout: Math.round(payout) }, sold, { field: 'sold' })
             },
             updatedAt: now()
         };
         const row = rowFromState(nextState);
         return save(row)
-            .then(() => syncInventorySummary(row.characterId, inventory))
+            .then(() => syncInventorySummary(row.characterId, inventory, 'npc_liquidation'))
             .then(() => {
                 const snapshot = normalize(row);
                 cache.set(snapshot.characterId, snapshot);
@@ -3334,7 +3550,7 @@ const BotLifeState = {
         };
         const row = rowFromState(nextState);
         return save(row)
-            .then(() => syncInventorySummary(row.characterId, nextState.inventory))
+            .then(() => syncInventorySummary(row.characterId, nextState.inventory, 'consumable_purchase'))
             .then(() => {
                 const snapshot = normalize(row);
                 cache.set(snapshot.characterId, snapshot);
@@ -3456,8 +3672,13 @@ const BotLifeState = {
         return next;
     },
 
-    learnCraftableRecipes(state) {
+    learnCraftableRecipes(state, { recipeIds = null } = {}) {
         if (!state?.characterId) return Promise.resolve(state || null);
+        if (!recipeIds) {
+            const leaf = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided(state)?.activity;
+            recipeIds = leaf?.activity === 'crafting' && Number(leaf.recipeId) > 0 ? [Number(leaf.recipeId)] : [];
+        }
+        if (!recipeIds.length) return Promise.resolve(state);
         const candidates = Object.values(state.inventory || {})
             .filter((item) => ItemDisposition.canLearnRecipe(state, item))
             .sort((left, right) => Number(left.selfId || 0) - Number(right.selfId || 0));
@@ -3467,12 +3688,23 @@ const BotLifeState = {
             const known = new Set((rows || []).map(row => Number(row.recipeId)));
             const recipes = candidates.filter(item => Number(item.amount || 0) > 0).flatMap(item => {
                 const decision = ItemDisposition.recipeDisposition(state, item, [...known]);
-                return decision?.action === 'learn' ? [{ ...decision.recipe, name: item.name }] : [];
+                return decision?.action === 'learn' && recipeIds.includes(Number(decision.recipe.recipeId))
+                    ? [{ ...decision.recipe, name: item.name }] : [];
             });
             if (!recipes.length) return state;
-            const learned = await Database.learnColdRecipes(state.characterId, recipes, state);
-            if (!learned.coldLifeRow) return state;
-            const saved = this.acceptLifecycleRow(learned.coldLifeRow);
+            const Commit = invoke('GameServer/Bot/Economy/EconomyCommit');
+            let saved = state, changed = false;
+            for (const recipe of recipes) {
+                const admitted = await Commit.admit(saved, Commit.KINDS.learn);
+                let learned;
+                try { learned = await Database.learnColdRecipes(state.characterId, [recipe], admitted.state,
+                    { economyCommand: admitted.command }); }
+                finally { Commit.finish(state.characterId, admitted.command); }
+                if (learned.learned?.length) changed = true;
+                if (learned.coldLifeRow) saved = Commit.acceptRow(learned.coldLifeRow);
+                if (saved.phase !== 'cold' || this.hotRow(saved.characterId)) break;
+            }
+            if (changed) invoke('GameServer/Bot/Economy/CraftWorkshopService').recipesChanged(state.characterId);
             notifyColdSnapshot(saved, 'recipe_book_learned', { critical: true });
             return saved;
         }).catch(error => {
@@ -3481,7 +3713,8 @@ const BotLifeState = {
         });
     },
 
-    upsertState(state, reason = 'seed') {
+    // options.releaseHot: markCold's write, the one that hands a hot row back.
+    upsertState(state, reason = 'seed', options = {}) {
         if (!state || !state.characterId) return Promise.resolve(null);
 
         const timestamp = now();
@@ -3503,22 +3736,28 @@ const BotLifeState = {
         const characterId = Number(nextState.characterId);
         const previous = pendingWrites.get(characterId) || Promise.resolve();
         const ready = initialized ? Promise.resolve(true) : this.init();
+        let paidTrip = null;
         const next = previous.then(() => ready).then((isReady) => {
             if (!isReady) {
                 throw new Error('state table unavailable');
             }
-            const protectedState = preserveClanOwnedEquipmentState(nextState, reason, cache.get(characterId));
+            const cached = cache.get(characterId);
+            const protectedState = preserveClanOwnedEquipmentState(nextState, reason, cached);
+            paidTrip = () => syncNewTripPayment(protectedState, cached);
             const row = rowFromState(protectedState);
-            return save(row).then(() => row);
+            return save(row, { releaseHot: options.releaseHot === true }).then(() => row);
         }).then((row) => Database.updateCharacterLocation(row.characterId, {
             locX: row.locX,
             locY: row.locY,
             locZ: row.locZ
         }).then(() => row)).then((row) => Database.updateCharacterExperience(row.characterId, row.level, row.exp, row.sp).then(() => row))
             .then((row) => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp).then(() => row))
+            .then((row) => paidTrip().then(() => row))
             .then((row) => {
                 const snapshot = normalize(row);
+                const current = cache.get(characterId);
                 cache.set(characterId, snapshot);
+                notifyMarketReviewState(snapshot, current);
                 notifyColdSnapshot(snapshot, reason);
                 return snapshot;
             })
@@ -3562,10 +3801,13 @@ const BotLifeState = {
                 || state.activity === 'pk_hunting'
                 || state.partyId
                 || state.party?.partyId
-                || (state.activity === 'merchant' && state.stats?.marketStore)
                 || (state.activity === 'crafting' && state.stats?.craftShop)) {
                 return;
             }
+            // An arrived trader waits on the native meeting event; its old
+            // resolve deadline is not a task waiting in the worker's heap.
+            if (state.stats?.tradeMeeting
+                && require('./ColdSimulationKernel').lifecycleKind(state) === 'event_driven') return;
 
             const nextResolveAt = Number(state.timing?.nextResolveAt || 0);
             if (nextResolveAt > timestamp && !hasStaleRateModelPlan(state)) return;
@@ -3587,6 +3829,7 @@ const BotLifeState = {
     },
 
     targetCombatSummary() {
+        if (Config.developerDiagnostics !== true) return null;
         return Array.from(cache.values()).reduce((summary, state) => {
             const targets = state.stats?.targetCombat?.populationTargets || {};
             const values = Object.values(targets);
@@ -3641,15 +3884,17 @@ const BotLifeState = {
         const next = previous.catch(() => {}).then(async () => {
             const enemies = invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session);
             const incidents = invoke('GameServer/Social/PvpResponsibility').snapshot(session.actor);
+            const people = session.peopleKnowledge;
             const current = cache.get(id);
             if (!current || current.phase !== 'hot' || (JSON.stringify(current.stats?.pvpEnemies || []) === JSON.stringify(enemies)
-                && JSON.stringify(current.stats?.pvpIncidents || []) === JSON.stringify(incidents))) return false;
+                && JSON.stringify(current.stats?.pvpIncidents || []) === JSON.stringify(incidents)
+                && (!people || current.stats?.peoplePoints === people.peoplePoints && current.stats?.peopleEpisode === people.peopleEpisode))) return false;
             await Database.execute([
-                `UPDATE ${TABLE} SET statsJson = json_set(COALESCE(statsJson, '{}'), '$.pvpEnemies', json(?), '$.pvpIncidents', json(?)) WHERE characterId = ? AND phase = 'hot'`,
-                [JSON.stringify(enemies), JSON.stringify(incidents), id]
+                `UPDATE ${TABLE} SET statsJson = json_patch(json_set(COALESCE(statsJson, '{}'), '$.pvpEnemies', json(?), '$.pvpIncidents', json(?)), json(?)) WHERE characterId = ? AND phase = 'hot'`,
+                [JSON.stringify(enemies), JSON.stringify(incidents), JSON.stringify(people || {}), id]
             ], 'bot:enemy-memory');
             const latest = cache.get(id);
-            if (latest) cache.set(id, { ...latest, stats: { ...(latest.stats || {}), pvpEnemies: enemies, pvpIncidents: incidents } });
+            if (latest) cache.set(id, { ...latest, stats: { ...(latest.stats || {}), ...(people || {}), pvpEnemies: enemies, pvpIncidents: incidents } });
             return true;
         }).catch(error => {
             utils.infoWarn('BotLife', 'failed enemy memory for %s: %s', id, error.message);
@@ -3678,6 +3923,7 @@ const BotLifeState = {
                     if (session[key]) session[key] = { ...session[key], name,
                         stats: { ...session[key].stats, nameGeneratorVersion: version } };
                 }
+                RefreshPartyMemberships([session], invoke);
                 if (session.actor.fetchIsOnline?.()) {
                     const Response = invoke('GameServer/Network/Response');
                     session.dataSendToMe?.(Response.userInfo(session.actor));
@@ -3685,7 +3931,7 @@ const BotLifeState = {
                 }
             }
             invoke('GameServer/Clan/ClanService').renameMember(id, name);
-            if (snapshot.stats?.marketStore) invoke('GameServer/Bot/Economy/MarketOpportunity').indexColdStore(snapshot);
+            invoke('GameServer/AfkTrade/AfkTradeService').renameOwner(id, name);
             notifyColdSnapshot(snapshot, 'generated_name_migration', { critical: true });
             return snapshot;
         });
@@ -3736,6 +3982,16 @@ const BotLifeState = {
         return () => changeListeners.delete(listener);
     },
 
+    subscribePublications(listener, options = {}) {
+        return cache.subscribePublications(listener, options);
+    },
+
+    subscribeMarketReviewChanges(listener) {
+        if (typeof listener !== 'function') return () => {};
+        marketReviewListeners.add(listener);
+        return () => marketReviewListeners.delete(listener);
+    },
+
     acceptSimulationOwnership(characterId, result = {}, committedState = null) {
         const id = Number(characterId);
         const current = cache.get(id);
@@ -3757,12 +4013,19 @@ const BotLifeState = {
             next.stats = { ...next.stats, nameGeneratorVersion: current.stats.nameGeneratorVersion };
         }
         cache.set(id, next);
+        notifyMarketReviewState(next, current);
         invoke('GameServer/Clan/ClanService').syncColdMember(next);
         return next;
     },
 
     allStates(limit = 500) {
         return cache.recent(recentLimit(limit));
+    },
+
+    // Every cached state, newest first, with no 2000 bound: for the feeds to
+    // the cold worker, which must see the whole population.
+    everyState() {
+        return cache.recent(cache.size);
     },
 
     // The states a bounded allStates(limit) view leaves out (oldest updatedAt).
@@ -3777,6 +4040,7 @@ const BotLifeState = {
 
     // For a caller that changed the cached state object in place, not through a write.
     refreshOccupancy(state) {
+        if (workerProjectorRole) throw new TypeError('worker_projector_occupancy_write');
         if (state && cache.get(Number(state.characterId)) === state) cache.occupancy.update(state);
     },
 
@@ -3788,6 +4052,51 @@ const BotLifeState = {
 
     stateRevision() {
         return cache.revision;
+    },
+
+    async safetyPage(page = {}) {
+        if (page === null || typeof page !== 'object' || Array.isArray(page)) {
+            throw new TypeError('Lifecycle safety page options must be an object');
+        }
+        const { afterId = 0, limit = 64 } = page;
+        let { highWaterId } = page;
+        if (!Number.isSafeInteger(afterId) || afterId < 0
+            || !Number.isSafeInteger(limit) || limit < 1 || limit > 64
+            || (highWaterId !== undefined && (!Number.isSafeInteger(highWaterId) || highWaterId < 0))
+            || (highWaterId === undefined ? afterId !== 0 : afterId > highWaterId)) {
+            throw new RangeError('Invalid lifecycle safety page cursor or limit');
+        }
+        if (!Database.isReady()) {
+            throw Object.assign(new Error('Lifecycle safety database is unavailable'), {
+                code: 'BOT_LIFE_SAFETY_UNAVAILABLE'
+            });
+        }
+        // Fix only the cycle's upper PK boundary; each page reads current rows.
+        if (highWaterId === undefined) {
+            const [maximum] = await Database.execute([
+                `SELECT COALESCE(MAX(characterId), 0) AS highWaterId FROM ${TABLE}`, []
+            ], 'bot-life:safety-high-water');
+            highWaterId = maximum.highWaterId;
+            if (!Number.isSafeInteger(highWaterId) || highWaterId < 0) {
+                throw new RangeError('Invalid lifecycle safety high-water identity');
+            }
+        }
+        if (afterId === highWaterId) {
+            return { rows: [], cursor: { afterId, highWaterId }, done: true };
+        }
+        const rows = await Database.execute([
+            `SELECT characterId, phase, activity, simulationOwner, simulationRevision,
+                simulationLeaseId, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+                lastResolvedAt, lastHotAt, updatedAt
+            FROM ${TABLE}
+            WHERE characterId > ? AND characterId <= ? ORDER BY characterId ASC LIMIT ?`,
+            [afterId, highWaterId, limit]
+        ], 'bot-life:safety-page');
+        const lastId = rows.length ? rows[rows.length - 1].characterId : afterId;
+        // An exact-size page may need an empty final read after a deleted tail.
+        // Do not inspect limit+1 rows just to predict that final read.
+        const done = rows.length < limit || lastId === highWaterId;
+        return { rows, cursor: { afterId: done ? highWaterId : lastId, highWaterId }, done };
     },
 
     marketGoalCursorSnapshot() {
@@ -3831,6 +4140,7 @@ const BotLifeState = {
 
 BotLifeState.canonicalizeAreaState = canonicalizeAreaState;
 BotLifeState.inventorySummaryFromItems = inventorySummaryFromItems;
+BotLifeState.setSessionSnapshotsPhase = setSessionSnapshotsPhase;
 BotLifeState.equipmentSummaryFromInventory = equipmentSummaryFromInventory;
 BotLifeState.marketPurchaseBlocker = marketPurchaseBlocker;
 BotLifeState.normalizeInventoryStackability = normalizeInventoryStackability;
@@ -3838,5 +4148,7 @@ BotLifeState.preserveClanOwnedEquipmentState = preserveClanOwnedEquipmentState;
 BotLifeState.reconcileEquipmentInventory = reconcileEquipmentInventory;
 BotLifeState.reconcileFulfilledEquipmentPlan = reconcileFulfilledEquipmentPlan;
 BotLifeState.reconcileIncompatibleShieldState = reconcileIncompatibleShieldState;
+
+BotLifeState.targetCombatTelemetry = targetCombatTelemetry;
 
 module.exports = BotLifeState;

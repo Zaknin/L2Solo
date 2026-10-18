@@ -189,4 +189,25 @@ try {
     Formulas.calcHitChance = originalChance;
     CompanionService.startQueuedGroundPickup = originalPickup;
 }
+
+const DataCache = invoke('GameServer/DataCache'), originalNpcs = DataCache.npcs;
+try {
+    let staticReads = 0, sourceRadius = 8;
+    DataCache.npcs = [{ selfId: 1, collision: { radius: 10 } }, { selfId: 1, model: { radius: 30 } },
+        { fetchRadius: () => { staticReads++; return Infinity; }, collision: { radius: 1000 } },
+        { model: { radius: 0 }, collision: { radius: 1000 } }, { collision: { radius: -20 } }];
+    const source = { fetchRadius: () => sourceRadius };
+    assert.strictEqual(AttackRange.maxKnownTargetRadius(), 30,
+        'the query maximum includes all raw duplicate NPC rows and preserves collision-radius precedence/normalization');
+    assert.strictEqual(AttackRange.targetQueryRadius(source, 40), 78);
+    sourceRadius = 12;
+    assert.strictEqual(AttackRange.targetQueryRadius(source, 40), 82, 'the actor\'s current radius remains fresh');
+    assert.strictEqual(staticReads, 1, 'repeated query reads reuse the prepared static maximum');
+    DataCache.npcs.push({ collision: { radius: 45 } });
+    assert.strictEqual(AttackRange.maxKnownTargetRadius(), 45, 'source growth refreshes the static maximum');
+    DataCache.npcs = [{ collision: { radius: 90 } }];
+    assert.strictEqual(AttackRange.targetQueryRadius(source, 40), 142, 'source replacement refreshes the maximum');
+    DataCache.npcs = null;
+    assert.strictEqual(AttackRange.targetQueryRadius(source, 40), 52, 'a missing dataset still contributes zero');
+} finally { DataCache.npcs = originalNpcs; }
 console.log('Player auto-attack range checks passed');

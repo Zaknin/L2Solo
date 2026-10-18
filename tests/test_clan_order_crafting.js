@@ -5,10 +5,11 @@ const { once } = require('events');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-order-crafting');
 require('../src/Global');
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-order-crafting.sqlite');
+const databasePath = isolated.world;
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const GoalService = invoke('GameServer/Clan/ClanGoalService');
@@ -39,6 +40,10 @@ function seedDatabase() {
     insertCharacter.run(5300005, 'bot_pop_order', 'OrderMage', 22, 53, 0);
     insertCharacter.run(5300006, 'bot_pop_order', 'OrderCrafter', 57, 49, 0);
     seed.prepare('INSERT INTO clans(id, name, level, leaderId) VALUES (6300001, ?, 3, 5300001)').run('OrderClan');
+    // A Bounty Hunter outside the clan retains Create Item 1.
+    seed.prepare(`INSERT INTO characters(id, username, name, classId, race, level, maxHp, maxMp,
+        sex, face, hair, hairColor, locX, locY, locZ) VALUES (5300007, 'bot_pop_order', 'OrderSpoiler', 55, 4, 60, 500, 250,
+        0, 0, 0, 0, 83400, 148600, -3400)`).run();
     const insertLife = seed.prepare(`INSERT INTO bot_life_state(
         characterId, accountName, characterName, level, activity, phase,
         inventorySummary, statsJson, updatedAt
@@ -48,6 +53,7 @@ function seedDatabase() {
     insertLife.run(5300004, 'OrderBuffer', 51, JSON.stringify({ generatedCold: true, classId: 17, role: 'buffer' }));
     insertLife.run(5300005, 'OrderMage', 53, JSON.stringify({ generatedCold: true, classId: 22, role: 'mage' }));
     insertLife.run(5300006, 'OrderCrafter', 49, JSON.stringify({ generatedCold: true, classId: 57, role: 'crafter' }));
+    insertLife.run(5300007, 'OrderSpoiler', 60, JSON.stringify({ generatedCold: true, classId: 55, role: 'spoiler' }));
     seed.exec('UPDATE bot_life_state SET hp=500, mp=250, maxHp=500, maxMp=250, locX=83400, locY=148600, locZ=-3400');
     seed.close();
 }
@@ -58,7 +64,7 @@ async function projection() {
 
 async function main() {
     seedDatabase();
-    options.default.Database.path = path.relative(rootDir, databasePath);
+    isolated.assertConfigured(options.default);
     Database.init(); DataCache.init(); await LifeState.init(); await BackgroundPartyState.init();
     const Recipes = invoke('GameServer/Items/C4RecipeItems');
     const Cold = invoke('GameServer/Bot/Economy/ColdCraftingService');
@@ -107,6 +113,10 @@ async function main() {
         assert.strictEqual(noDwarf.order.status, 'blocked');
         const [queued] = await Database.execute(["SELECT actionType FROM clan_actions WHERE clanId = 6300001 AND status = 'pending'", []]);
         assert.strictEqual(queued.actionType, 'goal_plan', 'blocked crafts must be reviewed when roster or stock changes');
+        const spoilerPlan = await CraftOrders.planFor({ id: 0, itemId: 1879, memberIds: [5300002, 5300007] },
+            { id: 6300001, state: { memberIds: [] } }, 2, { source: null });
+        assert.strictEqual(spoilerPlan.craft.crafterName, 'OrderSpoiler', 'a spoiler with sufficient Create Item is a capable clan provider');
+        assert.notStrictEqual(spoilerPlan.reasonCode, 'clan_craft_crafter_unavailable');
 
         await stock(1870, 6); await stock(1871, 6); await stock(recipe.recipeItemId, 1);
         const created = await OrderService.create(await projection(), { itemId: 1879, amount: 2, strategy: 'craft', memberIds: members });
@@ -252,6 +262,6 @@ async function main() {
         assert.strictEqual(deliveries.length, 1);
         assert((await Database.fetchItems(deliveries[0].characterId)).some(row => row.selfId === 439 && row.equipped), 'the compatible recipient must equip the crafted armor');
         console.log('Manual clan crafting checks passed');
-    } finally { await Database.close(); removeDatabaseFiles(); }
+    } finally { await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

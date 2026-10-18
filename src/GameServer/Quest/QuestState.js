@@ -8,6 +8,7 @@ const COMPLETED = "completed";
 class QuestState {
   constructor(session, quest, row = {}) {
     this.session = session;
+    this.actorId = Number(session.actor?.fetchId?.()) || 0;
     this.quest = quest;
     this.state = row.state || CREATED;
     try {
@@ -54,6 +55,8 @@ class QuestState {
   }
 
   save() {
+    // A state loaded for the previous character never writes into the new one.
+    if (Number(this.session.actor?.fetchId?.()) !== this.actorId) return Promise.resolve();
     return Database.setCharacterQuest(
       this.session.actor.fetchId(),
       this.quest.id,

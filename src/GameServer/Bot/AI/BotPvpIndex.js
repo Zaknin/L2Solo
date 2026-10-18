@@ -1,8 +1,8 @@
-// Shared, short-lived lookup snapshot: a burst of hits/ticks does not scan
-// the online population per actor. Membership is revalidated at every use.
+// Native membership uses addressed current World registrations. Injected
+// legacy worlds retain their snapshot; neither path adds spatial eligibility.
 const REFRESH_MS = 250;
 let source, revision, length = -1, expiresAt = 0;
-let actors = new Map(), parties = new Map();
+let parties = new Map();
 
 function keys(session) {
     const leader = session.partyCompanion === true ? session.followPlayerSession : session;
@@ -18,10 +18,9 @@ function refresh() {
     const now = Date.now();
     if (sessions === source && users?.revision === revision && sessions.length === length && now < expiresAt) return;
     source = sessions; revision = users?.revision; length = sessions.length; expiresAt = now + REFRESH_MS;
-    actors = new Map(); parties = new Map();
+    parties = new Map();
     for (const session of sessions) {
         if (!session?.actor) continue;
-        actors.set(Number(session.actor.fetchId?.()), session);
         for (const key of keys(session)) {
             if (!parties.has(key)) parties.set(key, new Set());
             parties.get(key).add(session);
@@ -30,18 +29,31 @@ function refresh() {
 }
 
 function actor(id) {
-    refresh();
-    const session = actors.get(Number(id));
-    return Number(session?.actor?.fetchId?.()) === Number(id) ? session.actor : null;
+    const lookup = Number(id);
+    const registered = invoke('GameServer/World/World').registeredActorById(lookup);
+    const current = registered?.actor;
+    return Number(current?.fetchId?.()) === lookup ? current : null;
 }
 
 function members(session) {
-    refresh();
+    const World = invoke('GameServer/World/World');
+    const native = World.pvpPartyMembershipIndex === true;
+    if (native) {
+        if (typeof World.pvpPartyMembershipKeys !== 'function' || typeof World.pvpPartySessionsForKey !== 'function') {
+            throw new TypeError('invalid_party_membership_index');
+        }
+    } else {
+        // Explicit legacy injected worlds retain their original snapshot reader.
+        refresh();
+    }
     const found = new Set([session, session?.partyCompanion ? session.followPlayerSession : null]);
-    for (const key of keys(session)) for (const member of parties.get(key) || []) found.add(member);
+    for (const key of native ? World.pvpPartyMembershipKeys(session) : keys(session)) {
+        const selected = native ? World.pvpPartySessionsForKey(key) : parties.get(key) || [];
+        for (const member of selected) found.add(member);
+    }
     return [...found].filter(Boolean);
 }
 
 module.exports = { actor, members, invalidate() {
-    expiresAt = 0; source = undefined; actors.clear(); parties.clear();
+    expiresAt = 0; source = undefined; parties.clear();
 }, REFRESH_MS };

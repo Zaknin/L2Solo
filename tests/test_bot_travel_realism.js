@@ -1,6 +1,11 @@
 const assert = require('assert');
 
+const fs = require('node:fs');
+const nodePath = require('node:path');
+const isolated = require('./helpers/isolatedSocialDatabase')('bot_travel_realism', nodePath.resolve(__dirname, '..'));
+require('./helpers/databaseIsolation');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const DataCache = invoke('GameServer/DataCache');
 const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
@@ -25,6 +30,8 @@ function bot(loc = {}) {
         fetchLocZ() { return this.locZ; },
         moveTo(data) { this.moves.push(data); },
         unselect() { this.unselected = true; },
+        // The restock reads the wallet after its purchase (a19a9727).
+        backpack: { fetchItemFromSelfId: () => null, fetchItems: () => [] },
         state: {
             inMotion: () => false
         },
@@ -35,27 +42,80 @@ function bot(loc = {}) {
     };
 }
 
+const World = invoke('GameServer/World/World');
+const originalUsers = World.user;
+const published = new Set();
+const scheduledWork = [];
+let fixtureUsers;
+// Each scene keeps the original TravelBot object ID 2000099. Remove its
+// previous registration before publishing the next unit actor at that ID.
+// The original leader facades lack an ID: use the adjacent explicit ID from
+// the same test actor constructor's range, without altering their positions.
+function publishTravelSession(session, actor) {
+    const leader = session.followPlayerSession || session.resumeAfterBuff?.followPlayerSession
+        || session.resumeAfterShopping?.followPlayerSession;
+    if (leader?.actor && typeof leader.actor.fetchId !== 'function') leader.actor.fetchId = () => 2000098;
+    const current = leader?.actor ? [leader, session] : [session];
+    if (!fixtureUsers) { fixtureUsers = { sessions: [], revision: 0 }; World.user = fixtureUsers; }
+    for (const previous of [...published]) {
+        if (current.includes(previous)) continue;
+        World.removeUser(previous); published.delete(previous);
+    }
+    session.actor = actor;
+    if (session.partyCompanion && leader) session.followPlayerSession = leader;
+    for (const item of current) {
+        const ownActor = item.actor;
+        item.accountId ??= `${item === leader ? 'travel_player' : 'bot_travel'}_${ownActor.fetchId()}`;
+        item.fetchAccountId ??= function () { return this.accountId; };
+        item.dataSendToMe ??= () => {};
+        ownActor.fetchIsOnline ??= () => true;
+        ownActor.session = item;
+        if (!published.has(item)) { World.insertUser(item); published.add(item); }
+        else World.updateUserLocation(item);
+        assert.strictEqual(World.registeredActorById(ownActor.fetchId())?.actor, ownActor,
+            'the unit actor must be the exact native World registration');
+    }
+    BotManager.sessions = [session];
+    World.refreshPartyMemberships(current);
+}
+async function settleScheduledWork() {
+    for (let round = 0; scheduledWork.length; round += 1) {
+        assert(round < 20, 'unit restock callbacks must settle in a bounded number of turns');
+        await Promise.all(scheduledWork.splice(0));
+    }
+}
 const originalSetTimeout = global.setTimeout;
 const originalPlanForActor = ShotStock.planForActor;
 const originalShotAmount = ShotStock.shotAmount;
 const originalPurchaseActorRestock = ShotStock.purchaseActorRestock;
 const BotManager = invoke('GameServer/Bot/BotManager');
 const originalPartySay = BotManager.botPartySay;
+const originalBotSessions = BotManager.sessions;
 const originalApplyFullNewbieBlessing = BotBuffs.applyFullNewbieBlessing;
 const originalNeedsNewbieRefresh = BotBuffs.needsNewbieRefresh;
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const NpcRestockPlan = invoke('GameServer/Bot/Economy/NpcRestockPlan');
+const originalHotRow = LifeState.hotRow;
+const originalPurchaseForActor = NpcRestockPlan.purchaseForActor;
 
+async function run() {
 try {
     global.setTimeout = (fn) => {
-        fn();
+        scheduledWork.push(Promise.resolve(fn()));
         return 0;
     };
 
     ShotStock.planForActor = () => ({ selfId: 1835, price: 1, kind: 'soulshot', rank: 'none', name: 'Soulshot: No Grade' });
     ShotStock.shotAmount = () => 0;
     ShotStock.purchaseActorRestock = () => Promise.resolve({ ok: true, delta: 10, cost: 10 });
+    // A hot restock goes on only while the bot's row is hot, and buys at the NPC
+    // through one seller basket (a19a9727); the travel scenes have no database.
+    LifeState.hotRow = (characterId) => ({ characterId, phase: 'hot' });
+    NpcRestockPlan.purchaseForActor = () => Promise.resolve({ ok: true, receipts: [] });
 
     const shopper = bot({ locX: 1000, locY: 1000, locZ: -100 });
     const shoppingSession = {
+        plan: 'shopping',
         preShopLocation: { locX: 2000, locY: 2100, locZ: -120 },
         partyCompanion: false,
         dataSendToOthers() {}
@@ -66,11 +126,58 @@ try {
         }
     };
 
+    publishTravelSession(shoppingSession, shopper);
+
+    const Slots = invoke('GameServer/Bot/AI/TownNpcSlots');
+    const otherShopper = {};
+    Slots.reserve(otherShopper, 'completed-visit', () => [1]);
+    Slots.reserve(shoppingSession, 'completed-visit', () => [1]);
+    shoppingSession.townNpcApproach = { key: 'completed-visit', phase: 'interaction' };
     ShoppingState.scheduleRestock(shoppingSession, shopper, noTeleportGenerics, { say() {} });
+
+    await settleScheduledWork();
     assert.strictEqual(shopper.moves.length, 0, 'solo shopping must let hunting route through the town gatekeeper');
     assert.strictEqual(shoppingSession.preShopLocation, undefined);
     assert.strictEqual(shoppingSession.pendingFarmDepartureAnnouncement, true,
         'the next hunting-ground decision should announce a clear farming destination');
+    assert(!shoppingSession.townNpcQueue && !shoppingSession.townNpcSlot && !shoppingSession.townNpcApproach,
+        'finishing the visit must release all shop waiting state before hunting resumes');
+    Slots.release(otherShopper);
+
+    const HuntingState = invoke('GameServer/Bot/AI/States/HuntingState');
+    const departureBot = bot({ locX: 80456, locY: 147864, locZ: -3504 });
+    const departureSession = { actor: departureBot, plan: 'hunting', pendingFarmDepartureAnnouncement: true };
+    const savedMove = CompanionNavigationRecovery.move;
+    try {
+        let departureTarget;
+        CompanionNavigationRecovery.move = (_session, _actor, target) => {
+            departureTarget = target;
+            return { status: 'started' };
+        };
+        assert(HuntingState.leaveShop(departureSession, departureBot),
+            'a completed solo visit must leave the shop even before a suitable farm spot is selected');
+        assert(Math.hypot(departureTarget.locX - 83396, departureTarget.locY - 147904) < 200,
+            'the departure must walk toward the public square');
+        departureBot.locX = departureTarget.locX;
+        departureBot.locY = departureTarget.locY;
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'arriving on the square must resume normal decisions without a teleport');
+        departureBot.locX = 80456;
+        departureBot.locY = 147864;
+        departureSession.spotRelocation = { method: 'town_gatekeeper' };
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'an already chosen farming trip must retain ownership of movement');
+        departureSession.spotRelocation = undefined;
+        departureSession.incomingThreatId = 123;
+        departureSession.incomingThreatAt = Date.now();
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'leaving the shop must yield to incoming combat');
+        departureSession.incomingThreatId = undefined;
+        departureBot.fetchHp = () => 10;
+        departureBot.fetchMaxHp = () => 100;
+        assert.strictEqual(HuntingState.leaveShop(departureSession, departureBot), false,
+            'a wounded bot must recover before walking out of the shop');
+    } finally { CompanionNavigationRecovery.move = savedMove; }
 
     BotBuffs.applyFullNewbieBlessing = () => ({ buffs: [], expiresAt: Date.now() + 60000 });
 
@@ -92,6 +199,7 @@ try {
         preBuffPlan: 'hunting',
         preBuffLocation: { locX: -83000, locY: 242000, locZ: -3700 }
     };
+    publishTravelSession(buffSession, buffBot);
     GettingBuffedState.tick(buffSession, buffBot, noTeleportGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -113,9 +221,11 @@ try {
             townVisitKey: initialTownVisit.key
         }
     };
+    publishTravelSession(townVisitSession, townVisitBot);
     GettingBuffedState.tick(townVisitSession, townVisitBot, noTeleportGenerics, starterTownAi);
     assert.strictEqual(townVisitBot.moves.length, 1, 'the guide visit should use one direct open-air approach');
     Object.assign(townVisitBot, townVisitBot.moves[0].to);
+    publishTravelSession(townVisitSession, townVisitBot);
     GettingBuffedState.tick(townVisitSession, townVisitBot, noTeleportGenerics, starterTownAi);
     assert.strictEqual(townVisitBot.moves.length, 1, 'the guide visit must not add a shared staging leg');
     assert.strictEqual(
@@ -164,6 +274,7 @@ try {
             role: 'dps'
         }
     };
+    publishTravelSession(companionSession, companionBot);
     GettingBuffedState.tick(companionSession, companionBot, noTeleportGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -181,6 +292,7 @@ try {
         preBuffPlan: 'hunting',
         preBuffLocation: { locX: -83000, locY: 242000, locZ: -3700 }
     };
+    publishTravelSession(edgeGuideSession, edgeGuideBot);
     GettingBuffedState.tick(edgeGuideSession, edgeGuideBot, noTeleportGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -190,6 +302,7 @@ try {
     assert.strictEqual(edgeGuideBot.moves.length, 1,
         'the guide approach should stop near the NPC instead of buffing from the old wide radius');
     Object.assign(edgeGuideBot, edgeGuideBot.moves[0].to);
+    publishTravelSession(edgeGuideSession, edgeGuideBot);
     GettingBuffedState.tick(edgeGuideSession, edgeGuideBot, noTeleportGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -217,6 +330,7 @@ try {
     const recoveryGenerics = {
         teleportTo(_session, _actor, target) { recoveryTeleports.push(target); }
     };
+    publishTravelSession(deathRecoverySession, deathRecoveryBot);
     GettingBuffedState.tick(deathRecoverySession, deathRecoveryBot, recoveryGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -224,6 +338,7 @@ try {
     assert.strictEqual(recoveryTeleports.length, 1, 'an overleveled companion should skip the Newbie Guide and teleport back');
     assert.strictEqual(deathRecoverySession.plan, 'getting_buffed', 'the recovery state should remain active until the return teleport settles');
     deathRecoverySession.resumeAfterBuff.returnTeleportStartedAt = Date.now() - 2000;
+    publishTravelSession(deathRecoverySession, deathRecoveryBot);
     GettingBuffedState.tick(deathRecoverySession, deathRecoveryBot, recoveryGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() {}
@@ -257,6 +372,7 @@ try {
         }
     };
     const lowLevelRecoveryTeleports = [];
+    publishTravelSession(lowLevelRecoverySession, lowLevelRecoveryBot);
     GettingBuffedState.tick(lowLevelRecoverySession, lowLevelRecoveryBot, {
         teleportTo(_session, _actor, target) { lowLevelRecoveryTeleports.push(target); }
     }, {
@@ -281,7 +397,9 @@ try {
         resumeAfterShopping: { plan: 'following', followPlayerSession: { actor: shoppingLeader } },
         dataSendToOthers() {}
     };
+    publishTravelSession(shoppingCompanionSession, shoppingBot);
     ShoppingState.scheduleRestock(shoppingCompanionSession, shoppingBot, noTeleportGenerics, { say() {} });
+    await settleScheduledWork();
 
     assert.strictEqual(shoppingCompanionSession.plan, 'following', 'companion should resume following after its town errand');
     assert.strictEqual(shoppingCompanionSession.companionShopping, undefined, 'completed town errand should not leave a shopping state behind');
@@ -299,7 +417,9 @@ try {
         resumeAfterShopping: { plan: 'following', followPlayerSession: { actor: shoppingLeader } },
         dataSendToOthers() {}
     };
+    publishTravelSession(youngShoppingSession, youngShoppingBot);
     ShoppingState.scheduleRestock(youngShoppingSession, youngShoppingBot, noTeleportGenerics, starterTownAi);
+    await settleScheduledWork();
     assert.strictEqual(
         youngShoppingSession.plan,
         'getting_buffed',
@@ -349,6 +469,7 @@ try {
         if (sent) unreachableGuideMessages.push(text);
         return sent;
     };
+    publishTravelSession(unreachableGuideSession, unreachableGuideBot);
     GettingBuffedState.tick(unreachableGuideSession, unreachableGuideBot, noTeleportGenerics, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         say() { throw new Error('companion coordination must use party delivery'); }
@@ -386,6 +507,7 @@ try {
     };
     const unreachableShopBot = bot({ locX: 0, locY: 0, locZ: -100 });
     const unreachableShopMessages = [];
+    publishTravelSession(unreachableShopSession, unreachableShopBot);
     ShoppingState.tick(unreachableShopSession, unreachableShopBot, noTeleportGenerics, {
         say(_session, text) { unreachableShopMessages.push(text); },
         getClosestTown: () => ({ name: 'Dion', x: 1000, y: 1000, z: -100 })
@@ -423,6 +545,7 @@ try {
         retryAt: 0
     };
     const buyerFallbackBot = bot({ locX: 0, locY: 0, locZ: -100 });
+    publishTravelSession(buyerFallbackSession, buyerFallbackBot);
     ShoppingState.tick(buyerFallbackSession, buyerFallbackBot, noTeleportGenerics, {
         say() {},
         getClosestTown: () => ({ name: 'Giran', x: 1000, y: 1000, z: -100 })
@@ -438,10 +561,22 @@ try {
     console.log('Bot travel realism checks passed');
 } finally {
     BotManager.botPartySay = originalPartySay;
+    BotManager.sessions = originalBotSessions;
+    for (const session of [...published]) { World.removeUser(session); published.delete(session); }
+    World.user = originalUsers;
     global.setTimeout = originalSetTimeout;
     ShotStock.planForActor = originalPlanForActor;
     ShotStock.shotAmount = originalShotAmount;
     ShotStock.purchaseActorRestock = originalPurchaseActorRestock;
+    LifeState.hotRow = originalHotRow;
+    NpcRestockPlan.purchaseForActor = originalPurchaseForActor;
     BotBuffs.applyFullNewbieBlessing = originalApplyFullNewbieBlessing;
     BotBuffs.needsNewbieRefresh = originalNeedsNewbieRefresh;
+    fs.rmSync(isolated.directory, { recursive: true, force: true });
 }
+
+}
+run().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});

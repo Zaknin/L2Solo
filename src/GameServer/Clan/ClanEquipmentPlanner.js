@@ -23,7 +23,7 @@ function plannerState(member) {
 // The clan's purchase budget for a member: what the member can pay itself
 // plus the clan's free money (options.clanShare).
 function clanBudget(state, options = {}) {
-    return PurchaseFunding.spendable(state) + Math.max(0, number(options.clanShare));
+    return PurchaseFunding.spendable(state, 0, { upperBound: true }) + Math.max(0, number(options.clanShare));
 }
 
 function existingPlanFor(member) {
@@ -77,13 +77,15 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
         ...member,
         stats: { ...(member?.stats || {}), equipmentPlan: undefined }
     } : member;
-    const existing = existingPlanFor(planningMember);
     const state = plannerState(planningMember);
+    const retained = existingPlanFor(planningMember);
+    const existing = GearAcquisitionPlanner.acquisitionTargetAllowed(state, retained) ? retained : null;
     const marketBudget = clanBudget(state, options);
     const plannerOptions = {
         spots,
         clanCrafting: true,
         craftRecipes: options.craftRecipes,
+        craftProviders: options.craftProviders,
         ...(options.recipeId ? { recipeId: options.recipeId } : {}),
         allowedRecipeIds: options.allowedRecipeIds ? new Set(options.allowedRecipeIds) : undefined,
         maxExpectedKills: number(options.maxExpectedKills, Config.equipmentMaxExpectedKills),
@@ -115,6 +117,11 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
                 ...state,
                 stats: { ...state.stats, equipmentPlan: undefined }
             }, plannerOptions);
+        }
+        if (existing?.strategy === 'direct_drop' && ['b', 'a', 's'].includes(existing.grade)) {
+            const crafted = GearAcquisitionPlanner.planFor(state, { ...plannerOptions,
+                wishTargetId: number(existing.target?.selfId), wishSlot: number(existing.target?.slot) });
+            if (crafted?.strategy === 'craft' && Policy.isAcquisitionPlan(crafted)) return crafted;
         }
         const rateProfileCurrent = !existing
             || Number(existing.rateModelVersion || 0) >= GearAcquisitionPlanner.RATE_MODEL_VERSION
@@ -237,6 +244,7 @@ function planForMember(member, spots = [], warehouseRows = [], options = {}) {
     const state = { ...member, inventory: pooled, stats: { ...(member.stats || {}) } };
     if (previous?.strategy === 'craft') delete state.stats.equipmentPlan;
     const retainedRecipe = previous?.strategy === 'craft' && previous.status !== 'blocked' && !options.ignoreExistingPlan
+        && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previous)
         && !(options.excludedTargetIds || []).map(Number).includes(Number(previous.target?.selfId))
         ? Number(previous.recipeId) : null;
     const plan = calculate(state, spots, [], { ...options, recipeId: retainedRecipe });

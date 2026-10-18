@@ -18,7 +18,7 @@ function safeMembers(party, members) {
             && ['hunting', 'grouped', 'resting', 'party_wait'].includes(member.activity)
             && !member.stats?.clanPartyObjective && !member.stats?.equipmentPlan?.clanGoal
             && !member.stats?.pvpEncounter && !member.stats?.partyMarketReturn
-            && !member.stats?.travel && !member.stats?.marketStore);
+            && !member.stats?.travel);
 }
 async function reclaim(objective, { parties, life, database, metrics }, now = Date.now()) {
     if (!required(objective)) return false;
@@ -40,7 +40,7 @@ async function reclaim(objective, { parties, life, database, metrics }, now = Da
                 meta: { partyId: party.partyId, clanId: objective.clanId, clanGoalKey: objective.clanGoalKey } } });
         // A worker claim or membership change wins over this stale decision.
         if (!result?.ok) continue;
-        life.acceptPartyAssignments(prepared);
+        life.acceptPartyAssignments(prepared, result.lifeRows);
         parties.acceptCommit(preparedParty);
         metrics.recordPartyDissolution();
         return true;

@@ -1,21 +1,111 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
+const isolated = require('./helpers/isolatedSocialDatabase')('test_clan_planning_worker');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const DataCache = invoke('GameServer/DataCache');
 const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Equipment = invoke('GameServer/Clan/ClanEquipmentService');
 const Goals = invoke('GameServer/Clan/ClanGoalService');
 const Database = invoke('Database');
+Database.init();
 const Runtime = require('../src/GameServer/Clan/ClanPlanningCoordinator');
 const { ClanPlanningCoordinator } = Runtime;
 const { planForMember } = require('../src/GameServer/Clan/ClanEquipmentPlanner');
 
+async function sharedModulesStayPure() {
+    DataCache.init();
+    const Persona = invoke('GameServer/Bot/AI/BotPersona');
+    const Death = invoke('GameServer/Progression/DeathExperience');
+    const state = { characterId: 990001, level: 20, exp: DataCache.experience[19],
+        stats: { classId: 4 }, inventory: {}, phase: 'cold' };
+    const context = { timestamp: 123456 };
+    const personaRow = Persona.tableRow(Persona.generate(state));
+    const coldDeath = Death.applyColdDeath(state, context);
+    const restoration = Death.restoreCold(coldDeath.state, { restoreExpPercent: 30 });
+    const worker = new Worker(`
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const { parentPort, workerData } = require('node:worker_threads');
+        const root = workerData.root;
+        require(path.join(root, 'tests/helpers/databaseIsolation'));
+        const isolated = require(path.join(root, 'tests/helpers/isolatedSocialDatabase'))('clan-pure-modules');
+        try {
+            require(path.join(root, 'src/Global'));
+            isolated.assertConfigured(options.default);
+            invoke('GameServer/DataCache').init();
+            const originalInvoke = global.invoke;
+            global.invoke = name => {
+                if (name === 'Database') throw new Error('pure-worker forbidden dependency: Database');
+                return originalInvoke(name);
+            };
+            const Persona = invoke('GameServer/Bot/AI/BotPersona');
+            const Death = invoke('GameServer/Progression/DeathExperience');
+            assert.equal(Persona.of(workerData.state), null);
+            Persona.useRowSource(id => id === workerData.state.characterId ? workerData.personaRow : null);
+            const persona = Persona.of(workerData.state);
+            const coldDeath = Death.applyColdDeath(workerData.state, workerData.context);
+            const restoration = Death.restoreCold(coldDeath.state, { restoreExpPercent: 30 });
+            assert.equal(Object.keys(require.cache).some(file => /[\\/]src[\\/]Database\\.js$/.test(file)), false);
+            assert.throws(() => Persona.init(), /pure-worker forbidden dependency: Database/);
+            assert.throws(() => Death.load({ fetchId: () => workerData.state.characterId }),
+                /pure-worker forbidden dependency: Database/);
+            assert.equal(fs.existsSync(isolated.world) || fs.existsSync(isolated.history), false);
+            parentPort.postMessage({ persona, coldDeath, restoration });
+        } finally {
+            fs.rmSync(isolated.directory, { recursive: true, force: true });
+        }
+    `, { eval: true, workerData: { root: path.resolve(__dirname, '..'), state, context, personaRow } });
+    try {
+        const result = await new Promise((resolve, reject) => {
+            worker.once('message', resolve);
+            worker.once('error', reject);
+            worker.once('exit', code => reject(new Error(`pure module worker exited before its result: ${code}`)));
+        });
+        assert.deepEqual(result.persona, Persona.fromTableRow(personaRow), 'native persona rows must retain exact values');
+        assert.deepEqual(result.coldDeath, coldDeath, 'native cold death valuation must stay exact without Database');
+        assert.deepEqual(result.restoration, restoration, 'native cold restoration must stay exact without Database');
+    } finally {
+        await worker.terminate();
+    }
+    console.log('Shared persona/death modules retain native pure-worker values and reject SQL access');
+}
+
 async function parityAndIntegration() {
     DataCache.init();
     const context = await Runtime.context();
+    const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+    const wearableIds = new Set(DataCache.items.filter(item => Number(item.etc?.slot) > 0)
+        .map(item => Number(item.selfId)));
+    const expectedPrices = [...new Set(invoke('GameServer/World/Generics/NpcShopBuyLists').allEntries()
+        .map(entry => Number(entry.selfId)))].filter(id => !wearableIds.has(id))
+        .map(selfId => ({ selfId, price: pricing.npcPrice({ selfId }) }))
+        .filter(row => Number.isFinite(row.price) && row.price > 0);
+    assert.deepEqual(context.npcPriceRows, expectedPrices,
+        'the compact snapshot covers every native positive nonwearable NPC quote');
+    assert.equal((await Runtime.context()).npcPriceRows, context.npcPriceRows,
+        'scalar NPC quotes reuse the existing static rate cache');
+    const ore = DataCache.items.find(item => Number(item.selfId) === 1785);
+    const orePrice = pricing.npcPrice({ selfId: 1785 });
+    assert(orePrice > invoke('GameServer/Items/NpcSellRules').npcBuyPrice(ore.template.price),
+        'Soul Ore needs its real NPC purchase floor rather than the lower NPC sale value');
+    for (const selfId of [1785, 1061]) {
+        const price = pricing.npcPrice({ selfId });
+        assert(Number.isFinite(price) && price > 0);
+        assert.equal(context.npcPriceRows.find(row => row.selfId === selfId)?.price, price,
+            `native material/consumable price ${selfId} must reach the worker snapshot`);
+    }
+    assert.equal(pricing.npcPrice({ selfId: 1464 }), Infinity,
+        'C shots have no canonical NPC purchase price');
+    assert.equal(context.npcPriceRows.some(row => row.selfId === 1464), false,
+        'a compact price snapshot must not invent an NPC C-shot source');
+    assert.equal(context.shopEntries.some(row => Number(row.selfId) === 1464), false);
     const worker = new ClanPlanningCoordinator();
     try {
         for (const [classId, level] of [[4, 20], [15, 40], [55, 52], [21, 61]]) {
@@ -27,48 +117,56 @@ async function parityAndIntegration() {
                 `worker must preserve planning for class ${classId}, level ${level}`);
         }
         assert.equal(worker.metrics().completed, 4);
-        const world = invoke('GameServer/World/World');
-        const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
-        const oldUser = world.user;
+        // The offers are board records: a cold buyer never buys from a live
+        // private store (E14).
+        const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+        const record = (id, ownerId, ownerName, town, line, account = 'test-seller') => AfkTrade.refreshRecord({
+            id, ownerId, ownerName, ownerAccount: account, kind: 'sell_ad', storeType: 1, status: 'active', town,
+            title: '', revision: 1, expiresAt: 0, locX: 0, locY: 0, locZ: 0, lines: [{ id, name: ownerName, ...line }]
+        });
         try {
-            world.user = { sessions: [{ accountId: 'test-seller', actor: {
-                fetchId: () => 990010, fetchName: () => 'Test Seller',
-                fetchPrivateStore: () => ({ storeType: 1, town: 'Giran', items: [{ selfId: 123, price: 10, count: 1 }] })
-            } }] };
-            market.indexColdStore({ characterId: 990002, activity: 'merchant', stats: {
-                marketStore: { storeType: 1, town: 'Giran', items: [{ selfId: 123, price: 1, count: 1 }] }
-            } });
+            record(990110, 990010, 'Test Seller', 'Giran', { selfId: 123, price: 10, count: 1 });
+            record(990102, 990002, 'Own Seller', 'Giran', { selfId: 123, price: 1, count: 1 }, 'bot_own');
             const member = { characterId: 990002, level: 20, classId: 4, phase: 'cold', inventory: {}, adena: 100000,
                 stats: { classId: 4, equipmentPlan: { status: 'active', strategy: 'market', rateModelVersion: 0,
                     target: { selfId: 123, slot: 7 } } } };
             const marketContext = await Runtime.context();
             const expected = planForMember(member);
-            assert.equal(expected.market.sourceType, 'private_store');
-            assert.equal(expected.market.price, 10, 'a buyer must not plan to buy from its own cheaper cold shop');
+            assert.equal(expected.market.sourceType, 'afk_player_store');
+            assert.equal(expected.market.price, 10, 'a buyer must not plan to buy from its own cheaper listing');
             assert.deepEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {}, context: marketContext }, DataCache), expected);
 
             const swordLine = { selfId: 79, price: 78600000, count: 1 };
-            world.user = { sessions: [{ accountId: 'test-seller', actor: {
-                fetchId: () => 990011, fetchName: () => 'Sword Seller',
-                fetchPrivateStore: () => ({ storeType: 1, town: 'Heine', items: [swordLine] })
-            } }] };
+            AfkTrade._resetForTests();
+            record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
+            const swordInventory = {};
+            for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: 21, level: 40 }).items) {
+                const old = swordInventory[entry.selfId], equippedSlots = [...(old?.equippedSlots || []), entry.slot];
+                swordInventory[entry.selfId] = { ...entry, amount: Number(old?.amount || 0) + 1,
+                    equipped: true, equippedCount: equippedSlots.length, equippedSlots };
+            }
             const swordMember = { characterId: 990003, level: 55, classId: 21, phase: 'cold',
-                adena: 20000000, inventory: {}, stats: { classId: 21, equipmentPlan: {
+                adena: 20000000, inventory: swordInventory, stats: { classId: 21, equipmentPlan: {
                     status: 'active', strategy: 'market', target: { selfId: 79, slot: 7 },
-                    market: { town: 'Heine', price: 78600000, sourceType: 'private_store' },
+                    market: { town: 'Heine', price: 78600000, sourceType: 'afk_player_store' },
                     clanGoal: { clanId: 77, goalKey: 'clan-equipment:77:990003:79:7' }
                 } } };
+            assert.equal(invoke('GameServer/Bot/AI/PersonalGearProgression').assess(swordMember).required, false,
+                'held B sword market controls start after the full usable C kit');
             const swordContext = await Runtime.context();
+            assert(swordContext.npcOffers.some(row => Number(row.selfId) === 2132 && row.town === 'Giran'
+                && Number(row.price) > 0), 'the clan worker sees actual NPC B-gemstone supply, not only its price floor');
             const unfunded = planForMember(swordMember);
             assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,
                 'an unaffordable listing must release a retained clan market goal');
             assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
                 options: {}, context: swordContext }, DataCache), unfunded);
 
+            // A repriced or sold-out record reaches the worker through the
+            // board table before the next plan (ClanPlanningCoordinator.plan).
             swordLine.price = 10000000;
-            const affordableContext = { ...swordContext, offers: swordContext.offers.map((offer) => (
-                offer.selfId === 79 && offer.sourceId === 990011 ? { ...offer, price: swordLine.price } : offer
-            )) };
+            record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
+            const affordableContext = swordContext;
             const repriced = planForMember(swordMember);
             assert.equal(repriced.strategy, 'market');
             assert.equal(repriced.target.selfId, 79, 'the funded listing must retain the requested sword');
@@ -78,17 +176,15 @@ async function parityAndIntegration() {
                 options: {}, context: affordableContext }, DataCache), repriced);
 
             swordLine.count = 0;
-            const soldOutContext = { ...affordableContext, offers: affordableContext.offers.filter((offer) => (
-                offer.selfId !== 79 || offer.sourceId !== 990011
-            )) };
+            record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
+            const soldOutContext = swordContext;
             const soldOut = planForMember(swordMember);
             assert.notEqual(soldOut.strategy === 'market' && soldOut.target?.selfId === 79, true,
                 'a sold-out listing must release the clan goal');
             assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
                 options: {}, context: soldOutContext }, DataCache), soldOut);
         } finally {
-            world.user = oldUser;
-            market.removeColdStore(990002);
+            AfkTrade._resetForTests();
         }
         const oldRate = process.env.L2NODE_PROGRESSION_RATE;
         try {
@@ -180,18 +276,43 @@ parentPort.on('message', (m) => {
         await assert.rejects(worker.plan({ crash: true }, {}), /exited/);
         assert.deepEqual(await worker.plan({}, {}), { ok: true }, 'worker must restart after a crash');
 
+
+        const sent = [], originalSend = worker.send.bind(worker);
+        worker.send = async (...args) => { sent.push(args[0]); return originalSend(...args); };
+        let admit, release, hydrated = 0;
+        const admitted = new Promise(resolve => { admit = resolve; });
+        const held = new Promise(resolve => { release = resolve; });
+        const active = worker.withJob(Date.now() + 1000, {}, async jobKey => { hydrated++; admit(jobKey); await held; return 42; });
+        const jobKey = await admitted;
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, () => { hydrated++; }), /job busy/);
+        await assert.rejects(worker.plan({}, {}), /job busy/);
+        assert.equal(hydrated, 1, 'busy admission rejects before candidate hydration');
+        assert.equal(worker.activeJob, jobKey);
+        release(); assert.equal(await active, 42);
+        assert.equal(worker.activeJob, null); assert.equal(worker.pending.size, 0);
+        assert.equal(sent.filter(type => type === 'end_planning_job').length, 1, 'success waits for native end acknowledgement');
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, async () => { throw Error('fixture work failed'); }), /fixture work failed/);
+        assert.equal(worker.activeJob, null);
+        await assert.rejects(worker.withJob(Date.now() - 1, {}, () => { hydrated++; }), /deadline/);
+        assert.equal(hydrated, 1); assert.equal(worker.activeJob, null);
+        assert.equal(sent.filter(type => type === 'end_planning_job').length, 3, 'error and deadline release the current worker job');
+
         let ticks = 0;
         const timer = setInterval(() => ticks++, 5);
         try { await worker.plan({ busyMs: 200 }, {}); }
         finally { clearInterval(timer); }
         assert(ticks >= 5, 'CPU-bound worker calculation must allow the game thread to keep processing timers');
 
-        const stopped = assert.rejects(worker.plan({ hang: true }, {}), /stopped/);
+        const stopped = assert.rejects(worker.withJob(Date.now() + 1000, {},
+            jobKey => worker.plan({ hang: true, jobKey }, {})), /stopped/);
         await new Promise((resolve) => setImmediate(resolve));
         await worker.shutdown();
         await stopped;
         assert.equal(worker.metrics().pending, 0);
         await assert.rejects(worker.plan({}, {}), /stopped/);
+        assert.equal(worker.activeJob || null, null);
+        await assert.rejects(worker.withJob(Date.now() + 1000, {}, () => {}), /stopped/);
+        assert.equal(worker.activeJob, null, 'shutdown during admission releases the job');
     } finally {
         await worker.shutdown();
         fs.rmSync(directory, { recursive: true, force: true });
@@ -199,7 +320,13 @@ parentPort.on('message', (m) => {
 }
 
 (async () => {
+    if (process.argv.includes('--job-lifecycle')) {
+        await workerLifecycle();
+        console.log('Clan planning worker job admission, end ACK, error/deadline/shutdown checks passed');
+        return;
+    }
+    await sharedModulesStayPure();
     await parityAndIntegration();
     await workerLifecycle();
     console.log('Clan planning worker parity, stale snapshots, isolation and recovery checks passed');
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+})().catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => { Database.close(); require('node:fs').rmSync(isolated.directory, { recursive: true, force: true }); });

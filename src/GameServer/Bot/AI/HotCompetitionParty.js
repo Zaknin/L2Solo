@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const { randomUUID } = require('crypto');
 
 // Publish one persistent autonomous roster, never player-companion ownership.
@@ -12,6 +13,8 @@ async function form(sides, context, valid) {
     }
     const existing = grouped[0]?.party;
     if (existing?.stats?.objective?.clanGoalKey || existing?.stats?.objective?.clanOperation) return { ok: false, reason: 'clan_objective' };
+    const Material = require('../Population/CraftMaterialParty');
+    if (Material.isObjective(existing?.stats?.objective)) return { ok: false, reason: 'material_party_requires_review' };
     const release = existing ? () => {} : invoke('GameServer/Bot/Population/PopulationService').reserveCompetitionPartySlot();
     if (!release) return { ok: false, reason: 'party_capacity' };
     if (existing && Lifecycle.pending.has(existing.partyId)) { release(); return { ok: false, reason: 'party_transition' }; }
@@ -25,6 +28,7 @@ async function form(sides, context, valid) {
         const canCommit = () => valid() && sessions.every(s => s.hotCompetitionCommit === token)
             && Date.now() - context.at <= 10000;
         if (!canCommit() || states.some(s => s?.phase !== 'hot')) return { ok: false, reason: 'hot_party_context_changed' };
+        if (states.some(s => Material.requestOf(s))) return { ok: false, reason: 'material_party_requires_review' };
         const Composition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
         const leaderId = existing?.leaderId || Composition.chooseLeader(states)?.characterId || ids[0];
         const partyId = existing?.partyId || `bgp_hot_${randomUUID()}`;
@@ -38,7 +42,7 @@ async function form(sides, context, valid) {
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, Number(existing?.updatedAt || 0) + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
         const assignments = states.map(s => Life.preparePartyAssignment({ ...s, activity: 'grouped', spotId: context.spotId },
-            partyId, Composition.roleForState(s), leaderId));
+            partyId, Composition.roleForState(s), leaderId, null, context.spotId));
         const result = await invoke('Database').commitBackgroundPartyMembership({ party: prepared.row, members: assignments,
             expectedPhase: 'hot', expectedPartyUpdatedAt: existing?.updatedAt ?? null, canCommitHot: canCommit,
             event: { characterId: leaderId, eventType: existing ? 'party_recruit' : 'party',
@@ -46,7 +50,7 @@ async function form(sides, context, valid) {
                 meta: { partyId, npcId: context.npcId, source: 'hot_competition' } } });
         if (!result.ok) return result;
         Parties.acceptCommit(prepared);
-        const assigned = Life.acceptPartyAssignments(assignments);
+        const assigned = Life.acceptPartyAssignments(assignments, result.lifeRows);
         // No await between durable membership and the complete live roster.
         sessions.forEach(s => {
             s.coldLifeState = assigned.find(state => state.characterId === s.actor.fetchId());
@@ -55,14 +59,23 @@ async function form(sides, context, valid) {
             s.hotCompetitionHold = null;
         });
         invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
+        refreshPartyMemberships(sessions, invoke);
         sessions.find(s => s.actor.fetchId() === leaderId).backgroundHuntTarget = context.mob;
         const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
         if (existing) Metrics.recordPartyRecruit(1); else Metrics.recordPartyFormation();
         return { ok: true, partyId, recruited: !!existing };
     } finally {
-        sessions.forEach(s => { if (s.hotCompetitionCommit === token) s.hotCompetitionCommit = null; });
+        const cleared = [];
+        sessions.forEach(s => {
+            if (s.hotCompetitionCommit === token) {
+                s.hotCompetitionCommit = null;
+                cleared.push(s);
+            }
+        });
         if (existing) Lifecycle.pending.delete(existing.partyId);
         release();
+        const World = invoke('GameServer/World/World');
+        cleared.forEach(s => World.notifyUserStateChanged(s));
     }
 }
 module.exports = { form };

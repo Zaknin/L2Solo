@@ -203,6 +203,7 @@ const HotBotLoadTest = {
     stableSince: 0,
 
     start() {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return;
         if (this.started) return;
         this.started = true;
 
@@ -308,7 +309,7 @@ const HotBotLoadTest = {
 
     measure({ count, durationMs, tickMs, spreadMs, runStartedAt, mode, coldMin }) {
         const prepare = mode === 'mixed' ? this.prepareMixedWorld(coldMin) : Promise.resolve(0);
-        prepare.then((preparedDue) => Promise.all(hotSessions().map((session) => Database.fetchItems(session.actor.fetchId())
+        prepare.then((preparedDue) => Promise.all(hotSessions().map((session) => Database.fetchItems(session.actor.fetchId(), 'hot_load_test')
             .then((items) => [session.actor.fetchId(), items[0] || null])))
             .then((entries) => ({ entries, preparedDue })))
             .then(({ entries, preparedDue }) => this.measureReady({
@@ -461,7 +462,7 @@ const HotBotLoadTest = {
             if (!coldBacklog.length || Date.now() - coldBacklog.at(-1).at >= 5000) {
                 const snapshot = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot();
                 coldBacklog.push({ at: Date.now(), states: snapshot.worker?.states,
-                    scheduled: snapshot.worker?.dueFences?.scheduled, dueAgeMs: snapshot.worker?.dueAgeMs,
+                    queueHead: snapshot.worker?.queueHead ?? null,
                     snapshots: snapshot.snapshots.dirty, snapshotAgeMs: snapshot.snapshots.oldestMs });
             }
             const observerStartedAt = performance.now();

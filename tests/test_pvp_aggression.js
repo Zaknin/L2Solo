@@ -2,6 +2,12 @@ const assert = require('assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 const { spawnSync } = require('child_process');
 require('../src/Global');
+// Load native data before the first economic route or combat profile check.
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
 const Aggression = require('../src/GameServer/Social/PvpAggression');
 const Resource = require('../src/GameServer/Social/ResourceCompetitionPolicy');
@@ -57,7 +63,8 @@ try {
     }
     assert.deepStrictEqual(decisions, [false, false, true, true, true]);
     Config.pvpAggression = 0;
-    const context = { botLevel: 40, threatLevel: 1, hpRatio: 1, mpRatio: 1, role: 'dps' };
+    // U26: a visibly stronger bot (higher weapon grade), not a hidden level gap.
+    const context = { ownLook: { weapon: 2, glow: 0, body: 0 }, threatLook: { weapon: 0, glow: 0, body: 0 }, hpRatio: 1, mpRatio: 1, role: 'dps' };
     assert.strictEqual(Risk.evaluate(context).action, 'flee', 'zero aggression cannot initiate PK pursuit');
     assert.strictEqual(Risk.evaluate({ ...context, targetedByThreat: true }).action, 'fight', 'self-defense remains possible');
     const actor = id => ({ fetchId: () => id, fetchLevel: () => 40, fetchClassId: () => 0,

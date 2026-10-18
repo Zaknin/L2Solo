@@ -1,0 +1,484 @@
+'use strict';
+const Html = require('../World/Generics/HtmlKit');
+const { SELL, BUY } = require('./BoardIndex');
+const { isKind } = require('./BoardRules');
+const Native = require('./NativeBoard');
+const { TRADE_TYPES, matchesType } = require('./PlayerBoardService');
+// C4 puts adjacent links on separate lines outside table cells. Keep pages
+// short and use the native table/edit/combobox subset rather than inline layout.
+const PAGE_SIZE = 6;
+const MAX_HTML = 8192;
+const SEARCH_PAGE_SIZE = 8;
+const NAVIGATION_LIMIT = 32;
+const word = side => side === BUY ? 'buy' : side === 'workshop' ? side : 'sell';
+const sideOf = side => side === 'workshop' ? side : side === 'buy' || Number(side) === BUY ? BUY : SELL;
+const integer = value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const text = (value, fallback, limit = 512) => {
+    const source = String(value || fallback);
+    if (/\b-?\d+_\d+\b|\bitem\s*\d+\b|\bid=\d+/i.test(source)) return fallback;
+    if (Html.esc(source).length <= limit) return source;
+    let low = 0, high = Math.min(source.length, limit);
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (Html.esc(source.slice(0, middle)).length + 1 <= limit) low = middle;
+        else high = middle - 1;
+    }
+    return source.slice(0, low) + '…';
+};
+const amount = value => Math.max(0, Number(value) || 0).toLocaleString('en-US');
+function encodeCursor(cursor, workshop = false) {
+    return !cursor ? '-' : workshop ? `${cursor.ownerId}:${cursor.recipeId}` : `${cursor.selfId}:${cursor.n}`;
+}
+function decodeCursor(value, side) {
+    if (!value || value === '-') return null;
+    if (!/^\d{1,10}:\d{1,10}$/.test(value)) throw Error('invalid cursor');
+    const [a, b] = value.split(':').map(Number);
+    return side === 'workshop' ? { ownerId: a, recipeId: b } : { selfId: a, n: b, side };
+}
+
+function create({ service = () => require('./PlayerBoardService'),
+    afk = () => invoke('GameServer/AfkTrade/AfkTradeService'),
+    workshops = () => invoke('GameServer/Bot/Economy/CraftWorkshopService'),
+    response = () => invoke('GameServer/Network/Response'),
+    townOf = actor => invoke('GameServer/Bot/BotAI').getClosestTownName(actor.fetchLocX(), actor.fetchLocY(), actor.fetchLocZ()),
+    waypoints = () => invoke('GameServer/World/Generics/NativeItemLocations'),
+    meeting = session => require('./PlayerBoardMeeting').status(session) } = {}) {
+    const itemName = id => text(afk().itemName(id), 'Unknown item');
+    function normalize(session, query = {}) {
+        return { side: sideOf(query.side), town: Object.hasOwn(query, 'town') ? query.town || null : townOf(session.actor),
+            selfId: integer(query.selfId) || 0, cursor: query.cursor || null,
+            tradeType: sideOf(query.side) === 'workshop' ? 'all' : TRADE_TYPES.includes(query.tradeType) ? query.tradeType : 'all' };
+    }
+    function command(query, cursor = null) {
+        return `board list ${word(query.side)} ${query.town ? encodeURIComponent(query.town) : '-'} ${query.selfId} ${encodeCursor(cursor, query.side === 'workshop')}`
+            + (query.tradeType && query.tradeType !== 'all' ? ' ' + query.tradeType : '');
+    }
+    function previous(session, query) {
+        // Only bounded cursor references, never offers or rendered pages. This
+        // returns to the actual page after hidden rows or HTML-size clipping.
+        const key = JSON.stringify([query.side, query.town, query.selfId, query.tradeType]);
+        let navigation = session.playerBoardNavigation;
+        if (!navigation || navigation.key !== key || !query.cursor) {
+            navigation = session.playerBoardNavigation = { key, cursors: [query.cursor], at: 0 };
+        } else {
+            const cursorKey = encodeCursor(query.cursor, query.side === 'workshop');
+            const at = navigation.cursors.findIndex(cursor => encodeCursor(cursor, query.side === 'workshop') === cursorKey);
+            if (at >= 0) navigation.at = at;
+            else {
+                navigation.cursors.splice(navigation.at + 1);
+                navigation.cursors.push({ ...query.cursor });
+                if (navigation.cursors.length > NAVIGATION_LIMIT) navigation.cursors.shift();
+                navigation.at = navigation.cursors.length - 1;
+            }
+        }
+        return navigation.at ? navigation.cursors[navigation.at - 1] : undefined;
+    }
+    function frame(body, query, next, back) {
+        const actions = [];
+        if (back !== undefined) actions.push({ label: 'Previous', command: command(query, back) });
+        if (query.cursor) actions.push({ label: 'First', command: command(query) });
+        if (next) actions.push({ label: 'Next', command: command(query, next) });
+        return page(body, actions.length ? Html.actionFooter(actions) : '');
+    }
+    function page(body, footer = '') {
+        // This client keeps the window title "Chat"; <title> inside the NPC
+        // body adds a duplicate plain heading instead of renaming the frame.
+        return Html.page('<!--L2SOLO_BOARD-->' + Html.table([Html.row([Html.cell(body, { width: Html.WIDTH, align: 'left' })])]), { footer });
+    }
+    function tradeDetails(rows) {
+        return Html.table(rows.map(([label, value]) => Html.row([
+            Html.cell(Html.esc(label), { width: 80, align: 'left' }),
+            Html.cell(value, { width: 190, align: 'left' })
+        ])));
+    }
+    function towns(session, query) {
+        let listed = query.side === 'workshop' ? workshops().boardRecords().map(shop => shop.town)
+            : [...(afk().boardIndex().townItems.get(query.side)?.keys() || [])];
+        if (query.side !== 'workshop' && query.tradeType && query.tradeType !== 'all') {
+            const index = afk().boardIndex();
+            listed = listed.filter(town => {
+                for (const id of index.itemIds(query.side, town)) {
+                    for (const line of index.lines(id, query.side, town)) if (matchesType(line, query.tradeType)) return true;
+                }
+                return false;
+            });
+        }
+        return [...new Set([query.town, townOf(session.actor), ...listed])]
+            .filter(town => typeof town === 'string' && town && town !== '*' && town.length <= 64 && !/[;\x00-\x1f]/.test(town)).sort();
+    }
+    function header(session, query) {
+        let body = Html.font('Market Board', Html.COLOR.title) + '<br>';
+        body += Html.columns([SELL, BUY, 'workshop'].map(side => Html.cell(Html.link(side === SELL ? 'Buy items' : side === BUY ? 'Sell items' : 'Craft',
+            command({ ...query, side, cursor: null }), { color: query.side === side ? Html.COLOR.title : Html.COLOR.link }), { width: 90, align: 'center' }))) + '<br1>';
+        const selected = query.town || 'All towns';
+        const choices = [selected, ...(selected === 'All towns' ? [] : ['All towns']), ...towns(session, query).filter(town => town !== selected)].slice(0, 25);
+        body += Html.columns([
+            Html.cell('<combobox var="board_town" width=174 height=17 list="' + Html.esc(choices.join(';')) + '">', { width: 184 }),
+            Html.cell(Html.button('Set town', 'board town $board_town', { width: 76 }), { width: 86 })
+        ]) + '<br1>';
+        if (query.side !== 'workshop') {
+            const label = { all: 'All offers', meeting: 'Meetings', shop: 'Private shops' };
+            body += Html.columns([
+                Html.cell('<combobox var="board_type" width=174 height=17 list="' +
+                    [query.tradeType, ...TRADE_TYPES.filter(type => type !== query.tradeType)].map(type => label[type]).join(';') + '">', { width: 184 }),
+                Html.cell(Html.button('Set type', 'board type $board_type', { width: 76 }), { width: 86 })
+            ]) + '<br1>';
+        }
+        body += Html.columns([
+            Html.cell('<edit var="board_query" width=174 height=15 length=48>', { width: 184 }),
+            Html.cell(Html.button('Search', 'board search $board_query', { width: 76 }), { width: 86 })
+        ]) + '<br1>' + Html.spacer(6);
+        body += Html.font('Search by item name. Click an item to compare offers.') + '<br>';
+        if (query.selfId) body += Html.columns([
+            Html.cell(Html.font(itemName(query.selfId), Html.COLOR.title), { width: 184 }),
+            Html.cell(Html.link('All items', command({ ...query, selfId: 0 })), { width: 86, align: 'right' })
+        ]) + '<br1>';
+        return body;
+    }
+    function requestOf(entry) {
+        return entry.kind === 'workshop' ? `workshop ${entry.ownerId} ${entry.recipeId} ${entry.price} ${entry.revision ?? '-'}`
+            : `${entry.kind} ${entry.id} ${entry.lineId} ${entry.selfId} ${entry.price} ${entry.revision ?? '-'}`;
+    }
+    const action = (label, command, role) => ({ label, command, role });
+    function navigation(session, query) {
+        return [action('Buy items', command({ ...query, side: SELL }), 'sell'),
+            action('Sell items', command({ ...query, side: BUY }), 'buy'),
+            action('Craft', command({ ...query, side: 'workshop' }), 'workshop'),
+            ...(query.selfId ? [action('All items', command({ ...query, selfId: 0 }), 'all')] : []),
+            ...(session.tradeMeetingPresence?.actorId === Number(session.actor.fetchId()) ? [action('Cancel trade', 'board cancel', 'cancel')] : []),
+            ...(session.playerBoardWaypoint ? [action('Stop tracking', 'board untrack', 'untrack')] : [])];
+    }
+    function model(session, fields = {}) {
+        const query = session.playerBoardView || normalize(session);
+        return { title: 'Market Board', screen: 'list', itemId: query.selfId, itemName: query.selfId ? itemName(query.selfId) : '',
+            towns: ['All towns', ...towns(session, query).slice(0, 25)], meeting: meeting(session), ...fields };
+    }
+    function detail(session, title, request, result, message, details, actions, rows = []) {
+        const id = result.productId || result.selfId || request.selfId || 0;
+        return model(session, { screen: 'detail', title, itemId: id, itemName: id ? itemName(id) : '',
+            message, details, actions, rows });
+    }
+    function entryHtml(entry, query) {
+        const workshop = entry.kind === 'workshop';
+        const name = workshop ? itemName(entry.selfId) : text(entry.itemName, 'Unknown item');
+        const owner = text(entry.ownerName, 'Merchant', 100), town = text(entry.town, query.town || 'the local town', 64);
+        const request = requestOf(entry);
+        const item = Html.link((entry.enchant ? '+' + amount(entry.enchant) + ' ' : '') + name, command({ ...query, selfId: entry.selfId }));
+        const action = workshop ? 'Craft' : query.side === BUY ? 'Sell' : 'Buy';
+        const mode = workshop ? 'Crafting fee' : entry.conditional ? 'Meeting offer' : entry.kind === 'shop' ? 'Private shop' : 'Advertisement';
+        // Let the native Chat window supply its translucent background.
+        return Html.table([
+            Html.row([Html.cell(item, { width: 192, align: 'left' }), Html.cell(Html.link(action, 'board answer ' + request), { width: 78, align: 'right' })]),
+            `<tr><td width=270 colspan=2 align=left>${Html.font(amount(entry.price) + (workshop ? ' a fee' : ' a each'), Html.COLOR.title)}${workshop ? '' : ' | ' + amount(entry.count) + (query.side === BUY ? ' wanted' : ' available')}</td></tr>`,
+            Html.row([Html.cell(`${Html.esc(owner)} (${Html.esc(town)})<br1>${Html.font(mode)}`, { width: 192, align: 'left' }),
+                Html.cell(Html.link('Location', 'board locate ' + request), { width: 78, align: 'right' })])
+        ]) + '<br1>' + Html.line('L2UI.SquareGray') + '<br1>';
+    }
+    function search(session, offset = 0) {
+        const query = session.playerBoardView || normalize(session);
+        const q = String(session.playerBoardSearch || '').toLowerCase();
+        if (!q) return show(session, query, 'Enter part of an item name to search.');
+        const ids = service().itemIds(session, { side: query.side, town: query.town, tradeType: query.tradeType, kind: query.side === 'workshop' ? 'workshop' : undefined });
+        const matches = ids.map(selfId => ({ selfId, name: itemName(selfId) })).filter(row => row.name.toLowerCase().includes(q))
+            .sort((a, b) => a.name.localeCompare(b.name) || a.selfId - b.selfId);
+        const start = Math.min(offset, Math.max(0, Math.ceil(matches.length / SEARCH_PAGE_SIZE) - 1) * SEARCH_PAGE_SIZE);
+        let body = Html.font('Find market offers', Html.COLOR.title) + '<br>'
+            + Html.font('Search: ' + session.playerBoardSearch) + '<br1>' + Html.font(query.town || 'All towns') + '<br>';
+        for (const row of matches.slice(start, start + SEARCH_PAGE_SIZE)) body += Html.columns([
+            Html.cell(Html.link(row.name, command({ ...query, selfId: row.selfId })), { align: 'left' })
+        ]) + '<br1>';
+        if (!matches.length) body += 'No matching items in this market.<br>';
+        const actions = [{ label: 'Back', command: command(query, query.cursor) }];
+        if (start) actions.unshift({ label: 'Previous', command: `board searchpage ${start - SEARCH_PAGE_SIZE}` });
+        if (start + SEARCH_PAGE_SIZE < matches.length) actions.push({ label: 'Next', command: `board searchpage ${start + SEARCH_PAGE_SIZE}` });
+        session.nativeBoardSearchOffset = start;
+        return send(session, page(body, Html.actionFooter(actions)), model(session, { screen: 'search', title: 'Find market offers', itemId: 0, itemName: '',
+            message: matches.length ? `${matches.length} matching items` : 'No matching items in this market.', page: Math.floor(start / SEARCH_PAGE_SIZE) + 1,
+            rows: matches.slice(start, start + SEARCH_PAGE_SIZE).map(row => ({ itemId: row.selfId, name: row.name,
+                select: action('Compare offers', command({ ...query, selfId: row.selfId })) })),
+            actions: [...navigation(session, query), ...actions.map(a => ({ ...a, role: a.label.toLowerCase() === 'previous' ? 'prev' : a.label.toLowerCase() }))] }));
+    }
+    function send(session, html, snapshot = model(session, { screen: 'detail', title: 'Checking the trade', message: 'Checking goods and payment. Waiting for the merchant response.' })) {
+        if (html.length > MAX_HTML) throw Error('board HTML exceeds packet guard');
+        return Native.present(session, html, snapshot, response());
+    }
+    function track(session, result) {
+        const loc = result.loc, coords = [loc?.locX, loc?.locY, loc?.locZ].map(Number);
+        if (!loc || !coords.every(n => Number.isSafeInteger(n) && Math.abs(n) <= 2000000)) return false;
+        session.playerBoardWaypoint = { x: coords[0], y: coords[1], z: coords[2], name: text(result.ownerName, 'Merchant', 100) };
+        waypoints().syncDirection(session, session.playerBoardWaypoint);
+        return true;
+    }
+    function show(session, input = {}, message = '') {
+        if (!session?.actor) return null;
+        const query = normalize(session, input);
+        // Filters and cursor references only; all offers are read fresh.
+        session.playerBoardView = query;
+        const page = service().entries(session, { ...query, kind: query.side === 'workshop' ? 'workshop' : undefined,
+            limit: PAGE_SIZE });
+        let body = header(session, query) + (message ? Html.font(text(message, '', 512), Html.COLOR.warn) + '<br>' : '');
+        // Only the selected character's own meeting marker is shown.
+        if (session.tradeMeetingPresence?.actorId === Number(session.actor.fetchId())) body += 'Waiting for the merchant. Stay here.<br>'
+            + Html.actionFooter([{ label: 'Cancel trade', command: 'board cancel' }]) + '<br>';
+        if (session.playerBoardWaypoint) body += Html.font('Tracking: ' + session.playerBoardWaypoint.name) + '<br1>'
+            + Html.actionFooter([{ label: 'Stop tracking', command: 'board untrack' }]) + '<br1>';
+        let next = page.next;
+        const visible = [];
+        const back = previous(session, query);
+        if (!page.available) body += 'The market board is not ready.<br>';
+        else if (!page.entries.length) body += 'No matching offers.<br>';
+        else for (const entry of page.entries) {
+            const row = entryHtml(entry, query);
+            if (frame(body + row, query, next || entry.cursor, back).length + 32 > MAX_HTML) { next = entry.cursor; break; }
+            body += row;
+            const workshop = entry.kind === 'workshop';
+            visible.push({ itemId: entry.selfId, name: (entry.enchant ? '+' + amount(entry.enchant) + ' ' : '') + (workshop ? itemName(entry.selfId) : text(entry.itemName, 'Unknown item')),
+                owner: text(entry.ownerName, 'Merchant', 64), town: text(entry.town, query.town || 'the local town', 64),
+                price: amount(entry.price) + (workshop ? ' a fee' : ' a each'), quantity: workshop ? '' : amount(entry.count) + (query.side === BUY ? ' wanted' : ' available'),
+                mode: workshop ? 'Crafting fee' : entry.conditional ? 'Meeting offer' : entry.kind === 'shop' ? 'Private shop' : 'Advertisement',
+                select: action('Compare', command({ ...query, selfId: entry.selfId })),
+                primary: action(workshop ? 'Craft' : query.side === BUY ? 'Sell' : 'Buy', 'board answer ' + requestOf(entry)),
+                locate: action('Location', 'board locate ' + requestOf(entry)) });
+        }
+        const actions = navigation(session, query);
+        if (back !== undefined) actions.push(action('Previous', command(query, back), 'prev'));
+        if (query.cursor) actions.push(action('First', command(query), 'first'));
+        if (next) actions.push(action('Next', command(query, next), 'next'));
+        return send(session, frame(body, query, next, back), model(session, { rows: visible, actions,
+            page: (session.playerBoardNavigation?.at || 0) + 1, message: message || (!page.available ? 'The market board is not ready.' : !page.entries.length ? 'No matching offers.' : ''),
+            details: session.playerBoardWaypoint ? [['Tracking', session.playerBoardWaypoint.name]] : [] }));
+    }
+    function open(session) {
+        if (!session?.actor) return;
+        Native.begin(session);
+        return show(session, session.playerBoardView || {});
+    }
+    function applyFilter(session, query) {
+        if (session.nativeBoardModel?.screen !== 'search') return show(session, query);
+        session.playerBoardView = normalize(session, query);
+        return search(session);
+    }
+    function refresh(session) {
+        if (session.nativeBoardModel?.screen === 'search') return search(session, session.nativeBoardSearchOffset || 0);
+        if (session.nativeBoardModel?.screen === 'detail') {
+            const current = { ...session.nativeBoardModel, meeting: meeting(session) };
+            return send(session, '', current);
+        }
+        return show(session, session.playerBoardView || {});
+    }
+    async function answer(session, request) {
+        const actor = session.actor;
+        const epoch = session.nativeBoardEpoch;
+        const result = await service().answer(session, request);
+        if (session.actor !== actor) return result;
+        if (session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return result;
+        const query = session.playerBoardView || normalize(session);
+        if (result.action === 'store_opened') {
+            if (session.nativeBoardVersion >= 1 && session.nativeBoardOpen) {
+                send(session, '', { screen: 'store', title: 'Private shop' });
+                session.nativeBoardOpen = false;
+            }
+            return result;
+        }
+        if (result.ok && result.action === 'locate') {
+            if (!track(session, result)) return show(session, query, 'The merchant location is unavailable.');
+            show(session, query, result.conditional ? 'Meeting point marked on your radar. The merchant comes after you agree.'
+                : 'Merchant location marked on your radar.');
+        } else if (result.ok && ['meet', 'contact'].includes(result.action)) {
+            if (request.kind === 'workshop' && request.confirmed) session.dataSendToMe(response().systemMessage.text('Move closer to the crafter before crafting.'));
+            const workshop = request.kind === 'workshop', marked = track(session, result);
+            const body = Html.font(workshop ? 'Meet the crafter' : result.side === BUY ? 'Sell items' : 'Buy items', Html.COLOR.title) + '<br>'
+                + Html.keyValueRows([
+                    ['Item', Html.esc(itemName(workshop ? result.productId : request.selfId))],
+                    [workshop ? 'Fee' : 'Price each', Html.font(amount(request.price) + ' a', Html.COLOR.title)],
+                    ['Merchant', Html.esc(text(result.ownerName, 'Merchant', 100))],
+                    ['Town', Html.esc(text(result.town, 'the local town', 64))]
+                ]) + '<br>'
+                + (result.action === 'contact' ? 'This advertisement has no private shop. Contact the merchant to arrange the trade.'
+                    : result.conditional ? 'Go to the meeting point, then click Try again to choose a quantity. The merchant comes after you agree to the trade.'
+                        : workshop ? 'Go to the crafter, then click Try again to review the materials and confirm crafting.'
+                            : 'Go to the private shop, then click Try again to open its trade window.') + '<br>'
+                + Html.font(marked ? 'The location is marked on your radar.' : 'The merchant location is unavailable.', Html.COLOR.warn);
+            send(session, page(body, Html.actionFooter([
+                ...(result.action === 'meet' ? [{ label: 'Try again', command: 'board answer ' + requestOf(request) }] : []),
+                { label: 'Back', command: command(query, query.cursor) }
+            ])), detail(session, workshop ? 'Meet the crafter' : 'Meet the merchant', request, result,
+                result.action === 'contact' ? 'Contact the merchant to arrange the trade.' : result.conditional ? 'Go to the marked meeting point, then try again. The merchant comes after you agree.'
+                    : workshop ? 'Go to the crafter to review materials and confirm crafting.' : 'Go to the private shop to open its trade window.',
+                [['Price', amount(request.price) + ' a' + (workshop ? ' fee' : ' each')], ['Merchant', result.ownerName], ['Town', result.town],
+                    ['Radar', marked ? 'Location marked' : 'Location unavailable']],
+                [...(result.action === 'meet' ? [action('Try again', 'board answer ' + requestOf(request), 'primary')] : []), action('Back to market', command(query, query.cursor), 'back')]));
+        } else if (result.ok && result.action === 'confirm_trade') {
+            const owner = text(result.ownerName, 'Merchant', 100);
+            const verb = result.side === BUY ? 'Sell' : 'Buy';
+            const body = Html.font(verb + ' items', Html.COLOR.title) + '<br>' + tradeDetails([
+                ['Item', Html.esc(itemName(result.selfId))], ['Quantity', amount(result.amount)],
+                ['Total', Html.font(amount(result.total) + ' a', Html.COLOR.title)], ['Merchant', Html.esc(owner)],
+                ['Town', Html.esc(text(result.town, 'the local town', 64))]
+            ]) + '<br>'
+                + 'Agree to reserve the goods and payment.<br1>'
+                + 'Stay here until the merchant arrives.<br>'
+                + Html.columns([Html.cell('<edit var="board_quantity" width=150 height=15 length=16>', { width: 160 }),
+                    Html.cell(Html.button('Set', 'board quantity $board_quantity', { width: 100 }), { width: 110 })]) + '<br1>' + Html.spacer(6)
+                + Html.font('Change the quantity above,') + '<br1>' + Html.font('or agree to the amount shown.');
+            send(session, page(body, Html.actionFooter([
+                { label: 'Agree and wait', command: 'board agree' }, { label: 'Back', command: command(query, query.cursor) }])),
+                detail(session, verb + ' items', request, result, 'Agree to reserve the goods and payment. Stay at the meeting point until the merchant arrives.',
+                    [['Quantity', amount(result.amount)], ['Price each', amount(result.price) + ' a'], ['Total', amount(result.total) + ' a'], ['Merchant', owner], ['Town', result.town]],
+                    [action('Agree and wait', 'board agree', 'primary'), action('Set quantity', 'board quantity', 'quantity'), action('Back to market', command(query, query.cursor), 'back')]));
+        } else if (result.ok && result.action === 'agreed') {
+            send(session, page(Html.font('Trade agreed', Html.COLOR.title) + '<br>'
+                + 'Goods and payment are reserved.<br1>'
+                + 'Wait here for ' + Html.esc(text(result.ownerName, 'the merchant', 100)) + '.<br1>'
+                + 'Leaving the meeting point cancels the trade.<br>'
+                + Html.font('You will be notified when the trade completes.'), Html.actionFooter([
+                { label: 'Cancel trade', command: 'board cancel' },
+                { label: 'Market Board', command: command(query, query.cursor) }])), detail(session, 'Trade agreed', request, result,
+                    'Goods and payment are reserved. Stay here; leaving the meeting point cancels the trade.',
+                    [['Quantity', amount(request.amount || 1)], ['Price each', amount(request.price) + ' a'],
+                        ['Total', amount(request.price * (request.amount || 1)) + ' a'], ['Merchant', text(result.ownerName, 'Merchant', 64)],
+                        ['Town', text(result.town, 'the local town', 64)]],
+                    [action('Cancel trade', 'board cancel', 'cancel'), action('Market Board', command(query, query.cursor), 'back')]));
+        } else if (result.ok && result.action === 'confirm') {
+            const name = itemName(result.productId), owner = text(result.ownerName, 'Merchant', 100);
+            let body = Html.font('Confirm craft', Html.COLOR.title) + '<br>' + Html.keyValueRows([
+                ['Product', Html.esc(name)], ['Quantity', amount(result.productCount || 1)], ['Fee', amount(result.price) + ' a'],
+                ['Crafter', Html.esc(owner)], ...(result.successRate == null ? [] : [['Success', amount(result.successRate) + '%']])
+            ]) + '<br>' + 'You supply the materials and the crafting fee.<br1>';
+            if (result.materials?.length) body += Html.keyValueRows(result.materials.map(row => [amount(row.amount), Html.esc(itemName(row.selfId))]), { labelWidth: 60 }) + '<br>';
+            if (result.successRate != null && result.successRate < 100) body += Html.font('Materials and the fee are spent even if crafting fails.', Html.COLOR.warn) + '<br>';
+            send(session, page(body, Html.actionFooter([
+                { label: 'Craft', command: `board craft ${result.ownerId} ${result.recipeId} ${result.price} ${result.revision}` },
+                { label: 'Back', command: command(query, query.cursor) }])), detail(session, 'Confirm craft', request, result,
+                    result.successRate != null && result.successRate < 100 ? 'Materials and the fee are spent even if crafting fails.' : 'You supply the materials and the crafting fee.',
+                    [['Quantity', amount(result.productCount || 1)], ['Fee', amount(result.price) + ' a'], ['Crafter', owner], ...(result.successRate == null ? [] : [['Success', amount(result.successRate) + '%']])],
+                    [action('Craft', `board craft ${result.ownerId} ${result.recipeId} ${result.price} ${result.revision}`, 'primary'), action('Back to market', command(query, query.cursor), 'back')],
+                    (result.materials || []).map(row => ({ itemId: row.selfId, name: itemName(row.selfId), quantity: amount(row.amount), mode: 'Required material' }))));
+        } else {
+            const owner = text(result.ownerName, 'Merchant', 100), town = text(result.town, 'the local town', 64);
+            const message = !result.ok ? result.reason === 'record_changed' ? 'This offer has changed.'
+                : result.reason === 'own_record' ? 'You cannot answer your own offer.'
+                    : ({ materials_missing: 'You do not have the required crafting materials.', insufficient_funds: 'You do not have enough adena.',
+                        stock_changed: 'The seller no longer has this item available. Worn items cannot be sold.',
+                        items_missing: 'You do not have enough unequipped items for this sale.',
+                        player_at_point: 'Stay at the meeting point and finish combat before agreeing.',
+                        meeting_point_changed: 'The meeting point changed. Open the offer again to see its location.',
+                        merchant_party: 'This bot is hunting with a party. Try again after it leaves the party.',
+                        merchant_busy: 'The merchant is busy. Please try again shortly.',
+                        merchant_changed: 'The merchant is no longer ready for this trade. Please try again.',
+                        merchant_declined: 'The merchant cannot accept these terms now. No goods or payment were reserved.',
+                        trade_unavailable: 'The trade could not be agreed. Please try again.',
+                        craft_busy: 'A craft is already in progress. Please wait for its result.',
+                        craft_unavailable: 'Crafting is unavailable. Check the materials and try again.', location_unavailable: 'The merchant location is unavailable.' })[result.reason] || 'This offer is unavailable.'
+                : result.action === 'crafted' ? 'Craft completed.'
+                    : result.action === 'craft_failed' ? 'Crafting failed. Materials and the fee were spent; no item was produced.'
+                    : result.action === 'completed' ? 'Trade completed. Goods and payment are delivered.'
+                    : result.action === 'cancelled' ? 'Trade cancelled. Unused goods and payment are returned.'
+                    : result.action === 'agreed' ? 'Agreed. Wait here for the merchant. Leaving cancels the trade.'
+                    : request.kind === 'workshop' ? `${owner} crafts ${itemName(result.productId)} in ${town}. Meet there.`
+                        : `${owner} ${result.side === BUY ? 'buys ' + itemName(request.selfId) + ' in ' + town + '. Meet there.' : 'sells in ' + town + '.'}`;
+            if (request.confirmed && (request.kind === 'workshop' || !result.ok)) session.dataSendToMe(response().systemMessage.text(message));
+            if (result.ok && result.action === 'crafted' && result.received) {
+                invoke('GameServer/ConsoleText').transmitPickup(session, result.received.selfId, result.received.amount);
+            }
+            show(session, query, message);
+        }
+        return result;
+    }
+    async function handle(session, parts) {
+        const actor = session?.actor;
+        const epoch = session?.nativeBoardEpoch;
+        try {
+            if (!session?.actor) return;
+            if (session.playerBoardAgreePending || session.playerBoardCraftPending) return;
+            if (parts[1] === 'type') {
+                const value = parts.slice(2).join(' ');
+                const type = ({ 'All offers': 'all', Meetings: 'meeting', 'Private shops': 'shop' })[value] || value;
+                const query = session.playerBoardView || normalize(session);
+                if (!TRADE_TYPES.includes(type) || query.side === 'workshop') return;
+                return applyFilter(session, { ...query, tradeType: type, cursor: null });
+            }
+            if (parts[1] === 'town') {
+                const query = session.playerBoardView || normalize(session), town = parts.slice(2).join(' ').trim();
+                if (town !== 'All towns' && !towns(session, query).includes(town)) return;
+                return applyFilter(session, { ...query, town: town === 'All towns' ? null : town, cursor: null });
+            }
+            if (parts[1] === 'search') {
+                const searchText = parts.slice(2).join(' ').trim();
+                if (!searchText || searchText.length > 48 || /[\x00-\x1f$]/.test(searchText)) return show(session, session.playerBoardView || {}, 'Enter part of an item name to search.');
+                session.playerBoardSearch = searchText;
+                return search(session);
+            }
+            if (parts[1] === 'searchpage' && parts.length === 3 && integer(parts[2]) !== null && Number(parts[2]) <= 100000) return search(session, Number(parts[2]));
+            if (parts[1] === 'untrack' && parts.length === 2) {
+                if (session.playerBoardWaypoint) {
+                    session.playerBoardWaypoint = undefined;
+                    waypoints().syncDirection(session, session.nativeItemsWaypoint);
+                }
+                return show(session, session.playerBoardView || {});
+            }
+            if (parts[1] === 'list' && (parts.length === 6 || parts.length === 7)) {
+                if (!['sell', 'buy', 'workshop'].includes(parts[2]) || integer(parts[4]) === null) return;
+                if (parts.length === 7 && !TRADE_TYPES.includes(parts[6])) return;
+                const side = sideOf(parts[2]), town = parts[3] === '-' ? null : decodeURIComponent(parts[3]);
+                if (town && town.length > 64) return;
+                return show(session, { side, town, selfId: Number(parts[4]), cursor: decodeCursor(parts[5], side), tradeType: parts[6] || 'all' });
+            }
+            if (parts[1] === 'quantity' && parts.length === 3) {
+                const prepared = session.playerBoardPreparation, count = integer(parts[2]);
+                if (!prepared || !count) return show(session, session.playerBoardView || {}, 'Enter a positive whole quantity.');
+                return answer(session, { ...prepared, amount: count, confirmed: false });
+            }
+            if (parts[1] === 'cancel' && parts.length === 2) {
+                const actor = session.actor, cancelled = await service().cancel(session);
+                if (actor !== session.actor || session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return;
+                if (cancelled?.ok === false) return show(session, session.playerBoardView || {}, 'The trade could not be cancelled. Try again.');
+                return show(session, session.playerBoardView || {}, 'Trade cancelled. Unused goods and payment are returned.');
+            }
+            if (parts[1] === 'agree' && parts.length === 2) {
+                const prepared = session.playerBoardPreparation;
+                if (!prepared) return show(session, session.playerBoardView || {}, 'This offer is unavailable.');
+                session.playerBoardAgreePending = prepared;
+                try {
+                    session.dataSendToMe(response().systemMessage.text('Trade in progress. Checking goods and payment.'));
+                    send(session, page(Html.font('Checking the trade', Html.COLOR.title) + '<br>'
+                        + 'Checking goods and payment.<br1>'
+                        + 'Waiting for the merchant response.<br1>'
+                        + 'Please wait for the result.'));
+                    return await answer(session, { ...prepared, confirmed: true });
+                }
+                finally { if (session.playerBoardAgreePending === prepared) session.playerBoardAgreePending = undefined; }
+            }
+            let request;
+            const revision = value => value === '-' ? null : integer(value);
+            if (parts[1] === 'craft' && parts.length === 6) request = { kind: 'workshop', confirmed: true,
+                ownerId: integer(parts[2]), recipeId: integer(parts[3]), price: integer(parts[4]), revision: revision(parts[5]) };
+            else if (['answer', 'locate'].includes(parts[1]) && parts[2] === 'workshop' && parts.length === 7) request = { kind: 'workshop',
+                ownerId: integer(parts[3]), recipeId: integer(parts[4]), price: integer(parts[5]), revision: revision(parts[6]) };
+            else if (['answer', 'locate'].includes(parts[1]) && isKind(parts[2]) && parts.length === 8) request = { kind: parts[2],
+                id: integer(parts[3]), lineId: integer(parts[4]), selfId: integer(parts[5]), price: integer(parts[6]), revision: revision(parts[7]) };
+            if (!request || Object.entries(request).some(([key, value]) => key !== 'revision' && value === null)) return;
+            if (parts[1] === 'locate') request.locateOnly = true;
+            if (request.kind === 'workshop' && request.confirmed) session.dataSendToMe(response().systemMessage.text('Craft in progress. Checking materials and payment.'));
+            return await answer(session, request);
+        } catch (error) {
+            utils.infoWarn('Board', 'player board request failed: %s', error.message);
+            if (session?.actor !== actor) return;
+            if (session.nativeBoardVersion >= 1 && epoch !== session.nativeBoardEpoch) return;
+            if (parts[1] === 'agree') session.dataSendToMe(response().systemMessage.text('The trade could not be agreed. Please try again.'));
+            if (parts[1] === 'craft') session.dataSendToMe(response().systemMessage.text('The craft could not be completed. Please try again.'));
+            return show(session, session.playerBoardView || {}, 'This offer is unavailable.');
+        }
+    }
+    function meetingResult(session, meeting) {
+        if (meeting.state === 'accepted' || session.playerBoardMeetingResult === meeting.id) return;
+        session.playerBoardMeetingResult = meeting.id;
+        if (session.nativeBoardVersion >= 1 && !session.nativeBoardOpen) return;
+        return show(session, session.playerBoardView || {}, meeting.state === 'completed'
+            ? 'Trade completed. Goods and payment are delivered.'
+            : 'Trade cancelled. Unused goods and payment are returned.');
+    }
+    return { open, show, refresh, answer, handle, meetingResult };
+}
+const window = create();
+module.exports = { ...window, create, PAGE_SIZE, MAX_HTML, encodeCursor, decodeCursor };

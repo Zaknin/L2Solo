@@ -2,7 +2,8 @@ const assert = require('assert');
 require('../src/Global');
 invoke('GameServer/DataCache').init();
 const Resolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
-const { ColdSimulationKernel, beginRouteTravelState, finishPartyRouteTravelState } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const { ColdSimulationKernel, finishPartyRouteTravelState } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
 const at = 1800000000000;
 const point = { locX: 145224, locY: 120001, locZ: -4500 };
 const spot = { id: '24_20:antharas_lair', name: 'Assembly test', center: point,
@@ -87,9 +88,15 @@ async function main() {
         resolveParty: options => Resolver.resolve(options),
         emit: (type, payload) => messages.push({ type, payload }),
         projectResolve: (state, result) => ({ ...state, ...result.patch }) });
-    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, route: null,
-        grants: new Map(scattered.map(s => [s.characterId, { characterId: s.characterId,
-            leaseId: `assembly-${s.characterId}`, revision: 1 }])) });
+    const requestId = 'assembly-claim';
+    const held = new Map(scattered.map(s => [s.characterId, { characterId: s.characterId,
+        ownerId: 'cold_simulation_owner', leaseId: `assembly-${s.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
+    for (const state of scattered) {
+        kernel.upsert({ state, context: {} });
+        kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
+            partyId: party.partyId, claimRequestId: requestId });
+    }
+    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, route: null, requestId, grants: held });
     await kernel.resolvePartyGrant(party.partyId);
     const batch = messages.find(m => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
@@ -99,7 +106,7 @@ async function main() {
 
     const route = { needed: true, reason: 'party_spot_replan', spotId: spot.id,
         travelMs: 25000, to: point, destinations: { 1: point, 2: point } };
-    const travelling = scattered.map(s => beginRouteTravelState(s, route, at));
+    const travelling = scattered.map(s => beginHuntingTrip(s, route, at));
     assert.deepStrictEqual(travelling[1].loc, scattered[1].loc, 'departure does not teleport');
     const arrived = travelling.map(s => finishPartyRouteTravelState(s, at + 25000));
     const hunt = resolve(arrived, { timestamp: at + 25000 });
@@ -148,7 +155,7 @@ async function main() {
     let workerError;
     worker.on('error', error => { workerError = error; });
     worker.on('message', message => received.push(message));
-    const send = (type, payload) => worker.postMessage(Protocol.envelope(type, 'assembly-test', payload));
+    const send = (type, payload, msgId) => worker.postMessage(Protocol.envelope(type, 'assembly-test', payload, msgId));
     const until = async predicate => {
         const deadline = Date.now() + 15000;
         while (!received.some(predicate)) {
@@ -174,7 +181,7 @@ async function main() {
         const claim = await until(m => m.type === 'claim_request');
         send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
             ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-            leaseId: `worker-assembly-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) });
+            leaseId: `worker-assembly-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, claim.msgId);
         const proposal = await until(m => m.type === 'proposal_batch');
         assert(proposal.payload.proposals.every(p => p.result.materialize.exp === 0));
         assert(proposal.payload.proposals.every(p => !p.result.memoryEvents?.length));

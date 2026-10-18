@@ -39,7 +39,7 @@
         <section class="market-ledger-head" aria-labelledby="marketHeading">
             <div>
                 <h1 id="marketHeading">Find what is trading, and where.</h1>
-                <p id="marketFreshness">Loading active player and bot shops.</p>
+                <p id="marketFreshness">Loading shops and public announcements.</p>
             </div>
             <div class="market-kpis" aria-label="Market summary">
                 <div><span>For sale</span><strong id="marketPageWts">—</strong><small id="marketPageSellUnits">— active offers</small></div>
@@ -48,6 +48,28 @@
                 <div><span>7d turnover</span><strong id="marketPageVolume">—</strong><small id="marketPageVolumeScope">all trade channels</small></div>
             </div>
         </section>
+
+        <details class="market-economy">
+            <summary>Economy indicators <span>Price levels and hourly adena balance</span></summary>
+            <div class="market-economy-grid">
+                <section aria-labelledby="marketPriceIndexHeading">
+                    <div class="market-section-heading"><div><span class="section-kicker">Prices</span><h2 id="marketPriceIndexHeading">Market price index</h2></div><span>First estimated price = 100</span></div>
+                    <p class="market-economy-note">Completed board deals, grouped by item type and grade.</p>
+                    <div class="market-table-wrap"><table class="market-table">
+                        <thead><tr><th>Item group</th><th>Grade</th><th>Index</th><th>Deals</th><th>Buyers / hour</th></tr></thead>
+                        <tbody id="marketCounterRows"><tr><td colspan="5" class="list-empty">Loading price indices.</td></tr></tbody>
+                    </table></div>
+                </section>
+                <section aria-labelledby="marketAdenaHeading">
+                    <div class="market-section-heading"><div><span class="section-kicker">Money supply</span><h2 id="marketAdenaHeading">Adena created and removed</h2></div><span>24 hourly buckets</span></div>
+                    <p class="market-economy-note" id="marketAdenaMeta">Each activity's net change across bags, warehouses, escrow and bids. Transfers cancel. The current hour is incomplete; recent activity may still be saving.</p>
+                    <div class="market-table-wrap"><table class="market-table">
+                        <thead><tr><th>Hour</th><th>Created</th><th>Removed</th><th>Net</th></tr></thead>
+                        <tbody id="marketAdenaRows"><tr><td colspan="4" class="list-empty">Loading hourly balance.</td></tr></tbody>
+                    </table></div>
+                </section>
+            </div>
+        </details>
 
         <section class="market-controls" aria-label="Market filters">
             <label class="market-search">
@@ -61,6 +83,7 @@
             </div>
             <label><span>Town</span><select id="marketTown"><option value="all">All towns</option></select></label>
             <label><span>Traders</span><select id="marketSource"><option value="market">Players + bots</option><option value="players">Players only</option><option value="bots">Bots only</option><option value="fixed">Fixed traders only</option><option value="all">All traders</option></select></label>
+            <label><span>Listings</span><select id="marketListing"><option value="all">Shops + announcements</option><option value="shops">Physical shops</option><option value="ads">Announcements</option></select></label>
             <label><span>Type</span><select id="marketCategory"><option value="all">All items</option><option value="materials">Materials</option><option value="weapons">Weapons</option><option value="armor">Armor</option><option value="jewelry">Jewelry</option><option value="other">Other</option></select></label>
             <label><span>Sort</span><select id="marketSort"><option value="shops">Most offers</option><option value="units">Most units</option><option value="price">Best price</option><option value="name">Item name</option></select></label>
         </section>
@@ -115,6 +138,7 @@
             </div>
         </section>
     </main>
+    <script src="/observer/format.js"></script>
     <script src="/observer/marketModel.js"></script>
     <script src="/observer/spaRouter.js"></script>
     <script src="/observer/worldState.js"></script>

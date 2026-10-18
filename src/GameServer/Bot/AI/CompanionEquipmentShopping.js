@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const World = invoke('GameServer/World/World');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -11,7 +12,11 @@ function actorAdena(bot) {
     return Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || 0);
 }
 
-function currentState(session, bot, town) {
+function currentState(session, bot, town, economy = null) {
+    // Autonomous shopping shares the physical actor's route inputs. A
+    // nearby town is a destination until the actor actually reaches it.
+    const physical = session.partyCompanion === true ? null : economy?.state
+        || invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(bot, session);
     const previous = session.coldLifeState || {};
     const inventory = LifeState.inventorySummaryFromItems(bot.backpack?.fetchItems?.() || []);
     return {
@@ -20,13 +25,14 @@ function currentState(session, bot, town) {
         name: bot.fetchName?.() || previous.name,
         level: Number(bot.fetchLevel?.() || previous.level || 1),
         adena: actorAdena(bot),
-        currentRegion: town.name,
-        loc: {
+        currentRegion: physical ? physical.currentRegion : town.name,
+        loc: physical?.loc || {
             locX: Number(bot.fetchLocX()),
             locY: Number(bot.fetchLocY()),
             locZ: Number(bot.fetchLocZ())
         },
         stats: {
+            ...(physical?.stats || {}),
             ...(previous.stats || {}),
             classId: Number(bot.fetchClassId?.() ?? previous.stats?.classId ?? 0),
             role: session.botStatus?.role || previous.stats?.role || null
@@ -35,22 +41,19 @@ function currentState(session, bot, town) {
     };
 }
 
-function liveMerchantOffer(offer) {
-    return offer?.session?.actor && (
-        (offer.sourceType === 'private_store' && String(offer.session.accountId || '').startsWith('bot_'))
-        || ['afk_player_store', 'afk_bot_store'].includes(offer.sourceType)
-    );
-}
-
-function affordableOffers(target, state, town) {
-    const budget = PurchaseFunding.spendable(state);
-    return MarketOpportunity.hotOffers(target.selfId, {
+function affordableOffers(target, state, town, session) {
+    // ARCH-NOTE: Player companion errands use the player's choice; autonomous bots spend only on their funded item.
+    const budget = PurchaseFunding.spendable(state, 0, session.partyCompanion === true
+        ? { upperBound: true } : { itemId: target.selfId });
+    const offer = MarketOpportunity.bestHotOffer(target.selfId, {
         town: town.name,
-        buyerCharacterId: state.characterId
-    }).filter((offer) => (
-        Number(offer.price) <= budget
-        && (offer.sourceType === 'npc' || liveMerchantOffer(offer))
-    ));
+        buyerCharacterId: state.characterId,
+        budget,
+        accept: (candidate) => candidate.sourceType === 'npc'
+            || ['afk_player_store', 'afk_bot_store'].includes(candidate.sourceType)
+            || candidate.sourceType === 'private_store' && candidate.store?.kind === 'player'
+    });
+    return offer ? [offer] : [];
 }
 
 function ownedTargetAmount(state, plan) {
@@ -68,12 +71,37 @@ function pendingTargetAmount(plan) {
 }
 
 function checkedPlan(session, state, town, options = {}) {
+    // Autonomous hot bots buy the same funded leaf as cold actors. Player
+    // companion requests retain their explicitly assigned native errands.
+    if (session.partyCompanion !== true) {
+        const Context = invoke('GameServer/Bot/Economy/EconomyContext');
+        const economy = options.economy || Context.forState(state);
+        if (economy.routePending) return { plan: state.stats?.equipmentPlan || null, offers: [], pending: true };
+        const leaf = economy.network.activity;
+        const selfId = Number(leaf?.itemId || 0);
+        if (leaf?.activity !== 'shopping' || !selfId || leaf.town && leaf.town !== town.name) return { plan: null, offers: [] };
+        const item = require('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, selfId);
+        const amount = Math.max(1, Math.ceil(leaf.amount || 1));
+        const fundedState = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
+        // The leaf's funded root funds it, as for a cold goal (PurchaseFunding.goalTerms).
+        const ratio = PurchaseFunding.leafRatio(leaf, economy.network.queue?.find(row => row.key === leaf.rootKey));
+        const funding = ratio > 0 ? { valueRate: ratio } : {};
+        const budget = Math.min(PurchaseFunding.spendable(fundedState, 0, PurchaseFunding.goalTerms({ plan: funding }, selfId)) / amount,
+            economy.worth(selfId) ?? Infinity);
+        const offer = MarketOpportunity.bestHotOffer(selfId, { town: town.name, buyerCharacterId: state.characterId, budget,
+            accept: row => Number(row.count) >= amount && (row.sourceType === 'private_store' && row.store?.kind === 'player'
+                || !leaf.sourceType || (leaf.sourceType === 'npc' ? row.sourceType === 'npc'
+                    : ['afk_player_store', 'afk_bot_store'].includes(row.sourceType))) });
+        return { statsPacket: economy.statsPacket, plan: offer ? { status: 'active', strategy: 'market',
+            target: { selfId, name: item?.template?.name, slot: Number(item?.etc?.slot || 0) }, amount,
+            market: { sourceType: offer.sourceType }, ...funding } : null, offers: offer ? [offer] : [] };
+    }
     const previous = state.stats?.equipmentPlan;
     const excludedSlots = new Set((options.excludedSlots || []).map(Number));
     const offerCache = new Map();
     const offersFor = (target) => {
         const selfId = Number(target?.selfId || 0);
-        if (!offerCache.has(selfId)) offerCache.set(selfId, affordableOffers(target, state, town));
+        if (!offerCache.has(selfId)) offerCache.set(selfId, affordableOffers(target, state, town, session));
         return offerCache.get(selfId);
     };
     const previousOffers = previous?.target?.selfId ? offersFor(previous.target) : [];
@@ -113,31 +141,25 @@ function npcTarget(offer, bot, town) {
 }
 
 function merchantTarget(offer, town) {
-    const actor = offer.session.actor;
-    return {
-        actorId: Number(actor.fetchId()),
-        name: actor.fetchName(),
-        locX: Number(actor.fetchLocX()),
-        locY: Number(actor.fetchLocY()),
-        locZ: Number(actor.fetchLocZ()),
-        town: offer.town || town.name
-    };
+    return MarketOpportunity.offerTarget(offer, town.name);
 }
 
-function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = []) {
+function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = [], economy = null) {
     if (!town?.name || purchaseCount >= MAX_PURCHASES_PER_VISIT) return null;
-    const state = currentState(session, bot, town);
+    const state = currentState(session, bot, town, economy);
     const unseal = invoke('GameServer/Bot/AI/BotMammonUnseal').plan(session,bot,town,state);
     if (unseal) return unseal;
     const DualCraft = invoke('GameServer/Bot/AI/CompanionDualSwordCrafting');
     const prepared = DualCraft.plan(session,bot,town,state);
     if (prepared.handled) return prepared.errand;
-    const checked = checkedPlan(session, state, town, { excludedSlots });
+    const checked = checkedPlan(session, state, town, { excludedSlots, economy });
+    if (checked.pending) return { pending: true };
     const plan = checked.plan;
     session.coldLifeState = {
         ...state,
-        stats: { ...(state.stats || {}), equipmentPlan: plan }
+        stats: { ...(state.stats || {}), ...checked.statsPacket, equipmentPlan: plan }
     };
+    refreshPartyMemberships([session], invoke);
 
     const combination = DualCraft.plan(session,bot,town,session.coldLifeState,plan);
     if (combination.handled) return combination.errand;
@@ -151,10 +173,15 @@ function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = []) {
         kind: offer.sourceType === 'npc' ? 'npc_equipment_purchase' : 'market_purchase',
         sourceType: offer.sourceType,
         sourceId: offer.sourceId,
+        lineId: Number(offer.lineId || 0) || null,
+        objectId: offer.objectId || null,
         itemId: Number(plan.target.selfId),
         itemName: offer.itemName || plan.target.name,
         slot: Number(plan.target.slot || 0),
         price: Number(offer.price),
+        amount: Math.min(Number(offer.count || Infinity), Number(plan.amount || 1)),
+        // The native writer checks the same terms the plan was budgeted with.
+        funding: PurchaseFunding.nativeTerms(PurchaseFunding.goalTerms({ plan }), plan.target.selfId),
         purchaseCount,
         excludedSlots: [...excludedSlots],
         target: offer.sourceType === 'npc'
@@ -166,7 +193,8 @@ function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = []) {
 function alternateNpcErrand(session, bot, town, errand) {
     if (errand?.kind !== 'npc_equipment_purchase' || !town?.name) return null;
     const state = currentState(session, bot, town);
-    const budget = PurchaseFunding.spendable(state);
+    const budget = PurchaseFunding.spendable(state, 0, session.partyCompanion === true
+        ? { upperBound: true } : { itemId: errand.itemId });
     const failedSourceIds = new Set([
         ...(errand.failedSourceIds || []).map(Number),
         Number(errand.sourceId || 0)

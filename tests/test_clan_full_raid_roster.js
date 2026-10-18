@@ -1,0 +1,531 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs'), path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-full-raid');
+require('../src/Global'); isolated.assertConfigured(options.default);
+const Data = invoke('GameServer/DataCache'); Data.init();
+const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
+const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState'), Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const Combat = invoke('GameServer/Bot/Population/ColdCombatProfile'), Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const Roster = require('../src/GameServer/Clan/ClanRaidRoster');
+const Formation = require('../src/GameServer/Bot/Population/RequiredPartyFormation');
+const Requests = require('../src/GameServer/Bot/Population/PartyRequestPlanner');
+const Assembly = require('../src/GameServer/Bot/Population/PartyHuntingAssembly');
+const Lifecycle = require('../src/GameServer/Bot/Population/HotPartyLifecycle');
+const Hot = require('../src/GameServer/Bot/AI/HotBackgroundParty');
+const World = invoke('GameServer/World/World'), Index = invoke('GameServer/World/RaidEntityIndex');
+const Catalog = invoke('GameServer/RaidBoss/RaidBossSourceCatalog'), Scope = invoke('GameServer/RaidBoss/RaidEncounterScope');
+const Runtime = require('../src/GameServer/Clan/ClanPlanningCoordinator');
+const base = 840000, ids = Array.from({ length: 9 }, (_, i) => base + i);
+const spot = { id: 'raid:full-fixture', avgLevel: 50, raidBoss: true, raidBossTemplateId: 10137,
+    raidInstanceId: 'full-instance', raidWorldAvailable: true, raidAuthorityRevision: 0 };
+function body(id, classId, skills = []) {
+    const state = { characterId: id, classId, clanId: 0, level: 50, phase: 'cold', activity: 'grouped', spotId: spot.id,
+        accountName: 'bot_pop_full', loc: { locX: 0, locY: 0, locZ: 0 }, inventory: {},
+        stats: { generatedCold: true, classId, coldCombat: { version: Combat.PROFILE_VERSION, classId,
+            skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } };
+    for (const slot of [7, 14, 6, 9, 10, 11, 12]) {
+        if (slot === 14 && Object.values(state.inventory).some(row => row.slot === 7)) continue;
+        const item = Data.items.find(row => row.etc?.slot === slot && row.etc?.rank === 'c' && Gear.suitable(row, state, Gear.roleFor(state), 'c'));
+        if (item) state.inventory[item.selfId] = { selfId: item.selfId, slot, amount: 1, equipped: true };
+    }
+    return state;
+}
+const seeded = [body(base, 4), body(base + 1, 17, [{ selfId: 1068, level: 1 }]), body(base + 2, 15, [{ selfId: 1015, level: 1 }]),
+    ...[7, 9, 10, 21, 0, 9].map((classId, i) => body(base + 3 + i, classId))];
+const seed = new DatabaseSync(isolated.world);
+seed.exec(fs.readFileSync(path.join(__dirname, '../database/sql/sqlite.sql'), 'utf8'));
+seed.exec("INSERT INTO accounts(username,password) VALUES('bot_pop_full','fixture')");
+for (const member of seeded) {
+    seed.prepare(`INSERT INTO characters(id,username,name,classId,race,level,exp,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
+        VALUES(?,'bot_pop_full',?,?,0,50,?,500,300,0,0,0,0,0,0,0)`).run(member.characterId, `Full${member.characterId}`, member.classId, Number(Data.experience[49]));
+    for (const skill of member.stats.coldCombat.skills) seed.prepare(`INSERT INTO skills(characterId,selfId,name,passive,level)
+        VALUES(?,?,?,0,?)`).run(member.characterId, skill.selfId, `Fixture skill ${skill.selfId}`, skill.level);
+    seed.prepare(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,exp,phase,activity,spotId,hp,maxHp,mp,maxMp,
+        inventorySummary,statsJson,updatedAt) VALUES(?,'bot_pop_full',?,50,?,'cold','hunting',?,500,500,300,300,?,?,?)`)
+        .run(member.characterId, `Full${member.characterId}`, Number(Data.experience[49]), spot.id, JSON.stringify(member.inventory), JSON.stringify(member.stats), Date.now());
+}
+seed.close();
+const query = (sql, args = []) => Database.execute([sql, args]);
+const old = { find: Catalog.findById, project: Scope.projectSource, contains: invoke('GameServer/Bot/AI/SpotService').containsLocation,
+    registered: World.registeredActorById, boss: Index.bossByTemplateId, snapshot: Life.partySessionSnapshot };
+let marker, goal, party;
+async function refreshed() { return Life.statesByIds(ids); }
+const owner = () => Database.clanRaidOwner(marker);
+const admission = members => Roster.admission(party, members, spot, { owner: owner(), arrived: Assembly.ready(party, members, spot) });
+function nativeSessions(states) {
+    const Actor = invoke('GameServer/Actor/Actor'), Item = invoke('GameServer/Item/Item');
+    return states.map(state => {
+        const session = { hotBackgroundPartyId: party.partyId, persistenceMode: 'ephemeral', hennas: state.stats?.hennas || [null,null,null],
+            accountId: 'raid-fixture', dataSendToMe() {}, dataSendToOthers() {}, dataSendToMeAndOthers() {} };
+        const actor = new Actor(session, { id: state.characterId, name: state.name, title: '', classId: state.classId, clanId: marker.clanId,
+            level: state.level, exp: state.exp, sp: state.sp, race: 0, sex: 0, head: 0, isOnline: true,
+            hp: 500, maxHp: 500, mp: 1000, maxMp: 1000, cp: 0, maxCp: 0, locX: 0, locY: 0, locZ: 0,
+            str: 40, dex: 30, con: 40, int: 30, wit: 20, men: 30, pAtk: 500, mAtk: 500, pDef: 500, mDef: 500,
+            atkSpd: 333, castSpd: 333, accur: 100, evasion: 20, crit: 0, radius: 8, size: 20, height: 20,
+            runSpd: 120, walkSpd: 60, maxLoad: 10000, face: 0, hair: 0, hairColor: 0, isGM: false, items: [], paperdoll: {} });
+        actor.backpack.paperdoll = Object.fromEntries(Array.from({ length: 28 }, (_, i) => [i, { id: 0, selfId: 0 }]));
+        actor.backpack.items = Object.values(state.inventory).filter(row => row.equipped).map((row, i) => {
+            const definition = Data.items.find(item => item.selfId === row.selfId);
+            return new Item(state.characterId * 100 + i, { ...definition.template, ...definition.stats, ...definition.etc, ...row });
+        });
+        actor.skillset.populateSnapshot(state.stats.coldCombat.skills);
+        actor.automation.replenishVitals = () => {};
+        actor.automation.stopReplenish = () => {};
+        session.actor = actor;
+        return session;
+    });
+}
+async function nativeImpactCases(sessions, registry) {
+    const Npc = invoke('GameServer/Npc/Npc'), Formulas = invoke('GameServer/Formulas');
+    const Statements = require('../src/DatabaseStatements');
+    const original = { boss: Index.bossByTemplateId, snapshot: Life.partySessionSnapshot, capture: Combat.capture,
+        prepare: Statements.prepare, remove: World.removeNpc, user: World.user,
+        experience: invoke('GameServer/Actor/Generics').experienceReward, hitChance: Formulas.calcHitChance };
+    let captures = 0, fullCaptures = 0, ownerReads = 0, openingWrites = 0, loot = 0, experience = 0, goalCompletion;
+    const boss = new Npc(998877, { selfId: marker.npcId, raidBoss: true, kind: 'Boss', name: 'Impact boss', title: '',
+        level: 50, maxHp: 1000, maxMp: 1000, hp: 1000, mp: 1000, locX: 20, locY: 0, locZ: 0, head: 0,
+        radius: 8, size: 20, height: 20, atkSpd: 333, runSpd: 120, walkSpd: 60,
+        revHp: 0, revMp: 0, pDef: 10, mDef: 10, pAtk: 10, exp: 100, sp: 1 });
+    boss.raidInstanceId = marker.raidInstanceId;
+    boss.broadcastVitals = () => {};
+    boss.canEngageCombat = () => false; // No world movement/timer in this isolated action fixture.
+    boss.automation.replenishVitals = () => {};
+    boss.automation.stopReplenish = () => {};
+    Index.bossByTemplateId = () => boss;
+    Formulas.calcHitChance = () => true;
+    await Database.setSkill({ selfId: 1184, name: 'Ice Bolt', level: 1 }, sessions[5].actor.fetchId());
+    await Database.setSkill({ selfId: 1015, name: 'Heal', level: 1 }, sessions[1].actor.fetchId());
+    sessions[5].actor.skillset.populateSnapshot([{ selfId: 1184, level: 1 }]);
+    sessions[1].actor.skillset.populateSnapshot([{ selfId: 1068, level: 1 }, { selfId: 1015, level: 1 }]);
+    World.user = { sessions };
+    Combat.capture = (...args) => { captures++; return original.capture(...args); };
+    Life.partySessionSnapshot = (...args) => { fullCaptures++; return original.snapshot(...args); };
+    Statements.prepare = (connection, sql, ...args) => {
+        if (sql.includes('AS markerJson') || sql.includes('AS reserved')) ownerReads++;
+        if (sql.startsWith('UPDATE bot_background_parties SET statsJson=?,updatedAt=?')) openingWrites++;
+        return original.prepare(connection, sql, ...args);
+    };
+    World.removeNpc = () => {
+        loot++;
+        sessions[0].fixtureLoot = (sessions[0].fixtureLoot || 0) + 1;
+        goalCompletion = Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection,
+            goal: { ...goal, status: 'completed' } });
+    }; // Controlled corpse/drop leaf; native ReceivedHit/Die/NpcDied/EXP still execute.
+    invoke('GameServer/Actor/Generics').experienceReward = (...args) => { experience++; return original.experience(...args); };
+    const resetCounts = () => { captures = 0; fullCaptures = 0; ownerReads = 0; openingWrites = 0; };
+    async function freshParty(label) {
+        const [current] = await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]);
+        if (current) party = Parties.acceptRow(current);
+        if (party?.status === 'hot') await phase('cold');
+        if (party && ['active', 'hot'].includes(party.status)) {
+            party = await Parties.createOrUpdate({ ...party, status: 'dissolved', nextResolveAt: null }); assert(party);
+        }
+        if (party?.status === 'dissolved') await Life.releaseDissolvedPartyMembers(party.partyId, 'raid_defeated');
+        await Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection, goal });
+        const members = await refreshed(), prepared = Parties.prepareCommit({ partyId: `impact-${label}`, leaderId: base,
+            memberIds: ids, spotId: spot.id, status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000,
+            stats: { objective: { ...members[0].stats.clanPartyObjective, sourceKind: 'raid', raidBoss: true,
+                raidBossTemplateId: marker.npcId, npcId: marker.npcId, minPartySize: 9, maxPartySize: 9, fullRoster: marker } } });
+        // Native release completed professions in these level50 fixtures.
+        // Spawn the actual current canonical classes, rather than old actors.
+        sessions.forEach(session => session.actor.setClassId(members.find(member => member.characterId === session.actor.fetchId()).classId));
+        const assigned = members.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
+        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); await phase('hot');
+        sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; session.actor.state.setCasts(false); session.actor.state.setHits(false); });
+        boss.setHp(1000); boss.state.setDead(false); boss.setDestId(base); boss.raidInstanceId = marker.raidInstanceId;
+        const opened = await Lifecycle.openMarkedRaid(party, sessions);
+        assert(opened.ok, opened.reason); party = opened.party; assert(!Roster.held(party));
+        resetCounts();
+    }
+    function queuedMelee() {
+        const actor = sessions[0].actor, attack = actor.attack, timers = [];
+        actor.state.setHits(false);
+        attack.queueTimer = callback => { timers.push(callback); return null; };
+        attack.prepareMeleeHit = () => ({ damage: 10, flags: 0 });
+        attack.meleeHit(sessions[0], boss);
+        assert(timers.length >= 2, 'actual native melee dispatch queues impact and repeat');
+        return timers[0];
+    }
+    async function denied(label, change, restore) {
+        const impact = queuedMelee(), beforeHp = boss.fetchHp(), before = party.stats.raidAdmission;
+        await change(); impact();
+        assert.equal(boss.fetchHp(), beforeHp, `${label}: queued attack cannot damage after input change`);
+        assert.deepEqual(Parties.find(party.partyId).stats.raidAdmission, before, `${label}: no earned opening`);
+        assert(!Roster.held(Parties.find(party.partyId)), label);
+        await restore();
+    }
+    try {
+        await freshParty('melee');
+        sessions[0].raidOpenedBossId = boss.fetchId();
+        assert(!Roster.nativeHotStarted(party), 'defensive autoaggro/tactical flag does not earn opening');
+        sessions.forEach(session => { session.actor.state.setCasts(true); Hot.tick(session, session.actor, invoke('GameServer/Actor/Generics'), {}); });
+        sessions.forEach(session => session.actor.state.setCasts(false));
+        assert.equal(captures, 0, 'nine admitted AI ticks do not capture nine combat profiles each');
+        assert.equal(fullCaptures, 0); assert.equal(ownerReads, 0);
+        // A real support skill landing is not an offensive executor event.
+        const healer = sessions[2], healTimers = [];
+        healer.actor.attack.queueTimer = callback => { healTimers.push(callback); return null; };
+        healer.actor.attack.remoteHit(healer, healer.actor, healer.actor.skillset.fetchSkill(1015));
+        healTimers.at(-1)(); assert(!Roster.held(Parties.find(party.partyId))); assert.equal(openingWrites, 0);
+        await denied('logout ninth', () => registry.delete(base + 8), () => registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] }));
+        await denied('party change', () => { sessions[8].hotBackgroundPartyId = 'foreign'; }, () => { sessions[8].hotBackgroundPartyId = party.partyId; });
+        await denied('membership race', () => query('UPDATE characters SET clanId=0 WHERE id=?', [base + 8]),
+            () => query('UPDATE characters SET clanId=? WHERE id=?', [marker.clanId, base + 8]));
+        await denied('canonical class race', () => query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]),
+            () => query('UPDATE characters SET classId=? WHERE id=?', [sessions[2].actor.fetchClassId(), base + 2]));
+        await denied('source replacement', () => { boss.raidInstanceId = 'new-instance'; }, () => { boss.raidInstanceId = marker.raidInstanceId; });
+        await denied('owner replacement', () => query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.productionGoal.fullRoster.generation','other') WHERE clanId=?", [marker.clanId]),
+            () => query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.productionGoal.fullRoster.generation',?) WHERE clanId=?", [marker.generation, marker.clanId]));
+        const item = sessions[8].actor.backpack.fetchItems()[0], enchant = item.fetchEnchantLevel();
+        await denied('gear race', () => item.setEnchantLevel(enchant + 1), () => item.setEnchantLevel(enchant));
+        const learned = healer.actor.skillset.skills;
+        await denied('learned capability race', () => { healer.actor.skillset.skills = []; }, () => { healer.actor.skillset.skills = learned; });
+        await denied('arrival race', () => sessions[8].actor.setLocX(5000), () => sessions[8].actor.setLocX(0));
+        await query('BEGIN');
+        try { await denied('raw transaction busy', () => {}, () => {}); }
+        finally { await query('ROLLBACK'); }
+        const impact = queuedMelee(), pendingWrite = query('UPDATE bot_life_state SET sp=sp+1 WHERE characterId=?', [base]);
+        impact(); assert.equal(boss.fetchHp(), 1000, 'pending SQL writer defers native opening'); await pendingWrite;
+        await query(`CREATE TEMP TRIGGER fail_marked_impact BEFORE UPDATE OF statsJson ON bot_background_parties
+            WHEN NEW.partyId='impact-melee' BEGIN SELECT RAISE(ABORT,'injected marked opening rollback'); END`);
+        await denied('native transaction rollback', () => {}, () => query('DROP TRIGGER fail_marked_impact'));
+        resetCounts(); queuedMelee()(); party = Parties.find(party.partyId);
+        assert.equal(boss.fetchHp(), 990, 'actual9 native melee impact deals damage');
+        assert(Roster.nativeHotStarted(party)); assert.equal(openingWrites, 1);
+        assert.equal(captures, 9, 'one compact pass for the opening event'); assert.equal(fullCaptures, 0); assert.equal(ownerReads, 2);
+        const heldProof = structuredClone(party.stats.raidAdmission);
+        registry.delete(base + 8); queuedMelee()(); registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        assert.equal(boss.fetchHp(), 980, 'legitimate post-opening departure does not require nine alive again');
+        assert.equal(captures, 9); assert.equal(ownerReads, 2); assert.equal(openingWrites, 1);
+        assert.deepEqual(party.stats.raidAdmission, heldProof);
+        await freshParty('magic');
+        const caster = sessions[5], attack = caster.actor.attack, timers = [];
+        const skill = caster.actor.skillset.fetchSkill(1184);
+        attack.queueTimer = callback => { timers.push(callback); return null; };
+        attack.prepareSkillDamage = () => 10;
+        attack.remoteHit(caster, boss, skill); registry.delete(base + 8); timers.at(-1)();
+        registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        assert.equal(boss.fetchHp(), 1000, 'actual offensive magic landing also fences a lost ninth'); assert(!Roster.held(Parties.find(party.partyId)));
+        // The first native magic damage kills: real Die/destructor and EXP
+        // run after durable opening, before any async promotion/goal closure.
+        const beforeExp = caster.actor.fetchExp();
+        timers.length = 0; boss.setHp(5); caster.actor.state.setCasts(false);
+        caster.actor.skillReuseUntil.delete(skill.fetchSelfId()); // Fixture advances past the native reuse before its next cast.
+        attack.remoteHit(caster, boss, skill);
+        timers.at(-1)(); party = Parties.find(party.partyId);
+        assert(boss.state.fetchDead()); assert.equal(boss.fetchDestId(), undefined);
+        assert.equal(loot, 1); assert.equal(experience, 9); await goalCompletion;
+        assert(caster.actor.fetchExp() > beforeExp, 'actual native party EXP reaches the killer after durable opening');
+        await invoke('GameServer/Persistence/CharacterWriteQueue').flushAll();
+        assert(Roster.nativeHotStarted(party), 'earned opening survives destructor and completed owner goal');
+        const earned = structuredClone(party.stats.raidAdmission);
+        sessions[8].actor.setLevel(51); await phase('cold'); await phase('hot');
+        assert.deepEqual(party.stats.raidAdmission, earned, 'phase handoff/restart retains original9 earned proof despite post-hit level/goal noise');
+        assert(await Lifecycle.confirmMarkedRaidStart(party, [], Date.now()));
+        assert.equal(loot, 1); assert.equal(experience, 9); assert.equal(earned.members.length, 9);
+        const row = (await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0];
+        party = Parties.acceptRow(row); assert(Roster.nativeHotStarted(party));
+        console.log('Native marked raid impact: melee/magic races, defensive autoaggro, busy/rollback, one-hit death/EXP/goal completion and bounded opening inputs passed');
+    } finally {
+        Index.bossByTemplateId = original.boss; Life.partySessionSnapshot = original.snapshot; Combat.capture = original.capture;
+        Statements.prepare = original.prepare; World.removeNpc = original.remove; World.user = original.user;
+        Formulas.calcHitChance = original.hitChance;
+        invoke('GameServer/Actor/Generics').experienceReward = original.experience;
+        boss.destructor(sessions[0]);
+    }
+}
+function productionResolverCases(members) {
+    const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
+    const Solo = invoke('GameServer/Bot/Population/BackgroundResolver');
+    const Encounter = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
+    const at = Date.now(), currentOwner = owner();
+    const run = (people, raidOwner = currentOwner, actualParty = party) => Resolver.resolve({
+        party: actualParty, members: people, spot, targetNpcId: 10137, timestamp: at, elapsedMs: 15000, raidOwner });
+    const incomplete = run(members.slice(0, 8));
+    assert.equal(incomplete.debug.reason, 'raid_roster_incomplete'); assert.equal(incomplete.debug.fights, 0);
+    assert(!incomplete.partyPatch.stats.raidAdmission);
+    const ownerGone = run(members, null);
+    assert.equal(ownerGone.partyPatch.status, 'dissolved'); assert.equal(ownerGone.debug.reason, 'raid_roster_owner_changed');
+    assert(ownerGone.memberResults.every(row => row.result.materialize.exp === 0 && row.result.materialize.items.length === 0));
+    const previous = { prepare: Solo.prepareRaidParty, fight: Solo.resolvePartyFight };
+    let attempts = 0;
+    try {
+        Solo.prepareRaidParty = () => ({ casts: 0, needsRest: false, ready: true });
+        Solo.resolvePartyFight = input => {
+            attempts++;
+            return { won: false, encounter: { hp: 500, mob: { selfId: 10137, maxHp: 1000 } },
+                members: input.members.map(state => ({ state, vitals: { ...state.vitals }, profile: Combat.profileFor(state, at),
+                    skillUses: 0, heals: 0, musicUses: 0, potionsUsed: 0, cooldowns: {} })),
+                debug: { actions: 1, mobSelfId: 10137, remainingHp: 500 } };
+        };
+        const readyParty = { ...party, stats: { ...party.stats, raidPreparation: { status: 'ready' } } };
+        const opened = run(members, currentOwner, readyParty);
+        assert.equal(attempts, 1, 'production marked resolver reaches exactly one native fight leaf');
+        assert.equal(opened.partyPatch.stats.raidAdmission.startedAt, at);
+        assert.equal(opened.partyPatch.stats.raidAdmission.members.length, 9);
+        assert.equal(opened.partyPatch.stats.raidEncounter.participants[party.partyId], at);
+        assert.equal(opened.memberResults.length, 9);
+    } finally { Solo.prepareRaidParty = previous.prepare; Solo.resolvePartyFight = previous.fight; Encounter.resetForTests(); }
+}
+async function propose(proof, { reward = 100, status = 'active' } = {}) {
+    const members = await refreshed();
+    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
+    assert.equal(grants.length, 9);
+    const [raid] = await query('SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10137']);
+    const revision = Number(raid?.revision || 0);
+    const atomicGroup = { id: `full:${grants[0].leaseId}`, memberIds: ids,
+        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedUpdatedAt: party.updatedAt,
+            updatedAt: Math.max(Date.now(), party.updatedAt + 1), status, nextResolveAt: Date.now() + 30000,
+            statsJson: JSON.stringify({ ...party.stats, raidAdmission: proof }) }],
+        raidCommit: { key: 'raid:10137', expectedRevision: revision, revision: revision + 1,
+            snapshot: { key: 'raid:10137', raidInstanceId: marker.raidInstanceId, status: 'active', hp: 500,
+                participants: { [party.partyId]: proof.startedAt }, updatedAt: Date.now() } } };
+    const entries = members.map(member => ({ nextState: { ...member, exp: member.exp + reward },
+        token: grants.find(grant => grant.characterId === member.characterId), atomicGroup,
+        proposal: { baseState: member }, options: { allowParty: true, allowLifecycle: true } }));
+    return { entries, grants };
+}
+async function reject(proof, mutation, restore, detail) {
+    const prepared = await propose(proof);
+    const before = await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId');
+    try {
+        await mutation();
+        const result = await Owner.commitAndReleaseBatch(prepared.entries);
+        assert(result.every(row => !row.ok && row.detail === detail), JSON.stringify(result.map(row => [row.reason, row.detail])));
+        assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), before);
+    } finally { await Owner.releaseBatch(prepared.grants, { releaseInvalidated: true }); await restore(); }
+}
+async function phase(to) {
+    const states = await refreshed(), at = Date.now();
+    const result = await Database.transitionBackgroundParty({ partyId: party.partyId, expectedStatus: party.status,
+        expectedUpdatedAt: party.updatedAt, expectedPhase: states[0].phase, phase: to,
+        nextResolveAt: to === 'hot' ? null : at + 30000, statsJson: JSON.stringify(party.stats),
+        members: states.map(state => ({ characterId: state.characterId, expectedRevision: state.simulation.revision,
+            expectedUpdatedAt: state.updatedAt, patch: Owner.persistencePatch({ ...state, phase: to }, at) })) });
+    assert(result.ok, result.reason); result.rows.forEach(row => Life.acceptLifecycleRow(row)); party = Parties.acceptRow(result.party);
+}
+async function main() {
+    Database.init();
+    try {
+        assert(await Life.init()); await Parties.init();
+        Catalog.findById = id => id === spot.id ? spot : old.find(id);
+        Scope.projectSource = value => value?.id === spot.id ? { ...spot } : old.project(value);
+        invoke('GameServer/Bot/AI/SpotService').containsLocation = (source, loc) => source?.id === spot.id ? Math.abs(loc.locX) < 1000 : old.contains(source, loc);
+        const clan = await Database.createAutonomousClan({ name: 'FullNative', leaderId: base, memberIds: ids, founderQuorum: 5, maxBotMemberShare: 1 });
+        assert(clan.ok);
+        marker = { clanId: clan.clanId, ownerSection: 'productionGoal', goalKey: 'full-sword', generation: 'full-generation',
+            memberIds: ids, sourceId: spot.id, npcId: spot.raidBossTemplateId, raidInstanceId: spot.raidInstanceId, minPartySize: 9, maxPartySize: 9 };
+        goal = { goalKey: marker.goalKey, status: 'preparing', assignedMemberIds: ids, fullRoster: marker };
+        assert((await Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection, goal })).ok);
+        const objective = { status: 'open', priority: 'required', reason: 'clan_equipment', clanOperation: 'equipment',
+            clanId: marker.clanId, clanGoalKey: marker.goalKey, objectiveKey: 'direct_drop:full:10137', sourceKind: 'raid', raidBoss: true,
+            spotId: spot.id, npcId: spot.raidBossTemplateId, sourceLevel: 50, minPartySize: 9, maxPartySize: 9, fullRoster: marker };
+        let members = await refreshed();
+        const ungrouped = members.map(member => ({ ...member, activity: 'party_wait', stats: { ...member.stats, clanPartyObjective: objective, partyRequest: objective } }));
+        assert.equal(Formation.proposalFromStates(ungrouped, { candidateLimit: 64 }).candidates.length, 9);
+        assert.equal(Formation.proposalFromStates(ungrouped.slice(0, 8), { candidateLimit: 64 }).candidates.length, 0);
+        const twoBuffers = structuredClone(ungrouped);
+        twoBuffers[1].stats.coldCombat.skills.push(...Combat.skillSnapshotsFromRecords([{ selfId: 1015, level: 1 }]));
+        twoBuffers[2].classId = twoBuffers[2].stats.classId = twoBuffers[2].stats.coldCombat.classId = 17;
+        twoBuffers[2].stats.coldCombat.skills.push(...Combat.skillSnapshotsFromRecords([{ selfId: 1068, level: 1 }]));
+        assert.equal(Formation.proposalFromStates(twoBuffers, { candidateLimit: 64 }).candidates.length, 9, 'native two healing buffers accepted without generic healer formula');
+        assert.equal(Requests.limitsForObjective(objective).minSize, 9);
+        assert.deepEqual(Requests.partyObjectiveForPlan({ status: 'active', strategy: 'direct_drop', next: { spotId: spot.id, npcId: 10137 },
+            clanGoal: { clanId: marker.clanId, goalKey: marker.goalKey, partyNeed: 'required', fullRoster: marker } }).fullRoster, marker);
+        const prepared = Parties.prepareCommit({ partyId: 'full-native', leaderId: base, memberIds: ids, spotId: spot.id,
+            status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
+        const assigned = ungrouped.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
+        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); members = await refreshed();
+        const checked = admission(members); assert(checked.ok, checked.reason); const proof = checked.proof;
+        assert(Buffer.byteLength(JSON.stringify(proof)) <= 1024);
+        for (const count of [7, 8]) assert(!admission(members.slice(0, count)).ok);
+        assert(!admission([...members.slice(0, 8), members[0]]).ok);
+        const changed = (index, patch) => members.map((member, i) => i === index ? { ...member, ...patch } : member);
+        assert(!admission(changed(2, { classId: 21 })).ok);
+        assert(!admission(changed(8, { clanId: 0 })).ok, 'foreign or lagging hot clan identity cannot open');
+        assert(!admission(changed(2, { level: 59 })).ok);
+        assert(!admission(changed(0, { inventory: {} })).ok);
+        assert(!admission(changed(2, { stats: { ...members[2].stats, coldCombat: { ...members[2].stats.coldCombat, skills: [] } } })).ok);
+        assert(!admission(changed(8, { stats: { ...members[8].stats, travel: { arrivalAt: Date.now() + 50000 } } })).ok);
+        assert.equal(Roster.admission({ ...party, stats: {} }, members.slice(0, 7), spot).legacy, true);
+        productionResolverCases(members);
+        assert(!admission(changed(8, { stats: { ...members[8].stats, playerPartyTakeover: { playerId: 123 } } })).ok,
+            'player-controlled guest cannot open the marked bot raid');
+        const operation = await query(`INSERT INTO clan_operations(clanId,operationKey,operationType,leaderId,memberIdsJson)
+            VALUES(?,'full-reserve','pob',?,'[]')`, [marker.clanId, base]);
+        await query('INSERT INTO clan_operation_members(operationId,clanId,characterId) VALUES(?,?,?)', [operation.insertId, marker.clanId, base]);
+        assert(!admission(members).ok, 'own active native operation reservation blocks opening');
+        await query("UPDATE clan_operation_members SET status='released' WHERE characterId=?", [base]);
+        await query("UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.craftStationId',99) WHERE characterId=?", [base + 8]);
+        assert(!admission(members).ok, 'native static-service projection cannot count as ordinary ninth');
+        await query("UPDATE bot_life_state SET statsJson=json_remove(statsJson,'$.craftStationId') WHERE characterId=?", [base + 8]);
+        const worker = new Runtime.ClanPlanningCoordinator();
+        try { await worker.withJob(Date.now() + 30000, Data, async jobKey => {
+            const result = await worker.prepareRaids({ jobKey, deadlineAt: Date.now() + 30000,
+                clan: { id: marker.clanId, level: 0, physicalMemberCount: 9, state: { mode: 'autonomous' }, members: Roster.assessmentMembers(members) },
+                spots: [spot], prospects: [], previousGoal: { assignedMemberIds: ids } }, Data, [spot]);
+            assert(result.teams[spot.id]?.actualReady); assert(Roster.exact(result.teams[spot.id].memberIds, ids));
+        }); } finally { await worker.shutdown(); }
+        const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+        const EncounterWire = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
+        const at = Date.now(), messages = [], currentOwner = owner();
+        const kernel = new ColdSimulationKernel({ now: () => at, emit: (type, data) => messages.push({ type, data }),
+            resolveSolo: () => ({}), projectResolve: member => member,
+            resolveParty: input => {
+                assert.deepEqual(input.raidOwner, currentOwner, 'actual kernel forwards the compact current owner context');
+                const checked = Roster.admission(input.party, input.members, input.spot, { owner: input.raidOwner, arrived: true, timestamp: at });
+                assert(checked.ok, checked.reason);
+                const snapshot = EncounterWire.record(input.party, EncounterWire.begin(input.party, input.spot, 10137, at), { won: false,
+                    encounter: { hp: 500, mob: { maxHp: 1000 } } }, at);
+                return { partyPatch: { stats: { raidEncounter: snapshot, raidAdmission: checked.proof } }, nextResolveAt: at + 30000,
+                    memberResults: input.members.map(state => ({ state, result: { events: [] } })), events: [] };
+            } });
+        try {
+            const grants = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
+                ownerId: Owner.OWNER_ID, leaseId: 'full-wire', revision: 1, leaseUntil: at + 30000 }]));
+            for (const member of members) { kernel.upsert({ state: member, context: member.characterId === base ? { raidOwner: currentOwner } : {} });
+                kernel.inFlight.set(member.characterId, { state: member, grant: grants.get(member.characterId), partyId: party.partyId, claimRequestId: 'full-claim' }); }
+            kernel.partyRuns.set(party.partyId, { party, members, spot, requestId: 'full-claim', grants });
+            await kernel.resolvePartyGrant(party.partyId);
+            const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
+            assert.equal(proposals.length, 9);
+            assert(proposals.every(proposal => JSON.parse(proposal.atomicGroup.partyChanges[0].statsJson).raidAdmission.members.length === 9));
+            kernel.onCommitAck({ results: proposals.map(proposal => ({ characterId: proposal.characterId, raidStepId: proposal.raidStepId,
+                ok: false, inputToken: proposal.token, proposalId: proposal.proposalId })) });
+        } finally { await kernel.shutdown(); EncounterWire.resetForTests(); }
+        await reject(proof, () => query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]),
+            () => query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]), 'raid_roster_member_changed');
+        await reject(proof, () => query('UPDATE characters SET clanId=0 WHERE id=?', [base + 8]),
+            () => query('UPDATE characters SET clanId=? WHERE id=?', [marker.clanId, base + 8]), 'raid_roster_member_changed');
+        await reject(proof, () => Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection,
+            goal: { ...goal, fullRoster: { ...marker, generation: 'replacement' } } }),
+        () => Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection, goal }), 'raid_roster_owner_changed');
+        await reject(proof, async () => { spot.raidInstanceId = 'respawn'; }, async () => { spot.raidInstanceId = marker.raidInstanceId; }, 'raid_roster_source_changed');
+        const stale = await propose(proof);
+        const noReward = await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId');
+        stale.entries[0] = { ...stale.entries[0], token: { ...stale.entries[0].token, leaseId: 'stale-lease' } };
+        assert((await Owner.commitAndReleaseBatch(stale.entries)).every(row => !row.ok && row.detail === 'lease_changed'));
+        assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), noReward);
+        await Owner.releaseBatch(stale.grants, { releaseInvalidated: true });
+        // No prior native opening provenance: a held-looking proof alone is rejected.
+        const forged = await propose(proof); delete forged.entries[0].atomicGroup.raidCommit.snapshot.participants;
+        assert((await Owner.commitAndReleaseBatch(forged.entries)).every(row => !row.ok && row.detail === 'raid_roster_not_opened'));
+        await Owner.releaseBatch(forged.grants, { releaseInvalidated: true });
+        const success = await propose(proof); const result = await Owner.commitAndReleaseBatch(success.entries);
+        assert(result.every(row => row.ok), JSON.stringify(result.map(row => [row.reason, row.detail])));
+        party = Parties.acceptRow(result[0].raidPartyRow); assert(Roster.held(party, spot));
+        assert.equal(await Parties.createOrUpdate({ ...party, stats: { ...party.stats, raidAdmission: null } }), null,
+            'generic party save cannot erase earned admission proof');
+        const lostMarker = await propose(proof);
+        const nextStats = JSON.parse(lostMarker.entries[0].atomicGroup.partyChanges[0].statsJson);
+        delete nextStats.objective.fullRoster;
+        lostMarker.entries[0].atomicGroup.partyChanges[0].statsJson = JSON.stringify(nextStats);
+        assert((await Owner.commitAndReleaseBatch(lostMarker.entries)).every(row => !row.ok && row.detail === 'raid_roster_held_changed'),
+            'held atomic update cannot erase marker and reopen as legacy7');
+        await Owner.releaseBatch(lostMarker.grants, { releaseInvalidated: true });
+        assert((await Owner.commitAndReleaseBatch(success.entries)).every(row => !row.ok), 'native replay fences suppress another result');
+        const persisted = (await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0];
+        party = Parties.acceptRow(persisted); assert(Roster.held(party, spot), 'restart reconstruction preserves original9 proof');
+        await Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: 'goal', goal: { status: 'completed', goalKey: 'unrelated-cash' } });
+        await query('UPDATE bot_life_state SET adena=adena+10,sp=sp+10 WHERE characterId=?', [base]);
+        members = await refreshed(); const casualty = changed(8, { vitals: { ...members[8].vitals, hp: 0 } });
+        assert(Roster.admission(party, casualty, spot, { owner: null, arrived: false }).held);
+        assert.equal(party.stats.raidAdmission.members.length, 9);
+        await phase('hot'); await phase('cold'); assert.deepEqual(party.stats.raidAdmission, proof, 'native phase handoff retains earned proof');
+        // A merely admitted hot group cannot become started through autoaggro
+        // or use a missing ninth after the asynchronous admission reply.
+        await phase('hot');
+        const states = await refreshed(), sessions = nativeSessions(states);
+        const registry = new Map(sessions.map(session => [session.actor.fetchId(), { actor: session.actor, session }]));
+        World.registeredActorById = id => registry.get(Number(id));
+        Life.partySessionSnapshot = (session, current) => ({ ...current, phase: 'hot', level: session.actor.fetchLevel(),
+            inventory: Life.inventorySummaryFromItems(session.actor.backpack.fetchItems()),
+            stats: { ...current.stats, classId: session.actor.fetchClassId(), coldCombat: Combat.capture(session.actor), hennas: session.hennas || [] } });
+        const admittedParty = { ...party, stats: { ...party.stats, raidAdmission: { ...proof, startedAt: null } } };
+        let targetId = base, instance = marker.raidInstanceId;
+        Index.bossByTemplateId = () => ({ raidInstanceId: instance, fetchId: () => 998877, fetchDestId: () => targetId });
+        assert(!Roster.nativeHotStarted(admittedParty), 'autoaggro while admission pending is not opening provenance');
+        registry.delete(base + 8);
+        assert.equal(Hot.roster(sessions[0]).length, 8);
+        assert(!Lifecycle.markedAttackReady(admittedParty, sessions), 'logout ninth AFTER async approval prevents first physical strike');
+        assert(!Roster.nativeHotStarted(admittedParty));
+        registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        sessions[0].raidOpenedBossId = 998877;
+        assert(!Roster.nativeHotStarted(admittedParty), 'autoaggro tactical flag without an actual offensive impact never opens');
+        targetId = 123456; assert(!Roster.nativeHotStarted(admittedParty), 'unrelated party engagement cannot promote');
+        targetId = base; instance = 'another-instance'; assert(!Roster.nativeHotStarted(admittedParty));
+        // Exercise the actual hot opening RPC and native lifecycle writer.
+        instance = marker.raidInstanceId;
+        await phase('cold');
+        assert(await Parties.createOrUpdate({ ...party, status: 'dissolved', nextResolveAt: null }));
+        await Life.releaseDissolvedPartyMembers(party.partyId, 'raid_defeated');
+        members = await refreshed();
+        const hotPrepared = Parties.prepareCommit({ partyId: 'full-hot-native', leaderId: base, memberIds: ids, spotId: spot.id,
+            status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
+        const hotAssigned = members.map(member => Life.preparePartyAssignment({ ...member,
+            stats: { ...member.stats, clanPartyObjective: objective, partyRequest: objective } }, hotPrepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
+        assert((await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned })).ok);
+        Life.acceptPartyAssignments(hotAssigned); party = Parties.acceptCommit(hotPrepared); await phase('hot');
+        sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; delete session.raidOpenedBossId; });
+        Runtime.start();
+        const opened = await Lifecycle.openMarkedRaid(party, sessions);
+        assert(opened.ok, opened.reason); party = opened.party;
+        assert(Roster.admitted(party)); assert(!Roster.held(party));
+        registry.delete(base + 8); assert(!Lifecycle.markedAttackReady(party, sessions));
+        assert(!Roster.nativeHotStarted(party));
+        registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        // Admission before any hit also survives phase transfer without
+        // manufacturing an active encounter or earned fight.
+        await phase('cold'); assert(!Roster.held(party));
+        const Legacy = require('../src/GameServer/Bot/Population/ColdRaidLegacyCommit');
+        const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
+        const Encounter = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
+        const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
+        const Bridge = require('../src/GameServer/Bot/Population/ColdRaidWorldBridge');
+        const originalResolve = Resolver.resolve, originalCommit = Database.commitAndReleaseColdSimulationLeases;
+        const originalSettle = Bridge.settle, originalDecorate = Scope.decorateSpot, originalPrepare = Authority.prepare;
+        let bridgeCalls = 0, race = true;
+        try {
+            Scope.decorateSpot = () => ({ ...spot, raidAuthorityRevision: Authority.get('raid:10137').revision,
+                raidAuthority: Authority.get('raid:10137').snapshot });
+            Authority.prepare = () => true; // Native world physics is outside this isolated SQLite fixture.
+            Bridge.settle = async () => { bridgeCalls++; assert.equal((await query('SELECT status FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0].status, 'dissolved'); };
+            Resolver.resolve = input => {
+                const accepted = Roster.admission(input.party, input.members, input.spot, { owner: input.raidOwner, arrived: true, timestamp: input.timestamp });
+                if (!accepted.ok) return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
+                    materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: null } })), events: [], nextResolveAt: null,
+                    partyPatch: { status: 'dissolved', stats: { partyBreakReason: accepted.reason } }, debug: { fights: 0, wins: 0 } };
+                const snapshot = Encounter.record(input.party, Encounter.begin(input.party, input.spot, 10137, input.timestamp),
+                    { won: true, encounter: null }, input.timestamp);
+                return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
+                    materialize: { exp: 100, sp: 0, adena: 0, items: [] }, nextResolveAt: Date.now() + 30000 } })), events: [],
+                nextResolveAt: null, partyPatch: { status: 'dissolved', stats: { raidEncounter: snapshot, raidAdmission: accepted.proof } }, debug: { fights: 1, wins: 1 } };
+            };
+            Database.commitAndReleaseColdSimulationLeases = async requests => {
+                if (race) { race = false; await query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]); }
+                return originalCommit.call(Database, requests);
+            };
+            const denied = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
+            assert(!denied.ok && denied.detail === 'raid_roster_member_changed', JSON.stringify(denied)); assert.equal(bridgeCalls, 0);
+            await query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]);
+            const won = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
+            assert(won.ok, JSON.stringify(won)); assert.equal(bridgeCalls, 1);
+            const replay = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
+            assert(!replay.ok); assert.equal(bridgeCalls, 1, 'replay never reaches world bridge a second time');
+        } finally {
+            Resolver.resolve = originalResolve; Database.commitAndReleaseColdSimulationLeases = originalCommit;
+            Bridge.settle = originalSettle; Scope.decorateSpot = originalDecorate; Authority.prepare = originalPrepare;
+        }
+        await nativeImpactCases(sessions, registry);
+        console.log('Full clan raid roster: native formation/worker, exact9 admission, atomic races/replay, held casualties/recovery/handoff and hot first-strike race passed');
+    } finally {
+        Catalog.findById = old.find; Scope.projectSource = old.project; invoke('GameServer/Bot/AI/SpotService').containsLocation = old.contains;
+        World.registeredActorById = old.registered; Index.bossByTemplateId = old.boss; Life.partySessionSnapshot = old.snapshot;
+        await Runtime.shutdown(); await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true });
+    }
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

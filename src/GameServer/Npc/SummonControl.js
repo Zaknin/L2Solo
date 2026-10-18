@@ -137,6 +137,11 @@ function stop(session, summon) {
     sendStopMove(session, summon);
 }
 
+// Lifetime a servitor loses per second while idle (C4 data, 1 s when unset).
+function timeLostIdle(skill) {
+    return Number(skill.fetchSummonTimeLostIdle?.()) || 1000;
+}
+
 function startLifetime(session, actor, summon, skill) {
     const total = Number(skill.fetchSummonTotalLifeTime?.()) || 0;
     if (total <= 0) return;
@@ -145,7 +150,7 @@ function startLifetime(session, actor, summon, skill) {
     clearLifetimeTimer(summon);
     summon.summonTimeRemaining = total;
     summon.summonTotalLifeTime = total;
-    summon.summonTimeLostIdle = Number(skill.fetchSummonTimeLostIdle?.()) || 1000;
+    summon.summonTimeLostIdle = timeLostIdle(skill);
     summon.summonTimeLostActive = Number(skill.fetchSummonTimeLostActive?.()) || summon.summonTimeLostIdle;
     const botOwned = isBotSummonSession(session);
     summon.summonItemConsumeId = botOwned ? 0 : Number(skill.fetchOngoingItemConsumeId?.()) || 0;
@@ -360,6 +365,22 @@ function attackTick(session, summon, target) {
     }, speed);
 }
 
+// A bot coming back near the player keeps the servitor it had away from the
+// player (ColdCombatProfile.capture -> BackgroundResolver.persistedSummon):
+// the same skill, HP and remaining life, without a new cast.
+function restoreFromCold(session, actor, saved, now = Date.now()) {
+    if (!saved?.active || activeSummon(actor)) return null;
+    const remaining = Number(saved.expiresAt) - now;
+    if (!(remaining > 0)) return null;
+    const skill = actor.skillset?.fetchSkill?.(Number(saved.skillId));
+    if (!skill) return null;
+    const Effects = invoke('GameServer/Skills/C4SkillEffects');
+    const npcData = Effects.fetchSummonNpcData(skill);
+    if (!npcData) return null;
+    return Effects.placeSummon(session, actor, skill, npcData, Effects.fetchSummonCoords(actor, null, skill),
+        { hp: saved.hp, remainingLife: remaining * timeLostIdle(skill) / 1000 });
+}
+
 function unsummon(session, actor, summon) {
     if (actor.pet === summon && (actor.fetchMounted?.() || actor.mounted)) invoke('GameServer/Pets/PetMount').set(actor,false);
     stop(session, summon);
@@ -520,6 +541,7 @@ function useSkillAction(session, actor, summon, actionId) {
 }
 
 module.exports = {
+    restoreFromCold,
     activeSummon,
     attack,
     moveToTarget,

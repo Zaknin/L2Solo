@@ -1,3 +1,4 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Catalog = require('./C4Unseal');
 const Mammon = require('../World/GiranMammon');
 const Data = invoke('GameServer/DataCache');
@@ -24,7 +25,7 @@ function menu(session, page = 0, message = '') {
     const pages = Math.max(1, Math.ceil(choices.length / 8));
     page = Math.max(0,Math.min(pages-1,Number(page)||0));
     const links = choices.slice(page*8,page*8+8).map(({item,recipe}) => {
-        const target = Data.items.find(i=>i.selfId===recipe.productId);
+        const target = ItemTemplateIndex.findStrictRequired(Data.items, recipe.productId);
         return `<a action="bypass -h mammon-unseal exchange ${item.fetchId()} ${recipe.productId}">+${item.fetchEnchantLevel()} ${escape(target.template.name)}</a><br>`;
     }).join('');
     session.dataSendToMe(Response.npcHtml(npc.fetchId(), `<html><body>Blacksmith of Mammon:<br>
@@ -49,7 +50,7 @@ async function exchange(session, objectId, productId, validate = () => {}) {
             validate();
             if (session.actor !== actor || actor.backpack.fetchItemRaw(item.fetchId()) !== item || item.fetchEquipped()) throw Error('unseal_interrupted');
         });
-        const template = Data.items.find(i=>i.selfId===row.selfId);
+        const template = ItemTemplateIndex.findStrictRequired(Data.items, row.selfId);
         item.model = {...item.model,...utils.crushOb(template),...row,equipped:false};
         if (session.actor === actor) session.dataSendToMe(Response.itemsList(actor.backpack.fetchItems()));
         return row;

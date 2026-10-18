@@ -32,20 +32,26 @@ function shutdown(signal) {
     utils.infoWarn('DB', 'flushing buffered character state before %s', signal);
     const forceExit = setTimeout(() => process.exit(0), 15000);
     forceExit.unref?.();
-    Promise.resolve().then(() => invoke('GameServer/Bot/Population/PopulationService').stop())
-        .catch((error) => utils.infoWarn('ColdWorker', 'cold simulation drain failed: %s', error.message))
-        .then(() => CharacterWriteQueue.flushAll())
-        .catch((error) => utils.infoWarn('DB', 'final buffered flush failed: %s', error.message))
-        .then(() => PathfindingWorkerPool.shutdown())
-        .then(() => invoke('GameServer/Clan/ClanPlanningCoordinator').shutdown())
-        .then(() => LangfuseTracing.shutdown())
-        .then(async () => {
+    // Each step logs its own failure and the next steps still run, so the
+    // database is always closed.
+    (async () => {
+        try { await invoke('GameServer/Bot/Population/PopulationService').stop(); }
+        catch (error) { utils.infoWarn('ColdWorker', 'cold simulation drain failed: %s', error.message); }
+        try { await CharacterWriteQueue.flushAll(); }
+        catch (error) { utils.infoWarn('DB', 'final buffered flush failed: %s', error.message); }
+        try { await PathfindingWorkerPool.shutdown(); }
+        catch (error) { utils.infoWarn('Pathfinding', 'pathfinding worker shutdown failed: %s', error.message); }
+        try { await invoke('GameServer/Clan/ClanPlanningCoordinator').shutdown(); }
+        catch (error) { utils.infoWarn('ClanPlan', 'clan planning worker shutdown failed: %s', error.message); }
+        try { await LangfuseTracing.shutdown(); }
+        catch (error) { utils.infoWarn('Langfuse', 'tracing shutdown failed: %s', error.message); }
+        try {
             const result = await invoke('GameServer/Social/InteractionMemoryRuntime').events.drain();
             if (!result.drained) utils.infoWarn('InteractionMemory', 'shutdown left %d unwritten episodes', result.pending);
-        })
-        .then(() => Database.close())
-        .catch((error) => utils.infoWarn('DB', 'graceful SQLite close failed: %s', error.message))
-        .finally(() => process.exit(0));
+        } catch (error) { utils.infoWarn('InteractionMemory', 'shutdown drain failed: %s', error.message); }
+        try { await Database.close(); }
+        catch (error) { utils.infoWarn('DB', 'graceful SQLite close failed: %s', error.message); }
+    })().finally(() => process.exit(0));
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
@@ -80,7 +86,7 @@ Database.init(() => {
     const stackableItemIds = (DataCache.items || [])
         .filter((item) => item.etc?.stackable === true)
         .map((item) => Number(item.selfId));
-    Database.compactStackableInventory(stackableItemIds, 'compact-stackable-inventory-v2').then((result) => {
+    Database.compactStackableInventory(stackableItemIds, 'compact-stackable-inventory-v3').then((result) => {
         if (!result.skipped && result.rowsRemoved > 0) {
             utils.infoSuccess('DB', 'compacted stackable inventory groups=%d rows=%d', result.groups, result.rowsRemoved);
             return Database.reclaimUnusedSpace();
@@ -99,7 +105,12 @@ Database.init(() => {
         await invoke('GameServer/ClanHall/Runtime').start();
         const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
         await AfkTrade.init();
+        // Every bot's persona before any bot decides (BotPersona.of).
+        await invoke('GameServer/Bot/AI/BotPersona').loadAll().then((count) => {
+            utils.infoSuccess('BotPersona', 'loaded %d personas', count);
+        }).catch((error) => utils.infoWarn('BotPersona', 'persona load failed: %s', error.message));
 
+        invoke('GameServer/Knowledge/RecipeCatalog').warmup();
         invoke('GameServer/World/Generics/NativeKnowledgeBase').warmup();
 
         new Server('AuthServer', options.default.AuthServer, (socket) => {
@@ -111,9 +122,6 @@ Database.init(() => {
         });
 
         BotManager.init();
-        AfkTrade.matchBotDemand().catch((error) => {
-            utils.infoWarn('AfkTrade', 'restored shop matching failed: %s', error.message);
-        });
         WorldObserver.init();
         DevConsole.init();
         if (process.env.L2NODE_HOT_LOAD_TEST === '1') {

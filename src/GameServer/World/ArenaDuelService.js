@@ -1,3 +1,4 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { isAutomaticArenaBuff } = require('./ArenaBuffEligibility');
 const Database = invoke('Database');
@@ -24,12 +25,8 @@ let active = null;
 let monitor = null;
 let selectionInFlight = false;
 
-function actorOf(session) {
-    return session?.actor || null;
-}
-
 function className(classId) {
-    return DataCache.classTemplates?.find((entry) => Number(entry.classId) === Number(classId))?.template?.class
+    return (DataCache.classTemplates == null ? undefined : ClassProgression.firstClassRow(DataCache.classTemplates, classId))?.template?.class
         || `Class ${classId}`;
 }
 
@@ -157,10 +154,10 @@ async function makeSnapshot(candidate) {
     const character = await loadColdCharacter(sourceId);
     if (!character) return null;
     const [items, skills] = await Promise.all([
-        Database.fetchItems(sourceId),
+        Database.fetchItems(sourceId, 'arena_snapshot'),
         Database.fetchSkills(sourceId)
     ]);
-    const classInfo = DataCache.classTemplates?.find((entry) => Number(entry.classId) === Number(character.classId)) || {};
+    const classInfo = (DataCache.classTemplates == null ? undefined : ClassProgression.firstClassRow(DataCache.classTemplates, character.classId)) || {};
     const filteredItems = snapshotItems(hydrateItemRows(items));
     return {
         character,
@@ -251,10 +248,19 @@ function applySelfBuffs(session, actor) {
         });
 }
 
+// actor.silentMoving is read first by NpcAggro and is recomputed only by
+// ToggleSkills.cleanupState; effects removed or restored here must resync it.
+function syncSilentMoving(actor, effects) {
+    const silentMoving = effects.find((effect) => effect?.stats?.silentMoving);
+    if (silentMoving) invoke('GameServer/Skills/ToggleSkills').cleanupState(actor.session, actor, silentMoving);
+}
+
 function clearArenaEffects(actor) {
     if (!actor) return;
     EffectTicker.clearAll(actor);
-    EffectStore.list(actor).forEach((effect) => EffectStore.remove(actor, effect.key));
+    const cleared = EffectStore.list(actor);
+    cleared.forEach((effect) => EffectStore.remove(actor, effect.key));
+    syncSilentMoving(actor, cleared);
     actor.activeBuffs = {};
 }
 
@@ -293,8 +299,21 @@ function restoreEffects(session, actor, effects = []) {
             ...effect,
             ...(remaining > 0 ? { durationMs: remaining } : {})
         });
-        if (restored) EffectTicker.scheduleExpiry(session, actor, restored);
+        if (!restored) return;
+        // The arena cleared the tickers with the effects. Restart them as the
+        // login restore does (CharacterStatus.restoreEffects), and a toggle's
+        // MP/HP drain as ToggleSkills.activate does, before the expiry timer:
+        // each apply* call clears the key's timers first.
+        // A self-sourced dot reaches 0 HP without Die on an NPC-side actor (summon
+        // ids are below 2000000), so a summon's restored dot stays inert, as before.
+        if (restored.dot && !actor.fetchKind) EffectTicker.applyDot(session, actor, actor, restored);
+        if (restored.manaDot) EffectTicker.applyManaDot(session, actor, actor, restored);
+        if (restored.healthDot) EffectTicker.applyHealthDot(session, actor, actor, restored);
+        if (restored.manaHot) EffectTicker.applyManaHot(session, actor, actor, restored);
+        if (restored.hot) EffectTicker.applyHot(session, actor, actor, restored);
+        EffectTicker.scheduleExpiry(session, actor, restored);
     });
+    syncSilentMoving(actor, effects);
 }
 
 function managerDistanceSquared(actor) {
@@ -530,7 +549,9 @@ function release(session, reason = 'released') {
     stopPlayerCombatAction(duel.playerSession, duel.player, { abortCombat: !playerDied });
     if (duel.player && duel.enteredArena === true) {
         EffectTicker.clearAll(duel.player);
-        EffectStore.list(duel.player).forEach((effect) => EffectStore.remove(duel.player, effect.key));
+        const cleared = EffectStore.list(duel.player);
+        cleared.forEach((effect) => EffectStore.remove(duel.player, effect.key));
+        syncSilentMoving(duel.player, cleared);
         duel.player.activeBuffs = {};
     }
     if (duel.playerSession && !playerDied && duel.player && duel.enteredArena === true && duel.playerEffectsBefore) {

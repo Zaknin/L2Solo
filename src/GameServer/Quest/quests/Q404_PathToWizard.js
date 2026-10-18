@@ -40,19 +40,11 @@ function count(state, selfId) {
   return state.session.actor.backpack.fetchItemFromSelfId(selfId)?.fetchAmount() || 0;
 }
 
-async function exchange(state, remove, give, condition) {
-  const quest = service();
-  for (const item of remove) {
-    if (!(await quest.takeItem(state.session, item))) return false;
-  }
-  await quest.giveItem(state.session, give, 1);
-  await state.set("cond", condition);
-  state.playSound(MIDDLE);
-  return true;
-}
+const { exchange } = require("../ProfessionQuestSteps");
 
 module.exports = {
   id: 404,
+  questItems: [1280, 1281, 1282, 1283, 1284, 1285, 1286, 1287, 1288, 1289, 1290, 1291],
   name: "Path to Wizard",
   npcs: [GALLINT, EARTH_SNAKE, WASTELAND_LIZARDMAN, FLAME_SALAMANDER, WIND_SYLPH, WATER_UNDINE],
   startNpcs: [GALLINT],

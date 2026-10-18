@@ -46,12 +46,89 @@ for (const [recipeId, stationId] of firstStation) {
 }
 
 assert.strictEqual(CraftShopService.publishedStationRecipes(), published, 'the table is built once per item catalogue');
+const template = id => DataCache.items.find(item => Number(item.selfId) === Number(id));
+const bWeaponRecipes = allowed.filter(recipe => recipe.successRate === 100
+    && template(recipe.productId)?.etc?.rank === 'b'
+    && template(recipe.productId)?.template?.kind.startsWith('Weapon.'));
+assert.strictEqual(bWeaponRecipes.length, 19, 'native B weapons include physical and caster blunts');
+for (const recipe of bWeaponRecipes) {
+    const station = published.stationByRecipeId.get(recipe.recipeId);
+    assert(station?.id === 'b_weapons' || station?.id === 'b_weapons_entry',
+        `${template(recipe.productId).template.name} must have a published B weapon station`);
+}
+assert.strictEqual(CraftShopService.CraftStations[13].id, 'b_weapons', 'existing B crafter account keeps its station');
+assert.strictEqual(CraftShopService.CraftStations[31].id, 'b_weapons_entry', 'the entry station is appended after existing accounts');
+const entry = CraftShopService.profileFor({ level: 70, accountName: 'bot_craft_32', stats: { classId: 57 } });
+assert.strictEqual(entry.stationId, 'b_weapons_entry');
+assert(entry.entries.some(row => row.recipeId === 457), 'the new station publishes Great Axe');
+assert(entry.entries.some(row => row.recipeId === 441), 'the new station publishes Heavy War Axe');
+assert(entry.entries.length <= CraftShopService.MAX_PUBLIC_RECIPES, 'the native public recipe limit is respected');
+const entryBProducts = [856, 887, 918,
+    357, 383, 503, 554, 612, 633, 2384, 2388, 2397, 2402,
+    2376, 2379, 2390, 673, 600, 2406, 2415, 2464];
+for (const productId of entryBProducts) {
+    const recipe = C4RecipeItems.resolveVariantsByProductId(productId).find(row => row.successRate === 100);
+    assert(recipe && published.ids.has(recipe.recipeId), `${template(productId).template.name} has its native 100% service`);
+    const station = published.stationByRecipeId.get(recipe.recipeId);
+    const slot = CraftShopService.CraftStations.indexOf(station);
+    const profile = CraftShopService.profileFor({ level: 70, accountName: `bot_craft_${slot + 1}`, stats: { classId: 57 } });
+    assert(profile.entries.some(row => row.recipeId === recipe.recipeId), 'published entry recipes reach the physical service portfolio');
+    assert(profile.entries.length <= CraftShopService.MAX_PUBLIC_RECIPES);
+}
+assert.deepStrictEqual(CraftShopService.CraftStations.slice(32).map(row => row.id),
+    ['b_armor_zubei', 'b_armor_avadon', 'b_jewelry_entry'], 'new B services append after every persisted crafter account');
 const originalItems = DataCache.items;
 DataCache.items = originalItems.filter((item) => Number(item.selfId) !== Number(published.recipes[0].productId));
 try {
     assert(!CraftShopService.publishedStationRecipes().ids.has(Number(published.recipes[0].recipeId)),
         'a changed item catalogue rebuilds the table');
 } finally {
+    DataCache.items = originalItems;
+}
+
+// Station crafters are seeded at the content cap; the stations publish only
+// what such a crafter makes, and the full catalogue at the maximum cap.
+assert.deepStrictEqual(CraftShopService.stationCrafter(), { classId: 57, level: 70 });
+const progression = options.default.Progression;
+options.default.Progression = { ...(progression || {}), contentCap: 52 };
+try {
+    assert.deepStrictEqual(CraftShopService.stationCrafter(), { classId: 57, level: 52 });
+    const cappedFirst = new Map();
+    for (const station of CraftShopService.CraftStations) {
+        for (const recipe of CraftShopService.stationRecipes(station, direct(6))) {
+            if (!cappedFirst.has(Number(recipe.recipeId))) cappedFirst.set(Number(recipe.recipeId), station.id);
+        }
+    }
+    const capped = CraftShopService.publishedStationRecipes();
+    assert.deepStrictEqual(capped.recipes.map((recipe) => Number(recipe.recipeId)), [...cappedFirst.keys()],
+        'a capped world publishes what a capped station crafter (craft level 6) makes');
+    assert(capped.recipes.length < published.recipes.length, 'fixture: the cap removes recipes');
+} finally {
+    if (progression === undefined) delete options.default.Progression;
+    else options.default.Progression = progression;
+}
+assert.deepStrictEqual(CraftShopService.publishedStationRecipes().recipes.map((recipe) => Number(recipe.recipeId)),
+    [...firstStation.keys()], 'the maximum cap publishes the full catalogue again');
+
+const nativeSource = C4RecipeItems.nativeSource, loadedSource = C4RecipeItems.loadedSource;
+const early = { recipeId: 77, productId: 501, type: 'dwarven', level: 1, materials: [] };
+const last = { ...early, recipeId: '77' }, lower = { ...early, recipeId: 22 };
+const absentProduct = { ...early, recipeId: 88, productId: 502 };
+const common = { ...early, recipeId: 99, type: 'common' };
+const fixtureRows = [early, last, lower, absentProduct, common];
+const fixtureSource = { rows: fixtureRows, revision: fixtureRows,
+    recipeItems: { 100: early, 101: last, 102: lower, 103: absentProduct, 104: common } };
+try {
+    C4RecipeItems.nativeSource = () => fixtureSource;
+    C4RecipeItems.loadedSource = () => fixtureSource;
+    DataCache.items = [{ selfId: 501 }];
+    assert.deepStrictEqual(CraftShopService.availableRecipes(stationService), [lower, last],
+        'station reader keeps scroll order, last numeric recipe-ID variant, exact dwarven type and present products');
+    DataCache.items.push({ selfId: 502 });
+    assert.deepStrictEqual(CraftShopService.availableRecipes(stationService), [lower, last, absentProduct],
+        'an appended product refreshes the same shared recipe relation');
+} finally {
+    C4RecipeItems.nativeSource = nativeSource; C4RecipeItems.loadedSource = loadedSource;
     DataCache.items = originalItems;
 }
 console.log('Craft station catalogue checks passed');

@@ -31,8 +31,11 @@ try {
     assert(full.materialize.exp > 0, 'only a completed kill should award experience for karma washing');
     assert(full.debug.fights < 5, 'the same time must not also buy five fresh fights');
     assert(full.debug.combatActions <= 5 * 48, 'the previous cycle action budget must remain bounded');
+    // An unkillable mob cannot be chosen voluntarily by the solo safety gate.
+    // An aggressive interruption still must consume one bounded fight cycle.
     Cold.npcForSpot = () => ({ level: 12, maxHp: 1e9, pAtk: 1, pAtkRnd: 0,
-        pDef: 200, mDef: 100, accur: 1, evasion: 0, critical: 0, atkSpd: 253 });
+        pDef: 200, mDef: 100, accur: 1, evasion: 0, critical: 0, atkSpd: 253,
+        aggressiveInterruption: true });
     const unkillable = run(60000);
     assert.strictEqual(unkillable.debug.wins, 0);
     assert.strictEqual(unkillable.debug.fights, 0, 'a pending fight is not a completed encounter');

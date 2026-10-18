@@ -48,6 +48,23 @@ const itemGoal = Observer.compactClanGoal({
 assert.strictEqual(itemGoal.target.iconUrl, '/observer/item-icons/armor_t59_ul_i00.png',
     'item goals must reuse the local Observer item-icon catalog');
 
+for (const itemName of [undefined, 'Item 192']) {
+    const savedGoal = { type: 'equipment', status: 'executing',
+        target: { itemId: 192, itemName, memberId: 42, memberName: 'Recipient' } };
+    const resolvedGoal = Observer.compactClanGoal(savedGoal);
+    assert.strictEqual(resolvedGoal.target.itemName, 'Crystal Staff',
+        'saved clan goals with missing or placeholder names must resolve their item from the catalog');
+    assert.strictEqual(resolvedGoal.target.iconUrl, '/observer/item-icons/weapon_crystal_staff_i00.png',
+        'the resolved item name must also restore the clan goal icon');
+    assert.strictEqual(resolvedGoal.target.memberName, 'Recipient');
+    assert.strictEqual(savedGoal.target.itemName, itemName,
+        'Observer inspection must not alter the persisted clan goal');
+}
+const unknownItemGoal = Observer.compactClanGoal({ type: 'equipment',
+    target: { itemId: 99999999, itemName: 'Item 99999999' } });
+assert.strictEqual(unknownItemGoal.target.itemName, 'Item 99999999');
+assert.strictEqual(unknownItemGoal.target.iconUrl, null);
+
 const craftRecipe = invoke('GameServer/Items/C4RecipeItems').resolveByProductId(1879);
 const automaticCraftGoal = { type: 'equipment', status: 'executing', goalKey: 'clan-equipment:7:43:1879',
     target: { itemId: 1879, memberId: 43 }, plan: { kind: 'craft' } };
@@ -244,7 +261,8 @@ assert.strictEqual(playerMember.online, true);
 async function databaseBackedChecks() {
     const rootDir = path.resolve(__dirname, '..');
     const databasePath = path.join(rootDir, 'tmp', 'test-world-observer-clans.sqlite');
-    [databasePath, `${databasePath}-wal`, `${databasePath}-shm`].forEach((file) => fs.rmSync(file, { force: true }));
+    const historyPath = path.join(rootDir, 'tmp', 'test-world-observer-clans.history.sqlite');
+    [databasePath, historyPath].forEach((file) => ['', '-wal', '-shm'].forEach((suffix) => fs.rmSync(file + suffix, { force: true })));
     const seed = new DatabaseSync(databasePath);
     seed.exec(fs.readFileSync(path.join(rootDir, 'database', 'sql', 'sqlite.sql'), 'utf8'));
     seed.prepare('INSERT INTO accounts(username, password) VALUES (?, ?)').run('bot_pop_observer', 'test-only');
@@ -280,8 +298,6 @@ async function databaseBackedChecks() {
         VALUES (91, 1419, 'Blood Mark', 'quest', 2, 100, 200)`).run();
     seed.prepare(`INSERT INTO clan_contributions(clanId, characterId, targetLevel, amount, resolveKey, createdAt)
         VALUES (91, 9101, 4, 50000, 'observer:test', 200)`).run();
-    seed.prepare(`INSERT INTO clan_goal_events(clanId, eventType, goalType, plan, reasonCode, payloadJson, occurredAt)
-        VALUES (91, 'goal_updated', 'item', 'market', 'observer_test', '{}', 300)`).run();
     seed.prepare(`INSERT INTO clan_orders(
         clanId, revision, kind, status, itemId, itemName, amount, strategy,
         maxUnitPrice, budget, spent, memberIdsJson, planJson, reasonCode, createdAt, updatedAt
@@ -299,6 +315,9 @@ async function databaseBackedChecks() {
 
     options.default.Database.path = path.relative(rootDir, databasePath);
     Database.init();
+    // Goal events live in the history file.
+    await Database.recordHistory('clan_goal_event', { clanId: 91, eventType: 'goal_updated', goalType: 'item',
+        plan: 'market', reasonCode: 'observer_test', payloadJson: '{}', occurredAt: 300 });
     try {
         const directory = await Observer.clanSnapshot();
         assert.strictEqual(directory.total, 1);
@@ -351,7 +370,7 @@ async function databaseBackedChecks() {
         assert.strictEqual(offlinePlayer.clan.id, 91);
     } finally {
         await Database.close();
-        [databasePath, `${databasePath}-wal`, `${databasePath}-shm`].forEach((file) => fs.rmSync(file, { force: true }));
+        [databasePath, historyPath].forEach((file) => ['', '-wal', '-shm'].forEach((suffix) => fs.rmSync(file + suffix, { force: true })));
     }
 }
 
@@ -371,6 +390,7 @@ async function clanOrderUiChecks() {
         uiIcon: (name) => `<svg data-icon="${name}"></svg>`, roleLabel: (role) => role, uiLabel: (kind, label) => label,
         activityLabel: value => value,
         readableToken: (value) => value || '', compactNumber: (value) => String(value),
+        WorldObserverFormat: require('../src/WorldObserver/public/format'),
         fetch: null
     });
     for (const name of ['escapeHtml', 'text', 'number', 'clanGoalSummary', 'clanAutomaticGoalMarkup', 'resetClanOrderDraft', 'clanOrderDraft',

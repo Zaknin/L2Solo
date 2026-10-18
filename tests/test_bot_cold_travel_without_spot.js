@@ -1,6 +1,8 @@
 const assert = require('assert');
 
 require('../src/Global');
+// Load native data before the first economic route or combat profile check.
+invoke('GameServer/DataCache').init();
 
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
@@ -9,7 +11,6 @@ const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const ColdCraftingService = invoke('GameServer/Bot/Economy/ColdCraftingService');
 const ListingService = invoke('GameServer/Bot/Economy/ColdMarketListingService');
 const MarketService = invoke('GameServer/Bot/Economy/ColdMarketService');
-const TradeChat = invoke('GameServer/Bot/Economy/ColdMarketTradeChat');
 const GoalService = invoke('GameServer/Bot/Goals/GoalService');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
@@ -34,7 +35,6 @@ const originals = {
     beginMarketTravel: GoalExecutor.beginMarketTravel,
     finishMarketVisit: GoalExecutor.finishMarketVisit,
     bestBuyOffer: MarketOpportunity.bestBuyOffer,
-    announce: TradeChat.maybeAnnounce,
     recordMany: LifeEvents.recordMany,
     globalAnnounce: GlobalChat.maybeAnnounce
 };
@@ -75,7 +75,6 @@ async function run() {
     GoalService.current = () => Promise.resolve(null);
     MarketService.tryPurchase = (value) => Promise.resolve({ state: value, purchased: false });
     GoalExecutor.finishMarketVisit = () => null;
-    TradeChat.maybeAnnounce = (value) => Promise.resolve({ state: value });
     GoalService.review = () => Promise.resolve(null);
     LifeEvents.recordMany = () => Promise.resolve(null);
     GlobalChat.maybeAnnounce = () => null;
@@ -256,7 +255,7 @@ async function run() {
         timing: { lastResolvedAt: Date.now() - 30000 },
         stats: {
             restUntil: Date.now() - 1,
-            lastWarehouseWithdrawal: { items: [{ selfId: 5220, amount: 5, reason: 'market' }], at: Date.now() }
+            lastWarehouseWithdrawal: { items: [[5220, 5, 1]], at: Date.now() }
         }
     };
     LifeState.applyResolve = () => Promise.resolve({
@@ -313,7 +312,6 @@ run().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() =
     GoalExecutor.beginMarketTravel = originals.beginMarketTravel;
     GoalExecutor.finishMarketVisit = originals.finishMarketVisit;
     MarketOpportunity.bestBuyOffer = originals.bestBuyOffer;
-    TradeChat.maybeAnnounce = originals.announce;
     LifeEvents.recordMany = originals.recordMany;
     GlobalChat.maybeAnnounce = originals.globalAnnounce;
 });

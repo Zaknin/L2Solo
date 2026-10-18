@@ -2,24 +2,12 @@ const Runtime = require('./Runtime');
 const Services = require('./Services');
 const Approach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const Navigation = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
+const VisitPolicy = require('./VisitPolicy');
 const RETRY_MS = 300000;
 const VISIT_MS = 180000;
 
-function duty(session) {
-    const stats = session.coldLifeState?.stats || {};
-    return (
-        session.clanAllianceQuest ||
-        session.clanAllianceSupportLeaderId ||
-        stats.clanPartyObjective ||
-        stats.equipmentPlan?.clanGoal ||
-        stats.supplyErrand ||
-        stats.marketReturn ||
-        stats.craftReturn ||
-        stats.warehouseWorkflow ||
-        stats.mammonReturn ||
-        stats.partyMarketReturn
-    );
-}
+// A moment the bot can leave what it is doing: no fight, no travel. Who may
+// use the hall at all is VisitPolicy's rule, shared with the cold visit.
 function safe(session, actor) {
     return (
         !actor.isDead?.() &&
@@ -32,9 +20,7 @@ function safe(session, actor) {
         !session.incomingThreatId &&
         !session.spotRelocation &&
         !session.townEscape &&
-        !session.pendingTownTrip &&
-        !duty(session) &&
-        Number(actor.fetchKarma?.() || 0) === 0
+        !session.pendingTownTrip
     );
 }
 function local(actor, hall) {
@@ -62,23 +48,29 @@ function finish(session, actor, retryAt) {
         session.dataSendToOthers?.(invoke('GameServer/Network/Response').sitAndStand(actor), actor);
     }
 }
+// The hall a dead hot bot restarts in, or null for a town restart.
+function restartHall(session, actor) {
+    return VisitPolicy.mayUse(VisitPolicy.fromSession(session, actor), { restart: true })
+        ? Runtime.forActor(actor) : null;
+}
 function tick(session, actor, timestamp = Date.now()) {
     if (session.clanHallVisit === undefined)
         session.clanHallVisit = session.coldLifeState?.stats?.clanHallVisit || null;
     const visit = session.clanHallVisit;
     const hall = Runtime.forActor(actor);
     const npc = Services.manager(hall);
-    const grouped = !!(session.followPlayerSession || session.partyCompanion || session.hotBackgroundPartyId);
-    if (
+    const blocked =
         !safe(session, actor) ||
         !Services.available(hall, timestamp) ||
         !npc ||
-        (visit && (visit.hallId !== hall.id || timestamp >= visit.expiresAt)) ||
-        (grouped && !Services.near(actor, npc))
-    ) {
+        (visit && (visit.hallId !== hall.id || timestamp >= visit.expiresAt));
+    // Built only for a bot that has a working hall and a free moment.
+    const view = blocked ? null : VisitPolicy.fromSession(session, actor);
+    if (blocked || !VisitPolicy.mayUse(view, { atManager: Services.near(actor, npc) })) {
         if (visit) finish(session, actor, timestamp + RETRY_MS);
         return false;
     }
+    const grouped = view.grouped;
     if (!visit) {
         if (
             !['hunting', 'resting', 'following'].includes(session.plan) ||
@@ -160,4 +152,4 @@ function tick(session, actor, timestamp = Date.now()) {
     }
     return false;
 }
-module.exports = { RETRY_MS, VISIT_MS, safe, local, tick, finish };
+module.exports = { RETRY_MS, VISIT_MS, safe, local, restartHall, tick, finish };

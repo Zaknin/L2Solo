@@ -21,7 +21,7 @@ async function tradeDone(session, buffer) {
     packet.readD(); // 1 = confirmed, 0 = cancelled
 
     if (packet.data[0] !== 1) {
-        console.info("TradeDone :: %s cancelled native bot trade", playerName);
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info("TradeDone :: %s cancelled native bot trade", playerName);
         BotTradeService.cancel(session);
         session.dataSendToMe(ServerResponse.tradeDone(false));
         return;
@@ -64,7 +64,7 @@ async function tradeDone(session, buffer) {
             }
             reservedBuffTrade = confirmation.trade;
         }
-        console.info(
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
             "TradeDone :: %s confirmed native bot trade id=%s bot=%s playerItems=%j botItems=%j",
             playerName,
             tradeSummary?.id || 'unknown',
@@ -73,6 +73,9 @@ async function tradeDone(session, buffer) {
             tradeSummary?.botItems || []
         );
         const result = await BotTradeService.commit(session);
+        // The database moved the items for the character that confirmed; a
+        // session that now plays another character gets nothing about it.
+        if (result.ok && result.playerActorChanged) return;
         if (!result.ok) {
             utils.infoWarn(
                 'TradeDone',
@@ -113,6 +116,14 @@ async function tradeDone(session, buffer) {
                 .then(() => invoke('GameServer/Bot/Economy/BuffService').completeNativeTrade(buffTrade))
                 .catch(error => utils.infoWarn('BuffService', 'native buff fulfillment failed: %s', error.stack || error.message))
                 .finally(() => invoke('GameServer/Bot/Economy/BuffService').releaseNativeTrade(buffTrade));
+            session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
+            session.dataSendToMe(ServerResponse.tradeDone(true));
+            return;
+        }
+
+        if (result.botActorChanged) {
+            // The bot left the world during the commit: no chat or upgrade
+            // from a character that is gone, only the player's result.
             session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
             session.dataSendToMe(ServerResponse.tradeDone(true));
             return;

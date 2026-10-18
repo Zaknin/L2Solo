@@ -189,6 +189,17 @@ async function main() {
         assert.strictEqual((await send('Arina, hello')).reason, 'membership_changed');
         assert.strictEqual(f.other.inbox.length, 0, 'departed sender cancels reply');
         f = setup();
+        const Takeover = invoke('GameServer/Bot/AI/PlayerPartyTakeover');
+        const takeoverRequest = Takeover.request;
+        let takeoverCalls = 0;
+        try {
+            Takeover.request = async () => { takeoverCalls++; return { ok: true, reply: 'Welcome aboard.' }; };
+            respond = async () => { f.player.actor.fetchClanId = () => 0;
+                return { action: 'request_player_join_party', reply: 'Sure.' }; };
+            assert.strictEqual((await send('Arina, hello')).reason, 'membership_changed');
+            assert.strictEqual(takeoverCalls, 0, 'departed sender cannot trigger the model party action');
+        } finally { Takeover.request = takeoverRequest; }
+        f = setup();
         respond = async r => { f.clan.members = f.clan.members.filter(m => m.id !== 202);
             return { route: 'bot', botId: 202, intent: 'conversation', confidence: 1, reason: 'clanmate' }; };
         assert.strictEqual((await send('Who is there?')).reason, 'speaker_unavailable');

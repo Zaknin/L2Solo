@@ -23,11 +23,13 @@ function actor(id, x = 0, kind = null) {
 }
 try {
     replace(Geo, 'hasLineOfSight', () => true);
-    const group = [1, 2, 3].map(id => ({ hotBackgroundPartyId: 'group', actor: actor(id), dataSendToOthers() {} }));
+    const group = [1, 2, 3].map(id => ({ accountId: `bot_hot_party_${id}`, fetchAccountId() { return this.accountId; },
+        hotBackgroundPartyId: 'group', actor: actor(id), dataSendToOthers() {} }));
     const [leader, healer, follower] = group;
     const party = { partyId: 'group', leaderId: 1, memberIds: [1, 2, 3], status: 'hot', stats: { objective: { npcId: 20 } } };
     replace(Parties, 'find', () => party);
-    replace(World, 'user', { sessions: group });
+    replace(World, 'user', { sessions: [], revision: 0 });
+    group.forEach(session => World.insertUser(session));
     const wanted = actor(20, 400, 'Monster'), other = actor(21, 20, 'Monster');
     replace(World, 'fetchNpcsInRadius', () => [other, wanted]);
     replace(Awareness, 'npcThreateningActor', s => s.incoming || null);
@@ -77,7 +79,7 @@ try {
     follower.incoming.raid = true;
     assert.strictEqual(tick(follower), false, 'raid protection remains owned by the existing escape path');
     follower.incoming = null; follower.actor.x = 0;
-    leader.backgroundHuntTarget = null; leader.actor.hp = 40;
+    leader.backgroundHuntTarget = null; leader.actor.hp = 29;
     tick(healer);
     assert(healer.actor.state.fetchSeated(), 'group waits for recovery before a new pull');
 
@@ -136,7 +138,12 @@ try {
     searchTick(leader, 36000);
     assert.strictEqual(leader.lastDecision.action, 'party_wait_roster', 'leader waits for separated members');
     follower.actor.x = 0;
+    // The party rest rule (RestPolicy, party): a member at 40% HP keeps
+    // fighting, under 30% the group recovers.
     leader.actor.hp = 40;
+    searchTick(leader, 41000);
+    assert.notStrictEqual(leader.lastDecision.action, 'party_recovery', 'a party fights on at 40% HP');
+    leader.actor.hp = 29;
     const scansBeforeRecovery = wideScans;
     searchTick(leader, 42000);
     assert.strictEqual(leader.lastDecision.action, 'party_recovery');

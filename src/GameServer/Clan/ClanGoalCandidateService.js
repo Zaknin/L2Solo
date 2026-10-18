@@ -1,3 +1,4 @@
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const EquipmentService = invoke('GameServer/Clan/ClanEquipmentService');
 const EquipmentPolicy = invoke('GameServer/Clan/ClanEquipmentPolicy');
 const ClanPolicy = invoke('GameServer/Clan/ClanSimulationPolicy');
@@ -8,6 +9,23 @@ const CACHE_TTL_MS = 30 * 1000;
 const MAX_CACHE_ENTRIES = 128;
 const DEFAULT_LIMIT = 8;
 const cache = new Map();
+const cacheGroups = new Map();
+
+function removeCache(key) {
+    const entry = cache.get(key);
+    if (!entry) return;
+    cache.delete(key);
+    const group = cacheGroups.get(entry.clanId);
+    group?.delete(key);
+    if (!group?.size) cacheGroups.delete(entry.clanId);
+}
+
+require('./ClanReviewEvents').subscribe(clanId => {
+    const group = cacheGroups.get(clanId);
+    if (!group) return;
+    for (const key of group) cache.delete(key);
+    cacheGroups.delete(clanId);
+});
 
 const metrics = {
     builds: 0,
@@ -61,9 +79,9 @@ function fingerprint(clan, previousGoal = null) {
 
 function prune(now = Date.now()) {
     for (const [key, entry] of cache) {
-        if (now - entry.createdAt > CACHE_TTL_MS) cache.delete(key);
+        if (now - entry.createdAt > CACHE_TTL_MS) removeCache(key);
     }
-    while (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+    while (cache.size > MAX_CACHE_ENTRIES) removeCache(cache.keys().next().value);
 }
 
 function routeSnapshot(plan = {}) {
@@ -136,7 +154,7 @@ function goalStallAssessment(clan, previousGoal, candidates, options = {}) {
         return { stalled: false, reason: null };
     }
     const now = number(options.now, Date.now());
-    const goalUpdatedAt = number(previousGoal.updatedAt || previousGoal.createdAt);
+    const goalUpdatedAt = number(previousGoal.progressAt || previousGoal.createdAt || previousGoal.updatedAt);
     const ageMs = goalUpdatedAt > 0 ? Math.max(0, now - goalUpdatedAt) : 0;
     const current = candidates.find((candidate) => candidate.assessment.current) || null;
     if (current && !current.route.available) {
@@ -218,6 +236,20 @@ function rankedCandidates(clan, previousGoal, planning, limit = DEFAULT_LIMIT) {
     ));
 }
 
+function networkCandidates(clan, previousGoal, planning) {
+    const members = new Map((clan.members || []).map(member => [memberId(member), member]));
+    const candidates = [];
+    for (const wish of planning.economy.network.queue) {
+        if (wish.object?.kind !== 'equipment') continue;
+        const id = number(wish.object.memberId), member = members.get(id), plan = planning.plans.get(id);
+        if (!member || !EquipmentPolicy.isAcquisitionPlan(plan)
+            || number(plan.target?.selfId) !== number(wish.object.itemId)) continue;
+        candidates.push(candidateFor(clan, member, plan, previousGoal, candidates.length + 1));
+        if (candidates.length === 5) break;
+    }
+    return candidates;
+}
+
 async function snapshotFor(clan, previousGoal = null, options = {}) {
     const startedAt = Date.now();
     let occupancy = options.occupancy || null;
@@ -235,12 +267,16 @@ async function snapshotFor(clan, previousGoal = null, options = {}) {
     const key = `${fingerprint(clan, previousGoal)}:${availabilityKey}`;
     prune(startedAt);
     const cached = cache.get(key);
-    if (cached && startedAt - cached.createdAt <= CACHE_TTL_MS) {
-        metrics.cacheHits += 1;
+    if (cached && startedAt - cached.createdAt <= CACHE_TTL_MS && !(options.reviewCauses || []).includes('recruitment_input')) {
+        DiagnosticConfig.developerDiagnostics && (metrics.cacheHits += 1);
         return { ...cached.value, cacheHit: true };
     }
+    const clanId = number(clan.id);
+    const group = cacheGroups.get(clanId) || new Set();
+    cacheGroups.set(clanId, group);
     const planning = await EquipmentService.planningForClan(clan, previousGoal, { ...options, occupancy });
-    let candidates = rankedCandidates(clan, previousGoal, planning, options.limit);
+    let candidates = planning.economy ? networkCandidates(clan, previousGoal, planning)
+        : rankedCandidates(clan, previousGoal, planning, options.limit);
     const selectedMember = planning.selection?.member;
     const selectedPlan = planning.selection?.plan;
     if (selectedMember && EquipmentPolicy.isAcquisitionPlan(selectedPlan)) {
@@ -288,12 +324,17 @@ async function snapshotFor(clan, previousGoal = null, options = {}) {
             ? candidates.length > 0
             : candidates.length > 1 && reason !== 'goal_progressing'
     };
-    cache.set(key, { createdAt: Date.now(), value });
-    const durationMs = Date.now() - startedAt;
-    metrics.builds += 1;
-    metrics.buildMs += durationMs;
-    metrics.buildMaxMs = Math.max(metrics.buildMaxMs, durationMs);
-    metrics.candidates += candidates.length;
+    // An input event received while planning was awaiting belongs to a fresh
+    // review; it must not reinstall this older candidate snapshot in the cache.
+    if (cacheGroups.get(clanId) === group && !planning.recruitment?.continuation && !clan.state?.recruitmentDemand) {
+        cache.set(key, { clanId, createdAt: Date.now(), value });
+        group.add(key);
+    }
+    const durationMs = DiagnosticConfig.developerDiagnostics ? Date.now() - startedAt : 0;
+    DiagnosticConfig.developerDiagnostics && (metrics.builds += 1);
+    DiagnosticConfig.developerDiagnostics && (metrics.buildMs += durationMs);
+    DiagnosticConfig.developerDiagnostics && (metrics.buildMaxMs = Math.max(metrics.buildMaxMs, durationMs));
+    DiagnosticConfig.developerDiagnostics && (metrics.candidates += candidates.length);
     return { ...value, cacheHit: false };
 }
 
@@ -303,8 +344,10 @@ module.exports = {
     fingerprint,
     goalStallAssessment,
     rankedCandidates,
+    networkCandidates,
     snapshotFor,
     metrics() {
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
         return {
             ...metrics,
             buildAvgMs: metrics.builds ? metrics.buildMs / metrics.builds : 0,
@@ -313,6 +356,7 @@ module.exports = {
     },
     reset() {
         cache.clear();
+        cacheGroups.clear();
         Object.keys(metrics).forEach((key) => { metrics[key] = 0; });
     }
 };

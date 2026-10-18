@@ -2,8 +2,6 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const ActivationPlacement = invoke('GameServer/Bot/Population/ActivationPlacement');
-const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
-const { marketStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
@@ -111,7 +109,12 @@ const HotActivation = {
                 && options.interruptBackgroundActivity !== true) {
                 return { ok: false, reason: 'pk_encounter_only', state };
             }
-            if (state.activity === 'traveling' && options.interruptBackgroundActivity !== true) {
+            // With honest travel a traveller a player invites or calls leaves its
+            // trip, as a hunter leaves its spot (design 5.9).
+            const leavesTrip = options.interruptBackgroundActivity === true
+                || (['remote_invite', 'party_invite', 'remote_chat_come'].includes(reason)
+                    && invoke('GameServer/Bot/Population/ColdTrip').travellerAnswers(state));
+            if (state.activity === 'traveling' && !leavesTrip) {
                 return { ok: false, reason: 'in_transit', state };
             }
             if (!state.accountName) return { ok: false, reason: 'missing_account', state };
@@ -121,11 +124,10 @@ const HotActivation = {
             const mammonVisit = state.activity === 'crafting' && !!state.stats?.mammonReturn;
             const craftShop = state.activity === 'crafting' && !mammonVisit && state.stats?.craftShop
                 ? CraftShopService.profileFor(state) : null;
-            const marketStore = state.activity === 'merchant' ? state.stats?.marketStore : null;
             const placement = ActivationPlacement.resolve(state, {
                 ...options,
-                keepStoreLocation: options.keepStoreLocation || !!marketStore || !!craftShop || mammonVisit,
-                storeLoc: marketStore?.loc || craftShop?.loc || state.loc
+                keepStoreLocation: options.keepStoreLocation || !!craftShop || mammonVisit,
+                storeLoc: craftShop?.loc || state.loc
             });
             // A failed placement must not dissolve a party, remove a market
             // listing or hand ownership away from the cold worker.
@@ -154,8 +156,7 @@ const HotActivation = {
                         leaseUntil: handoff.leaseUntil
                     }
                 };
-                if (options.interruptBackgroundActivity === true
-                    && ['traveling', 'pk_hunting'].includes(state.activity)) {
+                if (leavesTrip && ['traveling', 'pk_hunting'].includes(state.activity)) {
                     state = {
                         ...state,
                         activity: 'hunting',
@@ -177,7 +178,6 @@ const HotActivation = {
 
                 craftActivation = !!craftShop;
                 const plan = activationPlan(state, options);
-                if (marketStore) MarketOpportunity.removeColdStore(state.characterId);
                 const recipesReady = craftShop
                     ? CraftShopService.ensureRecipes(state.characterId, craftShop)
                     : Promise.resolve();
@@ -193,29 +193,17 @@ const HotActivation = {
                         // actor. BotManager consumes this after enterWorld has
                         // loaded the final skill/equipment-derived stat caps,
                         // before publishing the final CharInfo or starting AI.
-                        readyOnActivation: !marketStore && !craftShop && (
+                        readyOnActivation: !craftShop && (
                             options.readyOnActivation === true || options.recoverOnActivation === true
                         ),
                         locX: placement.loc?.locX,
                         locY: placement.loc?.locY,
                         locZ: placement.loc?.locZ,
-                        keepStoreLocation: !!marketStore || !!craftShop || mammonVisit,
-                        coldLifeState: !marketStore && !craftShop ? state : null,
+                        keepStoreLocation: !!craftShop || mammonVisit,
+                        coldLifeState: !craftShop ? state : null,
                         populationLocationPolicy: reason === 'near_player' && !options.forceNearPlayer
                             ? 'physical' : 'return',
-                        coldMarketState: marketStore ? state : null,
                         coldCraftState: craftShop ? state : null,
-                        privateStore: marketStore ? {
-                            storeType: Number(marketStore.storeType || 1),
-                            budgetBacked: marketStore.budgetBacked === true,
-                            buyerCharacterId: Number(marketStore.buyerCharacterId || 0) || null,
-                            revision: Math.max(1, Number(marketStore.revision || 1)),
-                            title: marketStore.autoTitle === false
-                                ? marketStore.title
-                                : marketStoreTitle(marketStore.items),
-                            town: marketStore.town || state.currentRegion || null,
-                            items: marketStore.items || []
-                        } : null,
                         manufactureShop: craftShop
                     })).then((session) => {
                     if (!session) throw new Error('bot_spawn_failed');
@@ -224,7 +212,7 @@ const HotActivation = {
                     }, 10000);
                     pendingTimer.unref?.();
 
-                    console.info(
+                    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info(
                         'BotPopulation :: requested activation for %s reason=%s activity=%s plan=%s spot=%s loc=%d,%d,%d playerDist=%s ready=%s',
                         state.name,
                         reason,

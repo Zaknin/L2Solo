@@ -53,6 +53,9 @@ function actor(id) {
 
         World.indexSpawnsInGrid();
         fillerReads = 0;
+        assert.equal(Index.nearTemplate(World, 1, 0, 0, 200), target);
+        assert.equal(Index.nearTemplate(World, 2, 0, 0, 200), null);
+        assert.equal(fillerReads, 0, 'known template lookup ignores unrelated spawns');
         // Catch an accidental fallback on both hits and misses, independently
         // of machine speed. A missing/just-despawned target must stay O(1).
         const originalFind = World.npc.spawns.find;
@@ -134,6 +137,21 @@ function actor(id) {
         assert.strictEqual(Index.find(World, oldSpawnId), null);
         assert.strictEqual(Index.find(World, respawned.fetchId()), respawned, 'real respawn path does not reuse a stale actor');
         Decay.decay(World, respawned);
+
+        // A live quest NPC removed with a timed effect must not come back as
+        // NpcInfo when that effect later expires (E249).
+        const EffectStore = invoke('GameServer/Effects/EffectStore');
+        const EffectTicker = invoke('GameServer/Effects/EffectTicker');
+        const questNpc = Spawn.spawnNpc(World, definition);
+        const broadcasts = [];
+        const watcher = { dataSendToMe() {}, dataSendToMeAndOthers: (packet) => broadcasts.push(packet) };
+        const timed = EffectStore.apply(questNpc, { key: 'test_slow', id: 9998, level: 1, type: 'debuff', durationMs: 20 });
+        EffectTicker.scheduleExpiry(watcher, questNpc, timed);
+        assert(Spawn.despawnQuestNpc(World, questNpc, watcher));
+        assert.strictEqual(Object.keys(questNpc.effectExpiryTimers || {}).length, 0, 'despawn clears effect expiry timers');
+        broadcasts.length = 0;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        assert.strictEqual(broadcasts.filter((packet) => packet[0] === 0x16).length, 0, 'despawned NPC is not resent as NpcInfo');
 
         const DataCache = invoke('GameServer/DataCache');
         const Rates = invoke('GameServer/ProgressionRates');

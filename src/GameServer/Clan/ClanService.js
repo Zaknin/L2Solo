@@ -385,12 +385,16 @@ const ClanService = {
         if (!clan) return Promise.resolve({ ok: false, code: 'no_clan' });
         if (!this.isLeader(actor, clan)) return Promise.resolve({ ok: false, code: 'not_leader' });
 
-        const sessions = clanOnlineSessions(clan);
+        // Members are remembered with their characters: a connection that
+        // selects a character of another clan during the write keeps that
+        // character's clan. Characters of this clan online after the write
+        // (an alt selected meanwhile) are cleared and get the dissolve UI.
+        const remembered = clanOnlineSessions(clan).map((session) => session.actor);
         return Database.dissolveClan({ clanId: clan.id, leaderId: actor.fetchId() }).then((result) => {
             if (!result.ok) return result;
-            sessions.forEach((memberSession) => {
-                if (memberSession.actor) clearActorClan(memberSession.actor);
-            });
+            const sessions = clanOnlineSessions(clan);
+            remembered.forEach(clearActorClan);
+            sessions.forEach((memberSession) => clearActorClan(memberSession.actor));
             state.clans.delete(number(clan.id));
             return { ok: true, clan, sessions, memberIds: result.memberIds || [] };
         });
@@ -563,6 +567,7 @@ const ClanService = {
         return { clan, member };
     },
 
+    onlineSessionByActorId,
     onlineSessions: clanOnlineSessions,
     broadcastAppearance: broadcastClanAppearance
 };

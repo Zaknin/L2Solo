@@ -9,6 +9,7 @@ const EffectStats    = invoke('GameServer/Effects/EffectStats');
 const EffectStore    = invoke('GameServer/Effects/EffectStore');
 const C4EquipmentItemSkills = invoke('GameServer/Items/C4EquipmentItemSkills');
 const WeaponSA = invoke('GameServer/Items/C4WeaponSA');
+const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const RaidCurse = invoke('GameServer/RaidBoss/RaidCurse');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const AttackRange = invoke('GameServer/Actor/AttackRange');
@@ -101,6 +102,7 @@ class Attack {
     meleeHit(session, creature) {
         if (session?.pvpHandoffPending) return;
         const actor = session.actor;
+        const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
 
         if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
             return;
@@ -220,6 +222,7 @@ class Attack {
                 // Check every melee victim again at impact, including polearm
                 // secondary targets. Already-launched arrows keep travelling.
                 if (!rangedAttack && !AttackRange.isWithinRange(actor, target, attackRange)) return;
+                if (!invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
 
                 if (!entry.hitLanded || entry.hit.damage <= 0) this.recordPlayerAggression(session, actor, target);
                 if (entry.hitLanded) {
@@ -281,6 +284,7 @@ class Attack {
     remoteHit(session, creature, skill) {
         if (session?.pvpHandoffPending) return;
         const actor = session.actor;
+        const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
         const corpseTarget = ['corpse_mob', 'corpse_player', 'corpse_pet', 'corpse_ally']
             .includes(skill.fetchTargetKind?.());
 
@@ -317,6 +321,29 @@ class Attack {
             return;
         }
 
+        const magicSkill = this.beginRemoteCast(session, actor, creature, skill);
+
+        const castWeapon = WeaponSA.equipped(actor);
+        const castTime = skill.fetchCalculatedHitTime();
+        // Lisvus C4 launches the client animation 400 ms before impact for
+        // casts longer than its 420 ms gauge threshold. Keep short/static
+        // casts at their existing duration, without negative timer delays.
+        const launchLead = magicSkill && castTime > 420 ? 400 : 0;
+        const cast = { raidParty, corpseTarget, mpCost, magicSkill, launchLead, castWeapon };
+        const land = () => this.landRemoteCast(session, actor, creature, skill, cast);
+
+        if (launchLead) {
+            this.queueTimer(() => this.launchRemoteCast(session, actor, creature, skill, corpseTarget),
+                castTime - launchLead);
+        }
+        // Schedule from the same start time: a delayed launch callback must
+        // not shift impact past the original deadline or a pet's follow timer.
+        // Cancellation clears both native timers, and casting stays active.
+        this.queueTimer(land, castTime);
+
+    }
+
+    beginRemoteCast(session, actor, creature, skill) {
         const magicSkill = this.isMagicSkill(skill);
         this.chargeShotForSkill(session, actor, magicSkill, skill);
 
@@ -336,193 +363,204 @@ class Attack {
         // reuse starts above, before this cast has dealt any damage.
         this.activeCast = { target: creature, skill, landsAt: Date.now() + skill.fetchCalculatedHitTime() };
         HotPartyCastTracker.begin(session, actor, creature, skill);
+        return magicSkill;
+    }
 
-        const castWeapon = WeaponSA.equipped(actor);
-        const castTime = skill.fetchCalculatedHitTime();
-        // Lisvus C4 launches the client animation 400 ms before impact for
-        // casts longer than its 420 ms gauge threshold. Keep short/static
-        // casts at their existing duration, without negative timer delays.
-        const launchLead = magicSkill && castTime > 420 ? 400 : 0;
-        const land = () => {
-            this.activeCast = null;
-            // Once the landing callback owns the turn, no other damage event
-            // can interleave before MP and effects resolve. Stop watching the
-            // target before the authoritative cast work begins.
+    launchRemoteCast(session, actor, creature, skill, corpseTarget) {
+        if (this.blockedPvpDefense(session, actor, creature, skill)
+            || this.checkParticipants(actor, creature, { allowDeadTarget: corpseTarget })) {
+            this.clearTimers();
             HotPartyCastTracker.clear(actor);
-            if (this.blockedPvpDefense(session, actor, creature, skill) || this.checkParticipants(actor, creature, { allowDeadTarget: corpseTarget })) {
-                invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
-                invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-                return;
-            }
-
-            const semantic = skill.fetchSemantic?.() || {};
-            const targets = this.resolveSkillTargets(session, actor, creature, skill);
-            const corpseAreaCast = skill.fetchTargetKind?.() === 'corpse_mob'
-                && semantic.sourceTarget === 'area' && semantic.skillType === C4SkillRules.DAMAGE;
-            const selfEffectOnly = targets.length === 0
-                && semantic.sourceTarget === 'aura'
-                && !!semantic.selfEffect;
-            const emptyEnemyAuraCast = targets.length === 0
-                && semantic.sourceTarget === 'aura'
-                && skill.fetchTargetKind?.() === 'enemy'
-                && !semantic.selfEffect;
-            const executionTargets = selfEffectOnly ? [actor] : targets;
-
-            if (executionTargets.length === 0 && !emptyEnemyAuraCast && !corpseAreaCast) {
-                actor.state.setCasts(false);
-                invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
-                invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-                return;
-            }
-
-            if (!this.consumeSkillItems(session, actor, skill)) {
-                actor.state.setCasts(false);
-                this.rejectSkillUseCondition(session, actor, 'Not enough required items.');
-                invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
-                invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-                return;
-            }
-
-            if (magicSkill && !launchLead && executionTargets.length > 0) {
-                session.dataSendToMeAndOthers(ServerResponse.magicSkillLaunched(actor, skill, executionTargets), actor);
-            }
-
-            actor.setMp(actor.fetchMp() - mpCost);
-            if (skill.fetchConsumedHp() > 0) {
-                actor.setHp(Math.max(1, actor.fetchHp() - skill.fetchConsumedHp()));
-            }
-            actor.statusUpdateVitals(actor);
-
-            const shotState = this.captureShotState(actor);
-            if (!selfEffectOnly && executionTargets.length > 0 && RaidCurse.skillBlocked(session, actor, executionTargets, skill)) {
-                this.clearLoadedShot(actor, magicSkill);
-                actor.state.setCasts(false);
-                invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
-                invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-
-                actor.automation.replenishVitals(actor);
-                if (invoke('GameServer/Bot/AI/PartyCompanionService').startQueuedGroundPickup(session)) {
-                    return;
-                }
-                if (this.queue.name) {
-                    this.dequeueEvent(session);
-                    return;
-                }
-                return;
-            }
-
-            // A sonic/force charge belongs to the cast, not to each target of
-            // an area skill. Consume it once after the cast has survived all
-            // cancellation gates and immediately before authoritative effects.
-            if (!this.consumeSkillCharges(session, actor, skill)) {
-                actor.state.setCasts(false);
-                this.rejectSkillUseCondition(session, actor, 'Not enough charges.');
-                invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
-                invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-                return;
-            }
-
-            if (corpseAreaCast) {
-                invoke('GameServer/World/Generics/NpcDecay').decay(invoke('GameServer/World/World'), creature);
-            }
-            executionTargets.forEach((target) => {
-                if (skill.fetchTargetKind?.() === 'enemy') invoke('GameServer/Bot/AI/BotMobCompetition').record(actor, target);
-                this.restoreShotState(actor, shotState);
-                const outcome = SkillEffects.execute(session, actor, target, skill, {
-                    attack: this,
-                    magicSkill,
-                    selfEffectOnly,
-                    chargeCount: actor.activeSkillChargeCount
-                });
-                // A hostile control/debuff is aggression even without HP
-                // damage (and even if resisted). Use the same flag and party
-                // wake path as a hit, after native target/cast validation.
-                if (!(outcome.damage > 0) && skill.fetchTargetKind?.() === 'enemy') this.recordPlayerAggression(session, actor, target);
-                // Chat confirmations are emitted only after the authoritative
-                // skill result exists. A queued, interrupted, resisted, or
-                // stack-rejected cast must never claim success to the party.
-                invoke('GameServer/Bot/AI/BotPartyChat').confirmSkillResult(session, actor, target, skill, outcome);
-                invoke('GameServer/Bot/AI/BotActionFeedback').result(session, actor, target, skill, outcome);
-                if (outcome?.applied && session?.accountId?.startsWith?.('bot_') && target?.session?.accountId && !target.session.accountId.startsWith('bot_')) {
-                    Promise.resolve(invoke('GameServer/Bot/AI/BotEventJournal').record({
-                        playerId: target.session.actor?.fetchId?.(),
-                        botId: actor.fetchId?.(),
-                        eventType: 'support_result',
-                        summary: `${actor.fetchName?.() || 'Bot'} successfully used ${skill.model?.name || 'a support skill'} on ${target.fetchName?.() || 'the player'}.`,
-                        weight: 3,
-                        dedupeKey: `support:${actor.fetchId?.()}:${target.fetchId?.()}:${skill.fetchSelfId?.()}`,
-                        coalesceWindowMs: 5000,
-                        meta: { skillId: skill.fetchSelfId?.(), outcome: outcome.type || null }
-                    })).catch(() => {});
-                }
-
-                if (outcome.damage > 0) {
-                    this.hit(session, actor, target, outcome.damage, { skill });
-                    if (outcome.forceLethalVitals && target.fetchHp?.() > 0) {
-                        target.setHp?.(1);
-                        target.setCp?.(1);
-                        target.statusUpdateVitals?.(target);
-                    }
-                }
-                else if (outcome.missed) {
-                    ConsoleText.transmit(session, ConsoleText.caption.missedHit);
-                }
-                else if (outcome.resisted) {
-                    const targetSession = target?.session || (this.isNpcCombatant(actor) ? session : null);
-                    if (targetSession?.dataSendToMe) {
-                        ConsoleText.transmit(targetSession, ConsoleText.caption.magicResisted, [{
-                            kind: ConsoleText.kind.text,
-                            value: actor.fetchName?.() || 'The monster'
-                        }]);
-                    }
-                }
-                if (!selfEffectOnly) WeaponSA.onCast(session, actor, target, skill, { weapon: castWeapon, outcome, attack: this });
-                if (outcome.spoilOnHit) {
-                    outcome.spoiled = invoke('GameServer/Npc/SpoilSweep').trySpoilCrush(session, actor, target, skill);
-                }
-            });
-            delete actor.activeSkillChargeCount;
-            this.clearLoadedShot(actor, magicSkill);
-            actor.state.setCasts(false);
-            invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
-
-            // Start replenish
-            actor.automation.replenishVitals(actor);
-
-            if (invoke('GameServer/Bot/AI/PartyCompanionService').startQueuedGroundPickup(session)) {
-                return;
-            }
-
-            if (this.queue.name) {
-                this.dequeueEvent(session);
-                return;
-            }
-
-        };
-
-        if (launchLead) {
-            this.queueTimer(() => {
-                if (this.blockedPvpDefense(session, actor, creature, skill)
-                    || this.checkParticipants(actor, creature, { allowDeadTarget: corpseTarget })) {
-                    this.clearTimers();
-                    HotPartyCastTracker.clear(actor);
-                    invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
-                    invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
-                    return;
-                }
-                const targets = this.resolveSkillTargets(session, actor, creature, skill);
-                const semantic = skill.fetchSemantic?.() || {};
-                const animationTargets = !targets.length && semantic.sourceTarget === 'aura' && semantic.selfEffect
-                    ? [actor] : targets;
-                if (animationTargets.length) {
-                    session.dataSendToMeAndOthers(ServerResponse.magicSkillLaunched(actor, skill, animationTargets), actor);
-                }
-            }, castTime - launchLead);
+            invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
+            invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+            return;
         }
-        // Schedule from the same start time: a delayed launch callback must
-        // not shift impact past the original deadline or a pet's follow timer.
-        // Cancellation clears both native timers, and casting stays active.
-        this.queueTimer(land, castTime);
+        const targets = this.resolveSkillTargets(session, actor, creature, skill);
+        const semantic = skill.fetchSemantic?.() || {};
+        const animationTargets = !targets.length && semantic.sourceTarget === 'aura' && semantic.selfEffect
+            ? [actor] : targets;
+        if (animationTargets.length) {
+            session.dataSendToMeAndOthers(ServerResponse.magicSkillLaunched(actor, skill, animationTargets), actor);
+        }
+    }
+
+    landRemoteCast(session, actor, creature, skill, { raidParty, corpseTarget, mpCost, magicSkill, launchLead, castWeapon }) {
+        this.activeCast = null;
+        // Once the landing callback owns the turn, no other damage event
+        // can interleave before MP and effects resolve. Stop watching the
+        // target before the authoritative cast work begins.
+        HotPartyCastTracker.clear(actor);
+        if (this.blockedPvpDefense(session, actor, creature, skill) || this.checkParticipants(actor, creature, { allowDeadTarget: corpseTarget })) {
+            invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
+            invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+            return;
+        }
+
+        const { corpseAreaCast, selfEffectOnly, executionTargets, emptyEnemyAuraCast } = this.remoteCastTargets(session, actor, creature, skill);
+
+        if (executionTargets.length === 0 && !emptyEnemyAuraCast && !corpseAreaCast) {
+            actor.state.setCasts(false);
+            invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
+            invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+            return;
+        }
+
+        if (!this.consumeSkillItems(session, actor, skill)) {
+            actor.state.setCasts(false);
+            this.rejectSkillUseCondition(session, actor, 'Not enough required items.');
+            invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
+            invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+            return;
+        }
+
+        this.payRemoteCast(session, actor, skill, { magicSkill, launchLead, executionTargets, mpCost });
+
+        const shotState = this.captureShotState(actor);
+        if (!selfEffectOnly && executionTargets.length > 0 && RaidCurse.skillBlocked(session, actor, executionTargets, skill)) {
+            this.abandonCursedRemoteCast(session, actor, creature, skill, magicSkill);
+            return;
+        }
+
+        // A sonic/force charge belongs to the cast, not to each target of
+        // an area skill. Consume it once after the cast has survived all
+        // cancellation gates and immediately before authoritative effects.
+        if (!this.consumeSkillCharges(session, actor, skill)) {
+            actor.state.setCasts(false);
+            this.rejectSkillUseCondition(session, actor, 'Not enough charges.');
+            invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(session, actor);
+            invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+            return;
+        }
+
+        if (corpseAreaCast) {
+            invoke('GameServer/World/Generics/NpcDecay').decay(invoke('GameServer/World/World'), creature);
+        }
+        executionTargets.forEach((target) => this.applyRemoteCastEffect(session, actor, target, skill,
+            { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }));
+        this.finishRemoteCast(session, actor, skill, magicSkill);
+    }
+
+    remoteCastTargets(session, actor, creature, skill) {
+        const semantic = skill.fetchSemantic?.() || {};
+        const targets = this.resolveSkillTargets(session, actor, creature, skill);
+        const corpseAreaCast = skill.fetchTargetKind?.() === 'corpse_mob'
+            && semantic.sourceTarget === 'area' && semantic.skillType === C4SkillRules.DAMAGE;
+        const selfEffectOnly = targets.length === 0
+            && semantic.sourceTarget === 'aura'
+            && !!semantic.selfEffect;
+        const emptyEnemyAuraCast = targets.length === 0
+            && semantic.sourceTarget === 'aura'
+            && skill.fetchTargetKind?.() === 'enemy'
+            && !semantic.selfEffect;
+        const executionTargets = selfEffectOnly ? [actor] : targets;
+        return { corpseAreaCast, selfEffectOnly, executionTargets, emptyEnemyAuraCast };
+    }
+
+    payRemoteCast(session, actor, skill, { magicSkill, launchLead, executionTargets, mpCost }) {
+        if (magicSkill && !launchLead && executionTargets.length > 0) {
+            session.dataSendToMeAndOthers(ServerResponse.magicSkillLaunched(actor, skill, executionTargets), actor);
+        }
+
+        actor.setMp(actor.fetchMp() - mpCost);
+        if (skill.fetchConsumedHp() > 0) {
+            actor.setHp(Math.max(1, actor.fetchHp() - skill.fetchConsumedHp()));
+        }
+        actor.statusUpdateVitals(actor);
+    }
+
+    abandonCursedRemoteCast(session, actor, creature, skill, magicSkill) {
+        this.clearLoadedShot(actor, magicSkill);
+        actor.state.setCasts(false);
+        invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
+        invoke('GameServer/Bot/AI/BotPartyChat').cancelExpectedSkillResult(session, actor, creature, skill);
+
+        actor.automation.replenishVitals(actor);
+        if (invoke('GameServer/Bot/AI/PartyCompanionService').startQueuedGroundPickup(session)) {
+            return;
+        }
+        if (this.queue.name) {
+            this.dequeueEvent(session);
+            return;
+        }
+        return;
+    }
+
+    applyRemoteCastEffect(session, actor, target, skill, { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }) {
+        if ((skill.fetchTargetKind?.() === 'enemy' || corpseAreaCast)
+            && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
+        if (skill.fetchTargetKind?.() === 'enemy') invoke('GameServer/Bot/AI/BotMobCompetition').record(actor, target);
+        this.restoreShotState(actor, shotState);
+        const outcome = SkillEffects.execute(session, actor, target, skill, {
+            attack: this,
+            magicSkill,
+            selfEffectOnly,
+            chargeCount: actor.activeSkillChargeCount
+        });
+        // A hostile control/debuff is aggression even without HP
+        // damage (and even if resisted). Use the same flag and party
+        // wake path as a hit, after native target/cast validation.
+        if (!(outcome.damage > 0) && skill.fetchTargetKind?.() === 'enemy') this.recordPlayerAggression(session, actor, target);
+        // Chat confirmations are emitted only after the authoritative
+        // skill result exists. A queued, interrupted, resisted, or
+        // stack-rejected cast must never claim success to the party.
+        invoke('GameServer/Bot/AI/BotPartyChat').confirmSkillResult(session, actor, target, skill, outcome);
+        invoke('GameServer/Bot/AI/BotActionFeedback').result(session, actor, target, skill, outcome);
+        if (outcome?.applied && session?.accountId?.startsWith?.('bot_') && target?.session?.accountId && !target.session.accountId.startsWith('bot_')) {
+            Promise.resolve(invoke('GameServer/Bot/AI/BotEventJournal').record({
+                playerId: target.session.actor?.fetchId?.(),
+                botId: actor.fetchId?.(),
+                eventType: 'support_result',
+                summary: `${actor.fetchName?.() || 'Bot'} successfully used ${skill.model?.name || 'a support skill'} on ${target.fetchName?.() || 'the player'}.`,
+                weight: 3,
+                dedupeKey: `support:${actor.fetchId?.()}:${target.fetchId?.()}:${skill.fetchSelfId?.()}`,
+                coalesceWindowMs: 5000,
+                meta: { skillId: skill.fetchSelfId?.(), outcome: outcome.type || null }
+            })).catch(() => {});
+        }
+
+        if (outcome.damage > 0) {
+            this.hit(session, actor, target, outcome.damage, { skill });
+            if (outcome.forceLethalVitals && target.fetchHp?.() > 0) {
+                target.setHp?.(1);
+                target.setCp?.(1);
+                target.statusUpdateVitals?.(target);
+            }
+        }
+        else if (outcome.missed) {
+            ConsoleText.transmit(session, ConsoleText.caption.missedHit);
+        }
+        else if (outcome.resisted) {
+            const targetSession = target?.session || (this.isNpcCombatant(actor) ? session : null);
+            if (targetSession?.dataSendToMe) {
+                ConsoleText.transmit(targetSession, ConsoleText.caption.magicResisted, [{
+                    kind: ConsoleText.kind.text,
+                    value: actor.fetchName?.() || 'The monster'
+                }]);
+            }
+        }
+        if (!selfEffectOnly) WeaponSA.onCast(session, actor, target, skill, { weapon: castWeapon, outcome, attack: this });
+        if (outcome.spoilOnHit) {
+            outcome.spoiled = invoke('GameServer/Npc/SpoilSweep').trySpoilCrush(session, actor, target, skill);
+        }
+    }
+
+    finishRemoteCast(session, actor, skill, magicSkill) {
+        delete actor.activeSkillChargeCount;
+        this.clearLoadedShot(actor, magicSkill);
+        actor.state.setCasts(false);
+        invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
+
+        // Start replenish
+        actor.automation.replenishVitals(actor);
+
+        if (invoke('GameServer/Bot/AI/PartyCompanionService').startQueuedGroundPickup(session)) {
+            return;
+        }
+
+        if (this.queue.name) {
+            this.dequeueEvent(session);
+            return;
+        }
 
     }
 
@@ -554,12 +592,17 @@ class Attack {
             const boss = Number(actor.minionBossObjectId) > 0 ? RaidEntityIndex.bossFor(World, actor) : null;
             const faction = actor.fetchClanName?.();
             const range = Math.max(0, Number(skill.fetchDistance?.()) || 0);
-            const targets = boss ? RaidEntityIndex.entitiesForRaid(World, {
-                bossId: boss.fetchId(), bossTemplateId: boss.fetchSelfId()
-            }) : [actor, ...(faction ? (World.npc?.spawns || []).filter(target => (
-                this.isNpcCombatant(target) && target !== actor
-                && target.fetchClanName?.() === faction && this.distance2d(actor,target) <= range
-            )) : [])];
+            let targets;
+            if (boss) {
+                targets = RaidEntityIndex.entitiesForRaid(World, { bossId: boss.fetchId(), bossTemplateId: boss.fetchSelfId() });
+            } else if (actor.minionLeader) {
+                targets = invoke('GameServer/World/RaidBossMinionManager').leaderGroup(World, actor.minionLeader);
+            } else {
+                targets = [actor, ...(faction ? (World.npc?.spawns || []).filter(target => (
+                    this.isNpcCombatant(target) && target !== actor
+                    && target.fetchClanName?.() === faction && this.distance2d(actor,target) <= range
+                )) : [])];
+            }
             return this.uniqueSkillTargets(targets.filter(target => (
                 this.isValidSkillTarget(target,skill,actor) && target.isDead?.() !== true
             )));
@@ -770,9 +813,7 @@ class Attack {
     }
 
     chargeShotForSkill(session, actor, magicSkill, skill = null) {
-        if (!magicSkill && skill?.fetchSsBoost && Number(skill.fetchSsBoost()) <= 0) {
-            return;
-        }
+        if (!ShotStock.actionShotKind(magicSkill, skill?.fetchSsBoost?.())) return;
 
         if (magicSkill) {
             const autoShot = actor.backpack?.fetchAutoSpiritshot?.(actor);
@@ -801,17 +842,10 @@ class Attack {
     }
 
     calculatedSkillHitTime(actor, skill, magicSkill) {
-        const hitTime = Math.max(0, Number(skill?.fetchHitTime?.()) || 0);
-        if (skill?.fetchSemantic?.()?.staticHitTime) return hitTime;
-
-        const attackRate = magicSkill ? actor.fetchCollectiveCastSpd() : actor.fetchCollectiveAtkSpd();
-        const scaledHitTime = Formulas.calcRemoteAtkTime(hitTime, attackRate);
-        const adjustedHitTime = magicSkill && actor.spiritshotLoaded
-            ? Math.floor(scaledHitTime * 0.70)
-            : scaledHitTime;
-        return magicSkill && hitTime >= 500
-            ? Math.max(500, adjustedHitTime)
-            : adjustedHitTime;
+        const hitTime = skill?.fetchHitTime?.();
+        if (skill?.fetchSemantic?.()?.staticHitTime) return Formulas.calcSkillHitTime(hitTime, 1, { staticHitTime: true });
+        const speed = magicSkill ? actor.fetchCollectiveCastSpd() : actor.fetchCollectiveAtkSpd();
+        return Formulas.calcSkillHitTime(hitTime, speed, { magic: !!magicSkill, spiritshot: !!actor.spiritshotLoaded });
     }
 
     skillUseConditionFailure(session, actor, skill) {
@@ -979,10 +1013,12 @@ class Attack {
             const usedBlessedSpiritshot = usedSpiritshot && !!actor.blessedSpiritshotLoaded;
             const semantic = skill.fetchSemantic?.() || {};
             const vulnModifier = traitVulnerabilityModifier(creature, semantic.trait);
-            const magicCriticalRate = Math.min(300, Math.max(0,
-                (8 * EffectStats.multiplier(actor, 'mCritRateMul'))
-                + EffectStats.add(actor, 'mCritRateAdd')
-            ));
+            const magicCriticalRate = Formulas.magicCriticalRate({
+                multiplier: EffectStats.multiplier(actor, 'mCritRateMul'),
+                add: EffectStats.add(actor, 'mCritRateAdd'),
+                wit: actor.fetchCollectiveWit?.(),
+                weapon: !!actor.backpack?.fetchEquippedWeapon?.()
+            });
             const magicCritical = Formulas.rollCritical(magicCriticalRate, rng);
             const power = semantic.skillType === C4SkillRules.DEATH_LINK
                 ? Formulas.calcDeathLinkPower(skill.fetchPower(), actor.fetchHp?.(), actor.fetchMaxHp?.())

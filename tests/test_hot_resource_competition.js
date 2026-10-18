@@ -1,5 +1,10 @@
 const assert = require('assert'), fs = require('fs'), os = require('os'), path = require('path');
 require('../src/Global');
+invoke('GameServer/DataCache').init();
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 const Hot = invoke('GameServer/Bot/AI/HotResourceCompetition');
 const Claims = invoke('GameServer/Bot/AI/BotMobCompetition');
 const World = invoke('GameServer/World/World');
@@ -15,6 +20,7 @@ const Population = invoke('GameServer/Bot/Population/PopulationService');
 const AI = invoke('GameServer/Bot/BotAI');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-hot-resource-'));
 options.default.Database.path = path.join(dir, 'test.sqlite');
+options.default.Database.historyPath = path.join(dir, 'history.sqlite');
 const original = { user: World.user, npcs: World.fetchNpcsInRadius, incoming: Awareness.npcThreateningActor,
     plan: Retreat.plan, spot: Spots.findCurrentSpot, peace: utils.isInPeaceZone, now: Date.now,
     enabled: Config.backgroundPartyEnabled, limit: Config.maxBackgroundParties, enqueue: Memory.events.enqueue, promote: AI.promoteForPlayerInteraction };
@@ -30,8 +36,9 @@ function actor(id) {
         automation: { abortAll() {} }, moveTo({ to }) { this.requested = to; },
         skillset: { fetchSkills: () => [] }, backpack: { fetchItems: () => [] } };
     const s = { actor: bot, aiActive: true, plan: 'hunting', accountId: `bot_hot_${id}`,
+        fetchAccountId() { return this.accountId; },
         coldLifeState: Life.cachedState(id), persona: { traits: { caution: 0.5, assertiveness: 0.5, sociability: 0.8, empathy: 0.5 } } };
-    bot.session = s; sessions.push(s); return s;
+    bot.session = s; sessions.push(s); World.insertUser(s); return s;
 }
 function mob(owner) {
     const target = { fetchId: () => target.id, id: serial++, fetchKind: () => 'Monster', fetchSelfId: () => 10,
@@ -46,7 +53,7 @@ async function run() {
     Date.now = () => now;
     AI.promoteForPlayerInteraction = () => {};
     Config.backgroundPartyEnabled = true; Config.maxBackgroundParties = 60;
-    World.user = { sessions }; Awareness.npcThreateningActor = s => s.incoming || null;
+    World.user = { sessions: [], revision: 0 }; Awareness.npcThreateningActor = s => s.incoming || null;
     utils.isInPeaceZone = () => false;
     Spots.findCurrentSpot = () => ({ id: 'field' });
     Retreat.plan = bot => ({ safe: true, movesAway: true, routeUsable: true, requestedTo: { locX: bot.x - 1400, locY: 0, locZ: 0 } });
@@ -79,6 +86,41 @@ async function run() {
     assert.strictEqual(Hot.beforeAttack(a, first, now, () => { throw Error('teammates do not reroll'); }), false);
     assert.strictEqual(Claims.record(a.actor, first, now + 1), false);
     assert.strictEqual(emitted.length, 0, 'native accepted hits after joining are shared hunting');
+    now += 120001;
+    const materialRequest = { status: 'open', priority: 'required', materialParty: true, itemId: 4097,
+        targetId: 5726, amount: 12, requiredTotal: 12, spotId: 'field', npcId: 10 };
+    await Database.execute(['UPDATE bot_life_state SET statsJson=? WHERE characterId=?', [JSON.stringify({ partyRequest: materialRequest }), 21]]);
+    Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [21]]))[0]);
+    const materialSolo = actor(21), materialTarget = mob(a);
+    assert(Hot.beforeAttack(materialSolo, materialTarget, now, () => 0)); await materialSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!materialSolo.hotBackgroundPartyId, 'a hot invitation cannot bypass the material agreement');
+    assert.deepStrictEqual(Life.cachedState(21).stats.partyRequest, materialRequest);
+    assert.deepStrictEqual(JSON.parse((await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=?', [21]]))[0].statsJson).partyRequest,
+        materialRequest, 'rejected recruitment preserves the durable material need');
+    assert.strictEqual(Parties.find(partyId).memberIds.length, 2);
+    assert(!materialSolo.hotCompetitionCommit && !a.hotCompetitionCommit && !b.hotCompetitionCommit);
+    now += 120001;
+    const ordinarySolo = actor(22), newPairTarget = mob(ordinarySolo);
+    assert(Hot.beforeAttack(materialSolo, newPairTarget, now, () => 0)); await materialSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!materialSolo.hotBackgroundPartyId && !ordinarySolo.hotBackgroundPartyId,
+        'new hot formation also retains the core material request for canonical admission');
+    const ordinaryParty = Parties.find(partyId);
+    const materialStats = { ...ordinaryParty.stats, objective: materialRequest,
+        agreement: { materialNeeds: [{ ...materialRequest, characterId: 1, quota: 12, collected: 2 }] } };
+    await Database.execute(['UPDATE bot_background_parties SET statsJson=? WHERE partyId=?', [JSON.stringify(materialStats), partyId]]);
+    Parties.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [partyId]]))[0]);
+    now += 120001;
+    const joiningSolo = actor(23), existingMaterialTarget = mob(a);
+    assert(Hot.beforeAttack(joiningSolo, existingMaterialTarget, now, () => 0)); await joiningSolo.hotCompetitionPending;
+    assert.strictEqual(Hot.report.recent.at(-1).reason, 'material_party_requires_review');
+    assert(!joiningSolo.hotBackgroundPartyId);
+    assert.deepStrictEqual(Parties.find(partyId).stats.agreement, materialStats.agreement,
+        'an active material contract cannot accept unreviewed hot recruits');
+    assert.strictEqual(Parties.find(partyId).memberIds.length, 2);
+    await Database.execute(['UPDATE bot_background_parties SET statsJson=? WHERE partyId=?', [JSON.stringify(ordinaryParty.stats), partyId]]);
+    Parties.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [partyId]]))[0]);
     now += 120001;
     const c = actor(3), second = mob(a);
     assert(Hot.beforeAttack(c, second, now, () => 0)); await c.hotCompetitionPending;

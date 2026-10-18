@@ -4,6 +4,7 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
 require('../src/Global');
+invoke('GameServer/DataCache').init();
 
 const rootDir = path.resolve(__dirname, '..');
 const databasePath = path.join(rootDir, 'tmp', 'test-clan-warehouse-contribution-wallet.sqlite');
@@ -47,6 +48,7 @@ async function wallet(id) {
 async function main() {
     seedDatabase();
     options.default.Database.path = path.relative(rootDir, databasePath);
+    options.default.Database.historyPath = `${databasePath}.history`;
     Database.init();
     await Database.initClanHalls(); // creates the dues cursor table, as the server start does
     try {

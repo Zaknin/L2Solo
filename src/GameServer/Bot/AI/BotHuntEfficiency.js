@@ -1,40 +1,223 @@
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const Rates = invoke('GameServer/ProgressionRates');
+const DataCache = invoke('GameServer/DataCache');
+const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const MAX_SPOTS = 8;
 const MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+// The bot hunts in a party or alone: the author keeps the two apart.
+function situationOf(state, mode) {
+    const grouped = mode ? ['party','duo','party_pve'].includes(mode)
+        : !!state.party?.partyId || ['party','duo'].includes(state.stats?.routeMode) || state.activity==='grouped';
+    return grouped ? 'party' : 'solo';
+}
 function signature(state, mode) {
     const inventory = state.inventory || {};
     const items = Array.isArray(inventory) ? inventory : Object.values(inventory);
     const equipped = items.filter(item => item.equipped || Number(item.equippedCount) > 0)
         .map(item => `${item.selfId}:${item.enchant || 0}`).sort();
-    const level = Number(state.fetchLevel?.() || state.level || state.stats?.level || 1);
-    const grouped = mode ? ['party','duo','party_pve'].includes(mode)
-        : !!state.party?.partyId || ['party','duo'].includes(state.stats?.routeMode) || state.activity==='grouped';
+    const level = levelOf(state);
     // Pre-migration samples used gross rewards and cannot establish net profit.
-    return ['net-xp-v1',Roles.classIdOf(state),level,grouped?'party':'solo',Rates.profile().exp,...equipped].join(':');
+    const rates = Rates.profile();
+    return ['net-income-v3',Roles.classIdOf(state),level,situationOf(state,mode),
+        rates.exp, rates.adena, rates.drop, rates.spoil,...equipped].join(':');
 }
-function record(state, { spotId, combatMs, recoveryMs = 0, exp = 0, timestamp = Date.now() }) {
+// The situation a row was recorded in (the fourth part of its signature).
+function levelOf(state) {
+    return Number(state.fetchLevel?.() || state.level || state.stats?.level || 1);
+}
+// What the loot of a hunt is worth: adena dropped as an item at face value,
+// every other item at the NPC buy price.
+function lootValue(items = []) {
+    let value = 0;
+    for (const item of items) {
+        const amount = Math.max(0, Number(item.amount || 0));
+        if (Number(item.selfId) === 57) { value += amount; continue; }
+        const price = Number(ItemTemplateIndex.find(DataCache.items, item.selfId)?.template?.price || 0);
+        value += NpcSellRules.npcBuyPrice(price) * amount;
+    }
+    return value;
+}
+// Prices are independent of the wish network: callers may supply their
+// current quotes, otherwise native shop/template prices are the baseline.
+function consumablePrices(state, price = id => Number(ItemTemplateIndex.find(DataCache.items, id)?.template?.price || 0)) {
+    const shots = invoke('GameServer/Inventory/ShotStock').planForState(state);
+    const potion = invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state);
+    return { shots: Math.max(0, Number(price(shots.selfId)) || 0), potions: Math.max(0, Number(price(potion.selfId)) || 0) };
+}
+function netIncome(row, costs) {
+    return Number(row.adena || 0) + Number(row.loot || 0)
+        - Number(row.shots || 0) * costs.shots - Number(row.potions || 0) * costs.potions;
+}
+function consumedCost(state, after) {
+    if (!after) return 0;
+    const shots = invoke('GameServer/Inventory/ShotStock').planForState(state);
+    const ids = [shots.selfId, ...invoke('GameServer/Bot/AI/HealingPotionStock').POTION_IDS];
+    return ids.reduce((total, id) => total + Math.max(0,
+        Number(state.inventory?.[id]?.amount || 0) - Number(after[id]?.amount || 0))
+        * Number(ItemTemplateIndex.find(DataCache.items, id)?.template?.price || 0), 0);
+}
+// One sample of a spot: cycleMs is the round's time on the spot, from its
+// start to the next round (the fights, the rest, the wait between rounds).
+function record(state, { spotId, cycleMs, exp = 0, adena = 0, loot = 0, costs = 0, kills = 0,
+    partyRoster = null, timestamp = Date.now() }) {
     const key = signature(state);
     const prior = Array.isArray(state.stats?.huntEfficiency) ? state.stats.huntEfficiency : [];
-    const kept = prior.filter(row => row.signature === key && timestamp >= row.at && timestamp-row.at < MAX_AGE_MS);
-    const cycleMs = Math.max(0,Number(combatMs)) + Math.max(0,Number(recoveryMs));
+    const opposite = signature(state, situationOf(state) === 'solo' ? 'party' : 'solo');
+    const kept = prior.filter(row => (row.signature === key || row.signature === opposite)
+        && timestamp >= row.at && timestamp-row.at < MAX_AGE_MS);
+    cycleMs = Math.max(0,Number(cycleMs));
     if (!spotId || !Number.isFinite(cycleMs) || cycleMs <= 0 || !Number.isFinite(exp)) return kept;
-    const old = kept.find(row => row.spotId === spotId);
-    const mix = (field,value) => old ? Number(old[field])*0.75+value*0.25 : value;
+    const old = kept.find(row => row.spotId === spotId && row.signature === key && row.partyRoster === partyRoster);
+    // Rows saved before income was recorded start their income from this sample.
+    const mix = (field,value) => old && Number.isFinite(old[field]) ? Number(old[field])*0.75+value*0.25 : value;
     const next = { spotId,signature:key,at:timestamp,samples:Math.min(32,(old?.samples||0)+1),
         exp:mix('exp',exp),cycleMs:mix('cycleMs',cycleMs),
-        source:'cold_combat_and_estimated_recovery' };
-    return [next,...kept.filter(row=>row.spotId!==spotId)].slice(0,MAX_SPOTS);
+        adena:mix('adena',Math.max(0,Number(adena)||0)),loot:mix('loot',Math.max(0,Number(loot)||0)),
+        costs:mix('costs',Math.max(0,Number(costs)||0)),
+        kills:mix('kills',Math.max(0,Number(kills)||0)),
+        partyRoster, source:'cold_round' };
+    const rows = [next,...kept.filter(row=>row.spotId!==spotId || row.signature!==key)].slice(0,MAX_SPOTS);
+
+    return rows;
+}
+
+const { SERVER_STARTED_AT } = require('../Population/Uptime');
+
+// Time on the spot against all time (E36): the round time each record
+// schedules against the uptime that really passed until the next record,
+// two running sums that fade over the life of a row. A gap that spans a
+// restart, or a stint near the player (hot: no record), starts anew: it
+// counts neither way.
+function nextClock(state, timestamp, cycleMs, startedAt) {
+    const clock = state.stats?.huntClock;
+    const at = Number(clock?.at || 0);
+    let onSpot = Number(clock?.onSpot || 0);
+    let total = Number(clock?.total || 0);
+    const hotAt = Number(state.timing?.lastHotAt || 0);
+    if (at > 0 && at >= startedAt && hotAt <= at && timestamp > at) {
+        const elapsed = timestamp - at;
+        const keep = Math.exp(-elapsed / MAX_AGE_MS);
+        onSpot = onSpot * keep + Math.min(elapsed, Math.max(0, Number(clock.cycleMs || 0)));
+        total = total * keep + elapsed;
+    }
+    return { at: timestamp, cycleMs: Math.round(cycleMs), onSpot: Math.round(onSpot), total: Math.round(total) };
+}
+function onSpotShare(state) {
+    const clock = state?.stats?.huntClock;
+    const total = Number(clock?.total || 0);
+    if (!(total > 0)) return 1;
+    return Math.max(0, Math.min(1, Number(clock.onSpot || 0) / total));
+}
+
+// The one record of a hunting round, solo or a party member's own share
+// (prepareResolve): `exp` is the net exp the round gave the bot. The round
+// lasts until the bot's next round. Returns the stats to merge, or {} for a
+// result that was no hunting round.
+function recordRound(state, result, { spotId, exp = 0, timestamp = Date.now(), startedAt = SERVER_STARTED_AT } = {}) {
+    const debug = result?.debug || {};
+    const Valuation = invoke('GameServer/Bot/Economy/EconomicValuation');
+    const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
+    const losses = debug.deaths || (state.activity !== 'dead' && result.patch?.activity === 'dead' ? 1 : 0);
+    // A death's price counts only when the round had a death: the economy
+    // foundation (with its earning-spot search) is not built for a zero.
+    const life = Valuation.progressStats(state, { timestamp, startedAt, kills: debug.wins, losses,
+        lossHours: losses > 0 ? invoke('GameServer/Bot/Economy/EconomyContext').basics(state, { timestamp }).deathHours : 0,
+        risky: !!state.stats?.pvpIntent,
+        persona: invoke('GameServer/Bot/AI/BotPersona').of(state), knowledgeEnabled: Learning.knowledgeEnabled() });
+    if (!(Number(debug.combatMs) > 0 || Number(debug.fights) > 0)) return life;
+    const cycleMs = Math.max(0, Number(result.nextResolveAt || 0) - timestamp);
+    const huntClock = nextClock(state, timestamp, cycleMs, startedAt);
+    const items = result.materialize?.items || [];
+    const huntEfficiency = record(state, {
+        spotId: spotId || debug.spotId, cycleMs, exp, timestamp,
+        adena: Number(result.materialize?.adena || 0), loot: lootValue(items),
+        costs: consumedCost(state, result.patch?.inventory) + buffPurchaseCost(state, timestamp),
+        kills: Number(debug.wins || 0), partyRoster: debug.partyRoster || null,
+        share: onSpotShare({ stats: { huntClock } })
+    });
+    return { ...life, huntEfficiency, huntClock };
+}
+function buffPurchaseCost(state, timestamp) {
+    const purchase = state.stats?.lastBuffServicePurchase;
+    const at = Number(purchase?.at || 0);
+    return at > Number(state.stats?.huntClock?.at || 0) && at <= timestamp
+        ? Math.max(0, Number(purchase?.price || 0)) : 0;
+}
+function sampledRows(state, timestamp, mode) {
+    const rows = state.stats?.huntEfficiency;
+    if (!Array.isArray(rows) || !rows.length) return [];
+    const key = signature(state,mode);
+    return rows.filter(row => row.signature===key && row.samples>=3 && timestamp>=row.at && timestamp-row.at<MAX_AGE_MS
+            && Number.isFinite(row.exp) && Number.isFinite(row.cycleMs) && row.cycleMs>0);
 }
 function scores(state, timestamp = Date.now(), mode) {
-    const key = signature(state,mode);
-    const rows = (Array.isArray(state.stats?.huntEfficiency)?state.stats.huntEfficiency:[])
-        .filter(row => row.signature===key && row.samples>=3 && timestamp>=row.at && timestamp-row.at<MAX_AGE_MS
-            && Number.isFinite(row.exp) && Number.isFinite(row.cycleMs) && row.cycleMs>0);
+    const rows = sampledRows(state, timestamp, mode);
     const best = Math.max(0,...rows.map(row=>row.exp/row.cycleMs));
     if (!(best>0)) return new Map(rows.map(row=>[row.spotId,-40]));
     // A bounded preference leaves unknown spots available for exploration and
     // cannot override party/level/territory safety gates in LevelingRoutes.
     return new Map(rows.map(row=>[row.spotId,Math.round(Math.max(-40,Math.min(15,55*row.exp/row.cycleMs/best-40)))]));
 }
-module.exports = { record, scores, signature, MAX_SPOTS, MAX_AGE_MS };
+// The best measured income among at most MAX_SPOTS rows: adena plus loot at
+// the NPC buy price, per hour of the hunt cycle and per kill, and the exp per
+// hour of that same row.
+// `share` is the bot's time on the spot against all its time: the hour of
+// a bot counts its trips, its town visits and its waits (E36).
+function bestIncome(rows, share = 1) {
+    let best = null;
+    for (const row of rows) {
+        if (!Number.isFinite(row.adena) || !Number.isFinite(row.loot) || !Number.isFinite(row.kills)) continue;
+        const income = row.adena + row.loot - Math.max(0, Number(row.costs) || 0);
+        const perHour = income / row.cycleMs * HOUR_MS * share;
+        if (best && perHour <= best.perHour) continue;
+        best = { spotId: row.spotId, perHour, perKill: row.kills > 0 ? income / row.kills : 0, expPerHour: row.exp / row.cycleMs * HOUR_MS * share };
+    }
+    return best;
+}
+
+// No cohort median: a bot calibrates the common table only with its own
+// samples. This base income is independent from the wish network, so price
+// priors and providers cannot recurse through the common value of an hour.
+function huntIncome(state, timestamp = Date.now(), mode) {
+    const own = bestIncome(sampledRows(state, timestamp, mode), onSpotShare(state));
+    if (own?.perHour > 0) return { ...own, source: 'own' };
+    const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+    const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
+    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
+    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true, rewardOptions);
+    const progress = current || Table.best(tableRole, levelOf(state), true);
+    const costs = consumablePrices(state);
+    const row = current && netIncome(current, costs) > 0 ? current : Table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
+        || Table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
+    if (!row) return { perHour: 0, perKill: 0, expPerHour: 0, source: 'unavailable' };
+    const income = netIncome(row, costs);
+    return { perHour: income * onSpotShare(state), perKill: row.kills > 0 ? income / row.kills : 0,
+        expPerHour: (progress?.exp || 0) * onSpotShare(state), source: 'table',
+        spotId: row.spotId || state.spotId, progressSpotId: progress?.spotId || state.spotId, useShots: row.useShots !== false };
+}
+// Adena per hour of repeatable hunting, independent of wallet and wishes.
+function huntHour(hunt, state = {}) {
+    if (Number(hunt?.perHour) > 0) return Number(hunt.perHour);
+    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
+    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const costs = consumablePrices(state);
+    const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
+    const table = invoke('GameServer/Bot/AI/SpotValueTable');
+    const row = table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
+        || table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
+    return Math.max(1, row ? netIncome(row, costs) : 0);
+}
+function hourValue(state, timestamp = Date.now(), mode) {
+    const hunt = huntIncome(state, timestamp, mode);
+    const packetHour = !mode && Number(state.stats?.money?.[0]);
+    return { perHour: packetHour > 0 ? packetHour : huntHour(hunt, state), perKill: hunt.perKill,
+        expPerHour: hunt.expPerHour, source: hunt.source };
+}
+// Kept as lifecycle adapters for callers which accepted earlier samples.
+function observe() {}
+function resetLevelBands() {}
+module.exports = { record, recordRound, scores, signature, situationOf, lootValue, hourValue, onSpotShare, observe,
+    resetLevelBands, consumablePrices, netIncome, consumedCost, buffPurchaseCost, huntHour, huntIncome, estimate: huntIncome, sampledRows, bestIncome, MAX_SPOTS, MAX_AGE_MS, SERVER_STARTED_AT };

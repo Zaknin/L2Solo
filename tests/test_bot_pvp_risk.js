@@ -1,6 +1,10 @@
 const assert = require('assert');
 
 require('../src/Global');
+// U26 (user, 2026-10-05): can-I-win is a chance with one roll per decision. A fixed
+// middle roll (0.49) makes each such decision the author's threshold (willing iff
+// chance >= 0.5, i.e. ratio >= threshold); the chance itself is tested in test_visible_strength.
+require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 
 const BotPvpRisk = invoke('GameServer/Bot/AI/BotPvpRisk');
 
@@ -42,9 +46,10 @@ assert.strictEqual(BotPvpRisk.evaluate({
     role: 'dps'
 }).action, 'flee', 'critical HP bot should flee without real support');
 
+// U26: the PK looks stronger (higher weapon grade); levels are hidden.
 assert.strictEqual(BotPvpRisk.evaluate({
-    botLevel: 20,
-    threatLevel: 23,
+    ownLook: { weapon: 1, glow: 0, body: 1 },
+    threatLook: { weapon: 2, glow: 0, body: 1 },
     hpRatio: 0.9,
     mpRatio: 0.9,
     allies: 3,

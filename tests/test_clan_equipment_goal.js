@@ -3,10 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-equipment-goal');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const rootDir = path.resolve(__dirname, '..');
-const databasePath = path.join(rootDir, 'tmp', 'test-clan-equipment-goal.sqlite');
+const databasePath = isolated.world;
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -52,7 +54,7 @@ function seedDatabase() {
 
 async function main() {
     seedDatabase();
-    options.default.Database.path = path.relative(rootDir, databasePath);
+    isolated.assertConfigured(options.default);
     Database.init();
     await LifeState.init();
 
@@ -187,8 +189,12 @@ async function main() {
         const [followUp] = await Database.execute([`SELECT status, availableAt
             FROM clan_actions WHERE clanId = ? AND actionType = 'goal_plan' AND status = 'pending'
             ORDER BY id DESC LIMIT 1`, [created.clanId]]);
-        assert(followUp, 'an L3 equipment goal must keep a bounded periodic priority review queued');
-        assert(Number(followUp.availableAt) >= Date.now(), 'an unchanged equipment review must use the retry cadence');
+        assert.strictEqual(followUp, undefined, 'an unchanged autonomous equipment goal waits for its own input event');
+        require('../src/GameServer/Clan/ClanReviewEvents').changed(created.clanId, 'member_gear');
+        await ClanActionService.scheduleReviews();
+        const [eventReview] = await Database.execute([`SELECT availableAt FROM clan_actions
+            WHERE clanId=? AND actionType='goal_plan' AND status='pending'`, [created.clanId]]);
+        assert(Number(eventReview.availableAt) <= Date.now(), 'the addressed gear event admits a current review immediately');
 
         console.log('Clan equipment goal checks passed');
     } finally {
@@ -197,6 +203,7 @@ async function main() {
         GearAcquisitionPlanner.planFor = originalPlanFor;
         SpotProfiles.ensure = originalSpotEnsure;
         await Database.close();
+        fs.rmSync(isolated.directory, { recursive: true, force: true });
         [databasePath, `${databasePath}-wal`, `${databasePath}-shm`].forEach((file) => fs.rmSync(file, { force: true }));
     }
 }

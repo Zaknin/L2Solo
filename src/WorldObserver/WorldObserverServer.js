@@ -1,3 +1,5 @@
+const ClassProgression = invoke('GameServer/ClassProgression');
+const ItemTemplateIndex = require('../GameServer/Item/ItemTemplateIndex');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -8,6 +10,12 @@ const ITEM_ICON_MANIFEST_PATH = path.join(ITEM_ICON_CATALOG_DIR, 'index.json');
 const KNOWLEDGE_BASE_DIR = path.join(__dirname, '..', '..', 'data', 'KnowledgeBase');
 const { searchPlayers } = require('./CharacterSearch');
 const { createKnowledgeBaseService } = require('./KnowledgeBaseService');
+const { createExportedCatalogue } = require('../GameServer/Knowledge/ExportedCatalogueAdapter');
+const GameCatalogue = require('../GameServer/Knowledge/GameDataCatalogue');
+const { createJsonResponseCache, sendCachedJson } = require('./JsonResponseCache');
+const marketJson = createJsonResponseCache(() => marketSnapshot());
+const ActorEconomy = require('./ActorEconomyProjection');
+const { createActorCollections } = require('./ActorCollections');
 const BotBrainContext = invoke('GameServer/Bot/AI/BotBrainContext');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
@@ -83,19 +91,7 @@ const REGION_LABELS = [
 ];
 
 function raidBossCatalog() {
-    const templates = new Map((DataCache.npcs || [])
-        .filter((npc) => npc?.template?.raidBoss === true)
-        .map((npc) => [Number(npc.selfId), npc]));
-    const seen = new Set();
-    return (DataCache.npcSpawns || [])
-        .flatMap((group) => group?.spawns || [])
-        .map((spawn) => ({ spawn, npc: templates.get(Number(spawn?.selfId)) }))
-        .filter(({ spawn, npc }) => {
-            const id = Number(spawn?.selfId || 0);
-            if (!npc || !Number.isInteger(id) || id <= 0 || seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        })
+    return (GameCatalogue.native().raidBossDefinitions() || [])
         .map(({ spawn, npc }) => ({
             id: Number(npc.selfId),
             name: npc.template.name || spawn.name || `Raid boss ${npc.selfId}`,
@@ -214,19 +210,12 @@ function normalizedClassId(value) {
 function className(value) {
     const classId = normalizedClassId(value);
     if (classId === null) return null;
-    return (DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === classId)
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId)
         ?.template?.class || null;
 }
 
 function classCatalog() {
-    return (DataCache.classTemplates || [])
-        .map((template) => ({
-            classId: normalizedClassId(template.classId),
-            className: template.template?.class || null
-        }))
-        .filter((entry) => entry.classId !== null && entry.className)
-        .sort((left, right) => left.className.localeCompare(right.className, 'en', { sensitivity: 'base' }));
+    return ClassProgression.classDirectory(DataCache.classTemplates || []);
 }
 
 const RACE_NAMES = Object.freeze({
@@ -244,8 +233,7 @@ function normalizedRaceId(value, classId = null) {
     }
     const normalized = normalizedClassId(classId);
     if (normalized === null) return null;
-    const raceId = Number((DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === normalized)
+    const raceId = Number(ClassProgression.firstClassRow(DataCache.classTemplates || [], normalized)
         ?.template?.race);
     return Number.isInteger(raceId) && RACE_NAMES[raceId] ? raceId : null;
 }
@@ -466,8 +454,6 @@ function equipmentSlot(slot) {
     return EQUIPMENT_SLOTS[Number(slot)] || (slot ? `slot ${slot}` : 'other');
 }
 
-let itemTemplateIndex = null;
-let itemTemplateSource = null;
 let itemIconCatalogCache = null;
 let knowledgeBaseServiceCache = null;
 let clanOrderItemCatalogSource = null;
@@ -515,7 +501,10 @@ function compactClanGoal(raw) {
     const goal = raw && raw.goal ? raw.goal : raw;
     if (!goal || typeof goal !== 'object') return null;
     const targetItemId = clanNumber(goal.target?.itemId) || null;
-    const targetItemName = goal.target?.itemName || null;
+    const storedItemName = goal.target?.itemName || null;
+    const targetItemName = !storedItemName || storedItemName === `Item ${targetItemId}`
+        ? itemTemplate(targetItemId)?.template?.name || storedItemName
+        : storedItemName;
     const targetIcon = targetItemId ? itemIconFor(null, targetItemId, targetItemName, null) : null;
     const target = goal.target ? {
         itemId: targetItemId,
@@ -1293,7 +1282,10 @@ function knowledgeBaseService() {
         knowledgeBaseServiceCache = createKnowledgeBaseService({
             dataDir: KNOWLEDGE_BASE_DIR,
             progressionRates: ProgressionRates,
-            iconFor: itemIconFor
+            iconFor: itemIconFor,
+            catalogueFactory: createExportedCatalogue,
+            nativeCatalogue: Array.isArray(DataCache.items) && Array.isArray(DataCache.npcs)
+                && require('../GameServer/Items/C4RecipeItems').loadedSource() ? GameCatalogue.native() : null
         });
     }
     return knowledgeBaseServiceCache;
@@ -1313,12 +1305,7 @@ function itemIconFilePath(fileName) {
 }
 
 function itemTemplate(selfId) {
-    const items = DataCache.items || [];
-    if (!itemTemplateIndex || itemTemplateSource !== items) {
-        itemTemplateSource = items;
-        itemTemplateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return itemTemplateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, itemTemplate) || null;
 }
 
 function liveEquippedItems(actor) {
@@ -1639,15 +1626,65 @@ function compactActorClan(subject) {
     };
 }
 
+function observerItem(selfId) {
+    const meta = knowledgeBaseService().itemOverview(Number(selfId));
+    return { selfId: Number(selfId), name: meta?.name || `Item ${selfId}`,
+        iconUrl: meta?.iconUrl || null, grade: meta?.grade || null };
+}
+
+function observerWishName(kind, reference) {
+    if (kind === 'henna') {
+        const symbol = invoke('GameServer/Henna/HennaRules').symbol(reference);
+        return symbol ? ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN'].filter(stat => Number(symbol[stat]))
+            .map(stat => `${stat} ${Number(symbol[stat]) > 0 ? '+' : ''}${symbol[stat]}`).join(' · ') : null;
+    }
+    if (kind === 'book') {
+        const book = invoke('GameServer/Skills/SkillBookCatalog').bookFor(reference);
+        return book ? observerItem(book).name.replace(/^Spellbook:\s*/i, '') : null;
+    }
+    return null;
+}
+
+function actorEconomy(state, session = null) {
+    const decisionStats = { ...state?.stats, ...session?.decisionStats };
+    const held = session && session.economySeq === Number(decisionStats.decisionSeq || 0) ? session.heldEconomy?.statsPacket : null;
+    const stats = { ...decisionStats, ...held };
+    const decision = !session && state ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.inspect(state) : null;
+    const activity = held ? session.heldEconomy.network?.activity : decision?.activity;
+    return ActorEconomy.project({ ...state, stats,
+        adena: session?.actor?.backpack?.fetchTotalAdena?.() ?? state?.adena }, { itemFor: observerItem, wishName: observerWishName, activity });
+}
+
+async function collectionSubject(kind, id) {
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    if (kind === 'bot') {
+        const session = invoke('GameServer/Bot/BotManager').findSessionById(id);
+        const state = session?.coldLifeState || await invoke('GameServer/Bot/Population/BotLifeState').findByCharacterId(id);
+        return session?.actor || state ? { actor: session?.actor || null, state, session } : null;
+    }
+    const session = realPlayerSessions().find(row => Number(row.actor?.fetchId?.()) === id);
+    if (session?.actor) return { actor: session.actor, state: null, session };
+    const rows = await Database.execute(['SELECT id, username FROM characters WHERE id = ?', [id]], 'observer:profile-owner');
+    return rows[0] && !/^(bot_|afk_trade_)/.test(rows[0].username) ? { actor: null, state: null } : null;
+}
+
+const actorCollection = createActorCollections({ subjectFor: collectionSubject,
+    execute: query => Database.execute(query, 'observer:profile-collection'), itemFor: observerItem,
+    shopsFor: id => Database.fetchAfkTradeShops(id, { activeOnly: true }),
+    enemiesFor: subject => invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(
+        subject.session?.pvpEnemyMemory || subject.state?.stats?.pvpEnemies) });
+
 function compactHotDetail(status, session) {
-    const context = BotBrainContext.compactStatus(session, status, '', {
+    const context = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? BotBrainContext.compactStatus(session, status, '', {
         includeInventory: false,
         includeSkills: false
-    });
+    }) : null;
     const pkIds = isPkActor(session?.actor) ? new Set([Number(status.id)]) : new Set();
     return {
         ...compactHotBot(status, pkIds, session),
         kind: 'bot',
+        economy: actorEconomy(session.coldLifeState || invoke('GameServer/Bot/Population/BotLifeState').cachedState(status.id), session),
+        pvp: session.actor?.fetchPvp?.(), pk: session.actor?.fetchPk?.(), karma: session.actor?.fetchKarma?.(),
         clan: compactActorClan(session?.actor),
         vitals: fullVitals(status.vitals),
         movement: status.movement || null,
@@ -1658,15 +1695,15 @@ function compactHotDetail(status, session) {
         buffs: context?.buffs || status.buffs || null,
         debuffs: status.debuffs || [],
         timers: status.timers || {},
-        decisions: Object.fromEntries(Object.entries(status.decisions || {}).map(([key, value]) => [key, compactDecision(value)])),
-        enemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session),
-        interactionMemory: invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(status.id)),
+        decisions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? Object.fromEntries(Object.entries(status.decisions || {}).map(([key, value]) => [key, compactDecision(value)])) : null,
+        enemies: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session) : null,
+        interactionMemory: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(status.id)) : null,
         build: compactBuild(status.build),
-        equipment: compactEquipment(context?.equipment),
+        equipment: context ? compactEquipment(context.equipment) : liveEquipment(session?.actor),
         persona: status.persona || null,
         social: status.social || null,
         ambient: status.ambient || null,
-        inference: status.inference || null,
+        inference: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? status.inference || null : null,
         updatedAt: Date.now()
     };
 }
@@ -1706,9 +1743,9 @@ function compactPlayerDetail(session) {
         pvp: Number(actor.fetchPvp?.() || 0),
         pk: Number(actor.fetchPk?.() || 0),
         karma: Number(actor.fetchKarma?.() || 0),
-        movementPacketTrace: Array.isArray(session.movementPacketTrace)
+        movementPacketTrace: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && Array.isArray(session.movementPacketTrace)
             ? session.movementPacketTrace.slice(-160)
-            : [],
+            : null,
         updatedAt: Date.now()
     };
 }
@@ -1726,7 +1763,7 @@ async function persistedPlayerDetail(characterId) {
             WHERE c.id = ?
             LIMIT 1
         `, [id], { read: true }], 'observer:player-detail'),
-        Database.fetchItems(id)
+        Database.fetchItems(id, 'observer_player_detail')
     ]);
     const row = rows[0];
     if (!row || Number(row.isBot) === 1) return null;
@@ -1791,8 +1828,10 @@ function compactColdDetail(state, leaderState = null) {
     return {
         ...compact,
         kind: 'bot',
-        enemies: invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(stats.pvpEnemies),
-        interactionMemory: invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(state.characterId)),
+        economy: actorEconomy(state),
+        pvp: state.pvp, pk: state.pk, karma: state.karma ?? stats.karma,
+        enemies: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/BotEnemyMemory').normalize(stats.pvpEnemies) : null,
+        interactionMemory: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Social/InteractionMemoryRuntime').inspect(Number(state.characterId)) : null,
         clan: compactActorClan(state),
         classId,
         className: className(classId),
@@ -1824,7 +1863,7 @@ function compactColdDetail(state, leaderState = null) {
             adenaEarned: Number(stats.adenaEarned || 0),
             partyGearReceived: Number(stats.partyGearReceived || 0)
         },
-        lastResolve: lastResolve ? {
+        lastResolve: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) && lastResolve ? {
             route: lastResolve.route || null,
             targetNpcId: Number(lastResolve.targetNpcId || 0) || null,
             fights: Number(lastResolve.fights || 0),
@@ -1833,8 +1872,8 @@ function compactColdDetail(state, leaderState = null) {
         } : null,
         plan: compactColdPlan(state),
         travel: stats.travel || null,
-        goal: stats.goal || null,
-        persona: BotPersona.generate(state),
+        goal: stats.acquisitionGoal || stats.goal || null,
+        persona: BotPersona.of(state),
         updatedAt: state.updatedAt || 0
     };
 }
@@ -2065,27 +2104,32 @@ async function worldBootstrap() {
 
 function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
-    const memory = process.memoryUsage();
+    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
     return {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
         uptimeMs: Math.round(process.uptime() * 1000),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null,
-        coldCompetitionActions: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null,
-        hotCompetitionActions: invoke('GameServer/Bot/AI/HotResourceCompetition').report,
-        partyReviews: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null,
-        clanSocial: invoke('GameServer/Clan/ClanSocialRuntime').summary(),
-        runtime: {
+        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
+        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
+        hotCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
+        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
+        clanSocial: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
+        runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
+            developerDiagnostics: {
+                main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
+                worker: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.developerDiagnostics || null,
+                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false }
+            },
             townNavigation: {
                 paths: invoke('GameServer/Bot/AI/TownNavigation').forPool(invoke('GameServer/Geodata/PathfindingWorkerPool')).stats(),
                 workers: invoke('GameServer/Geodata/PathfindingWorkerPool').stats(),
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
-        }
+        } : null
     };
 }
 
@@ -2161,7 +2205,7 @@ async function snapshot() {
     const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
     const { hotBots, bots, players } = await collectWorldActors();
-    const memory = process.memoryUsage();
+    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
 
     return LifeEvents.recent(18).then((events) => ({
         generatedAt: Date.now(),
@@ -2173,10 +2217,10 @@ async function snapshot() {
         classes: classCatalog(),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null,
-        coldCompetitionActions: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null,
-        partyReviews: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null,
-        runtime: {
+        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
+        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
+        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
+        runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
             townNavigation: {
@@ -2184,7 +2228,7 @@ async function snapshot() {
                 workers: invoke('GameServer/Geodata/PathfindingWorkerPool').stats(),
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
-        },
+        } : null,
         players,
         bots,
         stats: {
@@ -2202,15 +2246,15 @@ async function snapshot() {
 function snapshotJson(now = Date.now()) {
     const ttlMs = observerCacheTtl(now);
     if (snapshotCache.json && now - snapshotCache.generatedAt < ttlMs) {
-        snapshotCache.hits += 1;
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.hits += 1;
         return Promise.resolve(snapshotCache.json);
     }
     if (snapshotCache.inFlight) {
-        snapshotCache.hits += 1;
+        if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.hits += 1;
         return snapshotCache.inFlight;
     }
 
-    snapshotCache.builds += 1;
+    if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) snapshotCache.builds += 1;
     snapshotCache.inFlight = Promise.resolve()
         .then(() => snapshot())
         .then((data) => JSON.stringify(data))
@@ -2235,7 +2279,7 @@ async function botDetail(characterId) {
     const BotManager = invoke('GameServer/Bot/BotManager');
     const hotSession = BotManager.findSessionById(id);
     if (hotSession?.actor) {
-        await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
+        if (PopulationConfig.developerDiagnostics) await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
         const status = BotManager.getBotStatus(hotSession);
         return status?.available ? compactHotDetail(status, hotSession) : null;
     }
@@ -2243,7 +2287,7 @@ async function botDetail(characterId) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
     const state = await LifeState.findByCharacterId(id);
     if (!state) return null;
-    await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
+    if (PopulationConfig.developerDiagnostics) await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([id]);
 
     const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0) || null;
     let leaderState = leaderId === id ? state : null;
@@ -2263,8 +2307,8 @@ async function botDetail(characterId) {
             leaderState = await LifeState.findByCharacterId(leaderId);
         }
     }
-    const rows = await Database.execute(['SELECT karma FROM characters WHERE id = ?', [id]]);
-    return compactColdDetail({ ...state, karma: Number(rows[0]?.karma || 0) }, leaderState);
+    const rows = await Database.execute(['SELECT karma, pvp, pk FROM characters WHERE id = ?', [id]]);
+    return compactColdDetail({ ...state, karma: Number(rows[0]?.karma || 0), pvp: rows[0]?.pvp, pk: rows[0]?.pk }, leaderState);
 }
 
 async function actorDetail(kind, characterId) {
@@ -2482,42 +2526,46 @@ function sendFile(request, response, filePath) {
     });
 }
 
-function route(request, response) {
-    const url = new URL(request.url, 'http://localhost');
+// The bare roots redirect to the application. Returns true when it answered the request.
+function redirectObserverRoot(response, url) {
     if (url.pathname === '/' || url.pathname === '/observer') {
         response.writeHead(302, { Location: '/observer/' });
         response.end();
-        return;
+        return true;
     }
+    return false;
+}
 
+// World reads: the cached snapshot, the bootstrap frame, character search, clan social state and world status. Returns true when it answered the request.
+function serveWorldReads(request, response, url) {
     if (url.pathname === '/observer/api/snapshot') {
         snapshotJson()
             .then((json) => sendSnapshotJson(request, response, json))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/world/bootstrap') {
         worldBootstrap()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/characters/search') {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         searchPlayers({ execute: (query) => Database.execute(query, 'observer:character-search'),
             query: url.searchParams.get('q'), limit: url.searchParams.get('limit'), classes: classCatalog(),
             onlineIds: realPlayerSessions().map((session) => session.actor.fetchId()) })
             .then((characters) => sendJson(response, { characters }))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clans/social') {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
-        sendJson(response, invoke('GameServer/Clan/ClanSocialRuntime').inspect());
-        return;
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
+        sendJson(response, (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').inspect() : { enabled: false });
+        return true;
     }
     if (url.pathname === '/observer/api/world/status') {
         try {
@@ -2525,57 +2573,69 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Loopback-only control: teleport an online player to a live raid boss. Returns true when it answered the request.
+function handleTeleportControl(request, response, url) {
     if (url.pathname === '/observer/api/control/teleport-player-to-raid') {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         if (!loopbackRequest(request)) {
             sendJson(response, { ok: false, error: 'loopback_only' }, 403);
-            return;
+            return true;
         }
         readJsonBody(request)
             .then((payload) => teleportPlayerToRaid(payload.playerName, payload.bossTemplateId))
             .then((result) => sendJson(response, result, result.ok ? 200 : 400))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Market reads: the cached market listing and one item's price history. Returns true when it answered the request.
+function serveMarketReads(request, response, url) {
     if (url.pathname === '/observer/api/market') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
-        marketSnapshot()
-            .then((data) => sendJson(response, data))
+        marketJson()
+            .then((entry) => sendCachedJson(request, response, entry))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/market/history') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
         marketHistorySnapshot(url.searchParams.get('itemId'), url.searchParams.get('range'))
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, /invalid_market_item/.test(err.message) ? 400 : 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Knowledge base reads: catalogue meta, item and NPC lists and details. Returns true when it answered the request.
+function serveKnowledgeReads(response, url) {
     if (url.pathname === '/observer/api/knowledge/meta') {
         try {
             sendJson(response, knowledgeBaseService().meta());
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/knowledge/items') {
@@ -2584,7 +2644,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     const knowledgeItemMatch = url.pathname.match(/^\/observer\/api\/knowledge\/items\/(\d+)$/);
@@ -2595,7 +2655,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/knowledge/npcs') {
@@ -2604,7 +2664,7 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
 
     const knowledgeNpcMatch = url.pathname.match(/^\/observer\/api\/knowledge\/npcs\/(\d+)$/);
@@ -2615,9 +2675,13 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Incremental world changes, the clan list and the clan-order item search. Returns true when it answered the request.
+function serveChangesAndClanReads(request, response, url) {
     if (url.pathname === '/observer/api/world/changes') {
         worldChanges(url.searchParams.get('since'))
             .then((data) => {
@@ -2633,21 +2697,21 @@ function route(request, response) {
                 sendJson(response, data);
             })
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clans') {
         clanSnapshot()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     if (url.pathname === '/observer/api/clan-order-items') {
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET' });
             response.end();
-            return;
+            return true;
         }
         try {
             sendJson(response, {
@@ -2657,13 +2721,17 @@ function route(request, response) {
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
+// Player-managed clan orders: craft preview, create, edit and state transitions. Returns true when it answered the request.
+function handleClanOrderRoutes(request, response, url) {
     const craftPreviewMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/craft-preview$/);
     if (craftPreviewMatch) {
         if (request.method !== 'POST') {
-            response.writeHead(405, { Allow: 'POST' }); response.end(); return;
+            response.writeHead(405, { Allow: 'POST' }); response.end(); return true;
         }
         readJsonBody(request, 32768).then(async payload => {
             const clan = await ClanGoalService.clanProjectionById(Number(craftPreviewMatch[1]));
@@ -2683,7 +2751,7 @@ function route(request, response) {
             return { ok: true, plan: { kind: plan.kind, reasonCode: plan.reasonCode, craft } };
         }).then(result => sendJson(response, result, result.ok ? 200 : 400))
             .catch(err => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderCreateMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders$/);
@@ -2691,13 +2759,13 @@ function route(request, response) {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request, 32768)
             .then((payload) => createPlayerManagedClanOrder(clanOrderCreateMatch[1], payload))
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderEditMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders\/(\d+)$/);
@@ -2705,7 +2773,7 @@ function route(request, response) {
         if (request.method !== 'PATCH') {
             response.writeHead(405, { Allow: 'PATCH' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request, 32768)
             .then(async (payload) => {
@@ -2715,7 +2783,7 @@ function route(request, response) {
             })
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
 
     const clanOrderTransitionMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/orders\/(\d+)\/(pause|resume|replan|cancel)$/);
@@ -2723,7 +2791,7 @@ function route(request, response) {
         if (request.method !== 'POST') {
             response.writeHead(405, { Allow: 'POST' });
             response.end();
-            return;
+            return true;
         }
         readJsonBody(request)
             .then((payload) => transitionPlayerManagedClanOrder(
@@ -2734,9 +2802,13 @@ function route(request, response) {
             ))
             .then((result) => sendJson(response, result, clanOrderMutationStatus(result)))
             .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Clan crest: read (GET), replace (POST) and delete (DELETE) on one path. Returns true when it answered the request.
+function handleClanCrest(request, response, url) {
     const clanCrestMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)\/crest$/);
     if (clanCrestMatch) {
         if (request.method === 'POST') {
@@ -2744,34 +2816,38 @@ function route(request, response) {
                 .then((payload) => updatePlayerManagedClanCrest(clanCrestMatch[1], payload))
                 .then((result) => sendJson(response, result, clanCrestMutationStatus(result)))
                 .catch((err) => sendJson(response, { ok: false, error: err.message }, err.statusCode || 500));
-            return;
+            return true;
         }
         if (request.method === 'DELETE') {
             deletePlayerManagedClanCrest(clanCrestMatch[1])
                 .then((result) => sendJson(response, result, clanCrestMutationStatus(result)))
                 .catch((err) => sendJson(response, { ok: false, error: err.message }, 500));
-            return;
+            return true;
         }
         if (request.method !== 'GET') {
             response.writeHead(405, { Allow: 'GET, POST, DELETE' });
             response.end();
-            return;
+            return true;
         }
         clanCrest(clanCrestMatch[1])
             .then((crest) => crest
                 ? sendClanCrest(request, response, crest, url)
                 : sendJson(response, { error: 'Clan crest not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Detail reads: bot relationships, clan, bot, actor collections and actor detail. Returns true when it answered the request.
+function serveDetailReads(request, response, url) {
     const relationshipMatch = url.pathname.match(/^\/observer\/api\/bot\/(\d+)\/relationships$/);
     if (relationshipMatch) {
-        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return; }
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         invoke('WorldObserver/Relationships').detail(relationshipMatch[1])
             .then(data => sendJson(response, data || { error: 'Bot not found' }, data ? 200 : 404))
             .catch(err => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     const clanMatch = url.pathname.match(/^\/observer\/api\/clan\/(\d+)$/);
@@ -2781,7 +2857,7 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Clan not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
 
     const botMatch = url.pathname.match(/^\/observer\/api\/bot\/(\d+)$/);
@@ -2791,7 +2867,17 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Bot not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
+    }
+
+    const collectionMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)\/(inventory|warehouse|skills|pvp|board)$/);
+    if (collectionMatch) {
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
+        actorCollection(collectionMatch[1], Number(collectionMatch[2]), collectionMatch[3], {
+            offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 100)
+        }).then(data => sendJson(response, data || { error: 'Character not found' }, data ? 200 : 404))
+            .catch(error => sendJson(response, { error: error.message }, error.message === 'invalid_profile_collection' ? 400 : 500));
+        return true;
     }
 
     const actorMatch = url.pathname.match(/^\/observer\/api\/actor\/(bot|player)\/(\d+)$/);
@@ -2801,11 +2887,15 @@ function route(request, response) {
                 ? sendJson(response, data)
                 : sendJson(response, { error: 'Actor not found' }, 404))
             .catch((err) => sendJson(response, { error: err.message }, 500));
-        return;
+        return true;
     }
+    return false;
+}
 
+// Static delivery: item icons, application pages and public files under /observer/. Returns true when it answered the request.
+function serveStatic(request, response, url) {
     if (url.pathname === '/observer/item-icons/supplemental.json') {
-        sendFile(request, response, path.join(ITEM_ICON_CATALOG_DIR, 'supplemental.json')); return;
+        sendFile(request, response, path.join(ITEM_ICON_CATALOG_DIR, 'supplemental.json')); return true;
     }
 
     const itemIconMatch = url.pathname.match(/^\/observer\/item-icons\/([^/]+)$/);
@@ -2820,25 +2910,25 @@ function route(request, response) {
         if (!filePath) {
             response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
             response.end('Not found');
-            return;
+            return true;
         }
         sendFile(request, response, filePath);
-        return;
+        return true;
     }
 
     if (/^\/observer\/database(?:\/(?:items|npcs)(?:\/\d+)?)?\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'knowledge-base.html'));
-        return;
+        return true;
     }
 
     if (/^\/observer\/market\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'market.html'));
-        return;
+        return true;
     }
 
     if (/^\/observer\/(?:world|overview|characters|parties|dungeons\/[a-z0-9_-]+|rankings|raid-bosses(?:\/\d+)?|clans(?:\/\d+)?(?:\/map)?|actors\/(?:bot|player)\/\d+)\/?$/.test(url.pathname)) {
         sendFile(request, response, path.join(PUBLIC_DIR, 'index.html'));
-        return;
+        return true;
     }
 
     if (url.pathname.startsWith('/observer/')) {
@@ -2848,11 +2938,27 @@ function route(request, response) {
         if (!filePath.startsWith(PUBLIC_DIR)) {
             response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
             response.end('Forbidden');
-            return;
+            return true;
         }
         sendFile(request, response, filePath);
-        return;
+        return true;
     }
+    return false;
+}
+
+// Checks run in this exact order; each group answers or passes the request on.
+function route(request, response) {
+    const url = new URL(request.url, 'http://localhost');
+    if (redirectObserverRoot(response, url)) return;
+    if (serveWorldReads(request, response, url)) return;
+    if (handleTeleportControl(request, response, url)) return;
+    if (serveMarketReads(request, response, url)) return;
+    if (serveKnowledgeReads(response, url)) return;
+    if (serveChangesAndClanReads(request, response, url)) return;
+    if (handleClanOrderRoutes(request, response, url)) return;
+    if (handleClanCrest(request, response, url)) return;
+    if (serveDetailReads(request, response, url)) return;
+    if (serveStatic(request, response, url)) return;
 
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     response.end('Not found');
@@ -2909,8 +3015,10 @@ const WorldObserverServer = {
     worldStatus,
     marketSnapshot,
     marketHistorySnapshot,
+    actorCollection,
     observerCacheTtl,
     snapshotCacheStats() {
+        if (!(invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true)) return { enabled: false };
         return {
             generatedAt: snapshotCache.generatedAt,
             etag: snapshotCache.etag,

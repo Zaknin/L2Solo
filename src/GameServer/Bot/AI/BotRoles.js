@@ -14,6 +14,9 @@ const ROLE_CLASSES = {
 };
 const DWARF_CLASS_IDS = new Set([53, 54, 55, 56, 57, 117, 118]);
 const SPOILER_CLASS_IDS = new Set([53, 54, 55, 117]);
+// The C4 craft classes: Artisan, Warsmith and Maestro. Spoiler dwarves learn
+// Create Item from their class line but do not craft.
+const CRAFTER_CLASS_IDS = new Set([56, 57, 118]);
 const MANA_REST_ROLES = new Set(['mage', 'archer', 'healer']);
 // Prophet and the Orc mystic line cast as their primary party job. Sword
 // Singer and Bladedancer share the buffer role, but they are melee fighters
@@ -44,8 +47,7 @@ function normalizedClassId(value) {
 function className(value) {
     const classId = normalizedClassId(value);
     if (classId === null) return null;
-    return (DataCache.classTemplates || [])
-        .find((template) => Number(template.classId) === classId)
+    return ClassProgression.firstClassRow(DataCache.classTemplates || [], classId)
         ?.template?.class || null;
 }
 
@@ -81,6 +83,10 @@ function isSpoiler(value) {
 
     const level = levelOf(value);
     return DWARF_CLASS_IDS.has(classId) && level !== null && level < 40;
+}
+
+function isCrafterClass(value) {
+    return CRAFTER_CLASS_IDS.has(normalizedClassId(value));
 }
 
 function inferRole(value) {
@@ -200,6 +206,7 @@ module.exports = {
     className,
     roleClassId,
     isSpoiler,
+    isCrafterClass,
     presentation,
     inferRole,
     combatRoleFor,

@@ -1,9 +1,14 @@
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
-const Database = invoke('Database');
+// ARCH-NOTE: Pure stock plans also run in guarded workers; load SQL only
+// when an existing persistence branch is reached, before actor mutations.
+let database;
+const persistenceDatabase = () => database ||= invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility');
+const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 
+const BeginnerShots = require('../Items/C4BeginnerShots');
 const DEFAULT_TARGET_AMOUNT = 1000;
 const PURCHASE_TARGET_AMOUNT = 3000;
 const WEAPON_SLOTS = new Set([7, 14]);
@@ -37,8 +42,8 @@ const BLESSED_SPIRITSHOT_BY_RANK = {
 
 // Quest rewards use these no-grade variants. They carry the same charge
 // skills as the shop shots, but are separate item ids and must remain usable.
-const BEGINNER_SOULSHOT_IDS = [5789];
-const BEGINNER_SPIRITSHOT_IDS = [5790];
+const BEGINNER_SOULSHOT_IDS = [BeginnerShots.SOULSHOT];
+const BEGINNER_SPIRITSHOT_IDS = [BeginnerShots.SPIRITSHOT];
 const SOULSHOT_IDS = Object.values(SOULSHOT_BY_RANK);
 const SPIRITSHOT_IDS = Object.values(SPIRITSHOT_BY_RANK);
 const BLESSED_SPIRITSHOT_IDS = Object.values(BLESSED_SPIRITSHOT_BY_RANK);
@@ -85,12 +90,112 @@ function weaponRankFromActor(actor) {
     return 'none';
 }
 
-function weaponRankFromRows(rows = []) {
-    const equippedWeapon = rows.find((row) => {
-        if (Number(row.equipped) !== 1 && row.equipped !== true) return false;
-        return WEAPON_SLOTS.has(Number(row.slot || 0));
+function isEquipped(item) {
+    return item?.equipped === true || Number(item?.equipped) === 1 || Number(item?.equippedCount || 0) > 0;
+}
+
+// The equipped weapon among a bot's items, database rows or the cold inventory
+// summary, or null. With two equipped weapons the lowest template id (selfId)
+// wins: the summary has no item object id to compare.
+function equippedWeapon(items) {
+    let weapon = null;
+    for (const item of Object.values(items || {})) {
+        if (!isEquipped(item) || !WEAPON_SLOTS.has(Number(item.slot || 0))) continue;
+        if (!weapon || Number(item.selfId) < Number(weapon.selfId)) weapon = item;
+    }
+    return weapon;
+}
+
+// A bot's shot from its cold state, as hot auto shots load it (planFor): its
+// class's kind at the equipped weapon's grade, and how many the weapon takes
+// per charge (perAction, the weapon's count as hot charges it; 0 without a
+// weapon, so no shot loads).
+function planForState(state) {
+    const weapon = equippedWeapon(state?.inventory);
+    const plan = planFor({
+        classId: Number(state?.stats?.classId || state?.classId || 0),
+        rank: weapon ? itemRank(weapon.selfId) : 'none'
     });
-    return equippedWeapon ? itemRank(equippedWeapon.selfId) : 'none';
+    const count = weapon ? templateFor(weapon.selfId)?.etc?.[plan.kind === 'soulshot' ? 'soulshot' : 'spiritshot'] : 0;
+    return { ...plan, perAction: Math.max(0, Number(count) || 0) };
+}
+
+function starterPlanFor(classId) {
+    const plan = planFor({ classId });
+    const grant = BeginnerShots.grant(plan.kind);
+    return { ...plan, ...grant, name: itemName(grant.selfId), price: 0 };
+}
+
+// Creation-only caller; resuming existing generated bots never calls this.
+function ensureStarterStock(characterId, classId) {
+    const plan = starterPlanFor(classId);
+    return ensureCharacterStock(characterId, { classId, plan, targetAmount: plan.amount });
+}
+
+function beginnerAmount(state, plan = planForState(state)) {
+    const selfId = BeginnerShots.selfIdFor(plan.kind, plan.rank);
+    return selfId ? Math.max(0, Number(state.inventory?.[selfId]?.amount) || 0) : 0;
+}
+
+function combatPlanForState(state) {
+    const plan = planForState(state);
+    const selfId = BeginnerShots.selfIdFor(plan.kind, plan.rank);
+    return selfId && plan.perAction > 0 && beginnerAmount(state, plan) >= plan.perAction
+        ? { ...plan, selfId, name: itemName(selfId), price: 0 } : plan;
+}
+
+// A shared bounded encounter decision; never builds the wish graph or reads SQL.
+// The stock review supplies its existing table/hunt reads. Combat preparation
+// can read the same static table and at most eight of the owner's hunt samples.
+function usePolicy(state, prepared = {}) {
+    const plan = prepared.plan || planForState(state);
+    const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+    const Table = invoke('GameServer/Bot/AI/SpotValueTable');
+    let best = prepared.bestTable, without = prepared.withoutShots, hour = prepared.hourAdena;
+    if (!Object.hasOwn(prepared, 'bestTable')) {
+        const role = state.party?.role || state.stats?.role || BotRoles.inferRole(state.stats?.classId || 0);
+        const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+        const hunt = Hunt.huntIncome(state, prepared.timestamp || Date.now(), prepared.mode);
+        const spot = hunt.spotId || state.spotId;
+        best = (spot && Table.value(spot, tableRole, state.level, hunt.useShots !== false))
+            || Table.best(tableRole, state.level, hunt.useShots !== false);
+        without = spot ? Table.value(spot, tableRole, state.level, false) : null;
+        hour = Hunt.huntHour(hunt, state);
+    }
+    const rawUse = plan.perAction > 0 ? Math.max(0, Number(best?.shots) || 0) : 0;
+    const benefit = Math.max(0, 1 - Math.max(0, Number(without?.exp) || 0) / Math.max(1, Number(best?.exp) || 0));
+    const buyback = BeginnerShots.isRestricted(plan.selfId) ? 0
+        : invoke('GameServer/Items/NpcSellRules').npcBuyPrice(itemPrice(plan.selfId));
+    const affordableUse = cost => rawUse > 0 && Number(hour) > 0 && benefit >= rawUse * cost / hour ? rawUse : 0;
+    const paidUsePerHour = affordableUse(buyback);
+    const beginnerUsePerHour = affordableUse(0);
+    const usePerHour = beginnerAmount(state, plan) >= plan.perAction && plan.perAction > 0
+        ? beginnerUsePerHour : paidUsePerHour;
+    return { itemId: plan.selfId, rawUse, benefit, usePerHour, beginnerUsePerHour, paidUsePerHour,
+        purchaseUsePerHour: !BeginnerShots.isRestricted(plan.selfId) && paidUsePerHour > 0
+            ? affordableUse(Number(prepared.unitPrice ?? Infinity)) : 0 };
+}
+
+// Personal ammunition stays usable when a hunt forecast or bag interval
+// shrinks. Only a native crafter can treat its current shot as production
+// surplus; an older grade becomes spare after changing the weapon.
+function isPersonalShot(state, selfId) {
+    if (!SHOT_IDS.includes(Number(selfId))) return false;
+    const plan = planForState(state);
+    return Number(selfId) === plan.selfId && plan.perAction > 0
+        && !invoke('GameServer/Bot/Economy/CraftEligibility').isServiceCrafter(state);
+}
+
+function keptAmounts(state, basics = null, row = null) {
+    // The stock rule needs no wish network (L25); row: a shots stock row
+    // already read (itemId, target, beginnerCurrent).
+    const stock = row || (basics || invoke('GameServer/Bot/Economy/EconomyContext').basics(state)).stock('shots');
+    const kept = { [stock.itemId]: Math.max(0, stock.target - (stock.beginnerCurrent || 0)) };
+    const plan = planForState(state);
+    if (isPersonalShot(state, plan.selfId)) {
+        kept[plan.selfId] = Math.max(kept[plan.selfId] || 0, Number(state.inventory?.[plan.selfId]?.amount) || 0);
+    }
+    return kept;
 }
 
 function planFor({ classId, rank = 'none' } = {}) {
@@ -138,6 +243,15 @@ function kindForSelfId(selfId) {
     return null;
 }
 
+// The shot an action loads (Attack.chargeShotForSkill, used by hot and cold
+// combat): a spell a spiritshot, a physical skill a soulshot unless its
+// ssBoost is 0, a normal attack (no skill, so no ssBoost) a soulshot. A cast
+// or a skill spends its shot at use; a normal attack only when the hit lands.
+function actionShotKind(magic, ssBoost) {
+    if (magic) return 'spiritshot';
+    return Number(ssBoost) <= 0 ? null : 'soulshot';
+}
+
 function isCompatibleWithActor(kind, selfId, actor) {
     const id = Number(selfId);
     const rank = weaponRankFromActor(actor);
@@ -148,27 +262,63 @@ function isCompatibleWithActor(kind, selfId, actor) {
     );
 }
 
-function enableAutoShot(actor) {
+// Hot combat only checks scalar inputs; an input change prepares the shared
+// allowance once. Weak ownership releases it with the actor, never on a timer.
+const autoUse = new WeakMap();
+function autoInputs(actor, held) {
+    const session = actor.session, state = session?.coldLifeState, stats = state?.stats;
+    const classId = actor.fetchClassId?.(), level = actor.fetchLevel?.();
+    const weaponId = actor.backpack?.paperdoll?.[7]?.selfId || actor.backpack?.paperdoll?.[14]?.selfId;
+    const equipmentRevision = actor.backpack?.equipmentRevision;
+    const weapon = actor.backpack?.fetchEquippedWeapon?.();
+    const shotKind = classWantsSpiritshots(classId) ? 'spiritshot' : 'soulshot';
+    const beginnerId = BeginnerShots.selfIdFor(shotKind, weaponRankFromActor(actor));
+    const beginner = beginnerId ? actor.backpack?.fetchItemFromSelfId?.(beginnerId) : null;
+    const charge = shotKind === 'soulshot' ? weapon?.fetchSoulshot?.() : weapon?.fetchSpiritshot?.();
+    const beginnerReady = !!beginner && Number(beginner.fetchAmount?.()) >= Math.max(1, Number(charge) || 1);
+    const spotId = session?.currentSpot?.id || state?.spotId;
+    const partyId = session?.hotBackgroundPartyId;
+    const role = state?.party?.role || stats?.role, huntAt = stats?.huntClock?.at;
+    if (held && held.classId === classId && held.level === level && held.weaponId === weaponId
+        && held.beginnerReady === beginnerReady && held.equipmentRevision === equipmentRevision && held.spotId === spotId && held.partyId === partyId && held.role === role && held.huntAt === huntAt) return held;
+    return { classId, level, weaponId, equipmentRevision, beginnerReady, spotId, partyId, role, huntAt };
+}
+function refreshAutoShot(actor) {
+    const held = autoUse.get(actor), inputs = autoInputs(actor, held);
+    if (inputs !== held) enableAutoShot(actor, { inputs });
+}
+function enableAutoShot(actor, options = {}) {
     if (!actor?.backpack) return null;
 
     const plan = planForActor(actor);
-    if (!actor.backpack.fetchItemFromSelfId?.(plan.selfId)) return null;
-
     const enabled = actor.autoSoulshots instanceof Set
         ? actor.autoSoulshots
         : new Set(actor.autoSoulshots || []);
     // A bot has one combat profile. Remove an old grade/kind after an equipment
     // upgrade so a physical weapon never keeps a caster shot (or vice versa).
     SHOT_IDS.forEach((selfId) => enabled.delete(selfId));
-    enabled.add(plan.selfId);
+    // Spawn and weapon refresh have no held review yet; use only the actor's
+    // physical inventory and own hunt samples, not a new economic graph.
+    const stock = options.stock || usePolicy(invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(actor));
+    const allowed = Number(stock.itemId) === plan.selfId && (stock.ownedUsePerHour ?? stock.usePerHour) > 0;
+    // Auto mode may outlive an empty stack; native charging still requires
+    // physical units. A useful gift need not justify buying replacement stock.
+    const beginnerId = BeginnerShots.selfIdFor(plan.kind, plan.rank);
+    const inputs = options.inputs || autoInputs(actor);
+    if (inputs.beginnerReady && (stock.beginnerUsePerHour ?? stock.usePerHour) > 0) enabled.add(beginnerId);
+    if (allowed && (stock.paidUsePerHour ?? stock.usePerHour) > 0) enabled.add(plan.selfId);
     actor.autoSoulshots = enabled;
-    return plan;
+    autoUse.set(actor, inputs);
+    const activeId = enabled.has(beginnerId) ? beginnerId : allowed ? plan.selfId : null;
+    return activeId && actor.backpack.fetchItemFromSelfId?.(activeId)
+        ? { ...plan, selfId: activeId, name: itemName(activeId), price: itemPrice(activeId) } : null;
 }
 
 function planForRows(rows, classId) {
+    const weapon = equippedWeapon(rows);
     return planFor({
         classId,
-        rank: weaponRankFromRows(rows || [])
+        rank: weapon ? itemRank(weapon.selfId) : 'none'
     });
 }
 
@@ -199,13 +349,13 @@ function ensureActorStock(actor, options = {}) {
 
     if (current) {
         const delta = targetAmount - currentAmount;
-        return Database.updateItemAmount(actor.fetchId(), current.fetchId(), targetAmount).then(() => {
+        return persistenceDatabase().updateItemAmount(actor.fetchId(), current.fetchId(), targetAmount).then(() => {
             current.setAmount(targetAmount);
             return { changed: true, plan, amount: targetAmount, delta };
         });
     }
 
-    return Database.setItem(actor.fetchId(), {
+    return persistenceDatabase().setItem(actor.fetchId(), {
         selfId: plan.selfId,
         name: plan.name,
         amount: targetAmount,
@@ -222,7 +372,7 @@ function ensureCharacterStock(characterId, options = {}) {
     if (!id) return Promise.resolve({ changed: false, reason: 'missing_character' });
 
     const targetAmount = Number(options.targetAmount || DEFAULT_TARGET_AMOUNT);
-    return Database.fetchItems(id).then((rows) => {
+    return persistenceDatabase().fetchItems(id, 'shot_stock').then((rows) => {
         const plan = options.plan || planForRows(rows || [], options.classId ?? characterId?.classId);
         const current = existingRow(rows, plan.selfId);
         const currentAmount = Number(current?.amount || 0);
@@ -233,7 +383,7 @@ function ensureCharacterStock(characterId, options = {}) {
 
         if (current) {
             const delta = targetAmount - currentAmount;
-            return Database.updateItemAmount(id, current.id, targetAmount).then(() => ({
+            return persistenceDatabase().updateItemAmount(id, current.id, targetAmount).then(() => ({
                 changed: true,
                 plan,
                 amount: targetAmount,
@@ -241,7 +391,7 @@ function ensureCharacterStock(characterId, options = {}) {
             }));
         }
 
-        return Database.setItem(id, {
+        return persistenceDatabase().setItem(id, {
             selfId: plan.selfId,
             name: plan.name,
             amount: targetAmount,
@@ -256,64 +406,182 @@ function ensureCharacterStock(characterId, options = {}) {
     });
 }
 
+// What the bot's healing-potion restock (HealingPotionStock.restockPlan) costs
+// now: survival first, so the shot restock leaves this money for the potions.
+// The potion price is the caller's local NPC price, else the cheapest NPC price.
+function potionRestockCost(value, inventory, adena, reserve, potionUnitPrice) {
+    const Potions = invoke('GameServer/Bot/AI/HealingPotionStock');
+    const potion = Potions.purchasePotionFor(value);
+    const unitPrice = Number(potionUnitPrice ?? invoke('GameServer/Bot/Economy/StaticMerchantPricing')
+        .cheapestPurchase(potion.selfId));
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) return 0;
+    return Potions.restockPlan(value, { potion, inventory: inventory || undefined, adena, reserve, unitPrice }).cost;
+}
+
+// One restock rule for hot and cold bots, like HealingPotionStock.restockPlan:
+// below 1,000 shots a bot buys up to 3,000, first from players' shops cheaper
+// than the NPC (cheapest first, as many as needed), then from the NPC, and
+// spends only what is above its consumables reserve (PurchaseFunding) and the
+// cost of its healing-potion restock (survival first, user 2026-10-04).
+// `value` is a hot actor or a cold state; the NPC price is the one unit price.
+function restockPlan(value, options = {}) {
+    const actor = !!value?.backpack;
+    const plan = options.plan || (actor ? planForActor(value) : planForState(value));
+    const inventory = options.inventory || (actor ? null : value?.inventory);
+    let currentAmount = inventory
+        ? Number(inventory[String(plan.selfId)]?.amount || 0)
+        : shotAmount(value, plan);
+    const adena = Math.max(0, Number(options.adena ?? (actor
+        ? value.backpack.fetchItemFromSelfId?.(57)?.fetchAmount?.() : value?.adena) ?? 0) || 0);
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const state = actor ? Economy.stateForActor(value) : value;
+    currentAmount += beginnerAmount(state, plan);
+    const coldMain = require('node:worker_threads').isMainThread && state?.phase === 'cold';
+    const context = options.context || (coldMain ? Economy.basics(state) : Economy.forState(state));
+    const stock = context.stock('shots');
+    const targetAmount = Math.max(0, Number(options.targetAmount ?? stock.target) || 0);
+    const reserve = context.survivalReserve;
+    const unitPrice = Number(options.unitPrice ?? invoke('GameServer/Bot/Economy/StaticMerchantPricing')
+        .botPurchasePrice(plan.selfId));
+    const npcPrice = Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice : 0;
+    const wish = options.targetAmount === undefined ? context.network?.queue?.find(row => Number(row.object?.itemId) === Number(plan.selfId)) : null;
+    const fundedState = !coldMain && options.targetAmount === undefined && context.statsPacket
+        ? { ...state, stats: { ...state.stats, money: context.statsPacket.money } } : state;
+    // The wish's rank at the price each source asks (E187): the board lines
+    // at the cheapest line's price, the NPC remainder at the NPC's.
+    const allowanceAt = price => PurchaseFunding.stockAllowance(fundedState, wish, plan.selfId,
+        context.kitCost(plan.selfId, price), PurchaseFunding.quoteScale(stock.unitPrice, price));
+    const allowance = allowanceAt(npcPrice);
+    const maxPrice = npcPrice > 0 ? npcPrice - 1 : invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state).worth(plan.selfId);
+    // The players' lines cheaper than the NPC, cheapest first, then the NPC:
+    // the one rule for a stack purchase (OfferQuery.fill).
+    const offers = [...(options.offers || [])].sort((a, b) => Number(a.price) - Number(b.price));
+    const cheapest = offers.find(offer => Number(offer.price) > 0 && Number(offer.price) <= maxPrice);
+    const boardAllowance = cheapest ? allowanceAt(Number(cheapest.price)) : allowance;
+    const needed = Math.max(allowance, boardAllowance) > 0 && currentAmount < (options.targetAmount !== undefined ? targetAmount : stock.survivalTarget);
+    const left = needed ? Math.max(0, targetAmount - currentAmount) : 0;
+    const potionCost = needed ? potionRestockCost(value, inventory, adena, reserve, options.potionUnitPrice) : 0;
+    const free = Math.max(0, adena - potionCost);
+    const money = Math.min(boardAllowance, free);
+    const filled = invoke('GameServer/Bot/Economy/OfferQuery').fill(offers, left, { money, maxPrice });
+    // Each line carries the terms it was budgeted with to the native writer.
+    const shops = filled.lines.map(({ line, count, price }) => ({ offer: line, price, amount: count, cost: count * price,
+        funding: PurchaseFunding.stockTerms(wish, plan.selfId, context.kitCost(plan.selfId, price)) }));
+    const shopAmount = shops.reduce((sum, line) => sum + line.amount, 0);
+    const shopCost = shops.reduce((sum, line) => sum + line.cost, 0);
+    const npcBudget = Math.min(allowance, free);
+    const npcAmount = npcRestockAmount({ needed, targetAmount, currentAmount, unitPrice: npcPrice, npcBudget }, shopAmount, shopCost);
+    return {
+        plan,
+        currentAmount,
+        targetAmount,
+        needed,
+        shops,
+        npcAmount,
+        unitPrice: npcPrice,
+        amount: shopAmount + npcAmount,
+        cost: shopCost + npcAmount * npcPrice,
+        spendBudget: money,
+        npcBudget,
+        adena,
+        reserve,
+        potionCost
+    };
+}
+
+// The NPC part of a restock (restockPlan): the remaining hours of stock with the money
+// left after the players' shops, within the wish's allowance at the NPC's
+// price (npcBudget, E187). `bought` and `spent` are what the shop lines
+// bought, so a line that fails at purchase leaves its shots and money to the NPC.
+function npcRestockAmount(restock, bought = 0, spent = 0) {
+    if (!restock.needed || !(restock.unitPrice > 0)) return 0;
+    const left = restock.targetAmount - restock.currentAmount - bought;
+    const money = Math.max(0, (restock.npcBudget ?? restock.spendBudget
+        ?? (restock.adena - restock.reserve - restock.potionCost)) - spent);
+    return Math.max(0, Math.min(left, Math.floor(money / restock.unitPrice)));
+}
+
+// A hot bot's restock (restockPlan) on its trip: the players' shops, then the NPC.
 async function purchaseActorRestock(actor, options = {}) {
     if (!actor?.backpack || typeof actor.fetchId !== 'function') {
         return { ok: false, reason: 'missing_actor' };
     }
 
-    const targetAmount = Number(options.targetAmount || PURCHASE_TARGET_AMOUNT);
     const plan = options.plan || planForActor(actor);
-    const currentAmount = shotAmount(actor, plan);
-    const missingAmount = Math.max(0, targetAmount - currentAmount);
-    if (missingAmount <= 0) return { ok: true, changed: false, plan, amount: currentAmount, cost: 0 };
-
-    const staticPrice = invoke('GameServer/Bot/Economy/StaticMerchantPricing')
-        .cheapestPurchase(plan.selfId);
-    const unitPrice = Number.isFinite(staticPrice) ? Math.max(1, Number(plan.price || 0), staticPrice)
-        : Math.max(1, Number(plan.price || 0));
-    const fullCost = missingAmount * unitPrice;
-    const adenaItem = actor.backpack.fetchItemFromSelfId(57);
-    let adena = Number(adenaItem?.fetchAmount ? adenaItem.fetchAmount() : 0);
-    let remaining = missingAmount;
-    let marketCost = 0;
     const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
-    const offers = AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId() })
-        .filter((offer) => Number(offer.price) > 0 && Number(offer.price) < unitPrice && Number(offer.count) > 0)
-        .sort((a, b) => Number(a.price) - Number(b.price)).slice(0, 4);
-    for (const offer of offers) {
-        const quantity = Math.min(remaining, Number(offer.count), Math.floor(adena / Number(offer.price)));
-        if (quantity <= 0) continue;
+    // The board's lines of the town the bot stands in (б5: a deal is made in
+    // the seller's town); away from a town, only the merchant's price.
+    const town = options.town ?? invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor);
+    const botActor = actor.session?.actor === actor
+        && Number(actor.session.coldLifeState?.characterId) === Number(actor.fetchId());
+    const localQuote = botActor && town && options.unitPrice === undefined
+        ? invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town) : null;
+    const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const offers = town ? [
+        ...AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId(), town }),
+        ...Market.privateOffers(plan.selfId, town).filter(offer => offer.store?.kind === 'player'
+            && Number(offer.sourceId) !== Number(actor.fetchId())
+            && invoke('GameServer/PrivateStoreTrade').inRange(actor, offer.session.actor))
+    ] : [];
+    const restock = restockPlan(actor, { plan, targetAmount: options.targetAmount,
+        unitPrice: options.unitPrice ?? localQuote?.price, potionUnitPrice: options.potionUnitPrice,
+        offers });
+    if (!restock.needed) return { ok: true, changed: false, plan, amount: restock.currentAmount, cost: 0 };
+    if (restock.amount <= 0) {
+        return { ok: false, reason: 'not_enough_adena', plan, adena: restock.adena,
+            cost: (restock.targetAmount - restock.currentAmount) * restock.unitPrice };
+    }
+
+    let delta = 0;
+    let cost = 0;
+    for (const line of restock.shops) {
         try {
-            await AfkTrade.buyFromShop(actor.fetchId(), offer.store, plan.selfId, quantity,
-                { expectedPrice: Number(offer.price) });
-            marketCost += quantity * Number(offer.price);
-            remaining -= quantity;
-            adena = Number(actor.backpack.fetchItemFromSelfId(57)?.fetchAmount?.() || 0);
+            const live = line.offer.sourceType === 'private_store';
+            const result = live
+                ? await invoke('GameServer/Bot/TradeService').buyFromStore(actor, line.offer.store, plan.selfId, line.amount,
+                    { objectId: line.offer.objectId, expectedUnitPrice: line.price, funding: line.funding })
+                : await AfkTrade.buyFromShop(actor.fetchId(), line.offer.store, plan.selfId, line.amount,
+                    { lineId: line.offer.lineId, expectedPrice: line.price, funding: line.funding });
+            if (result.pending) return { ok: true, pending: true, meetingId: result.meetingId, changed: delta > 0,
+                plan, amount: shotAmount(actor, plan), delta, cost };
+            delta += line.amount;
+            cost += line.cost;
         } catch (_) {
             // An AFK listing may change between selection and purchase.
         }
-        if (remaining <= 0) break;
     }
-    if (remaining <= 0) return { ok: true, changed: true, plan, amount: targetAmount, delta: missingAmount, cost: marketCost };
-
-    const affordableAmount = unitPrice > 0 ? Math.floor(adena / unitPrice) : missingAmount;
-    const delta = Math.min(remaining, affordableAmount);
-    const currentAdenaItem = actor.backpack.fetchItemFromSelfId(57);
-    if (!currentAdenaItem || delta <= 0) {
-        return marketCost > 0
-            ? { ok: true, changed: true, plan, amount: targetAmount - remaining, delta: missingAmount - remaining, cost: marketCost, adena }
-            : { ok: false, reason: 'not_enough_adena', plan, cost: fullCost, adena };
+    const adenaItem = actor.backpack.fetchItemFromSelfId(57);
+    const adena = Number(adenaItem?.fetchAmount ? adenaItem.fetchAmount() : 0);
+    const npcAmount = npcRestockAmount(restock, delta, cost);
+    const npcCost = npcAmount * restock.unitPrice;
+    if (options.skipNpc) return { ok: true, changed: delta > 0, plan,
+        amount: shotAmount(actor, plan), delta, cost, adena };
+    if (!adenaItem || npcAmount <= 0 || adena < npcCost) {
+        return delta > 0
+            ? { ok: true, changed: true, plan, amount: shotAmount(actor, plan), delta, cost, adena }
+            : { ok: false, reason: 'not_enough_adena', plan, cost: restock.cost, adena };
     }
 
-    const cost = delta * unitPrice;
-    const nextAdena = adena - cost;
-    const nextAmount = targetAmount - remaining + delta;
-    return Database.updateItemAmount(actor.fetchId(), currentAdenaItem.fetchId(), nextAdena)
-        .then(() => {
-            currentAdenaItem.setAmount(nextAdena);
-            return ensureActorStock(actor, { targetAmount: nextAmount, plan });
-        })
-        .then((result) => ({ ok: true, ...result, cost: marketCost + cost, adena: nextAdena }));
+    if (botActor) {
+        if (!town) return { ok: delta > 0, changed: delta > 0, reason: 'no_local_npc', plan,
+            amount: shotAmount(actor, plan), delta, cost, adena };
+        const result = await invoke('GameServer/Bot/Economy/NpcRestockPlan').purchaseForActor(actor, {
+            town, shots: false, potions: false, scrolls: false,
+            extras: [{ selfId: plan.selfId, amount: npcAmount, unitPrice: restock.unitPrice }] });
+        const bought = result.receipts.reduce((sum, row) => sum + Number(row.units || 0), 0);
+        return { ok: result.ok && delta + bought > 0, changed: delta + bought > 0, plan,
+            amount: shotAmount(actor, plan), delta: delta + bought, cost: cost + result.spent,
+            adena: Number(actor.backpack.fetchItemFromSelfId(57)?.fetchAmount?.() || 0) };
+    }
+
+    // Non-bot character adapters retain their existing owner; the player's
+    // purchase interface is outside the NPC bot basket contract.
+    const nextAdena = adena - npcCost;
+    const nextAmount = shotAmount(actor, plan) + npcAmount;
+    await persistenceDatabase().updateItemAmount(actor.fetchId(), adenaItem.fetchId(), nextAdena);
+    adenaItem.setAmount(nextAdena);
+    const result = await ensureActorStock(actor, { targetAmount: nextAmount, plan });
+    return { ok: true, ...result, delta: delta + npcAmount, cost: cost + npcCost, adena: nextAdena };
 }
 
 // A weapon change can switch the shot grade and kind: buy the restock with the
@@ -322,28 +590,51 @@ function restockAfterWeaponChange(actor, slots = [], logTag = 'BotGear') {
     if (!slots.some((slot) => WEAPON_SLOTS.has(Number(slot)))) return Promise.resolve(null);
     // Through the module object, as the callers did before: tests replace these.
     const shots = module.exports;
-    return shots.purchaseActorRestock(actor, { targetAmount: DEFAULT_TARGET_AMOUNT })
+    return shots.purchaseActorRestock(actor)
         .then(() => shots.enableAutoShot(actor))
         .catch((error) => utils.infoWarn(logTag, 'failed to refresh shots for %s: %s', actor.fetchName?.(), error.message));
 }
 
-function needsActorRestock(actor, threshold = 0) {
-    return shotAmount(actor) <= Number(threshold || 0);
+function needsActorRestock(actor) {
+    const context = invoke('GameServer/Bot/Economy/EconomyContext').forActor(actor);
+    const stock = context.stock('shots');
+    return stock.needed && context.purchaseBudget(stock.itemId) > 0;
 }
 
+// Where a hot bot goes for its shots in `town`: the best seller there, a
+// city merchant's or a shop's stall, or an ad dealt with by record at its
+// place (D6). The purchase itself is the restock (purchaseActorRestock).
 function restockTarget(actor, town, excludedIds = []) {
     const excluded = new Set(excludedIds.map(Number));
-    const offers = invoke('GameServer/Bot/Economy/MarketOpportunity')
-        .hotOffers(planForActor(actor).selfId, { town, buyerCharacterId: actor.fetchId() });
+    const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const offers = MarketOpportunity.hotOffers(planForActor(actor).selfId, { town, buyerCharacterId: actor.fetchId() });
+    let fundedLive;
     for (const offer of offers) {
         if (excluded.has(Number(offer.sourceId)) || Number(offer.sourceId) === Number(actor.fetchId())) continue;
-        if (offer.sellerKind !== 'fixed' && !String(offer.sourceType).startsWith('afk_')) continue;
-        const seller = offer.projection?.actor || offer.session?.actor;
-        if (!seller) continue;
-        return { actorId: seller.fetchId(), sourceId: Number(offer.sourceId), name: offer.sourceName,
-            locX: seller.fetchLocX(), locY: seller.fetchLocY(), locZ: seller.fetchLocZ(), town };
+        if (offer.sellerKind !== 'fixed' && !String(offer.sourceType).startsWith('afk_') && offer.store?.kind !== 'player') continue;
+        if (offer.sellerKind === 'fixed' && !offer.session?.actor) continue;
+        if (offer.store?.kind === 'player') {
+            fundedLive ||= new Set(restockPlan(actor, { offers }).shops.map(line => line.offer));
+            if (!fundedLive.has(offer)) continue;
+        }
+        return MarketOpportunity.offerTarget(offer, town);
     }
     return null;
+}
+
+// Ordinary shops keep their stock in the owner's bag. Walk to an affordable
+// seller before the restock; an actor in another part of town cannot pay it remotely.
+function liveRestockTarget(actor, town) {
+    if (!town) return null;
+    const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const plan = planForActor(actor);
+    const offers = Market.hotOffers(plan.selfId, { town, buyerCharacterId: actor.fetchId(),
+        accept: offer => String(offer.sourceType).startsWith('afk_') || offer.store?.kind === 'player' });
+    if (!offers.some(offer => offer.store?.kind === 'player')) return null;
+    const quote = invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town);
+    const restock = restockPlan(actor, { plan, offers, unitPrice: quote?.price });
+    const line = restock.shops[0];
+    return line?.offer.store?.kind === 'player' ? Market.offerTarget(line.offer, town) : null;
 }
 
 function describe(plan) {
@@ -352,6 +643,7 @@ function describe(plan) {
 }
 
 module.exports = {
+    liveRestockTarget,
     restockTarget,
     DEFAULT_TARGET_AMOUNT,
     PURCHASE_TARGET_AMOUNT,
@@ -363,13 +655,25 @@ module.exports = {
     planForKind,
     planForActor,
     planForActorKind,
+    planForState,
+    starterPlanFor,
+    ensureStarterStock,
+    beginnerAmount,
+    combatPlanForState,
+    actionShotKind,
     kindForSelfId,
     isCompatibleWithActor,
+    isPersonalShot,
+    keptAmounts,
+    usePolicy,
     enableAutoShot,
+    refreshAutoShot,
     planForRows,
     shotAmount,
     ensureActorStock,
     ensureCharacterStock,
+    restockPlan,
+    npcRestockAmount,
     purchaseActorRestock,
     restockAfterWeaponChange,
     needsActorRestock,

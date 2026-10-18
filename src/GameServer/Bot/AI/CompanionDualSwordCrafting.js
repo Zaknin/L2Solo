@@ -1,3 +1,5 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const Recipes = invoke('GameServer/Items/C4DualSwordCombinations');
@@ -17,7 +19,7 @@ function recipeFor(state, plan = state.stats?.equipmentPlan) {
     const classId = Roles.classIdOf(state);
     if (!recipe || !Compatibility.profileFor(role,classId).weaponKinds.includes('Weapon.Dual')) return null;
     const ranks = ['none','d','c','b','a','s'];
-    const item = DataCache.items.find(item => Number(item.selfId) === recipe.productId);
+    const item = ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId);
     const rank = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').gradeForLevel(state.level);
     return item && ranks.indexOf(item.etc.rank) <= ranks.indexOf(rank) ? recipe : null;
 }
@@ -58,6 +60,7 @@ function plan(session, bot, town, state, candidate = state.stats?.equipmentPlan)
         session.coldLifeState = {...state,stats:{...state.stats,equipmentPlan:{
             ...candidate,status:'complete',completedAt:Date.now(),reason:'dual_sword_equipped'
         }}};
+        refreshPartyMemberships([session], invoke);
         return {handled:true,errand:null};
     }
     const missing = recipe.materials.filter(m => count(state.inventory,m.selfId) < m.amount);
@@ -76,10 +79,11 @@ function plan(session, bot, town, state, candidate = state.stats?.equipmentPlan)
     const target = stationTarget(recipe,town);
     const refreshed = { ...candidate, status:missing.length ? 'active' : 'ready_to_craft',
         strategy:'craft',recipeId:recipe.recipeId,
-        target:{selfId:recipe.productId,name:DataCache.items.find(i=>Number(i.selfId)===recipe.productId)?.template?.name,slot:14},
+        target:{selfId:recipe.productId,name:ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId)?.template?.name,slot:14},
         combine:{type:'dual_sword',resultId:recipe.productId,requirements:recipe.materials},
         materials:recipe.materials.map(m=>({...m,owned:count(state.inventory,m.selfId),missing:Math.max(0,m.amount-count(state.inventory,m.selfId))})) };
     session.coldLifeState = { ...state,stats:{...state.stats,equipmentPlan:refreshed} };
+    refreshPartyMemberships([session], invoke);
     if (!target) return {handled:true,errand:null};
     if (missing.length && !count(state.inventory,recipe.productId)) {
         const warehouse = Services.targetFor(Services.ROLES.WAREHOUSE,town.name,{
@@ -107,6 +111,7 @@ function refreshState(session,bot) {
     const previous = session.coldLifeState || {};
     session.coldLifeState = {...previous,inventory:Life.inventorySummaryFromItems(bot.backpack.fetchItems()),
         adena:Number(bot.backpack.fetchItemFromSelfId(57)?.fetchAmount() || 0)};
+    refreshPartyMemberships([session], invoke);
 }
 
 async function execute(session,bot,errand) {
@@ -135,7 +140,7 @@ async function execute(session,bot,errand) {
         }
         let product = bot.backpack.fetchItemFromSelfId(recipe.productId);
         if (!product) {
-            const template = DataCache.items.find(i=>Number(i.selfId)===recipe.productId);
+            const template = ItemTemplateIndex.findNumericRowRequired(DataCache.items, recipe.productId);
             // Same bot-only atomic combination and fee policy as cold crafting.
             const result = await Database.combineInventoryItems(bot.fetchId(),{
                 ingredients:recipe.materials,product:{selfId:recipe.productId,name:template.template.name,amount:1,slot:14},

@@ -1,6 +1,9 @@
 const assert = require('assert');
 
+require('./helpers/databaseIsolation');
+const isolated = require('./helpers/isolatedSocialDatabase')('party-refresh-plan-context');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 
 const DataCache = invoke('GameServer/DataCache');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -29,7 +32,7 @@ const held = (name) => {
 };
 const now = Date.now();
 const failingMember = {
-    characterId: 9200001,
+    characterId: 9200001, phase: 'cold',
     name: 'FailingDropMember',
     level: 30,
     inventory: held('Short Sword'),
@@ -53,7 +56,7 @@ const failingMember = {
     }
 };
 const craftStartedAt = now - 3 * 60 * 60 * 1000;
-const craftBaseline = { level: 41, exp: 123456 };
+const craftBaseline = { level: 29, exp: 123456 };
 const craftPlan = {
     status: 'component_ready',
     strategy: 'craft',
@@ -62,23 +65,24 @@ const craftPlan = {
     target: { selfId: 9301, name: 'Craft Target', slot: 7 },
     next: { spotId: 'material-spot', npcId: 20002, itemId: 1879 },
     startedAt: craftStartedAt,
-    plannedForLevel: 41,
+    plannedForLevel: 29,
     progressionBaseline: craftBaseline
 };
 const craftMember = {
-    characterId: 9200002,
+    characterId: 9200002, phase: 'cold',
     name: 'CraftMember',
-    level: 41,
+    level: 30,
     exp: 200000,
-    inventory: held("Apprentice's Rod"),
+    inventory: held('Short Sword'),
     party: { partyId: 'bgp-refresh-context' },
-    stats: { classId: 10, role: 'mage', equipmentPlan: craftPlan }
+    stats: { classId: 0, role: 'dps', equipmentPlan: craftPlan }
 };
 
 const originals = {
     replacementPlanFor: GearAcquisitionPlanner.replacementPlanFor,
     planFor: GearAcquisitionPlanner.planFor,
-    statesForParties: LifeState.statesForParties,
+    cachedStatesForParties: LifeState.cachedStatesForParties,
+    cachedState: LifeState.cachedState,
     upsertState: LifeState.upsertState,
     leaveParty: LifeState.leaveParty,
     createOrUpdate: PartyState.createOrUpdate,
@@ -88,6 +92,38 @@ const originals = {
 };
 
 async function main() {
+    // The refresh tests planner finalization. Supply a real funded gear
+    // decision before instrumenting the two planner calls below.
+    const native = require('./fixtures/native_gear_economy')({ characterId: failingMember.characterId, timestamp: now });
+    const kit = require('./fixtures/profitable_stock_state').kitFor(0, failingMember.level);
+    const armour = Object.fromEntries(Object.entries(kit.inventory).filter(([, row]) => Number(row.slot) !== 7));
+    Object.assign(failingMember, { activity: native.member.activity, exp: native.member.exp,
+        adena: native.member.adena, currentRegion: native.member.currentRegion, spotId: native.member.spotId,
+        loc: { ...native.member.loc }, inventory: { ...armour, ...failingMember.inventory,
+            57: { ...native.member.inventory[57] } } });
+    const failedEconomy = native.review(failingMember);
+    const failedWish = failedEconomy.network.queue.find(wish => wish.key === failedEconomy.network.activity?.rootKey);
+    assert(failedEconomy.network.activity?.activity === 'shopping' && !failedEconomy.network.activity.funding
+        && failedWish?.object?.slot && failedWish.funded && Array.isArray(failedEconomy.statsPacket.money),
+        `native failed-drop gear decision: ${require('./fixtures/native_gear_economy').describe(failedEconomy)}`);
+
+    const craftNative = require('./fixtures/native_gear_economy')({ characterId: craftMember.characterId, timestamp: now });
+    const craftWish = craftNative.economy.network.queue.find(wish => wish.key === craftNative.economy.network.activity?.rootKey);
+    const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByProductId(craftWish?.object?.itemId);
+    assert(recipe && recipe.productId === craftWish.object.itemId && recipe.materials.length,
+        'the actual native gear target has an authored recipe and materials');
+    const target = DataCache.items.find(item => Number(item.selfId) === Number(recipe.productId));
+    Object.assign(craftPlan, { recipeId: recipe.recipeId, grade: target.etc.rank,
+        target: { selfId: recipe.productId, name: target.template.name, slot: craftWish.object.slot },
+        next: { ...craftPlan.next, itemId: recipe.materials[0].selfId } });
+    Object.assign(craftMember, craftNative.member, { stats: { ...craftNative.member.stats, equipmentPlan: craftPlan },
+        party: { partyId: 'bgp-refresh-context' } });
+    const craftEconomy = craftNative.review(craftMember);
+    const refreshedWish = craftEconomy.network.queue.find(wish => wish.key === craftEconomy.network.activity?.rootKey);
+    assert(craftEconomy.network.activity?.activity === 'shopping' && !craftEconomy.network.activity.funding
+        && refreshedWish?.funded && refreshedWish.object?.itemId === recipe.productId,
+        'the instrumented craft route targets the current funded native gear wish');
+
     const replacementOptions = [];
     const saved = new Map();
     const events = [];
@@ -102,17 +138,20 @@ async function main() {
     GearAcquisitionPlanner.planFor = () => ({
         status: 'active',
         strategy: 'craft',
-        grade: 'c',
-        recipeId: 189,
+        grade: craftPlan.grade,
+        recipeId: craftPlan.recipeId,
         target: { ...craftPlan.target },
         next: { ...craftPlan.next },
         partyNeed: 'required',
         requiresParty: true,
         materials: []
     });
-    LifeState.statesForParties = async (ids) => new Map(ids.map((id) => [id, [failingMember, craftMember]]));
+    const current = new Map([[failingMember.characterId, failingMember], [craftMember.characterId, craftMember]]);
+    LifeState.cachedState = id => current.get(Number(id));
+    LifeState.cachedStatesForParties = parties => new Map(parties.map(party => [party.partyId, party.memberIds.map(id => current.get(Number(id)))]));
     LifeState.upsertState = async (state) => {
         saved.set(Number(state.characterId), state.stats.equipmentPlan);
+        current.set(Number(state.characterId), state);
         return state;
     };
     LifeState.leaveParty = async () => null;
@@ -120,13 +159,18 @@ async function main() {
     SpotProfiles.ensure = () => [];
     SpotProfiles.currentOccupancy = () => ({});
 
-    await PopulationService.refreshBackgroundPartyRequirements([{
-        partyId: 'bgp-refresh-context',
-        leaderId: failingMember.characterId,
-        memberIds: [failingMember.characterId, craftMember.characterId],
-        spotId: 'drop-spot',
-        stats: { lastRequirementRefreshAt: 0, objective: null }
-    }]);
+    const party = { partyId: 'bgp-refresh-context', status: 'active', leaderId: failingMember.characterId,
+        memberIds: [failingMember.characterId, craftMember.characterId], spotId: 'drop-spot',
+        stats: { lastRequirementRefreshAt: 0, objective: null } };
+    await PopulationService.refreshBackgroundPartyRequirements([party]);
+    assert.strictEqual(replacementOptions.length, 0, 'marking a refresh does not plan on main');
+    const selections = [failingMember, craftMember].map(state => ({ characterId: state.characterId,
+        plan: require('../src/GameServer/Bot/Population/PartyRequirementRefresh').plan(state,
+            { occupancy: {}, timestamp: now,
+                ...(state === failingMember ? { spots: native.spots, planningOptions: native.planningOptions,
+                    preparedEconomy: failedEconomy } : { spots: craftNative.spots,
+                    planningOptions: craftNative.planningOptions, preparedEconomy: craftEconomy }) }).acquisitionPlan }));
+    await PopulationService.applyWorkerPartyRequirements(party, { memberPlans: selections, requirementRefreshedAt: now });
 
     assert.strictEqual(replacementOptions.length, 1, 'fixture: the failing drop route must be replaced');
     assert((replacementOptions[0].excludedTargetIds || []).includes(Number(weapon.selfId)),
@@ -135,12 +179,8 @@ async function main() {
     assert(failedPlan, 'the changed requirement must be saved');
     assert((failedPlan.recoveryTargets || []).some((entry) => (
         Number(entry.targetId) === Number(weapon.selfId) && entry.reason === 'combat_unviable'
-        && Number(entry.until) > now
-    )), 'the saved plan must carry the failed target cooldown');
-
-    assert(events.some((event) => event.type === 'gear_acquisition_fallback'
-        && event.characterId === failingMember.characterId && event.meta.reason === 'combat_unviable'),
-        'a failure found by the refresh must record the same fallback event as the resolve path');
+        && Array.isArray(entry.wake) && entry.wake.every(Number.isFinite) && entry.until === undefined
+    )), 'the saved plan must carry the failed target dormant wake inputs');
 
     const refreshedCraft = saved.get(craftMember.characterId);
     assert(refreshedCraft, 'fixture: the craft route requirement changed and must be saved');
@@ -156,14 +196,16 @@ async function main() {
 main().catch((error) => {
     console.error(error);
     process.exitCode = 1;
-}).finally(() => {
+}).finally(async () => {
     Object.assign(GearAcquisitionPlanner, {
         replacementPlanFor: originals.replacementPlanFor, planFor: originals.planFor
     });
     Object.assign(LifeState, {
-        statesForParties: originals.statesForParties, upsertState: originals.upsertState, leaveParty: originals.leaveParty
+        cachedStatesForParties: originals.cachedStatesForParties, cachedState: originals.cachedState, upsertState: originals.upsertState, leaveParty: originals.leaveParty
     });
     PartyState.createOrUpdate = originals.createOrUpdate;
     LifeEvents.recordMany = originals.recordMany;
     Object.assign(SpotProfiles, { ensure: originals.ensure, currentOccupancy: originals.currentOccupancy });
+    await invoke('Database').close();
+    require('node:fs').rmSync(isolated.directory, { recursive: true, force: true });
 });

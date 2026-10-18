@@ -1,11 +1,16 @@
+/* eslint-env browser */
+/* global MarketModel, WorldObserverFormat */
+
 const marketState = {
     data: null,
     loading: false,
+    etag: null,
     live: true,
     query: new URLSearchParams(location.search).get('q') || '',
     side: 'wts',
     town: 'all',
     source: 'market',
+    listing: 'all',
     category: 'all',
     sort: 'shops',
     view: 'items',
@@ -30,10 +35,13 @@ const marketEls = {
     volume: document.querySelector('#marketPageVolume'),
     tradeUnits: document.querySelector('#marketPageTradeUnits'),
     volumeScope: document.querySelector('#marketPageVolumeScope'),
+    counterRows: document.querySelector('#marketCounterRows'),
+    adenaRows: document.querySelector('#marketAdenaRows'),
     search: document.querySelector('#marketSearch'),
     sideTabs: document.querySelector('#marketSideTabs'),
     town: document.querySelector('#marketTown'),
     source: document.querySelector('#marketSource'),
+    listing: document.querySelector('#marketListing'),
     category: document.querySelector('#marketCategory'),
     sort: document.querySelector('#marketSort'),
     viewTabs: document.querySelector('#marketViewTabs'),
@@ -58,12 +66,7 @@ const marketEls = {
 };
 
 function escapeMarketHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+    return WorldObserverFormat.escapeHtml(value);
 }
 
 function marketNumber(value, fallback = '—') {
@@ -72,9 +75,7 @@ function marketNumber(value, fallback = '—') {
 }
 
 function compactMarketNumber(value) {
-    const amount = Math.max(0, Number(value || 0));
-    if (amount < 1000) return amount.toLocaleString();
-    return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: amount < 10000 ? 1 : 0 }).format(amount);
+    return WorldObserverFormat.compactAmount(value);
 }
 
 function relativeMarketTime(timestamp) {
@@ -96,7 +97,7 @@ function itemIcon(item, className = 'market-item-icon') {
 }
 
 function marketFilters(side = marketState.side, query = marketState.query) {
-    return { side, query, town: marketState.town, source: marketState.source, category: marketState.category };
+    return { side, query, town: marketState.town, source: marketState.source, listing: marketState.listing, category: marketState.category };
 }
 
 function filteredMarketOffers() {
@@ -111,15 +112,15 @@ function renderMarketSummary() {
     const sales = MarketModel.summary(MarketModel.filterOffers(marketState.offers, { side: 'wts', source: 'market' }));
     const buys = MarketModel.summary(MarketModel.filterOffers(marketState.offers, { side: 'wtb', source: 'market' }));
     const week = marketState.data?.history?.windows?.week || {};
-    marketEls.wts.textContent = marketNumber(sales.shops);
-    marketEls.wtb.textContent = marketNumber(buys.shops);
-    marketEls.sellUnits.textContent = `${marketNumber(sales.listings)} offers · ${compactMarketNumber(sales.units)} units`;
-    marketEls.buyUnits.textContent = `${marketNumber(buys.listings)} offers · ${compactMarketNumber(buys.units)} units`;
+    marketEls.wts.textContent = marketNumber(sales.listings);
+    marketEls.wtb.textContent = marketNumber(buys.listings);
+    marketEls.sellUnits.textContent = `${marketNumber(sales.shops)} shops · ${marketNumber(sales.announcements)} ads · ${compactMarketNumber(sales.units)} units`;
+    marketEls.buyUnits.textContent = `${marketNumber(buys.shops)} shops · ${marketNumber(buys.announcements)} ads · ${compactMarketNumber(buys.units)} units`;
     marketEls.trades.textContent = compactMarketNumber(week.trades || 0);
     marketEls.volume.textContent = `${compactMarketNumber(week.adena || 0)} A`;
     marketEls.tradeUnits.textContent = `${compactMarketNumber(week.units || 0)} units · all channels`;
     marketEls.volumeScope.textContent = 'includes fixed traders';
-    marketEls.freshness.textContent = `Player and bot shops · fixed traders shown separately · refreshed ${relativeMarketTime(marketState.data?.generatedAt)}`;
+    marketEls.freshness.textContent = `Player and bot shops and announcements · fixed traders shown separately · refreshed ${relativeMarketTime(marketState.data?.generatedAt)}`;
 }
 
 function renderMarketTownOptions() {
@@ -372,9 +373,12 @@ function marketLocation(offer) {
 
 function marketOfferRow(offer) {
     const location = marketLocation(offer);
+    const announcement = ['sell_ad', 'buy_ad', 'order'].includes(offer.kind);
+    const execution = offer.conditional ? 'Conditional · terms checked at meeting'
+        : offer.custodyPolicy === 0 ? 'Reserved stock / budget' : 'Checked when trading';
     return `<div class="market-offer-row ${offer.side}">
-        <span class="market-offer-location"><strong>${escapeMarketHtml(offer.town)}</strong><small>${location ? escapeMarketHtml(location) : 'Town location'}</small></span>
-        <span class="market-offer-owner"><strong>${escapeMarketHtml(offer.ownerName)}</strong><small>${escapeMarketHtml(marketSourceLabel(offer.source))}${offer.title ? ` · ${escapeMarketHtml(offer.title)}` : ''}</small></span>
+        <span class="market-offer-location"><strong>${escapeMarketHtml(offer.town)}</strong><small>${announcement ? 'Meeting town · announcement' : location ? escapeMarketHtml(location) : 'Shop location'}</small></span>
+        <span class="market-offer-owner"><strong>${escapeMarketHtml(offer.ownerName)}</strong><small>${escapeMarketHtml(marketSourceLabel(offer.source))} · ${announcement ? 'Announcement' : 'Shop'}${offer.title ? ` · ${escapeMarketHtml(offer.title)}` : ''}</small><small>${execution}${offer.expiresAt ? ` · expires ${escapeMarketHtml(new Date(offer.expiresAt).toLocaleString())}` : ''}</small></span>
         <span class="market-offer-price"><strong>${marketNumber(offer.price)} A</strong><small>${marketNumber(offer.count)} units${offer.enchant ? ` · +${marketNumber(offer.enchant)}` : ''}</small></span>
     </div>`;
 }
@@ -416,9 +420,9 @@ function renderMarketDetail() {
             <div><span>Highest bid</span><strong>${buys.length ? `${marketNumber(buys[0].price)} A` : '—'}</strong></div>
             <div><span>Spread</span><strong>${spread === null ? '—' : `${marketNumber(spread)} A`}</strong></div>
         </div>
-        <p class="market-book-scope">${marketState.source === 'market' ? 'Player and bot shops' : marketEls.source.selectedOptions[0].textContent} · ${marketState.town === 'all' ? 'all towns' : escapeMarketHtml(marketState.town)}. Prices are per unit.</p>
+        <p class="market-book-scope">${marketState.source === 'market' ? 'Player and bot offers' : marketEls.source.selectedOptions[0].textContent} · ${marketState.town === 'all' ? 'all towns' : escapeMarketHtml(marketState.town)}. Prices are per unit.</p>
         ${marketState.side === 'wtb' ? `${section('wtb', buys)}${section('wts', sales)}` : `${section('wts', sales)}${section('wtb', buys)}`}
-        <div class="market-demand-line"><span>Bot purchase plans</span><strong>${marketNumber(item.demand?.units || 0)} units</strong><small>${marketNumber(item.demand?.fundedUnits || 0)} funded · plans are not active buy offers</small></div>`;
+        <div class="market-demand-line"><span>Public buy offers · current filters</span><strong>${marketNumber(buys.reduce((sum, offer) => sum + offer.count, 0))} units</strong><small>${marketNumber(buys.filter(offer => offer.conditional).reduce((sum, offer) => sum + offer.count, 0))} conditional · ${marketNumber(buys.filter(offer => !offer.conditional && offer.custodyPolicy === 0).reduce((sum, offer) => sum + offer.count, 0))} reserved · already included above</small></div>`;
     marketEls.detail.dataset.marketSelectedId = String(item.selfId);
     marketEls.detail.scrollTop = scrollTop;
     marketEls.detail.querySelectorAll('.market-book-side').forEach((entry) => {
@@ -433,16 +437,17 @@ function renderMarketTowns() {
     offers.forEach((offer) => {
         let town = byTown.get(offer.town);
         if (!town) {
-            town = { name: offer.town, offers: 0, units: 0, shops: new Set() };
+            town = { name: offer.town, offers: 0, units: 0, shops: new Set(), ads: new Set() };
             byTown.set(offer.town, town);
         }
         town.offers += 1;
         town.units += offer.count;
-        town.shops.add(offer.ownerId || offer.ownerName);
+        if (['sell_ad', 'buy_ad', 'order'].includes(offer.kind)) town.ads.add(offer.storeId);
+        else town.shops.add(offer.storeId);
     });
     const rows = [...byTown.values()].sort((left, right) => right.offers - left.offers || left.name.localeCompare(right.name));
     marketEls.towns.innerHTML = rows.length ? rows.map((town) => `<button type="button" class="market-town-ledger-row" data-market-town="${escapeMarketHtml(town.name)}">
-        <strong>${escapeMarketHtml(town.name)}</strong><span><b>${marketNumber(town.offers)}</b> offers</span><span><b>${marketNumber(town.shops.size)}</b> shops</span><span>${compactMarketNumber(town.units)} units</span>
+        <strong>${escapeMarketHtml(town.name)}</strong><span><b>${marketNumber(town.offers)}</b> offers</span><span><b>${marketNumber(town.shops.size)}</b> shops · ${marketNumber(town.ads.size)} ads</span><span>${compactMarketNumber(town.units)} units</span>
     </button>`).join('') : '<div class="list-empty">No active offers for these filters.</div>';
 }
 
@@ -459,6 +464,22 @@ function renderMarketTrades() {
     }).join('') : '<div class="list-empty">No trades recorded since server start.</div>';
 }
 
+function renderMarketEconomy() {
+    const economy = MarketModel.economy(marketState.data);
+    const labels = { gear: 'Equipment', shot: 'Shots', recipe: 'Recipes', material: 'Materials' };
+    marketEls.counterRows.innerHTML = economy.counters.length ? economy.counters.map((row) => `<tr>
+        <td>${escapeMarketHtml(labels[row.kind] || row.kind)}</td><td>${escapeMarketHtml(row.grade === 'none' ? 'No grade' : row.grade.toUpperCase())}</td>
+        <td>${row.priceIndex === null ? '—' : Number(row.priceIndex).toFixed(1)}</td>
+        <td>${marketNumber(row.deals)}</td><td>${Number(row.buyersPerHour).toFixed(1)}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="list-empty">Price indices unavailable.</td></tr>';
+    marketEls.adenaRows.innerHTML = economy.available ? economy.buckets.map((row) => `<tr>
+        <td>${escapeMarketHtml(new Date(row.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' }))}${row.partial ? ' · partial' : ''}</td>
+        <td>${row.observed ? marketNumber(row.sources) : '—'}</td>
+        <td>${row.observed ? marketNumber(row.sinks) : '—'}</td>
+        <td>${row.observed ? `${row.net > 0 ? '+' : ''}${marketNumber(row.net)}` : '—'}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="list-empty">Hourly balance unavailable.</td></tr>';
+}
+
 function renderMarketPage() {
     if (!marketState.data) return;
     renderMarketSummary();
@@ -466,15 +487,19 @@ function renderMarketPage() {
     renderMarketTable();
     renderMarketTowns();
     renderMarketTrades();
+    renderMarketEconomy();
 }
 
 async function refreshMarket() {
     if (marketState.loading) return;
     marketState.loading = true;
     try {
-        const response = await fetch('/observer/api/market', { cache: 'no-store' });
+        const response = await fetch('/observer/api/market', { cache: 'no-store',
+            headers: marketState.etag ? { 'If-None-Match': marketState.etag } : {} });
+        if (response.status === 304) { window.WorldObserverShell?.connection(true); return; }
         if (!response.ok) throw new Error(`Market API ${response.status}`);
         marketState.data = await response.json();
+        marketState.etag = response.headers.get('ETag');
         marketState.offers = MarketModel.activeOffers(marketState.data);
         renderMarketPage();
         window.WorldObserverShell?.connection(true);
@@ -494,6 +519,7 @@ function marketFiltersChanged({ towns = false } = {}) {
 }
 
 marketEls.search.addEventListener('input', () => { marketState.query = marketEls.search.value; marketFiltersChanged(); });
+marketEls.listing.addEventListener('change', () => { marketState.listing = marketEls.listing.value; marketFiltersChanged({ towns: true }); });
 marketEls.sideTabs.addEventListener('click', (event) => {
     const button = event.target.closest('[data-market-side]');
     if (!button) return;

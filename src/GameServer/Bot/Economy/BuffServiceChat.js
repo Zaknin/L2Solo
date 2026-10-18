@@ -6,6 +6,7 @@ const TradeChat = invoke('GameServer/Bot/Economy/BotTradeChat');
 const REPEAT_MS = 10 * 60 * 1000;
 const SHIFT_MS = 10 * 60 * 1000;
 const SHIFT_COOLDOWN_MS = 30 * 60 * 1000;
+const SERVICE_SQUARE_RADIUS = 900;
 const lastAt = new Map();
 
 function onDuty(session, timestamp = Date.now()) {
@@ -15,7 +16,14 @@ function onDuty(session, timestamp = Date.now()) {
         || session.activeTrade || session.chatArrivalActive || session.supplyErrandPhase
         || session.followPlayerSession || ['merchant', 'shopping', 'pk_hunting'].includes(session.plan)) return false;
     const town = Town.getTown({ locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() });
-    if (!town) {
+    // A service shift belongs on the public square. Starting it at a shop
+    // counter, or during an errand, parks the buffer and blocks its departure.
+    if (!town || Math.hypot(actor.fetchLocX() - town.center.locX, actor.fetchLocY() - town.center.locY) > SERVICE_SQUARE_RADIUS
+        || Math.abs(actor.fetchLocZ() - town.center.locZ) > 128
+        || session.townNpcApproach || session.townNpcSlot || session.townNpcQueue
+        || session.spotRelocation || session.pendingTownTrip || session.shoppingRestock
+        || session.townEscape || session.companionTownTransit || session.clanAllianceQuest
+        || actor.state?.inMotion?.() || actor.state?.fetchTowards?.()) {
         session.buffServiceShiftUntil = 0;
         return false;
     }

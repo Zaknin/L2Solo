@@ -13,6 +13,11 @@ const TYPES = {
     6650: { npcId: 12781, level: 24, food: [7582], category: 'baby', name: 'Baby Kookaburra', ownerShare: 0.1 },
     4425: { npcId: 12564, level: 1, food: [2515], category: 'wolf', name: 'Sin Eater', ownerShare: 1 }
 };
+const typeIndex = require('../Knowledge/NativeServiceIndex').currentIndex(['npcId'], types => {
+    const byNpc = new Map();
+    for (const type of types) if (!byNpc.has(type.npcId)) byNpc.set(type.npcId, type);
+    return byNpc;
+});
 // Explicit emulator policies for details not independently established as retail.
 const POLICY = Object.freeze({ maxLevel: 80, corpseMs: 20 * 60 * 1000, autoFeed: 0.55,
     hungerSpeed: 0.5, starvationGraceMs: 60 * 1000, rewardRadius: 2500, inventorySlots: 80, inventoryWeight: 30000 });
@@ -48,5 +53,13 @@ function deathLoss(npcId, level) {
     return Math.round((stats(npcId, level + 1).exp - stats(npcId, level).exp) * (6.5 - 0.07 * level) / 100);
 }
 function skillLevel(level) { return Math.max(1, Math.floor(level / 10) + (level >= 70 ? Math.floor((level - 65) / 10) : 0)); }
-function typeForNpc(npcId) { return Object.values(TYPES).find(type => type.npcId === Number(npcId)); }
+function typeForNpc(npcId) {
+    const types = Object.values(TYPES);
+    if (!types.length) return undefined;
+    if (npcId && ['object', 'function'].includes(typeof npcId)) return types.find(type => type.npcId === Number(npcId));
+    const index = typeIndex(types);
+    if (!index) return types.find(type => type.npcId === Number(npcId));
+    const id = Number(npcId);
+    return Number.isNaN(id) ? undefined : index.get(id);
+}
 module.exports = { TYPES, POLICY, stats, normalize, levelFor, levelPenalty, deathLoss, skillLevel, typeForNpc, clamp };

@@ -1,3 +1,4 @@
+process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 
 require('../src/Global');
@@ -7,6 +8,7 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { PAGE_BYTES } = require('../src/GameServer/Bot/Population/ColdMessagePages');
+const StateWire = require('../src/GameServer/Bot/Population/ColdStateWire');
 // Snapshot fixtures have no SQLite connection. Exercise real batched hydration
 // against an empty repository while keeping transport and cache code intact.
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
@@ -43,9 +45,9 @@ function setup() {
     };
 
     const incremental = setup();
-    const originalAllStates = LifeState.allStates;
+    const originalEveryState = LifeState.everyState;
     let fullCalls = 0;
-    LifeState.allStates = () => {
+    LifeState.everyState = () => {
         fullCalls += 1;
         return [];
     };
@@ -57,7 +59,7 @@ function setup() {
     assert.strictEqual(incremental.messages[0].payload.initial, false);
 
     const full = setup();
-    LifeState.allStates = () => Array.from({ length: 130 }, (_, index) => ({
+    LifeState.everyState = () => Array.from({ length: 130 }, (_, index) => ({
         characterId: index + 1,
         phase: 'cold',
         revision: 1
@@ -68,6 +70,77 @@ function setup() {
     assert(full.messages.every((message) => message.payload.rows.length <= 48), 'full pages must stay bounded');
     assert.strictEqual(full.messages.at(-1).payload.done, true);
     assert(full.coordinator.snapshot().snapshots.yields >= 3, 'full pages must yield to the main loop');
+
+    // A native bag can exceed a page without exceeding the number of item
+    // types. Keep every physical instance, including enchant and object ID.
+    const largeState = { characterId: 1, phase: 'cold', inventory: { 952: {
+        selfId: 952, amount: 4160, equipped: false, stackable: false,
+        instances: Array.from({ length: 4160 }, (_, i) => ({ id: 7000000 + i,
+            amount: 1, enchant: i % 7, equipped: false, slot: 0 })) } } };
+    assert(Protocol.byteLength(largeState) > Protocol.MAX_MESSAGE_BYTES);
+    const packed = StateWire.packState(largeState);
+    assert(Protocol.byteLength(packed) < PAGE_BYTES);
+    assert.deepStrictEqual(StateWire.unpackState(packed), largeState);
+    assert.strictEqual(typeof largeState.inventory[952].instances[0].id, 'number', 'packing must not mutate canonical bags');
+    const command = { requests: [{ kind: 'lifecycle', state: largeState, precomputedPlan: { plannedState: largeState },
+        precomputedResult: { patch: { inventory: largeState.inventory } } }] };
+    const packedCommand = StateWire.packPayload('command_request', command);
+    assert.deepStrictEqual(StateWire.unpackPayload('command_request', packedCommand), command,
+        'post-trade lifecycle commands must preserve their complete inventory patch');
+    const commandMessage = Protocol.envelope('command_request', 'e', packedCommand);
+    assert(Protocol.omitPlannedStates(commandMessage));
+    assert(Protocol.byteLength(commandMessage) < PAGE_BYTES, 'native reconstruction removes only the redundant planned state');
+    assert.throws(() => StateWire.unpackState({ ...packed,
+        inventoryInstanceColumns: { 952: ['id'] } }), /invalid_inventory_wire/);
+    for (const mode of ['full', 'incremental', 'snapshot_page', 'claim_ack', 'commit_ack', 'release_ack', 'command_ack']) {
+        const { coordinator, messages } = setup();
+        delete coordinator.post;
+        coordinator.worker.postMessage = message => messages.push(message);
+        coordinator.reconcileOrphanedBackgroundParties = async () => {};
+        LifeState.everyState = () => [largeState];
+        if (mode === 'full') assert.strictEqual((await coordinator.sendFullSnapshot()).ok, true);
+        else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], {}, 32)).ok, true);
+        else {
+            const field = mode === 'snapshot_page' ? 'rows' : mode === 'claim_ack' ? 'rejected' : 'results';
+            const row = { characterId: 1, ok: false, state: largeState,
+                ...(mode === 'commit_ack' ? { proposalId: 'p', inputToken: { characterId: 1,
+                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}),
+                ...(mode === 'release_ack' ? { releaseRequestId: 'r', inputToken: { characterId: 1,
+                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}) };
+            assert.strictEqual(coordinator.postCollections(mode, { [field]: [row],
+                ...(mode === 'claim_ack' ? { grants: [] } : {}) }), 1, mode);
+        }
+        assert(messages.length > 0, mode);
+        const message = messages.at(-1);
+        assert(Protocol.byteLength(message) < Protocol.MAX_MESSAGE_BYTES);
+        const payload = StateWire.unpackPayload(message.type, message.payload);
+        const rows = payload.rows || payload.rejected || payload.results;
+        assert.deepStrictEqual(rows[0].state, largeState, mode);
+        if (mode === 'full') assert.strictEqual(message.payload.done, true, 'a large bag must not suppress bootstrap readiness');
+    }
+
+    // A critical publisher already running when the worker announces running
+    // must finish, then replay the requested FULL bootstrap rather than dirty.
+    const deferredBootstrap = setup();
+    let releaseCritical, criticalStarted;
+    const criticalGate = new Promise(resolve => { releaseCritical = resolve; });
+    const enteredCritical = new Promise(resolve => { criticalStarted = resolve; });
+    const sendIncremental = deferredBootstrap.coordinator.sendIncrementalEntries.bind(deferredBootstrap.coordinator);
+    deferredBootstrap.coordinator.sendIncrementalEntries = async (...args) => {
+        criticalStarted(); await criticalGate; return sendIncremental(...args);
+    };
+    LifeState.everyState = () => [{ characterId: 77, phase: 'cold' }];
+    deferredBootstrap.coordinator.markDirty({ characterId: 77, phase: 'cold' }, { critical: true });
+    await enteredCritical;
+    assert.strictEqual(await deferredBootstrap.coordinator.sendSnapshots(true), false);
+    assert.strictEqual(deferredBootstrap.coordinator.snapshotBootstrapPending, true);
+    releaseCritical();
+    await deferredBootstrap.coordinator.criticalSnapshotInFlight;
+    const bootstrapDeadline = Date.now() + 2000;
+    while (!deferredBootstrap.messages.some(message => message.payload.initial && message.payload.done)) {
+        assert(Date.now() < bootstrapDeadline, 'deferred full bootstrap must publish its completion marker');
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
 
     const critical = setup();
     critical.coordinator.markDirty({ characterId: 99, phase: 'cold', revision: 2 }, {
@@ -119,7 +192,7 @@ function setup() {
                 }
             }
         }));
-        LifeState.allStates = () => states;
+        LifeState.everyState = () => states;
         const send = () => mode === 'full' ? coordinator.sendFullSnapshot()
             : coordinator.sendIncrementalEntries(states, {}, 32, 'P0');
         const result = await send();
@@ -168,7 +241,7 @@ function setup() {
         if (mode === 'full') assert.strictEqual(messages[0].payload.done, true);
     }
 
-    LifeState.allStates = originalAllStates;
+    LifeState.everyState = originalEveryState;
     const sliced = setup();
     const governor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
     const originalAdmit = governor.admit;
@@ -201,7 +274,40 @@ function setup() {
         governor.complete = originalComplete;
         clearTimeout(sliced.coordinator.snapshotContinuationTimer);
     }
-    console.log('Cold coordinator incremental refresh, cooperative full bootstrap, and P0 bypass checks passed');
+    const nativeTravel = setup();
+    const previousCachedState = LifeState.cachedState;
+    const waitingMeeting = { characterId: 930021, phase: 'cold', activity: 'hunting', updatedAt: 1000,
+        stats: { tradeMeeting: [7, 1] }, timing: { nextResolveAt: 2000 },
+        simulation: { revision: 40, ownerId: 'legacy_main', leaseId: null } };
+    const paidLeg = { ...waitingMeeting, activity: 'traveling', updatedAt: 1001,
+        stats: { ...waitingMeeting.stats, travel: { reason: 'trade_meeting', arrivalAt: 3000 } },
+        timing: { nextResolveAt: 3000 }, simulation: { ...waitingMeeting.simulation, revision: 41 } };
+    let authoritative = waitingMeeting;
+    try {
+        LifeState.cachedState = id => id === waitingMeeting.characterId ? authoritative : previousCachedState.call(LifeState, id);
+        // The previous page is still hydrating while the native leg commits.
+        // A deferred incoming/memory notification carries its pre-trip object.
+        nativeTravel.coordinator.criticalSnapshotInFlight = Promise.resolve();
+        nativeTravel.coordinator.notifyState(waitingMeeting);
+        authoritative = paidLeg;
+        nativeTravel.coordinator.notifyState(paidLeg);
+        nativeTravel.coordinator.markDirty(waitingMeeting, { critical: true, reason: 'trade_incoming' });
+        nativeTravel.coordinator.criticalSnapshotInFlight = null;
+        await nativeTravel.coordinator.flushCriticalSnapshots();
+        const published = nativeTravel.messages.at(-1).payload.rows[0].state;
+        assert.strictEqual(published.simulation.revision, 41,
+            'a delayed pre-trip notification must not replace a newer native paid leg');
+        assert.strictEqual(published.activity, 'traveling');
+        const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+        const kernel = new ColdSimulationKernel({ now: () => 4000, resolveSolo: () => null });
+        kernel.upsertMany(nativeTravel.messages.flatMap(message => message.payload.rows));
+        assert.strictEqual(kernel.dueCandidates(4000, 1)[0]?.characterId, waitingMeeting.characterId,
+            'the actual published leg must retain resolver coverage for arrival');
+    } finally {
+        LifeState.cachedState = previousCachedState;
+        clearTimeout(nativeTravel.coordinator.snapshotContinuationTimer);
+    }
+    console.log('Cold coordinator incremental refresh, cooperative full bootstrap, P0 bypass and native trip publication checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

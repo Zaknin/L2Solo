@@ -100,6 +100,20 @@ assert.deepStrictEqual(Matchup.spotMatchup(spot, pair, { soloSafety: true }), re
 const swapped = [fighter({ pAtk: 900 }), fighter()];
 assert.deepStrictEqual(Matchup.spotMatchup(spot, swapped, { soloSafety: true }),
     referenceMatchup(spot, swapped, { soloSafety: true }));
+const weakOwner = fighter({ maxHp: 5 });
+const tank = fighter({ maxHp: 9000, pAtk: 900 });
+const nativePair = [weakOwner, tank], coldPair = [weakOwner, { ...tank, soloDamageReceiver: false }];
+assert.notDeepStrictEqual(referenceMatchup(spot, nativePair, { soloSafety: true }),
+    referenceMatchup(spot, coldPair, { soloSafety: true }), 'the receiver flag changes this fixture');
+assert.deepStrictEqual(Matchup.spotMatchup(spot, nativePair, { soloSafety: true }),
+    referenceMatchup(spot, nativePair, { soloSafety: true }));
+assert.deepStrictEqual(Matchup.spotMatchup(spot, coldPair, { soloSafety: true }),
+    referenceMatchup(spot, coldPair, { soloSafety: true }), 'cold summons cannot reuse native tanking verdicts');
+const scored = fighter({ soloAttackScores: {} });
+assert.notDeepStrictEqual(referenceMatchup(spot, [scored], { soloSafety: true }),
+    referenceMatchup(spot, [fighter()], { soloSafety: true }), 'native attack priorities change this fixture');
+assert.deepStrictEqual(Matchup.spotMatchup(spot, [scored], { soloSafety: true }),
+    referenceMatchup(spot, [scored], { soloSafety: true }), 'native priorities cannot reuse theoretical attack verdicts');
 
 // The shared cache is bounded: thousands of distinct profiles evict the oldest.
 for (let i = 0; i < Matchup.VERDICT_PROFILE_LIMIT + 50; i++) {

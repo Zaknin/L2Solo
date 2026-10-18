@@ -1,17 +1,18 @@
+const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
 
 // One compare-and-swap transaction for state, hand-in and reward. The caller
 // must be a server-authored handler that has validated its NPC and conditions.
-async function apply(state, { takes: wanted = [], gives = [], variables = state.variables, status = 'started', exp = 0, sp = 0, beginner = null, pk = null }) {
+async function apply(state, { takes: wanted = [], gives = [], variables = state.variables, status = 'started', exp = 0, sp = 0, beginner = null, pk = null, removeRecipes = [] }) {
     // A count of zero means "consume whatever the character holds of this kind";
     // it is a no-op, not a shortage the database should reject.
     const takes = wanted.filter(([, amount]) => amount > 0);
     const actor = state.session.actor;
     const next = { state: status, variables: { ...variables, revision: String(state.getInt('revision') + 1) } };
     const rewards = gives.flatMap(([selfId, amount]) => {
-        const template = DataCache.items.find(item => item.selfId === selfId);
+        const template = ItemTemplateIndex.findStrictRequired(DataCache.items, selfId);
         if (!template) throw new Error(`Missing quest item ${selfId}`);
         const item = { selfId, amount, name: template.template.name, stackable: template.etc.stackable };
         return item.stackable ? [item] : Array.from({ length: amount }, () => ({ ...item, amount: 1 }));
@@ -23,16 +24,38 @@ async function apply(state, { takes: wanted = [], gives = [], variables = state.
     } : null;
     const rows = await Database.applyQuestStep(actor.fetchId(), state.quest.id,
         { state: state.state, variables: state.variables }, next,
-        takes.map(([selfId, amount]) => ({ selfId, amount })), rewards, experience, beginner, pk);
+        takes.map(([selfId, amount]) => ({ selfId, amount })), rewards, experience, beginner, pk, removeRecipes);
+    let equipmentChanged = false;
     for (const row of rows) {
         const item = actor.backpack.fetchItemRaw(row.id);
         if (!row.amount) {
+            if (item?.fetchEquipped()) {
+                actor.backpack.unequipPaperdoll(item.fetchSlot());
+                equipmentChanged = true;
+            }
             actor.backpack.items = actor.backpack.items.filter(i => i.fetchId() !== row.id);
         } else if (item) item.setAmount(row.amount);
         else actor.backpack.insertItem(row.id, row.selfId, row);
     }
     state.state = next.state;
     state.variables = next.variables;
+    if (removeRecipes.length) {
+        invoke('GameServer/Bot/Economy/CraftWorkshopService').recipesChanged(actor.fetchId());
+        const store = actor.model || actor;
+        for (const type of ['dwarven', 'common']) {
+            const property = type === 'dwarven' ? 'dwarvenRecipes' : 'commonRecipes';
+            const before = store[property] || [];
+            store[property] = before.filter(row => !removeRecipes.includes(Number(row.recipeId)));
+            if (actor.fetchMaxMp && before.length !== store[property].length)
+                state.session.dataSendToMe(Response.recipeBookItemList(actor, type === 'dwarven'));
+        }
+    }
+    if (equipmentChanged && actor.fetchMaxHp) {
+        invoke(path.actor).calculateStats(state.session, actor);
+        invoke('GameServer/Skills/ToggleSkills').syncEquipment(state.session, actor);
+        state.session.dataSendToMe(Response.userInfo(actor));
+        state.session.dataSendToOthers?.(Response.charInfo(actor));
+    }
     if (rows.experience) {
         const award = rows.experience;
         actor.setExpSp(award.totalExp, award.totalSp);
@@ -53,4 +76,19 @@ async function apply(state, { takes: wanted = [], gives = [], variables = state.
     for (const [id, amount] of gives) invoke('GameServer/Quest/QuestService').transmitItemReceived(state.session, id, amount);
     return { ok: true };
 }
-module.exports = { apply };
+// What the character holds of each item, ready for `takes`. Equipped items
+// are left out: the step transaction only takes unequipped ones.
+function heldItems(state, itemIds) {
+    const items = state.session.actor.backpack.fetchItems();
+    return itemIds.map(id => [id, items
+        .filter(item => item.fetchSelfId() === id && !item.fetchEquipped())
+        .reduce((sum, item) => sum + item.fetchAmount(), 0)]).filter(([, amount]) => amount > 0);
+}
+
+// Abandoning a quest (L2J QuestState.exitQuest(true)): take every held item of
+// the quest and reset it to created in one transaction. `kept` holds the
+// variables that survive, such as reward receipts.
+function abandon(state, itemIds = [], kept = {}) {
+    return apply(state, { takes: heldItems(state, itemIds), status: 'created', variables: kept });
+}
+module.exports = { apply, heldItems, abandon };

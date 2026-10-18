@@ -1,8 +1,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+require('./helpers/databaseIsolation');
 const { DatabaseSync } = require('node:sqlite');
+const isolated = require('./helpers/isolatedSocialDatabase')('clan-production-physical');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 const Cache = invoke('GameServer/DataCache');
 Cache.init();
 const Database = invoke('Database');
@@ -16,7 +19,7 @@ const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Craft = invoke('GameServer/Bot/Economy/ColdCraftingService');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const root = path.resolve(__dirname, '..');
-const dbPath = path.join(root, 'tmp/test-clan-production.sqlite');
+const dbPath = isolated.world;
 const ids = [4910001, 4910002, 4910003];
 const cleanup = () => [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].forEach(file => fs.rmSync(file, { force: true }));
 const query = (sql, args = []) => Database.execute([sql, args]);
@@ -37,7 +40,6 @@ async function main() {
             .run(id, `Production${index}`, JSON.stringify({ classId, generatedCold: true }));
     }
     seed.close();
-    options.default.Database.path = path.relative(root, dbPath);
     Database.init();
     await Life.init();
     try {
@@ -54,37 +56,52 @@ async function main() {
         assert(!Policy.isResource(1896));
         assert(!Policy.isResource(1458));
         const items = [{ id: 1, selfId: 1864, amount: 20 }, { id: 2, selfId: 2005, amount: 5 }];
-        assert.deepEqual(WarehousePolicy.depositCandidates({}, items, []).map(item => item.selfId), [1864]);
-        assert.equal(WarehousePolicy.depositCandidates({}, items, [], { demand: { 2005: 2 } })[1].amount, 2);
-        assert.equal(WarehousePolicy.depositCandidates({}, items, [{ selfId: 2005, amount: 2 }], { demand: { 2005: 2 } }).length, 1);
+        assert.deepEqual(WarehousePolicy.depositCandidates({}, items, []), []);
+        assert.equal(WarehousePolicy.depositCandidates({}, items, [], { demand: { 2005: 2 } })[0].amount, 2);
+        assert.equal(WarehousePolicy.depositCandidates({}, items, [{ selfId: 2005, amount: 2 }], { demand: { 2005: 2 } }).length, 0);
         const scrolls = [{ id: 3, selfId: 1786, amount: 5 }];
         assert.equal(WarehousePolicy.depositCandidates({}, scrolls, [], { demand: { 1786: 2 } })[0].amount, 2);
         const personal = { clanId, level: 62, stats: { equipmentPlan: { strategy: 'craft', status: 'active',
             recipeId: 2, materials: [{ selfId: 1869, amount: 18 }] } }, inventory: { 1869: { selfId: 1869, amount: 50 } } };
         assert(Policy.isPersonalCraft(personal));
-        assert(!Craft.beginTravel(personal));
-        assert.equal(Disposition.saleCandidates(personal).length, 0);
-        assert.equal(Planner.finalizePlan(personal, null, personal.stats.equipmentPlan).strategy, 'none');
+        assert.equal(Disposition.saleCandidates(personal).find(row => row.selfId === 1869).count, 32);
+        assert.equal(Planner.finalizePlan(personal, null, personal.stats.equipmentPlan).strategy, 'craft');
 
-        // Shared raw inputs must not be counted twice, and crystal/gemstone needs remain ignored.
+        // ARCH-NOTE: Shared raw inputs are allocated once. The approved
+        // physical-input rule includes crystals and gemstones in full demand.
         const chain = Recipes.resolveByProductId(1880);
-        const rootRecipe = { recipeId: 999999, materials: [{ selfId: 1880, amount: 2 }, { selfId: 1458, amount: 99 }] };
+        const rootRecipe = { recipeId: 999999, materials: [
+            { selfId: 1880, amount: 2 }, { selfId: 1458, amount: 99 }, { selfId: 2130, amount: 7 }
+        ] };
         const requirements = Policy.requirements(rootRecipe, { 1880: { selfId: 1880, amount: 1 } });
         assert.equal(requirements.get(1880), 2);
-        assert(!requirements.has(1458));
+        assert.equal(requirements.get(1458), 99);
+        assert.equal(requirements.get(2130), 7);
         for (const material of chain.materials) assert(requirements.get(material.selfId) >= material.amount);
+        const partial = { 1458: { selfId: 1458, amount: 98 }, 2130: { selfId: 2130, amount: 6 } };
+        const held = structuredClone(partial);
+        assert.deepEqual(Policy.warehouseMaterials({ materials: rootRecipe.materials }, partial, [
+            { selfId: 1458, amount: 5, reservedAmount: 3 }, { selfId: 2130, amount: 2 }
+        ]), [{ selfId: 1458, amount: 1 }, { selfId: 2130, amount: 1 }],
+        'the clan must withdraw the physical missing crystal and gemstone units without spending reservations');
+        assert.deepEqual(partial, held, 'planning must not grant or consume any owned input');
         const pooled = Policy.stockInventory({}, [{ selfId: 1869, kind: 'Other.Material', amount: 20, reservedAmount: 3 }]);
         assert.equal(pooled[1869].amount, 17);
 
-        // Level zero and level four both collect resources. Party membership and
+        // Level zero keeps personal stock; an active craft at level four collects
+        // only its inputs. Party membership and
         // worker ownership must survive an atomic, revision-fenced deposit.
         await add(ids[2], 1864, 20);
         await add(ids[2], 2005, 5);
         let clan = await projection();
-        assert((await Warehouse.resolveClan(clan, { batchSize: 8 })).deposited > 0);
-        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1864).amount, 20);
+        assert.equal((await Warehouse.resolveClan(clan, { batchSize: 8 })).skipped, true);
+        assert(!(await Database.fetchClanWarehouseItems(clanId)).some(row => row.selfId === 1864));
         assert.equal((await Database.fetchItems(ids[2])).find(row => row.selfId === 2005).amount, 5);
         await query('UPDATE clans SET level = 4 WHERE id = ?', [clanId]);
+        const supplies = { goalKey: 'supply-test', type: 'equipment', status: 'executing', required: 1, progress: 0,
+            target: { memberId: ids[0], itemId: 3 }, policy: { strategy: 'craft' },
+            plan: { craft: { materials: [{ selfId: 1864, required: 57 }, { selfId: 1870, required: 30 }, { selfId: 1865, required: 11 }] } } };
+        await query("UPDATE clan_simulation_clans SET stateJson = json_set(stateJson, '$.productionGoal', json(?)) WHERE clanId = ?", [JSON.stringify(supplies), clanId]);
         await add(ids[2], 1870, 30);
         await query("UPDATE bot_life_state SET partyId = 'production-party' WHERE characterId = ?", [ids[2]]);
         clan = await projection();
@@ -145,11 +162,19 @@ async function main() {
                 clanGoal: { clanId, goalKey: 'production-test', beneficiaryId: ids[0] },
                 craftProviders: { 2: capabilities.craftProviders[2] } } } }, 'clan_equipment_goal');
         const beforeMp = (await Life.findByCharacterId(ids[1])).vitals.mp;
+        const beforeItems = await Database.fetchItems(ids[0]);
+        const amountFor = (rows, selfId) => rows.filter(row => Number(row.selfId) === Number(selfId))
+            .reduce((total, row) => total + Number(row.amount), 0);
         const result = await Craft.craft(customer, () => 0);
         assert(result.crafted, JSON.stringify(result));
         assert((await Database.fetchCharacterRecipes(ids[1])).some(row => Number(row.recipeId) === 2));
         assert(!(await Database.fetchItems(ids[0])).some(row => Number(row.selfId) === recipe.recipeItemId && row.amount > 0));
         assert((await Database.fetchItems(ids[0])).some(row => Number(row.selfId) === 3 && row.amount === 1));
+        const afterItems = await Database.fetchItems(ids[0]);
+        for (const material of recipe.materials) {
+            assert.equal(amountFor(beforeItems, material.selfId) - amountFor(afterItems, material.selfId), material.amount,
+                `native clan manufacture consumes exactly the authored input ${material.selfId}`);
+        }
         assert.equal((await Life.findByCharacterId(ids[1])).vitals.mp, beforeMp - recipe.mpCost);
         assert.equal((await Life.findByCharacterId(ids[1])).inventory[1870].amount, 19, 'crafting must preserve unmaterialized crafter loot');
         assert.equal(await Life.upsertState(customer, 'stale_pre_craft'), null, 'stale lifecycle writes must not restore spent ingredients');
@@ -158,6 +183,6 @@ async function main() {
         assert(!repeated.crafted);
         assert.equal((await Database.fetchItems(ids[0])).find(row => Number(row.selfId) === 3).amount, 1);
         console.log('Clan production: pooling, selective parts, all levels, party transfers, recipe learning and native clan manufacture passed');
-    } finally { await Database.close(); cleanup(); }
+    } finally { await Database.close(); cleanup(); fs.rmSync(isolated.directory, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

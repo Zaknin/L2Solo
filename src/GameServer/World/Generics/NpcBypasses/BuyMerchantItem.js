@@ -3,11 +3,8 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const DataCache      = invoke('GameServer/DataCache');
 const TradeService   = invoke('GameServer/Bot/TradeService');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
-const LifeState      = invoke('GameServer/Bot/Population/BotLifeState');
-const BotManager     = invoke('GameServer/Bot/BotManager');
-const Cooldown       = invoke('GameServer/Bot/Population/Cooldown');
-const GoalExecutor   = invoke('GameServer/Bot/Goals/GoalExecutor');
 const Html           = invoke('GameServer/World/Generics/HtmlKit');
+const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 
 function fold(v) {
     return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
@@ -31,6 +28,7 @@ function quantityLinks(prefix, selfId, stock) {
 
 function buildShopHtml(session, bot) {
     const store = bot.fetchPrivateStore();
+    TradeService.refreshStorePrices(store, session.actor);
     const items = store ? store.items : [];
     const adena = session.actor.backpack.fetchTotalAdena();
     const title = store?.title ?? 'Merchant';
@@ -75,6 +73,11 @@ module.exports = async function(session, parts) {
     }
 
     const store = bot.fetchPrivateStore();
+    TradeService.refreshStorePrices(store, session.actor);
+    if (store?.afkTrade === true) {
+        session.dataSendToMe(ServerResponse.actionFailed());
+        return;
+    }
     if (!store || store.storeType !== 1 || !store.items.length) {
         session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: "This merchant has nothing for sale." }));
         return;
@@ -106,34 +109,12 @@ module.exports = async function(session, parts) {
     }
 
     try {
-        const sellerSession = BotManager.sessions.find((candidate) => candidate.actor === bot);
-        const bought = await TradeService.buyFromStore(session.actor, store, selfId, buyQty, {
-            afterPurchase: sellerSession?.coldMarketState
-                ? async (purchaseResult) => {
-                    const updatedSeller = await LifeState.applyMarketSale(sellerSession.coldMarketState, {
-                        selfId,
-                        price: storeItem.price,
-                        buyerCharacterId: session.actor.fetchId(),
-                        storeItem
-                    }, purchaseResult.qty);
-                    if (updatedSeller) sellerSession.coldMarketState = updatedSeller;
-                }
-                : null
-        });
+        const bought = await TradeService.buyFromStore(session.actor, store, selfId, buyQty);
+        MarketTelemetry.recordTrade({ channel: 'wts', sourceType: 'private_store_player_purchase',
+            selfId, itemName: bought.name, quantity: bought.qty, unitPrice: bought.totalAdena / bought.qty,
+            town: store.town, sellerCharacterId: bot.fetchId(), sellerName: bot.fetchName(),
+            buyerCharacterId: session.actor.fetchId(), buyerName: session.actor.fetchName() });
         const soldOut = !store.items.some((item) => Number(item.count || 0) > 0);
-        if (sellerSession?.coldMarketState) {
-            // A dynamic seller has no reason to remain seated after its last
-            // item is bought. Preserve its planned return trip, remove the
-            // now-empty store, and hand it back to cold simulation.
-            const returnState = soldOut ? GoalExecutor.finishMarketVisit(sellerSession.coldMarketState) : null;
-            if (returnState) {
-                const departingState = {
-                    ...returnState,
-                    stats: { ...(returnState.stats || {}), marketStore: null }
-                };
-                await Cooldown.transitionToColdState(sellerSession, departingState, 'market_sold_out');
-            }
-        }
         BotSocialMemory.recordTradeCompleted(session, bot, `bought ${bought.qty} ${bought.name}`);
 
         session.dataSendToMe(ServerResponse.userInfo(session.actor));

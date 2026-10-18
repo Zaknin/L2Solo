@@ -113,6 +113,17 @@ assert.deepStrictEqual(
     'death should send the native empty short-buff payload'
 );
 
+// E291: dying with Silent Move on must clear the silentMoving flag NpcAggro
+// reads first, or the revived actor stays invisible to aggressive mobs.
+dyingActor.state.setDead(false);
+EffectStore.apply(dyingActor, { key: 'silent_move', id: 221, type: 'buff', toggle: true, stats: { silentMoving: true }, durationMs: 0 });
+dyingActor.silentMoving = true;
+assert.strictEqual(EffectStore.list(dyingActor).length, 1, 'Silent Move should be stored before the second death');
+die({ dataSendToMeAndOthers() {} }, dyingActor);
+assert.strictEqual(dyingActor.state.fetchDead(), true, 'second death should mark the actor dead');
+assert.deepStrictEqual(EffectStore.list(dyingActor), [], 'second death should remove Silent Move');
+assert.strictEqual(dyingActor.silentMoving, false, 'death should clear the silent moving flag with the effect');
+
 const packets = [];
 const actor = {
     hp: 0,
@@ -208,6 +219,33 @@ assert.strictEqual(fallenA.unselected, true, 'teleported companion must clear it
 assert.strictEqual(aliveSession.plan, 'following', 'living companions must return to follow when the leader teleports');
 assert.strictEqual(aliveSession.botStay, true, 'leader teleport must preserve an explicit Hold order');
 assert.deepStrictEqual(aliveSession.stayLocation, { locX: 1000, locY: 2080, locZ: -3000 }, 'a held companion must use its new teleport location as the hold anchor');
+
+// A companion with karma is not moved into a town (peace zone) with the
+// leader; it waits where it is. Outside a town it still follows.
+{
+    const companionAt = (id, karma) => ({
+        actor: { fetchId: () => id, fetchKarma: () => karma, isDead: () => false, unselect() {} },
+        partyCompanion: true,
+        followPlayerSession: leaderSession,
+        plan: 'hunting'
+    });
+    const white = companionAt(71, 0);
+    const red = companionAt(72, 500);
+    const moves = [];
+    const generics = {
+        revive() {},
+        teleportTo(_session, actor, coords) { moves.push({ id: actor.fetchId(), coords }); }
+    };
+    const dionGatekeeper = { locX: 15681, locY: 142885, locZ: -2704 };
+    assert.strictEqual(TeleportTo.syncPartyCompanions(leaderSession, dionGatekeeper, generics, [white, red]), 1,
+        'a leader teleport into town moves only companions without karma');
+    assert.deepStrictEqual(moves.map((move) => move.id), [71]);
+    assert.strictEqual(red.plan, 'hunting', 'a companion with karma left outside town keeps its state');
+    moves.length = 0;
+    assert.strictEqual(TeleportTo.syncPartyCompanions(leaderSession, { locX: 1000, locY: 2000, locZ: -3000 }, generics, [white, red]), 2,
+        'a leader teleport outside a town still moves a companion with karma');
+    assert.deepStrictEqual(moves.map((move) => move.id), [71, 72]);
+}
 
 const formationCalls = [];
 const fullParty = Array.from({ length: 8 }, (_value, index) => ({

@@ -9,6 +9,7 @@ const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 // for go through this path; equipment still has a chance to reach players via
 // a private store.
 function buyersInTown(town) {
+    if (require('./ProductionPolicy').buyersDisabled()) return [];
     return Object.entries(MerchantStoreConfigs)
         .filter(([, store]) => store?.storeType === 3 && store.town === town)
         .map(([name, store]) => ({ name, ...store }));
@@ -22,7 +23,7 @@ function candidatesFor(state, town) {
         const offer = buyers.reduce((best, buyer) => {
             const line = (buyer.items || []).find((entry) => Number(entry.selfId) === Number(item.selfId));
             if (!line) return best;
-            const price = StaticMerchantPricing.priceFor(buyer, line);
+            const price = StaticMerchantPricing.botPriceFor(buyer, line);
             return !best || price > best.price ? { buyer, price } : best;
         }, null);
         if (!offer || offer.price <= 0) return [];

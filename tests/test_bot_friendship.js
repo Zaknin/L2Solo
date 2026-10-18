@@ -16,7 +16,7 @@ let requestSocial = {
 
 Database.execute = ([sql]) => {
     const text = String(sql);
-    if (text.includes('FROM bot_social_memory s INNER JOIN bot_life_state')) {
+    if (text.includes('FROM interaction_relations') && text.includes('INNER JOIN bot_life_state')) {
         return Promise.resolve([{
             botId: 103,
             name: 'ActualHealer',
@@ -39,7 +39,7 @@ Database.execute = ([sql]) => {
             selected: 0
         }]);
     }
-    if (text.includes('FROM bot_social_memory')) return Promise.resolve([requestSocial]);
+    if (text.includes('FROM interaction_relations')) return Promise.resolve([requestSocial]);
     if (text.includes('INSERT INTO bot_friendships')) return Promise.resolve([]);
     if (text.includes('FROM bot_friendships')) return Promise.resolve([{}]);
     if (text.includes('FROM bot_friend_roster WHERE playerId') && text.includes('botId')) return Promise.resolve([]);
@@ -80,8 +80,42 @@ Promise.all([
     requestSocial = { trust: 20, insults: 0, recentlyAbandonedAt: Date.now() - 1000 };
     const coolingDown = await BotFriendship.request({ characterId: 42 }, { characterId: 101, name: 'CoolingFriend' });
     assert.strictEqual(coolingDown.reason, 'recently_abandoned', 'a recent abandonment must still be respected');
+    // Friendship needs a trusted relationship, no insults and no abandonment in the last five minutes.
+    const requestReason = async (social) => {
+        requestSocial = social;
+        return (await BotFriendship.request({ characterId: 42 }, { characterId: 105, name: 'PinFriend' })).reason;
+    };
+    assert.strictEqual(await requestReason({ trust: 7, familiarity: 20, insults: 0 }), 'low_trust');
+    assert.strictEqual(await requestReason({ trust: 8, familiarity: 0, insults: 0 }), 'accepted');
+    assert.strictEqual(await requestReason({ trust: 8, insults: 1 }), 'insults');
+    assert.strictEqual(await requestReason({ trust: 8, insults: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }),
+        'recently_abandoned');
+    assert.strictEqual(await requestReason({ trust: 8, insults: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 - 1 }), 'accepted');
     const removed = await BotFriendship.remove({ characterId: 42 }, 100);
     assert.strictEqual(removed.ok, true, 'removing a friend should clear friendship and const membership');
+
+    // E251: a const toggle queued before a removal must not write its roster
+    // row after the removal deleted the friendship.
+    const order = [];
+    let releaseFriend;
+    Database.execute = ([sql]) => {
+        const text = String(sql).trim();
+        if (text.includes('FROM bot_friendships f')) return new Promise((resolve) => { releaseFriend = () => resolve([{}]); });
+        order.push(text.split(/\s+/).slice(0, 3).join(' '));
+        if (text.startsWith('SELECT 1 FROM bot_friend_roster')) return Promise.resolve([]);
+        if (text.includes('COUNT(*) AS count')) return Promise.resolve([{ count: 0 }]);
+        return Promise.resolve([]);
+    };
+    const toggle = BotFriendship.toggleConst({ characterId: 77 }, 200);
+    const removal = BotFriendship.remove({ characterId: 77 }, 200);
+    for (let i = 0; i < 5 && !releaseFriend; i++) await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    releaseFriend();
+    const [toggled, removedLater] = await Promise.all([toggle, removal]);
+    assert.strictEqual(toggled.selected, true);
+    assert.strictEqual(removedLater.ok, true);
+    assert.deepStrictEqual(order.slice(-3), ['INSERT INTO bot_friend_roster', 'DELETE FROM bot_friend_roster', 'DELETE FROM bot_friendships'],
+        'the removal runs after the queued toggle, so no roster row survives the friendship');
     console.log('Bot friendship roster checks passed');
 }).catch((error) => {
     console.error(error);

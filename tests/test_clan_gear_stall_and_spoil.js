@@ -1,6 +1,7 @@
 const assert = require('assert');
 
 require('../src/Global');
+invoke('GameServer/DataCache').init();
 
 const DataCache = invoke('GameServer/DataCache');
 const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -28,6 +29,8 @@ async function main() {
     const originalPlanningForClan = EquipmentService.planningForClan;
     const originalPlanFor = GearPlanner.planFor;
     const originalBestSourceForPlan = GearPlanner.bestSourceForPlan;
+    const Simulation = invoke('GameServer/Clan/ClanSimulationService');
+    const originalProjection = Simulation.autonomousClanProjection;
     const originalRate = process.env.L2NODE_PROGRESSION_RATE;
     try {
         DataCache.items = [{
@@ -140,6 +143,59 @@ async function main() {
         assert.strictEqual(snapshot.candidates.some((candidate) => candidate.assessment.current), false,
             'a hard-stalled current target must leave the decision set when an executable alternative exists');
         assert.strictEqual(snapshot.deterministicCandidateId, 'equipment:7:2:99102:10');
+        const Policy = require('../src/GameServer/Clan/ClanEquipmentPolicy');
+        const old = { type: 'equipment', status: 'executing', target: { memberId: 1, itemId: 99101, slot: 7 },
+            createdAt: now - 8 * 60 * 60 * 1000, updatedAt: now - 1000 };
+        const rebuilt = Policy.buildGoal(clan, { member: clan.members[0], plan: currentPlan }, old, now);
+        assert.equal(rebuilt.progressAt, old.createdAt, 'a routine review preserves the legacy progress clock');
+        const normalizedLegacy = Policy.buildGoal(clan, { member: { ...clan.members[0], inventory: { 1864: { amount: 5 } } },
+            plan: { ...currentPlan, materials: [{ selfId: 1864, amount: 5 }] } }, { ...old, progressSnapshot: {} }, now);
+        assert.equal(normalizedLegacy.progressAt, old.createdAt, 'initializing a legacy snapshot cannot turn old stock into new progress');
+        assert.equal(CandidateService.goalStallAssessment(clan, rebuilt, [], { now }).reason, 'goal_hard_stalled',
+            'a fresh updatedAt cannot hide eight hours without progress');
+        const advancedMember = { ...clan.members[0], stats: { ...clan.members[0].stats,
+            targetCombat: { targetNpcId: currentPlan.next.npcId, targetKills: 1 } } };
+        const advanced = Policy.buildGoal(clan, { member: advancedMember, plan: currentPlan }, rebuilt, now + 1000);
+        assert.equal(advanced.progressAt, now + 1000, 'a real target kill advances the progress clock');
+        const reviewed = Policy.buildGoal(clan, { member: advancedMember, plan: currentPlan }, advanced, now + 2000);
+        assert.equal(reviewed.progressAt, advanced.progressAt, 'repeated unchanged kills do not advance the clock');
+        const reviewGoal = { type: 'equipment', status: 'executing', goalKey: 'event-input',
+            target: { memberId: 1, itemId: 99101, slot: 7 }, createdAt: now, updatedAt: now };
+        const reviewOptions = { occupancy: {}, now };
+        await CandidateService.snapshotFor(clan, reviewGoal, reviewOptions);
+        assert.strictEqual((await CandidateService.snapshotFor(clan, reviewGoal, reviewOptions)).cacheHit, true);
+        require('../src/GameServer/Clan/ClanReviewEvents').changed(clan.id, 'board');
+        assert.strictEqual((await CandidateService.snapshotFor(clan, reviewGoal, reviewOptions)).cacheHit, false,
+            'a changed offer must replan immediately even when the member snapshot is unchanged');
+        CandidateService.reset();
+        let releasePlanning;
+        const held = new Promise(resolve => { releasePlanning = resolve; });
+        const immediatePlan = EquipmentService.planningForClan;
+        EquipmentService.planningForClan = async (...args) => { await held; return immediatePlan(...args); };
+        const pending = CandidateService.snapshotFor(clan, reviewGoal, reviewOptions);
+        require('../src/GameServer/Clan/ClanReviewEvents').changed(clan.id, 'treasury');
+        releasePlanning(); await pending;
+        EquipmentService.planningForClan = immediatePlan;
+        assert.strictEqual((await CandidateService.snapshotFor(clan, reviewGoal, reviewOptions)).cacheHit, false,
+            'planning completed after an input change cannot reinstall its old cache');
+        const events = require('../src/GameServer/Clan/ClanReviewEvents');
+        events.stop();
+        let boardChanged;
+        Simulation.autonomousClanProjection = async () => [];
+        await events.start({ subscribePublications: () => () => {} }, {
+            subscribeBoardChanges(listener) { boardChanged = listener; return () => {}; }
+        });
+        events.track({ ...clan, members: [{ ...clan.members[0], stats: { equipmentPlan: {
+            target: { selfId: 99101 }, next: { itemId: 1880 }, materials: [{ selfId: 1864, amount: 5 }]
+        } } }] });
+        const noMembershipQuery = { execute() { throw new Error('board-only input must not query members'); } };
+        boardChanged({ selfIds: [1864], ready: true });
+        assert.deepStrictEqual((await events.drain(noMembershipQuery)).map(event => event.clanId), [clan.id],
+            'the beneficiary material offer addresses its clan, not only the final goal item');
+        events.track({ ...clan, members: clan.members });
+        boardChanged({ selfIds: [1864, 1880], ready: true });
+        assert.deepStrictEqual(await events.drain(noMembershipQuery), [], 'replacing a plan detaches its old material interests');
+        events.stop();
         console.log('Clan gear stall and spoil checks passed');
     } finally {
         DataCache.npcRewards = originalRewards;
@@ -148,6 +204,7 @@ async function main() {
         EquipmentService.planningForClan = originalPlanningForClan;
         GearPlanner.planFor = originalPlanFor;
         GearPlanner.bestSourceForPlan = originalBestSourceForPlan;
+        Simulation.autonomousClanProjection = originalProjection;
         CandidateService.reset();
         if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
         else process.env.L2NODE_PROGRESSION_RATE = originalRate;

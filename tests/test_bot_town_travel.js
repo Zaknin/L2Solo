@@ -12,9 +12,26 @@ const BotEventJournal = invoke('GameServer/Bot/AI/BotEventJournal');
 const DataCache = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
 
-function botAt(loc) {
+// A trip to town reads a Scroll of Escape from the backpack (N2, user
+// 2026-10-04); every test bot carries a few unless a case says otherwise.
+function backpackWith(scrolls) {
+    const items = new Map([[736, { id: 1, amount: scrolls }], [57, { id: 2, amount: 100000 }]]);
+    return {
+        items,
+        fetchItemFromSelfId(selfId) {
+            const item = items.get(Number(selfId));
+            return item && item.amount > 0 ? { fetchId: () => item.id, fetchAmount: () => item.amount } : null;
+        },
+        deleteItem(_session, id, amount) {
+            for (const item of items.values()) if (item.id === id) item.amount -= amount;
+        }
+    };
+}
+
+function botAt(loc, scrolls = 5) {
     let casts = false;
     return {
+        backpack: backpackWith(scrolls),
         moves: [],
         teleports: [],
         fetchId: () => 2000500,
@@ -84,6 +101,43 @@ try {
     assert.strictEqual(farSession.plan, 'shopping', 'SoE cast should enter shopping state');
     assert(farSession.townEscape, 'far town trip should expose an active SoE cast');
     assert.strictEqual(timers[0].delay, BotTownTravel.SOE_CAST_MS, 'ordinary bot SoE should preserve its 20 second cast');
+    assert.strictEqual(farBot.backpack.items.get(736).amount, 4, 'the far town trip reads one Scroll of Escape');
+
+    const scrollless = botAt({ locX: 0, locY: 0, locZ: 0 }, 0);
+    const scrolllessSession = session(scrollless);
+    assert.strictEqual(BotTownTravel.request(scrolllessSession, scrollless, farAi, 'Restocking.'), 'walk',
+        'without a Scroll of Escape a far town trip is walked');
+    assert.strictEqual(scrollless.moves.length, 1, 'the scrollless bot walks to town');
+
+    // E197: a gatekeeper fee the backpack cannot cover is counted per path;
+    // an ordinary trip then walks, a supply errand that must read a scroll is
+    // refused.
+    {
+        const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+        const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+        const TripPayment = invoke('GameServer/Bot/Travel/TripPayment');
+        const originalFee = TripPayment.fee, originalDiagnostics = Config.developerDiagnostics;
+        try {
+            TripPayment.fee = () => 2900;
+            Config.developerDiagnostics = true;
+            Diagnostics.stop();
+            const town = { name: 'Fee Town', x: 5000, y: 0, z: -100 };
+            const broke = botAt({ locX: 0, locY: 0, locZ: 0 });
+            broke.backpack.items.get(57).amount = 1000;
+            assert.strictEqual(BotTownTravel.request(session(broke), broke, farAi, 'Selling.', { destinationTown: town }), 'walk');
+            assert.strictEqual(BotTownTravel.request(session(broke), broke, farAi, 'Supplies.',
+                { destinationTown: town, forceScrollOfEscape: true }), 'unpaid');
+            const payer = botAt({ locX: 0, locY: 0, locZ: 0 });
+            assert.strictEqual(BotTownTravel.request(session(payer), payer, farAi, 'Selling.', { destinationTown: town }), 'escape');
+            assert.strictEqual(payer.backpack.items.get(57).amount, 100000 - 2900, 'the fee is paid once');
+            assert.deepStrictEqual(Diagnostics.metrics().counts, {
+                'trip_fare:short:hot': 1, 'trip_fare:short:hot_errand': 1, 'trip_fare:covered:hot': 1 });
+        } finally {
+            TripPayment.fee = originalFee;
+            Config.developerDiagnostics = originalDiagnostics;
+            Diagnostics.stop();
+        }
+    }
 
     const closeBot = botAt({ locX: 0, locY: 0, locZ: 0 });
     const closeSession = session(closeBot);
@@ -106,6 +160,20 @@ try {
     const resumedResult = BotTownTravel.request(fightingSession, fightingBot, farAi, fightingSession.pendingTownTrip.reason);
     assert.strictEqual(resumedResult, 'escape', 'pending town trip should start after combat ends');
     assert.strictEqual(fightingSession.pendingTownTrip, undefined, 'started town trip should clear its pending marker');
+
+    const redBot = botAt({ locX: 0, locY: 0, locZ: 0 });
+    let redKarma = 500;
+    redBot.fetchKarma = () => redKarma;
+    const redSession = session(redBot);
+    const redResult = BotTownTravel.request(redSession, redBot, farAi, 'Out of shots.');
+    // A bot with karma walks to Floran, the town where a PK trades (design 5.8).
+    assert.strictEqual(redResult, 'walk', 'a hot bot with karma walks to its town');
+    assert.strictEqual(redSession.plan, 'shopping');
+    assert.strictEqual(redSession.townEscape, undefined, 'a bot with karma should not cast Scroll of Escape to town');
+    assert.strictEqual(redBot.moves.length, 1, 'a bot with karma walks');
+    const floran = invoke('GameServer/World/TownRespawn').towns.floran_village;
+    assert.deepStrictEqual(redBot.moves[0].to, { locX: floran.locX, locY: floran.locY, locZ: floran.locZ }, 'to Floran');
+    assert.strictEqual(redSession.pendingTownTrip, undefined, 'the started trip clears its pending marker');
 
     const visiblePackets = [];
     const interruptedBot = botAt({ locX: 10, locY: 20, locZ: 30 });

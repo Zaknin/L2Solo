@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const fs = require('node:fs');
+const isolated = require('./helpers/isolatedSocialDatabase')('cold-raid-commit');
 require('../src/Global');
+isolated.assertConfigured(options.default);
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
@@ -8,8 +10,7 @@ const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Raid = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
 const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-raid-commit-'));
-options.default.Database.path = path.join(dir, 'test.sqlite');
+const dir = isolated.directory;
 const at = Date.now();
 const spot = { id: 'raid:10484', raidBoss: true, raidBossTemplateId: 10484, raidInstanceId: 'spawn-one' };
 const state = id => Life.cachedState(id);
@@ -124,15 +125,23 @@ async function run() {
                 memberResults: members.map(state => ({ state, result: { events: [] } })), events: [] };
         } });
     const members = a.memberIds.map(state);
+    const held = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
+        ownerId: Owner.OWNER_ID, leaseId: 'kernel', revision: 1, leaseUntil: at + 30000 }]));
+    for (const member of members) {
+        kernel.upsert({ state: member, context: {} });
+        kernel.inFlight.set(member.characterId, { state: member, grant: held.get(member.characterId),
+            partyId: a.partyId, claimRequestId: 'raid-claim' });
+    }
     kernel.partyRuns.set(a.partyId, { party: a, members, spot: { ...spot, raidAuthorityRevision: 0 },
-        grants: new Map(members.map(member => [member.characterId, { leaseId: 'kernel', revision: 1, characterId: member.characterId }])) });
+        requestId: 'raid-claim', grants: held });
     await kernel.resolvePartyGrant(a.partyId);
     const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
     assert.equal(proposals.length, 9, JSON.stringify(messages));
     assert(proposals.every(p => p.raidStepId === 'raid:kernel' && p.atomicGroup.partyChanges.length === 1
         && p.atomicGroup.raidCommit.expectedRevision === 0));
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
-    kernel.onCommitAck({ results: proposals.map(p => ({ characterId: p.characterId, raidStepId: p.raidStepId, ok: false })) });
+    kernel.onCommitAck({ results: proposals.map(p => ({ characterId: p.characterId, raidStepId: p.raidStepId, ok: false,
+        inputToken: p.token, proposalId: p.proposalId })) });
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
     const afterReject = await win('after-kernel-rejection'); Raid.abort('after-kernel-rejection');
     assert.equal(afterReject.snapshot.status, 'defeated');

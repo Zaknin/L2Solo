@@ -36,17 +36,11 @@ function equippedWeapon(state) {
   return Number(backpack.fetchPaperdollSelfId?.(7)) || 0;
 }
 
-async function collect(state, selfId, needed, chance = 1) {
-  const current = count(state, selfId);
-  if (current >= needed || Math.random() >= chance) return false;
-  const amount = service().questDropAmount(1, needed, current);
-  if (!amount) return false;
-  await service().giveItem(state.session, selfId, amount);
-  return current + amount >= needed;
-}
+const { collect } = require('../ProfessionQuestSteps');
 
 module.exports = {
   id: 401,
+  questItems: [1138, 1139, 1140, 1141, 1142, 1143, 1144],
   name: 'Path to Warrior',
   npcs: [AURON, SIMPLON],
   startNpcs: [AURON],

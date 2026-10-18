@@ -28,7 +28,7 @@ function accept(session, options = {}) {
     const invite = session.pendingClanInvite;
     session.pendingClanInvite = null;
 
-    if (!invite?.requestorSession?.actor) {
+    if (!invite?.requestorSession?.actor || invite.invitedActor !== session.actor) {
         session.dataSendToMe(ServerResponse.actionFailed());
         return Promise.resolve({ ok: false, code: 'missing_invite' });
     }
@@ -46,15 +46,21 @@ function accept(session, options = {}) {
         return Promise.resolve({ ok: false, code: allowed.code || 'not_allowed' });
     }
 
-    return ClanService.addMember(clan, session.actor, 0).then((result) => {
+    // The join is the invited character's even if the connection selects
+    // another one meanwhile; only its UI is skipped then.
+    const actor = session.actor;
+    return ClanService.addMember(clan, actor, 0).then((result) => {
         if (!result.ok) return result;
-        session.dataSendToMe(ServerResponse.joinPledge(clan.id));
-        session.dataSendToMe(ServerResponse.pledgeShowMemberListAll(
-            ClanService.refreshOnlineMembers(clan),
-            session.actor
-        ));
-        session.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan));
-        refreshAppearance(session);
+        const current = session.actor === actor;
+        if (current) {
+            session.dataSendToMe(ServerResponse.joinPledge(clan.id));
+            session.dataSendToMe(ServerResponse.pledgeShowMemberListAll(
+                ClanService.refreshOnlineMembers(clan),
+                actor
+            ));
+            session.dataSendToMe(ServerResponse.pledgeShowInfoUpdate(clan));
+            refreshAppearance(session);
+        }
 
         broadcastClan(clan, (memberSession) => (
             memberSession === session
@@ -62,17 +68,17 @@ function accept(session, options = {}) {
                 : ServerResponse.pledgeShowMemberListAdd(result.member)
         ));
 
-        if (options.automated && isBotSession(session)) {
+        if (current && options.automated && isBotSession(session)) {
             const BotManager = invoke('GameServer/Bot/BotManager');
             BotManager.botTell(session, invite.requestorSession, `I'll join ${clan.name}.`);
         }
 
-        if (isBotSession(session)) invoke('GameServer/Bot/AI/BotClanChat').onJoined(session, clan.id);
+        if (current && isBotSession(session)) invoke('GameServer/Bot/AI/BotClanChat').onJoined(session, clan.id);
 
         return { ok: true, clan, member: result.member };
     }).catch((err) => {
         utils.infoWarn('Clan', 'join clan failed: %s', err.message);
-        session.dataSendToMe(ServerResponse.actionFailed());
+        if (session.actor === actor) session.dataSendToMe(ServerResponse.actionFailed());
         return { ok: false, code: 'join_failed' };
     });
 }

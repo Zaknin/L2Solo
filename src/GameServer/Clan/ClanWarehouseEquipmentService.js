@@ -1,3 +1,4 @@
+const refreshPartyMemberships = require('../World/PartyMembershipPublication');
 const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Policy = invoke('GameServer/Clan/ClanWarehouseEquipmentPolicy');
@@ -33,7 +34,10 @@ function publish(session, result) {
     const received = Policy.materialize(result.received);
     backpack.items.push(received);
     backpack.equipPaperdoll(result.slot, received.fetchId(), received.fetchSelfId());
-    if (session.coldLifeState) session.coldLifeState = result.state;
+    if (session.coldLifeState) {
+        session.coldLifeState = result.state;
+        refreshPartyMemberships([session], invoke);
+    }
     // Persistence already committed both sides of the exchange. Only runtime
     // stats, item skills, toggles, and client appearance need refreshing here.
     invoke(path.actor).calculateStats(session, actor);
@@ -84,25 +88,33 @@ async function resolve(clanId, options) {
         FROM characters c JOIN bot_life_state l ON l.characterId = c.id
         WHERE c.clanId = ? ORDER BY c.id`, [clanId]], 'clan-gear:members');
     const manager = invoke('GameServer/Bot/BotManager');
+    const Goals = invoke('GameServer/Clan/ClanGoalService');
     let exchanged = 0;
     let inspected = 0;
+    let pending = false;
     for (const item of stock) {
-        if ((inspected > 0 && Date.now() >= deadlineAt) || exchanged >= 8) break;
+        if ((inspected > 0 && Date.now() >= deadlineAt) || exchanged >= 8) { pending = true; break; }
         let completed = true;
         const memberCursor = memberCursors.get(clanId);
         const memberStart = memberCursor?.itemId === item.id ? memberCursor.memberId : 0;
         const orderedMembers = [...members].sort((a, b) => Number(a.id <= memberStart) - Number(b.id <= memberStart) || a.id - b.id);
         for (const member of orderedMembers) {
-            if (inspected > 0 && Date.now() >= deadlineAt) { completed = false; break; }
+            if (inspected > 0 && Date.now() >= deadlineAt) { completed = false; pending = true; break; }
             memberCursors.set(clanId, { itemId: item.id, memberId: member.id });
             const session = manager.findSessionById(Number(member.id));
-            if (member.phase === 'hot' ? !available(session, clanId)
-                : member.phase !== 'cold' || !['hunting', 'resting', 'grouped'].includes(member.activity)
-                    || !coldAvailable(member.id)) continue;
-            if (Identity.isStaticService({ ...member, stats: JSON.parse(member.statsJson || '{}') })) continue;
-            const inventory = member.phase === 'hot' ? liveRows(session.actor) : await Database.fetchItems(member.id);
+            if (!['hot', 'cold'].includes(member.phase)) continue;
+            if (Identity.isStaticService({ ...member, stats: Goals.memberJson(Number(member.id), 'stats', member.statsJson) })) continue;
+            const inventory = member.phase === 'hot' && session?.actor?.backpack
+                ? liveRows(session.actor) : await Database.fetchItems(member.id, 'clan_warehouse_equipment');
             inspected += 1;
             if (!Policy.plan(member, inventory, item)) continue;
+            if (member.phase === 'hot' ? !available(session, clanId)
+                : !['hunting', 'resting', 'grouped'].includes(member.activity) || !coldAvailable(member.id)) {
+                // Retain only an actual compatible exchange awaiting its native
+                // availability fence, rather than rediscovering all clans.
+                pending = true;
+                continue;
+            }
             const actor = session?.actor;
             const request = {
                 clanId, characterId: member.id, warehouseId: item.id, expectedPhase: member.phase,
@@ -117,10 +129,11 @@ async function resolve(clanId, options) {
                 : await exchangeCold(request);
             if (result.ok) {
                 exchanged += 1;
-                console.info('ClanGear :: %s exchanged warehouse item %d, returned %s', member.name, item.selfId,
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('ClanGear :: %s exchanged warehouse item %d, returned %s', member.name, item.selfId,
                     result.returned.map((old) => `${old.selfId}+${old.enchant}`).join(', ') || 'empty slot');
                 break;
             }
+            if (['member_busy', 'ownership_conflict'].includes(result.code || result.reason)) pending = true;
         }
         if (completed) {
             itemCursors.set(clanId, Number(item.id));
@@ -128,7 +141,7 @@ async function resolve(clanId, options) {
         }
         await new Promise((resolve) => setImmediate(resolve));
     }
-    return { exchanged };
+    return { exchanged, pending };
 }
 
 function resolveClan(clanId, options = {}) {

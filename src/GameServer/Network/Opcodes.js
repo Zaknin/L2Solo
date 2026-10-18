@@ -78,6 +78,7 @@ const Opcodes = {
         table[0x94] = ClientRequest.privateStoreTitle(3);
         table[0x96] = ClientRequest.privateStoreSell;
         table[0xaa] = ClientRequest.userCommand;
+        table[0xa7] = ClientRequest.multiSellChoose;
         table[0xac] = ClientRequest.recipeBookOpen;
         table[0xae] = ClientRequest.recipeItemMakeInfo;
         table[0xaf] = ClientRequest.recipeItemMakeSelf;
@@ -96,7 +97,7 @@ const Opcodes = {
         table[0xc2] = ClientRequest.macro;
         table[0xcd] = ClientRequest.showMap;
 
-        table[0x57] = (session) => { invoke(path.actor).adminPanel(session, session.actor); }; // Board
+        table[0x57] = session => invoke('GameServer/AfkTrade/PlayerBoardWindow').open(session); // Board
         table[0x9d] = ClientRequest.skillCoolTime;
         table[0xb9] = () => {}; // Recommend button
         table[0x4a] = () => {}; // StartRotating

@@ -1,19 +1,13 @@
+const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const DataCache = invoke('GameServer/DataCache');
 const EnchantRules = invoke('GameServer/Items/C4EnchantRules');
-const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 const MAX_OPERATIONS = 64;
-let templateSource = null;
-let templateIndex = new Map();
 
 function templateFor(selfId) {
-    const items = DataCache.items || [];
-    if (items !== templateSource) {
-        templateSource = items;
-        templateIndex = new Map(items.map((item) => [Number(item.selfId), item]));
-    }
-    return templateIndex.get(Number(selfId)) || null;
+    return ItemTemplateIndex.findLast(DataCache.items, selfId, templateFor) || null;
 }
 
 function itemKind(item, template = templateFor(item?.selfId)) {
@@ -77,6 +71,19 @@ function inventoryScrolls(state = {}) {
 }
 
 function warehouseRequests(state = {}, warehouseItems = [], options = {}) {
+    if (state.phase === 'cold') {
+        const Decision = require('../Population/ColdEconomyDecision');
+        const economy = Decision.economyFor(state);
+        const materials = economy.materials || Decision.capture(economy, state).materials;
+        return materials.flatMap(([selfId, missing]) => {
+            const row = warehouseItems.find(item => Number(item.selfId) === selfId);
+            const amount = Math.min(missing, Math.max(0, Number(row?.amount || 0)));
+            // ARCH-NOTE: the captured worker materials use the existing town
+            // withdrawal reasons; enchant also triggers the physical safe batch.
+            const reason = EnchantRules.resolveScroll(selfId) ? 'enchant' : 'craft';
+            return amount > 0 ? [{ selfId, amount, reason }] : [];
+        });
+    }
     const needs = targetNeeds(state, options);
     const inventory = inventoryScrolls(state);
     const missing = {
@@ -198,6 +205,8 @@ function summary(operations = []) {
     }, new Map()).values()];
 }
 
+// ARCH-NOTE: FX-F1 restores the authored guaranteed D-grade safe batch;
+// the delivered adapter discarded its operations and enchanted only one item.
 function consumedInventory(state = {}, operations = []) {
     const consumed = operations.reduce((amounts, operation) => {
         const selfId = Number(operation.scrollSelfId || 0);
@@ -220,7 +229,7 @@ async function enchantSafe(state, options = {}) {
     if (!state || state.phase === 'hot' || !state.characterId || !hasPotential(state)) {
         return { state, enchanted: false, operations: [] };
     }
-    const rows = await Database.fetchItems(state.characterId);
+    const rows = await Database.fetchItems(state.characterId, 'cold_safe_enchant');
     const operations = plan(rows, options);
     if (!operations.length) return { state, enchanted: false, operations: [] };
 

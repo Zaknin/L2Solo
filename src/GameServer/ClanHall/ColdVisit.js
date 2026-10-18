@@ -1,6 +1,7 @@
 const Runtime = require('./Runtime');
 const Services = require('./Services');
 const Effects = invoke('GameServer/Effects/EffectStore');
+const VisitPolicy = require('./VisitPolicy');
 const VISIT_MS = 180000;
 function hallFor(state) {
     // Membership projection is refreshed on joins/kicks; a saved stats.clanId is not authority.
@@ -51,25 +52,10 @@ function actorFor(state, hall) {
     };
     return actor;
 }
+// The same rule as the hot visit and the hot restart (VisitPolicy): a cold
+// bot is never at the manager, so a party member restarts in town.
 function eligible(state) {
-    const s = state?.stats || {};
-    return (
-        state?.phase === 'cold' &&
-        !state.party?.partyId &&
-        !state.partyId &&
-        !s.pvpEncounter &&
-        Number(s.karma || 0) === 0 &&
-        !s.clanPartyObjective &&
-        !s.equipmentPlan?.clanGoal &&
-        !s.clanAllianceQuest &&
-        !s.supplyErrand &&
-        !s.marketReturn &&
-        !s.craftReturn &&
-        !s.warehouseWorkflow &&
-        !s.mammonReturn &&
-        !s.partyMarketReturn &&
-        !String(state.accountName || '').startsWith('bot_craft_')
-    );
+    return state?.phase === 'cold' && VisitPolicy.mayUse(VisitPolicy.fromState(state));
 }
 function needed(state, timestamp = Date.now()) {
     if (!eligible(state)) return false;
@@ -137,7 +123,7 @@ function finish(state, timestamp, reason) {
         reason
     );
 }
-async function resolve(state, timestamp = Date.now()) {
+async function resolve(state, timestamp = Date.now(), options = {}) {
     if (!needed(state, timestamp) && !state.stats?.clanHallVisit) return null;
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
@@ -276,7 +262,8 @@ async function resolve(state, timestamp = Date.now()) {
                 );
         }
     }
-    const saved = await Life.applyResolve(state, next);
+    // ARCH-NOTE: The native lifecycle queue rechecks the original worker/checkpoint before any hall transition writes.
+    const saved = await Life.applyResolve(state, next, options);
     if (saved) await invoke('GameServer/Bot/Population/BotLifeEvents').recordMany(state.characterId, next.events);
     return { ok: !!saved, state: saved || state, debug: next.debug };
 }

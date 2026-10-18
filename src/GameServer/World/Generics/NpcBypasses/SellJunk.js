@@ -3,36 +3,44 @@ const Database       = invoke('Database');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
-const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
+const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
+const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
 
-module.exports = function(session) {
-    const backpack = session.actor.backpack;
-    const items = backpack.items;
+// The player's "sell unequipped junk": everything unequipped the NPC buys,
+// except shots and what a pending warehouse visit will store.
+function playerSales(session) {
+    const items = session.actor.backpack.items;
     const protectPendingWarehouseItems = session.plan === 'shopping'
         && session.shoppingWarehouseDone !== true;
-
-    const bot = String(session.accountId || '').startsWith('bot_');
-    const crafter = bot ? { classId: Number(session.actor.fetchClassId()), level: Number(session.actor.fetchLevel()) } : null;
-    // A bot keeps the healing potions its restock would buy back right after
-    // this sale (HealingPotionStock.restockPlan), and sells only the surplus.
-    const potion = bot ? HealingPotionStock.purchasePotionFor(session.actor) : null;
-    let potionsToKeep = potion ? HealingPotionStock.targetAmountFor(session.actor) : 0;
-
-    const sales = ItemDisposition.unreservedActorItems(session.coldLifeState, items)
+    return ItemDisposition.unreservedActorItems(session.coldLifeState, items)
         .filter(item => NpcSellRules.canSell(item)
             && !ShotStock.SHOT_IDS.includes(Number(item.fetchSelfId()))
-            && (!bot || !ItemDisposition.isKeptFromNpcJunk(item, crafter,
-                (recipeId) => !!backpack.hasRecipe?.(session.actor, recipeId)))
             && (!protectPendingWarehouseItems || !ItemDisposition.isWarehouseCandidate(item)))
-        .map((item) => {
-            let amount = item.fetchAmount();
-            if (potion && Number(item.fetchSelfId()) === potion.selfId) {
-                const kept = Math.min(amount, potionsToKeep);
-                potionsToKeep -= kept;
-                amount -= kept;
-            }
-            return { item, amount };
-        })
+        .map((item) => ({ item, amount: item.fetchAmount() }));
+}
+
+// A bot sells what the cold visit would sell to the NPC (one rule for hot and
+// cold bots, MarketListingPolicy.npcSaleForActor). Recipes it can learn are
+// learned first, as on the cold path.
+async function botSales(session) {
+    await BotWarehouse.learnActorRecipes(session.actor, session.coldLifeState, session);
+    const selling = MarketListingPolicy.npcSaleForActor(session);
+    const sales = [];
+    for (const item of ItemDisposition.unreservedActorItems(session.coldLifeState, session.actor.backpack.items)) {
+        const selfId = Number(item.fetchSelfId());
+        const left = Number(selling.get(selfId) || 0);
+        if (left <= 0 || item.fetchEquipped() || !NpcSellRules.canSell(item)) continue;
+        const amount = Math.min(item.fetchAmount(), left);
+        selling.set(selfId, left - amount);
+        sales.push({ item, amount });
+    }
+    return sales;
+}
+
+async function sellJunk(session) {
+    const backpack = session.actor.backpack;
+    const bot = String(session.accountId || '').startsWith('bot_');
+    const sales = (bot ? await botSales(session) : playerSales(session))
         .filter((sale) => sale.amount > 0);
 
     if (sales.length === 0) {
@@ -43,10 +51,13 @@ module.exports = function(session) {
     let totalAdenaPayout = 0;
     let soldDetails = [];
 
+    // Every write is kept so that its failure reaches the handler's log below
+    // instead of rejecting unhandled; the writes still start in the same order.
+    const writes = [];
     const soldItemIds = new Set();
     sales.forEach(({ item, amount }) => {
         const price = item.fetchPrice();
-        const sellPrice = Math.max(1, Math.floor(price * 0.5));
+        const sellPrice = NpcSellRules.npcBuyPrice(price);
         const payout = sellPrice * amount;
         
         totalAdenaPayout += payout;
@@ -54,28 +65,33 @@ module.exports = function(session) {
         
         const left = item.fetchAmount() - amount;
         if (left > 0) {
-            Database.updateItemAmount(session.actor.fetchId(), item.fetchId(), left);
+            writes.push(Database.updateItemAmount(session.actor.fetchId(), item.fetchId(), left));
             item.setAmount(left);
             return;
         }
-        Database.deleteItem(session.actor.fetchId(), item.fetchId());
+        writes.push(Database.deleteItem(session.actor.fetchId(), item.fetchId()));
         soldItemIds.add(Number(item.fetchId()));
     });
 
     backpack.items = backpack.items.filter((item) => !soldItemIds.has(Number(item.fetchId())));
 
-    backpack.stackableExists(57).then((adenaItem) => {
+    const announceSale = () => {
+        session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
+        session.dataSendToMe(ServerResponse.userInfo(session.actor));
+        session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
+        session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+    };
+
+    // An existing Adena stack is updated; only a missing one gets a new stack
+    // (a failed update must not fall through to a second, new stack).
+    writes.push(backpack.stackableExists(57).then((adenaItem) => {
         const total = adenaItem.fetchAmount() + totalAdenaPayout;
-        Database.updateItemAmount(session.actor.fetchId(), adenaItem.fetchId(), total).then(() => {
+        return Database.updateItemAmount(session.actor.fetchId(), adenaItem.fetchId(), total).then(() => {
             adenaItem.setAmount(total);
-            session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-            session.dataSendToMe(ServerResponse.userInfo(session.actor));
-            
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+            announceSale();
         });
-    }).catch(() => {
-        Database.setItem(session.actor.fetchId(), {
+    }, () => {
+        return Database.setItem(session.actor.fetchId(), {
             selfId: 57,
             name: "Adena",
             amount: totalAdenaPayout,
@@ -83,11 +99,16 @@ module.exports = function(session) {
             slot: 0
         }).then((packet) => {
             backpack.insertItem(Number(packet.insertId), 57, { amount: totalAdenaPayout });
-            session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
-            session.dataSendToMe(ServerResponse.userInfo(session.actor));
-            
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Sold: ${soldDetails.join(', ')}` }));
-            session.dataSendToMe(ServerResponse.speak(session.actor, { kind: 0, text: `Successfully sold ${sales.length} items. Gained +${totalAdenaPayout} Adena!` }));
+            announceSale();
         });
+    }));
+
+    return Promise.all(writes);
+}
+
+// The NPC dialog does not await its handlers: a failure is logged here.
+module.exports = function(session) {
+    return sellJunk(session).catch((error) => {
+        utils.infoWarn('SellJunk', 'junk sale failed for %s: %s', session?.actor?.fetchName?.() || 'unknown', error?.message || String(error));
     });
 };

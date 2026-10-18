@@ -1,3 +1,5 @@
+const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
+const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Database = invoke('Database');
 const ClanRules = invoke('GameServer/Clan/ClanRules');
 const ClanService = invoke('GameServer/Clan/ClanService');
@@ -21,8 +23,8 @@ const metrics = {
     durationMs: 0,
     durationSamples: 0,
     durationMaxMs: 0,
-    stages: new Map(),
-    reasonCounts: new Map()
+    stages: new DiagnosticMetricMap(),
+    reasonCounts: new DiagnosticMetricMap()
 };
 
 let founderScanOffset = 0;
@@ -45,7 +47,7 @@ function parseJson(value, fallback = {}) {
 
 function recordReason(code) {
     if (!code) return;
-    metrics.reasonCounts.set(code, (metrics.reasonCounts.get(code) || 0) + 1);
+    DiagnosticConfig.developerDiagnostics && metrics.reasonCounts.set(code, (metrics.reasonCounts.get(code) || 0) + 1);
 }
 
 function recordReasons(codes = []) {
@@ -62,17 +64,13 @@ function socialRelations(characterId, now = Date.now()) {
 
 function normalizeCandidate(row = {}) {
     const stats = parseJson(row.statsJson, {});
-    const generatedPersona = BotPersona.generate({
-        characterId: row.characterId,
-        stats: { ...stats, generatedIndex: stats.generatedIndex ?? row.characterId }
-    });
     const storedPersona = row.traitsJson
         ? {
             characterId: Number(row.characterId),
-            primaryDrive: String(row.primaryDrive || generatedPersona?.primaryDrive || ''),
-            traits: parseJson(row.traitsJson, generatedPersona?.traits || {})
+            primaryDrive: String(row.primaryDrive || ''),
+            traits: parseJson(row.traitsJson, {})
         }
-        : generatedPersona;
+        : BotPersona.of(row.characterId);
     return {
         characterId: number(row.characterId),
         id: number(row.characterId),
@@ -107,7 +105,7 @@ function candidateFilterSql() {
 }
 
 async function candidateProjection(limit = 512, offset = 0) {
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     const safeLimit = Math.max(1, Math.min(2000, Math.floor(number(limit, 512))));
     const safeOffset = Math.max(0, Math.floor(number(offset)));
     try {
@@ -124,12 +122,12 @@ async function candidateProjection(limit = 512, offset = 0) {
         `, []], 'clan-simulation:founder-projection');
         return rows.map(normalizeCandidate).filter((candidate) => !Policy.isStaticService(candidate));
     } finally {
-        StageMetrics.record(metrics.stages, 'candidate_projection', Date.now() - startedAt);
+        DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'candidate_projection', Date.now() - startedAt);
     }
 }
 
 async function autonomousClanProjection() {
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     try {
         const rows = await Database.execute([`
             SELECT simulated.clanId, simulated.stateJson,
@@ -168,7 +166,7 @@ async function autonomousClanProjection() {
         });
         return [...byId.values()];
     } finally {
-        StageMetrics.record(metrics.stages, 'clan_projection', Date.now() - startedAt);
+        DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'clan_projection', Date.now() - startedAt);
     }
 }
 
@@ -209,34 +207,64 @@ function selectRecruitment(founder, candidates, required) {
     return selected;
 }
 
-async function joinExisting(candidate, clan, suitability) {
+async function joinExisting(candidate, clan, suitability, demand = null) {
     const result = await Database.joinAutonomousClan({
         clanId: clan.id,
         characterId: candidate.characterId,
         memberLimit: ClanRules.memberLimit(clan.level),
-        maxBotMemberShare: Config.maxBotMemberShare
+        maxBotMemberShare: Config.maxBotMemberShare,
+        expectedDemandGeneration: demand?.generation || null,
+        candidateFingerprint: demand ? require('./ClanRosterDemand').memberFingerprint(candidate) : null
     });
     if (!result.ok) {
-        metrics.joinBlocked += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.joinBlocked += 1);
         recordReason(result.code);
         return result;
     }
-    metrics.existingClanJoins += 1;
+    DiagnosticConfig.developerDiagnostics && (metrics.existingClanJoins += 1);
     ClanService.reload().then(() => {
         invoke('GameServer/Bot/AI/BotClanChat').onJoined(candidate, clan.id);
     }).catch((error) => utils.infoWarn('Clan', 'failed to reload after autonomous join: %s', error.message));
     return { ...result, suitability };
 }
 
+async function recruitForDemand(clan, demand) {
+    const Life = invoke('GameServer/Bot/Population/BotLifeState');
+    const candidates = await Life.statesByIds(demand.newMemberIds, { ownerId: 'legacy_main', unassigned: true });
+    const rows = candidates.length ? await Database.execute([`SELECT characterId,traitsJson,primaryDrive,archetype FROM bot_personas
+        WHERE characterId IN (${candidates.map(() => '?').join(',')})`, candidates.map(member => member.characterId)]) : [];
+    const personas = new Map(rows.map(row => [Number(row.characterId), { traits: parseJson(row.traitsJson), primaryDrive: row.primaryDrive, archetype: row.archetype }]));
+    const refused = [];
+    for (const candidate of candidates) {
+        candidate.persona = personas.get(candidate.characterId) || BotPersona.of(candidate.characterId);
+        candidate.partyHistory = candidate.stats?.partyHistory || {};
+        candidate.socialRelations = socialRelations(candidate.characterId);
+        const context = require('./ClanRosterDemand').intakeContext(candidate, clan);
+        const suitability = Policy.clanSuitability(candidate, clan, { threshold: Config.existingClanSuitabilityThreshold, ...context });
+        if (!suitability.ok) { refused.push(candidate.characterId); continue; }
+        const result = await joinExisting(candidate, clan, suitability, demand);
+        if (result.ok) return { accepted: candidate.characterId, refused, result };
+        refused.push(candidate.characterId);
+    }
+    return { accepted: null, refused };
+}
+
 async function resolveCandidate(candidate, options = {}) {
-    const startedAt = Date.now();
+    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
     try {
         const clans = options.clans || await autonomousClanProjection();
         const existing = Policy.selectExistingClan(candidate, clans, {
-            threshold: Config.existingClanSuitabilityThreshold
+            threshold: Config.existingClanSuitabilityThreshold,
+            contextForClan: require('./ClanRosterDemand').intakeContext
         });
         if (existing) {
             recordReason(Contracts.REASON_CODES.FOUNDER_EXISTING_CLAN);
+            if (existing.clan.state?.recruitmentDemand) {
+                const [current] = await invoke('GameServer/Bot/Population/BotLifeState').statesByIds([candidate.characterId],
+                    { ownerId: 'legacy_main', unassigned: true });
+                if (!current) return { ok: false, code: 'recruitment_candidate_changed' };
+                return joinExisting({ ...candidate, ...current }, existing.clan, existing.suitability, existing.clan.state.recruitmentDemand);
+            }
             return joinExisting(candidate, existing.clan, existing.suitability);
         }
 
@@ -246,10 +274,10 @@ async function resolveCandidate(candidate, options = {}) {
             quorumCandidates: [candidate, ...recruits],
             founderThresholds: options.founderThresholds || await founderThresholds()
         });
-        metrics.founderEvaluations += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.founderEvaluations += 1);
         recordReasons(eligibility.reasons);
         if (!eligibility.ok) {
-            metrics.founderBlocked += 1;
+            DiagnosticConfig.developerDiagnostics && (metrics.founderBlocked += 1);
             return { ok: false, code: eligibility.reasons[0] || Contracts.REASON_CODES.FOUNDER_NO_QUORUM, eligibility, recruits };
         }
 
@@ -268,11 +296,11 @@ async function resolveCandidate(candidate, options = {}) {
             }
         });
         if (!result.ok) {
-            metrics.founderBlocked += 1;
+            DiagnosticConfig.developerDiagnostics && (metrics.founderBlocked += 1);
             recordReason(result.code);
             return { ...result, eligibility, recruits };
         }
-        metrics.founderCreated += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.founderCreated += 1);
         try {
             const crest = await ClanCrestService.ensureAutonomousCrest(result.clanId);
             if (!crest.ok) utils.infoWarn('ClanCrest', 'could not assign crest to clan %d: %s', result.clanId, crest.code);
@@ -282,11 +310,12 @@ async function resolveCandidate(candidate, options = {}) {
         await ClanService.reload();
         return { ...result, eligibility, recruits };
     } finally {
-        StageMetrics.record(metrics.stages, 'resolve_candidate', Date.now() - startedAt);
+        DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'resolve_candidate', Date.now() - startedAt);
     }
 }
 
 const ClanSimulationService = {
+    recruitForDemand,
     config: Config,
     policy: Policy,
 
@@ -304,7 +333,7 @@ const ClanSimulationService = {
                 return { candidate, existingClan: existing, recruits, eligibility };
             }));
         }).then((evaluations) => {
-            metrics.founderCandidates = evaluations.filter((entry) => entry.eligibility.ok).length;
+            DiagnosticConfig.developerDiagnostics && (metrics.founderCandidates = evaluations.filter((entry) => entry.eligibility.ok).length);
             return evaluations;
         });
     },
@@ -322,9 +351,9 @@ const ClanSimulationService = {
         const safeLimit = Math.max(1, Math.min(2000, Math.floor(number(limit, Config.resolveBatchSize))));
         const scanOffset = founderScanOffset;
         const summary = { attempted: 0, created: 0, joined: 0, blocked: 0, budgetStopped: false };
-        metrics.runs += 1;
+        DiagnosticConfig.developerDiagnostics && (metrics.runs += 1);
         const stopForBudget = () => {
-            if (!summary.budgetStopped) metrics.budgetStops += 1;
+            if (!summary.budgetStopped) DiagnosticConfig.developerDiagnostics && (metrics.budgetStops += 1);
             summary.budgetStopped = true;
         };
         try {
@@ -340,7 +369,7 @@ const ClanSimulationService = {
             deadlineAt = Date.now() + budgetMs;
             if (!candidates.length) return summary;
             const pool = candidates;
-            const scanStartedAt = Date.now();
+            const scanStartedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
             const reservedIds = new Set();
             let processed = 0;
             for (const candidate of candidates) {
@@ -362,30 +391,39 @@ const ClanSimulationService = {
                     summary.created += 1;
                     (result.memberIds || [candidate.characterId, ...(result.recruits || []).map((entry) => entry.characterId)])
                         .forEach((id) => reservedIds.add(Number(id)));
+                    const membersById = new Map([candidate, ...(result.recruits || [])]
+                        .map((entry) => [Number(entry.characterId), entry]));
                     clans.push({
                         id: result.clanId,
                         name: '',
                         level: 0,
                         leaderId: candidate.characterId,
-                        members: (result.memberIds || []).map((id) => ({ id, characterId: id }))
+                        members: (result.memberIds || []).map((id) => {
+                            const member = membersById.get(Number(id));
+                            return { id, characterId: id, classId: member.classId, level: member.level };
+                        })
                     });
                 } else summary.blocked += 1;
             }
-            founderScanOffset += processed;
+            // Joined and founding candidates leave the clanId=0 list; counting
+            // them would skip as many unseen candidates on the next page.
+            founderScanOffset += candidates.slice(0, processed)
+                .filter((candidate) => !reservedIds.has(candidate.characterId)).length;
             if (processed >= candidates.length && candidates.length < safeLimit) founderScanOffset = 0;
-            StageMetrics.record(metrics.stages, 'scan_loop', Date.now() - scanStartedAt);
+            DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'scan_loop', Date.now() - scanStartedAt);
             return summary;
         } finally {
-            const durationMs = Math.max(0, Date.now() - startedAt);
-            metrics.durationMs += durationMs;
-            metrics.durationSamples += 1;
-            metrics.durationMaxMs = Math.max(metrics.durationMaxMs, durationMs);
-            if (Date.now() > deadlineAt) metrics.budgetOverruns += 1;
-            StageMetrics.record(metrics.stages, 'total', durationMs);
+            const durationMs = DiagnosticConfig.developerDiagnostics ? Math.max(0, Date.now() - startedAt) : 0;
+            DiagnosticConfig.developerDiagnostics && (metrics.durationMs += durationMs);
+            DiagnosticConfig.developerDiagnostics && (metrics.durationSamples += 1);
+            DiagnosticConfig.developerDiagnostics && (metrics.durationMaxMs = Math.max(metrics.durationMaxMs, durationMs));
+            if (Date.now() > deadlineAt) DiagnosticConfig.developerDiagnostics && (metrics.budgetOverruns += 1);
+            DiagnosticConfig.developerDiagnostics && StageMetrics.record(metrics.stages, 'total', durationMs);
         }
     },
 
     metrics() {
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
         return {
             founderCandidates: metrics.founderCandidates,
             founderEvaluations: metrics.founderEvaluations,

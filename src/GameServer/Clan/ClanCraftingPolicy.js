@@ -1,8 +1,6 @@
 // Shared by the planning worker and the runtime. No live-world dependencies.
 const Recipes = invoke('GameServer/Items/C4RecipeItems');
 const DualSwords = invoke('GameServer/Items/C4DualSwordCombinations');
-const DataCache = invoke('GameServer/DataCache');
-const ItemIndex = require('../Item/ItemTemplateIndex');
 
 const RESOURCE_IDS = new Set([
     ...Array.from({ length: 32 }, (_, index) => 1864 + index),
@@ -10,13 +8,12 @@ const RESOURCE_IDS = new Set([
     5220, 5549, 5550, 5551, 5552
 ]);
 const isResource = (id) => RESOURCE_IDS.has(Number(id));
-const isSupplement = (id) => /^(Crystal:|Gemstone\s)/i.test(ItemIndex.find(DataCache.items, id)?.template?.name || '');
+const isSupplement = require('../Bot/Economy/CraftSupplementMaterials').isSupplementalMaterial;
 const clanIdFor = (state) => Number(state?.clanId ?? state?.stats?.clanId ?? 0);
 const resolveRecipe = (id) => Recipes.resolveByRecipeId(id) || DualSwords.resolveByRecipeId(id);
 const isPersonalCraft = (state, plan = state?.stats?.equipmentPlan) => clanIdFor(state) > 0
     && plan?.strategy === 'craft' && Number(plan.clanGoal?.clanId) !== clanIdFor(state)
-    // Emergency NPC exchanges consume already owned/bought blades. Ordinary
-    // personal crafting and long component-farming chains stay clan-managed.
+    // Emergency NPC exchanges consume already owned/bought blades.
     && !(plan.weaponBridge === true && DualSwords.resolveByRecipeId(plan.recipeId));
 
 function stockInventory(inventory = {}, rows = []) {
@@ -31,21 +28,26 @@ function stockInventory(inventory = {}, rows = []) {
     return result;
 }
 
+function recipeForProvider(recipe, provider, batches = 1) {
+    if (!provider || provider.known) return recipe;
+    const materials = recipe.materials.map(row => ({ ...row }));
+    const scroll = materials.find(row => Number(row.selfId) === Number(recipe.recipeItemId));
+    if (scroll) scroll.amount += 1 / batches;
+    else materials.push({ selfId: Number(recipe.recipeItemId), amount: 1 / batches });
+    return { ...recipe, materials };
+}
+
 // Allocate each owned unit once across the entire recipe tree. Demand includes
 // intermediates AND their missing inputs, so stock can shorten either route.
-function requirements(recipe, inventory = {}, allowedRecipeIds = null, count = 1, providers = {}, componentRecipes = {}) {
+function requirements(recipe, inventory = {}, allowedRecipeIds = null, count = 1, providers = {}, componentRecipes = {}, usedRecipes = null) {
     const owned = new Map(Object.values(inventory).map(item => [Number(item.selfId), Number(item.amount || 0)]));
     const demand = new Map();
     const visit = (current, batches, ancestors) => {
         if (!current || ancestors.has(Number(current.recipeId))) return;
+        usedRecipes?.add(Number(current.recipeId));
         const seen = new Set(ancestors).add(Number(current.recipeId));
-        const materials = (current.materials || []).map(row => ({ ...row }));
         const provider = providers[current.recipeId];
-        if (provider && !provider.known) {
-            const scroll = materials.find(row => Number(row.selfId) === Number(current.recipeItemId));
-            if (scroll) scroll.amount += 1 / batches;
-            else materials.push({ selfId: Number(current.recipeItemId), amount: 1 / batches });
-        }
+        const materials = recipeForProvider(current, provider, batches).materials || [];
         for (const material of materials) {
             const id = Number(material.selfId);
             if (isSupplement(id)) continue;
@@ -84,4 +86,4 @@ function warehouseMaterials(plan, inventory, rows) {
     })).filter(item => item.amount > 0);
 }
 
-module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, requirements, warehouseMaterials };
+module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, requirements, warehouseMaterials, recipeForProvider };

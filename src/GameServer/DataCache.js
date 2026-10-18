@@ -20,6 +20,11 @@ const DataCache = {
         DataCache.experience      = validateModel(path + 'Templates/Experience/experience');
         DataCache.revitalize      = validateModel(path + 'Templates/Revitalize/revitalize');
         DataCache.skillTree       = validateModel(path + 'Skills/Tree/tree');
+        // Loaded catalog IDs/order are fixed after expansion. Payload rows stay
+        // borrowed; independently supplied/replaced sources are read fresh.
+        for (const source of [DataCache.classTemplates, DataCache.newbieShortcuts, DataCache.newbieSpawns, DataCache.skillTree]) {
+            ClassProgression.registerLoadedSource(source);
+        }
         const C4LateTownGatekeepers = invoke('GameServer/World/C4LateTownGatekeepers');
         const C4SevenSignsDungeonTeleports = invoke('GameServer/World/C4SevenSignsDungeonTeleports');
         DataCache.npcs            = applyNpcAiTypes([
@@ -49,6 +54,18 @@ const DataCache = {
             ...validateModel(path + 'Npcs/c4_heathen_camp'),
             ...validateModel(path + 'Npcs/c4_imperial_tomb'),
             ...validateModel(path + 'Npcs/c4_tower_of_insolence'),
+            ...validateModel(path + 'Npcs/c4_blazing_swamp'),
+            ...validateModel(path + 'Npcs/c4_devastated_castle_outskirts'),
+            ...validateModel(path + 'Npcs/c4_antharas_lair'),
+            ...validateModel(path + 'Npcs/c4_devils_isle_elites'),
+            ...validateModel(path + 'Npcs/c4_cemetery'),
+            ...validateModel(path + 'Npcs/c4_forsaken_plains'),
+            ...validateModel(path + 'Npcs/c4_fields_of_massacre'),
+            ...validateModel(path + 'Npcs/c4_ancient_battleground'),
+            ...validateModel(path + 'Npcs/c4_tower_of_insolence_lower_floors'),
+            ...validateModel(path + 'Npcs/c4_skyshadow_meadow'),
+            ...validateModel(path + 'Npcs/c4_beast_farm'),
+            ...validateModel(path + 'Npcs/c4_remaining_high_level_monsters'),
             ...validateModel(path + 'Npcs/c4_necropolis_of_sacrifice'),
             ...validateModel(path + 'Npcs/c4_catacomb_of_the_branded'),
             ...validateModel(path + 'Npcs/c4_catacomb_of_the_witch'),
@@ -66,9 +83,11 @@ const DataCache = {
             ...validateModel(path + 'Npcs/c4_low_level_raid_bosses'),
             ...validateModel(path + 'Npcs/c4_raid_bosses'),
             ...validateModel(path + 'Npcs/c4_raid_boss_minions'),
+            ...validateModel(path + 'Npcs/c4_group_leader_minions'),
             ...validateModel(path + 'Npcs/c4_quest_content'),
             ...C4LateTownGatekeepers.npcs,
             ...require('./World/GiranMammon').npcs,
+            ...require('./World/GiranCrystallizationStation').npcs,
             ...validateModel(path + 'Npcs/clan_halls'),
             ...C4SevenSignsDungeonTeleports.npcs
         ], npcAiTypes);
@@ -94,6 +113,18 @@ const DataCache = {
             ...validateModel(path + 'Npcs/Spawns/c4_heathen_camp'),
             ...validateModel(path + 'Npcs/Spawns/c4_imperial_tomb'),
             ...validateModel(path + 'Npcs/Spawns/c4_tower_of_insolence'),
+            ...validateModel(path + 'Npcs/Spawns/c4_blazing_swamp'),
+            ...validateModel(path + 'Npcs/Spawns/c4_devastated_castle_outskirts'),
+            ...validateModel(path + 'Npcs/Spawns/c4_antharas_lair'),
+            ...validateModel(path + 'Npcs/Spawns/c4_devils_isle_elites'),
+            ...validateModel(path + 'Npcs/Spawns/c4_cemetery'),
+            ...validateModel(path + 'Npcs/Spawns/c4_forsaken_plains'),
+            ...validateModel(path + 'Npcs/Spawns/c4_fields_of_massacre'),
+            ...validateModel(path + 'Npcs/Spawns/c4_ancient_battleground'),
+            ...validateModel(path + 'Npcs/Spawns/c4_tower_of_insolence_lower_floors'),
+            ...validateModel(path + 'Npcs/Spawns/c4_skyshadow_meadow'),
+            ...validateModel(path + 'Npcs/Spawns/c4_beast_farm'),
+            ...validateModel(path + 'Npcs/Spawns/c4_remaining_high_level_monsters'),
             ...validateModel(path + 'Npcs/Spawns/c4_necropolis_of_sacrifice'),
             ...validateModel(path + 'Npcs/Spawns/c4_catacomb_of_the_branded'),
             ...validateModel(path + 'Npcs/Spawns/c4_catacomb_of_the_witch'),
@@ -113,6 +144,7 @@ const DataCache = {
             ...validateModel(path + 'Npcs/Spawns/c4_quest_content'),
             ...C4LateTownGatekeepers.spawns,
             ...require('./World/GiranMammon').spawns,
+            ...require('./World/GiranCrystallizationStation').spawns,
             ...validateModel(path + 'Npcs/Spawns/clan_halls'),
             ...C4SevenSignsDungeonTeleports.spawns,
             ...require('../../data/Pets/c4-quest-npcs.json').spawns,
@@ -142,6 +174,18 @@ const DataCache = {
             ...validateModel(path + 'Npcs/Rewards/c4_heathen_camp'),
             ...validateModel(path + 'Npcs/Rewards/c4_imperial_tomb'),
             ...validateModel(path + 'Npcs/Rewards/c4_tower_of_insolence'),
+            ...validateModel(path + 'Npcs/Rewards/c4_blazing_swamp'),
+            ...validateModel(path + 'Npcs/Rewards/c4_devastated_castle_outskirts'),
+            ...validateModel(path + 'Npcs/Rewards/c4_antharas_lair'),
+            ...validateModel(path + 'Npcs/Rewards/c4_devils_isle_elites'),
+            ...validateModel(path + 'Npcs/Rewards/c4_cemetery'),
+            ...validateModel(path + 'Npcs/Rewards/c4_forsaken_plains'),
+            ...validateModel(path + 'Npcs/Rewards/c4_fields_of_massacre'),
+            ...validateModel(path + 'Npcs/Rewards/c4_ancient_battleground'),
+            ...validateModel(path + 'Npcs/Rewards/c4_tower_of_insolence_lower_floors'),
+            ...validateModel(path + 'Npcs/Rewards/c4_skyshadow_meadow'),
+            ...validateModel(path + 'Npcs/Rewards/c4_beast_farm'),
+            ...validateModel(path + 'Npcs/Rewards/c4_remaining_high_level_monsters'),
             ...validateModel(path + 'Npcs/Rewards/c4_necropolis_of_sacrifice'),
             ...validateModel(path + 'Npcs/Rewards/c4_catacomb_of_the_branded'),
             ...validateModel(path + 'Npcs/Rewards/c4_catacomb_of_the_witch'),
@@ -158,9 +202,9 @@ const DataCache = {
             ...validateModel(path + 'Npcs/Rewards/c4_catacomb_of_the_forbidden_path'),
             ...validateModel(path + 'Npcs/Rewards/c4_low_level_raid_bosses'),
             ...validateModel(path + 'Npcs/Rewards/c4_raid_bosses'),
-            ...validateModel(path + 'Npcs/Rewards/c4_raid_boss_minions')
+            ...validateModel(path + 'Npcs/Rewards/c4_raid_boss_minions'),
+            ...validateModel(path + 'Npcs/Rewards/c4_group_leader_minions')
         ];
-        DataCache.teleports       = validateModel(path + 'Teleports/teleports');
         DataCache.adminShop       = validateModel(path + 'Admin/Shop/shop');
 
         DataCache.items = [
@@ -201,6 +245,18 @@ const DataCache = {
             ...validateModel(path + 'Items/Others/c4_heathen_camp'),
             ...validateModel(path + 'Items/Others/c4_imperial_tomb'),
             ...validateModel(path + 'Items/Others/c4_tower_of_insolence'),
+            ...validateModel(path + 'Items/Others/c4_blazing_swamp'),
+            ...validateModel(path + 'Items/Others/c4_devastated_castle_outskirts'),
+            ...validateModel(path + 'Items/Others/c4_antharas_lair'),
+            ...validateModel(path + 'Items/Others/c4_devils_isle_elites'),
+            ...validateModel(path + 'Items/Others/c4_cemetery'),
+            ...validateModel(path + 'Items/Others/c4_forsaken_plains'),
+            ...validateModel(path + 'Items/Others/c4_fields_of_massacre'),
+            ...validateModel(path + 'Items/Others/c4_ancient_battleground'),
+            ...validateModel(path + 'Items/Others/c4_tower_of_insolence_lower_floors'),
+            ...validateModel(path + 'Items/Others/c4_skyshadow_meadow'),
+            ...validateModel(path + 'Items/Others/c4_beast_farm'),
+            ...validateModel(path + 'Items/Others/c4_remaining_high_level_monsters'),
             ...validateModel(path + 'Items/Others/c4_necropolis_of_sacrifice'),
             ...validateModel(path + 'Items/Others/c4_catacomb_of_the_branded'),
             ...validateModel(path + 'Items/Others/c4_catacomb_of_the_witch'),
@@ -218,7 +274,10 @@ const DataCache = {
             ...validateModel(path + 'Items/Others/c4_low_level_raid_bosses'),
             ...validateModel(path + 'Items/Others/c4_raid_bosses'),
             ...validateModel(path + 'Items/Others/c4_quest_298_380_items'),
-            ...validateModel(path + 'Items/Others/c4_quest_334_items')
+            ...validateModel(path + 'Items/Others/c4_quest_334_items'),
+            ...validateModel(path + 'Items/Others/c4_recipe_scrolls'),
+            ...validateModel(path + 'Items/Others/c4_group_leader_minions'),
+            ...validateModel(path + 'Items/Others/c4_second_profession')
         ];
 
         DataCache.skills = invoke('GameServer/Skills/C4SkillRules').expandSourcedLevels([
@@ -227,16 +286,18 @@ const DataCache = {
             ...validateModel(path + 'Skills/Switch/switch')
         ]);
 
+        invoke('GameServer/Npc/NpcSkills').prepareThreats(DataCache.npcs);
+        invoke('GameServer/Items/ItemAcquisitionCatalog').prepare();
         utils.infoSuccess('Datapack', 'cached');
     },
 
     fetchNpcFromSelfId(selfId, callback) {
-        const item = structuredClone(DataCache.npcs.find((ob) => ob.selfId === selfId));
+        const item = structuredClone(ItemTemplateIndex.findStrict(DataCache.npcs, selfId));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown Npc SelfId %d', selfId);
     },
 
     fetchNpcRewardsFromSelfId(selfId, callback) {
-        const item = structuredClone(DataCache.npcRewards.find((ob) => ob.selfId === selfId));
+        const item = structuredClone(ItemTemplateIndex.findStrict(DataCache.npcRewards, selfId));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown NpcRewards SelfId %d', selfId);
     },
 
@@ -246,12 +307,12 @@ const DataCache = {
     },
 
     fetchSkillFromSelfId(selfId, callback) {
-        const item = structuredClone(DataCache.skills.find((ob) => ob.selfId === selfId));
+        const item = structuredClone(ItemTemplateIndex.findStrictRequired(DataCache.skills, selfId));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown Skill SelfId %d', selfId);
     },
 
     fetchSkillTreeFromClassId(classId, callback) {
-        const item = structuredClone(DataCache.skillTree.find((ob) => ob.classId === classId));
+        const item = structuredClone(ClassProgression.firstClassRow(DataCache.skillTree, classId, 'strict'));
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown SkillTree ClassId %d', classId);
     }
 };
