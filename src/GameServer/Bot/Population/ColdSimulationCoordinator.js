@@ -1499,7 +1499,6 @@ class ColdSimulationCoordinator {
             interactionMemory,
             clanHallServices: invoke('GameServer/ClanHall/ColdVisit').needed(state),
             pressure,
-            goalReviewAt: Number(GoalService.snapshot(state.characterId)?.current?.nextReviewAt || 0),
             goalRevision: GoalService.revision(state.characterId),
             // The worker cannot see AFK shops: hand it the Adena the bot's own
             // buy order holds, which still counts as purchase budget.

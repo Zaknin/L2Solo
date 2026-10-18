@@ -1249,15 +1249,6 @@ function forState(state = {}, deps = {}) {
         : deps.withNodes && !held.projection ? null
             : heldReadsHold() || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) ? [] : ['market'];
     if (holdWhy && diagnostic) Hold.check('economy', holdWhy, deps);
-    // The step's second request against the build its first one left: both
-    // requests of a worker step (pre-round lifecycle, post-round result) carry
-    // the step's one timestamp, and every kept request stamps it (askedAt).
-    // The prize of a post-round hold: refused = any build of the second
-    // request; second_build = one after the first request built (2 -> 1).
-    const secondAsk = diagnostic && !isMainThread && held?.askedAt === timestamp;
-    const secondBuild = secondAsk && held.plan.timestamp === timestamp;
-    if (secondAsk) Hold.count('economy', holdWhy?.length === 0 ? 'post_round:held' : 'post_round:refused');
-    if (secondBuild && holdWhy?.length !== 0) Hold.count('economy', 'post_round:second_build');
     if (holdWhy?.length === 0) {
         if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
         if (diagnostic) {
@@ -1270,7 +1261,6 @@ function forState(state = {}, deps = {}) {
                 revision: state.simulation?.revision, wallet: positive(state.adena) });
         }
         if (deps.rememberContext !== false) {
-            held.askedAt = timestamp;
             held.gearThreat = gearThreat;
             held.stateRef = new WeakRef(state);
             remember(cache, actorKey, held, RETAIN_LIMIT);
@@ -1552,6 +1542,9 @@ function forState(state = {}, deps = {}) {
 
     if (diagnostic) {
         Diagnostics.count('context', 'build', diagnosticReason);
+        // Builds per worker step (one step's requests share its timestamp):
+        // repeat = a second build of the same bot in one step (the goal: 0).
+        if (!isMainThread) Diagnostics.count('context', 'step_build', held?.plan.timestamp === timestamp ? 'repeat' : 'first');
         // Per reason too: a wave's builds cost ~3x a calm one's (2026-10-15);
         // the split says whether lost retention or a moved input is the dear one.
         elapsed = performance.now() - started;
@@ -1580,8 +1573,6 @@ function forState(state = {}, deps = {}) {
             const refusal = (gate === 'sections' || gate === 'wish_dirty') && eventVerdict.facts ? `${gate}.${eventVerdict.facts}` : gate;
             Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
         }
-        // Sampled owners: what the step's second build changed against the first.
-        if (secondBuild && gateDiff && Diagnostics.enabled(state.characterId)) Hold.count('economy', `post_round:${gateDiff}`);
     }
     // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
     const mismatch = gateDiff !== null && Diagnostics.isPlanMismatch({ owner: state.characterId, phase: 'wish_context', gate, gateDiff });
@@ -1626,7 +1617,7 @@ function forState(state = {}, deps = {}) {
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
         const leaf = plan.network?.activity, own = ColdEconomyDecision.ownItem(leaf);
-        remember(cache, actorKey, { key, askedAt: timestamp,
+        remember(cache, actorKey, { key,
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
