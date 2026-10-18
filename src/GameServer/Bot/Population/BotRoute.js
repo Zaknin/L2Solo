@@ -2,14 +2,14 @@
 // The bot's hunting route (docs/architecture.md §2 route): where a far bot
 // hunts and the trip there. Two parts:
 // - choose: the spot search, the bot's computed value over COMPUTED.route
-//   (build, relations, occupation, sources). The worker keeps its result in
-//   the bot's kernel record (ColdSimulationWorker planLifecycle) and drops it
-//   when the step's mask hits those sections or the step wrote another plan
-//   destination; it reads no leaf and no focus (own outputs).
+//   (build, relations, occupation, sources). trip keeps its result in the
+//   bot's kernel record; the worker's step drops it (drop, dropReason) when
+//   its mask hits those sections, it wrote other plan / request fields the
+//   search reads, or a leaf trip starts; it reads no leaf and no focus.
 // - record: the trip from where the bot stands now (destinations, travel
 //   time, the reason fields), built per read and never kept.
 // leafChoice: the spot the step's own decision names, when it may go there.
-// Callers: the worker's trip start (planLifecycle), the party run (the
+// Callers: the worker's trip start (planLifecycle: trip), the party run (the
 // worker's partyRoute, ColdSimulationKernel), the competition retreat on main
 // (ColdSimulationCoordinator retreatRoute). Worker-safe: every spot lookup
 // reads the catalog the caller passes (`spots`, the spot profile array: the
@@ -30,6 +30,7 @@ const PartyHuntingAssembly = require('./PartyHuntingAssembly');
 const CraftMaterialParty = require('./CraftMaterialParty');
 const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
 const ColdTrip = require('./ColdTrip');
+const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 
 // The gates: a bot that may be routed now. Checked by choose and again by
 // record at every read (activity, travel and the duties move step by step).
@@ -68,8 +69,10 @@ function groundOf(state, currentSpot) {
 
 // The search options of one routed bot or party at this timestamp. Solo
 // checks judge this bot, as the only capacity state; its combat profiles
-// depend on the bot, not the spot: built once per call (solo()).
-function frameFor(state, party, partyMembers, timestamp) {
+// depend on the bot, not the spot: built once per frame (solo()), as is the
+// unsafe-ground verdict. One frame serves one trip start (leafChoice or
+// choose, then record): the caller builds it once and passes it to each.
+function frameFor(state, party, partyMembers = [], timestamp) {
     const partyRoute = !!party;
     const routedMembers = partyRoute ? partyMembers : [state];
     const excludedSpotIds = partyRoute ? PartySpotRiskPolicy.excludedSpotIds(party, timestamp)
@@ -82,20 +85,22 @@ function frameFor(state, party, partyMembers, timestamp) {
         soloProfiles = soloProfiles || BotTargetMatchup.stateProfiles(state, { ...options, mode: 'solo' });
         return { ...options, mode: 'solo', matchupProfiles: soloProfiles };
     };
-    return { partyRoute, routedMembers, excludedSpotIds, role, options, solo };
+    return { partyRoute, routedMembers, excludedSpotIds, role, options, solo, unsafe: undefined };
 }
 
 function unsafeSoloGround(state, currentSpot, frame) {
+    if (frame.unsafe !== undefined) return frame.unsafe;
     const ground = !frame.partyRoute ? groundOf(state, currentSpot) : null;
-    return !!ground && !LevelingRoutes.isSpotAllowedForState(ground, state, frame.solo());
+    frame.unsafe = !!ground && !LevelingRoutes.isSpotAllowedForState(ground, state, frame.solo());
+    return frame.unsafe;
 }
 
 // The search: { spotId (null: none found), materialRoute, materialSources }
-// or null when the bot may not be routed now (nothing to keep). Reads no
-// leaf and no focus.
-function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp }) {
+// or null when the bot may not be routed now or the search threw (nothing
+// to keep: the next trip start searches again). Reads no leaf and no focus.
+function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp, frame = null }) {
     if (!routable(state, party, partyMembers)) return null;
-    const frame = frameFor(state, party, partyMembers, timestamp);
+    frame = frame || frameFor(state, party, partyMembers, timestamp);
     const { partyRoute, excludedSpotIds, role, options } = frame;
     const currentId = currentSpotId(state, currentSpot, party, spots);
     let fallbackSpot = null;
@@ -131,7 +136,7 @@ function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp
             && LevelingRoutes.modeForState(routeState, options) !== 'party'
             ? { ...options, profiles: spots, matchupProfiles: frame.solo().matchupProfiles }
             : { ...options, profiles: spots });
-    } catch (_) { selected = null; }
+    } catch (_) { return null; }
     if (unsafe && selected) {
         const repeatsCurrentGround = String(selected.id || '') === String(currentId || '');
         if (repeatsCurrentGround || !LevelingRoutes.isSpotAllowedForState(selected, state, frame.solo())) selected = null;
@@ -168,11 +173,11 @@ function evacuationSpot(state, currentId, spots, frame) {
 // the bot may hunt there: not a raid profile, not excluded, allowed for its
 // kit, and fitting its level (or an economic hunt within 15 levels). The
 // room is checked at arrival. Null: the kept route decides.
-function leafChoice(state, leaf, { spots, timestamp }) {
+function leafChoice(state, leaf, { spots, timestamp, frame = null }) {
     if (leaf?.activity !== 'hunting' || !leaf.spotId || !routable(state, null, [])) return null;
     const wished = SpotIndex.spotById(spots, leaf.spotId);
     if (!wished || wished.raidBoss === true) return null;
-    const frame = frameFor(state, null, [], timestamp);
+    frame = frame || frameFor(state, null, [], timestamp);
     if (frame.excludedSpotIds.has(String(wished.id))) return null;
     const level = Number(state.level || 1);
     const fits = LevelingRoutes.isSpotAllowedForState(wished, state, frame.solo())
@@ -186,7 +191,7 @@ function leafChoice(state, leaf, { spots, timestamp }) {
 // catalog, the bot is already there, or no arrival point. The reason fields
 // are read here, at the trip's start: a kept choice is read later, from
 // another place (its death pressure and its ground are those of the start).
-function record(state, chosen, party, partyMembers = [], { spots, currentSpot = null, timestamp }) {
+function record(state, chosen, party, partyMembers = [], { spots, currentSpot = null, timestamp, frame = null }) {
     if (!chosen?.spotId || !routable(state, party, partyMembers)) return null;
     const selected = SpotIndex.spotById(spots, chosen.spotId);
     if (!selected) return null;
@@ -213,7 +218,7 @@ function record(state, chosen, party, partyMembers = [], { spots, currentSpot = 
         if (!destination) return null;
         destinations[String(member.characterId)] = destination;
     }
-    const frame = frameFor(state, party, partyMembers, timestamp);
+    frame = frame || frameFor(state, party, partyMembers, timestamp);
     const spotBackoff = partyRoute ? PartySpotRiskPolicy.backoff(party, currentId, timestamp)
         : SpotRiskPolicy.backoffForStates(frame.routedMembers, currentId, timestamp);
     const unsafe = unsafeSoloGround(state, currentSpot, frame);
@@ -241,9 +246,57 @@ function record(state, chosen, party, partyMembers = [], { spots, currentSpot = 
 }
 
 // One search and its trip, nothing kept: the party run and the retreat.
-function route(state, currentSpot, party, partyMembers, { spots, timestamp }) {
-    return record(state, choose(state, currentSpot, party, partyMembers, { spots, timestamp }), party, partyMembers,
-        { spots, currentSpot, timestamp });
+function route(state, currentSpot, party, partyMembers = [], { spots, timestamp }) {
+    if (!routable(state, party, partyMembers)) return null;
+    const frame = frameFor(state, party, partyMembers, timestamp);
+    return record(state, choose(state, currentSpot, party, partyMembers, { spots, timestamp, frame }), party, partyMembers,
+        { spots, currentSpot, timestamp, frame });
 }
 
-module.exports = { choose, record, leafChoice, route };
+// The solo trip of a step: to the spot the step's own leaf names when the
+// bot may hunt there (a trip there drops the kept route: it was searched
+// from the ground the bot leaves), else to the route kept on `owner` (the
+// bot's kernel record), searched here when it holds none (null: dropped or
+// never computed; not saved, so the first read after a restart searches).
+// The trip is built from where the bot stands now; null: no trip. Counted
+// as route:trip:leaf|kept|search.
+function trip(owner, state, leaf, { spots, currentSpot = null, timestamp }) {
+    if (!routable(state, null, [])) return null;
+    const frame = frameFor(state, null, [], timestamp);
+    const wished = leafChoice(state, leaf, { spots, timestamp, frame });
+    if (wished) {
+        EconomyDiagnostics.count('route', 'trip', 'leaf');
+        const started = record(state, wished, null, [], { spots, currentSpot, timestamp, frame });
+        if (started) drop(owner, 'leaf');
+        return started;
+    }
+    EconomyDiagnostics.count('route', 'trip', owner?.route ? 'kept' : 'search');
+    const chosen = owner?.route || choose(state, currentSpot, null, [], { spots, timestamp, frame });
+    if (owner && !owner.route) owner.route = chosen;
+    return record(state, chosen, null, [], { spots, currentSpot, timestamp, frame });
+}
+
+// The kept route goes; the next trip start searches again. Counted as
+// route:drop:<why> when one was kept.
+function drop(owner, why) {
+    if (!owner?.route) return;
+    EconomyDiagnostics.count('route', 'drop', why);
+    owner.route = null;
+}
+
+// The plan and party request fields the search reads (the party wait,
+// PartyWaitFallback.waiting and spotFor; the plan's destination).
+function planKey(plan, request) {
+    return `${plan?.status}|${plan?.strategy}|${plan?.next?.spotId}|${plan?.next?.npcId}|${plan?.partyNeed}|`
+        + `${plan?.requiresParty}|${request?.status}|${request?.priority}|${!!request?.materialParty}|${!!request?.suspendedFor}`;
+}
+
+// Why a step drops the kept route, read at the writer of the step's plan:
+// its build moved a route section (DecisionSections.COMPUTED.route), or it
+// wrote other plan / party request fields the search reads. '': kept.
+function dropReason(sectionsMoved, before = {}, after = {}) {
+    if (sectionsMoved) return 'sections';
+    return planKey(before.plan, before.request) !== planKey(after.plan, after.request) ? 'plan' : '';
+}
+
+module.exports = { choose, record, leafChoice, route, trip, drop, dropReason };

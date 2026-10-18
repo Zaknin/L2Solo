@@ -199,6 +199,55 @@ try {
     assert.strictEqual(BotRoute.leafChoice(leafHunter, { activity: 'resting' },
         { spots: [currentSpot, targetSpot], timestamp: leafAt }), null);
 
+    // The kept route (BotRoute.trip on the bot's kernel record): a step that
+    // moves none of its inputs walks to the kept spot even when a new search
+    // would choose another; a route section, a plan / request field the
+    // search reads, or a leaf trip makes the next trip start search again.
+    const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+    const otherSpot = { ...targetSpot, id: 'other-field', name: 'Other fields' };
+    const keptSpots = [currentSpot, targetSpot, otherSpot];
+    const keptHunter = { ...leafHunter, characterId: 10 };
+    let searched = targetSpot;
+    SpotProfiles.findForState = () => searched;
+    const record = { route: null };
+    const tripTo = (leaf = null) => BotRoute.trip(record, keptHunter, leaf,
+        { spots: keptSpots, currentSpot, timestamp: leafAt })?.spotId;
+    const stepDrops = (mask, before, after) => {
+        const why = BotRoute.dropReason(mask & Sections.COMPUTED.route, before, after);
+        if (why) BotRoute.drop(record, why);
+        return why;
+    };
+    const waitPlan = { status: 'active', strategy: 'direct_drop', partyNeed: 'required', next: { spotId: 'source', npcId: 7 } };
+    const openRequest = { status: 'open', priority: 'preferred' };
+    const quiet = { plan: waitPlan, request: openRequest };
+    // The search's answer flips, so a trip shows whether it searched or kept.
+    const flipSearch = () => { searched = searched === targetSpot ? otherSpot : targetSpot; };
+    assert.strictEqual(tripTo(), targetSpot.id, 'the first trip start searches');
+    flipSearch();
+    assert.strictEqual(stepDrops(Sections.sectionMask(['money', 'supply']), quiet, quiet), '');
+    assert.strictEqual(tripTo(), targetSpot.id, 'a step that moves no route input keeps its route');
+    assert.strictEqual(stepDrops(Sections.sectionMask(['occupation']), quiet, quiet), 'sections');
+    assert.strictEqual(tripTo(), otherSpot.id, 'a moved route section searches again');
+    flipSearch();
+    assert.strictEqual(stepDrops(0, quiet, { ...quiet, plan: { ...waitPlan, next: { spotId: 'new-source', npcId: 7 } } }), 'plan');
+    assert.strictEqual(tripTo(), targetSpot.id, 'a new plan destination searches again');
+    flipSearch();
+    assert.strictEqual(stepDrops(0, quiet, { ...quiet, request: { ...openRequest, status: 'deferred' } }), 'plan',
+        'a party request deferred (the party wait starts) drops the route');
+    assert.strictEqual(tripTo(), otherSpot.id);
+    flipSearch();
+    assert.strictEqual(stepDrops(0, quiet, { ...quiet, request: { ...openRequest, priority: 'required' } }), 'plan');
+    assert.strictEqual(tripTo(), targetSpot.id);
+    flipSearch();
+    assert.strictEqual(tripTo({ activity: 'hunting', spotId: otherSpot.id }), otherSpot.id, 'the leaf trip goes first');
+    assert.strictEqual(tripTo(), otherSpot.id, 'after a leaf trip the next trip start searches, not the old kept spot');
+    SpotProfiles.findForState = () => { throw Error('search failed'); };
+    BotRoute.drop(record, 'test');
+    assert.strictEqual(tripTo(), undefined, 'a failed search starts no trip');
+    SpotProfiles.findForState = () => targetSpot;
+    assert.strictEqual(tripTo(), targetSpot.id, 'a failed search is not kept: the next trip start searches');
+    SpotProfiles.findForState = routeTargetForState;
+
     const raidSpot = {
         id: 'raid:10103',
         name: 'Sorcerer Isirr',

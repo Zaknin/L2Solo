@@ -886,26 +886,14 @@ function roomAtArrival(spotId, arriving, overflow = 0) {
     return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
 }
 
-// The solo trip of a step (BotRoute): to the spot the step's own leaf names
-// when the bot may hunt there (the kept route is neither read nor changed),
-// else to the route kept in the bot's kernel record, searched here when the
-// record has none (null: dropped or never computed; not saved, so the first
-// read after a restart searches). The trip is built from where the bot
-// stands now; null: no trip.
+// The step's solo trip and the kept route's drop (BotRoute.trip / drop): the
+// route lives in the bot's kernel record.
 function routeTrip(state, context, leaf, timestamp) {
-    const spots = planningSpots, currentSpot = context?.spot || null;
-    const wished = BotRoute.leafChoice(state, leaf, { spots, timestamp });
-    if (wished) return BotRoute.record(state, wished, null, [], { spots, currentSpot, timestamp });
-    const owner = kernel.states.get(Number(state.characterId));
-    const chosen = owner?.route || BotRoute.choose(state, currentSpot, null, [], { spots, timestamp });
-    if (owner && !owner.route) owner.route = chosen;
-    return BotRoute.record(state, chosen, null, [], { spots, currentSpot, timestamp });
+    return BotRoute.trip(kernel.states.get(Number(state.characterId)), state, leaf,
+        { spots: planningSpots, currentSpot: context?.spot || null, timestamp });
 }
-
-// The kept route goes; the next trip start searches again.
-function dropRoute(characterId) {
-    const owner = kernel.states.get(Number(characterId));
-    if (owner) owner.route = null;
+function dropRoute(characterId, why) {
+    BotRoute.drop(kernel.states.get(Number(characterId)), why);
 }
 
 // A solo trip ends on a full spot: the bot stands there with a "was full"
@@ -1245,7 +1233,7 @@ function startKernel(config = {}) {
                     onEconomy: (built, seen) => {
                         economy = built; seenEcho = ColdEconomyDecision.stateEcho(seen);
                         // This build clears wishDirty too (a party member, a karma step).
-                        if (Number(built?.mask) & DecisionSections.COMPUTED.route) dropRoute(state.characterId);
+                        if (Number(built?.mask) & DecisionSections.COMPUTED.route) dropRoute(state.characterId, 'sections');
                         const advice = refreshed?.advisory || ColdEconomyDecision.advisory(built, seen, undefined, observedDeps);
                         rememberWishAdvisory(owner, advice, refreshed ? null : seen, observedDeps);
                     }
@@ -1409,10 +1397,9 @@ function startKernel(config = {}) {
             // route section, or a new plan destination the search reads (the
             // gear branch, the party wait), drops the kept route before the
             // trip start, so the search below runs on the planned state.
-            if ((Number(economy.mask) & DecisionSections.COMPUTED.route)
-                || (previousPlan?.status ?? null) !== (acquisitionPlan?.status ?? null)
-                || String(previousPlan?.next?.spotId ?? '') !== String(acquisitionPlan?.next?.spotId ?? '')
-                || !state.stats?.partyRequest !== !partyRequest) dropRoute(state.characterId);
+            const routeDrop = BotRoute.dropReason(Number(economy.mask) & DecisionSections.COMPUTED.route,
+                { plan: previousPlan, request: state.stats?.partyRequest }, { plan: acquisitionPlan, request: partyRequest });
+            if (routeDrop) dropRoute(state.characterId, routeDrop);
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { excludedSpotIds, timestamp })

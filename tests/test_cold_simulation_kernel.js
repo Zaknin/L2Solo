@@ -1002,7 +1002,15 @@ function claimAck(kernel, payload) {
         }
     });
     partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });
+    // A member's kept solo route: a new state keeps it, the party run's
+    // claim takes the member and drops it.
+    partyRouteKernel.states.get(31).route = { spotId: 'solo-kept' };
+    partyRouteKernel.upsert({ state: { ...partyRouteMembers[1], level: 17,
+        simulation: { ...partyRouteMembers[1].simulation, revision: Number(partyRouteMembers[1].simulation?.revision || 0) + 1 } },
+    context: {} });
+    assert.deepStrictEqual(partyRouteKernel.states.get(31).route, { spotId: 'solo-kept' }, 'a committed state keeps the bot\'s route');
     partyRouteKernel.tick();
+    assert.strictEqual(partyRouteKernel.states.get(31).route, null, 'the party claim drops the member\'s solo route');
     const partyRouteClaim = partyRouteMessages.shift();
     claimAck(partyRouteKernel, {
         grants: partyRouteClaim.payload.candidates.map((candidate) => ({
