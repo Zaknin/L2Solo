@@ -1666,9 +1666,9 @@ const PopulationService = {
             : request?.status === 'open' ? Number(request.requestedAt || timestamp) + PartyRequestPlanner.maxAgeMs(request.priority) : 0;
         // Ownership/HP/coordinates pulse regularly. Refresh their original
         // reference without restarting an unchanged recruitment decision.
-        const supportRole = PartyComposition.roleForState(state);
+        const supportRole = PartyComposition.supportRole(state, objective);
         return { key: `spot:${spotId}`, dueAt,
-            supportKey: !objective && ['healer', 'buffer', 'tank'].includes(supportRole) ? `${state.level}:${supportRole}` : null,
+            supportKey: supportRole ? `${state.level}:${supportRole}` : null,
             stamp: [state.level ?? null, state.stats?.classId ?? null, state.clanId ?? state.stats?.clanId ?? null,
                 objective?.spotId ?? null, request?.status ?? null, request?.priority ?? null,
                 state.stats?.equipmentPlan?.strategy ?? null, state.stats?.equipmentPlan?.target?.selfId ?? null] };
@@ -2215,7 +2215,7 @@ const PopulationService = {
                 const required = states.filter((state) => {
                     const objective = RequiredPartyFormation.objectiveFor(state);
                     return objective && RequiredPartyFormation.spotFor(state, objective) === String(proposal.spotId || '')
-                        || proposal.materialParty && !objective && ['healer', 'buffer', 'tank'].includes(PartyComposition.roleForState(state));
+                        || proposal.materialParty && !!PartyComposition.supportRole(state, objective);
                 });
                 const select = proposal.materialParty ? require('./CraftMaterialParty').selectMembers
                     : (rows, options) => require('../../Clan/ClanRaidRoster').selectMembers(rows, { fullRoster: proposal.fullRoster }, options);
@@ -2340,8 +2340,7 @@ const PopulationService = {
                 const willingStates = states.filter((state) => (
                     requiresClanEquipmentParty(state)
                     || require('./CraftMaterialParty').isObjective(partyObjectiveForState(state))
-                    || materialRequested && !partyObjectiveForState(state)
-                        && ['healer', 'buffer', 'tank'].includes(PartyComposition.roleForState(state))
+                    || materialRequested && !!PartyComposition.supportRole(state, partyObjectiveForState(state))
                     || PersonaPartyPolicy.backgroundIntent(state).accept
                 ));
                 const requiredStates = willingStates.filter(openRequired);
@@ -2502,12 +2501,16 @@ const PopulationService = {
         const timestamp = options.timestamp ?? Date.now();
         const objectiveOf = options.objectiveOf || partyObjectiveMemo();
         const grouped = new Map();
+        // Production hands in only the assembly event's page: its helpers were
+        // already read from the support index (PartyAssemblyEvents.supportShortlist)
+        // and filtered by runPartyAssemblyEvent. A second index read here would
+        // rotate the index again and skip that filter; this pool is bounded by the page.
         const supports = new Map();
         (states || []).forEach((state) => {
             const key = partyObjectiveKeyForState(state, objectiveOf(state));
             if (!grouped.has(key)) grouped.set(key, []);
             grouped.get(key).push(state);
-            if (!partyObjectiveForState(state) && ['healer', 'buffer', 'tank'].includes(PartyComposition.roleForState(state))) {
+            if (PartyComposition.supportRole(state, partyObjectiveForState(state))) {
                 if (!supports.has(state.level)) supports.set(state.level, []);
                 const pool = supports.get(state.level);
                 if (pool.length < 12) pool.push(state);

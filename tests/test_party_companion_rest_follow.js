@@ -2221,17 +2221,41 @@ try {
     });
     assert.strictEqual(autoPullSkillCast, false, 'a mob already attacking its tank must not be taunted again');
     assert.strictEqual(engagedPulledTarget, autoPullTarget, 'the tank should fight the mob it already pulled');
-    // Out of resurrection reach: no one can revive it this tick, so the pull rule decides.
-    const fallenAutoPullMember = fakeActor(2000098, { locX: 5000, locY: 0 });
+    // In resurrection reach, as in production (the fallen companion is a bot
+    // session too): the tank revives it with a scroll instead of pulling.
+    const fallenAutoPullMember = fakeActor(2000098, { locX: 60, locY: 0 });
     fallenAutoPullMember.state.dead = true;
     const fallenAutoPullSession = fakeSession('bot_auto_pull_fallen_member', fallenAutoPullMember);
     fallenAutoPullSession.followPlayerSession = healerLeaderSession;
     fallenAutoPullSession.partyCompanion = true;
     fallenAutoPullSession.plan = 'following';
+    BotManager.sessions = [autoPullTankSession, fallenAutoPullSession];
     autoPullTargetId = undefined;
     PartyAwareness.invalidateThreatProjection(healerLeaderSession);
     autoPullTankSession.currentTargetId = undefined;
     autoPullTank.unselect();
+    publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
+    let scrollTargetId = null;
+    autoPullTank.automation.scheduleAction = (_session, _actor, target) => { scrollTargetId = target.fetchId(); };
+    let revivingPullCombat = false;
+    FollowingState.tick(autoPullTankSession, autoPullTank, {
+        skillExec() { revivingPullCombat = true; }
+    }, {
+        say() {},
+        executeCombat() { revivingPullCombat = true; },
+        executePvPCombat() {}
+    });
+    assert.strictEqual(revivingPullCombat, false, 'a tank reviving a party member must not pull');
+    assert.strictEqual(scrollTargetId, fallenAutoPullMember.fetchId(), 'the tank casts a resurrection scroll on the fallen member in reach');
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.providerId, autoPullTank.fetchId());
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.source, 'scroll');
+    delete autoPullTank.automation.scheduleAction;
+    healerLeaderSession.partyRevivalAttempt = null;
+    autoPullTank.unselect();
+    autoPullTankSession.currentTargetId = undefined;
+
+    // Out of resurrection reach: no one can revive it this tick, so the pull rule decides.
+    fallenAutoPullMember.locX = 5000;
     publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
     let blockedAutoPullCombat = false;
     FollowingState.tick(autoPullTankSession, autoPullTank, {

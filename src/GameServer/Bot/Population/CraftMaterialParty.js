@@ -227,9 +227,8 @@ function selectMembers(candidates, { minSize = 2, maxSize = MAX_MEMBERS, levelRa
     const anchor = cores[0], spotId = requestOf(anchor).spotId;
     const core = cores.filter(state => requestOf(state).spotId === spotId
         && Math.abs(state.level - anchor.level) <= levelRange).slice(0, Math.min(MAX_CORE, maxSize));
-    const supports = candidates.filter(state => !requestOf(state) && !state.stats?.clanPartyObjective
-        && !(state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil) > timestamp)
-        && ['healer', 'buffer', 'tank'].includes(Composition.roleForState(state)));
+    const supports = candidates.filter(state => Composition.supportRole(state, requestOf(state) || state.stats?.clanPartyObjective)
+        && !(state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil) > timestamp));
     const recruits = Composition.selectRecruits(core, supports, { maxSize: Math.min(MAX_MEMBERS, maxSize), levelRange, timestamp });
     const members = [...core, ...recruits];
     return members.length >= minSize ? members : [];

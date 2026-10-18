@@ -53,12 +53,17 @@ function proposalFromStates(states = [], options = {}) {
     });
 
     const groups = new Map();
+    // On main this runs on the assembly event's page: its helpers were already
+    // read from the support index (PartyAssemblyEvents.supportShortlist) and
+    // filtered by PopulationService.runPartyAssemblyEvent. A second index read
+    // here would rotate the index again and skip that filter; the worker has no
+    // copy of the index. This pool is bounded by the states handed in.
     const supports = new Map();
     rows.forEach((state) => {
         const objective = objectiveFor(state);
         if (!objective) {
-            const role = PartyComposition.roleForState(state);
-            if (['healer', 'buffer', 'tank'].includes(role)) {
+            const role = PartyComposition.supportRole(state, objective);
+            if (role) {
                 const key = `${state.level}:${role}`;
                 if (!supports.has(key)) supports.set(key, []);
                 const pool = supports.get(key);
