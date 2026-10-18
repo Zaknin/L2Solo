@@ -101,6 +101,24 @@ for (const event of recovery.snapshot().recent) {
     assert.strictEqual(side.id, 2, 'the resting member never initiates a resource encounter');
     assert.strictEqual(side.partyUpdatedAt, at, 'older teammate context cannot overwrite the current roster');
 }
+// A pair's four decision rolls come from the pair itself: a second hunter on
+// the party side (who must then be picked) leaves the same pair's rolls as they were.
+const oneHunter = JSON.parse(JSON.stringify(mixedEntries));
+oneHunter[2].state.activity = 'resting';
+const firstEvent = (input, start) => {
+    const m = make(1); m.sample(input, memory, start); m.sample(input, memory, start + INTERVAL_MS);
+    return m.snapshot().events[0];
+};
+let samePairs = 0;
+for (let i = 0; i < 60; i++) {
+    const start = at + i * INTERVAL_MS, one = firstEvent(oneHunter, start), two = firstEvent(mixedEntries, start);
+    if (!one || !two || one.actor.id !== two.actor.id || one.peer.id !== two.peer.id) continue;
+    assert.strictEqual(one.actor.activeSize + one.peer.activeSize, 2);
+    assert.strictEqual(two.actor.activeSize + two.peer.activeSize, 3);
+    assert.deepStrictEqual(two.decisionRolls, one.decisionRolls, 'another hunter in the group does not move this pair\'s rolls');
+    samePairs++;
+}
+assert(samePairs > 3, 'the same pair meets with one and with two party hunters');
 for (const change of ['missing', 'distant', 'dead', 'travelling']) {
     const unavailable = JSON.parse(JSON.stringify(recoveryEntries));
     if (change === 'missing') unavailable.pop();
