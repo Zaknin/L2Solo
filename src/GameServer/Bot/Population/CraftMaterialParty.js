@@ -29,7 +29,12 @@ function campsFor(state, itemId, spots, spoiler) {
     if (!cache) sources.set(index, cache = new Map());
     const key = `${itemId}:${state.level}:${tableRole}:${Number(spoiler)}:${Planner.rateProfileSignature()}`;
     const held = cache.get(key);
-    if (held?.done) return held.rows;
+    if (held?.done) {
+        // Least recently used: a key read again moves to the newest end.
+        cache.delete(key);
+        cache.set(key, held);
+        return held.rows;
+    }
     const camps = new Map((held?.rows || []).map(row => [row.spotId, row])), entries = index.get(itemId) || [];
     const end = Math.min((held?.cursor || 0) + MAX_SOURCE_CHECKS, entries.length);
     for (let i = held?.cursor || 0; i < end; i++) {
@@ -49,6 +54,8 @@ function campsFor(state, itemId, spots, spoiler) {
     // but never trigger combat simulation or a table rebuild at runtime.
     const result = [...camps.values()].sort((a, b) => Number(b.forecastKnown) - Number(a.forecastKnown)
         || b.rate - a.rate || a.spotId.localeCompare(b.spotId)).slice(0, MAX_CAMPS);
+    // An update of a held key frees its own slot first, so it evicts nobody.
+    cache.delete(key);
     if (cache.size >= SOURCE_CACHE_SIZE) cache.delete(cache.keys().next().value);
     cache.set(key, { rows: result, cursor: end, done: end === entries.length });
     return result;
