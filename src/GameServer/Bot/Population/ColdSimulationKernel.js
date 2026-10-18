@@ -1957,7 +1957,7 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.objective
                     );
                 }
-                if (projection?.raised?.includes('build')) openRequirements();
+                if (projection?.kitMoved) openRequirements();
                 if (requirementProgress && !meetingPending && !materialHunt && this.planPartyRequirement && projectedState
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {

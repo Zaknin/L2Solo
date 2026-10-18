@@ -1444,7 +1444,7 @@ function publishDeferredPartyRequests(rows) {
 }
 
 // Start-up only: a request left open across a restart is deferred once here;
-// at run time each bot's own step expires its request.
+// at run time each request expires at its own deadline (PartyAssemblyEvents).
 function expireStalePartyRequests() {
     const timestamp = now();
     const requiredMaxAge = PartyRequestPlanner.maxAgeMs('required');
@@ -2745,11 +2745,7 @@ const BotLifeState = {
         // error; raised with the round's hard events in one bump.
         const soft = !isMainThread && typeof options.softInputFor === 'function'
             ? DecisionSections.softEvents(nextState, nextState.stats.wishSections, options.softInputFor(nextState, timestamp)) : [];
-        const raised = DecisionEvents.raiseSections(state, nextState, hard, soft);
-        // The caller that reads what this step raised (a party step: a
-        // member's build opens the party's re-plan); the post-round build
-        // below clears the dirty bits, so they cannot be read after it.
-        if (typeof options.onRaised === 'function') options.onRaised(raised);
+        DecisionEvents.raiseSections(state, nextState, hard, soft);
         // The worker's post-round economy ask: only a step that took no
         // decision before its round (a party member).
         if (!isMainThread && !state.stats?.tradeMeeting && !beforeResolvePacket) {

@@ -628,14 +628,14 @@ function claimAck(kernel, payload) {
     assert.strictEqual(refreshProposal.partyResolution.requirementRefreshedAt, now);
     assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
 
-    // A member whose own step raised its build section opens the re-plan with
+    // A member whose own step moved its kit opens the re-plan with
     // no due mark from main; members already passed wait for the next step.
-    for (const raised of [[], ['build']]) {
+    for (const moved of [false, true]) {
         const kitMessages = [], kitPlanned = [];
         const kitKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
             resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
                 partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
-            projectResolve: state => ({ state, raised: state.characterId === 121 ? raised : [] }),
+            projectResolve: state => ({ state, kitMoved: moved && state.characterId === 121 }),
             planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
             emit: (type, payload) => kitMessages.push({ type, payload }) });
         kitKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
@@ -646,8 +646,8 @@ function claimAck(kernel, payload) {
             characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
             leaseId: `kit-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
         await kitKernel.resolveChain;
-        assert.deepStrictEqual(kitPlanned, raised.length ? [121] : [], 'a raised build opens the re-plan at that member');
-        assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), raised.length > 0,
+        assert.deepStrictEqual(kitPlanned, moved ? [121] : [], 'a moved kit opens the re-plan at that member');
+        assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), moved,
             'the re-plan stays open for the member passed before the raise');
     }
 
