@@ -179,4 +179,28 @@ process.env.L2NODE_PROGRESSION_RATE = 'x1';
         assert(Table.rankedSpotIds('dps', 24, { shots: 0, potions: 0 }, -15).length > 0, 'the committed table ranks a spot');
     }
 }
+{
+    // Two spots of equal income (the same monsters, the same measured row, no level curve): the list
+    // puts the spot whose level is closest to the bot's first, whatever their ids.
+    const os = require('os');
+    const fixture = { header: { schema: 1, inputs: { bandLevels: 2, maxLevel: 78 } }, roles: ['dps'], shots: [1, 0],
+        gaps: [-4, -2, 0, 2, 4, 6, 8], rowFields: ['minGap', 'refGap', 'kph', 'busy', 'deaths', 'exp', 'sp', 'adena', 'loot', 'shots', 'potions'],
+        curveFields: ['kph', 'busy', 'deaths', 'exp', 'adena'],
+        spots: [['a_far', 20, 30, 250, 1, 1, 1], ['b_near', 24, 30, 250, 1, 1, 1]],
+        rows: [[[-4, 0, 100, 9, 0, 100, 5, 30, 20, 0, 0], null], [[-4, 0, 100, 9, 0, 100, 5, 30, 20, 0, 0], null]], curves: {} };
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'spot-table-')), 'tie.json');
+    fs.writeFileSync(file, JSON.stringify(fixture));
+    const npcEntries = [{ selfId: 776, count: 17 }, { selfId: 418, count: 6 }];
+    Table.useFile(file);
+    Table.useSpots([{ id: 'a_far', npcEntries, rewards: { adenaMin: 40, adenaMax: 140 } },
+        { id: 'b_near', npcEntries, rewards: { adenaMin: 40, adenaMax: 140 } }]);
+    try {
+        const ranked = Table.rankedIncome('dps', 23, { shots: 0, potions: 0 });
+        assert.strictEqual(ranked.length, 2, 'both spots earn');
+        assert.strictEqual(ranked[0].income, ranked[1].income, 'the two spots earn the same');
+        assert.deepStrictEqual(ranked.map(row => row.spotId), ['b_near', 'a_far'], 'an income tie goes to the level-23 bot\'s closest spot');
+        assert.deepStrictEqual(Table.rankedSpotIds('dps', 23, { shots: 0, potions: 0 }), ['b_near', 'a_far'], 'the id view keeps that order');
+        assert.deepStrictEqual(Table.rankedSpotIds('dps', 20, { shots: 0, potions: 0 }), ['a_far', 'b_near'], 'a level-20 bot gets the other one first');
+    } finally { Table.useSpots([]); Table.useFile(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+}
 console.log('Spot value table lookups, curves, caps, rates and the committed table passed');

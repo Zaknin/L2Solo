@@ -419,7 +419,8 @@ function rankedSpotIds(role, level, costs = { shots: 0, potions: 0 }, minGap = -
     return rankIncome(t, rates, role, level, costs, minGap, shots, skill).map(({ index }) => t.spots[index][0]);
 }
 // The positive incomes of the role/level band at these consumable prices,
-// best first (ties by spot id), the first 64: [{ index, income }].
+// best first, ties to the spot whose level is closest to the bot's, then by
+// spot id; the first 64: [{ index, income }].
 function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
     const basisKey = `${role}:${level}:${minGap}:${Number(shots)}:${skill}`;
     let basis = incomeBases.get(basisKey);
@@ -461,7 +462,9 @@ function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
             - basis.values[index * 3 + 2] * costs.potions;
         if (income > 0) rows.push({ index: basis.indexes[index], income });
     }
-    rows.sort((a, b) => b.income - a.income || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
+    rows.sort((a, b) => b.income - a.income
+        || Math.abs(t.spots[a.index][1] - level) - Math.abs(t.spots[b.index][1] - level)
+        || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
     return rows.slice(0, 64);
 }
 function roles() {
