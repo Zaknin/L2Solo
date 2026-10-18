@@ -104,6 +104,7 @@ const tests = [
     'tests/test_craft_material_recruitment.js',
     'tests/test_party_destination_reservations.js',
     'tests/test_spot_value_table.js',
+    'tests/test_spot_list_search.js',
     'tests/test_spot_income_band_cache.js',
     'tests/test_cold_startup_repair_checkpoint.js',
     'tests/test_spot_reward_expectation.js',
