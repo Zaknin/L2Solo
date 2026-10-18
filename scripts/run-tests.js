@@ -770,6 +770,7 @@ const tests = [
     'tests/test_party_capacity.js',
     'tests/test_party_rewards.js',
     'tests/test_party_buff_targets.js',
+    'tests/test_party_member_reader.js',
     'tests/test_party_bot_loot.js',
     'tests/test_party_loot_toggle.js',
     'tests/test_party_client_loot_distribution.js',

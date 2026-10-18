@@ -18,6 +18,10 @@ const byLeader = new Map();
 const byObjectiveClan = new Map();
 const byGoalKey = new Map();
 const indexed = new Map();
+// Raid parties by their boss, kept by the same writer for both admitted
+// statuses (active and hot): `raidIndexed` holds each one's key and order.
+const byRaidBoss = new Map();
+const raidIndexed = new Map();
 
 function addKey(index, key, partyId) {
     if (!key) return;
@@ -54,8 +58,30 @@ function index(snapshot) {
     indexed.set(snapshot.partyId, keys);
 }
 
+// The raid boss a party hunts (template id), or 0 when it is no raid party.
+function raidBossKey(party) {
+    const objective = party?.stats?.objective;
+    if (objective?.sourceKind !== 'raid') return 0;
+    const bossKey = Number(objective.raidBossTemplateId || objective.npcId);
+    return bossKey > 0 ? bossKey : 0;
+}
+
+function indexRaid(snapshot) {
+    const previous = raidIndexed.get(snapshot.partyId);
+    if (previous) {
+        dropKey(byRaidBoss, previous.bossKey, snapshot.partyId);
+        raidIndexed.delete(snapshot.partyId);
+    }
+    if (snapshot.status !== 'active' && snapshot.status !== 'hot') return;
+    const bossKey = raidBossKey(snapshot);
+    if (!bossKey) return;
+    addKey(byRaidBoss, bossKey, snapshot.partyId);
+    raidIndexed.set(snapshot.partyId, { bossKey, order: cacheGeneration });
+}
+
 function clearIndexes() {
     byLeader.clear(); byObjectiveClan.clear(); byGoalKey.clear(); indexed.clear();
+    byRaidBoss.clear(); raidIndexed.clear();
 }
 
 // The active parties under one index key, in active() order. `reader` names
@@ -85,6 +111,7 @@ function acceptedParty(snapshot) {
     byStatus.get(snapshot.status)?.add(snapshot.partyId);
     cacheGeneration++;
     index(snapshot);
+    indexRaid(snapshot);
     for (const listener of publicationListeners) {
         try { listener(snapshot, current || null); }
         catch (error) { utils.infoWarn('BotParty', 'publication listener failed: %s', error?.message || error); }
@@ -408,6 +435,23 @@ const BackgroundPartyState = {
     activeByGoalKey(goalKey, reader = 'unknown') {
         return activeIn(byGoalKey, String(goalKey || ''), reader);
     },
+
+    // The parties with this status hunting one raid boss, without one party,
+    // in the order active() / admitted() give them (last accepted change).
+    raidCompetitors(bossKey, status, exceptPartyId, reader = 'unknown') {
+        Diagnostics.count('party_index', 'hit', reader);
+        Diagnostics.count('party_index', 'scan_avoided', reader,
+            byStatus.get('active').size + (status === 'hot' ? byStatus.get('hot').size : 0));
+        const parties = [];
+        for (const id of byRaidBoss.get(bossKey) || []) {
+            const party = cache.get(id);
+            if (id !== exceptPartyId && party?.status === status) parties.push(party);
+        }
+        if (parties.length > 1) parties.sort((a, b) => raidIndexed.get(a.partyId).order - raidIndexed.get(b.partyId).order);
+        return parties;
+    },
+
+    raidBossKey,
 
     // The active parties among these ids (each once), in active() order.
     activeByIds(partyIds, reader = 'unknown') {

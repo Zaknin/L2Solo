@@ -7,12 +7,16 @@ function create({ memory = invoke('GameServer/Social/InteractionMemoryRuntime'),
         const p = relation.effective || relation.personal;
         return Math.max(-100, Math.min(100, p.affinity + p.trust * 2 - p.hostility * 2 - p.fear));
     };
+    // pairs: smaller id -> larger id -> the pair's mean of both directions.
     const pair = (a, b) => {
         const left = Number(a.characterId), right = Number(b.characterId);
         if (left === right) return 0;
-        const key = left < right ? `${left}:${right}` : `${right}:${left}`;
-        if (!pairs.has(key)) pairs.set(key, (directed(left, right) + directed(right, left)) / 2);
-        return pairs.get(key);
+        const low = left < right ? left : right, high = left < right ? right : left;
+        let row = pairs.get(low);
+        if (!row) pairs.set(low, row = new Map());
+        let value = row.get(high);
+        if (value === undefined) row.set(high, value = (directed(left, right) + directed(right, left)) / 2);
+        return value;
     };
     return {
         score(state, peers) {
