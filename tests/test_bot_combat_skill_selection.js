@@ -7,6 +7,7 @@ const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
 const EffectStore = invoke('GameServer/Effects/EffectStore');
 const SummonerTactics = invoke('GameServer/Bot/AI/SummonerTactics');
 const World = invoke('GameServer/World/World');
+const { registerSessions } = require('./helpers/worldSessions');
 const NpcDied = invoke('GameServer/Actor/Generics/NpcDied');
 
 function skill(selfId, options = {}) {
@@ -241,7 +242,7 @@ try {
     const partyArcherSession = { actor: partyArcher, partyCompanion: true, followPlayerSession: leaderSession };
     const healerSession = { actor: partyHealer, partyCompanion: true, followPlayerSession: leaderSession };
     const savedPartyUser = World.user;
-    World.user = { sessions: [leaderSession, partyArcherSession, healerSession] };
+    registerSessions([leaderSession, partyArcherSession, healerSession]);
     const partyMob = {
         ...npc(20200), fetchAttackable: () => true, isDead: () => false,
         fetchDestId: () => partyTank.fetchId()
