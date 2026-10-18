@@ -212,7 +212,10 @@ function compact(record) {
 // served view cannot recreate the original graph's valuation or quantities.
 // The card with its craft step replaced (null when it no longer fits).
 function cardWithShot(before, shot) {
-    const counts = before.counts, at = shotOffset(counts);
+    const counts = before.counts;
+    // No shot to add or strip: the card as is (no copy per step).
+    if (!shot && !(counts & SHOT)) return before;
+    const at = shotOffset(counts);
     const previousEnd = at + (counts & SHOT ? 2 + new DataView(before.data).getUint16(at, true) : 0);
     const encoded = encodeShot(shot), size = before.data.byteLength - (previousEnd - at) + (encoded ? encoded.length + 2 : 0);
     if (previousEnd > before.data.byteLength || size > cardWireRoom(before.key)) return null;
@@ -745,7 +748,10 @@ class ColdEconomyDecisions {
         }
         if (incoming && Number.isFinite(Number(incoming.updatedAt))) {
             const card = incoming;
-            card.stale = bagChanged;
+            // A card made before the round its state's event dirtied (loot,
+            // level) is not served: decided() misses and main reads the
+            // basics view until the next decision point.
+            card.stale = bagChanged || !!state?.stats?.wishDirty;
             if (state && advisoryMatches(state, advice)) Object.defineProperty(card, 'advisory', {
                 value: advice, configurable: true, writable: true
             });
