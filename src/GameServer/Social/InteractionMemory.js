@@ -122,6 +122,13 @@ class InteractionMemory {
         return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
     }
 
+    // The accepted snapshot's relation rows and revision, read-only (a row of
+    // an unusual shape is the kept one), without the deep copy snapshot() makes.
+    relationRows(ownerId) {
+        const snapshot = this.snapshots.get(ownerId);
+        return snapshot ? { revision: snapshot.revision, relations: snapshot.mapRows(row => row) } : null;
+    }
+
     // The accepted snapshot's revision, without the deep copy snapshot() makes.
     revision(ownerId) {
         return this.snapshots.get(ownerId)?.revision;

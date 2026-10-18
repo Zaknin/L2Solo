@@ -244,8 +244,10 @@ function requestFacts(state, deps) {
 }
 // The build's input name (the weighing memo, the card's inputHash, the group
 // key): its facts without the occupation, which the verdict reads against
-// the held leaf, so a trip the leaf ordered does not rename the inputs.
-const inputName = facts => String(Sections.hash({ ...facts, occupation: null }));
+// the held leaf, so a trip the leaf ordered does not rename the inputs; and
+// the gear-threat mask the decision weighs and keeps, so the rebuild after a
+// threat refusal never reuses the weighing made under the other mask.
+const inputName = (facts, threat) => String(Sections.hash({ ...facts, occupation: null, threat }));
 // The held leaf's own purchase item stays exact: its order counts only the
 // rise since the decision (remainingToOrder), so use inside a band would buy short.
 function bandsHold(state, bands = [], leaf = null) {
@@ -913,11 +915,10 @@ function resolved(state, deps, production = true) {
             if (Workshops.bookFor(state.characterId) !== null) deps.knownRecipes = Workshops.cachedRecipes(state.characterId);
         }
         if (isMainThread && !Object.hasOwn(deps, 'memory')) {
-            // The bot's memory for its relations fact and bond, as the worker's
-            // deps read it: the plain snapshot (forActor, the coordinator's
-            // contextFor), since the runtime's packed store has no relations rows.
+            // The bot's memory rows for its relations fact, bond and threat, the
+            // rows the worker's snapshot carries, read without the snapshot's copy.
             // lazy: worker the main memory owner; the worker passes its own reader.
-            deps.memory = invoke('GameServer/Social/InteractionMemoryRuntime').snapshot(Number(state.characterId));
+            deps.memory = invoke('GameServer/Social/InteractionMemoryRuntime').relationRows(Number(state.characterId));
         }
         if (isMainThread && !Object.hasOwn(deps, 'buyOrderEscrow')) {
             // lazy: worker native market records live on main; workers receive their existing context mirror.
@@ -1231,7 +1232,7 @@ function forState(state = {}, deps = {}) {
     // read as the field activity it ordered (fieldActivity).
     const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
     const facts = requestFacts(current, deps);
-    const key = inputName(facts);
+    const key = inputName(facts, deps.gearThreatMask);
     // The held build's market items and spot crowd still read the same: read once per request.
     let readsHeld = null;
     const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);

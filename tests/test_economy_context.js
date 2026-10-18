@@ -249,6 +249,54 @@ async function run() {
         Economy.forget(native.characterId);
     } finally { Supply.useRowSource(null); }
     console.log('PASS held decision: own output keeps / facts refuse');
+    // The gear-threat mask the decision weighed is kept with it: the same
+    // mask holds the decision, a flip between physical-only and both refuses it.
+    // A saved decision restores under its own byte format and generation only.
+    {
+        const T = Date.now(), native = { ...base, characterId: 990024 };
+        const deps = () => ({ timestamp: T, memoryIdentity: 'fixture-memory', sourceReady: true });
+        const held = Economy.forState(native, deps());
+        const packet = held.statsPacket, published = { ...native, stats: { ...native.stats, ...packet } };
+        const options = { baseline: packet.wishSections, leaf: held.network.activity, timestamp: T };
+        const proof = held.eventProof(), mask = held.gearThreatMask;
+        assert(proof && (mask === 1 || mask === 3), 'fixture: a held proof and its threat mask');
+        assert.equal(Economy.eventProofHolds(published, proof, { ...deps(), gearThreatMask: mask }, options), true,
+            'the weighed threat mask holds the decision');
+        assert.equal(Economy.eventProofHolds(published, proof, { ...deps(), gearThreatMask: 4 - mask }, options), false,
+            'a flipped threat mask refuses the decision');
+        const accepted = { card: { activity: held.network.activity }, characterId: native.characterId,
+            decisionSeq: packet.decisionSeq, activityLeaf: packet.activityLeaf, focus: packet.wishFocus?.[0] ?? null,
+            baseline: packet.wishSections };
+        const bytes = Economy.restartEventProof(proof, accepted);
+        assert(bytes instanceof Uint8Array, 'a restartable decision saves its prefix');
+        const restored = Economy.restoreEventProof(bytes, accepted);
+        assert.equal(Economy.eventProofHolds(published, restored, deps(), { ...options, softPrefix: true }), true,
+            'the restored prefix holds the saved decision');
+        const older = Uint8Array.from(bytes); older[0] = 4;
+        assert.equal(Economy.restoreEventProof(older, accepted), null, 'a prefix of the former format is refused');
+        const kept = Generation.metadata();
+        try {
+            Generation.configure({ code: '3'.repeat(40), config: '2'.repeat(64) });
+            assert.equal(Economy.restoreEventProof(bytes, accepted), null, 'a prefix of another generation is refused');
+        } finally { Generation.configure(kept); }
+        assert(Economy.restoreEventProof(bytes, accepted), 'fixture: the generation is back');
+        Economy.forget(native.characterId);
+    }
+    // An enchant or special-ability decision names its object: it holds while
+    // that object is in the bag at the enchant level read; one without an
+    // object (an exchange) holds by its bag rows.
+    {
+        const leaf = improvement => ({ activity: 'improving', improvement });
+        const bag = enchant => ({ ...base, inventory: { 1310: { selfId: 1310, amount: 1, instances: [{ id: 77, enchant }] } } });
+        const enchant = { kind: 'enchant', itemId: 1310, objectId: 77, from: 2, to: 3 };
+        assert.equal(Economy.heldLeafRefusal(bag(2), leaf(enchant), {}), '', 'the named object at its level holds');
+        assert.notEqual(Economy.heldLeafRefusal({ ...base, inventory: {} }, leaf(enchant), {}), '', 'a gone object refuses');
+        assert.notEqual(Economy.heldLeafRefusal(bag(3), leaf(enchant), {}), '', 'a moved enchant level refuses');
+        assert.equal(Economy.heldLeafRefusal(bag(3), leaf({ kind: 'exchange', itemId: 1310 }), {}), '',
+            'an improvement without an object holds');
+        assert.notEqual(Economy.heldLeafRefusal(bag(2), leaf(null), {}), '', 'an improving leaf without its improvement refuses');
+    }
+    console.log('PASS threat mask kept / restart prefix format and generation / improving object');
     {
         const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute'), select = Route.select;
         const T = Date.now(), native = { ...base, characterId: 990022 }, occupancy = { fixture: { count: 1 } };

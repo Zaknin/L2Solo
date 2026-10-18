@@ -64,7 +64,7 @@ function marksFor(session, actor) {
     const memoryRevision = memory.revision(characterId);
     if (memoryRevision === undefined || session.decisionMemoryRevision !== memoryRevision || !session.decisionRelationTargets) {
         session.decisionRelationTargets = Sections.relationTargetIds({ stats },
-            memoryRevision === undefined ? null : memory.snapshot(characterId));
+            memoryRevision === undefined ? null : memory.relationRows(characterId));
         session.decisionMemoryRevision = memoryRevision;
     }
     const timestamp = Date.now();
