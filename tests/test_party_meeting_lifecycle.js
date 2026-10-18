@@ -63,6 +63,7 @@ async function main() {
         resolveParty: input => Resolver.resolve(input),
         projectResolve: (state, resolution) => ({ ...state, ...resolution.patch }),
         planPartyRequirement: () => { throw Error('held meeting cannot start another economic plan'); },
+        partyRoute: () => ({ needed: true, travelMs: 60000, spotId: 'wrong-spot', to: { locX: 9000, locY: 0, locZ: 0 } }),
         emit: (type, payload) => messages.push({ type, payload }) });
     const requestId = 'meeting-claim';
     const grants = new Map(members.map(state => [state.characterId, { characterId: state.characterId,
@@ -74,7 +75,7 @@ async function main() {
     const context = { isPartyLeader: true, party: { ...party, nextResolveAt: at + 10000 } };
     assert.equal(kernel.dueAt(members[0], context), at, 'a later group timer does not postpone the due paid arrival');
     kernel.partyRuns.set(party.partyId, { party, members, grants, requestId, requirementRefresh: true,
-        spot: null, route: { needed: true, travelMs: 60000, spotId: 'wrong-spot', to: { locX: 9000, locY: 0, locZ: 0 } } });
+        spot: null });
     await kernel.resolvePartyGrant(party.partyId);
     const batch = messages.find(message => message.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
@@ -156,6 +157,7 @@ async function main() {
             resolveSolo: () => { throw Error('completed roster resolves under group ownership'); },
             resolveParty: input => Resolver.resolve(input),
             projectResolve: (state, resolution) => ({ ...state, ...resolution.patch }),
+            partyRoute: () => ({ needed: true, travelMs: 60000, spotId: 'wrong-spot' }),
             emit: (type, payload) => raidMessages.push({ type, payload }) });
         for (const state of raidMembers) {
             terminalKernel.upsert({ state, context: {} });
@@ -165,7 +167,7 @@ async function main() {
         assert.equal(terminalKernel.dueAt(raidMembers[0], { isPartyLeader: true, party: victoryParty }), at,
             'terminal raid settlement is not delayed by a future personal leg');
         terminalKernel.partyRuns.set(party.partyId, { party: victoryParty, members: raidMembers, grants,
-            requestId, spot: null, route: { needed: true, travelMs: 60000, spotId: 'wrong-spot' } });
+            requestId, spot: null });
         await terminalKernel.resolvePartyGrant(party.partyId);
         const raidBatch = raidMessages.find(message => message.type === 'proposal_batch');
         assert(raidBatch, JSON.stringify(raidMessages));

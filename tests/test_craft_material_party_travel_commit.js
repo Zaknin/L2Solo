@@ -44,6 +44,7 @@ async function proposals(party, route, at) {
     const kernel = new Kernel.ColdSimulationKernel({ now: () => at,
         resolveSolo: () => { throw Error('no solo combat in a trip'); },
         resolveParty: () => { throw Error('no party combat in a trip'); },
+        partyRoute: () => route,
         emit: (type, payload) => messages.push({ type, payload }) });
     for (const member of members) {
         const current = Life.cachedState(member.characterId);
@@ -51,7 +52,7 @@ async function proposals(party, route, at) {
         kernel.inFlight.set(member.characterId, { state: current, grant: held.get(member.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members, route, requestId, grants: held });
+    kernel.partyRuns.set(party.partyId, { party, members, requestId, grants: held });
     await kernel.resolvePartyGrant(party.partyId);
     const rows = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(rows, JSON.stringify(messages));

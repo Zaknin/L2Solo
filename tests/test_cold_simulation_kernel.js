@@ -372,6 +372,8 @@ function claimAck(kernel, payload) {
                 targetNpcId: 0, activityPick: { activity: 'hunting', npcId: 20101 },
                 statsPacket: { money: [30000, .00001, 1000, 0], wishFocus: ['worker', 1], decisionSeq: 5, activityLeaf: 19, dormantWishes: [] },
                 acquisitionPlan: { strategy: 'direct_drop', status: 'active' },
+                // The trip the step started (BotRoute.record's shape).
+                route: { needed: true, mode: 'solo', spotId: 'trip-ground', destinations: { 3: { locX: 1, locY: 2, locZ: 3 } } },
                 plannedState: { ...commandState, stats: { ...commandState.stats, workerPlanned: true } }
             };
         },
@@ -387,6 +389,8 @@ function claimAck(kernel, payload) {
     assert.strictEqual(commandRequest.payload.requests[0].precomputedPlan.statsPacket.activityLeaf, 19, 'kernel forwards whole packet');
     assert(commandRequest.payload.requests[0].precomputedResult, 'main command gateway must receive worker-computed lifecycle output');
     assert.strictEqual(commandRequest.payload.requests[0].computedAt, now);
+    assert.deepStrictEqual(commandRequest.payload.requests[0].route, { needed: true, spotId: 'trip-ground' },
+        'main\'s command reads the spot of the trip the worker\'s step started');
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
         'a command request must consume its due token while the command is in flight');
     assert.strictEqual(commandKernel.snapshot().commandingAgeMs, 0,
