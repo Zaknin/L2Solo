@@ -1189,7 +1189,9 @@ function forState(state = {}, deps = {}) {
         return known ? Math.expm1(PriceBelief.sigma(known)) : 0;
     };
     const watchRows = marketWatchRows(network.queue, context.liquidationInputs?.rows || [], sourceBoard,
-        Number(state.characterId), price, id => context.worth(id) ?? price(id), priceError);
+        // || (TradeIntent.project above keeps ??): a zero-usefulness item's
+        // worth is 0, yet its sale is watched at its price.
+        Number(state.characterId), price, id => context.worth(id) || price(id), priceError);
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
