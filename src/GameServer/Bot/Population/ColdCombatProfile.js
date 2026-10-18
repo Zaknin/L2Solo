@@ -1099,21 +1099,38 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     };
 }
 
-// The slow build inputs, no clock: class (saved, current), level, worn gear,
-// hennas, skills, the hot capture.
-function kitParts(state) {
-    const saved = state.stats?.coldCombat || {};
-    const currentClassId = number(state.stats?.classId, number(state.classId));
-    const worn = state.inventory && typeof state.inventory === 'object'
-        ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
+// The kit parts' text forms, one owner for the far reader (combatView over a
+// saved state) and the near one (DecisionEvents.actorView over the live
+// character). wornPart: the worn rows of a state-format inventory (null: none).
+function wornPart(inventory) {
+    return inventory && typeof inventory === 'object'
+        ? Object.values(inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
             row.enchant, (row.equippedSlots?.length ? row.equippedSlots : [row.slot]).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
+}
+// The skills of a capture (stats.coldCombat).
+function skillsPart(saved) {
+    return Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '';
+}
+// The live skill list as a hot capture records it (capture).
+function liveSkillsPart(skills) {
+    return skillsPart({ skillSource: 'hot', skills: (skills || []).map(skillSnapshot) });
+}
+// The capture's numbers (stats.coldCombat); setEffects: its armour set
+// effects when the state has no inventory to derive them (savedSetEffects).
+function capturePart(saved, setEffects = []) {
+    return JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null, ...setEffects]);
+}
+// The slow build inputs, no clock: class (saved, current), level, worn gear,
+// hennas, skills, the hot capture. A new array per call.
+function combatView(state) {
+    const saved = state.stats?.coldCombat || {};
+    const currentClassId = number(state.stats?.classId, number(state.classId));
     // Main publishes the current class in stats; worker hydration may also
     // carry its alias at the root. Both forms have the same native build.
-    return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
-        Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
-        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null, ...savedSetEffects(state)])];
+    return [number(saved.classId, currentClassId), currentClassId, state.level, wornPart(state.inventory),
+        (state.stats?.hennas || []).join(','), skillsPart(saved), capturePart(saved, savedSetEffects(state))];
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
@@ -1121,12 +1138,15 @@ function buildHash(text) {
 // The names of the kit parts, one per kitEvents hash (DecisionSections.kit,
 // the route record's moved part).
 const KIT_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture'];
-// One small hash per kit part, no clock: the kit fact and the kit profile
-// store's hash.
+// One small hash per kit part (combatView's), no clock, in a new array: the
+// kit fact (DecisionSections.factsOf) and the kit profile store's hash.
+function kitHash(parts) {
+    const hashes = new Array(parts.length);
+    for (let index = 0; index < parts.length; index++) hashes[index] = fnv1a32(String(parts[index]));
+    return hashes;
+}
 function kitEvents(state = {}) {
-    const parts = kitParts(state);
-    for (let index = 0; index < parts.length; index++) parts[index] = fnv1a32(String(parts[index]));
-    return parts;
+    return kitHash(combatView(state));
 }
 // Drops the bot's kit profiles (both slots).
 function forgetBuild(characterId) {
@@ -1137,7 +1157,7 @@ function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, skillsFor, forgetBuild, kitStoreSize,
+    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

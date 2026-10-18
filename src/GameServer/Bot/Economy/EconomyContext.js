@@ -5,7 +5,6 @@ const Roles = require('../AI/BotRoles');
 const Knowledge = require('../AI/KnowledgeLearning');
 const Crystallization = require('./BotCrystallization');
 const Floor = require('../Population/SurvivalFloor');
-const InventoryLimits = require('../../Inventory/InventoryLimits');
 
 const GearThreat = require('./GearThreat');
 
@@ -72,22 +71,8 @@ function stateForActor(actor, session = actor?.session) {
     const decisionStats = require('../AI/DecisionEvents').decisionStatsFor(session);
     const stored = session?.coldLifeState || {};
     const current = invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(actor.fetchId?.());
-    const inventory = {};
     const physicalInventory = actor.backpack?.fetchItems?.() || [];
-    for (const item of physicalInventory) {
-        const id = Number(item.fetchSelfId?.());
-        if (!id) continue;
-        const amount = positive(item.fetchAmount?.());
-        const equipped = !!item.fetchEquipped?.();
-        const stackable = item.fetchStackable?.();
-        const previous = inventory[id];
-        inventory[id] = { selfId: id, amount: amount + positive(previous?.amount),
-            equipped: equipped || previous?.equipped, equippedCount: Number(equipped) + positive(previous?.equippedCount),
-            slot: equipped ? Number(item.fetchSlot?.()) : previous?.slot || 0,
-            enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0, stackable,
-            ...(stackable === true ? {} : { instances: [...(previous?.instances || []), { id: item.fetchId?.(), selfId: id, amount, equipped,
-                slot: Number(item.fetchSlot?.() || 0), enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0 }] }) };
-    }
+    const inventory = itemRows(physicalInventory);
     const hotKit = invoke('GameServer/Bot/Population/ColdCombatProfile').capture(actor);
     const state = { ...stored, characterId: actor.fetchId?.(), level: actor.fetchLevel?.(), inventory, physicalInventory,
         clanId: Number(actor.fetchClanId?.() ?? stored.clanId ?? stored.stats?.clanId ?? 0),
@@ -104,6 +89,26 @@ function stateForActor(actor, session = actor?.session) {
     if (!Object.values(loc).every(Number.isFinite)) Object.assign(loc, stored.loc || {});
     state.loc = loc;
     return routeState(state, session);
+}
+// The live items of a backpack as a state's inventory rows, one per item id
+// (stateForActor; the near fact reader's worn rows, DecisionEvents.actorView).
+function itemRows(items) {
+    const inventory = {};
+    for (const item of items) {
+        const id = Number(item.fetchSelfId?.());
+        if (!id) continue;
+        const amount = positive(item.fetchAmount?.());
+        const equipped = !!item.fetchEquipped?.();
+        const stackable = item.fetchStackable?.();
+        const previous = inventory[id];
+        inventory[id] = { selfId: id, amount: amount + positive(previous?.amount),
+            equipped: equipped || previous?.equipped, equippedCount: Number(equipped) + positive(previous?.equippedCount),
+            slot: equipped ? Number(item.fetchSlot?.()) : previous?.slot || 0,
+            enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0, stackable,
+            ...(stackable === true ? {} : { instances: [...(previous?.instances || []), { id: item.fetchId?.(), selfId: id, amount, equipped,
+                slot: Number(item.fetchSlot?.() || 0), enchant: item.fetchEnchantLevel?.() ?? item.fetchEnchant?.() ?? 0 }] }) };
+    }
+    return inventory;
 }
 function routeState(state, session) {
     if (!session || typeof session !== 'object') return state;
@@ -339,7 +344,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
-        bands: plan.quantityBands || [], safety: [plan.bagFull], hourAdena: plan.hourAdena,
+        bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
         market: options.reads, spots: options.spots,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
@@ -417,8 +422,6 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
                 : reason === 'money' ? ['money'] : ['sources']);
     }
     if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
-    if (!Array.isArray(proof.safety) || proof.safety.length !== 1 || proof.safety[0] !== bagFull(state))
-        return refuse('bag', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
     // A held build passes its entry's fields; a card carries them on its leaf.
@@ -499,7 +502,7 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
         || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity',
-            'quantities', 'liquidation', 'producerScope', 'stockRoots', 'bands', 'safety', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
+            'quantities', 'liquidation', 'producerScope', 'stockRoots', 'bands', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
         || !validProducerScope(proof.producerScope)
         || !RecomputeGeneration.current() || proof.generation !== RecomputeGeneration.current()
         || !/^[a-f0-9]{64}$/.test(proof.generation)
@@ -515,7 +518,7 @@ function restartEventProof(proof, accepted) {
         // refused), the soft facts in the shared exact byte form, then the
         // quantity owner's opaque bytes to the end.
         const write = Bytes.writer();
-        write.byte(5); write.raw(Buffer.from(proof.generation, 'hex'));
+        write.byte(6); write.raw(Buffer.from(proof.generation, 'hex'));
         if (!Providers.packLiquidationInputs(proof.liquidation, write)) return null;
         write.list(proof.stockRoots, row => {
             if (!Array.isArray(row) || row.length !== 2) throw Error('restart stock root');
@@ -525,7 +528,6 @@ function restartEventProof(proof, accepted) {
             if (!Array.isArray(row) || row.length !== 4) throw Error('restart band');
             write.uint(row[0]); write.number(row[1]); write.number(row[2], true); write.number(row[3]);
         });
-        write.list(proof.safety, value => write.number(value));
         write.number(proof.hourAdena);
         if (!ProductionIndex.packScopeIdentity(proof.producerScope, write)) return null;
         write.raw(quantities);
@@ -540,12 +542,11 @@ function restoreEventProof(prefix, accepted) {
         || prefix.byteLength > PROOF_RAW_BYTES || !accepted?.card) return null;
     try {
         const read = Bytes.reader(prefix);
-        // A prefix of format 4 (it carried the deleted input digest) is refused once.
-        if (read.byte() !== 5 || read.raw(32).toString('hex') !== generation) return null;
+        // A prefix of format 5 (it carried the deleted bag safety) is refused once.
+        if (read.byte() !== 6 || read.raw(32).toString('hex') !== generation) return null;
         const liquidation = Providers.unpackLiquidationInputs(read);
         const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
         const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
-        const safety = Object.freeze(read.list(() => read.number()));
         const hourAdena = read.number(), producerScope = ProductionIndex.unpackScopeIdentity(read);
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
         const packed = producerScope ? Uint8Array.from(read.rest()) : null;
@@ -556,7 +557,7 @@ function restoreEventProof(prefix, accepted) {
         return Object.freeze({ version: 2, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
-            quantities, liquidation, stockRoots, bands, safety, hourAdena, producerScope });
+            quantities, liquidation, stockRoots, bands, hourAdena, producerScope });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
@@ -708,13 +709,6 @@ function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBa
     return Number.isFinite(baseline?.bagValue)
         && Math.abs(value - baseline.bagValue)
             <= positive(hourAdena) * positive(baseline.incomeError);
-}
-// The event proof's bag safety: one crossing, the bag full (its slot limit;
-// the full-bag sale itself is SurvivalFloor's, read every step). The slot
-// count, weight tier and load drift with every loot row: the build reads
-// slots only as free hours. Capture and verdict only.
-function bagFull(state) {
-    return Number(Floor.stateInventory(state, DataCache.items).slots >= InventoryLimits.forState(state));
 }
 // Each distinct token once, in first-seen order, and per [id, token] pair
 // the slot of its token in that list (HeldReads).
@@ -1608,7 +1602,6 @@ function forState(state = {}, deps = {}) {
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
     const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    plan.bagFull = bagFull(state);
     // Source memo belongs only to the bounded cache owner. A planning view
     // or a group closure must never retain a second copy outside that cap.
     const retainedSourceMemo = projection.sourceSections;
@@ -2004,6 +1997,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, RETAIN_LIMIT, sectionKeys, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, sectionKeys, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

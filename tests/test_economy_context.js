@@ -272,7 +272,7 @@ async function run() {
         const restored = Economy.restoreEventProof(bytes, accepted);
         assert.equal(Economy.eventProofHolds(published, restored, deps(), { ...options, softPrefix: true }), true,
             'the restored prefix holds the saved decision');
-        const older = Uint8Array.from(bytes); older[0] = 4;
+        const older = Uint8Array.from(bytes); older[0] = 5;
         assert.equal(Economy.restoreEventProof(older, accepted), null, 'a prefix of the former format is refused');
         const kept = Generation.metadata();
         try {

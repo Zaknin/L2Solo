@@ -10,7 +10,9 @@ const Karma = require('../../Karma');
 const Warehouse = require('./PersonalWarehouseIndex');
 const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Providers = require('./WishProviders');
-// Read through the module object at call time (tests replace kitEvents).
+const Floor = require('../Population/SurvivalFloor');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
+const DataCache = invoke('GameServer/DataCache');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
@@ -63,22 +65,20 @@ function sectionBit(name) {
 function sectionMask(names) {
     return names.reduce((bits, name) => bits | sectionBit(name), 0);
 }
-// The one table of what a moved fact touches, for the cold facts
-// (factEvents) and the hot marks (DecisionEvents): the reader of a fact
-// differs by thread, the sections it raises do not. build: the character
-// build (class, level, gear, hennas, skills, craft); fight (hot marks only):
-// its condition moved (a buff or the day/night flip of a night-dependent
-// build), the fight's own section, no economy input.
+// The one table of what a moved fact touches, for near and far bots alike
+// (factEvents over factsOf). build: the kit (class, level, gear, hennas,
+// skills, craft); bag: the bag full or its weight level, which changes the
+// loot worth taking.
 const FACT_SECTIONS = Object.freeze({
     build: Object.freeze(['build', 'benefits', 'sources']),
     recipes: Object.freeze(['build', 'benefits', 'sources']),
-    fight: Object.freeze(['combat']),
     dead: Object.freeze(['combat']),
     relations: Object.freeze(['relations']),
     funding: Object.freeze(['money']),
     occupation: Object.freeze(['occupation']),
     riskDeaths: Object.freeze(['combat', 'occupation']),
     supply: Object.freeze(['supply']),
+    bag: Object.freeze(['supply', 'sources']),
     stores: Object.freeze(['supply', 'sources']),
     horizon: Object.freeze(['benefits'])
 });
@@ -88,17 +88,25 @@ function sectionNames(bits) {
     for (let at = 0; at < SECTIONS.length; at++) if (bits & 1 << at) names.push(SECTIONS[at]);
     return names;
 }
-// The build fact: class, level, worn gear, hennas, skills, the hot capture
-// (ColdCombatProfile.kitEvents, the kit parts), the craft (level, station,
-// workshop), the soul crystal quest and the karma flip that closes the towns.
-// Effects and night are no economy input, so a buff or the day/night flip
-// moves no fact. The recipe book is its own fact (semanticFacts.recipes).
-// Its parts do not read the clock.
-function kit(state) {
+// The kit fact of a view: class, level, worn gear, hennas, skills, the hot
+// capture (view.combat, ColdCombatProfile.combatView's parts), the craft
+// (level, station, workshop), the soul crystal quest and the karma flip that
+// closes the towns. Effects and night are no economy input, so a buff or the
+// day/night flip moves no fact; the clan is a relations fact; the recipe book
+// is its own fact. Its parts do not read the clock.
+function kitFact(view) {
+    return hash([CombatProfile.kitHash(view.combat), view.craftLevel, view.craftStationId, view.workshop,
+        view.soulCrystalQuest, view.closesTowns]);
+}
+// The kit part of the far reader (stateView), without the bag scan.
+function kitView(state) {
     const stats = state.stats || {};
-    return hash([CombatProfile.kitEvents(state),
-        state.craftLevel ?? stats.dwarvenCraftLevel, stats.craftStationId ?? null, stats.workshop,
-        !!stats.soulCrystalQuest, Karma.closesTowns(stats.karma)]);
+    return { combat: CombatProfile.combatView(state), craftLevel: state.craftLevel ?? stats.dwarvenCraftLevel,
+        craftStationId: stats.craftStationId ?? null, workshop: stats.workshop,
+        soulCrystalQuest: !!stats.soulCrystalQuest, closesTowns: Karma.closesTowns(stats.karma) };
+}
+function kit(state) {
+    return kitFact(kitView(state));
 }
 function fundingMark(state, escrow = 0) {
     const packet = state.stats?.money;
@@ -284,24 +292,70 @@ function relationTargetIds(state, memory = null) {
     const { friend, enemy } = Providers.relationTargets(state, { memory });
     return [friend?.targetId ?? null, enemy?.targetId ?? null];
 }
-// memory: the bot's interaction memory (the caller's deps.memory), null when
-// the caller read none. recipes: the known recipe ids the build reads
-// (WishProviders.recipeIds), null when the caller holds no recipe book.
-function semanticFacts(state, memory = null, recipes = null) {
+// The one fact function, for near and far bots alike: what about the bot's
+// world changed is the fact that differs from the copy kept with the
+// decision (factEvents). Only the reading of the raw values differs: the far
+// reader stateView (the saved state), the near one DecisionEvents.actorView
+// (the live character). view: the kit fields (kitView), recipes (the sorted
+// known recipe ids, null: none read), party (null: none), clanId,
+// relationTargets ([friend, enemy] ids; null: read here from memory), activity,
+// spotId, stats.travel (occupationPlanned's shape) and stats.relations (the
+// fallback rows without memory), dead, riskDeaths, supply ([id, present] per
+// stock item), stores (four identities), bagFull, weight (level 0-4).
+// memory: the bot's interaction memory rows, null when the caller read none.
+function factsOf(view, memory = null) {
+    return { build: kitFact(view), recipes: view.recipes ? hash(view.recipes) : null,
+        relations: hash([view.party, view.clanId, ...(view.relationTargets || relationTargetIds(view, memory))]),
+        occupation: hash([view.spotId, view.activity === 'resting' ? 'hunting' : view.activity]),
+        dead: view.dead, riskDeaths: view.riskDeaths, supply: hash(view.supply), stores: hash(view.stores),
+        bag: hash([view.bagFull, view.weight]) };
+}
+// The stock items whose presence is the supply fact: the trip's Scroll of
+// Escape (736), the planned shot, the planned healing potion.
+function stockIds(shotPlan, potion) {
+    return [736, shotPlan.selfId, potion.selfId];
+}
+// The far reader: the raw values of a saved state. recipes: the known recipe
+// ids the build reads (WishProviders.recipeIds), null when the caller holds
+// no recipe book. One bag scan gives the bag full and the load.
+function stateView(state, recipes = null) {
     const stats = state.stats || {};
+    const view = kitView(state);
     const partyId = Number(state.party?.partyId || state.partyId || 0);
-    const stockIds = [736, invoke('GameServer/Inventory/ShotStock').planForState(state).selfId,
-        invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId];
-    return { build: kit(state), recipes: recipes ? hash(recipes) : null,
-        relations: hash([partyId ? state.party : null, Number(state.clanId ?? stats.clanId ?? 0), ...relationTargetIds(state, memory)]),
-        occupation: hash([state.spotId, state.activity === 'resting' ? 'hunting' : state.activity]),
-        dead: Number(state.activity === 'dead' || Number(state.vitals?.hp) <= 0),
-        riskDeaths: positive(stats.spotRisk?.windowDeaths),
-        supply: hash(stockIds.map(id => [id, positive(state.inventory?.[id]?.amount) > 0])),
-        // The tables main keeps about the bot: the clan's material demand, the
-        // personal warehouse, the clan supply and whether the clan has a warehouse.
-        stores: hash([stats.clanMaterialDemand ?? null, Warehouse.contentIdentity(state),
-            ClanSupply.contentIdentity(state), ClanSupply.hasWarehouse(state)]) };
+    const bag = Floor.stateInventory(state, DataCache.items);
+    view.recipes = recipes;
+    view.party = partyId ? state.party : null;
+    view.clanId = Number(state.clanId ?? stats.clanId ?? 0);
+    view.relationTargets = null;
+    view.activity = state.activity;
+    view.spotId = state.spotId;
+    view.stats = { travel: stats.travel, relations: stats.relations };
+    view.dead = Number(state.activity === 'dead' || Number(state.vitals?.hp) <= 0);
+    view.riskDeaths = positive(stats.spotRisk?.windowDeaths);
+    // lazy: cycle the stock planners reach this module through the economy context.
+    const shots = invoke('GameServer/Inventory/ShotStock').planForState(state);
+    // lazy: cycle as the shot planner above.
+    const potion = invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state);
+    view.supply = stockIds(shots, potion).map(id => [id, positive(state.inventory?.[id]?.amount) > 0]);
+    view.stores = storesOf(state);
+    // The bag full: its slot limit (the full-bag sale itself is SurvivalFloor's).
+    view.bagFull = Number(bag.slots >= InventoryLimits.forState(state));
+    view.weight = Floor.weightPenalty(bag.load, CombatProfile.profileFor(state).maxLoad);
+    return view;
+}
+// The tables main keeps about the bot: the clan's material demand, the
+// personal warehouse, the clan supply and whether the clan has a warehouse.
+// owner: { characterId, clanId, stats } (a state is one); into: the array
+// written (the near reader's, updated in place).
+function storesOf(owner, into = new Array(4)) {
+    into[0] = owner.stats?.clanMaterialDemand ?? null; into[1] = Warehouse.contentIdentity(owner);
+    into[2] = ClanSupply.contentIdentity(owner); into[3] = ClanSupply.hasWarehouse(owner);
+    return into;
+}
+// memory: the bot's interaction memory (the caller's deps.memory), null when
+// the caller read none. recipes: as stateView's.
+function semanticFacts(state, memory = null, recipes = null) {
+    return factsOf(stateView(state, recipes), memory);
 }
 function horizonChanged(state, baseline, expPerHour, persona) {
     if (!baseline) return true;
@@ -385,8 +439,9 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
     if (previousFact('supply') !== current.supply) raise('supply');
+    if (previousFact('bag') !== current.bag) raise('bag');
     if (previousFact('stores') !== current.stores) raise('stores');
     return [...sections];
 }
 module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
+    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
