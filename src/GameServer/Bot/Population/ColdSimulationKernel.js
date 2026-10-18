@@ -1353,9 +1353,7 @@ class ColdSimulationKernel {
     // The bots on a spot for its kill share (E69), from the occupancy index.
     spotHunters(spot) {
         if (!spot?.id) return 1;
-        let count = 0;
-        for (const member of this.occupancy.members(spot.id, 'physical')) if (member) count++;
-        return Math.max(1, count);
+        return Math.max(1, this.occupancy.physicalCount(spot.id));
     }
 
     async resolveCommand(characterId, attempt) {

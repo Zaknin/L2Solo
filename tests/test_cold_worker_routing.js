@@ -254,9 +254,8 @@ try {
     assert.strictEqual(batchRouteFor(22), null,
         'later decisions in the same cold snapshot must not overbook the reserved destination');
 
-    // A spot found full at arrival leaves the bot a "was full" mark
-    // (SpotRiskPolicy.withCapacityBackoff); the marks live the bot's own
-    // steps (stats.stepCount), one mark per arrival.
+    // "Was full" marks (the arrival check itself: test_room_at_arrival.js):
+    // a chain of them, and the phantom places and searches they clear.
     const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
     const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
     const markedState = Risk.withCapacityBackoff({
@@ -278,10 +277,6 @@ try {
     assert.strictEqual(Risk.excludedSpotIdsForStates([atStep(chained, chainEnd + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).size, 0,
         'the whole chain expires one backoff after the last full spot');
     assert.strictEqual(markedState.stats.lastReason, 'route_capacity_full');
-    assert(Risk.excludedSpotIdsForStates([atStep(markedState, refusedAt + 1)]).has(targetSpot.id),
-        'a spot found full is not selected again at the next step');
-    assert(!Risk.excludedSpotIdsForStates([atStep(markedState, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).has(targetSpot.id),
-        'temporary congestion must expire after one step, without death-backoff escalation');
     assert.strictEqual(markedState.stats.spotBackoffs, undefined);
     for (const intent of [
         { equipmentPlan: { status: 'active', strategy: 'craft', next: { spotId: targetSpot.id } } },

@@ -2,12 +2,19 @@
 // background thread, against the bots that stand on the spot (ARCH-08-a).
 // A full spot leaves the bot standing there with a "was full" mark that its
 // next step's spot search reads; bots still on their way do not count; a safety
-// evacuation may exceed the spot by one bot; a party is checked as a whole.
+// evacuation may exceed the spot by one bot; a party is checked as a whole;
+// a near bot's spot change on main reaches the worker's index and counts.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 require('../src/Global');
 const { Worker } = require('node:worker_threads');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const Policy = require('../src/GameServer/Social/InteractionMemoryPolicy');
+invoke('GameServer/Clan/ClanService').syncColdMember = () => {};
+invoke('GameServer/Social/InteractionMemoryRuntime').repository = { loadMany: async ids => ids.map(Policy.empty) };
+Object.assign(invoke('GameServer/Clan/ClanSocialRuntime'), { refresh: async () => {}, enforceOne: async () => {}, send: () => {} });
 const root = path.resolve(__dirname, '..');
 
 // Runs inside the worker: a solo trip started by the real trip builder,
@@ -28,12 +35,18 @@ Events.raiseSections = (before, after, ...lists) => {
 };
 module.exports.probe = async ({ kind, id, spotId, reason, remove, party }) => {
     for (const gone of remove || []) kernel.remove(gone);
+    if (kind === 'standing') return kernel.occupancy.physicalCount(spotId, { standingOnly: true });
     if (kind === 'party') {
         const members = party.memberIds.map(member => kernel.states.get(member).state);
         const out = kernel.partyArrival({ party, members, spotId });
         if (!out) return null;
         const dirty = out.members.map(member => Number(member.stats?.wishDirty || 0));
-        return { excluded: [...PartyRisk.excludedSpotIds(out.party)], dirty, bits: bits() };
+        const memory = out.party.stats.partySpotRisk;
+        const afterRound = { ...out.party, stats: { ...out.party.stats,
+            partySpotRisk: { ...memory, rounds: memory.rounds + 1 } } };
+        return { excluded: [...PartyRisk.excludedSpotIds(out.party)], dirty, bits: bits(),
+            rounds: [PartyRisk.rounds(party), PartyRisk.rounds(out.party)],
+            lapsed: [...PartyRisk.excludedSpotIds(afterRound)] };
     }
     const { beginHuntingTrip } = require('./HuntingTravel');
     const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
@@ -147,12 +160,44 @@ function bot(characterId, extra = {}) {
         const party = { partyId: 'room-party', leaderId: 110, memberIds: [110, 111], spotId: room.id, stats: {} };
         const crowded = await probe({ kind: 'party', spotId: room.id, party });
         assert(crowded, 'a party is checked as a whole');
+        assert.equal(crowded.rounds[1], crowded.rounds[0] + 1, 'the arrival counts as the party\'s step');
         assert(crowded.excluded.includes(room.id), 'the party\'s next spot search skips the full spot');
+        assert(!crowded.lapsed.includes(room.id), 'the mark lapses after the party\'s next round');
         assert(crowded.dirty[0] & crowded.bits.occupation && crowded.dirty[0] & crowded.bits.sources,
             'the leader\'s next step reconsiders the spot');
         assert.equal(crowded.dirty[1], 0, 'a member\'s own arrival is not checked');
         assert.equal(await probe({ kind: 'party', spotId: room.id, party, remove: [101] }), null,
             'a party that fits the spot arrives without a mark');
+
+        // Two near bots (run on main) move onto the spot: the publication of
+        // their state write marks them dirty and the next snapshot page brings
+        // them into the worker's index, where they count at arrival.
+        const coordinator = new ColdSimulationCoordinator();
+        const pages = [];
+        Object.assign(coordinator, { workerEpoch: epoch, ready: true, started: true,
+            worker: { postMessage: message => {
+                if (message.type === 'snapshot_page') pages.push(message.payload);
+                worker.postMessage(message);
+            } },
+            contextIndex: () => ({ spots: new Map(), parties: new Map() }),
+            snapshotEntry: state => ({ state, context: { buyOrderEscrow: 0 } }) });
+        const near = (characterId, spot) => LifeState.acceptClanCraftState({ characterId, characterName: `Near${characterId}`,
+            phase: 'hot', activity: 'hunting', level: 20, spotId: spot.id, currentRegion: spot.name,
+            locX: spot.center.locX, locY: spot.center.locY, locZ: spot.center.locZ, statsJson: '{}', updatedAt: Date.now() });
+        near(120, away); near(121, away);
+        await coordinator.sendSnapshots();
+        near(120, room); near(121, room);
+        pages.length = 0;
+        coordinator.snapshotBootstrapPending = false;
+        await coordinator.sendSnapshots();
+        assert(pages.length && pages.every(page => page.initial !== true), 'the move goes in a dirty page, not a full snapshot');
+        let standingNear = 0;
+        for (const deadline = Date.now() + 5000; Date.now() < deadline && standingNear !== 2;) {
+            standingNear = await probe({ kind: 'standing', spotId: room.id });
+        }
+        assert.equal(standingNear, 2, 'a near bot\'s spot change reaches the worker\'s index');
+        const nearFull = await probe({ kind: 'solo', id: 104, spotId: room.id, reason: 'level_replan' });
+        assert.deepEqual(nearFull.marks.map(mark => mark.spotId), [room.id], 'near bots standing there fill the spot');
         console.log('Room at arrival checks passed');
     } finally { await worker.terminate(); }
-})().catch(error => { console.error(error.stack); process.exitCode = 1; });
+})().catch(error => { console.error(error.stack); process.exitCode = 1; }).finally(() => process.exit());

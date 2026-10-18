@@ -942,10 +942,7 @@ const ROOM_SECTIONS = Object.freeze(['occupation', 'sources']);
 function roomAtArrival(spotId, arriving, overflow = 0) {
     const spot = SpotIndex.spotById(planningSpots, spotId);
     if (!spot || spot.raidBoss === true) return true;
-    let standing = 0;
-    for (const [key, member] of kernel.occupancy.members(spotId, 'physical')) {
-        if (member?.activity !== 'traveling' && !arriving.has(key)) standing++;
-    }
+    const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
     return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
 }
 

@@ -211,6 +211,7 @@ class ColdSimulationCoordinator {
             // publication, and the coordinator lives on main only.
             if (packet.kind === 'put' && packet.state && packet.state.phase !== 'cold'
                 && occupiedSpotId(packet.previousState || {}) !== occupiedSpotId(packet.state)) {
+                // Dropped while the worker is not ready: its full snapshot at ready reads every state then.
                 this.markDirty(packet.state, { reason: 'near_spot' });
             }
             if (packet.kind !== 'remove') return;

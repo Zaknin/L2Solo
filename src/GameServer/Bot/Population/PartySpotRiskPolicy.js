@@ -37,12 +37,13 @@ function withBackoff(party, value, timestamp) {
     return { ...party, stats: { ...party.stats, partySpotRisk: memory(party, next.stats) } };
 }
 // The party found its spot full at arrival: the same "was full" mark as a
-// solo bot's, in the party's memory and counted in its rounds. The arrival is
-// not a round (no party resolve moves the counter there), so the mark holds
-// through the party's next round and lapses one round later.
+// solo bot's, in the party's memory. The arrival counts as the party's step
+// (its rounds +1), as a solo bot's arrival step does, so the mark holds at the
+// party's next round and lapses after it.
 function withCapacityBackoff(party, spotId) {
     const next = Risk.withCapacityBackoff(state(party), spotId);
-    return { ...party, stats: { ...party.stats, partySpotRisk: memory(party, next.stats) } };
+    return { ...party, stats: { ...party.stats,
+        partySpotRisk: memory(party, { ...next.stats, stepCount: next.stats.stepCount + 1 }) } };
 }
 function record(party, result, timestamp) {
     if (result?.memberResults) result = { ...result, memberResults: result.memberResults.map(entry => ({

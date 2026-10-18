@@ -156,6 +156,17 @@ class SpotOccupancyIndex {
         }
     }
 
+    // How many bots the index has on a spot ('physical'): standingOnly leaves
+    // out the bots still on their way there (indexed at their destination),
+    // excludeKeys the given state keys.
+    physicalCount(spotId, { excludeKeys = null, standingOnly = false } = {}) {
+        let count = 0;
+        for (const [key, state] of this.members(spotId, 'physical')) {
+            if (!(standingOnly && state?.activity === 'traveling') && !excludeKeys?.has(key)) count++;
+        }
+        return count;
+    }
+
     size() { return { owners: this.places.size, physical: this.physical.size, reserved: this.reserved.size }; }
 
     clear() {
