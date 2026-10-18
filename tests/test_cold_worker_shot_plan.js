@@ -42,8 +42,8 @@ async function createWorld(characters) {
 const observer = String.raw`
 module.exports.shotProbe = async () => {
     const entry = kernel.states.get(710021), state = entry.state, timestamp = Date.now();
-    entry.context.goalReviewAt = timestamp;
-    const result = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [] },
+    // New loot (an edge) runs the round's action plan.
+    const result = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [{ selfId: 1864, amount: 1 }] },
         debug: {}, events: [], nextResolveAt: timestamp + 60000 }, timestamp);
     const index = require('../Economy/ShotMarketIndex').native(), market = index.marketSnapshot(timestamp);
     const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(result.state, { timestamp });
@@ -150,7 +150,7 @@ parentPort.on('message', message => {
         const result = response.value;
         console.log(JSON.stringify({ edges: result.edges, shot: result.plan?.shot, huntHour: result.hour, forbiddenLoaded: result.forbiddenLoaded }));
         const selectedStep = Policy.unpackStep(result.plan?.shot);
-        assert(result.edges & 8); assert(selectedStep?.recipeTarget > 0, 'native worker with no known recipe selects a profitable executable recipe');
+        assert(result.edges & 1); assert(selectedStep?.recipeTarget > 0, 'native worker with no known recipe selects a profitable executable recipe');
         assert(messages.some(message => message.type === 'economy_diagnostics'), 'worker emits sampled decision telemetry on the separate developer bridge');
         assert.deepEqual(result.forbiddenLoaded, [], 'pure craft decision loads no World actor, Network or database implementation');
         assert.equal(result.indexHooks.overlay, result.indexHooks.before + 100, 'projected own stock has a transient overlay');

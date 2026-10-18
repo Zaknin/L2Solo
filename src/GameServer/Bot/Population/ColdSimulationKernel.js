@@ -367,6 +367,15 @@ function meetingTravelTransition(state, context, kind = null) {
         && (kind ?? lifecycleKind(state, context)) === 'resolver';
 }
 
+// A lifecycle plan as main receives it: the step's economy object stays in
+// the worker (it carries functions and is never posted).
+function postedPlan(plan) {
+    if (!plan?.economy) return plan;
+    const posted = { ...plan };
+    delete posted.economy;
+    return posted;
+}
+
 function priorityForResult(state, result) {
     const activity = String(result?.patch?.activity || state?.activity || '');
     if (activity === 'dead' || state?.activity === 'dead' || (result?.events || []).some((event) => (
@@ -1389,7 +1398,7 @@ class ColdSimulationKernel {
                     commandCheckpoint: attempt.checkpoint,
                     state: current.state,
                     context: current.context,
-                    precomputedPlan: lifecyclePlan,
+                    precomputedPlan: postedPlan(lifecyclePlan),
                     precomputedResult: result,
                     computedAt: timestamp,
                     ...(attempt.marketWakeup ? { marketWakeup: true } : {})
@@ -2074,8 +2083,10 @@ class ColdSimulationKernel {
                 timestamp
             });
             if (!this.resolverSourceCurrent(source)) return;
+            // The step's one decision (its economy, worker-local) travels
+            // through the round: the projection asks no second one.
             const projection = this.projectResolve
-                ? await this.projectResolve(resolveState, result, timestamp)
+                ? await this.projectResolve(resolveState, result, timestamp, lifecyclePlan)
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;

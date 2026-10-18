@@ -41,7 +41,6 @@ module.exports.decisionOracle = async ids => {
         planner.edges = (...args) => { const start = performance.now(); const value = oldEdges(...args); addedMs += performance.now() - start; return value; };
         planner.decide = (...args) => { const start = performance.now(); const value = oldDecide(...args); addedMs += performance.now() - start; return value; };
         Economy.forState = (value, deps) => { seen = structuredClone(value); built = original(value, deps); return built; };
-        entry.context.goalReviewAt = timestamp;
         try {
             const start = performance.now();
             const projected = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [] },

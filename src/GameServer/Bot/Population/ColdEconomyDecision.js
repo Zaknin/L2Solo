@@ -210,8 +210,9 @@ function compact(record) {
 }
 // A completed native preparation replaces only this binary section. A thin
 // served view cannot recreate the original graph's valuation or quantities.
-function refreshPreparedCraft(refreshed, shot, mp) {
-    const before = refreshed.decision, counts = before.counts, at = shotOffset(counts);
+// The card with its craft step replaced (null when it no longer fits).
+function cardWithShot(before, shot) {
+    const counts = before.counts, at = shotOffset(counts);
     const previousEnd = at + (counts & SHOT ? 2 + new DataView(before.data).getUint16(at, true) : 0);
     const encoded = encodeShot(shot), size = before.data.byteLength - (previousEnd - at) + (encoded ? encoded.length + 2 : 0);
     if (previousEnd > before.data.byteLength || size > cardWireRoom(before.key)) return null;
@@ -223,7 +224,11 @@ function refreshPreparedCraft(refreshed, shot, mp) {
         new DataView(data).setUint16(next, encoded.length, true); bytes.set(encoded, next + 2); next += encoded.length + 2;
     }
     bytes.set(source.subarray(previousEnd), next);
-    const decision = compact({ key: before.key, data });
+    return compact({ key: before.key, data });
+}
+function refreshPreparedCraft(refreshed, shot, mp) {
+    const decision = cardWithShot(refreshed.decision, shot);
+    if (!decision) return null;
     refreshed.economy.shot = shot;
     return { ...refreshed, decision, advisory: { ...refreshed.advisory, card: decision, preparedMp: mp } };
 }
@@ -474,7 +479,7 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
         activity, mp: Number(state.vitals?.mp), preparedMp: Number(state.vitals?.mp),
         // The goal revision the build saw (main's context), the baseline of
-        // the goal review edge (ColdEconomyPlan.heldEdges); not saved.
+        // the goal refusal (refusal); not saved: a restored card refuses once.
         ...(Number.isFinite(deps.goalRevision) ? { goalRevision: deps.goalRevision } : {}) };
     const restartProof = Economy.restartEventProof(eventProof, accepted);
     // lazy: cycle the shared sections also read the economy owner.
@@ -616,6 +621,10 @@ function refusal(state, accepted, deps = {}, options = {}) {
     if (!Economy.FIELD_ACTIVITIES.has(state.activity)) return `not_field:${state.activity}`;
     if (!options.afterResult && state.activity === 'traveling'
         && !invoke('GameServer/Bot/Population/BackgroundResolver').travelRecord(state.stats.travel)) return 'travel_record'; // lazy: as canReuse before L114 (load order unchecked)
+    // A goal change (main's goal revision moved since the build) is seen at
+    // the next decision point. No revision on the card (restored after a
+    // restart) differs too: one rebuild.
+    if (Number.isFinite(deps.goalRevision) && deps.goalRevision !== accepted.goalRevision) return 'goal';
     const why = [], verdict = {};
     const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
         baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()),
@@ -837,5 +846,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateKey, eventKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateKey, eventKey, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

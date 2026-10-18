@@ -2789,7 +2789,10 @@ const BotLifeState = {
         // ARCH-NOTE: C1 lifecycle packets precede their fight; accept the
         // worker's focus event before classifying actual changed sections.
         // Direct projections receive an already projected packet as before.
-        const beforeResolvePacket = isMainThread && options.statsPacketBeforeResolve === true && options.statsPacket;
+        // Both threads: a worker step that decided before its round merges
+        // that decision's packet here, so the event check below writes its
+        // dirty bits after it (seen by the next decision point).
+        const beforeResolvePacket = options.statsPacketBeforeResolve === true && options.statsPacket;
         if (beforeResolvePacket) Object.assign(nextState.stats, beforeResolvePacket);
         if (state.activity === 'hunting') {
             // A round records its rewards/resources/sample immediately. It
@@ -2803,7 +2806,9 @@ const BotLifeState = {
             }
             DecisionEvents.reconcile(state, nextState, timestamp, escrow);
         }
-        if (!isMainThread && !state.stats?.tradeMeeting) {
+        // The worker's post-round economy ask: only a step that took no
+        // decision before its round (a party member, a held transit).
+        if (!isMainThread && !state.stats?.tradeMeeting && !beforeResolvePacket) {
             const economyDeps = typeof options.economyDepsFor === 'function'
                 ? await options.economyDepsFor(nextState) : options.economyDeps || {};
             const calculationDeps = { ...economyDeps, timestamp };

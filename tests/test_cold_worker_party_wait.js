@@ -46,7 +46,7 @@ const scenario = (state) => workerData.scenarios[String(state.characterId)] || {
 invoke('GameServer/Bot/AI/GearPlanSelection').selectAcquisitionPlan = (state) => ({
     acquisitionPlan: scenario(state).plan, replanContext: {}, reusablePartyRequest: false, excludedSpotIds: new Set(),
     economy: { statsPacket: {}, network: { queue: [], activity: { activity: scenario(state).resting ? 'resting' : 'hunting',
-        ...(scenario(state).planned || {}) } }, riskWeight: 0 }
+        ...(scenario(state).planned || {}) } }, riskWeight: 0, stock: () => null }
 });
 invoke('GameServer/Bot/Population/PartyRequestPlanner').partyRequestForPlan = (state) => scenario(state).request || null;
 invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state) => scenario(state).planned || null;
