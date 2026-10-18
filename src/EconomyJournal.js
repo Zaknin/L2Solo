@@ -16,6 +16,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const STORES = [
     { store: 'inventory', table: 'items', column: 'amount', item: 'selfId' },
     { store: 'warehouse', table: 'warehouse_items', column: 'amount', item: 'selfId' },
+    { store: 'account_warehouse', table: 'account_warehouse_items', column: 'amount', item: 'selfId' },
     { store: 'clan_warehouse', table: 'clan_warehouse_items', column: 'amount', item: 'selfId' },
     { store: 'afk_escrow', table: 'afk_trade_shops', column: 'escrowAdena', adena: true },
     // Only sell lines hold items; a buy line's count is the amount wanted.
