@@ -175,7 +175,6 @@ function bandsHold(state, bands = [], leaf = null) {
 // held: { baseline, mp, nativeCraftContinuation } of the last actual decision.
 // Every failing check names itself in `why` (an array or null), in order.
 const miss = (why, reason) => { why?.push(reason); return false; };
-const ALL_SECTIONS = Sections.sectionMask(Sections.SECTIONS);
 function heldEventsQuiet(state, held, deps = {}, why = null) {
     const stats = state.stats || {};
     let quiet = true;
@@ -235,18 +234,22 @@ function captureEventProof(state, deps = {}, options = {}) {
 // sections ORs them into touchedSections and the checks go on; one that
 // names none stops with every section. Otherwise (every other caller) the
 // first refusal answers. The first refusal stays the reason either way.
-// A sections refusal returns `out` only to stop: `if (... && refuse()) return out`.
+// refuse always returns `out`; a sections refusal stops only outside
+// collect mode: `if (cond && refuse(...) && !collect) return out`.
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const collect = options.collect === true;
-    const out = { valid: false, reason: '', touchedSections: 0 };
+    // touchedSections: the pieces to rebuild; movedSections: only the
+    // sections refusals named (a refusal naming none adds nothing to it).
+    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0 };
     const refuse = (reason, names) => {
         out.reason ||= reason;
         if (!names) {
-            if (collect) out.touchedSections = ALL_SECTIONS;
+            if (collect) out.touchedSections = Sections.COMPUTED.weighing;
             return out;
         }
-        out.touchedSections |= typeof names === 'number' ? names : Sections.sectionMask(names);
-        return collect ? null : out;
+        const bits = typeof names === 'number' ? names : Sections.sectionMask(names);
+        out.touchedSections |= bits; out.movedSections |= bits;
+        return out;
     };
     if (!proof || proof.version !== 2 || proof.owner !== Number(state.characterId)
         || !Array.isArray(proof.decision) || proof.decision.length !== 3
@@ -268,36 +271,38 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (proof.at !== baseline.at) return refuse('baseline_at');
     if (timestamp < proof.at) return refuse('baseline_clock');
     const generation = RecomputeGeneration.current();
-    if ((!generation || proof.generation !== generation) && refuse('generation', ['build', 'sources'])) return out;
-    if (activityIdentity(options.leaf) !== proof.activity && refuse('activity', ['sources'])) return out;
+    if ((!generation || proof.generation !== generation) && refuse('generation', ['build', 'sources']) && !collect) return out;
+    if (activityIdentity(options.leaf) !== proof.activity && refuse('activity', ['sources']) && !collect) return out;
     // A raised event (reconcile bumps the sequence with it) is named by its
     // sections before the echo.
     const dirty = Number(state.stats?.wishDirty) || 0;
-    if (dirty && refuse('wish_dirty', dirty)) return out;
+    if (dirty && refuse('wish_dirty', dirty) && !collect) return out;
     const echo = Sections.decisionRefusal(state, ...proof.decision);
     // Collecting past raised bits: every raise (DecisionEvents markSections,
-    // raiseSections) bumps decisionSeq with its bits, an impossible step also
-    // clears activityLeaf, so a moved sequence or leaf is that raise, already
-    // named by its bits; read as sources it would rebuild the source walk on
-    // every event. A moved focus (no raise moves it) still lights sources.
-    const raisedEcho = collect && dirty && echo !== 'wish_focus';
-    if (echo && !raisedEcho && refuse(echo, ['sources'])) return out;
+    // raiseSections) bumps decisionSeq with its bits, so a moved sequence is
+    // that raise, already named by its bits; read as sources it would rebuild
+    // the source walk on every event. The leaf and the focus are still
+    // compared: a moved one lights sources, as the echo does.
+    if (echo && collect && dirty) {
+        const leafOrFocus = Sections.decisionRefusal(state, Number(state.stats?.decisionSeq || 0), proof.decision[1], proof.decision[2]);
+        if (leafOrFocus) refuse(leafOrFocus, ['sources']);
+    } else if (echo && refuse(echo, ['sources']) && !collect) return out;
     deps = resolved(state, deps);
     if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)) return refuse('unready');
     const current = fieldActivity(state, options.activity, options.leaf);
     // An occupation move the held leaf ordered (its trip, its arrival) is its own output.
     const changed = Sections.factEvents(name => baseline[name], options.facts || requestFacts(current, deps), false, null,
         Sections.occupationPlanned(state, options.leaf));
-    if (changed.length && refuse('sections', changed)) return out;
+    if (changed.length && refuse('sections', changed) && !collect) return out;
     // The gear-threat mask the decision weighed: only its flip between
     // "physical only" and "both" changes a decision. A baseline kept before
     // the mask was recorded has none to compare.
     if (baseline.threat !== undefined && baseline.threat !== (deps.gearThreatMask ?? GearThreat.maskFor(current, deps))
-        && refuse('observation', ['occupation', 'benefits', 'sources'])) return out;
+        && refuse('observation', ['occupation', 'benefits', 'sources']) && !collect) return out;
     const why = [];
     if (!heldEventsQuiet(state, { baseline, mp: options.mp, nativeCraftContinuation: deps.nativeCraftContinuation === true }, deps, why))
-        for (const name of why) if (refuse(name, name === 'money' ? ['money'] : ['sources'])) return out;
-    if (!bandsHold(state, proof.bands, options.leaf) && refuse('bands', ['supply', 'sources'])) return out;
+        for (const name of why) if (refuse(name, name === 'money' ? ['money'] : ['sources']) && !collect) return out;
+    if (!bandsHold(state, proof.bands, options.leaf) && refuse('bands', ['supply', 'sources']) && !collect) return out;
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
     // A held build passes its entry's fields; a card carries them on its leaf.
@@ -322,7 +327,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
-    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits && refuse('quantity', ['sources', 'money'])) return out;
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits && refuse('quantity', ['sources', 'money']) && !collect) return out;
     // The proof is held packed and read as a stream: no rows array.
     const ownRow = own === null ? null : row => ownQuantityRow(row, leaf.rootKey, own);
     const stock = stockReader(state, key => roots.get(key));
@@ -333,7 +338,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     };
     const moved = [];
     if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved)
-        && (moved.length ? refuse('quantity', ['sources', 'money']) : refuse('unproved'))) return out;
+        && (moved.length ? refuse('quantity', ['sources', 'money']) && !collect : refuse('unproved'))) return out;
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -355,11 +360,11 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
                 && count - original[1] === positive(state.inventory?.[id]?.amount) - band[3];
         });
     if ((!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
-        && refuse('liquidation', ['sources', 'money'])) return out;
-    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp) && refuse('check_failed', ['occupation', 'sources'])) return out;
+        && refuse('liquidation', ['sources', 'money']) && !collect) return out;
+    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp) && refuse('check_failed', ['occupation', 'sources']) && !collect) return out;
     const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
-    if (leafWhy && refuse(leafWhy.reason, leafWhy.sections)) return out;
-    return out.reason ? out : { valid: true, reason: '', touchedSections: 0 };
+    if (leafWhy && refuse(leafWhy.reason, leafWhy.sections) && !collect) return out;
+    return out.reason ? out : { valid: true, reason: '', touchedSections: 0, movedSections: 0 };
 }
 function eventProofHolds(state, proof, deps = {}, options = {}) {
     const verdict = heldBuildVerdict(state, proof, deps, options);
@@ -980,6 +985,12 @@ function forState(state = {}, deps = {}) {
     const mask = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
         | eventVerdict.touchedSections;
     // The foundation is reused with the prices and the horizon it was priced with.
+    // Reads no section names, reused with it: the income route's crowding
+    // (deps.occupancy), the persona and the town-visit rhythm. The walk's
+    // unnamed reads, reused with its memo until a source section is raised:
+    // hunt efficiency and clock, spot risk and the active spot exclusions
+    // (they expire by time), exp, persona, market trades, craft station,
+    // the equipment plan and the crafter's MP.
     const keptBase = held && !(mask & Sections.COMPUTED.foundation) ? held.plan : null;
     const keptSources = held?.sourceSections && !(mask & Sections.COMPUTED.sources) ? held : null;
     const started = diagnostic ? performance.now() : 0;
@@ -1126,6 +1137,7 @@ function forState(state = {}, deps = {}) {
         Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
             : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'sections');
         Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
+        Diagnostics.count('context', 'foundation', keptBase ? 'kept' : 'built');
     }
     const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra],
         soloProfiles: incomeRecord?.route?.matchupProfiles });
@@ -1142,9 +1154,11 @@ function forState(state = {}, deps = {}) {
     context.choiceBagValue = mask === 0 && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
         ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
-    // section in the mask (a soft one was raised by the soft point at the end
-    // of a step). A rebuild with an empty mask keeps them.
-    const reconsider = mask !== 0;
+    // section that moved (raised, or named by a refusal). A first build or an
+    // unproved held build (no section named, mask = every piece) keeps them.
+    const moved = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
+        | (held ? eventVerdict.movedSections : 0);
+    const reconsider = moved !== 0;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
@@ -1153,7 +1167,7 @@ function forState(state = {}, deps = {}) {
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         reconsider,
         // Diagnostics only: the events that re-weigh (network:reconsider), 'quiet' for none.
-        reconsiderReasons: !diagnostic ? null : mask ? Sections.sectionNames(mask) : ['quiet'],
+        reconsiderReasons: !diagnostic ? null : moved ? Sections.sectionNames(moved) : ['quiet'],
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,
@@ -1199,7 +1213,9 @@ function forState(state = {}, deps = {}) {
         Providers.relationBond(state, deps), watchRows);
     // The baseline fields of a section not in the mask stay those of the
     // accepted decision (carrySectionBaseline); every moved one is fresh.
-    Sections.carrySectionBaseline(acceptedSections, context.statsPacket.wishSections, mask);
+    // The money fields are always fresh: the weighing that just ran priced
+    // its queue against the current wallet (bagValue: choiceBagValue above).
+    Sections.carrySectionBaseline(acceptedSections, context.statsPacket.wishSections, mask | Sections.sectionBit('money'));
     building = false; endTokens();
 
     if (diagnostic) {
@@ -1611,6 +1627,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

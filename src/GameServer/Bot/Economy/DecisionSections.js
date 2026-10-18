@@ -70,8 +70,9 @@ function sectionMask(names) {
 // (EconomyContext.forState's mask), rebuilt when one is.
 // foundation: hunt income, risk, death and kit hours, stock targets, the
 // survival reserve (kit, profile, consumables, the observation; not money).
-// It also reads the party role (its spot value table and hunt income), a
-// relations fact: relations is in its list, so a party join rebuilds it.
+// Of the relations fact it reads only the party role (its spot value table
+// and hunt income); relations is in its list for it, so a party join
+// rebuilds it (a deviation from the spec's four sections).
 // sources: the source walk (worn gear and level; party, clan, role;
 // exclusions, risk, hunt rows; the plan, persona, craft station, trades;
 // the hour adena and the money mark). weighing: focus, step and money queue.
