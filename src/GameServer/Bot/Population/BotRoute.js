@@ -72,14 +72,16 @@ function groundOf(state, currentSpot) {
 // depend on the bot, not the spot: built once per frame (solo()), as is the
 // unsafe-ground verdict. One frame serves one trip start (leafChoice or
 // choose, then record): the caller builds it once and passes it to each.
-function frameFor(state, party, partyMembers = [], timestamp) {
+// hasRoom: the worker's room filter for the spot search (ROUTE-ROOM), only
+// on the solo trip; a party search and main pass none.
+function frameFor(state, party, partyMembers = [], timestamp, hasRoom = null) {
     const partyRoute = !!party;
     const routedMembers = partyRoute ? partyMembers : [state];
     const excludedSpotIds = partyRoute ? PartySpotRiskPolicy.excludedSpotIds(party, timestamp)
         : SpotRiskPolicy.excludedSpotIdsForStates(routedMembers, timestamp);
     const role = partyRoute ? PartyComposition.roleForState(state) : null;
     const options = { capacityStates: routedMembers, excludedSpotIds, timestamp,
-        ...(partyRoute ? { mode: 'party', role } : {}) };
+        ...(partyRoute ? { mode: 'party', role } : {}), ...(hasRoom ? { hasRoom } : {}) };
     let soloProfiles = null;
     const solo = () => {
         soloProfiles = soloProfiles || BotTargetMatchup.stateProfiles(state, { ...options, mode: 'solo' });
@@ -259,10 +261,10 @@ function route(state, currentSpot, party, partyMembers = [], { spots, timestamp 
 // bot's kernel record), searched here when it holds none (null: dropped or
 // never computed; not saved, so the first read after a restart searches).
 // The trip is built from where the bot stands now; null: no trip. Counted
-// as route:trip:leaf|kept|search.
-function trip(owner, state, leaf, { spots, currentSpot = null, timestamp }) {
+// as route:trip:leaf|kept|search. hasRoom: the search's room filter.
+function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoom = null }) {
     if (!routable(state, null, [])) return null;
-    const frame = frameFor(state, null, [], timestamp);
+    const frame = frameFor(state, null, [], timestamp, hasRoom);
     const wished = leafChoice(state, leaf, { spots, timestamp, frame });
     if (wished) {
         EconomyDiagnostics.count('route', 'trip', 'leaf');

@@ -37,6 +37,22 @@ Events.raiseSections = (before, after, ...lists) => {
 module.exports.probe = async ({ kind, id, spotId, reason, remove, party }) => {
     for (const gone of remove || []) kernel.remove(gone);
     if (kind === 'standing') return kernel.occupancy.physicalCount(spotId, { standingOnly: true });
+    if (kind === 'search') {
+        // The step's solo trip searches (routeTrip): the room its search may read.
+        const Spots = invoke('GameServer/Bot/Population/SpotProfiles'), find = Spots.findForState;
+        let hasRoom = null;
+        Spots.findForState = (state, options) => { hasRoom = options.hasRoom || null; return null; };
+        try {
+            const entry = kernel.states.get(id);
+            entry.route = null;
+            // The step's planned state: hunting on the other spot (as a wait
+            // fallback plans it), while the index still holds the bot's own entry.
+            routeTrip({ ...entry.state, activity: 'hunting', spotId: party, stats: { ...entry.state.stats, travel: null } },
+                { spot: null }, null, Date.now());
+            entry.route = null;
+        } finally { Spots.findForState = find; }
+        return hasRoom && { [spotId]: hasRoom(spotId), [party]: hasRoom(party) };
+    }
     if (kind === 'party') {
         const members = party.memberIds.map(member => kernel.states.get(member).state);
         const out = kernel.partyArrival({ party, members, spotId });
@@ -156,6 +172,14 @@ function bot(characterId, extra = {}) {
         const free = await probe({ kind: 'solo', id: 104, spotId: room.id, reason: 'level_replan', remove: [102] });
         assert.deepEqual(free.marks, [], 'a bot on its way to the spot does not count against it');
         assert.deepEqual(free.raised, [], 'an arrival into room raises nothing');
+
+        // ROUTE-ROOM: the step's spot search skips a spot with no room for
+        // the bot, those on their way counted (one stands there, one comes).
+        const search = id => probe({ kind: 'search', id, spotId: room.id, party: away.id });
+        assert.deepEqual(await search(104), { [room.id]: false, [away.id]: true },
+            'the search counts the bots on their way: no room left for one more');
+        assert.deepEqual(await search(103), { [room.id]: true, [away.id]: true },
+            'the bot\'s own index entry is not counted against it');
 
         // A party of two arrives where one bot stands: no room for all its members.
         const party = { partyId: 'room-party', leaderId: 110, memberIds: [110, 111], spotId: room.id, stats: {} };

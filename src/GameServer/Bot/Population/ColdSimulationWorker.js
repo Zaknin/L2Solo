@@ -881,17 +881,29 @@ function pruneLookSeen(ownerId) {
 // a spot the catalog does not know has room.
 const ROOM_SECTIONS = Object.freeze(['occupation', 'sources']);
 function roomAtArrival(spotId, arriving, overflow = 0) {
-    const spot = SpotIndex.spotById(planningSpots, spotId);
-    if (!spot || spot.raidBoss === true) return true;
+    const room = spotRoom(spotId);
+    if (room === Infinity) return true;
     const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
-    return standing + arriving.size <= LevelingRoutes.roomForSpot(spot) + overflow;
+    return standing + arriving.size <= room + overflow;
+}
+
+// How many bots a spot holds (LevelingRoutes.roomForSpot); a raid boss spot
+// or a spot the catalog does not know: no limit. The arrival check above and
+// the route search's filter below read this one rule.
+function spotRoom(spotId) {
+    const spot = SpotIndex.spotById(planningSpots, spotId);
+    return !spot || spot.raidBoss === true ? Infinity : LevelingRoutes.roomForSpot(spot);
 }
 
 // The step's solo trip and the kept route's drop (BotRoute.trip / drop): the
-// route lives in the bot's kernel record.
+// route lives in the bot's kernel record. The search skips a spot with no
+// room for the bot (ROUTE-ROOM): every bot indexed there, those on their
+// way included, other than this bot, plus this bot; re-checked at arrival.
 function routeTrip(state, context, leaf, timestamp) {
+    const self = new Set([stateKey(state)]);
+    const hasRoom = (spotId) => kernel.occupancy.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spotId);
     return BotRoute.trip(kernel.states.get(Number(state.characterId)), state, leaf,
-        { spots: planningSpots, currentSpot: context?.spot || null, timestamp });
+        { spots: planningSpots, currentSpot: context?.spot || null, timestamp, hasRoom });
 }
 function dropRoute(characterId, why) {
     BotRoute.drop(kernel.states.get(Number(characterId)), why);
