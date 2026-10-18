@@ -173,14 +173,22 @@ function evacuationSpot(state, currentId, spots, frame) {
 
 // The spot a solo bot's own hunting leaf names, as a choice for record, when
 // the bot may hunt there: not a raid profile, not excluded, allowed for its
-// kit, and fitting its level (or an economic hunt within 15 levels). The
-// room is checked at arrival. Null: the kept route decides.
+// kit, and fitting its level (or an economic hunt within 15 levels). With
+// the worker's room filter (frame.options.hasRoom, ROUTE-ROOM-2) a spot other
+// than the bot's own with no room for it is no leaf trip either (counted as
+// route:trip:leaf_full); the room is checked again at arrival. Null: the
+// kept route decides.
 function leafChoice(state, leaf, { spots, timestamp, frame = null }) {
     if (leaf?.activity !== 'hunting' || !leaf.spotId || !routable(state, null, [])) return null;
     const wished = SpotIndex.spotById(spots, leaf.spotId);
     if (!wished || wished.raidBoss === true) return null;
     frame = frame || frameFor(state, null, [], timestamp);
     if (frame.excludedSpotIds.has(String(wished.id))) return null;
+    const hasRoom = frame.options.hasRoom;
+    if (hasRoom && String(wished.id) !== String(state.spotId || '') && !hasRoom(wished.id)) {
+        EconomyDiagnostics.count('route', 'trip', 'leaf_full');
+        return null;
+    }
     const level = Number(state.level || 1);
     const fits = LevelingRoutes.isSpotAllowedForState(wished, state, frame.solo())
         && (SpotService.isSuitable(wished, level, frame.options)
