@@ -201,6 +201,13 @@ process.env.L2NODE_PROGRESSION_RATE = 'x1';
         assert.deepStrictEqual(ranked.map(row => row.spotId), ['b_near', 'a_far'], 'an income tie goes to the level-23 bot\'s closest spot');
         assert.deepStrictEqual(Table.rankedSpotIds('dps', 23, { shots: 0, potions: 0 }), ['b_near', 'a_far'], 'the id view keeps that order');
         assert.deepStrictEqual(Table.rankedSpotIds('dps', 20, { shots: 0, potions: 0 }), ['a_far', 'b_near'], 'a level-20 bot gets the other one first');
+        // The spot search (minGap -7) and the income route (-15) share one basis per role and level.
+        const free = { shots: 0, potions: 0 }, bases = Table.cacheStats().bases;
+        Table.rankedSpotIds('dps', 23, free, -15);
+        assert.strictEqual(Table.cacheStats().bases, bases, 'the wider band reads the basis the narrower one built');
+        const wide = Table.rankedSpotIds('dps', 28, free, -15), narrow = Table.rankedSpotIds('dps', 28, free, -7);
+        assert(wide.includes('a_far') && !narrow.includes('a_far'), 'a level-8-lower spot is in the wide band only');
+        assert.deepStrictEqual(narrow, wide.filter(id => id !== 'a_far'), 'the narrow band keeps the wide order');
     } finally { Table.useSpots([]); Table.useFile(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
 }
 console.log('Spot value table lookups, curves, caps, rates and the committed table passed');

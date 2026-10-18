@@ -838,8 +838,7 @@ function countIncomeRoute(state, deps, timestamp, route) {
 function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
-    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
-    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const tableRole = Roles.tableRoleFor(state);
     let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
     const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
     if (incomeRoute) {

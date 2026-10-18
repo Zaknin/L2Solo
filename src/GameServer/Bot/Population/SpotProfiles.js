@@ -517,9 +517,12 @@ const SpotProfiles = {
         // they advance. A gear plan otherwise remains the normal route choice
         // for established bots.
         const collectingGear = acquisitionPlan?.status === 'active' && acquisitionPlan.next?.spotId;
+        // One list object for the income route and the list walk below: its
+        // spoiler and costs are read once, and only when one of them asks.
+        const list = EquipmentIncomeRoute.spotList(state);
         if (!protectedStarterCohort && !collectingGear) {
             const incomeRoute = EquipmentIncomeRoute.select(state, {
-                spots: profiles, timestamp, mode,
+                spots: profiles, timestamp, mode, list,
                 required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
             if (incomeRoute) return incomeRoute.spot;
         }
@@ -565,26 +568,29 @@ const SpotProfiles = {
         // best income first, ties to the closest level. The first spot that
         // is not avoided, its ground and matchup allow and whose level fits
         // wins, else the first allowed one; the list with shots, then the
-        // list without them when no spot of the first is allowed. A party or
-        // duo search reads its leader's solo list (simplest; a list for the
-        // party's main role would be read once per party search).
-        const list = EquipmentIncomeRoute.spotList(state, { level: targetLevel });
+        // list without them when no spot of the first is allowed.
+        // Deviation from the task text (a party list): a party or duo search
+        // reads its leader's list (its party role when it has one, the
+        // simplest reading); a list for the party's main role would be read
+        // once per party search.
         let pick = null, firstAllowed = null, currentListed = false;
         for (const shots of [true, false]) {
-            for (const id of list.ids(shots)) {
+            for (const id of list.ids(shots, targetLevel)) {
                 const spot = SpotIndex.spotById(profiles, id);
                 // A foreign starter field is no list pick: the locality rule
                 // above would send the bot away from it again.
                 if (!spot || spot.raidBoss === true || excludedSpotIds.has(String(spot.id)) || foreign(spot)) continue;
-                if (currentSpot && spot.id === currentSpot.id) {
-                    if (mustRelocate) continue;
-                    currentListed = true;
-                }
+                const isCurrent = currentSpot && spot.id === currentSpot.id;
+                if (isCurrent && mustRelocate) continue;
                 const fits = SpotService.isSuitable(spot, targetLevel, options);
-                if (!fits && firstAllowed) continue;
+                if (!fits && firstAllowed && !isCurrent) continue;
+                // The keep rule below holds only a current spot this reader
+                // allows: the current match reads the ground at the target
+                // level, which a recovery lowers below the bot's own.
                 if (!homeAllowed(spot)) continue;
+                if (isCurrent) currentListed = true;
                 if (fits) { pick = spot; break; }
-                firstAllowed = spot;
+                firstAllowed ||= spot;
             }
             if (pick || firstAllowed) break;
         }
@@ -601,9 +607,12 @@ const SpotProfiles = {
 
         // No allowed spot on the list (a catalogue spot the table does not
         // rank, e.g. one without income): the allowed ground near the level,
-        // a field of the bot's own region first, then the closest level. If that too leaves bots without a spot, the
-        // simplest option is the list again with the income route's wider
-        // minGap (-15).
+        // a field of the bot's own region first, then the closest level.
+        // Deviation from the task text (recovery and level-gap fallback
+        // only): this near-level step comes first, so a spot the table does
+        // not rank is not mistaken for no ground at all. If bots still end
+        // without a spot, the simplest option is the list again with the
+        // income route's wider minGap (-15).
         const candidates = spotsNearLevel(profiles, targetLevel)
             .filter((profile) => !excludedSpotIds.has(String(profile.id)))
             .filter((profile) => homeAllowed(profile));

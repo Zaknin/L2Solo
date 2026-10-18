@@ -732,7 +732,10 @@ function preferredTarget(state = {}, options = {}) {
         : { ...options, allowedRecipeIds: stationRecipeIds() };
     const candidatePool = affordable.length ? affordable : progressionCandidates;
     // The spot atlas, not the crowd, marks live planning: every live planner
-    // passes it, and the crowd is met at arrival (ARCH-08-b).
+    // passes it, and the crowd is met at arrival (ARCH-08-b). Deviation from
+    // the task text ("first candidate, first safe source"): the live-route
+    // filter stays, keyed on the atlas, because it is no crowd read: it keeps
+    // a goal without any reachable route from becoming a durable blocked goal.
     const liveAvailability = (options.spots || []).length > 0;
     const candidates = [];
     // Three candidates per slot remain the normal cold-path budget. Only when
@@ -777,6 +780,7 @@ function preferredDropTarget(state = {}, options = {}) {
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => Number(owned.get(Number(item.selfId)) || 0) < 1)
         .sort((a, b) => itemScore(b, role, classId) - itemScore(a, role, classId) || Number(b.template?.price || 0) - Number(a.template?.price || 0));
+    // Live-route filter keyed on the atlas, not the crowd: see preferredTarget.
     if (!(options.spots || []).length) return candidates[0] || null;
     return candidates.find((item) => targetHasAvailableRoute(item, state, options)) || null;
 }
@@ -801,6 +805,7 @@ function preferredNoGradeTarget(state = {}, options = {}) {
         })
         .sort((a, b) => GearLifecycle.slotPriority(b.etc?.slot) - GearLifecycle.slotPriority(a.etc?.slot)
             || Number(a.template?.price || 0) - Number(b.template?.price || 0));
+    // Live-route filter keyed on the atlas, not the crowd: see preferredTarget.
     if (!(options.spots || []).length) return candidates[0] || null;
     return candidates.find((item) => targetHasAvailableRoute(item, state, options)) || null;
 }

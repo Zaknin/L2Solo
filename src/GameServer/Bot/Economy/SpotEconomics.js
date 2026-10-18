@@ -1,4 +1,5 @@
 'use strict';
+const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
 let SpotRewardExpectation = null;
 // Shared table evaluation. It depends on native facts and own samples,
@@ -22,8 +23,7 @@ function create(state, { timestamp = Date.now(), mode, persona, deathHours, mone
     const Tendency = invoke('GameServer/Bot/AI/TendencyRoll');
     const positive = value => Math.max(0, Number(value) || 0);
     persona ||= invoke('GameServer/Bot/AI/BotPersona').of(state) || { traits: {}, understanding: 0.3 };
-    const role = state.party?.role || state.stats?.role || invoke('GameServer/Bot/AI/BotRoles').inferRole(state.stats?.classId || 0);
-    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const tableRole = BotRoles.tableRoleFor(state);
     const hunt = Hunt.huntIncome(state, timestamp, mode);
     const packetHour = Number(state.stats?.money?.[0]);
     const huntHour = Number(hunt.perHour);

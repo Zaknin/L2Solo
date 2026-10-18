@@ -104,6 +104,13 @@ function inferRole(value) {
     return 'dps';
 }
 
+// The game table's role of a bot (SpotValueTable roles): its party role, else
+// its own. crafter -> spoiler is the author's call (the table has no crafter).
+function tableRoleFor(state = {}) {
+    const role = state.party?.role || state.stats?.role || inferRole(state.stats?.classId || state.classId || 0);
+    return role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+}
+
 function isRole(value, role) {
     if (role === 'spoiler') return isSpoiler(value);
     if (role === 'crafter' && isSpoiler(value)) return false;
@@ -209,6 +216,7 @@ module.exports = {
     isCrafterClass,
     presentation,
     inferRole,
+    tableRoleFor,
     combatRoleFor,
     isRole,
     isHealer,
