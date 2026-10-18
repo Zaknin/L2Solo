@@ -507,8 +507,8 @@ function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBa
 // The cheap check of a held decision: one row per kind of leaf answers "does
 // it still stand?" at the decision point (heldBuildVerdict). A row returns ''
 // or its own frozen failure: the name (check:<name>) and the sections the
-// build that follows re-weighs. input = { heldUnits, current, prepared,
-// timestamp }: heldUnits = the own item's bag+incoming at the decision (a held
+// build that follows re-weighs. input = { heldUnits, current, prepared }:
+// heldUnits = the own item's bag+incoming at the decision (a held
 // build's entry; a card carries it on its leaf); current = a lazy basics
 // reader; prepared = { liquidation } candidates already read by the verdict.
 // Execution still prepares its batch and checks via the command/CAS.
