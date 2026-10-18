@@ -34,9 +34,7 @@ function emptyCounters() {
         dbFlushes: 0,
         schedulerRuns: 0,
         schedulerSkips: 0,
-        schedulerBudgetStops: 0,
         partyFormationBudgetStops: 0,
-        schedulerYields: 0,
         schedulerOverruns: 0,
         slowResolves: 0,
         backgroundDeferrals: 0,
@@ -142,7 +140,6 @@ const PopulationMetrics = {
     interval: {
         resolveDurationsMs: [],
         schedulerDurationsMs: [],
-        schedulerSliceDurationsMs: [],
         partyFormationDurationsMs: [],
         partyFormationStageDurationsMs: new DiagnosticMetricMap(),
         actorPathDurationsMs: [],
@@ -363,24 +360,9 @@ const PopulationMetrics = {
         }
     },
 
-    recordSchedulerYield(sliceMs) {
-        if (!Config.developerDiagnostics) return;
-        const value = Math.max(0, Number(sliceMs) || 0);
-        this.counters.schedulerYields += 1;
-        this.interval.schedulerSliceDurationsMs.push(value);
-        if (this.interval.schedulerSliceDurationsMs.length > Config.resolveSampleLimit) {
-            this.interval.schedulerSliceDurationsMs.shift();
-        }
-    },
-
     recordSchedulerSkip() {
         if (!Config.developerDiagnostics) return;
         this.counters.schedulerSkips += 1;
-    },
-
-    recordSchedulerBudgetStop() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.schedulerBudgetStops += 1;
     },
 
     recordBackgroundDeferral() {
@@ -667,7 +649,6 @@ const PopulationMetrics = {
         this.lastSummaryCounters = { ...this.counters };
         const resolveStats = stats(this.interval.resolveDurationsMs);
         const schedulerStats = stats(this.interval.schedulerDurationsMs);
-        const schedulerSliceStats = stats(this.interval.schedulerSliceDurationsMs);
         const partyFormationStats = stats(this.interval.partyFormationDurationsMs);
         const actorPathStats = stats(this.interval.actorPathDurationsMs);
         const companionPathStats = stats(this.interval.companionPathDurationsMs);
@@ -689,7 +670,6 @@ const PopulationMetrics = {
         const stateRetentionPolicyRows = Object.fromEntries(this.interval.stateRetentionPolicyRows.entries());
         this.interval.resolveDurationsMs = [];
         this.interval.schedulerDurationsMs = [];
-        this.interval.schedulerSliceDurationsMs = [];
         this.interval.partyFormationDurationsMs = [];
         this.interval.actorPathDurationsMs = [];
         this.interval.companionPathDurationsMs = [];
@@ -716,7 +696,6 @@ const PopulationMetrics = {
             eventLoop: { ...this.eventLoop, delay },
             resolve: resolveStats,
             scheduler: { ...schedulerStats, ...this.schedulerState },
-            schedulerSlice: schedulerSliceStats,
             partyFormation: partyFormationStats,
             pathfinding: {
                 actor: actorPathStats,

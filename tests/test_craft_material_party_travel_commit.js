@@ -9,7 +9,6 @@ const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Agreement = require('../src/GameServer/Bot/Population/PartyAgreement');
 const Route = require('../src/GameServer/Bot/Population/CraftMaterialPartyRoute');
 const Kernel = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
-const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
 const point = { locX: 145224, locY: 120001, locZ: -4500 }, wallet = 10000, fee = 1001;
 let timestamp = Date.now();
 async function seed(index) {
@@ -133,28 +132,6 @@ async function main() {
     assert.equal(await Life.clearParty(party.partyId, Route.REASON), 0);
     assert.deepEqual(Life.cachedState(states[0].characterId).stats.partyRequest, request, 'postcommit cleanup preserves the owner need');
 
-    // The legacy main fallback must use the same writer, including physical
-    // coordinates and persisted goals, rather than independent lifecycle saves.
-    const legacyStates = party.memberIds.map(id => Life.cachedState(id));
-    const legacyParty = { ...party, partyId: 'material-trip-legacy', status: 'active', spotId: 'safe-field',
-        stats: { ...party.stats, travel: null, agreement: { ...party.stats.agreement, help: null } } };
-    const made = Parties.prepareCommit(legacyParty);
-    const legacyAssigned = legacyStates.map(state => Life.preparePartyAssignment(state, made.row.partyId,
-        state.stats.role, made.row.leaderId, timestamp, 'safe-field'));
-    const legacyFormed = await DB.commitBackgroundPartyMembership({ party: made.row, members: legacyAssigned });
-    assert(legacyFormed.ok, JSON.stringify(legacyFormed));
-    legacyFormed.lifeRows.forEach(row => Life.acceptNewerLifecycleRow(row));
-    const legacy = Parties.acceptRow(legacyFormed.partyRow);
-    const roster = legacy.memberIds.map(id => Life.cachedState(id)), legacyRoute = trip(roster, 'legacy-source', { materialSources: sources });
-    ++timestamp;
-    const next = roster.map(state => beginHuntingTrip(state, legacyRoute, timestamp));
-    const nextParty = { ...Route.retarget(legacy, [{ ...sources[0], spotId: 'legacy-source' }]), spotId: 'legacy-source',
-        nextResolveAt: timestamp + 1000, stats: { ...Route.retarget(legacy, [{ ...sources[0], spotId: 'legacy-source' }]).stats,
-            travel: { reason: 'party_spot_replan', spotId: 'legacy-source', arrivalAt: timestamp + 1000 } } };
-    const saved = await Route.commitLegacy(legacy, roster, nextParty, next, timestamp, 'party_travel');
-    assert(saved.ok);
-    assert.equal(saved.party.spotId, 'legacy-source');
-    assert(roster.every(state => Life.cachedState(state.characterId).stats.travel.spotId === 'legacy-source'));
-    console.log('PASS native material travel CAS, atomic contract/coordinates, evacuation rollback/refund, retained requests and shared legacy writer');
+    console.log('PASS native material travel CAS, atomic contract/coordinates, evacuation rollback/refund, retained requests');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => world.close());

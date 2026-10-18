@@ -177,15 +177,10 @@ async function main() {
         assert.equal(raidBatch.payload.proposals.find(entry => entry.partyResolution).partyResolution.party.status, 'dissolved');
     }
 
-    const Population = invoke('GameServer/Bot/Population/PopulationService');
-    const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
     const Bridge = require('../src/GameServer/Bot/Population/ColdRaidWorldBridge');
     const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
     const originalSettle = Bridge.settle;
     const settlements = [];
-    const saved = [];
-    const originals = [Life.statesForParty, Life.applyResolve, Parties.createOrUpdate, Life.clearParty];
     try {
         Bridge.settle = async input => { settlements.push(input); return { ok: true }; };
         for (const committed of [{ partyRow: { partyId: party.partyId, updatedAt: at } },
@@ -203,30 +198,11 @@ async function main() {
             assert.equal(settlements.length, count + 1, 'native postcommit bridge retries defeat for terminal partyRow as well as raidPartyRow');
             assert.equal(settlements.at(-1), victoryParty);
         }
-        Life.statesForParty = async () => members;
-        Life.applyResolve = async (state, resolution) => { const next = { ...state, ...resolution.patch }; saved.push(next); return next; };
-        Parties.createOrUpdate = async next => next;
-        const releases = [];
-        Life.clearParty = async (...args) => releases.push(args);
-        const legacy = await Population.resolveBackgroundParty(party);
-        assert.equal(legacy.debug.reason, 'party_meeting_lifecycle');
-        assert.deepEqual(saved[1].loc, to);
-        assert.equal(saved[1].activity, 'shopping');
-        assert.equal(saved[1].party.partyId, party.partyId);
-        saved.length = 0;
-        const legacyVictory = await Population.resolveBackgroundParty(victoryParty);
-        assert.equal(legacyVictory.party.status, 'dissolved');
-        assert.equal(legacyVictory.debug.reason, 'raid_already_defeated');
-        assert.deepEqual(releases, [[party.partyId, 'raid_defeated']], 'legacy path uses native member release');
-        assert.deepEqual(saved[1].stats.travel, members[1].stats.travel);
-        assert.deepEqual(saved[1].stats.tradeMeeting, [7, 1]);
-        assert.equal(settlements.at(-1).status, 'dissolved', 'legacy terminal cleanup also retries guarded world settlement');
     } finally {
         Bridge.settle = originalSettle;
-        [Life.statesForParty, Life.applyResolve, Parties.createOrUpdate, Life.clearParty] = originals;
     }
     assert.equal(Resolver.resolveMeetingLifecycle({ party, members: members.map(state => ({ ...state, stats: {} })), timestamp: at }), null,
         'the terminal meeting event restores the ordinary party path');
-    console.log('Party meeting routing, atomic arrival, native recovery, overwrite protection and legacy parity passed');
+    console.log('Party meeting routing, atomic arrival, native recovery and overwrite protection passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

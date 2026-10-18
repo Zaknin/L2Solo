@@ -117,8 +117,6 @@ async function main() {
             'an async equipment plan must recheck the raid lock before applying its stale result'
         );
         PartyState.active = () => [raidParty];
-        assert.strictEqual(PopulationService.partySessionExpired(raidParty, Date.now()), false,
-            'a started raid must not expire through ordinary party rotation');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview(raidParty, [{ level: 99, stats: {} }], Date.now()), false,
             'ordinary route eligibility must not dismantle a raid after preparation or combat starts');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview({

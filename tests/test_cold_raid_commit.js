@@ -171,33 +171,6 @@ async function run() {
     Authority.accept({ raidKey: 'raid:10484', revision: 0, snapshotJson: '{}' });
     assert.equal(Authority.get('raid:10484'), durableRevision, 'late cache deliveries cannot rewind shared authority');
 
-    const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
-    const originalResolve = Resolver.resolve;
-    const originalPrepare = Life.prepareResolve;
-    let projections = 0;
-    try {
-        Resolver.resolve = ({ party, members, spot, timestamp }) => {
-            const snapshot = Raid.record(party, Raid.begin(party, spot, 10485, timestamp), { won: true }, timestamp);
-            return { partyPatch: { status: 'dissolved', stats: { raidEncounter: snapshot, partyBreakReason: 'raid_defeated' } },
-                nextResolveAt: null, events: [], debug: {}, memberResults: members.map(state => ({ state, result: {
-                    patch: {}, materialize: { exp: 100, adena: 10, items: [] }, events: [], nextResolveAt: timestamp + 30000
-                } })) };
-        };
-        Life.prepareResolve = function (state, result, options) {
-            assert.equal(options.projectClassProgression, true, 'fallback must not write class progression before the transaction');
-            assert.equal(options.persist, false); projections++;
-            return originalPrepare.call(this, state, result, options);
-        };
-        const outcome = await require('../src/GameServer/Bot/Population/ColdRaidLegacyCommit').resolve({
-            party: b, members: b.memberIds.map(state), spot: { ...spot, id: 'raid:10485', raidBossTemplateId: 10485 },
-            targetNpcId: 10485, elapsedMs: 60000
-        });
-        assert.equal(outcome.ok, true); assert.equal(projections, 9);
-        assert.equal(outcome.party.status, 'dissolved');
-        assert(b.memberIds.every(id => !state(id).party?.partyId && state(id).adena === 10));
-        const [legacyBoss] = await Database.execute(['SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10485']]);
-        assert.equal(legacyBoss.revision, 1);
-    } finally { Resolver.resolve = originalResolve; Life.prepareResolve = originalPrepare; }
     console.log('Cold raid commit: 9-member atomicity, SQL rollback, ACK fencing, clan competition, replay and durable reload passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

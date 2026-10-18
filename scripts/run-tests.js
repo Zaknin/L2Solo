@@ -507,7 +507,6 @@ const tests = [
     'tests/test_atomic_party_membership.js',
     'tests/test_bot_background_party_affinity.js',
     'tests/test_bot_party_market_break.js',
-    'tests/test_bot_party_recruitment_chat.js',
     'tests/test_party_agreement_text.js',
     'tests/test_bot_hunting_self_defense.js',
     'tests/test_bot_emergency_finisher.js',

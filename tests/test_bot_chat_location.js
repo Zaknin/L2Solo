@@ -2,7 +2,6 @@ const assert = require('assert');
 require('../src/Global');
 const Location = invoke('GameServer/Bot/AI/BotChatLocation');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
-const Recruitment = invoke('GameServer/Bot/Population/ColdPartyRecruitmentChat');
 const RemoteChat = invoke('GameServer/Bot/AI/BotRemoteChat');
 const TownRespawn = invoke('GameServer/World/TownRespawn');
 const originalSpots = SpotService.spots;
@@ -28,10 +27,6 @@ try {
     SpotService.spots = [];
     const coarse = Location.describe({ spotId: '24_14' });
     assert.strictEqual(coarse, "the Hunter's Village area", 'simulation grid ids must not be interpreted as client map tiles');
-    const party = { leaderId: 1, spotId: '24_14' };
-    const members = [{ characterId: 1, name: 'Tank', level: 20, party: { role: 'tank' } }];
-    const ad = Recruitment.recruitmentText(party, members, null, 5);
-    assert(ad.includes(coarse) && !ad.includes('24_14'), 'missing spot data must not leak raw ids into recruitment');
     assert.strictEqual(Location.describe({ spot: { name: '24_14' }, region: 'Giran' }), 'Giran');
     assert.strictEqual(Location.describe({ spot: { name: '123,456,-700' } }), 'my hunting spot');
     assert.strictEqual(Location.describe({ loc: { locX: null, locY: null }, region: '24_14' }), 'my hunting spot',

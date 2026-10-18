@@ -81,28 +81,6 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
     assert(proposals.every(row => row.atomicGroup?.memberIds.length === roster.length), 'every transition uses the complete atomic roster');
     return { members: proposals.map(row => row.nextState), party: proposals.find(row => row.partyResolution).partyResolution.party };
 }
-async function legacyTransition(currentParty, roster, timestamp = at) {
-    const undo = [], override = (object, key, value) => { const original = object[key];
-        undo.push(() => { object[key] = original; }); object[key] = value; };
-    const states = [];
-    override(Date, 'now', () => timestamp);
-    override(Spots, 'ensure', () => profiles);
-    override(Spots, 'findById', id => byId.get(id));
-    override(Spots, 'currentOccupancy', () => ({}));
-    const life = invoke('GameServer/Bot/Population/BotLifeState');
-    override(life, 'statesForParty', async () => roster);
-    override(life, 'upsertState', async state => { states.push(state); return state; });
-    override(Route, 'commitLegacy', async (_party, _members, nextParty, nextMembers) => {
-        states.push(...nextMembers); return { ok: true, party: nextParty };
-    });
-    override(invoke('GameServer/Bot/Population/BackgroundPartyState'), 'createOrUpdate', async value => value);
-    override(invoke('GameServer/Bot/Population/BotLifeEvents'), 'record', async () => null);
-    try {
-        const result = await invoke('GameServer/Bot/Population/PopulationService').resolveBackgroundParty(currentParty);
-        assert(result.ok, JSON.stringify(result));
-        return { members: states, party: result.party };
-    } finally { undo.reverse().forEach(restore => restore()); }
-}
 async function main() {
     // Four alternatives per need still leave a common source after the risk,
     // combat and whole-roster capacity gates remove the other three.
@@ -149,9 +127,6 @@ async function main() {
     });
     assert(Risk.excludedSpotIds(moved.party, at + 1).has('danger'));
     moved.members.forEach((state, i) => assert.deepEqual(state.stats.spotBackoffs, members[i].stats.spotBackoffs));
-    const legacyMoved = await legacyTransition(party, members);
-    assert.equal(legacyMoved.party.stats.objective.spotId, 'common-source', 'legacy fallback uses the same material routing policy');
-    assert.deepEqual(legacyMoved.party.stats.agreement.materialNeeds.map(goal => goal.npcId), [626, 627]);
 
     spoiler = false;
     assert.equal(Route.select(party, members, profiles, options), null, 'spoil is not an executable source without a party spoiler');
@@ -179,12 +154,6 @@ async function main() {
         assert.equal(Request.partyRequestForPlan({ ...state, activity: 'traveling' }, state.stats.equipmentPlan,
             departed.party.stats.travel.arrivalAt + 1), state.stats.partyRequest, 'native replanning preserves evacuation cooldown during recovery/travel');
     });
-    const legacyDeparted = await legacyTransition(party, members);
-    assert(legacyDeparted.party.stats.travel.materialEvacuation);
-    const legacyArrived = await legacyTransition(legacyDeparted.party, legacyDeparted.members,
-        legacyDeparted.party.stats.travel.arrivalAt);
-    assert.equal(legacyArrived.party.status, 'dissolved');
-    assert.deepEqual(legacyArrived.members.map(state => state.stats.partyRequest?.itemId || null), [4108, 4104, null]);
     const ordinary = { ...party, stats: { ...party.stats, objective: { spotId: 'danger' } } };
     const normal = coordinator.routeFor(members[0], byId.get('danger'), ordinary, members, { ...index, occupancy: {} });
     assert.equal(normal.spotId, 'cash-field');

@@ -215,7 +215,6 @@ async function run() {
         'a resolving pass must leave a bounded party formation retry pending');
     PopulationService.resolving = false;
     PopulationService.partyFormationRunning = true;
-    assert.deepStrictEqual(await PopulationService.tickBudgeted(), [], 'the retired main-thread scheduler must remain inert');
 }
 
 run()

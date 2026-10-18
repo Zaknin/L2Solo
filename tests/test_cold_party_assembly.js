@@ -114,36 +114,6 @@ async function main() {
     assert.strictEqual(hunt.partyPatch.stats.partySpotRisk.partyId, party.partyId);
     assert(hunt.debug.wins > 0 && hunt.memberResults.some(e => e.result.materialize.exp > 0), 'arrived party resumes ordinary combat');
 
-    const Population = invoke('GameServer/Bot/Population/PopulationService');
-    const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const Spots = invoke('GameServer/Bot/AI/SpotService');
-    const restore = [];
-    const patch = (object, key, value) => {
-        const original = object[key]; restore.push(() => { object[key] = original; }); object[key] = value;
-    };
-    try {
-        const saved = [];
-        const occupancy = { [spot.id]: { count: 2, reservedCount: 2, capacity: 3,
-            reservedKeys: new Set(['1', '9']), retained: new Set(['1', '9']) } };
-        patch(Life, 'statesForParty', async () => scattered);
-        patch(Life, 'upsertState', async state => { saved.push(state); return state; });
-        patch(Parties, 'createOrUpdate', async next => next);
-        patch(Profiles, 'findById', () => spot);
-        patch(Profiles, 'ensure', () => [spot]);
-        patch(Profiles, 'currentOccupancy', () => occupancy);
-        patch(Spots, 'findCurrentSpot', () => spot);
-        patch(Spots, 'arrivalPointForState', () => point);
-        const legacy = await Population.resolveBackgroundParty({ ...party,
-            stats: { ...party.stats, objective: { spotId: spot.id } } });
-        assert.strictEqual(legacy.debug.activity, 'party_travel', 'legacy resolver also gathers distant followers when leader is already there');
-        assert.strictEqual(saved.length, 2);
-        assert.deepStrictEqual(saved[1].loc, scattered[1].loc);
-        assert(saved.every(s => s.stats.travel.reason === 'party_spot_replan'));
-        assert.strictEqual(occupancy[spot.id].reservedCount, 3);
-    } finally { restore.reverse().forEach(fn => fn()); }
-
     // Exercise the actual isolated worker: its static area catalog must reject
     // a surface teammate with the same X/Y sector and saved dungeon spot id.
     const { Worker } = require('worker_threads');

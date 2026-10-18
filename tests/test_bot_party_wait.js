@@ -265,14 +265,6 @@ async function run() {
     }, requestPlan, deferred.deferredUntil + 1);
     assert.strictEqual(reopened.status, 'open', 'a deferred request must be eligible for a fresh formation attempt');
 
-    assert.strictEqual(PopulationService.partySessionExpired({ startedAt: timestamp - Config.partySessionMaxMs - 1 }, timestamp), true);
-    assert.strictEqual(PopulationService.partySessionExpired({ startedAt: timestamp - 1000 }, timestamp), false);
-    assert.strictEqual(PopulationService.partySessionExpired({
-        startedAt: timestamp - Config.partySessionMaxMs - 60000,
-        stats: { sessionExpiresAt: timestamp + 60000 }
-    }, timestamp), false, 'a staggered session expiry must override the nominal party age');
-    assert.strictEqual(PopulationService.partySessionExpired({ stats: { sessionExpiresAt: timestamp - 1 } }, timestamp), true, 'an explicit staggered session expiry must rotate the party');
-    assert.strictEqual(PopulationService.partySessionExpired({ partyId: 'missing-session-metadata' }, timestamp), false, 'missing session metadata must not expire a party immediately');
     SpotProfiles.findForState = (candidate) => {
         assert.strictEqual(candidate.stats.equipmentPlan.phase, 'leveling');
         return fallbackSpot;

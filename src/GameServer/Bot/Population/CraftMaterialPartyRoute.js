@@ -59,26 +59,4 @@ function arrived(party, members, timestamp) {
         stats: { ...party.stats, travel: null, pveEncounter: null, partyBreakReason: REASON, dissolvedAt: timestamp } } };
 }
 
-// The main-thread fallback uses the worker's native, revision-fenced writer
-// too: sequential lifecycle saves cannot commit a new material contract.
-async function commitLegacy(party, members, nextParty, nextMembers, timestamp, activity) {
-    const Owner = require('./ColdSimulationOwner');
-    const { grants } = await Owner.claimBatch(members, { timestamp, allowParty: true, allowLifecycle: true });
-    try {
-        if (grants.length !== members.length) return { ok: false, reason: 'material_travel_claim_rejected' };
-        const run = { party, members, grants: new Map(grants.map(grant => [grant.characterId, grant])) };
-        const proposals = require('./ColdSimulationKernel').partyTransitionProposals(run, nextMembers, nextParty, timestamp, null, activity);
-        const committed = await Owner.commitAndReleaseBatch(proposals.map(proposal => ({
-            token: proposal.token, nextState: proposal.nextState, atomicGroup: proposal.atomicGroup,
-            options: proposal.options, proposal })), { timestamp });
-        if (committed.some(row => !row.ok)) return { ok: false, reason: 'material_travel_commit_rejected' };
-        const saved = require('./BackgroundPartyState').acceptRow(committed[0].partyRow);
-        const Life = require('./BotLifeState'), Coordinator = require('./ColdSimulationCoordinator');
-        for (const row of committed) Coordinator.markDirty(Life.cachedState(row.characterId), { critical: true, reason: activity });
-        return { ok: true, party: saved, debug: { activity } };
-    } finally {
-        await Owner.releaseBatch(grants, { releaseInvalidated: true });
-    }
-}
-
-module.exports = { REASON, select, retarget, arrived, evacuating, commitLegacy };
+module.exports = { REASON, select, retarget, arrived, evacuating };
