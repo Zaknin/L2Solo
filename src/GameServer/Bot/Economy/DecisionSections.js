@@ -12,11 +12,10 @@ const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Providers = require('./WishProviders');
 const Floor = require('../Population/SurvivalFloor');
 const InventoryLimits = require('../../Inventory/InventoryLimits');
+const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
 const DataCache = invoke('GameServer/DataCache');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
-// Resolved at the first call (cycles); a require per call is a path lookup (L73).
-let EconomicValuation = null;
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
 const SAMPLE_BYTES = 20;
@@ -79,8 +78,7 @@ const FACT_SECTIONS = Object.freeze({
     riskDeaths: Object.freeze(['combat', 'occupation']),
     supply: Object.freeze(['supply']),
     bag: Object.freeze(['supply', 'sources']),
-    stores: Object.freeze(['supply', 'sources']),
-    horizon: Object.freeze(['benefits'])
+    stores: Object.freeze(['supply', 'sources'])
 });
 // The names of the sections raised in wishDirty bits, in table order.
 function sectionNames(bits) {
@@ -122,6 +120,9 @@ function reachesUpper(wallet, bounds) {
     const high = bounds?.[1];
     return high !== null && high !== undefined && wallet >= high;
 }
+// Hard (allowSoft false): the held option became unaffordable or its
+// funding/obligation mark moved. Soft: a newly payable next wish or a drift
+// beyond the bot's error (the soft point's, softEvents).
 function moneyChanged(state, baseline, escrow, allowSoft) {
     if (!baseline) return false;
     const physicalWallet = positive(state.adena), budgetTracked = Array.isArray(baseline.budgetBounds);
@@ -138,23 +139,6 @@ function moneyChanged(state, baseline, escrow, allowSoft) {
 }
 function meaningfulMoney(state, baseline = state.stats?.wishSections, escrow = 0) {
     return moneyChanged(state, baseline, escrow, true);
-}
-// L70 event priorities (docs/principles.md section 3 point 5): a soft change
-// is re-examined at the bot's own next decision point once its kind's delay
-// since the last actual decision has passed. Wall clock, not rate-scaled: a
-// delay never starts a reconsideration by itself, it only lets one through.
-const SOFT_DELAY = Object.freeze({ money: 60 * 1000, observation: 5 * 60 * 1000,
-    horizon: 5 * 60 * 1000, market: 10 * 60 * 1000 });
-const SOFT_KINDS = Object.freeze(Object.keys(SOFT_DELAY));
-function softDeadline(baseline, kind) {
-    const at = Number(baseline?.at), index = SOFT_KINDS.indexOf(kind);
-    if (!Number.isFinite(at) || index < 0) return NaN;
-    const age = baseline.ages?.[index] ?? 0;
-    if (!Number.isFinite(age) || age < 0 || age > SOFT_DELAY[kind]) return NaN;
-    return at - age + SOFT_DELAY[kind];
-}
-function clockBytes(baseline) {
-    return baseline?.ages ? Buffer.byteLength(JSON.stringify({ ages: baseline.ages })) - 1 : 0;
 }
 function baselineIdentity(baseline) {
     const canonical = (value, depth = 0) => {
@@ -176,15 +160,6 @@ function baselineIdentity(baseline) {
         return createHash('sha256').update(JSON.stringify(canonical(baseline))).digest('hex');
     } catch (_) { return null; }
 }
-function carrySectionClocks(previous, current, updated) {
-    if (!previous || !Number.isFinite(previous.at) || current.at < previous.at) return current;
-    const resets = { money: sectionBit('money'), observation: sectionBit('occupation') | sectionBit('build'),
-        horizon: sectionBit('benefits'), market: sectionBit('sources') };
-    const ages = SOFT_KINDS.map((kind, at) => updated & resets[kind] ? 0
-        : Math.min(SOFT_DELAY[kind], Math.max(0, current.at - previous.at) + Number(previous.ages?.[at] || 0)));
-    if (ages.some(age => age > 0)) current.ages = ages;
-    return current;
-}
 function carrySectionBaseline(previous, current, updated) {
     if (!previous || !Number.isFinite(previous.at) || current.at < previous.at) return current;
     const carry = (mask, fields) => {
@@ -195,20 +170,9 @@ function carrySectionBaseline(previous, current, updated) {
         }
     };
     carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
-    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'expHour', 'frustration', 'bond']);
-    carry(sectionBit('benefits'), ['horizon']);
+    carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'frustration', 'bond']);
     carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
-    return carrySectionClocks(previous, current, updated);
-}
-function softDue(baseline, kind, timestamp = Date.now()) {
-    const deadline = softDeadline(baseline, kind);
-    // A baseline saved before L70 has no decision time: behave as before.
-    return !Number.isFinite(deadline) || Number(timestamp) >= deadline;
-}
-// Hard: the held option became unaffordable or its funding/obligation mark
-// moved. Soft: a newly payable next wish or a drift beyond the bot's error.
-function moneyEvent(state, baseline = state.stats?.wishSections, timestamp = Date.now(), escrow = 0) {
-    return moneyChanged(state, baseline, escrow, softDue(baseline, 'money', timestamp));
+    return current;
 }
 function incomeError(state, persona) {
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
@@ -254,10 +218,6 @@ function observationChanged(state, baseline, timestamp, mode, bondNow = null) {
         || learnedChange(current, previous, error, share, previousShare)
         || bondChanged(baseline, bondNow, error);
 }
-function observationEvent(state, baseline, timestamp, mode, bondNow = null) {
-    if (!baseline) return true;
-    return softDue(baseline, 'observation', timestamp) && observationChanged(state, baseline, timestamp, mode, bondNow);
-}
 function bounds(wallet) {
     const result = [-1, null];
     return { result, watch: price => {
@@ -270,8 +230,10 @@ function bounds(wallet) {
 // facts: the build's semanticFacts(state) when its caller already has them.
 // bond: the build's relation bond (WishProviders.relationBond), null without one.
 // threat: the gear-threat mask the build weighed (context.gearThreatMask),
-// compared hard by the held verdict.
-function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null, bond = null) {
+// compared hard by the held verdict. marketWatch: the build's watch rows
+// [itemId, storeType, reference price, error] (at most MARKET_WATCH), read by
+// the soft point (softEvents); recorded by every build, never carried.
+function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null, bond = null, marketWatch = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
     const budgetTracked = Array.isArray(money?.budgetBounds), escrow = budgetTracked ? money.buyOrderEscrow : 0;
@@ -282,10 +244,49 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
-        ...(facts || semanticFacts(state)), threat: context.gearThreatMask, horizon: context.horizonHours,
-        expHour: positive(context.hunt?.expPerHour), frustration: frustrationOf(state), ...(bond ? { bond } : {}),
+        ...(facts || semanticFacts(state)), threat: context.gearThreatMask,
+        frustration: frustrationOf(state), ...(bond ? { bond } : {}),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
-        ...(share === 1 ? {} : { share }) };
+        ...(share === 1 ? {} : { share }), ...(marketWatch?.length ? { marketWatch } : {}) };
+}
+// The soft point (far bots, the end of every step): the sections whose soft
+// inputs crossed the bot's own error since its decision, empty when quiet;
+// no clock: a drift inside the error is never an event, however long.
+// baseline: the decision's (stats.wishSections). input: { board (the board
+// mirror, null: not ready, the market part waits), buyOrderEscrow, memory (a
+// reader of the bot's memory rows, called only when the bond is compared),
+// timestamp (the step's) }.
+function softEvents(state, baseline, input) {
+    if (!baseline) return NONE;
+    let sections = NONE;
+    const add = names => { sections = sections === NONE ? [...names] : [...new Set([...sections, ...names])]; };
+    if (meaningfulMoney(state, baseline, input.buyOrderEscrow)) add(SOFT_SECTIONS.money);
+    const bondNow = () => Providers.relationBond(state, { memory: input.memory?.() ?? null });
+    if (observationChanged(state, baseline, input.timestamp, undefined, bondNow)) add(SOFT_SECTIONS.observation);
+    if (input.board && marketCrossed(input.board, baseline.marketWatch, Number(state.characterId))) add(SOFT_SECTIONS.market);
+    return sections;
+}
+const NONE = Object.freeze([]);
+const SOFT_SECTIONS = Object.freeze({ money: Object.freeze(['money']),
+    observation: Object.freeze(['occupation', 'benefits', 'sources']), market: Object.freeze(['sources', 'money']) });
+// The watch rows against the board mirror, one head read per row: a sell line
+// (SELL) below the reference by more than the error, or a buy line (BUY)
+// above it by more than the error. Rows of another shape
+// (a baseline saved by an older build) are skipped.
+const MARKET_WATCH = 20;
+function marketCrossed(board, watch, ownerId) {
+    if (!Array.isArray(watch)) return false;
+    const exclude = { excludeOwner: ownerId };
+    for (let at = 0; at < watch.length && at < MARKET_WATCH; at++) {
+        const row = watch[at];
+        if (!Array.isArray(row)) continue;
+        const [itemId, storeType, price, error] = row;
+        if (!(itemId > 0) || !(price > 0) || !(error >= 0)) continue;
+        const line = board.first(itemId, storeType, exclude);
+        if (!line) continue;
+        if (storeType === SELL ? line.price < price * (1 - error) : storeType === BUY && line.price > price * (1 + error)) return true;
+    }
+    return false;
 }
 // Who the friend and the enemy are (WishProviders.relationTargets over the
 // bot's memory), not how much: their trust and hostility are the soft bond.
@@ -360,15 +361,6 @@ function storesOf(owner, into = new Array(4)) {
 function semanticFacts(state, memory = null, recipes = null) {
     return factsOf(stateView(state, recipes), memory);
 }
-function horizonChanged(state, baseline, expPerHour, persona) {
-    if (!baseline) return true;
-    const horizon = (EconomicValuation ||= require('./EconomicValuation')).stageHours(state, expPerHour, persona);
-    return Math.abs(horizon - Number(baseline.horizon || 0)) > Math.abs(Number(baseline.horizon || 0)) * positive(baseline.incomeError);
-}
-function horizonEvent(state, baseline, expPerHour, persona, timestamp) {
-    if (!baseline) return true;
-    return softDue(baseline, 'horizon', timestamp) && horizonChanged(state, baseline, expPerHour, persona);
-}
 // A retained calculation accepts its own decision output, not a foreign
 // leaf or focus that happens to share the same sequence. Scalars also let
 // the cache compare its original unpublished input without another object.
@@ -384,7 +376,7 @@ function isEmptyWishPlan(plan) {
         && plan.next == null && plan.reason === 'wish_focus'
         && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
 }
-function events(before, after, timestamp = Date.now(), escrow = 0) {
+function events(before, after, escrow = 0) {
     // Main may replay a validated worker packet that already describes this
     // same round. Compare its actual baselines, not sequence alone; a packet
     // preceding a new death/level/resource event still raises that event.
@@ -400,7 +392,7 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     const current = { ...semanticFacts(after), relations: previousFact('relations'), recipes: previousFact('recipes') };
     // The round's callers (a hunting round, a rest) hold no leaf to tell an
     // ordered trip from a flight: a trip begun inside a round is an event.
-    return factEvents(previousFact, current, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
+    return factEvents(previousFact, current, moneyChanged(after, represented || before.stats?.wishSections, escrow, false)
         || !previous.funding && fundingMark(before) !== fundingMark(after));
 }
 // The one reading of an occupation against the held leaf (Recompute: own
@@ -448,5 +440,5 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     if (previousFact('stores') !== current.stores) raise('stores');
     return [...sections];
 }
-module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
+module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
+    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

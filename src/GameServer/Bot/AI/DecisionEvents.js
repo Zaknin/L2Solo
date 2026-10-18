@@ -16,13 +16,13 @@ const reasons = { town: 0, revived: 0, money: 0, build: 0, sources: 0, supply: 0
 const factRaises = {};
 // Every reason marks a section, so the next build reconsiders the held focus and activity.
 const bit = Sections.sectionBit;
-// A section name (reconcile, observe: factEvents' list) marks its own bit.
+// A section name (raiseSections, observe: factEvents' list) marks its own bit.
 const sectionBits = { ...Object.fromEntries(Sections.SECTIONS.map(name => [name, bit(name)])), funding: bit('money') };
 // A named reason marks the sections of its fact in the one table
 // (DecisionSections.FACT_SECTIONS); town is an arrival, no fact.
 const factBits = fact => Sections.sectionMask(Sections.FACT_SECTIONS[fact]);
 const reasonBits = { ...sectionBits, money: factBits('funding'), build: factBits('build'),
-    revived: factBits('dead'), benefits: factBits('horizon'), relations: factBits('relations'), town: bit('supply') | bit('money') };
+    revived: factBits('dead'), relations: factBits('relations'), town: bit('supply') | bit('money') };
 let hotEconomyBuilds = 0, reportedBuilds = 0, reportedAt = 0;
 function statsFor(session) {
     return session.coldLifeState ? (session.coldLifeState.stats ||= {}) : (session.decisionStats ||= {});
@@ -163,7 +163,7 @@ function actorView(session, actor, stats) {
     return view;
 }
 // The near bot's facts (the one fact function over its live view) and its
-// money and horizon marks, which near and far bots share as functions.
+// money marks, which near and far bots share as functions.
 function marksFor(session, actor) {
     const stats = session.coldLifeState?.stats || session.heldEconomy?.statsPacket || statsFor(session);
     const wallet = actor.backpack?.fetchTotalAdena?.() ?? actor.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() ?? 0;
@@ -171,20 +171,14 @@ function marksFor(session, actor) {
     // lazy: worker this module also handles cold projections, whose escrow is supplied by their caller.
     const escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(actor.fetchId?.());
     const facts = Sections.factsOf(actorView(session, actor, stats));
-    const timestamp = Date.now();
-    const level = Number(actor.fetchLevel?.() || 0), exp = actor.fetchExp?.();
-    const baseline = stats.wishSections;
-    // Progress is one scalar native read. Reuse the accepted horizon/error;
-    // no actor capture, bag scan or new estimate is needed on an AI action.
-    const progress = { characterId: actor.fetchId?.(), level, stats: { exp }, persona: session.coldLifeState?.persona };
-    const horizon = !!baseline && Number.isFinite(Number(exp)) && Sections.horizonEvent(progress,
-        baseline, baseline.expHour, invoke('GameServer/Bot/AI/BotPersona').of(progress), timestamp);
-    return { facts, horizon, money: Sections.fundingMark(physical, escrow),
-        meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp, escrow) };
+    // No delay: the near bot compares its money on every observation until it
+    // gets a soft point of its own (ARCH-14-b).
+    return { facts, money: Sections.fundingMark(physical, escrow),
+        meaningfulMoney: Sections.meaningfulMoney(physical, stats.wishSections, escrow) };
 }
 // The near bot's facts against the ones its last decision kept, by the far
 // rule (factEvents): a trip or an arrival the held leaf ordered is its own
-// output, no occupation event. Money and horizon add their own sections.
+// output, no occupation event. Money adds its own section.
 function observe(session, actor) {
     const marks = marksFor(session, actor), prior = session.decisionMarks;
     const raised = DiagnosticConfig.developerDiagnostics ? [] : null;
@@ -193,8 +187,7 @@ function observe(session, actor) {
         const planned = Sections.occupationPlanned(session.factView, session.heldEconomy?.network.activity);
         changed = Sections.factEvents(name => prior.facts[name], marks.facts, false, raised, planned);
         if (marks.money !== prior.money || marks.meaningfulMoney) { changed.push('money'); raised?.push('money'); }
-        if (marks.horizon && !prior.horizon) { changed.push('benefits'); raised?.push('benefits'); }
-    } else if (marks.horizon) { changed.push('benefits'); raised?.push('benefits'); }
+    }
     if (changed.length) {
         markSections(session, changed.reduce((bits, section) => bits | sectionBits[section], 0));
         if (raised) for (const name of raised) factRaises[name] = (factRaises[name] || 0) + 1;
@@ -260,13 +253,18 @@ function hold(session, actor, context) {
     }
     return session.heldEconomy;
 }
-function reconcile(before, after, timestamp, escrow = 0) {
-    const changed = Sections.events(before, after, timestamp, escrow);
-    if (!changed.length) return [];
+// One raise per step: the sections a step's checks raised (the round's hard
+// events, DecisionSections.events, and on the background thread the soft
+// point, softEvents) in one decisionSeq bump, their bits ORed into the bits
+// already raised. Nothing when no list names a section.
+function raiseSections(before, after, ...lists) {
+    let bits = 0;
+    for (const list of lists) for (const section of list) bits |= sectionBits[section] || 0;
+    if (!bits) return 0;
     const stats = after.stats ||= {};
     stats.decisionSeq = Math.max(Number(before.stats?.decisionSeq) || 0, Number(stats.decisionSeq) || 0) + 1;
-    stats.wishDirty = changed.reduce((bits, section) => bits | (sectionBits[section] || 0), 0);
-    return changed;
+    stats.wishDirty = (Number(stats.wishDirty) || 0) | bits;
+    return bits;
 }
 function held(session) {
     return session.economySeq === Number(statsFor(session).decisionSeq || 0) ? session.heldEconomy : null;
@@ -282,4 +280,4 @@ function summary(hotHunters = 0, timestamp) {
     return { hotEconomyBuilds: builds, hotEconomyBuildsPerBotMinute: Math.round(perMinute * 100) / 100,
         total: hotEconomyBuilds, reasons: counted };
 }
-module.exports = { statsFor, decisionStatsFor, raiseDecision, marksFor, observe, hold, held, prepared, rejectedState, rejectSession, summary, reconcile };
+module.exports = { statsFor, decisionStatsFor, raiseDecision, marksFor, observe, hold, held, prepared, rejectedState, rejectSession, summary, raiseSections };

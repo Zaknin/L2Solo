@@ -270,9 +270,9 @@ async function run() {
         const bytes = Economy.restartEventProof(proof, accepted);
         assert(bytes instanceof Uint8Array, 'a restartable decision saves its prefix');
         const restored = Economy.restoreEventProof(bytes, accepted);
-        assert.equal(Economy.eventProofHolds(published, restored, deps(), { ...options, softPrefix: true }), true,
+        assert.equal(Economy.eventProofHolds(published, restored, deps(), options), true,
             'the restored prefix holds the saved decision');
-        const older = Uint8Array.from(bytes); older[0] = 5;
+        const older = Uint8Array.from(bytes); older[0] = 6;
         assert.equal(Economy.restoreEventProof(older, accepted), null, 'a prefix of the former format is refused');
         const kept = Generation.metadata();
         try {
@@ -297,42 +297,9 @@ async function run() {
         assert.notEqual(Economy.heldLeafRefusal(bag(2), leaf(null), {}), '', 'an improving leaf without its improvement refuses');
     }
     console.log('PASS threat mask kept / restart prefix format and generation / improving object');
-    {
-        const Route = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute'), select = Route.select;
-        const T = Date.now(), native = { ...base, characterId: 990022 }, occupancy = { fixture: { count: 1 } };
-        const deps = { timestamp: T, occupancy, keepIncomeRoute: true };
-        try {
-            Route.select = (_state, input) => { void input.occupancy.fixture; return null; };
-            const preparedIncomeRoute = Economy.basics(native, deps).preparedIncomeRoute;
-            const held = Economy.forState(native, { ...deps, preparedIncomeRoute });
-            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
-            assert([...held.eventProof().spots.keys()].includes('fixture'), 'a replayed income route retains its occupancy reads');
-            occupancy.fixture.count++;
-            assert.equal(Economy.forState(published, deps).plan, held.plan, 'income crowd waits for its market delay');
-            assert.notEqual(Economy.forState(published, { ...deps, timestamp: T + 600000 }).plan, held.plan,
-                'income crowd refuses a held build once its market delay is due');
-        } finally { Route.select = select; }
-    }
-    {
-        const Providers = invoke('GameServer/Bot/Economy/WishProviders'), build = Providers.build;
-        const localBoard = new Board(), T = Date.now(), native = { ...base, characterId: 990023 }, sources = [];
-        const deps = { board: localBoard, timestamp: T, onSourceRead: id => sources.push(id) };
-        try {
-            Providers.build = (state, ctx, options) => { [...ctx.board.itemIds(3)]; return build(state, ctx, options); };
-            const held = Economy.forState(native, deps);
-            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
-            assert([...held.eventProof().market.keys()].includes(-3), 'the whole buy-side list is a retained market read');
-            localBoard.put({ id: 990023, ownerId: 99, storeType: 3, lines: [{ lineId: 1, selfId: 990099, count: 1, price: 1 }] });
-            assert.equal(Economy.forState(published, deps).plan, held.plan, 'a new board item waits for the market delay');
-            assert(sources.every(id => id > 0), 'list pseudo ids never escape through item source callbacks');
-            assert.notEqual(Economy.forState(published, { ...deps, timestamp: T + 600000 }).plan, held.plan,
-                'a new ad for a previously unseen item invalidates the list after its delay');
-        } finally { Providers.build = build; }
-    }
     // MVP-6 Bounds: a gear candidate's reads wait in its scope; only a kept
-    // scope becomes an input, so a rejected candidate's market cannot rebuild.
+    // scope reports its sources (the occupation planner's dependencies).
     const ScopedProviders = invoke('GameServer/Bot/Economy/WishProviders');
-    const MARKET_DELAY = invoke('GameServer/Bot/Economy/DecisionSections').SOFT_DELAY.market;
     const build = ScopedProviders.build;
     try {
         ScopedProviders.build = (state, ctx, deps) => {
@@ -341,20 +308,11 @@ async function run() {
             ctx.readScope.keep(admitted);
             return build(state, ctx, deps);
         };
-        const revisions = new Map(), sources = new Set();
-        const scopedDeps = () => ({ workshops: invoke('GameServer/Bot/Economy/CraftWorkshopService').publicForRecipe, workshopRevision: id => revisions.get(id) || 0, onSourceRead: id => sources.add(id) });
+        const sources = new Set();
         const scoped = { ...base, characterId: 905 };
-        const scopedContext = Economy.forState(scoped, scopedDeps());
-        const scopedOut = { ...scoped, stats: { ...scoped.stats, ...scopedContext.statsPacket } };
+        const scopedContext = Economy.forState(scoped, { onSourceRead: id => sources.add(id) });
+        assert(scopedContext.plan, 'fixture: the scoped build completes');
         assert(sources.has(990001) && !sources.has(990002), 'only the kept scope subscribes its sources');
-        revisions.set(990002, 1);
-        assert.equal(Economy.forState(scopedOut, scopedDeps()).plan, scopedContext.plan, 'a rejected candidate\'s market change keeps the context');
-        revisions.set(990001, 1);
-        // L70: a read market token is soft; it is re-examined once the
-        // market delay since the last actual decision has passed.
-        assert.equal(Economy.forState(scopedOut, scopedDeps()).plan, scopedContext.plan, 'a moved source waits for the market delay');
-        assert.notEqual(Economy.forState(scopedOut, { ...scopedDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, scopedContext.plan,
-            'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
     // The build's memos (inventory row keys, the kit fact, the bag tokens)
@@ -392,9 +350,10 @@ async function run() {
         Economy.forget(state.characterId);
     }
     console.log('PASS build memos end with the build / nested build');
-    // An item the purchase reader finds no offer for is still an input: the
-    // reader reads the context's watched board, so the first offer for that
-    // item rebuilds the held context.
+    // An item the purchase reader finds no offer for is still reported as
+    // read (the occupation planner's dependency); the first offer for it is
+    // no reason to drop the held decision: the market is heard only through
+    // the decision's watch list, at the soft point (ARCH-05).
     const Evidence = invoke('GameServer/Bot/Economy/WishPurchaseEvidence');
     const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
     const absentBoard = new BoardIndex(), ABSENT = 990003;
@@ -412,10 +371,68 @@ async function run() {
         assert.equal(Economy.forState(absentOut, absentDeps()).plan, absentContext.plan, 'no offer change keeps the context');
         absentBoard.put({ id: 1, ownerId: 77, storeType: 1, custodyPolicy: 1, revision: 1, town: 'Giran',
             lines: [{ lineId: 2, selfId: ABSENT, count: 1, price: 100 }] });
-        assert.notEqual(Economy.forState(absentOut, { ...absentDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, absentContext.plan,
-            'a first offer for an absent item rebuilds');
+        assert(!(absentContext.statsPacket.wishSections.marketWatch || []).some(row => row[0] === ABSENT), 'fixture: the absent item is not watched');
+        assert.equal(Economy.forState(absentOut, { ...absentDeps(), timestamp: Date.now() + 10 * 60 * 1000 }).plan, absentContext.plan,
+            'a first offer for an unwatched item keeps the held decision, however long after');
     } finally { ScopedProviders.build = build; }
-    console.log('PASS absent item is an input');
+    console.log('PASS absent item is read, its offer no event');
+    // The soft point (ARCH-05): at the end of a step the bot compares its
+    // wallet, its income and the items it watches against its own error, at
+    // once (no delay); a watched item's clearly better line is an event, a
+    // line inside the error, its own line or another item's line is none.
+    {
+        const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const Events = invoke('GameServer/Bot/AI/DecisionEvents');
+        const T = Date.now(), native = { ...base, characterId: 990025 }, softBoard = new BoardIndex();
+        const held = Economy.forState(native, { board: softBoard, timestamp: T });
+        const baseline = held.statsPacket.wishSections;
+        const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+        const watched = baseline.marketWatch?.find(row => row[1] === 1);
+        assert(watched && watched[2] > 0 && watched[3] >= 0, `a build watches its wish roots on the sell side: ${JSON.stringify(baseline.marketWatch)}`);
+        const soft = (state, more = {}, board = softBoard) => Sections.softEvents(state, { ...baseline, ...more },
+            { board, buyOrderEscrow: 0, timestamp: T + 1000, memory: () => null });
+        assert.deepEqual(soft(published), [], 'fixture: the published decision is quiet');
+        const wallet = { moneyError: 10, cashBounds: [-1, null], budgetBounds: [-1, null] };
+        const richer = amount => ({ ...published, adena: published.adena + amount });
+        assert.deepEqual(soft(richer(5), wallet), [], 'a wallet drift inside the error is no event');
+        assert.deepEqual(soft(richer(50), wallet), ['money'], 'a wallet drift beyond the error is an event a second later');
+        assert.deepEqual(soft({ ...published, stats: { ...published.stats, frustration: 1 } }, { frustration: 0, incomeError: 0.1 }),
+            ['occupation', 'benefits', 'sources'], 'a frustration beyond the error is an observation event');
+        const [item, , reference, error] = watched, below = Math.floor(reference * (1 - error)) - 1;
+        assert(below > 0, 'fixture: a price below the watched reference');
+        let record = 1;
+        const offer = (selfId, price, storeType = 1, ownerId = 77) => softBoard.put({ id: 9000 + record, ownerId, storeType,
+            custodyPolicy: 1, revision: record++, town: 'Giran', lines: [{ lineId: 1, selfId, count: 1, price }] });
+        offer(990004, 1);
+        assert.deepEqual(soft(published), [], 'a cheap line of an unwatched item is no event');
+        offer(item, below, 1, native.characterId);
+        assert.deepEqual(soft(published), [], 'the bot\'s own line is no event');
+        offer(item, Math.ceil(reference * (1 - error)));
+        assert.deepEqual(soft(published), [], 'a line inside the error is no event');
+        offer(item, below);
+        assert.deepEqual(soft(published), ['sources', 'money'], 'a watched item\'s clearly cheaper line is an event');
+        assert.deepEqual(soft(published, {}, null), [], 'without the board mirror the market waits');
+        const buyWatch = { marketWatch: [[990005, 3, 100, 0.1]] };
+        offer(990005, 105, 3);
+        assert.deepEqual(soft(published, buyWatch), [], 'a buy line inside the error is no event');
+        offer(990005, 120, 3);
+        assert.deepEqual(soft(published, buyWatch), ['sources', 'money'], 'a watched sale\'s clearly higher bid is an event');
+        // The rebuild weighed the line it saw: the same board is no new event.
+        Economy.forget(native.characterId);
+        const rebuilt = Economy.forState(native, { board: softBoard, timestamp: T + 2000 }).statsPacket.wishSections;
+        assert.deepEqual(Sections.softEvents(published, rebuilt, { board: softBoard, buyOrderEscrow: 0, timestamp: T + 3000,
+            memory: () => null }).filter(name => name === 'sources'), [], 'a decision that saw the cheap line does not cross on it again');
+        Economy.forget(native.characterId);
+        // One raise per step: the round's and the soft point's sections in one
+        // bump, ORed into the bits raised before.
+        const before = { stats: { decisionSeq: 3 } }, after = { stats: { decisionSeq: 3, wishDirty: Sections.sectionBit('supply') } };
+        Events.raiseSections(before, after, [], []);
+        assert.equal(after.stats.decisionSeq, 3, 'no section, no bump');
+        Events.raiseSections(before, after, ['money'], ['money', 'sources']);
+        assert.equal(after.stats.decisionSeq, 4, 'one bump for both lists');
+        assert.equal(after.stats.wishDirty, Sections.sectionMask(['supply', 'money', 'sources']), 'the raised bits join the earlier ones');
+    }
+    console.log('PASS soft point: money / observation / watched market / one raise');
     const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
     const shopRecipe = Object.values(invoke('GameServer/Items/C4RecipeItems').loadRecipeItems())
         .find(row => row.type === 'dwarven' && Number(row.mpCost) > 0);
@@ -427,18 +444,13 @@ async function run() {
     try {
         Workshop.register(shopOwner);
         assert.equal(Workshop.publicRecipeRows(shopOwner.characterId).length, 1);
-        // Every market read of this customer carries the workshop digest.
-        const shopDeps = () => ({ workshops: Workshop.publicForRecipe,
-            workshopRevision: () => Workshop.publicRecipeDigest(shopRecipe.productId) });
+        const shopDeps = () => ({ workshops: Workshop.publicForRecipe });
         const shopContext = Economy.forState(base, shopDeps());
         const shopBase = { ...base, stats: { ...base.stats, ...shopContext.statsPacket } };
         assert.equal(Economy.forState(shopBase, shopDeps()).plan, shopContext.plan);
         shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 6 } });
         assert.equal(Economy.forState(shopBase, shopDeps()).plan, shopContext.plan,
             'a workshop owner save without an offer change keeps the customer cache hit');
-        shopSaved({ vitals: { ...shopOwner.vitals, mp: shopRecipe.mpCost * 2 } });
-        assert.notEqual(Economy.forState(shopBase, { ...shopDeps(), timestamp: Date.now() + MARKET_DELAY }).plan, shopContext.plan,
-            'halved capacity is an offer change');
     } finally { Workshop.remove(shopOwner.characterId); }
     const physicalSpot = { id: 'gear-physical', npcEntries: [{ selfId: 130 }] };
     const mixedSpot = { id: 'gear-mixed', npcEntries: [{ selfId: 130 }, { selfId: 264 }] };
