@@ -17,6 +17,10 @@ const Response = invoke('GameServer/Network/Response');
 const { POINT, character, stock, sqlAmount, memoryAmount } = require('./helpers/liveMarketActors');
 const restores = [];
 const stub = (object, key, value) => { const old = object[key]; object[key] = value; restores.push(() => { object[key] = old; }); };
+// Routing assertions exercise the ordinary economic choice, not its rare
+// exploratory alternatives. Keep the native valuation and weighted choice,
+// but hold the roll away from the exploratory tails as the clock changes.
+stub(invoke('GameServer/Bot/AI/TendencyRoll'), 'roll', () => 0.5);
 for (const name of ['userInfo', 'charInfo', 'sitAndStand']) stub(Response, name, () => Buffer.alloc(1));
 function buyOrder(owner, selfId, count, price, enchant = 0) {
     owner.actor.storeType = 4;
