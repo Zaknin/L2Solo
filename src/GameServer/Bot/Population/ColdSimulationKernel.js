@@ -370,10 +370,12 @@ function meetingTravelTransition(state, context, kind = null) {
 
 // A lifecycle plan as main receives it: the step's economy object stays in
 // the worker (it carries functions and is never posted).
+// economy and route are worker-local (the request carries the route's spot).
 function postedPlan(plan) {
-    if (!plan?.economy) return plan;
+    if (!plan?.economy && !plan?.route) return plan;
     const posted = { ...plan };
     delete posted.economy;
+    delete posted.route;
     return posted;
 }
 
@@ -558,6 +560,9 @@ class ColdSimulationKernel {
         // The room check at a party's arrival (the worker's partyArrival):
         // { party, members } with the "was full" mark, or null.
         this.partyArrival = typeof options.partyArrival === 'function' ? options.partyArrival : null;
+        // The party's route (the worker's BotRoute.route on the leader's state):
+        // { leader, party, members, spot, timestamp } -> trip record or null.
+        this.partyRoute = typeof options.partyRoute === 'function' ? options.partyRoute : null;
         this.now = options.now || Date.now;
         this.emit = options.emit || (() => {});
         this.maxBatch = Math.max(1, Math.min(64, Number(options.maxBatch) || 64));
@@ -777,7 +782,9 @@ class ColdSimulationKernel {
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        this.states.set(characterId, { state, context: nextContext, version });
+        // The bot's one record; its kept route (BotRoute.choose, the worker's
+        // planLifecycle) survives a new state: only its sections drop it.
+        this.states.set(characterId, { state, context: nextContext, version, route: current?.route || null });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
@@ -1206,7 +1213,6 @@ class ColdSimulationKernel {
                     party,
                     members: partyMembers,
                     spot: current.context.spot,
-                    route: current.context.route || null,
                     pressure: current.context.pressure || {},
                     targetNpcId: Number(current.context.targetNpcId || 0),
                     grants: new Map(),
@@ -1215,6 +1221,9 @@ class ColdSimulationKernel {
                 });
                 candidateMemberIds.forEach((memberId) => {
                     const member = partyMembers.find((entry) => Number(entry.characterId) === memberId);
+                    // The party run takes the member: its solo route is dropped.
+                    const record = this.states.get(memberId);
+                    if (record) record.route = null;
                     this.claiming.add(memberId);
                     this.claimStartedAt.set(memberId, this.now());
                     candidates.push({
@@ -1402,6 +1411,8 @@ class ColdSimulationKernel {
                     context: current.context,
                     precomputedPlan: postedPlan(lifecyclePlan),
                     precomputedResult: result,
+                    // The trip the plan started (commandSpot on main reads it).
+                    route: lifecyclePlan?.route?.needed ? { needed: true, spotId: lifecyclePlan.route.spotId } : null,
                     computedAt: timestamp,
                     ...(attempt.marketWakeup ? { marketWakeup: true } : {})
                 }]
@@ -1838,10 +1849,15 @@ class ColdSimulationKernel {
                 return;
             }
 
-            if (!meetingPending && !rescuing && run.route?.needed) {
-                const arrivalAt = startedAt + Math.max(1000, Number(run.route.travelMs) || HUNTING_TRAVEL_MS);
+            // One search per party run, not kept: the party's objective spot and
+            // risk marks (on the party record) have no event to the leader.
+            const route = !meetingPending && !rescuing && this.partyRoute ? this.partyRoute({
+                leader: run.members.find(member => Number(member.characterId) === Number(run.purpose.leaderId)) || run.members[0],
+                party: run.party, members: run.members, spot: run.spot, timestamp: startedAt }) : null;
+            if (route?.needed) {
+                const arrivalAt = startedAt + Math.max(1000, Number(route.travelMs) || HUNTING_TRAVEL_MS);
                 const travellingMembers = run.members.map((state) => (
-                    beginHuntingTrip(state, run.route, startedAt)
+                    beginHuntingTrip(state, route, startedAt)
                     || {
                         ...state,
                         timing: { ...(state.timing || {}), nextResolveAt: arrivalAt }
@@ -1849,20 +1865,20 @@ class ColdSimulationKernel {
                 ));
                 const travellingParty = {
                     ...run.party,
-                    spotId: run.route.spotId,
+                    spotId: route.spotId,
                     nextResolveAt: arrivalAt,
                     stats: {
                         ...(require('./CraftMaterialPartyRoute').retarget(
-                            require('./PartySpotRiskPolicy').withBackoff(run.party, run.route.spotBackoff, startedAt),
-                            run.route.materialSources).stats || {}),
+                            require('./PartySpotRiskPolicy').withBackoff(run.party, route.spotBackoff, startedAt),
+                            route.materialSources).stats || {}),
                         pveEncounter: null,
                         travel: {
                             reason: 'party_spot_replan',
-                            regionName: run.route.regionName,
-                            spotId: run.route.spotId,
+                            regionName: route.regionName,
+                            spotId: route.spotId,
                             startedAt,
                             arrivalAt,
-                            ...(run.route.materialEvacuation ? { materialEvacuation: true } : {})
+                            ...(route.materialEvacuation ? { materialEvacuation: true } : {})
                         }
                     }
                 };

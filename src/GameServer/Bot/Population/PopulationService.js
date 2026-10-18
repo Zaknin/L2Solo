@@ -176,11 +176,11 @@ function beginHuntingTravel(state, spot, timestamp = Date.now(), options = {}) {
     }, timestamp);
 }
 
-// The spot the coordinator chose for a commanded bot (routeFor, sent in the
-// worker's context): the trip's destination, or the ground the worker fought
-// on when the bot needed no trip.
-function commandSpot(context) {
-    const spotId = context?.route?.needed ? context.route.spotId : context?.spot?.id;
+// The spot of a commanded bot: the trip the worker's plan started (its
+// request's route, BotRoute), or the ground the worker fought on when the
+// bot needed no trip.
+function commandSpot(workerRequest) {
+    const spotId = workerRequest?.route?.needed ? workerRequest.route.spotId : workerRequest?.context?.spot?.id;
     return spotId ? SpotProfiles.findById(spotId) : null;
 }
 
@@ -3137,14 +3137,14 @@ const PopulationService = {
         const selectedSpot = passiveActivity
             ? null
             : fallbackSpot || (precomputedResult
-                ? commandSpot(workerRequest.context)
+                ? commandSpot(workerRequest)
                 : SpotProfiles.findForState(travellingState, {
                     excludedSpotIds,
                     timestamp: startedAt
                 }));
         // A worker result is a fight at the worker's spot; applied over a trip
         // it would restore `hunting` there and strand stats.travel. The worker
-        // is routed by routeFor from the state this command writes.
+        // is routed by its own plan (BotRoute) from the state this command writes.
         const huntingTravelState = selectedSpot && !passiveActivity && !precomputedResult
             ? beginHuntingTravel(travellingState, selectedSpot, startedAt, { currentSpotId })
             : null;

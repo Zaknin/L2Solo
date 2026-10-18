@@ -116,6 +116,7 @@ const { ColdCompetitionMonitor } = require('./ColdCompetitionMonitor');
 const ColdCompetitionCandidates = require('./ColdCompetitionCandidates');
 const { ColdSimulationKernel } = require('./ColdSimulationKernel');
 const { beginHuntingTrip } = require('./HuntingTravel');
+const BotRoute = require('./BotRoute');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableMirror = require('./TableMirror');
 const { BoardIndex, recordOf } = require('../../AfkTrade/BoardIndex');
@@ -885,6 +886,28 @@ function roomAtArrival(spotId, arriving, overflow = 0) {
     return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
 }
 
+// The solo trip of a step (BotRoute): to the spot the step's own leaf names
+// when the bot may hunt there (the kept route is neither read nor changed),
+// else to the route kept in the bot's kernel record, searched here when the
+// record has none (null: dropped or never computed; not saved, so the first
+// read after a restart searches). The trip is built from where the bot
+// stands now; null: no trip.
+function routeTrip(state, context, leaf, timestamp) {
+    const spots = planningSpots, currentSpot = context?.spot || null;
+    const wished = BotRoute.leafChoice(state, leaf, { spots, timestamp });
+    if (wished) return BotRoute.record(state, wished, null, [], { spots, currentSpot, timestamp });
+    const owner = kernel.states.get(Number(state.characterId));
+    const chosen = owner?.route || BotRoute.choose(state, currentSpot, null, [], { spots, timestamp });
+    if (owner && !owner.route) owner.route = chosen;
+    return BotRoute.record(state, chosen, null, [], { spots, currentSpot, timestamp });
+}
+
+// The kept route goes; the next trip start searches again.
+function dropRoute(characterId) {
+    const owner = kernel.states.get(Number(characterId));
+    if (owner) owner.route = null;
+}
+
 // A solo trip ends on a full spot: the bot stands there with a "was full"
 // mark (counted from this step's counter before its +1) and the step raises
 // occupation and sources with its other events, so the next step's decision
@@ -1162,6 +1185,8 @@ function startKernel(config = {}) {
             buyOrderEscrow: kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow
         }),
         partyArrival,
+        partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
+            { spots: planningSpots, timestamp }),
         projectResolve: async (state, result, timestamp, lifecyclePlan = null) => {
             const owner = kernel.states.get(Number(state.characterId));
             // Room at arrival, before the projection: a full spot's mark rides
@@ -1219,6 +1244,8 @@ function startKernel(config = {}) {
                     },
                     onEconomy: (built, seen) => {
                         economy = built; seenEcho = ColdEconomyDecision.stateEcho(seen);
+                        // This build clears wishDirty too (a party member, a karma step).
+                        if (Number(built?.mask) & DecisionSections.COMPUTED.route) dropRoute(state.characterId);
                         const advice = refreshed?.advisory || ColdEconomyDecision.advisory(built, seen, undefined, observedDeps);
                         rememberWishAdvisory(owner, advice, refreshed ? null : seen, observedDeps);
                     }
@@ -1344,9 +1371,11 @@ function startKernel(config = {}) {
             // The card passed the verdict's cheap check (its spot not excluded).
             if (refreshed && !nullReuse) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
-                const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
-                rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
                 const leaf = refreshed.economy.network.activity;
+                // The card holds the plan: the route is read on the input state.
+                const route = routeTrip(state, context, leaf, timestamp);
+                const routedState = beginHuntingTrip(state, route, timestamp) || state;
+                rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
                 // economy: worker-local, the step's one decision; the
                 // projection after the round reads it (never posted).
                 return { statsPacket: refreshed.economy.statsPacket, economy: refreshed.economy,
@@ -1354,7 +1383,7 @@ function startKernel(config = {}) {
                     activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
                     economyDecision: refreshed.decision, previousPlan, acquisitionPlan: previousPlan,
                     partyRequest: null, reusablePartyRequest: false, replanFailure: null,
-                    targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState };
+                    targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState, route };
             }
             // Build the renewed proof against the native live history, so a
             // consumed wake/expiry does not invalidate it again on publication.
@@ -1376,6 +1405,14 @@ function startKernel(config = {}) {
             const acquisitionPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, preparedEconomy)
                 || selectedAcquisition.acquisitionPlan;
             const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp, { spots, economy });
+            // The step took its build result, which clears wishDirty: a moved
+            // route section, or a new plan destination the search reads (the
+            // gear branch, the party wait), drops the kept route before the
+            // trip start, so the search below runs on the planned state.
+            if ((Number(economy.mask) & DecisionSections.COMPUTED.route)
+                || (previousPlan?.status ?? null) !== (acquisitionPlan?.status ?? null)
+                || String(previousPlan?.next?.spotId ?? '') !== String(acquisitionPlan?.next?.spotId ?? '')
+                || !state.stats?.partyRequest !== !partyRequest) dropRoute(state.characterId);
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { excludedSpotIds, timestamp })
@@ -1394,7 +1431,8 @@ function startKernel(config = {}) {
                 spotId: fallbackSpot ? fallbackSpot.id : state.spotId,
                 stats: plannedStats
             };
-            const routedState = beginHuntingTrip(plannedState, context?.route, timestamp) || plannedState;
+            const route = routeTrip(plannedState, context, economy.network.activity, timestamp);
+            const routedState = beginHuntingTrip(plannedState, route, timestamp) || plannedState;
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { ...context, economy }, 'showcase') : null;
             const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
@@ -1418,7 +1456,8 @@ function startKernel(config = {}) {
                 targetNpcId: partyRouteWaiting ? Number(partyFallback?.npcId || 0) : Number(acquisitionPlan?.next?.npcId || 0),
                 reusablePartyRequest,
                 replanFailure: replanContext.failure || null,
-                plannedState: routedState
+                plannedState: routedState,
+                route
             };
         },
         emit: send,
