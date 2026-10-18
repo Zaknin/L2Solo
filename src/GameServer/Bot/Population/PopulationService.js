@@ -66,10 +66,7 @@ const ClanGoalService = invoke('GameServer/Clan/ClanGoalService');
 const ClanPartyService = invoke('GameServer/Clan/ClanPartyService');
 const ClanMarketService = invoke('GameServer/Clan/ClanMarketService');
 
-const {
-    partyRequestForPlan,
-    partyObjectiveForState
-} = PartyRequestPlanner;
+const { partyObjectiveForState } = PartyRequestPlanner;
 
 const { beginHuntingTrip } = require('./HuntingTravel');
 const SurvivalFloor = require('./SurvivalFloor');
@@ -1589,14 +1586,12 @@ const PopulationService = {
             || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.simulation?.leaseId) return { deferred: true };
         const expired = expirePartyRequestForState(state, timestamp);
         if (expired !== state) return LifeState.upsertState(expired, 'party_request_expired');
-        if (state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil || 0) <= timestamp) {
-            // The next ordinary cold review has the economic context and
-            // bounded source alternatives. Keep the need until that worker
-            // publishes its retry; main must not erase it or rebuild wishes.
-            if (require('./CraftMaterialParty').requestOf(state)) return { deferred: true };
-            const partyRequest = partyRequestForPlan(state, state.stats?.equipmentPlan, timestamp);
-            return LifeState.upsertState({ ...state, stats: { ...state.stats, partyRequest } }, 'party_request_retry');
-        }
+        // A deferred request whose time has passed: the next ordinary cold
+        // review has the economic context and bounded source alternatives.
+        // Keep the need until that worker publishes its retry; main must not
+        // erase it or rebuild wishes (it builds no economy for a far bot).
+        if (state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil || 0) <= timestamp
+            && require('./CraftMaterialParty').requestOf(state)) return { deferred: true };
         return state;
     },
 
@@ -2414,7 +2409,6 @@ const PopulationService = {
     },
 
     partyCapacityLimit,
-    partyRequestForPlan,
     partyObjectiveForState,
     expirePartyRequestForState,
 
@@ -3021,9 +3015,13 @@ const PopulationService = {
             replanContext = {};
             this.planDeferred = Number(this.planDeferred || 0) + 1;
         }
-        const partyRequest = workerPlan?.partyRequest?.materialParty
-            && Number(workerPlan.partyRequest.targetId) === Number(acquisitionPlan?.target?.selfId)
-            ? workerPlan.partyRequest : partyRequestForPlan(state, acquisitionPlan, startedAt);
+        // The background thread's request, built with the bot's economy for
+        // the plan it sent. A plan main re-targeted (retargetColdWorkerPlan)
+        // gets none: the bot's next worker step builds it for the new target.
+        // Without a worker plan the saved request stands.
+        const partyRequest = !workerPlan ? state.stats?.partyRequest || null
+            : Number(workerPlan.acquisitionPlan?.target?.selfId || 0) === Number(acquisitionPlan?.target?.selfId || 0)
+                ? workerPlan.partyRequest || null : null;
         const plannedStats = { ...(state.stats || {}), equipmentPlan: acquisitionPlan };
         if (partyRequest) plannedStats.partyRequest = partyRequest;
         else delete plannedStats.partyRequest;

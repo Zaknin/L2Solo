@@ -770,7 +770,9 @@ class ColdSimulationKernel {
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        this.states.set(characterId, { state, context: nextContext, version });
+        // The material memo is the background thread's own (partyRequestForPlan).
+        this.states.set(characterId, { state, context: nextContext, version,
+            ...(current?.materialMemo ? { materialMemo: current.materialMemo } : {}) });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);

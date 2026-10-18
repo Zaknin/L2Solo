@@ -3,7 +3,6 @@
 const MAX_SOURCE_CHECKS = 32, MAX_CAMPS = 4, MAX_CORE = 3, MAX_MEMBERS = 5;
 const REVIEW_MS = 5 * 60000, SOURCE_CACHE_SIZE = 256;
 const sources = new WeakMap();
-const negativeChecks = new WeakMap();
 const positive = value => Math.max(0, Number(value) || 0);
 const isObjective = objective => objective?.materialParty === true && !objective.clanGoalKey;
 const requestOf = state => isObjective(state.stats?.partyRequest) ? state.stats.partyRequest : null;
@@ -61,11 +60,14 @@ function campsFor(state, itemId, spots, spoiler) {
     return result;
 }
 
-function request(state, plan, { spots = [], economy, timestamp = Date.now() } = {}) {
+// memo: the bot's record in the background thread; its materialMemo field
+// keeps the last "no camp is worth a party" answer while the bot's decision
+// sequence, the memo key and the spot list hold, until the review time.
+function request(state, plan, { spots = [], economy, memo = null, timestamp = Date.now() } = {}) {
     if (state.partyId || state.party?.partyId || state.level < 52 || !plan?.recipeId
         || !['active', 'deferred', 'blocked'].includes(plan.status) || plan.clanGoal
         || !spots.length || !economy) return null;
-    const focus = economy.network?.focus?.[0] || state.stats?.wishFocus?.[0];
+    const focus = economy.network?.focus?.[0];
     if (focus !== `power:${plan.target?.selfId}:${plan.target?.slot}`) return null;
     const Index = require('../../Item/ItemTemplateIndex'), Data = invoke('GameServer/DataCache');
     const target = Index.find(Data.items, plan.target.selfId);
@@ -103,12 +105,11 @@ function request(state, plan, { spots = [], economy, timestamp = Date.now() } = 
         return { ...held, status: 'open', amount, requiredTotal, materialCash, materialSoloHours };
     }
     const memoKey = `${state.level}:${state.stats?.classId ?? state.classId}:${plan.target.selfId}:${material.selfId}:${amount}`;
-    const memo = economy.plan && negativeChecks.get(economy.plan);
-    if (memo?.key === memoKey && memo.spots === spots && timestamp < memo.until) return null;
+    const seq = Number(state.stats?.decisionSeq || 0), held = memo?.materialMemo;
+    if (held?.key === memoKey && held.seq === seq && held.spots === spots && timestamp < held.until) return null;
     const noRequest = () => {
-        // Borrow the existing economic decision identity: no second per-bot
-        // book, and no repeated exact safety work while that decision holds.
-        if (economy.plan) negativeChecks.set(economy.plan, { key: memoKey, spots, until: timestamp + REVIEW_MS });
+        // No repeated exact safety work while the bot's decision holds.
+        if (memo) memo.materialMemo = { key: memoKey, seq, spots, until: timestamp + REVIEW_MS };
         return null;
     };
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -142,7 +143,7 @@ function remaining(state, goal, inventory = state.inventory) {
 // renewed material decision may reopen it. No source search is needed here.
 function supplyPause(state, plan, { economy, timestamp = Date.now() } = {}) {
     const held = requestOf(state);
-    const focus = economy?.network?.focus?.[0] || state.stats?.wishFocus?.[0] || '';
+    const focus = economy?.network?.focus?.[0] || '';
     if (!held || !['open', 'deferred'].includes(held.status) || !focus.startsWith('stock:')
         || state.partyId || state.party?.partyId || state.activity === 'dead'
         || !plan?.recipeId || plan.clanGoal || plan.levelingRecovery
