@@ -791,12 +791,12 @@ function kitReader(data, price, scrollUseHours) {
 // is most of a foundation. A cold step often builds basics() and then
 // forState() for the same projected state; the second build takes the
 // first one's route through deps.preparedIncomeRoute instead of searching
-// again. Key: the same state object, timestamp, spots and occupancy objects,
+// again. Key: the same state object, timestamp and spots objects,
 // mode, maxChecks and required gear flag. Select also reads module state
-// (SpotRiskPolicy exclusions, SpotValueTable tables, SpotProfiles capacity,
+// (SpotRiskPolicy exclusions, SpotValueTable tables,
 // LevelingRoutes, the ColdCombatProfile kit store), so the reuse is exact only because
 // nothing yields or writes between the basics and the build of one step: a
-// record must never cross an await or a write to occupancy or reservations.
+// record must never cross an await or a write to the bot's spot marks.
 // The record keeps each price(id) select made, in order, with
 // its value: the build replays them through its own price first, so its
 // read set, price and belief maps and board watch fill exactly as a fresh
@@ -807,7 +807,7 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
     const required = GearProgression.assess(state).required;
     const prepared = deps.preparedIncomeRoute;
     if (prepared && prepared.state === state && prepared.timestamp === timestamp && prepared.spots === deps.spots
-        && prepared.occupancy === deps.occupancy && prepared.mode === deps.mode
+        && prepared.mode === deps.mode
         && prepared.maxChecks === deps.maxChecks && prepared.required === required) {
         let same = true;
         for (let i = 0; i < prepared.reads.length; i += 2) {
@@ -819,7 +819,7 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
     const route = IncomeRoute.select(state, { ...deps, timestamp, required,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
     if (Diagnostics.active()) countIncomeRoute(state, deps, timestamp, route);
-    keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
+    keep?.({ state, timestamp, spots: deps.spots, mode: deps.mode,
         maxChecks: deps.maxChecks, required, reads, route });
     return route;
 }
@@ -1003,9 +1003,9 @@ function forState(state = {}, deps = {}) {
     const mask = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
         | eventVerdict.touchedSections;
     // The foundation is reused with the prices and the horizon it was priced with.
-    // Reads no section names, reused with it: the income route's crowding
-    // (deps.occupancy), the persona and the town-visit rhythm. The walk's
-    // unnamed reads, reused with its memo until a source section is raised:
+    // Reads no section names, reused with it: the persona and the town-visit
+    // rhythm. The walk's unnamed reads, reused with its memo until a source
+    // section is raised:
     // hunt efficiency and clock, spot risk and the active spot exclusions
     // (they expire by time), exp, persona, market trades, craft station,
     // the equipment plan and the crafter's MP.

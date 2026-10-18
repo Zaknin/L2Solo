@@ -2,6 +2,7 @@ const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const EquipmentIncomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
@@ -429,18 +430,6 @@ function spotHunters(spot) {
     return spot?.id ? Math.max(1, LevelingRoutes.occupancyForSpot(SpotProfiles.currentOccupancy(SpotProfiles.ensure()), spot.id)) : 1;
 }
 
-function shouldLeaveOverCapacity(state, spot, occupancy) {
-    const entry = occupancy?.[spot?.id];
-    const reservationKey = clanEquipmentReservationKey(state, spot?.id);
-    if (reservationKey && entry?.retainedReservationKeys instanceof Set
-        && !entry.retainedReservationKeys.has(reservationKey)) return true;
-    const count = LevelingRoutes.occupancyForSpot(occupancy, spot?.id);
-    const capacity = Number(entry?.capacity || LevelingRoutes.capacityForSpot(spot));
-    if (!spot || count <= capacity) return false;
-    if (entry?.retained instanceof Set) return !entry.retained.has(stateKey(state));
-    return true;
-}
-
 // A solo fallback search must not become a travel loop between comparable
 // camps: the bot keeps its current camp when it is one of the candidates.
 function currentSpotAmong(candidates, currentSpot, mustRelocate) {
@@ -492,50 +481,33 @@ const SpotProfiles = {
                 ? [...options.excludedSpotIds].map(String)
                 : [])
         ]);
-        const occupancy = options.occupancy || currentOccupancy(profiles);
-        const capacityStates = Array.isArray(options.capacityStates) && options.capacityStates.length
-            ? options.capacityStates
-            : [state];
-        const capacityUnits = new Set(capacityStates.map(stateKey).filter(Boolean)).size || 1;
-        const reservationKey = clanEquipmentReservationKey(state, acquisitionPlan?.next?.spotId);
-        const reservationOptions = reservationKey ? {
-            reservationKey,
-            maxReservationGroups: MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT
-        } : {};
         const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
         const mode = LevelingRoutes.modeForState(state, options);
-        const routeOptions = { ...options, occupancy, excludedSpotIds, capacityUnits, ...reservationOptions,
+        // The crowd is no input of the search: a full spot is met at arrival (ARCH-08-a).
+        const routeOptions = { ...options, excludedSpotIds,
             spotEconomics: options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-                { timestamp, mode, occupancy }),
+                { timestamp, mode }),
             matchupProfiles: TargetMatchup.stateProfiles(state, { ...options, mode }) };
         const currentMatch = currentSpot ? LevelingRoutes.scoreSpot(currentSpot, state, routeOptions) : null;
-        // Staying on the leader's ground still admits any teammates reserved
-        // elsewhere. Check them before either current-spot shortcut, while
-        // leaving redistribution of already counted hunters to the retained set.
-        const currentNeedsRoom = currentSpot
-            && capacityUnitsFor(capacityStates, occupancy[currentSpot.id]) > 0
-            && !hasCapacityForStates(currentSpot, capacityStates, occupancy, reservationOptions);
         // A starter field outside the bot's region (locality penalty) asks
         // for a move only when a field without that penalty can take the bot:
-        // allowed, with room, near its level. A kit that survives no home
+        // allowed, near its level. A kit that survives no home
         // field yet (an orc mystic on fists before its first spell) would
         // otherwise be sent to another penalised field on every resolve and
         // never hunt. Checked only for the few young bots on foreign ground.
         // One reader per spot loop: profiles and safety are read once (L131).
         const homeAllowed = LevelingRoutes.spotAllowedReaderFor(state, routeOptions);
+        const foreign = (profile) => LevelingRoutes.localityPenaltyForSpot(profile, state, { level: targetLevel },
+            LevelingRoutes.tagsForSpot(profile)) > 0;
         const localityRelocate = currentSpot && currentMatch.localityPenalty > 0
             && spotsNearLevel(profiles, targetLevel).some((profile) => profile.id !== currentSpot.id
                 && !excludedSpotIds.has(String(profile.id))
-                && LevelingRoutes.localityPenaltyForSpot(profile, state, { level: targetLevel },
-                    LevelingRoutes.tagsForSpot(profile)) === 0
-                && hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions)
+                && !foreign(profile)
                 && homeAllowed(profile));
         const mustRelocate = currentSpot && (localityRelocate
             || (currentSpot.raidBoss === true && !explicitClanRaidSpot(state, currentSpot))
             || currentMatch.targetMatchup?.eligible === false
             || currentMatch.huntingGround?.allowed === false
-            || shouldLeaveOverCapacity(state, currentSpot, occupancy)
-            || currentNeedsRoom
             || excludedSpotIds.has(String(currentSpot.id)));
         const keepCurrentSpot = currentSpot && (!acquisitionPlan || protectedStarterCohort)
             && !mustRelocate
@@ -546,8 +518,8 @@ const SpotProfiles = {
         // for established bots.
         const collectingGear = acquisitionPlan?.status === 'active' && acquisitionPlan.next?.spotId;
         if (!protectedStarterCohort && !collectingGear) {
-            const incomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').select(state, {
-                spots: profiles, occupancy, timestamp, mode,
+            const incomeRoute = EquipmentIncomeRoute.select(state, {
+                spots: profiles, timestamp, mode,
                 required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
             if (incomeRoute) return incomeRoute.spot;
         }
@@ -557,25 +529,17 @@ const SpotProfiles = {
         }
 
         if (acquisitionPlan?.status === 'active') {
-            // A gear objective may have several valid drop sources. Select an
-            // available source instead of letting the persisted objective
-            // override the live spot capacity forever.
+            // A gear objective may have several valid drop sources: the first
+            // allowed one, else the persisted route.
             const plannedSource = GearAcquisitionPlanner.bestSourceForPlan(
                 state,
                 acquisitionPlan,
                 profiles,
-                { occupancy, excludedSpotIds, capacityUnits, ...reservationOptions,
+                { excludedSpotIds,
                     allowRaidSources: acquisitionPlan.next?.sourceKind === 'raid'
                         && GearAcquisitionPlanner.isClanOwnedPlan(acquisitionPlan) }
             );
-            const planned = plannedSource
-                ? SpotIndex.spotById(profiles, plannedSource.spotId)
-                // Lightweight callers may provide only the persisted route
-                // metadata, without a source atlas or occupancy snapshot.
-                // Preserve that route until live capacity data is available.
-                : Object.keys(occupancy || {}).length === 0
-                    ? SpotIndex.spotById(profiles, acquisitionPlan.next?.spotId)
-                    : null;
+            const planned = SpotIndex.spotById(profiles, plannedSource ? plannedSource.spotId : acquisitionPlan.next?.spotId);
             if (planned && !excludedSpotIds.has(String(planned.id))
                 && LevelingRoutes.isSpotAllowedForState(planned, state, routeOptions)) {
                 // A drop source may be valid for the item but still be a
@@ -583,7 +547,7 @@ const SpotProfiles = {
                 // plan pin an outleveled bot to that source indefinitely.
                 const hasLevelBounds = Number.isFinite(Number(planned.minLevel))
                     && Number.isFinite(Number(planned.maxLevel));
-                const economicSource = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state)
+                const economicSource = EquipmentIncomeRoute.economicHunt(state)
                     && Number(planned.avgLevel || planned.minLevel || 1) - state.level >= -15;
                 if (!currentSpot || !hasLevelBounds || SpotService.isSuitable(planned, targetLevel, options) || economicSource) {
                     return planned;
@@ -595,24 +559,67 @@ const SpotProfiles = {
             return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
         }
 
-        const allowed = LevelingRoutes.spotAllowedReaderFor(state, routeOptions);
+        const soloSearch = !['party', 'duo'].includes(mode);
+        const withRoute = (spot) => LevelingRoutes.decorateSpot(spot, LevelingRoutes.routeMatchFor(spot, state, routeOptions));
+        // The game table's spot list for the bot's role and level (ARCH-08-b):
+        // best income first, ties to the closest level. The first spot that
+        // is not avoided, its ground and matchup allow and whose level fits
+        // wins, else the first allowed one; the list with shots, then the
+        // list without them when no spot of the first is allowed. A party or
+        // duo search reads its leader's solo list (simplest; a list for the
+        // party's main role would be read once per party search).
+        const list = EquipmentIncomeRoute.spotList(state, { level: targetLevel });
+        let pick = null, firstAllowed = null, currentListed = false;
+        for (const shots of [true, false]) {
+            for (const id of list.ids(shots)) {
+                const spot = SpotIndex.spotById(profiles, id);
+                // A foreign starter field is no list pick: the locality rule
+                // above would send the bot away from it again.
+                if (!spot || spot.raidBoss === true || excludedSpotIds.has(String(spot.id)) || foreign(spot)) continue;
+                if (currentSpot && spot.id === currentSpot.id) {
+                    if (mustRelocate) continue;
+                    currentListed = true;
+                }
+                const fits = SpotService.isSuitable(spot, targetLevel, options);
+                if (!fits && firstAllowed) continue;
+                if (!homeAllowed(spot)) continue;
+                if (fits) { pick = spot; break; }
+                firstAllowed = spot;
+            }
+            if (pick || firstAllowed) break;
+        }
+        // Without a suitable camp a solo bot keeps its current one when the
+        // list holds it: comparable camps must not become a travel loop.
+        if (!pick && firstAllowed && soloSearch && currentListed) {
+            Diagnostics.count('spot_list', 'pick', 'current');
+            return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
+        }
+        if (pick || firstAllowed) {
+            Diagnostics.count('spot_list', 'pick', pick ? 'suitable' : 'allowed');
+            return withRoute(pick || firstAllowed);
+        }
+
+        // No allowed spot on the list (a catalogue spot the table does not
+        // rank, e.g. one without income): the allowed ground near the level,
+        // a field of the bot's own region first, then the closest level. If that too leaves bots without a spot, the
+        // simplest option is the list again with the income route's wider
+        // minGap (-15).
         const candidates = spotsNearLevel(profiles, targetLevel)
             .filter((profile) => !excludedSpotIds.has(String(profile.id)))
-            .filter((profile) => allowed(profile));
+            .filter((profile) => homeAllowed(profile));
         const relocationCandidates = mustRelocate
             ? candidates.filter((profile) => profile.id !== currentSpot.id)
             : candidates;
-        let routeCandidates = (relocationCandidates.length ? relocationCandidates : candidates)
-            .filter((profile) => hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions));
+        let routeCandidates = relocationCandidates.length ? relocationCandidates : candidates;
         let suitable = routeCandidates.filter((profile) => SpotService.isSuitable(profile, targetLevel, options));
-        const soloSearch = !['party', 'duo'].includes(mode);
         // Without a suitable camp a solo bot hunts allowed ground near its
         // level: like the easier-ground fallback below, it keeps its current camp.
         if (soloSearch && !suitable.length && currentSpotAmong(routeCandidates, currentSpot, mustRelocate)) {
+            Diagnostics.count('spot_list', 'pick', 'current');
             return LevelingRoutes.decorateSpot(currentSpot, currentMatch);
         }
         // A weak kit can make every camp near the character's level unsafe.
-        // Search easier ground using the same combat and capacity checks;
+        // Search easier ground using the same combat checks;
         // otherwise a perfectly healthy bot repeats missing_spot forever.
         if (!routeCandidates.length && soloSearch) {
             const recoveryState = { ...state, stats: { ...state.stats, equipmentPlan: null } };
@@ -620,32 +627,37 @@ const SpotProfiles = {
             const maybeSurvives = TargetMatchup.soloSpotUpperBound(routeOptions.matchupProfiles);
             const lower = lowerSpots(profiles, targetLevel)
                 .filter(profile => !excludedSpotIds.has(String(profile.id))
-                    && hasCapacityForStates(profile, capacityStates, occupancy, reservationOptions)
                     && maybeSurvives(profile))
                 .map(profile => ({ profile, value: spotValue(profile)?.valueHours ?? -Infinity }))
-                .sort((a, b) => b.value - a.value || String(a.profile.id).localeCompare(String(b.profile.id)));
+                // Value first, ties as the near-level fallback: closest level, then density.
+                .sort((a, b) => b.value - a.value
+                    || Math.abs(a.profile.avgLevel - targetLevel) - Math.abs(b.profile.avgLevel - targetLevel)
+                    || b.profile.density - a.profile.density
+                    || String(a.profile.id).localeCompare(String(b.profile.id)));
             routeCandidates = [];
             const recoveryAllowed = LevelingRoutes.spotAllowedReaderFor(recoveryState, routeOptions);
             // ARCH-NOTE: ALT optimistic damage prefilter preserves exact-safe
             // camps: naked L50 catalogue fixture finds 100% of best safe income
             // with 8 exact probes (default 128 found none). Same-catalogue first
             // search 65.9 -> 22.1 ms; warm 1.77 -> 2.38 ms. Shared gate unchanged.
-            for (let checked = 0; checked < lower.length && checked < 128 && routeCandidates.length < 8; checked++) {
+            // The first allowed one in this order is the pick (ARCH-08-b: no score).
+            for (let checked = 0; checked < lower.length && checked < 128 && !routeCandidates.length; checked++) {
                 const profile = lower[checked].profile;
                 if (recoveryAllowed(profile)) routeCandidates.push(profile);
             }
             suitable = [];
+            Diagnostics.count('spot_list', 'pick', routeCandidates.length ? 'recovery' : 'none');
+        } else {
+            Diagnostics.count('spot_list', 'pick', routeCandidates.length ? 'near_level' : 'none');
         }
-        const guided = LevelingRoutes.bestSpot(suitable.length ? suitable : routeCandidates, state, routeOptions);
-
-        if (guided?.spot) return guided.spot;
-
-        return (suitable.length ? suitable : routeCandidates).sort((a, b) => {
+        const fallback = (suitable.length ? suitable : routeCandidates).sort((a, b) => {
+            if (foreign(a) !== foreign(b)) return foreign(a) ? 1 : -1;
             const aGap = Math.abs(a.avgLevel - targetLevel);
             const bGap = Math.abs(b.avgLevel - targetLevel);
             if (aGap !== bGap) return aGap - bGap;
             return b.density - a.density;
         })[0] || null;
+        return fallback && withRoute(fallback);
     }
 };
 
@@ -653,7 +665,6 @@ SpotProfiles.occupancySnapshot = occupancySnapshot;
 SpotProfiles.currentOccupancy = currentOccupancy;
 SpotProfiles.spotHunters = spotHunters;
 SpotProfiles.indexedOccupancy = indexedOccupancy;
-SpotProfiles.shouldLeaveOverCapacity = shouldLeaveOverCapacity;
 SpotProfiles.farmIntentSpotId = farmIntentSpotId;
 SpotProfiles.hasCapacityForStates = hasCapacityForStates;
 SpotProfiles.reserveCapacity = reserveCapacity;

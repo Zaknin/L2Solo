@@ -37,8 +37,7 @@ const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const OfferOrder = require('../Economy/OfferOrder');
 const SpotIndex = require('./SpotIndex');
-// Resolved at the first call (cycles); a require per call is a path lookup (L73).
-let SpotEconomics = null;
+const SpotEconomics = require('../Economy/SpotEconomics');
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
@@ -732,7 +731,9 @@ function preferredTarget(state = {}, options = {}) {
         ? options
         : { ...options, allowedRecipeIds: stationRecipeIds() };
     const candidatePool = affordable.length ? affordable : progressionCandidates;
-    const liveAvailability = !!options.occupancy && (options.spots || []).length > 0;
+    // The spot atlas, not the crowd, marks live planning: every live planner
+    // passes it, and the crowd is met at arrival (ARCH-08-b).
+    const liveAvailability = (options.spots || []).length > 0;
     const candidates = [];
     // Three candidates per slot remain the normal cold-path budget. Only when
     // that entire batch has no live route do we inspect the next nearby batch.
@@ -776,7 +777,7 @@ function preferredDropTarget(state = {}, options = {}) {
         .filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => Number(owned.get(Number(item.selfId)) || 0) < 1)
         .sort((a, b) => itemScore(b, role, classId) - itemScore(a, role, classId) || Number(b.template?.price || 0) - Number(a.template?.price || 0));
-    if (!options.occupancy || !(options.spots || []).length) return candidates[0] || null;
+    if (!(options.spots || []).length) return candidates[0] || null;
     return candidates.find((item) => targetHasAvailableRoute(item, state, options)) || null;
 }
 
@@ -800,7 +801,7 @@ function preferredNoGradeTarget(state = {}, options = {}) {
         })
         .sort((a, b) => GearLifecycle.slotPriority(b.etc?.slot) - GearLifecycle.slotPriority(a.etc?.slot)
             || Number(a.template?.price || 0) - Number(b.template?.price || 0));
-    if (!options.occupancy || !(options.spots || []).length) return candidates[0] || null;
+    if (!(options.spots || []).length) return candidates[0] || null;
     return candidates.find((item) => targetHasAvailableRoute(item, state, options)) || null;
 }
 
@@ -1755,48 +1756,6 @@ function partyNeedReasonForSource(state = {}, source = {}) {
     return partyNeedAssessmentForSource(state, source).reason;
 }
 
-function sourceOccupancyEntry(source, occupancy) {
-    if (!occupancy || !source?.spotId) return null;
-    return occupancy instanceof Map ? occupancy.get(source.spotId) : occupancy[source.spotId];
-}
-
-function sourceStateKey(state = {}) {
-    return String(state.characterId || state.name || state.stats?.generatedIndex || '');
-}
-
-function sourceHasCapacity(source, state, options = {}) {
-    // Raid bosses are shared world objectives. Capacity is the boss itself,
-    // not an exclusive hunting-sector reservation: several clans may race it.
-    if (source?.sourceKind === 'raid' || source?.raidBoss === true) return true;
-    const entry = sourceOccupancyEntry(source, options.occupancy);
-    const units = Math.max(1, Math.floor(Number(options.capacityUnits || 1)));
-    if (!entry) {
-        const capacity = Number(source.capacity || LevelingRoutes.capacityForSpot(source));
-        return units <= Math.max(1, capacity);
-    }
-    const reservationKey = String(options.reservationKey || '');
-    const maxReservationGroups = Math.max(0, Math.floor(Number(options.maxReservationGroups || 0)));
-    if (reservationKey && maxReservationGroups > 0) {
-        const reservationKeys = entry.reservationKeys instanceof Set ? entry.reservationKeys : new Set();
-        const retainedReservationKeys = entry.retainedReservationKeys instanceof Set
-            ? entry.retainedReservationKeys
-            : reservationKeys;
-        if (reservationKeys.has(reservationKey)) {
-            if (!retainedReservationKeys.has(reservationKey)) return false;
-        } else if (retainedReservationKeys.size >= maxReservationGroups) {
-            return false;
-        }
-    }
-    const count = typeof entry === 'object'
-        ? Number(entry.reservedCount ?? entry.count ?? 0)
-        : Number(entry || 0);
-    const capacity = typeof entry === 'object' && Number(entry.capacity || 0) > 0
-        ? Number(entry.capacity)
-        : Number(source.capacity || LevelingRoutes.capacityForSpot(source));
-    if (entry.retained instanceof Set && entry.retained.has(sourceStateKey(state))) return true;
-    return count + units <= Math.max(1, capacity);
-}
-
 function targetHasAvailableRoute(target, state = {}, options = {}) {
     if (!target) return false;
     if (marketOfferForTarget(target, state, options)) return true;
@@ -1820,11 +1779,8 @@ function bestSourceForState(sources = [], state = {}, options = {}) {
         .filter((source) => !sourceIsExcluded(source, options))
         .filter((source) => sourceWithinVoluntaryHuntBand(state, source));
     const safeSources = allowedSources.filter((source) => soloSafeForSource(state, source));
-    if (!options.occupancy) return safeSources[0] || allowedSources[0] || null;
-    const safeAvailable = safeSources.filter((source) => sourceHasCapacity(source, state, options));
-    if (safeAvailable.length) return safeAvailable[0];
-    const available = allowedSources.filter((source) => sourceHasCapacity(source, state, options));
-    return available[0] || null;
+    // A full source is met at arrival, not skipped here (ARCH-08-b).
+    return safeSources[0] || allowedSources[0] || null;
 }
 
 function itemIdForPlan(plan = {}) {
@@ -2123,7 +2079,6 @@ function sourceRouteReader(state, options = {}) {
     const timestamp = options.timestamp ?? Date.now();
     const excluded = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
     const Spots = invoke('GameServer/Bot/AI/SpotService');
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
     const level = Number(state.level || 1);
     let profiles = null;
@@ -2132,11 +2087,9 @@ function sourceRouteReader(state, options = {}) {
     const refusal = spot => {
         if (spot.raidBoss === true) return 'raid';
         if (excluded.has(String(spot.id))) return 'excluded';
-        const soloOptions = { timestamp, occupancy: options.occupancy,
-            mode: 'solo', capacityStates: [state] };
+        const soloOptions = { timestamp, mode: 'solo' };
         if (!Spots.isSuitable(spot, level, soloOptions)
             && !(economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= level - 15)) return 'level';
-        if (!Profiles.hasCapacityForStates(spot, [state], options.occupancy)) return 'capacity';
         profiles ||= options.matchupProfiles || BotTargetMatchup.stateProfiles(state, soloOptions);
         if (!LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })) return 'matchup';
         return null;
@@ -2157,8 +2110,8 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     const timestamp = options.timestamp ?? Date.now();
     const routeAllowed = options.routeAllowed || sourceRouteReader(state, { ...options, timestamp });
     const spotValue = options.spotValue
-        || (SpotEconomics ||= require('../Economy/SpotEconomics')).create(state, { timestamp, occupancy: options.occupancy });
-    const trips = options.trips || new Map(), occupied = options.occupied || new Map();
+        || SpotEconomics.create(state, { timestamp });
+    const trips = options.trips || new Map();
     const current = String(state.stats?.travel?.spotId || state.spotId || null);
     const bestForWish = options.bestForWish;
     const spoilOnly = bestForWish?.spoilOnly, progressionRequired = bestForWish?.progressionRequired;
@@ -2266,7 +2219,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
                     if (tally && !partyNeeded++ && !tally.has('party_needed')) tally.set('party_needed', 0);
                     if (readyOnly) continue;
                     reason = 'party_needed';
-                } else if (sourceSpotOccupied(spot, state, options.occupancy, occupied)) reason = 'occupied';
+                }
                 if (!reason && !routeAllowed(spot)) reason = 'route_ineligible';
             }
             let row = null, perHour = 0, trip = null, town = null;
@@ -2314,19 +2267,6 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         for (let step = Math.ceil(processed / SOURCE_FACT_STEP); step < Math.ceil(plannedTurns / SOURCE_FACT_STEP); step++) yield 'source';
         return facts;
     }
-}
-
-// A non-raid record's occupied verdict reads only its spot, the bot and the
-// occupancy: one answer per spot object in verdicts (the caller's map lives
-// one build, as the route reader's verdicts do).
-function sourceSpotOccupied(spot, state, occupancy, verdicts) {
-    let full = verdicts.get(spot);
-    if (full === undefined) {
-        full = !sourceHasCapacity({ spotId: spot.id, capacity: LevelingRoutes.capacityForSpot(spot), raidBoss: spot.raidBoss === true },
-            state, { occupancy });
-        verdicts.set(spot, full);
-    }
-    return full;
 }
 
 // A party_needed or spoil_skill tail of one kind of a fact row, from rank

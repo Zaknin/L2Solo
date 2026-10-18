@@ -2756,7 +2756,9 @@ const BotLifeState = {
         // error; raised with the round's hard events in one bump.
         const soft = !isMainThread && typeof options.softInputFor === 'function'
             ? DecisionSections.softEvents(nextState, nextState.stats.wishSections, options.softInputFor(nextState, timestamp)) : [];
-        DecisionEvents.raiseSections(state, nextState, hard, soft);
+        // checkSections: the sections a failed cheap check of this step raised
+        // before its projection (the worker's room at arrival), in the same bump.
+        DecisionEvents.raiseSections(state, nextState, hard, soft, options.checkSections || []);
         // The worker's post-round economy ask: only a step that took no
         // decision before its round (a party member).
         if (!isMainThread && !state.stats?.tradeMeeting && !beforeResolvePacket) {

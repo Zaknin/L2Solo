@@ -97,6 +97,10 @@ const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyRequirementRefresh = invoke('GameServer/Bot/Population/PartyRequirementRefresh');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
+const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const DecisionEvents = require('../AI/DecisionEvents');
+const { stateKey } = require('./SpotOccupancyIndex');
 const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const Protocol = require('./ColdSimulationProtocol');
@@ -881,6 +885,66 @@ function currentPlanningOccupancy(timestamp = Date.now()) {
     return planningOccupancyCache;
 }
 
+// The cheap check `room` at arrival: the bots that stand on the spot in the
+// one "who stands here" index (kernel.occupancy), other than the arriving
+// ones, plus the arriving ones, against the spot's capacity. A bot traveling
+// there is indexed at its destination but does not stand there yet. Read once
+// when a trip ends; no place is held for a bot on its way. A raid boss spot or
+// a spot the catalog does not know has room, as hasCapacityForStates.
+const ROOM_SECTIONS = Object.freeze(['occupation', 'sources']);
+function roomAtArrival(spotId, arriving, overflow = 0) {
+    const spot = SpotIndex.spotById(planningSpots, spotId);
+    if (!spot || spot.raidBoss === true) return true;
+    const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
+    return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
+}
+
+// A solo trip ends on a full spot: the bot stands there with a "was full"
+// mark (counted from this step's counter before its +1) and the step raises
+// occupation and sources with its other events, so the next step's decision
+// point refuses the hunting leaf there and the spot search takes the next one.
+// A safety evacuation may exceed a full spot by one bot. A party trip is
+// checked once, at the party's arrival (partyArrival). Returns the marked
+// result, or null when the step is no such arrival or the spot has room.
+function soloArrival(state, result) {
+    const travel = state?.activity === 'traveling' ? state.stats?.travel : null;
+    if (!travel?.spotId || travel.reason === 'party_spot_replan' || result?.patch?.activity !== 'hunting'
+        || String(result.patch.spotId) !== String(travel.spotId)) return null;
+    const room = roomAtArrival(travel.spotId, new Set([stateKey(state)]),
+        travel.reason === 'unsafe_ground_evacuation' ? 1 : 0);
+    economyDiagnostics.count('roomAtArrival', 'solo', 'checked');
+    if (room) return null;
+    economyDiagnostics.count('roomAtArrival', 'solo', 'full');
+    // The arrival patch carries the whole stats copy (resolveTravel); the mark
+    // reads the same counter and marks from the state the step started on.
+    const { capacityBackoffs, lastReason } = SpotRiskPolicy.withCapacityBackoff(state, travel.spotId).stats;
+    return { ...result, patch: { ...result.patch, stats: { ...result.patch.stats, capacityBackoffs, lastReason } } };
+}
+
+// A party trip ends (the kernel's party round, finishPartyRouteTravelState):
+// the spot's standing bots that are not of this party plus the whole party
+// against the capacity, no overflow. Full -> the party's "was full" mark
+// (PartySpotRiskPolicy, read by its next spot search) and occupation and
+// sources raised on the leader; the members arrive and stand.
+function partyArrival({ party, members, spotId }) {
+    const arriving = new Set((party?.memberIds || []).map(String));
+    if (!spotId || !arriving.size) return null;
+    const room = roomAtArrival(spotId, arriving);
+    economyDiagnostics.count('roomAtArrival', 'party', 'checked');
+    if (room) return null;
+    economyDiagnostics.count('roomAtArrival', 'party', 'full');
+    const leaderId = Number(party.leaderId || 0);
+    return {
+        party: PartySpotRiskPolicy.withCapacityBackoff(party, spotId),
+        members: members.map(member => {
+            if (Number(member.characterId) !== leaderId) return member;
+            const raised = { ...member, stats: { ...(member.stats || {}) } };
+            DecisionEvents.raiseSections(member, raised, ROOM_SECTIONS);
+            return raised;
+        })
+    };
+}
+
 // payloadBytes: the payload's JSON size when the caller already counted it
 // (the kernel's proposal batches); the 256 KB limit is checked against it.
 let partyGoalJobs = 0;
@@ -1111,8 +1175,13 @@ function startKernel(config = {}) {
             ...planningNpcCatalog.plannerOptions,
             buyOrderEscrow: kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow
         }),
+        partyArrival,
         projectResolve: async (state, result, timestamp, lifecyclePlan = null) => {
             const owner = kernel.states.get(Number(state.characterId));
+            // Room at arrival, before the projection: a full spot's mark rides
+            // the patch, its sections join the step's one raise.
+            const crowded = soloArrival(state, result);
+            if (crowded) result = crowded;
             // The step's one decision, taken before the round (planLifecycle):
             // the round's consequences run on it, no second ask. A step
             // without one (a party member, karma) asks after
@@ -1124,6 +1193,7 @@ function startKernel(config = {}) {
                 persist: false,
                 timestamp,
                 projectClassProgression: true,
+                ...(crowded ? { checkSections: ROOM_SECTIONS } : {}),
                 moneyEscrowFor: escrowOf,
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and

@@ -28,6 +28,7 @@ const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwne
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
+const { occupiedSpotId } = require('./SpotOccupancyIndex');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
@@ -65,10 +66,6 @@ function wait(ms) {
 
 // Longest stretch the initial full snapshot builds rows without yielding.
 const SNAPSHOT_SLICE_MS = 50;
-// E324: the longest a handed-out route keeps its place. Cold hunting bots
-// resolve 30-130 s apart (live 2026-10-14: 649 of 650 within 130 s), and the
-// route waits in the context until that resolve.
-const PENDING_ROUTE_MAX_MS = 180000;
 // Expired-lease recovery wakes at the nearest lease expiry on the shared
 // background deadline heap. false restores the fixed recovery poll.
 const LEASE_RECOVERY_ALARM = true;
@@ -91,52 +88,6 @@ function recipeKnowledgeFor(state) {
 
 function yieldToLoop() {
     return new Promise((resolve) => setImmediate(resolve));
-}
-
-function admitSoloRouteTravelState(nextState, baseState, profiles, occupancy, timestamp = Date.now()) {
-    const travel = nextState?.stats?.travel;
-    if (nextState?.activity !== 'traveling'
-        || baseState?.activity === 'traveling'
-        || travel?.reason === 'party_spot_replan'
-        || !travel?.spotId) {
-        return { state: nextState, admitted: true, checked: false };
-    }
-    const spot = SpotIndex.spotById(profiles, travel.spotId);
-    if (!spot) return { state: nextState, admitted: true, checked: false };
-    // Leaving party-only content is a safety transition, not an optional
-    // farming reservation. A full destination may be exceeded by one bot so
-    // an under-equipped solo character never remains trapped in combat.
-    const safetyEvacuation = travel.reason === 'unsafe_ground_evacuation';
-    const normalCapacity = SpotProfiles.hasCapacityForStates(spot, [nextState], occupancy);
-    if (SpotProfiles.reserveCapacity(occupancy, spot, [nextState], {
-        maxOverflowUnits: safetyEvacuation ? 1 : 0
-    })) {
-        return {
-            state: nextState,
-            admitted: true,
-            checked: true,
-            ...(safetyEvacuation && !normalCapacity ? { capacityBypassed: true } : {})
-        };
-    }
-
-    const stats = { ...(nextState.stats || {}) };
-    delete stats.travel;
-    return {
-        state: SpotRiskPolicy.withCapacityBackoff({
-            ...nextState,
-            activity: baseState?.activity || 'hunting',
-            spotId: baseState?.spotId || nextState.spotId,
-            loc: baseState?.loc ? { ...baseState.loc } : nextState.loc,
-            timing: {
-                ...(nextState.timing || {}),
-                activityStartedAt: baseState?.timing?.activityStartedAt || timestamp,
-                nextResolveAt: timestamp + SpotRiskPolicy.ROUTE_CAPACITY_RETRY_MS
-            },
-            stats
-        }, travel.spotId, timestamp),
-        admitted: false,
-        checked: true
-    };
 }
 
 function npcPlanningCatalogRows() {
@@ -184,11 +135,6 @@ class ColdSimulationCoordinator {
         this.worker = null;
         this.workerEpoch = null;
         this.safetyTransport = null;
-        // characterId -> { spotId, at, expiresAt } of solo routes handed out in
-        // contexts and not yet committed (occupancyWithPendingRoutes).
-        this.pendingRoutes = new Map();
-        this.pendingRoutesOccupancy = null;
-        this.pendingRouteStats = { deletedByAck: 0, expiredBeforeAck: 0, replaced: 0 };
         this.projectionRetention = new ColdProjectionRetention({
             stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
             dependencies: (state, context) => {
@@ -258,8 +204,16 @@ class ColdSimulationCoordinator {
             }
         });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
-            // A bot that is no longer cold has no commit to wait for: its pending route goes.
-            if (packet.kind === 'remove' || !packet.state || packet.state.phase !== 'cold') this.pendingRoutes.delete(Number(packet.characterId));
+            // A near bot's spot reaches the worker's "who stands here" index
+            // (kernel.occupancy, read by the room check at arrival) when it
+            // changes; a far bot's state goes there with every step. Here
+            // rather than in LifeStateCache.set: this is that write's own
+            // publication, and the coordinator lives on main only.
+            if (packet.kind === 'put' && packet.state && packet.state.phase !== 'cold'
+                && occupiedSpotId(packet.previousState || {}) !== occupiedSpotId(packet.state)) {
+                // Dropped while the worker is not ready: its full snapshot at ready reads every state then.
+                this.markDirty(packet.state, { reason: 'near_spot' });
+            }
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
             this.economyRoutes.forget(packet.characterId);
@@ -353,7 +307,6 @@ class ColdSimulationCoordinator {
             snapshotCriticalRuns: 0,
             snapshotYields: 0,
             snapshotDeferrals: 0,
-            routeCapacityRejects: 0,
             afterCommitStepErrors: { partyCache: 0, raidCache: 0, raidSettlement: 0, economyDecision: 0,
                 board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
                 economyPlan: 0, clanEvents: 0, partyGoals: 0, partyPlans: 0, buff: 0 }
@@ -1129,7 +1082,7 @@ class ColdSimulationCoordinator {
         const spots = SpotIndex.tableFor(profiles);
         const parties = new Map((BackgroundPartyState.active?.() || []).map((party) => [Number(party.leaderId || 0), party]));
         let occupancy = {};
-        try { occupancy = this.occupancyWithPendingRoutes(profiles, spots); } catch (_) { occupancy = {}; }
+        try { occupancy = SpotProfiles.currentOccupancy(profiles) || {}; } catch (_) { occupancy = {}; }
         return {
             spots,
             profiles,
@@ -1141,52 +1094,6 @@ class ColdSimulationCoordinator {
                 ? options.compactPartyMemberIds
                 : null
         };
-    }
-
-    // E324: a solo route handed out in a context keeps its place until the
-    // bot's commit lands, as a gear plan's plan.next.spotId does through the
-    // farm intent. routeFor reserves it in the current occupancy, which lives
-    // one second; each rebuilt occupancy counts the routes still pending, in
-    // the order of their entries in the Map and only while they fit, so a bot whose
-    // place was taken meanwhile meets the admission as before. A bot the
-    // snapshot already counts at that spot is not counted twice. The Map keeps
-    // an entry where it was first set: a renewal for the same spot updates
-    // expiresAt in place, a changed spot or a new context without a route
-    // deletes the entry, and a new route is set at the end.
-    occupancyWithPendingRoutes(profiles, spots = SpotIndex.tableFor(profiles), timestamp = Date.now()) {
-        const occupancy = SpotProfiles.currentOccupancy(profiles) || {};
-        if (occupancy === this.pendingRoutesOccupancy) return occupancy;
-        this.pendingRoutesOccupancy = occupancy;
-        for (const [characterId, route] of this.pendingRoutes) {
-            if (route.expiresAt <= timestamp) {
-                this.pendingRoutes.delete(characterId);
-                this.pendingRouteStats.expiredBeforeAck += 1;
-                continue;
-            }
-            const spot = spots.get(route.spotId);
-            if (spot) SpotProfiles.reserveCapacity(occupancy, spot, [{ characterId }]);
-        }
-        return occupancy;
-    }
-
-    // A new context replaces the bot's pending route. The route waits there
-    // until the bot's next resolve; two snapshot refreshes cover the queue.
-    notePendingRoute(state, route, timestamp = Date.now()) {
-        const id = Number(state?.characterId);
-        if (!id) return;
-        const held = this.pendingRoutes.get(id);
-        const wanted = route?.needed && route.mode === 'solo' && route.spotId ? String(route.spotId) : null;
-        const due = Math.max(timestamp, Number(state.timing?.nextResolveAt || 0));
-        const expiresAt = Math.min(timestamp + PENDING_ROUTE_MAX_MS, due + 2 * snapshotRefreshMs());
-        if (held && wanted && held.spotId === wanted) {
-            held.expiresAt = expiresAt;
-            return;
-        }
-        if (held) {
-            this.pendingRoutes.delete(id);
-            this.pendingRouteStats.replaced += 1;
-        }
-        if (wanted) this.pendingRoutes.set(id, { spotId: wanted, at: timestamp, expiresAt });
     }
 
     routeFor(state, currentSpot, party, partyMembers, index) {
@@ -1513,7 +1420,6 @@ class ColdSimulationCoordinator {
             requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
             route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf, routeHold: true })
         };
-        this.notePendingRoute(state, context.route);
         this.projectionRetention.prepare(state, context, index.partyGeneration);
         return context;
     }
@@ -2220,22 +2126,9 @@ class ColdSimulationCoordinator {
             delete cleanupState.cleanup;
             return cleanupState;
         }
-        if (!proposal?.nextState) return resolvedState;
-        let profiles = [];
-        let occupancy = {};
-        try {
-            profiles = SpotProfiles.ensure() || [];
-            occupancy = this.occupancyWithPendingRoutes(profiles);
-        } catch (_) { profiles = []; occupancy = {}; }
-        const admission = admitSoloRouteTravelState(
-            proposal.nextState,
-            state,
-            profiles,
-            occupancy,
-            Date.now()
-        );
-        if (admission.checked && !admission.admitted) DiagnosticConfig.developerDiagnostics && (this.counters.routeCapacityRejects += 1);
-        return admission.state;
+        // The worker's step result commits as it is: the room at a spot is
+        // checked in the worker when the bot arrives there.
+        return resolvedState;
     }
 
     async step(name, characterId, work) {
@@ -2479,11 +2372,6 @@ class ColdSimulationCoordinator {
             this.tableChannel.flush();
             return;
         }
-        // A landed commit ends the bot's pending route: a started trip is
-        // counted by the occupancy from now on, any other state frees it.
-        results.forEach(result => {
-            if (this.pendingRoutes.delete(Number(result.characterId))) this.pendingRouteStats.deletedByAck += 1;
-        });
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
         const cancelled = new Set();
@@ -2935,8 +2823,6 @@ class ColdSimulationCoordinator {
         this.cancelSafety();
         Metrics.clearColdSafetyEpoch(epoch);
         this.projectionRetention.reset();
-        this.pendingRoutes.clear();
-        this.pendingRoutesOccupancy = null;
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
@@ -2984,8 +2870,6 @@ class ColdSimulationCoordinator {
         for (const held of this.commitAcknowledgements.values()) held.resolve(false);
         this.commitAcknowledgements.clear();
         this.projectionRetention.reset();
-        this.pendingRoutes.clear();
-        this.pendingRoutesOccupancy = null;
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         if (!this.started) return { stopped: true };
@@ -3068,7 +2952,6 @@ class ColdSimulationCoordinator {
             epoch: this.workerEpoch,
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
-            pendingRoutes: { size: this.pendingRoutes.size, ...this.pendingRouteStats },
             heldAcks: this.heldAcks.size,
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
@@ -3099,4 +2982,3 @@ module.exports = new ColdSimulationCoordinator();
 module.exports.ColdSimulationCoordinator = ColdSimulationCoordinator;
 module.exports.compactPartyMemberContext = compactPartyMemberContext;
 module.exports.npcPlanningCatalogRows = npcPlanningCatalogRows;
-module.exports.admitSoloRouteTravelState = admitSoloRouteTravelState;
