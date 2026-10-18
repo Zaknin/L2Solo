@@ -97,6 +97,24 @@ async function stored() {
     assert.deepEqual(pendingRow.stats.agreement, baseline.stats.agreement, 'no quota is written before the leader\'s check');
     assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0, 'a pending join waits for its far leader');
     assert.equal((await stored()).statsJson, pendingRow.statsJson);
+    // The leader's step that ran on a copy of the row taken before the pending
+    // join writes the row blind: the pending join outlives it; a step that
+    // read the pending join answers it and writes the row without it.
+    const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+    const coordinator = new ColdSimulationCoordinator();
+    coordinator.step = async (name, owner, work) => name === 'party' ? work() : undefined;
+    const workerCopy = { ...Parties.find('material-recruit') };
+    workerCopy.stats = { ...workerCopy.stats }; delete workerCopy.stats.pendingRecruits;
+    const leaderState = Life.cachedState(a.characterId);
+    await coordinator.afterCommit({ nextState: leaderState,
+        proposal: { partyResolution: { partyId: 'material-recruit', party: workerCopy } } });
+    assert.deepEqual((await stored()).stats.pendingRecruits, { ids: [novice.characterId] },
+        'a step on an older copy of the row keeps the pending join');
+    await coordinator.afterCommit({ nextState: leaderState, proposal: { partyResolution: { partyId: 'material-recruit',
+        party: workerCopy, recruitCheck: { outcome: 'declined' } } } });
+    assert.equal((await stored()).stats.pendingRecruits, undefined, 'the step that answered the pending join clears it');
+    await Parties.createOrUpdate({ ...Parties.find('material-recruit'), stats: { ...Parties.find('material-recruit').stats,
+        pendingRecruits: { ids: [novice.characterId] } } });
     // The leader's step: the check sees the newcomer's need in the contract.
     const party = Parties.find('material-recruit');
     const roster = [a, b].map(member => Life.cachedState(member.characterId));
