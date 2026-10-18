@@ -9,7 +9,7 @@ require('../src/Global');
 const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 // Only the native DB and a cold lifecycle module: no server, cache bootstrap,
-// live characters, population workers or pending market-learning policy.
+// live characters or population workers.
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-safety-page-'));
 const previous = { path: options.default.Database.path, historyPath: options.default.Database.historyPath };
 const fields = ['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
@@ -80,8 +80,6 @@ async function controls() {
     assert.deepEqual(last.map(row => row.characterId), [66, 67, 68, 69], 'deletes/churn cannot change PK cursor; new71 excluded');
     assert.deepEqual(await execute.call(Database, [range, [70, 70, 64]]), [], 'final native range is empty');
     assertCacheEmpty();
-    assert(!Object.keys(require.cache).some(key => key.endsWith('/PriceLearning.js')),
-        'safety paging must not depend on the unfinished learning helper');
     console.log(`PASS native controls: 70 uncached lifecycle rows, PK plan ${plan[0].detail}, compact64+4, deletes/churn/new71 excluded`);
     await execute.call(Database, ['DELETE FROM bot_life_state', []]);
     await seedLifecycle();

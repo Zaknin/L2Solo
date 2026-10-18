@@ -102,7 +102,12 @@ const id = 730180;
         assert.strictEqual(scrollMaterials[0][1], nativeNeed, 'captured scroll units match the maximum actual weapon goal');
         const expectedEnchantWithdrawal = Math.min(nativeNeed, 2);
         assert(expectedEnchantWithdrawal >= 1 && expectedEnchantWithdrawal <= 2, 'the actual need exercises a nonempty bounded warehouse withdrawal');
-        Coordinator.economyDecisions.accept(id, probe.decision);
+        // The worker publishes the decision's packet with the state; main
+        // serves a card only to the state carrying its decision (its echo),
+        // so the card main reads is the worker's on the published state.
+        state = await Life.upsertState({ ...state, stats: { ...state.stats, ...probe.statsPacket } },
+            'warehouse_decision_publication');
+        Coordinator.economyDecisions.accept(id, (await nativeDecision(state, { timestamp, nativeRoutes: true })).decision);
         const originalFull = Economy.forState;
         Economy.forState = () => { throw Error('main_cold_forState_forbidden'); };
         try {
@@ -170,9 +175,11 @@ const id = 730180;
                 equipmentPlan: { status: 'active', strategy: 'craft', recipeId: recipe.recipeId,
                     target: { selfId: 1880 }, materials: recipe.materials } } }, 'warehouse_overlap_fixture');
             const Decision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+            // The wire card belongs to the state's own decision (its echo).
             Coordinator.economyDecisions.accept(id, Decision.capture({
                 projection: { values: new Map(recipe.materials.map(item => [item.selfId, 1000])) },
-                network: { activity: null, quantityPrepared: true, queue: [{ plan: { kind: 'craft', requirements: recipe.materials
+                network: { decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, focus: state.stats.wishFocus,
+                    activity: null, quantityPrepared: true, queue: [{ plan: { kind: 'craft', requirements: recipe.materials
                     .map(item => ({ key: `item:${item.selfId}`, amount: item.amount, plan: { kind: 'buy', missingAmount: item.amount } })) } }] }
             }, state));
             const overlapStored = await Database.fetchWarehouseItems(id);
