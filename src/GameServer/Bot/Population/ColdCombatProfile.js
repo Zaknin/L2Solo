@@ -52,17 +52,13 @@ function itemTemplate(selfId) {
     return ItemTemplateIndex.find(DataCache.items, selfId) || null;
 }
 
-// A synchronous wish review compares many bags that keep most worn items.
-// Prepare each unchanged item once within that call, then discard the scope.
-// Combat/passive/buff calculations still run for every hypothetical build.
+// A prepared worn row depends only on game data (template, enchant, slot,
+// object id), so it is kept across builds and bots: reviews compare many bags
+// that keep most worn items and value the same shop templates. Bounded, the
+// oldest row goes first; a data reload (items, enchant or item-skill rules)
+// clears it. Combat/passive/buff calculations still run for every build.
 const EQUIPMENT_PREPARATION_LIMIT = 512;
-let equipmentPreparation = null;
-function withEquipmentPreparation(work) {
-    if (equipmentPreparation) return work();
-    equipmentPreparation = { rows: new Map(), size: 0 };
-    try { return work(); }
-    finally { equipmentPreparation = null; }
-}
+const preparedRows = { rows: new Map(), items: null, statBonus: null, effectForItem: null };
 
 function copyEquipmentEffect(effect) {
     if (!effect) return effect;
@@ -76,14 +72,14 @@ function copyEquipmentEffect(effect) {
 function preparedEquipment(template, selfId, objectId, enchant, slot) {
     const rules = invoke('GameServer/Items/C4EnchantRules');
     const effects = invoke('GameServer/Items/C4EquipmentItemSkills');
-    const scope = equipmentPreparation;
-    if (scope && (scope.items !== DataCache.items || scope.statBonus !== rules.statBonus
-        || scope.effectForItem !== effects.effectForItem)) {
-        scope.rows.clear(); scope.size = 0;
-        scope.items = DataCache.items; scope.statBonus = rules.statBonus; scope.effectForItem = effects.effectForItem;
+    const memo = preparedRows;
+    if (memo.items !== DataCache.items || memo.statBonus !== rules.statBonus || memo.effectForItem !== effects.effectForItem) {
+        memo.rows.clear();
+        memo.items = DataCache.items; memo.statBonus = rules.statBonus; memo.effectForItem = effects.effectForItem;
     }
-    const key = scope ? `${slot}:${enchant}:${objectId}` : null;
-    let prepared = scope?.rows.get(template)?.get(key);
+    const key = `${selfId}:${slot}:${enchant}:${objectId}`;
+    const held = memo.rows.get(key);
+    let prepared = held?.template === template ? held.row : null;
     if (!prepared) {
         const adapter = { fetchSelfId: () => selfId, fetchId: () => objectId,
             fetchEnchantLevel: () => enchant, fetchRank: () => template.etc?.rank,
@@ -93,13 +89,11 @@ function preparedEquipment(template, selfId, objectId, enchant, slot) {
         const stats = { ...template.stats };
         for (const stat of ['pAtk', 'mAtk', 'pDef', 'mDef']) stats[stat] = number(stats[stat]) + rules.statBonus(adapter, stat);
         prepared = { ...template, stats, etc: { ...(template.etc || {}), slot }, equipmentEffect: effects.effectForItem(adapter) };
-        if (scope && scope.size < EQUIPMENT_PREPARATION_LIMIT) {
-            if (!scope.rows.has(template)) scope.rows.set(template, new Map());
-            scope.rows.get(template).set(key, prepared); scope.size++;
-        }
+        if (!held && memo.rows.size >= EQUIPMENT_PREPARATION_LIMIT) memo.rows.delete(memo.rows.keys().next().value);
+        memo.rows.set(key, { template, row: prepared });
     }
-    // These rows stay private to profile construction. Only the effect enters
-    // the returned profile, and that boundary gives it an independent copy.
+    // These rows are shared and stay private to profile construction. Only
+    // the effect enters a profile, and kitEffects gives it an independent copy.
     return prepared;
 }
 
@@ -860,7 +854,7 @@ function gearCandidate(state, { kitPart, terms }, worn, { free, wear }, timestam
     const equipped = added ? [...kept, added] : kept;
     const legacyEquipment = equipmentFromTemplates(equipped, kitPart.spellcaster, kitPart.classStats);
     const sameKit = equipped.length > 0 && hasInventory(state) && !changed.some(item => item.equipmentEffect)
-        && sameGearConditions(legacyEquipment, kitPart.equipment)
+        && sameGearConditions(legacyEquipment, kitPart.equipment, terms.armorKinds ??= armorKindsKey(kitPart.equipment.armorKinds))
         && (!changed.some(setPart) || sameKeys(C4ArmorSets.effectsForEquippedIds(wornIds(equipped)),
             kitPart.effects.filter(effect => effect.category === C4ArmorSets.CATEGORY)));
     if (sameKit) return formulaPower(terms, legacyEquipment, kitPart.base, terms.stats);
@@ -878,17 +872,20 @@ function wornIds(equipped) {
 function sameKeys(effects, others) {
     return effects.length === others.length && effects.every((effect, index) => effect.key === others[index].key);
 }
-function sameGearConditions(equipment, kit) {
-    const kinds = list => [...(list || [])].sort().join(',');
+// kitKinds: armorKindsKey of the kit's gear, kept once per kit (terms.armorKinds).
+function sameGearConditions(equipment, kit, kitKinds) {
     return (equipment.weaponKind || '') === (kit.weaponKind || '') && (equipment.setKind || '') === (kit.setKind || '')
         && (number(equipment.shieldPDef) > 0) === (number(kit.shieldPDef) > 0)
-        && kinds(equipment.armorKinds) === kinds(kit.armorKinds);
+        && armorKindsKey(equipment.armorKinds) === kitKinds;
+}
+function armorKindsKey(list) {
+    return [...(list || [])].sort().join(',');
 }
 // The kit effects of a worn list: its armour sets (a state without inventory
 // keeps its captured ones) and its items' effects.
 function kitEffects(state, equipped) {
     return [...C4ArmorSets.effectsForEquippedIds(wornIds(equipped)), ...savedSetEffects(state),
-        ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)];
+        ...equipped.map(item => copyEquipmentEffect(item.equipmentEffect)).filter(Boolean)];
 }
 
 function activeMusicEffects(profile = {}, timestamp = Date.now()) {
@@ -1140,7 +1137,7 @@ function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, skillsFor, forgetBuild, withEquipmentPreparation, kitStoreSize,
+    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, skillsFor, forgetBuild, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

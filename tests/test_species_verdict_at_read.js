@@ -17,6 +17,9 @@ const strong = Matchup.speciesVerdict([fighter(900, 3000, 600)], mob.selfId, opt
 const weak = Matchup.speciesVerdict([fighter(15, 150, 40)], mob.selfId, options);
 assert.equal(strong.canHunt, true, 'a strong fighter can hunt the species');
 assert.equal(weak.canHunt, false, 'a weak fighter cannot');
-// Equal numbers in another array: the same answer, computed again.
-assert.deepEqual(Matchup.speciesVerdict([fighter(15, 150, 40)], mob.selfId, options), weak);
+// Equal numbers in another array: the same answer, computed again for that
+// array (a store shared by equal numbers would hand back the first object).
+const again = Matchup.speciesVerdict([fighter(15, 150, 40)], mob.selfId, options);
+assert.deepEqual(again, weak);
+assert.notStrictEqual(again, weak, 'another array gets its own verdict');
 console.log('PASS species verdict at read');

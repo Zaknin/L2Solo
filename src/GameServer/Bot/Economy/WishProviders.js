@@ -247,8 +247,8 @@ function build(state, ctx, deps = {}) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('provider', 'request');
     const started = diagnostic ? performance.now() : 0;
-    const result = Profile.withEquipmentPreparation(() =>
-        invoke('GameServer/Bot/AI/GearAcquisitionPlanner').withReadiness(() => buildProjection(state, ctx, deps)));
+    // lazy: cycle the gear planner and the wish providers load each other (the shared load cluster).
+    const result = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').withReadiness(() => buildProjection(state, ctx, deps));
     if (diagnostic) {
         Diagnostics.count('provider', 'build', 'context_miss');
         Diagnostics.duration('provider', performance.now() - started);

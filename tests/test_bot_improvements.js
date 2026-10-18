@@ -86,9 +86,9 @@ async function main() {
         assert.deepEqual(await snapshot(state.characterId),coldImage,'hot writer cannot bypass a current cold owner');
         console.log('PASS native enchant supply, real combat bonus, blessed reset, break and guarded rollback');
 
-        // The loss of a worn weapon is priced from the build without it: the
-        // hypothetical unequips it (the chest keeps the bag off the snapshot
-        // gear fallback) and wears the best spare in its place.
+        // The loss of a worn weapon is priced from the build without it (the
+        // chest keeps the bag off the snapshot gear fallback) and with the best
+        // spare worn in its place.
         const chest = Data.items.find(row => row.template.kind.startsWith('Armor.') && Number(row.etc.slot) === 10);
         const spareTemplate = Data.items.find(row => row.template.kind === weapon.template.kind
             && Number(row.etc.slot) === Number(weapon.etc.slot) && String(row.etc.rank).toUpperCase() === 'D'
@@ -97,20 +97,12 @@ async function main() {
         const worn = [{selfId:weapon.selfId,name:weapon.template.name,amount:1,equipped:true,slot:weapon.etc.slot},
             {selfId:chest.selfId,name:chest.template.name,amount:1,equipped:true,slot:10}];
         const stuckCtx = {hunt:{perHour:1000},price:()=>1000,timestamp:Date.now()};
-        const rate = power => power.pAtk * power.atkSpd + power.mAtk * power.castSpd;
         state = await seed(worn);
         const held = Policy.instances(state).find(row => row.selfId === weapon.selfId);
-        const bare = Policy.changedInventory(state, held, {equipped:false});
-        assert.equal(bare.inventory[weapon.selfId].equipped, false);
-        assert.equal(bare.inventory[weapon.selfId].equippedCount, 0);
-        assert(rate(Profile.profileFor(bare, Date.now(), { store: false })) < rate(Profile.profileFor(state)), 'the remainder fights without the weapon');
         const alone = Policy.stuckCost(state, held, stuckCtx);
         assert(alone > 0, 'losing the only worn weapon has a cost');
         const spared = await seed([...worn, {selfId:spareTemplate.selfId,name:spareTemplate.template.name,amount:1}]);
         const heldSpared = Policy.instances(spared).find(row => row.selfId === weapon.selfId);
-        const spare = Policy.instances(spared).find(row => row.selfId === spareTemplate.selfId);
-        const swapped = Policy.changedInventory(Policy.changedInventory(spared, heldSpared, {equipped:false}), spare, {equipped:true});
-        assert.equal(swapped.inventory[spareTemplate.selfId].equipped, true);
         const withSpare = Policy.stuckCost(spared, heldSpared, stuckCtx);
         assert(withSpare > 0 && withSpare < alone, 'a spare worn in its place keeps part of the income');
         console.log('PASS worn weapon loss priced bare and with the best spare worn');

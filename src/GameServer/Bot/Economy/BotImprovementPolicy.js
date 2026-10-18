@@ -35,30 +35,6 @@ function targets(state) {
 function targetInputs(state) {
     return targets(state).map(({ item }) => [item.selfId, item.id, item.enchant, item.equipped, item.slot, item.amount]);
 }
-// A row is worn when one of its instances is: both branches recompute it, so
-// an unequip takes the item off and an equip puts it on (equippedSlots stays:
-// the profile derives the slot of a newly worn row from its template).
-const worn = list => ({ equipped: list.some(i => i.equipped), equippedCount: list.filter(i => i.equipped).length });
-function changedInventory(state, item, patch) {
-    const inventory = { ...state.inventory };
-    const row = inventory[item.selfId];
-    const instances = (row.instances || []).filter(instance => Number(instance.id) !== Number(item.id));
-    const next = { ...item, ...patch };
-    if (next.selfId !== item.selfId) {
-        if (row.amount <= 1) delete inventory[item.selfId];
-        else inventory[item.selfId] = { ...row, amount: row.amount - 1, instances, ...worn(instances) };
-        const target = template(next.selfId);
-        const held = inventory[next.selfId];
-        inventory[next.selfId] = { ...held, selfId: next.selfId, amount: positive(held?.amount) + 1,
-            slot: next.slot || target?.etc?.slot, equipped: next.equipped || held?.equipped,
-            equippedCount: positive(held?.equippedCount) + Number(next.equipped), enchant: next.enchant,
-            instances: [...(held?.instances || []), next] };
-    } else {
-        const kept = [...instances, next];
-        inventory[item.selfId] = { ...row, enchant: next.enchant, instances: kept, ...worn(kept) };
-    }
-    return { ...state, inventory };
-}
 function isCaster(state) {
     return ['mage','healer','buffer','nuker','summoner'].includes(invoke('GameServer/Bot/AI/GearAcquisitionPlanner').roleFor(state));
 }
@@ -252,4 +228,4 @@ function crystalPath(state, id, ctx, spots = []) {
     }
     return best;
 }
-module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, targetInputs, adapter, changedInventory, enchantCost, stuckCost };
+module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, targetInputs, adapter, enchantCost, stuckCost };
