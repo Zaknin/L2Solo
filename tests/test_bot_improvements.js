@@ -103,7 +103,7 @@ async function main() {
         const bare = Policy.changedInventory(state, held, {equipped:false});
         assert.equal(bare.inventory[weapon.selfId].equipped, false);
         assert.equal(bare.inventory[weapon.selfId].equippedCount, 0);
-        assert(rate(Profile.powerFor(bare)) < rate(Profile.powerFor(state)), 'the remainder fights without the weapon');
+        assert(rate(Profile.profileFor(bare, Date.now(), { store: false })) < rate(Profile.profileFor(state)), 'the remainder fights without the weapon');
         const alone = Policy.stuckCost(state, held, stuckCtx);
         assert(alone > 0, 'losing the only worn weapon has a cost');
         const spared = await seed([...worn, {selfId:spareTemplate.selfId,name:spareTemplate.template.name,amount:1}]);

@@ -14,7 +14,6 @@ Data.init();
 const Skills = invoke('GameServer/Npc/NpcSkills');
 const Threat = invoke('GameServer/Bot/Economy/GearThreat');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
-const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 // The event input key at one fixed time (deps.timestamp when given).
 const KEY_AT = Date.now(), eventKey = (state, deps = {}) => Economy.eventInputKey(state, deps, deps.timestamp ?? KEY_AT);
@@ -77,25 +76,15 @@ check('preparation reuses unchanged sources and notices in-place hostile changes
     assert.equal(Threat.prepare(bot, deps, first).mask, 3);
     assert.notEqual(eventKey(state(), deps), eventKey(state([264], 'magic'), deps));
 });
-check('same native build caches distinct physical/magic gains in both orders', () => {
+check('physical and magic threats give distinct necklace gains', () => {
     const necklace = Data.items.find(item => Number(item.selfId) === 118);
     assert.ok(necklace);
-    for (const masks of [[1, 3], [3, 1]]) {
-        const bot = state(); bot.characterId += masks[0];
-        const build = Profile.buildGainsFor(bot, 1000);
-        const values = new Map(masks.map(mask => [mask, Providers.gearGain(bot, necklace, 1000, build, mask)]));
-        assert.equal(values.get(1).defence, 0);
-        assert.ok(values.get(3).defence > 0);
-        const original = Profile.powerFor;
-        let evaluations = 0;
-        Profile.powerFor = (...args) => { evaluations++; return original(...args); };
-        try {
-            for (const mask of masks) assert.deepEqual(Providers.gearGain(bot, necklace, 1000, build, mask), values.get(mask));
-        assert.deepEqual(Providers.gearGain(bot, necklace, 1000, build), values.get(3));
-            assert.equal(evaluations, 0, 'both threat variants hit the bounded native cache');
-        } finally { Profile.powerFor = original; }
-        assert.equal(values.get(1).attack, values.get(3).attack);
-    }
+    const bot = state();
+    const values = new Map([1, 3].map(mask => [mask, Providers.gearGain(bot, necklace, 1000, mask)]));
+    assert.equal(values.get(1).defence, 0);
+    assert.ok(values.get(3).defence > 0);
+    assert.deepEqual(Providers.gearGain(bot, necklace, 1000), values.get(3), 'the default threat is both');
+    assert.equal(values.get(1).attack, values.get(3).attack);
 });
 check('saved level-19 build: survival shots, then armour gaps; empty jewel slots take owned jewellery', () => {
     // Recorded build, not a reconstruction of its historical purchase order.

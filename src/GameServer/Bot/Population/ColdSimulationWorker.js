@@ -118,7 +118,6 @@ const TableMirror = require('./TableMirror');
 const { BoardIndex, recordOf } = require('../../AfkTrade/BoardIndex');
 const { MarketBuyerWaiters } = require('../Economy/MarketBuyerWaiters');
 const SpotIndex = require('../AI/SpotIndex');
-const BotTargetMatchup = require('../AI/BotTargetMatchup');
 const SpotValueTable = require('../AI/SpotValueTable');
 const ColdCombatProfile = require('./ColdCombatProfile');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
@@ -1612,8 +1611,7 @@ function startKernel(config = {}) {
             tables: tables.summary(),
             developerDiagnostics: economyDiagnostics.metrics(),
             ...heapTelemetry.snapshot(),
-            caches: { matchup: BotTargetMatchup.cacheStats(), spotValue: SpotValueTable.cacheStats(),
-                gainStore: ColdCombatProfile.cacheStats() },
+            caches: { spotValue: SpotValueTable.cacheStats(), kitProfiles: ColdCombatProfile.kitStoreSize() },
             heapUsed: process.memoryUsage().heapUsed,
             rss: process.memoryUsage().rss,
             eventLoopUtilization: elu.utilization,

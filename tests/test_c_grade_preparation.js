@@ -207,32 +207,6 @@ const ctx = review(source, board);
 assert(ctx.projection.roots.some(key => /^power:/.test(key)
     && Data.items.find(item => item.selfId === Number(key.split(':')[1]))?.etc.rank === 'c'),
     'native wishes compare C sources before 40 after completing D');
-// The preparation build has its own slot: the next review keeps the bot's
-// build entry and its remembered gains; forget and a build change release it.
-const Diagnostics = invoke('GameServer/Bot/Population/PopulationConfig'), diagnostics = Diagnostics.developerDiagnostics;
-Diagnostics.developerDiagnostics = true;
-const held = Profile.buildGainsFor(source, timestamp), preparing = Profile.size().ownerPreparations;
-assert(preparing > 0, 'a preparing bot holds its preparation build');
-// L110 counters: a new candidate misses once, then hits the same entry.
-let gains = Profile.cacheStats();
-Profile.gainFor(held, 'l110:counter', () => ({ attack: 1, defence: 2 }));
-Profile.gainFor(held, 'l110:counter', () => assert.fail('a stored gain is not computed again'));
-let counted = Profile.cacheStats();
-assert.deepEqual([counted.gainMisses - gains.gainMisses, counted.gainHits - gains.gainHits], [1, 1], 'gain store counts a miss then a hit');
-gains = counted;
-review(structuredClone(source), board, {}, false);
-assert.equal(Profile.buildGainsFor(source, timestamp), held, 'a review with a preparation keeps the bot build entry');
-counted = Profile.cacheStats();
-assert.deepEqual([counted.filledDrops, counted.switches, counted.preparationSwitches],
-    [gains.filledDrops, gains.switches, gains.preparationSwitches], 'a repeated review drops no filled entry and moves no owner slot');
-assert(counted.gainHits > gains.gainHits, 'a repeated review reads remembered gains');
-Profile.forgetBuild(source.characterId);
-assert(Profile.cacheStats().filledDrops > counted.filledDrops, 'forget of a filled build counts a filled drop');
-Diagnostics.developerDiagnostics = diagnostics;
-assert.equal(Profile.size().ownerPreparations, preparing - 1, 'forget releases the preparation build too');
-review(structuredClone(source), board, {}, false);
-Profile.buildGainsFor({ ...source, level: source.level + 1 }, timestamp);
-assert.equal(Profile.size().ownerPreparations, preparing - 1, 'a build change drops the preparation');
 Profile.forgetBuild(source.characterId);
 const missing = structuredClone(source);
 delete missing.inventory[Object.values(missing.inventory).find(row => row.equippedSlots.includes(12)).selfId];

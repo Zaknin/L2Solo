@@ -1,7 +1,4 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
-const DiagnosticConfig = require('../Population/PopulationConfig');
-const Diagnostics = require('../Economy/EconomyDiagnostics');
-const { fnv1a32 } = require('../Fnv1a');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
 const WeaponMask = invoke('GameServer/Skills/WeaponMask');
@@ -311,216 +308,28 @@ function stateProfiles(state, options = {}) {
             survivalKnown: !!member.stats?.coldCombat
                 || Number.isFinite(Number(member.stats?.classId ?? member.classId))
         }, member, options.timestamp));
-    if (states.length === 1 && profiles.length && Diagnostics.active() && typeof states[0].fetchHp !== 'function'
-        && Number(states[0].characterId) > 0) noteFingerprint(Number(states[0].characterId), profiles);
     return profiles;
 }
 
 // A spot search checks hundreds of spots with one profile array, and each mob
 // species appears on several of them. The verdict depends only on the
-// profiles, the species and the safety options. Searches repeat for the same
-// bot after every commit, and bots of one class, level and kit share combat
-// fields, so verdicts are shared by every profile array with the same fields.
-// Profiles unused for VERDICT_PROFILE_IDLE_MS (level-up, new gear) are dropped
-// when a new profile is added. The entry budget below bounds the memory; the
-// idle time only frees it early, so it is longer than a cold queue wait: at
-// 10 minutes a wave whose bots waited 15 (live 2026-10-15 07:54Z, wait 914 s)
-// dropped 781 waiting bots' fingerprints in 5 minutes, and spot misses went
-// from 25% to 52% as each came back to its turn.
-const VERDICT_PROFILE_LIMIT = 4096;
-const VERDICT_PROFILE_IDLE_MS = 30 * 60 * 1000;
-// The memory is in the entries under each fingerprint, not in the fingerprints
-// (L104): live 2026-10-14, 1,910 fingerprints held ~240 verdicts and ~270 spot
-// results each. Measured offline (Node 22): ~33 B per verdict or spot entry
-// (29-41 by map fill) plus ~2.2 KB per fingerprint (its ~1,700-char key and
-// the map shells). The least recently used fingerprints are dropped while the
-// verdicts and spot results of all of them exceed this budget: 786,432 entries
-// = ~26 MB, with ~1,550 fingerprints at ~510 entries each ~30 MB in all,
-// against ~40 MB for the 1,910 the idle rule alone kept.
-const VERDICT_ENTRY_BUDGET = 786432;
+// profiles, the species and the safety options: it is computed when asked and
+// kept only for that array (a WeakMap keyed by it, options.matchupProfiles of
+// one search), so it dies with the search.
 const npcVerdicts = new WeakMap();
-const sharedVerdicts = new Map();
-const uniqueVerdicts = new Map();
-let verdictSource, verdictCount = 0;
-
-// Cache use for the cold worker heartbeat (L104). fingerprintChars (key
-// lengths), optionMaps, verdictEntries and spotStores are kept always (the
-// entry budget reads them), incrementally per fingerprint in sharedVerdicts,
-// with the counts of each fingerprint in entryCounts (keyed by its verdict map)
-// so an eviction subtracts them; a dropped map may still be held by profile
-// arrays, so it stops counting (live false). spotStores is an upper bound: a
-// spot result lives in a WeakMap keyed by the spot object and goes with it.
-// evictions: every dropped fingerprint; budgetEvictions: those dropped only by
-// VERDICT_ENTRY_BUDGET (not idle, under the count limit). The hit and miss
-// counters (fingerprintHits/Misses: a new profile array found or not in
-// sharedVerdicts) and the pool clears are counted only with developer diagnostics.
-const stats = { fingerprintChars: 0, optionMaps: 0, verdictEntries: 0, spotStores: 0, fingerprintHits: 0,
-    fingerprintMisses: 0, verdictHits: 0, verdictMisses: 0, spotHits: 0, spotMisses: 0, evictions: 0,
-    sourceResets: 0, verdictPoolClears: 0, spotPoolClears: 0, budgetEvictions: 0 };
-const entryCounts = new WeakMap();
-function cacheStats() {
-    return { fingerprints: sharedVerdicts.size, uniqueVerdicts: uniqueVerdicts.size,
-        uniqueSpotResults: uniqueSpotResults.size, ...stats };
-}
-
-// Raw values with their type: channels() and soloSurvival() coerce with
-// number(), compare and test truthiness, so only identical inputs share.
-function fingerprintValue(value) {
-    switch (typeof value) {
-    case 'number': return Object.is(value, -0) ? '-0' : String(value);
-    case 'string': return JSON.stringify(value);
-    case 'boolean': return value ? 'T' : 'F';
-    case 'undefined': return 'u';
-    default: if (value === null) return 'n';
-    }
-    throw new TypeError('unshareable matchup value');
-}
-
-// Exactly the fields channels() and soloSurvival() read: the scalar fields
-// (FINGERPRINT_FIELDS, in this order), the skills, then the solo priority.
-const FINGERPRINT_FIELDS = ['role', 'weaponKind', 'pAtk', 'atkSpd', 'mAtk', 'castSpd', 'maxMp', 'weaponMask',
-    'maxHp', 'pDef', 'survivalKnown', 'soloDamageReceiver'];
-function fingerprintParts(profile) {
-    const role = profile.role || Roles.combatRoleFor(profile);
-    const parts = [role, profile.equipment?.weaponKind || '', profile.pAtk, profile.atkSpd, profile.mAtk,
-        profile.castSpd, profile.maxMp, profile.weaponMask, profile.maxHp, profile.pDef,
-        profile.survivalKnown === false, profile.soloDamageReceiver === false].map(fingerprintValue);
-    for (const skill of profile.skills || []) {
-        const semantic = skill.semantic || Rules.resolveCached(skill);
-        parts.push('|', ...[skill.passive, skill.spell === true, skill.mp, skill.power, skill.hitTime, skill.reuse,
-            skill.distance, semantic.skillType, semantic.target, semantic.notUsedInC4, semantic.undeadOnly,
-            semantic.requires?.weaponsAllowed, semantic.castRange, semantic.power, semantic.trait]
-            .map(fingerprintValue));
-    }
-    if (profile.soloAttackScores) {
-        parts.push('solo-priority');
-        for (const [id, score] of Object.entries(profile.soloAttackScores)) parts.push(id, fingerprintValue(score));
-    }
-    return parts;
-}
-function profileFingerprint(profile) {
-    return fingerprintParts(profile).join(',');
-}
-
-// Diagnostics, kept only while they count (the key itself is unchanged).
-// matchup:miss:<evicted|never_seen>: a fingerprint missed in sharedVerdicts
-// that an eviction dropped before, or one not held in that memory. Evicted
-// fingerprints are kept as a 30-bit hash (a small integer; a false 'evicted'
-// about once in 10^5 misses) in insertion order, the oldest dropped past
-// EVICTED_MEMORY: ~30 min of live budget evictions (1,300 per 5 min), ~100 KB.
-// A returning fingerprint leaves the memory.
-const EVICTED_MEMORY = 8192;
-const evictedFingerprints = new Set();
-function rememberEvicted(fingerprint) {
-    evictedFingerprints.add(fnv1a32(fingerprint) >>> 2);
-    if (evictedFingerprints.size > EVICTED_MEMORY) evictedFingerprints.delete(evictedFingerprints.values().next().value);
-}
-function missKind(fingerprint) {
-    return evictedFingerprints.delete(fnv1a32(fingerprint) >>> 2) ? 'evicted' : 'never_seen';
-}
-// matchup:fingerprint_moved:<field>: a solo bot's spot-search profiles
-// (stateProfiles) against its previous ones, the first moved part by name:
-// the summon kind (summon_<from>_to_<to>; active = the saved servitor, kept
-// while expiresAt > timestamp; castable = a summon skill whose mp, reuse and
-// cooldown allow it now), then the bot's FINGERPRINT_FIELDS, skills,
-// solo_priority and the summon profile. matchup:fingerprint:<same|first> are
-// the calls with none moved and the first seen. One hash per part, 16 x 32 bit
-// per owner (~150 B with the map entry), the least recent owner dropped past
-// VERDICT_PROFILE_LIMIT.
-const SUMMON_KINDS = ['none', 'active', 'castable'];
-const MOVED_PARTS = [...FINGERPRINT_FIELDS, 'skills', 'solo_priority', 'summon'];
-const ownerFingerprints = new Map();
-const fingerprintScratch = new Uint32Array(MOVED_PARTS.length + 1);
-function noteFingerprint(owner, profiles) {
-    const current = fingerprintScratch, parts = fingerprintParts(profiles[0]), fields = FINGERPRINT_FIELDS.length;
-    current[0] = profiles.length < 2 ? 0 : profiles[1].active === true ? 1 : 2;
-    for (let index = 0; index < fields; index++) current[index + 1] = fnv1a32(parts[index]);
-    const solo = parts.indexOf('solo-priority', fields);
-    current[fields + 1] = fnv1a32(parts.slice(fields, solo < 0 ? parts.length : solo).join(','));
-    current[fields + 2] = solo < 0 ? 0 : fnv1a32(parts.slice(solo).join(','));
-    current[fields + 3] = profiles.length < 2 ? 0 : fnv1a32(profiles.slice(1).map(profileFingerprint).join('#'));
-    let previous = ownerFingerprints.get(owner), moved = previous ? '' : 'first';
-    if (previous && previous[0] !== current[0]) moved = `summon_${SUMMON_KINDS[previous[0]]}_to_${SUMMON_KINDS[current[0]]}`;
-    for (let index = 1; !moved && index < current.length; index++) {
-        if (previous[index] !== current[index]) moved = MOVED_PARTS[index - 1];
-    }
-    if (previous) ownerFingerprints.delete(owner);
-    else previous = new Uint32Array(current.length);
-    previous.set(current);
-    ownerFingerprints.set(owner, previous);
-    if (ownerFingerprints.size > VERDICT_PROFILE_LIMIT) ownerFingerprints.delete(ownerFingerprints.keys().next().value);
-    if (moved === 'first') Diagnostics.count('matchup', 'fingerprint', 'first');
-    else if (moved) Diagnostics.count('matchup', 'fingerprint_moved', moved);
-    else Diagnostics.count('matchup', 'fingerprint', 'same');
-}
 
 // Verdicts of one profile array: safety options key -> species id -> verdict.
-function verdictsFor(profiles) {
-    let verdicts = npcVerdicts.get(profiles);
-    if (verdicts) return verdicts;
-    const source = dataCache().npcs || [];
-    if (verdictSource !== source || verdictCount !== source.length) {
-        for (const entry of sharedVerdicts.values()) { const held = entryCounts.get(entry.verdicts); if (held) held.live = false; }
-        if (verdictSource !== undefined) stats.sourceResets += 1;
-        stats.fingerprintChars = stats.optionMaps = stats.verdictEntries = stats.spotStores = 0;
-        verdictSource = source;
-        verdictCount = source.length;
-        sharedVerdicts.clear();
-        uniqueVerdicts.clear();
-    }
-    let fingerprint = null;
-    try { fingerprint = profiles.map(profileFingerprint).join('#'); } catch (_) { /* kept per array */ }
-    const now = Date.now();
-    const shared = fingerprint === null ? null : sharedVerdicts.get(fingerprint);
-    if (shared) {
-        sharedVerdicts.delete(fingerprint);
-        shared.usedAt = now;
-        sharedVerdicts.set(fingerprint, shared);
-        verdicts = shared.verdicts;
-        DiagnosticConfig.developerDiagnostics && (stats.fingerprintHits += 1);
-    } else {
-        verdicts = new Map();
-        DiagnosticConfig.developerDiagnostics && (stats.fingerprintMisses += 1);
-        if (fingerprint !== null && Diagnostics.active()) Diagnostics.count('matchup', 'miss', missKind(fingerprint));
-        if (fingerprint !== null) {
-            sharedVerdicts.set(fingerprint, { verdicts, usedAt: now });
-            entryCounts.set(verdicts, { chars: fingerprint.length, maps: 0, entries: 0, spots: 0, live: true });
-            stats.fingerprintChars += fingerprint.length;
-            trimSharedVerdicts(now, verdicts);
-        }
-    }
-    npcVerdicts.set(profiles, verdicts);
+function optionVerdicts(profiles, options) {
+    let byOptions = npcVerdicts.get(profiles);
+    if (!byOptions) npcVerdicts.set(profiles, byOptions = new Map());
+    const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
+    let verdicts = byOptions.get(optionsKey);
+    if (!verdicts) byOptions.set(optionsKey, verdicts = new Map());
     return verdicts;
 }
 
-// Drops fingerprints from the least recently used end: over the count limit,
-// idle ones, then while the entries exceed the budget. The fingerprint in use
-// (keep, the most recently used) is never dropped.
-function trimSharedVerdicts(now, keep) {
-    for (const [key, entry] of sharedVerdicts) {
-        if (entry.verdicts === keep) break;
-        if (sharedVerdicts.size <= VERDICT_PROFILE_LIMIT && now - entry.usedAt < VERDICT_PROFILE_IDLE_MS) {
-            if (stats.verdictEntries + stats.spotStores <= VERDICT_ENTRY_BUDGET) break;
-            stats.budgetEvictions += 1;
-        }
-        sharedVerdicts.delete(key);
-        stats.evictions += 1;
-        Diagnostics.active() && rememberEvicted(key);
-        const held = entryCounts.get(entry.verdicts);
-        if (held?.live) {
-            held.live = false;
-            stats.fingerprintChars -= held.chars; stats.optionMaps -= held.maps;
-            stats.verdictEntries -= held.entries; stats.spotStores -= held.spots;
-        }
-    }
-}
-
 function npcVerdict(verdicts, selfId, options) {
-    if (verdicts.has(selfId)) {
-        DiagnosticConfig.developerDiagnostics && (stats.verdictHits += 1);
-        return verdicts.get(selfId);
-    }
-    DiagnosticConfig.developerDiagnostics && (stats.verdictMisses += 1);
+    if (verdicts.has(selfId)) return verdicts.get(selfId);
     const npc = npcTemplate(selfId);
     let verdict = null;
     if (npc && huntingTargetPolicy().canHunt(npc)) {
@@ -530,77 +339,33 @@ function npcVerdict(verdicts, selfId, options) {
         const canHunt = options.soloSafety ? soloCanHunt(options.profiles, target,
             { maxTargetLevel: options.maxTargetLevel, npcLevel: Number(npc.template?.level || 0) }).eligible
             : match.eligible && withinRecoveryLevel;
-        // Read-only verdicts are shared. Mixed-attack and party profiles give
-        // continuous efficiencies, so the pool is cleared at a bound; verdicts
-        // already handed out stay valid.
-        const key = `${canHunt ? 1 : 0}:${fingerprintValue(match.efficiency)}`;
-        verdict = uniqueVerdicts.get(key);
-        if (!verdict) {
-            if (uniqueVerdicts.size >= VERDICT_PROFILE_LIMIT * 4) {
-                uniqueVerdicts.clear();
-                DiagnosticConfig.developerDiagnostics && (stats.verdictPoolClears += 1);
-            }
-            uniqueVerdicts.set(key, verdict = Object.freeze({ efficiency: match.efficiency, canHunt }));
-        }
+        verdict = Object.freeze({ efficiency: match.efficiency, canHunt });
     }
     verdicts.set(selfId, verdict);
     return verdict;
 }
 
 // A spot's matchup reads only its mob list and the verdicts of one profile
-// fingerprint and safety options, so it is shared the same way: a spot search
-// after every commit checks hundreds of spots against the same verdicts.
+// array and safety options, so it is kept beside them: a spot search checks
+// hundreds of spots against the same verdicts.
 const spotMatchups = new WeakMap();
-// Equal results are one object: most fingerprints get the same few values on
-// most spots. Bounded like the verdict pool; results already handed out stay valid.
-const uniqueSpotResults = new Map();
 
-// The species verdicts of one fingerprint (byOptions, its counts held: none
-// for an unshared array) under one set of safety options.
-function optionVerdicts(byOptions, held, options) {
-    const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
-    let verdicts = byOptions.get(optionsKey);
-    if (!verdicts) {
-        byOptions.set(optionsKey, verdicts = new Map());
-        if (held?.live) { held.maps += 1; stats.optionMaps += 1; }
-    }
-    return verdicts;
-}
-// Verdicts and spot results one call stored, against the entry budget.
-function countStored(byOptions, held, added, spots) {
-    if (!held?.live) return;
-    held.entries += added; held.spots += spots;
-    stats.verdictEntries += added; stats.spotStores += spots;
-    if (stats.verdictEntries + stats.spotStores > VERDICT_ENTRY_BUDGET) trimSharedVerdicts(Date.now(), byOptions);
-}
 // One species' verdict ({ efficiency, canHunt } or null) for profiles under
 // safety options: the one a spot search with the same profiles and options
 // reads, so a solo fight's pick (ColdCombatProfile.npcForSpot) shares it.
 function speciesVerdict(profiles, selfId, options = {}) {
-    const byOptions = verdictsFor(profiles), held = entryCounts.get(byOptions);
-    const verdicts = optionVerdicts(byOptions, held, options), before = verdicts.size;
-    const verdict = npcVerdict(verdicts, Number(selfId),
+    return npcVerdict(optionVerdicts(profiles, options), Number(selfId),
         { profiles, soloSafety: options.soloSafety, maxTargetLevel: options.maxTargetLevel });
-    countStored(byOptions, held, verdicts.size - before, 0);
-    return verdict;
 }
 
 function spotMatchup(spot, profiles, options = {}) {
     if (!profiles?.length) return evaluate([], {});
     let total = 0, effective = 0, eligible = false, safe = 0;
-    const byOptions = verdictsFor(profiles);
-    // Counts of this fingerprint; unshared (unfingerprinted) arrays have none.
-    const held = entryCounts.get(byOptions);
-    const verdicts = optionVerdicts(byOptions, held, options);
-    const entriesBefore = verdicts.size;
+    const verdicts = optionVerdicts(profiles, options);
     let bySpot = spotMatchups.get(verdicts);
     if (!bySpot) spotMatchups.set(verdicts, bySpot = new WeakMap());
     const known = bySpot.get(spot);
-    if (known) {
-        DiagnosticConfig.developerDiagnostics && (stats.spotHits += 1);
-        return known;
-    }
-    DiagnosticConfig.developerDiagnostics && (stats.spotMisses += 1);
+    if (known) return known;
     const verdictOptions = { profiles, soloSafety: options.soloSafety, maxTargetLevel: options.maxTargetLevel };
     for (const entry of spot.npcEntries || []) {
         const verdict = npcVerdict(verdicts, Number(entry.selfId), verdictOptions);
@@ -612,20 +377,11 @@ function spotMatchup(spot, profiles, options = {}) {
         eligible ||= canHunt;
         if (canHunt) safe += weight;
     }
-    countStored(byOptions, held, verdicts.size - entriesBefore, 1);
     const efficiency = total ? effective / total : 1;
     const safeFraction = total ? safe / total : 1;
     const spotEligible = !total || (eligible && (!options.soloSafety || safeFraction >= 0.6));
     const penalty = Math.round((1 - efficiency) * 250 + (options.soloSafety ? (1 - safeFraction) * 250 : 0));
-    const key = `${efficiency}:${safeFraction}:${spotEligible ? 1 : 0}:${penalty}`;
-    let result = uniqueSpotResults.get(key);
-    if (!result) {
-        if (uniqueSpotResults.size >= VERDICT_PROFILE_LIMIT * 4) {
-            uniqueSpotResults.clear();
-            DiagnosticConfig.developerDiagnostics && (stats.spotPoolClears += 1);
-        }
-        uniqueSpotResults.set(key, result = Object.freeze({ efficiency, safeFraction, eligible: spotEligible, penalty }));
-    }
+    const result = Object.freeze({ efficiency, safeFraction, eligible: spotEligible, penalty });
     bySpot.set(spot, result);
     return result;
 }
@@ -637,6 +393,5 @@ function damageRate(profiles, target = {}) {
         .map(attack => (attack.survivalWeight ?? attack.weight) * attack.modifier)), 0);
 }
 
-module.exports = { MIN_EFFICIENCY, VERDICT_PROFILE_LIMIT, VERDICT_ENTRY_BUDGET, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
-    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup, speciesVerdict,
-    cacheStats, sharedVerdictProfiles: () => sharedVerdicts.size, uniqueVerdictCount: () => uniqueVerdicts.size };
+module.exports = { MIN_EFFICIENCY, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
+    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup, speciesVerdict };

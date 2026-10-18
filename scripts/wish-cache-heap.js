@@ -1,5 +1,5 @@
 // Memory the wish review keeps per bot, split by layer, on real bot states from a world save (read-only).
-//  - context cache (layer B, LRU 64 per thread) and the per-build gains store (layer A) measured apart.
+//  - context cache (layer B, LRU 64 per thread) and the kit profile store measured apart.
 // Run from the repo root: L2NODE_CONFIG_FILE=config/default.ini node --expose-gc <this> <world save database.sqlite> [bots=400]
 require('../src/Global');
 const { DatabaseSync } = require('node:sqlite');
@@ -24,13 +24,13 @@ const h0 = heap();
 const t = performance.now(); let failed = 0, keyBytes = 0;
 for (const s of states) { try { keyBytes += Econ.forState(s, { timestamp: 1e12 }).inputKey.length; } catch { failed++; } }
 const ms = performance.now() - t;
-const h1 = heap();                                   // contexts (LRU 64) + gains store
-Econ.reset();                                        // drops contexts and networks, keeps the gains store
+const h1 = heap();                                   // contexts (LRU 64) + kit profiles
+Econ.reset();                                        // drops contexts and networks, keeps the kit profiles
 const h2 = heap();
-for (const s of states) Profile.forgetBuild(s.characterId);  // drops the gains store
+for (const s of states) Profile.forgetBuild(s.characterId);  // drops the kit profiles
 const h3 = heap();
 const ok = states.length - failed, kb = b => +(b / ok / 1024).toFixed(1);
 console.log(JSON.stringify({ bots: ok, failed, buildMsPerBot: +(ms / ok).toFixed(1),
-    allKeptKbPerBot: kb(h1 - h0), contextsKbPerBot_LRU64: kb(h1 - h2), gainsStoreKbPerBot: kb(h2 - h3),
+    allKeptKbPerBot: kb(h1 - h0), contextsKbPerBot_LRU64: kb(h1 - h2), kitProfilesKbPerBot: kb(h2 - h3),
     leftAfterForgetKbPerBot: kb(h3 - h0), inputKeyBytesPerBot: Math.round(keyBytes / ok) }));
 process.exit(0);

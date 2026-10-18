@@ -19,10 +19,11 @@ const NpcSkills = invoke('GameServer/Npc/NpcSkills');
 const RAID_MINIONS = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
-const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
+const HennaRules = invoke('GameServer/Henna/HennaRules');
 
 // Rebuild persisted kits that could have been overwritten by an older resolve.
 const PROFILE_VERSION = 6;
+const BASE_STATS = ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN'];
 const npcCombatCache = new WeakMap();
 
 const WEAPON_MASK_BY_KIND = Object.freeze({
@@ -102,7 +103,9 @@ function preparedEquipment(template, selfId, objectId, enchant, slot) {
     return prepared;
 }
 
-function equippedTemplates(state = {}) {
+// worn (optional): receives each worn row's preparedEquipment arguments
+// { template, selfId, objectId, enchant, slot }.
+function equippedTemplates(state = {}, worn = null) {
     return Object.values(state.inventory || {})
         .flatMap((item) => {
             // Unequipped rows always produced no slots. Do not resolve their
@@ -127,6 +130,7 @@ function equippedTemplates(state = {}) {
                 const instance = item.instances?.find(row => row.equipped && number(row.slot) === slot);
                 const enchant = number(instance?.enchant, number(item.enchant));
                 const selfId = number(item.selfId), objectId = number(instance?.id, selfId);
+                worn?.push({ template, selfId, objectId, enchant, slot });
                 return preparedEquipment(template, selfId, objectId, enchant, slot);
             });
         })
@@ -310,11 +314,6 @@ function npcCombatStats(npc) {
     };
     npcCombatCache.set(npc, result);
     return result;
-}
-
-function effectiveBase(profile, stat, timestamp, sources) {
-    return Math.max(1, Math.round((number(profile.base?.[stat.toLowerCase()], 1) + add(profile, stat, timestamp, sources))
-        * multiplier(profile, `${stat}Mul`, timestamp, sources)));
 }
 
 function skillDefinition(selfId, level) {
@@ -564,8 +563,8 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
 // never its buffs or the clock: profileFor returns the stored profile while
 // the state's kit hash is the stored one and builds it once (no buffs, day)
 // when it moved. characterId -> { own, preparation }, each slot null or
-// { kit, kitPart, profile }: own is the bot, preparation its future state of
-// gear preparation (buildGainsFor with preparation). The stored profile is
+// { kit, kitPart, profile, terms }: own is the bot, preparation its future state of
+// gear preparation (WishProviders, options.preparation). The stored profile is
 // shared, read-only: a reader spreads it into its own object to change it.
 // Buffs and night apply only in fightProfile. At most ownerLimit() bots; the
 // oldest inserted is dropped, a rebuilt one re-inserted. A state without a
@@ -634,7 +633,7 @@ function currentCp(state = {}, profile = {}, timestamp = Date.now()) {
 // Kit profile builds for the live read (combat_profile:build:all and its ms);
 // a fight reads the totals around itself (buildCount, buildMs). Counted only
 // while diagnostics are on. combat_profile:build:<site> names who asked: the
-// site set around the call (withBuildSite: matchup, fight, shadow; gainFor
+// site set around the call (withBuildSite: matchup, fight; candidateProfiles
 // sets gain; the innermost wins), else other.
 let builds = 0, buildTime = 0, buildSite = null;
 function buildKit(state, timestamp, kit) {
@@ -659,9 +658,12 @@ function withBuildSite(site, work) {
 function buildCount() { return builds; }
 function buildMs() { return buildTime; }
 
+// terms: the formula terms of the kit numbers (powerTerms), read by the
+// what-if of a candidate (candidateProfiles).
 function kitSlot(state, timestamp, kit) {
     const kitPart = gatherKit(state, timestamp);
-    return { kit, kitPart, profile: profileNumbers(kitPart, kitPart.effects, timestamp, { night: false }) };
+    const { profile, terms } = numbersPass(kitPart, kitPart.effects, timestamp, { night: false });
+    return { kit, kitPart, profile, terms };
 }
 
 // The gather part of a profile: class template, worn gear, the kit effects
@@ -674,90 +676,219 @@ function gatherKit(state, timestamp) {
     const level = Math.max(1, number(state.level, 1));
     const spellcaster = [10, 13, 14, 25, 26, 28, 38, 39, 40, 41, 49].includes(Formulas.getParentClassId(classId))
         || [10, 13, 14, 25, 26, 28, 38, 39, 40, 41, 49].includes(classId);
-    const equipped = equippedTemplates(state);
-    const legacyEquipment = equipmentFromTemplates(equipped, spellcaster, template.stats || {});
+    const worn = [];
+    const equipped = equippedTemplates(state, worn);
     const kitPart = {
         version: 1,
         capturedAt: number(saved?.capturedAt, timestamp),
         classId,
         base: { ...(template.base || {}), ...(template.stats || {}), ...(saved?.base || {}) },
-        // ARCH-NOTE: Restore snapshot gear for legacy bags with no equipped rows;
-        // selling the last weapon keeps that snapshot until the next hot capture.
-        // Equipped rows still override it immediately after purchases and crafts.
-        equipment: equipped.length
-            ? { ...(saved?.equipment || {}), ...legacyEquipment }
-            : { ...legacyEquipment, ...(saved?.equipment || {}) },
+        equipment: kitEquipment(equipmentFromTemplates(equipped, spellcaster, template.stats || {}), equipped.length, saved?.equipment),
         // Set bonuses follow the current worn parts, including hypothetical swaps;
         // a state without inventory keeps its captured ones.
-        effects: [...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))), ...savedSetEffects(state),
-            ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)],
+        effects: kitEffects(state, equipped),
         skills: skillsFor(state, classId, level),
-        level, race: number(template.template?.race), spellcaster
+        level, race: number(template.template?.race), spellcaster,
+        // The worn rows (equippedTemplates) and the class gear fallback, for
+        // the what-if of a candidate (candidateProfiles).
+        worn, classStats: template.stats || {}
     };
-    const henna = invoke('GameServer/Henna/HennaRules').totals(state.stats?.hennas || []);
+    const henna = hennaTotals(state.stats?.hennas);
     // Captured hot base stats already include the same paid symbols. Only
     // the delta from that capture is added when the cold inventory changes.
-    for (const stat of ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN']) {
+    for (const stat of BASE_STATS) {
         const captured = number(saved?.henna?.[stat]);
         kitPart.base[stat.toLowerCase()] = number(kitPart.base[stat.toLowerCase()], 1) + henna[stat] - captured;
     }
     return kitPart;
 }
 
+function hennaTotals(hennas) {
+    return HennaRules.totals(hennas || []);
+}
+
+// The gear of worn templates (legacyEquipment: equipmentFromTemplates of
+// worn rows) over the saved captured gear.
+function kitEquipment(legacyEquipment, worn, savedEquipment) {
+    // ARCH-NOTE: Restore snapshot gear for legacy bags with no equipped rows;
+    // selling the last weapon keeps that snapshot until the next hot capture.
+    // Equipped rows still override it immediately after purchases and crafts.
+    return worn
+        ? { ...(savedEquipment || {}), ...legacyEquipment }
+        : { ...legacyEquipment, ...(savedEquipment || {}) };
+}
+
 // The numbers pass: the formulas over a kit part, a list of effects and the
 // night of sourceOptions (statSources; unset: the night of timestamp).
 function profileNumbers(kitPart, effects, timestamp, sourceOptions) {
+    return numbersPass(kitPart, effects, timestamp, sourceOptions).profile;
+}
+// The pass and its power terms (powerTerms).
+function numbersPass(kitPart, effects, timestamp, sourceOptions) {
     const { classId, level, spellcaster } = kitPart;
     const profile = { version: kitPart.version, capturedAt: kitPart.capturedAt, classId, base: kitPart.base,
         equipment: kitPart.equipment, effects, skills: kitPart.skills };
     // Resolve effects and passive requirements once for this calculation.
     const sources = statSources(profile, timestamp, sourceOptions);
     const equipment = profile.equipment;
-    const str = effectiveBase(profile, 'STR', timestamp, sources);
-    const dex = effectiveBase(profile, 'DEX', timestamp, sources);
-    const con = effectiveBase(profile, 'CON', timestamp, sources);
-    const int = effectiveBase(profile, 'INT', timestamp, sources);
-    const wit = effectiveBase(profile, 'WIT', timestamp, sources);
-    const men = effectiveBase(profile, 'MEN', timestamp, sources);
+    const terms = powerTerms(profile, level, timestamp, sources);
+    const stats = terms.stats = effectiveStats(terms, profile.base);
+    const { dex, con, wit, men } = stats;
+    const power = formulaPower(terms, equipment, profile.base, stats);
     const classTransfer = level < 20 ? 0 : level < 40 ? 1 : 2;
-    const maxHp = (Formulas.calcHp(level, classId, con) * multiplier(profile, 'maxHpMul', timestamp, sources)) + add(profile, 'maxHpAdd', timestamp, sources);
     const maxMp = ((Formulas.calcMp(level, spellcaster ? 1 : 0, classTransfer, men) + number(equipment.bonusMp))
         * multiplier(profile, 'maxMpMul', timestamp, sources)) + add(profile, 'maxMpAdd', timestamp, sources);
     const maxCp = Math.max(0, Formulas.calcCp(level, classId, con)
         * multiplier(profile, 'maxCpMul', timestamp, sources) + add(profile, 'maxCpAdd', timestamp, sources));
     const cpRegen = Math.max(0, number(DataCache.revitalize?.hp?.[level]) * Formulas.calcLevelMod(level)
         * Formulas.calcBaseMod.CON(con) * multiplier(profile, 'regCp', timestamp, sources));
-    const pAtk = Math.round(Formulas.calcPAtk(level, str, number(equipment.pAtk, number(profile.base.pAtk)))
-        * multiplier(profile, 'pAtkMul', timestamp, sources)) + add(profile, 'pAtkAdd', timestamp, sources);
-    const mAtk = Math.round(Formulas.calcMAtk(level, int, number(equipment.mAtk, number(profile.base.mAtk)))
-        * multiplier(profile, 'mAtkMul', timestamp, sources)) + add(profile, 'mAtkAdd', timestamp, sources);
-    const pDef = Math.round(Formulas.calcPDef(level, number(equipment.pDef, number(profile.base.pDef)))
-        * multiplier(profile, 'pDefMul', timestamp, sources)) + add(profile, 'pDefAdd', timestamp, sources);
-    const mDef = Math.round(Formulas.calcMDef(level, men, number(equipment.mDef, number(profile.base.mDef)))
-        * multiplier(profile, 'mDefMul', timestamp, sources)) + add(profile, 'mDefAdd', timestamp, sources);
     const accur = Formulas.calcAccur(level, dex, number(equipment.accur, number(profile.base.accur))) + add(profile, 'pAccuracyCombatAdd', timestamp, sources);
     const evasion = Math.round((Formulas.calcEvasion(level, dex, number(equipment.evasion, number(profile.base.evasion)))
         + add(profile, 'pEvasionRateAdd', timestamp, sources)) * multiplier(profile, 'pEvasionMul', timestamp, sources));
     const critical = (Formulas.calcCritical(dex, number(equipment.critical, number(profile.base.critical)))
         * multiplier(profile, 'pCritRateMul', timestamp, sources)) + add(profile, 'pCritRateAdd', timestamp, sources);
-    const atkSpd = Math.round(Formulas.calcAtkSpd(dex, number(equipment.atkSpd, number(profile.base.atkSpd)))
-        * multiplier(profile, 'pAtkSpdMul', timestamp, sources));
-    const castSpd = Math.round(Formulas.calcCastSpd(wit) * multiplier(profile, 'castSpdMul', timestamp, sources));
     const mCritRate = Formulas.magicCriticalRate({
         multiplier: multiplier(profile, 'mCritRateMul', timestamp, sources),
         add: add(profile, 'mCritRateAdd', timestamp, sources),
         wit,
         weapon: !!equipment.weaponKind
     });
-    return {
+    return { terms, profile: {
         ...profile, level, race: kitPart.race,
         maxLoad: Math.max(0, Formulas.calcMaxLoad(con) * multiplier(profile, 'maxLoadMul', timestamp, sources)
             + add(profile, 'maxLoad', timestamp, sources)),
-        maxCp, cpRegen, maxHp: Math.max(1, maxHp), maxMp: Math.max(1, maxMp), pAtk: Math.max(1, pAtk), mAtk: Math.max(1, mAtk),
-        pDef: Math.max(1, pDef), mDef: Math.max(1, mDef), accur: Math.max(1, accur), evasion: Math.max(0, evasion),
-        critical: Math.max(0, critical), mCritRate, atkSpd: Math.max(1, atkSpd), castSpd: Math.max(1, castSpd),
+        maxCp, cpRegen, maxHp: power.maxHp, maxMp: Math.max(1, maxMp), pAtk: power.pAtk, mAtk: power.mAtk,
+        pDef: power.pDef, mDef: power.mDef, accur: Math.max(1, accur), evasion: Math.max(0, evasion),
+        critical: Math.max(0, critical), mCritRate, atkSpd: power.atkSpd, castSpd: power.castSpd,
         weaponMask: (WEAPON_MASK_BY_KIND[equipment.weaponKind] || 0) | (number(equipment.shieldPDef) > 0 ? 1048576 : 0)
+    } };
+}
+
+// The power terms of one numbers pass: level and class, each base stat's
+// effect addition and multiplier, and each power stat's effect multiplier
+// and addition (numbersPass adds stats, its effective base stats). With them
+// the power numbers (formulaPower) follow from the gear raw sums and the base
+// stats alone.
+function powerTerms(profile, level, timestamp, sources) {
+    const terms = { level, classId: profile.classId, baseAdd: {}, baseMul: {} };
+    for (const stat of BASE_STATS) {
+        terms.baseAdd[stat] = add(profile, stat, timestamp, sources);
+        terms.baseMul[stat] = multiplier(profile, `${stat}Mul`, timestamp, sources);
+    }
+    for (const stat of ['pAtk', 'mAtk', 'pDef', 'mDef', 'maxHp']) {
+        terms[`${stat}Mul`] = multiplier(profile, `${stat}Mul`, timestamp, sources);
+        terms[`${stat}Add`] = add(profile, `${stat}Add`, timestamp, sources);
+    }
+    terms.pAtkSpdMul = multiplier(profile, 'pAtkSpdMul', timestamp, sources);
+    terms.castSpdMul = multiplier(profile, 'castSpdMul', timestamp, sources);
+    return terms;
+}
+// The six base stats after the effects: { str, dex, con, int, wit, men }.
+function effectiveStats(terms, base) {
+    const stats = {};
+    for (const stat of BASE_STATS) {
+        const key = stat.toLowerCase();
+        stats[key] = Math.max(1, Math.round((number(base?.[key], 1) + terms.baseAdd[stat]) * terms.baseMul[stat]));
+    }
+    return stats;
+}
+// The power numbers: the formula of each over the gear raw sum (the class
+// base value with none), the effective base stats and the terms.
+function formulaPower(terms, equipment, base, stats) {
+    const { level, classId } = terms;
+    return {
+        maxHp: Math.max(1, Formulas.calcHp(level, classId, stats.con) * terms.maxHpMul + terms.maxHpAdd),
+        pAtk: Math.max(1, Math.round(Formulas.calcPAtk(level, stats.str, number(equipment.pAtk, number(base.pAtk))) * terms.pAtkMul) + terms.pAtkAdd),
+        mAtk: Math.max(1, Math.round(Formulas.calcMAtk(level, stats.int, number(equipment.mAtk, number(base.mAtk))) * terms.mAtkMul) + terms.mAtkAdd),
+        pDef: Math.max(1, Math.round(Formulas.calcPDef(level, number(equipment.pDef, number(base.pDef))) * terms.pDefMul) + terms.pDefAdd),
+        mDef: Math.max(1, Math.round(Formulas.calcMDef(level, stats.men, number(equipment.mDef, number(base.mDef))) * terms.mDefMul) + terms.mDefAdd),
+        atkSpd: Math.max(1, Math.round(Formulas.calcAtkSpd(stats.dex, number(equipment.atkSpd, number(base.atkSpd))) * terms.pAtkSpdMul)),
+        castSpd: Math.max(1, Math.round(Formulas.calcCastSpd(stats.wit) * terms.castSpdMul))
     };
+}
+
+// A bot's numbers before and after one change of its kit, a what-if: no
+// gather, nothing stored. Reads the kit entry once (options.preparation: the
+// preparation slot); before = the kit profile; after(change) = the numbers
+// with the change:
+// - gear { free, wear }: the worn rows whose slot free(slot) answers true come
+//   off, wear ({ selfId, objectId, enchant, slot, template? } or null) goes on;
+// - { hennas }: the symbol list replaces the bot's;
+// - { skill: { selfId, level } }: the skill is learnt.
+// A gear or henna change returns the power numbers (formulaPower) only, the
+// kit profile with the skill a whole profile. The reader keeps the prepared
+// worn rows and the kit's henna totals for its candidates; they die with it.
+function candidateProfiles(state = {}, timestamp = Date.now(), options = {}) {
+    const entry = withBuildSite('gain', () => kitEntry(state, timestamp, options));
+    let worn, hennas;
+    const after = change => change.skill ? skillCandidate(entry, change.skill, timestamp)
+        : change.hennas ? hennaCandidate(entry, hennas ||= hennaTotals(state.stats?.hennas), change.hennas)
+            : gearCandidate(state, entry, worn ||= entry.kitPart.worn.map(prepareWorn), change, timestamp);
+    return { before: entry.profile, after };
+}
+function prepareWorn(row) {
+    return preparedEquipment(row.template, row.selfId, row.objectId, row.enchant, row.slot);
+}
+function hennaCandidate({ kitPart, terms }, now, next) {
+    const then = hennaTotals(next), base = { ...kitPart.base };
+    for (const stat of BASE_STATS) base[stat.toLowerCase()] = number(base[stat.toLowerCase()], 1) + then[stat] - now[stat];
+    return formulaPower(terms, kitPart.equipment, base, effectiveStats(terms, base));
+}
+// A passive skill reaches the numbers through the numbers pass; an active one
+// only the skill list.
+function skillCandidate({ kitPart, profile }, skill, timestamp) {
+    const [snapshot] = skillSnapshotsFromRecords([skill]);
+    if (!snapshot) return profile;
+    const skills = [...kitPart.skills.filter(known => known.selfId !== snapshot.selfId), snapshot];
+    return snapshot.passive ? profileNumbers({ ...kitPart, skills }, kitPart.effects, timestamp, { night: false })
+        : { ...profile, skills };
+}
+// The gear of the changed worn list (kitEquipment). While no item effect
+// comes on or off, the armour set effects stay and so do the gear conditions
+// of passives (statSources: weapon kind, armour kinds, set kind, shield), the
+// kit's terms hold: the formula over the new raw sums (with a worn row, the
+// worn gear holds every field the formula reads). Else the kit effects of the
+// new worn list and a numbers pass. A state without inventory (captured set
+// effects) always takes the pass.
+// worn: the kit's worn rows prepared (prepareWorn), in kitPart.worn order.
+function gearCandidate(state, { kitPart, terms }, worn, { free, wear }, timestamp) {
+    const template = wear && (wear.template || itemTemplate(wear.selfId));
+    const added = template ? prepareWorn({ template, selfId: number(wear.selfId), objectId: number(wear.objectId, number(wear.selfId)),
+        enchant: number(wear.enchant), slot: number(wear.slot) }) : null;
+    const kept = [], changed = added ? [added] : [];
+    for (let index = 0; index < worn.length; index++) (free(kitPart.worn[index].slot) ? changed : kept).push(worn[index]);
+    const equipped = added ? [...kept, added] : kept;
+    const legacyEquipment = equipmentFromTemplates(equipped, kitPart.spellcaster, kitPart.classStats);
+    const sameKit = equipped.length > 0 && hasInventory(state) && !changed.some(item => item.equipmentEffect)
+        && sameGearConditions(legacyEquipment, kitPart.equipment)
+        && (!changed.some(setPart) || sameKeys(C4ArmorSets.effectsForEquippedIds(wornIds(equipped)),
+            kitPart.effects.filter(effect => effect.category === C4ArmorSets.CATEGORY)));
+    if (sameKit) return formulaPower(terms, legacyEquipment, kitPart.base, terms.stats);
+    const equipment = kitEquipment(legacyEquipment, equipped.length, state.stats?.coldCombat?.equipment);
+    return profileNumbers({ ...kitPart, equipment }, kitEffects(state, equipped), timestamp, { night: false });
+}
+// Armour sets are made of armour and shields, never of jewels (C4ArmorSets).
+function setPart(item) {
+    const kind = String(item.template?.kind || '');
+    return kind.startsWith('Armor.') && kind !== 'Armor.Jewel';
+}
+function wornIds(equipped) {
+    return new Set(equipped.map(item => Number(item.selfId)));
+}
+function sameKeys(effects, others) {
+    return effects.length === others.length && effects.every((effect, index) => effect.key === others[index].key);
+}
+function sameGearConditions(equipment, kit) {
+    const kinds = list => [...(list || [])].sort().join(',');
+    return (equipment.weaponKind || '') === (kit.weaponKind || '') && (equipment.setKind || '') === (kit.setKind || '')
+        && (number(equipment.shieldPDef) > 0) === (number(kit.shieldPDef) > 0)
+        && kinds(equipment.armorKinds) === kinds(kit.armorKinds);
+}
+// The kit effects of a worn list: its armour sets (a state without inventory
+// keeps its captured ones) and its items' effects.
+function kitEffects(state, equipped) {
+    return [...C4ArmorSets.effectsForEquippedIds(wornIds(equipped)), ...savedSetEffects(state),
+        ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)];
 }
 
 function activeMusicEffects(profile = {}, timestamp = Date.now()) {
@@ -971,62 +1102,14 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     };
 }
 
-// ARCH-NOTE: Float32 changed queue/focus for 15 of 300 saved builds.
-// Float64 preserves every nonzero and signed-zero result; exact +0/+0 uses
-// one slot marker. 256 Uint16 IDs share a buffer with 128 Float64 pairs.
-// Native 1,000-owner strong dominators: max entry 3,560 B including buffers,
-// plus amortized build/owner tables, key boxes and night markers 148.32 B.
-// The resulting 3,708.32 B remains below the 4 KB per-owner budget.
-// A bot that plans gear ahead also holds the entry of its preparation build
-// (WishProviders): up to ~7.4 KB while it prepares, inside the 10 KB per-bot
-// rule; a change of its own build drops it.
-// Shared candidate names are interned once; a build keeps only numeric hashes,
-// power numbers and packed gains. Owners release both variants and night markers.
-const buildGains = new Map();
-const ownerBuilds = new Map(), ownerPreparations = new Map();
-const candidateIndex = new Map();
-// Gain store use per thread (L110); counted only with developer diagnostics. switches and
-// preparationSwitches count owner slot moves away from a held key; clanSwitches is the part of
-// switches made inside a clan review; limitMisses count gains not stored because the entry or
-// the candidate index is full; filledDrops entries with gains deleted (evictions included);
-// evictions owners dropped by the owner limit.
-const stats = { gainHits: 0, gainMisses: 0, limitMisses: 0, switches: 0, preparationSwitches: 0, clanSwitches: 0, filledDrops: 0, evictions: 0 };
-function cacheStats() { return { ...size(), ...stats }; }
-// The clan copy of a member may carry another build key than the bot itself and take its slot (L110).
-function countClanSwitches(compute) {
-    if (!PopulationConfig.developerDiagnostics) return compute();
-    const before = stats.switches;
-    try { return compute(); } finally { stats.clanSwitches += stats.switches - before; }
-}
-const POWER_FIELDS = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
-const CANDIDATE_LIMIT = 65536, ENTRY_LIMIT = 256, NONZERO_LIMIT = 128;
-function releaseBuild(key) {
-    const entry = buildGains.get(key);
-    if (!entry) return;
-    if (--entry.owners <= 0) {
-        PopulationConfig.developerDiagnostics && entry.size > 0 && (stats.filledDrops += 1);
-        buildGains.delete(key);
-    }
-    if (entry.night === 1) {
-        const marker = buildGains.get(entry.baseKey);
-        if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
-    }
-}
-// The gain store's key: the kit parts (kitParts) and the active effects
-// (effectsPart).
-function powerKey(state, timestamp) {
-    const parts = kitParts(state, false);
-    parts.push(effectsPart(state, timestamp));
-    return parts.join('|');
-}
 // The slow build inputs, no clock: class (saved, current), level, worn gear,
 // hennas, skills, the hot capture.
-function kitParts(state, canonicalSlots) {
+function kitParts(state) {
     const saved = state.stats?.coldCombat || {};
     const currentClassId = number(state.stats?.classId, number(state.classId));
     const worn = state.inventory && typeof state.inventory === 'object'
         ? Object.values(state.inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
-            row.enchant, (row.equippedSlots?.length ? row.equippedSlots : canonicalSlots ? [row.slot] : []).join('.'), (row.instances || []).filter((item) => item.equipped)
+            row.enchant, (row.equippedSlots?.length ? row.equippedSlots : [row.slot]).join('.'), (row.instances || []).filter((item) => item.equipped)
                 .map((item) => `${item.slot}.${item.enchant}`).join('/')].join(':')).sort().join(',')
         : 'no-inventory';
     // Main publishes the current class in stats; worker hydration may also
@@ -1034,11 +1117,6 @@ function kitParts(state, canonicalSlots) {
     return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
         JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null, ...savedSetEffects(state)])];
-}
-// The fight condition of a build at timestamp: its active effects.
-function effectsPart(state, timestamp) {
-    return activeEffects(buffEffects(state), timestamp)
-        .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
 }
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
@@ -1049,181 +1127,20 @@ const KIT_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'captu
 // One small hash per kit part, no clock: the kit fact and the kit profile
 // store's hash.
 function kitEvents(state = {}) {
-    const parts = kitParts(state, true);
+    const parts = kitParts(state);
     for (let index = 0; index < parts.length; index++) parts[index] = fnv1a32(String(parts[index]));
     return parts;
 }
-function powerFor(state = {}, timestamp = Date.now(), options = {}) {
-    const profile = profileFor(state, timestamp, options);
-    return Object.fromEntries(POWER_FIELDS.map(field => [field, profile[field]]));
-}
-// ARCH-NOTE: Existing callers need named numbers transiently; packed entries
-// never retain that object or a per-candidate string/array.
-function powerNumbers(entry) {
-    return Object.fromEntries(POWER_FIELDS.map((field, index) => [field, entry.power[index]]));
-}
-function resizeGains(entry, idCapacity, gainCapacity) {
-    const buffer = new ArrayBuffer(idCapacity * 3 + gainCapacity * 16);
-    const ids = new Uint16Array(buffer, 0, idCapacity), slots = new Uint8Array(buffer, idCapacity * 2, idCapacity);
-    const gains = new Float64Array(buffer, idCapacity * 3, gainCapacity * 2);
-    if (entry.ids) { ids.set(entry.ids); slots.set(entry.slots); gains.set(entry.gains); }
-    entry.ids = ids; entry.slots = slots; entry.gains = gains;
-    return entry;
-}
-// kit: a hash of the entry's kit parts (powerKey without the effects),
-// diagnostics only (gain_switch below), 0 while they are off.
-function newEntry(power, night, baseKey, state) {
-    return resizeGains({ power: Float64Array.from(POWER_FIELDS.map(field => power[field])),
-        size: 0, gainSize: 0, owners: 0, night, baseKey,
-        kit: Diagnostics.active() ? buildHash(kitParts(state, false).join('|')) : 0 }, 32, 32);
-}
-function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false } = {}) {
-    const key = buildHash(powerKey(state, timestamp)), baseKey = key;
-    const owner = Number(state.characterId) || 0;
-    let entry = buildGains.get(baseKey);
-    // The kit profile has no night, so every entry is a day entry (night 0).
-    // releaseBuild and countSwitch still handle night entries, but none are
-    // made any more. ARCH-01-b deletes this store.
-    if (!entry) {
-        entry = newEntry(powerFor(state, timestamp, { preparation }), 0, baseKey, state);
-        if (owner) buildGains.set(key, entry);
-    }
-    if (!owner) return entry;
-    // The preparation build carries the bot's id but has its own slot: in
-    // one slot it released the bot's build entry, and both rebuilt every
-    // gain on each review.
-    const owners = preparation ? ownerPreparations : ownerBuilds;
-    const held = owners.get(owner);
-    if (held !== key) {
-        entry.owners++;
-        if (entry.night === 1) buildGains.get(baseKey).owners++;
-        if (held !== undefined) {
-            PopulationConfig.developerDiagnostics && (preparation ? stats.preparationSwitches += 1 : stats.switches += 1);
-            if (!preparation && Diagnostics.active()) countSwitch(buildGains.get(held), entry);
-            releaseBuild(held);
-        }
-        // No preparation outlives the build it was planned from; after a
-        // level-up its gains are computed once again.
-        if (!preparation && held !== undefined) forgetFrom(ownerPreparations, owner);
-    }
-    owners.delete(owner);
-    owners.set(owner, key);
-    while (owners.size > ownerLimit()) {
-        const [oldest, oldKey] = owners.entries().next().value;
-        owners.delete(oldest);
-        PopulationConfig.developerDiagnostics && (stats.evictions += 1);
-        releaseBuild(oldKey);
-    }
-    return entry;
-}
-function forgetFrom(owners, owner) {
-    const key = owners.get(owner);
-    if (key === undefined) return;
-    owners.delete(owner);
-    releaseBuild(key);
-}
+// Drops the bot's kit profiles (both slots).
 function forgetBuild(characterId) {
     kitProfiles.delete(Number(characterId));
-    forgetFrom(ownerPreparations, Number(characterId));
-    forgetFrom(ownerBuilds, Number(characterId));
 }
-// The shadow for gains keyed by the kit (design rules, Recompute: shadow
-// first). The store keys an entry by powerKey: the kit and the active
-// effects, so a buff's start or expiry moves the bot to a new entry and its
-// gains are computed again. combat_profile:gain_switch:<kit|effects|night>
-// names why an owner's own build moved to another entry; effects_gains adds
-// the gains the old entry held, what a kit key would have kept.
-function countSwitch(old, entry) {
-    if (!old) return;
-    const reason = old.baseKey === entry.baseKey ? 'night' : old.kit !== 0 && old.kit === entry.kit ? 'effects' : 'kit';
-    Diagnostics.count('combat_profile', 'gain_switch', reason);
-    if (reason === 'effects' && old.size > 0) Diagnostics.count('combat_profile', 'gain_switch', 'effects_gains', old.size);
-}
-// combat_profile:gain_kit:<same|diff|no_effects>, sampled owners only: each
-// computed gain is computed again for the kit alone (the state without the
-// effects powerKey's effects part holds, before and after) and compared.
-// same: per component (attack, defence) both zero or both positive and
-// within the bot's error floor (Learning.INCOME_ERROR_FLOOR) of the larger;
-// no_effects: nothing to drop, the kit gain is the gain. The floor, as the
-// store has no persona: a diff here is a diff for every bot. The kit's own
-// power is one build per entry (kitPowers).
-const kitPowers = new WeakMap();
-function sameGain(gain, kit) {
-    for (const part of ['attack', 'defence']) {
-        if ((gain[part] > 0) !== (kit[part] > 0)
-            || Math.abs(gain[part] - kit[part]) > Learning.INCOME_ERROR_FLOOR * Math.max(Math.abs(gain[part]), Math.abs(kit[part])))
-            return false;
-    }
-    return true;
-}
-function kitGainShadow(entry, state, timestamp, compute, effect) {
-    if (!Diagnostics.enabled(Number(state.characterId))) return;
-    if (effectsPart(state, timestamp) === '') {
-        Diagnostics.count('combat_profile', 'gain_kit', 'no_effects');
-        return;
-    }
-    const saved = state.stats?.coldCombat || {}, buffs = buffEffects(state);
-    const kit = { ...state, stats: { ...state.stats, coldCombat: { ...saved,
-        effects: (saved.effects || []).filter(item => !buffs.includes(item)) } } };
-    let before = kitPowers.get(entry);
-    // The kit state carries the bot's id: a what-if, not the bot's slot.
-    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp, { store: false })));
-    const kitEffect = withBuildSite('shadow', () => compute(kit, before));
-    Diagnostics.count('combat_profile', 'gain_kit', sameGain(effect, kitEffect) ? 'same' : 'diff');
-}
-// compute(base = the owner's state, before = the entry's power numbers): the
-// gain of one candidate; the shadow passes the kit state and its power.
-// state and timestamp (optional) are the owner's, read only by the shadow.
-function gainFor(entry, key, compute, state = null, timestamp = 0) {
-    let id = candidateIndex.get(key);
-    if (id === undefined && candidateIndex.size < CANDIDATE_LIMIT) {
-        id = candidateIndex.size;
-        candidateIndex.set(key, id);
-    }
-    for (let index = 0; id !== undefined && index < entry.size; index++) {
-        if (entry.ids[index] !== id) continue;
-        PopulationConfig.developerDiagnostics && (stats.gainHits += 1);
-        const slot = entry.slots[index];
-        return slot === 0 ? { attack: 0, defence: 0 }
-            : { attack: entry.gains[(slot - 1) * 2], defence: entry.gains[(slot - 1) * 2 + 1] };
-    }
-    PopulationConfig.developerDiagnostics && (stats.gainMisses += 1);
-    const outerSite = buildSite;
-    buildSite = 'gain';
-    let effect;
-    try { effect = compute(); } finally { buildSite = outerSite; }
-    if (state !== null && Diagnostics.active()) kitGainShadow(entry, state, timestamp, compute, effect);
-    const zero = Object.is(effect.attack, 0) && Object.is(effect.defence, 0);
-    // A limit miss is a computed gain the caller uses, only not kept: the
-    // limits bound the store, they cut no candidate. combat_profile:gain_limit
-    // names the full part: the shared candidate index, the entry or its
-    // nonzero gains.
-    if (id === undefined || entry.size >= ENTRY_LIMIT || (!zero && entry.gainSize >= NONZERO_LIMIT)) {
-        if (PopulationConfig.developerDiagnostics) {
-            stats.limitMisses += 1;
-            Diagnostics.count('combat_profile', 'gain_limit',
-                id === undefined ? 'index' : entry.size >= ENTRY_LIMIT ? 'entries' : 'nonzero');
-        }
-        return effect;
-    }
-    const idCapacity = entry.size === entry.ids.length ? Math.min(ENTRY_LIMIT, entry.ids.length * 2) : entry.ids.length;
-    const gainCapacity = !zero && entry.gainSize * 2 === entry.gains.length
-        ? Math.min(NONZERO_LIMIT, entry.gains.length) : entry.gains.length / 2;
-    if (idCapacity !== entry.ids.length || gainCapacity * 2 !== entry.gains.length) resizeGains(entry, idCapacity, gainCapacity);
-    const index = entry.size++;
-    entry.ids[index] = id;
-    if (zero) { entry.slots[index] = 0; return { attack: 0, defence: 0 }; }
-    const slot = entry.gainSize++;
-    entry.slots[index] = slot + 1;
-    entry.gains[slot * 2] = effect.attack;
-    entry.gains[slot * 2 + 1] = effect.defence;
-    return { attack: entry.gains[slot * 2], defence: entry.gains[slot * 2 + 1] };
-}
-function size() { return { kitProfiles: kitProfiles.size, buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
+// The kit profile store's bots in this thread (the status line).
+function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, fightSources, KIT_EVENTS, kitEvents, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, skillsFor, forgetBuild, withEquipmentPreparation, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

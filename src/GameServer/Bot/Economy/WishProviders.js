@@ -10,6 +10,7 @@ const Network = require('./WishNetwork');
 const Progression = require('../AI/PersonalGearProgression');
 const SoulCrystals = require('../../Items/SoulCrystalProgression');
 const DualSwords = require('../../Items/C4DualSwordCombinations');
+const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -160,33 +161,17 @@ function wornReader(state) {
 function replacementWorn(wornFor, slot) {
     return Equipment.isWeaponSlot(slot) ? wornFor(7) || wornFor(14) : wornFor(slot);
 }
-function replacementConflict(row, slot) {
-    // Non-weapon gain keeps its existing paired jewellery/body semantics.
-    if (!Equipment.isWeaponSlot(slot) && ![10, 11, 15].includes(slot)) return Number(row.slot) === slot;
-    if (!row.equipped && !(row.equippedCount > 0)) return false;
-    if (row.equippedSlots?.length) {
-        for (const wornSlot of row.equippedSlots) {
-            if (Equipment.equipmentReplacementConflict(slot, wornSlot)) return true;
-        }
-        return false;
-    }
-    const wornSlot = row.slot || need('../../Item/ItemTemplateIndex')
-        .find(invoke('GameServer/DataCache').items, row.selfId)?.etc?.slot;
-    return Equipment.equipmentReplacementConflict(slot, wornSlot);
+// What wearing `item` in its slot adds to the bot: its kit profile against
+// the numbers with the item worn (ColdCombatProfile.candidateProfiles).
+function gearGain(state, item, timestamp = Date.now(), threatMask = 3) {
+    return gearGainReader(state, timestamp, {}, undefined, threatMask)(item);
 }
-// What wearing `item` in its slot adds to the bot's build: remembered per
-// build and item (design 16.5), so a later review of the same build reuses it.
-function gearGain(state, item, timestamp = Date.now(), build = null, threatMask = 3) {
-    return gearGainReader(state, timestamp, build, undefined, threatMask)(item);
-}
-function gearGainReader(state, timestamp, build, caster = require('./BotImprovementPolicy').isCaster(state), threatMask = 3) {
+// options: the kit profile slot (candidateProfiles; preparation: the future state).
+function gearGainReader(state, timestamp, options = {}, caster = require('./BotImprovementPolicy').isCaster(state), threatMask = 3) {
     threatMask = threatMask === 1 ? 1 : 3;
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    build ||= Profile.buildGainsFor(state, timestamp);
-    let inventoryEntries, withoutSlot, previousSlot, ownWeapon;
+    let candidates, ownWeapon;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
-    const entries = () => inventoryEntries ||= Object.entries(state.inventory || {});
     const selectedWeapon = item => {
         if (!Planner.equipmentCandidate(item, state, role)) return false;
         if (ownWeapon === undefined) {
@@ -195,7 +180,7 @@ function gearGainReader(state, timestamp, build, caster = require('./BotImprovem
             const Index = need('../../Item/ItemTemplateIndex');
             // The same native comparison, once per review, includes weapons
             // received but not yet reconciled. Known material slots need no lookup.
-            for (const [key, row] of entries()) {
+            for (const [key, row] of Object.entries(state.inventory || {})) {
                 if (!(Number(row.amount) > 0) || Number(row.slot) > 0 && !Equipment.isWeaponSlot(row.slot)) continue;
                 const owned = Index.find(Data.items, row.selfId);
                 if (Equipment.isWeaponSlot(owned?.etc?.slot) && Planner.equipmentCandidate(owned, state, role)
@@ -208,37 +193,20 @@ function gearGainReader(state, timestamp, build, caster = require('./BotImprovem
         return Number(item.selfId) < Number(ownWeapon.key)
             && !Planner.equipmentItemBetter(ownWeapon.item, item, role, classId);
     };
-    return (item, targetSlot = Number(item.etc.slot)) => Profile.gainFor(build, `${caster ? 'm' : 'p'}:gear:${threatMask}:${item.selfId}:${targetSlot}`, (base = state, before = Profile.powerNumbers(build)) => {
+    return (item, targetSlot = Number(item.etc.slot)) => {
         const slot = targetSlot;
         if (Equipment.isWeaponSlot(slot) && !selectedWeapon(item)) return { attack: 0, defence: 0 };
-        // Only a new native gain needs a hypothetical bag. Prepare its unchanged
-        // rows/removal for the current slot, then give each candidate a fresh
-        // overlay. Candidates are grouped by slot: keep one base, not one bag
-        // for every slot. Cached gains allocate no bag; scratch dies at return.
-        if (!withoutSlot || previousSlot !== slot) {
-            previousSlot = slot;
-            withoutSlot = Object.fromEntries((inventoryEntries ||= Object.entries(state.inventory || {}))
-                .map(([key, row]) => {
-                    if ([1, 2, 4, 5].includes(slot)) {
-                        const slots = Planner.equippedSlotsFor(row, row.slot).filter(wornSlot => wornSlot !== slot);
-                        return [key, { ...row, equipped: slots.length > 0, equippedCount: slots.length, equippedSlots: slots }];
-                    }
-                    return [key, replacementConflict(row, slot)
-                        ? { ...row, equipped: false, equippedCount: 0, equippedSlots: [] } : row];
-                }));
-        }
-        const paired = [1, 2, 4, 5].includes(slot), previous = withoutSlot[item.selfId];
-        const equippedSlots = paired ? [...(previous?.equippedSlots || []), slot] : [slot];
-        const inventory = { ...withoutSlot, [item.selfId]: { selfId: Number(item.selfId),
-            amount: paired ? Math.max(Number(previous?.amount || 0) + 1, equippedSlots.length) : 1,
-            equipped: true, equippedCount: equippedSlots.length, equippedSlots, slot, enchant: 0 } };
-        const after = Profile.powerFor({ ...base, inventory }, timestamp, { store: false });
+        candidates ||= Profile.candidateProfiles(state, timestamp, options);
+        // The item at enchant 0 in its slot; what it replaces comes off (a
+        // weapon both hands, a two-handed one the shield, a jewel its side).
+        const before = candidates.before, after = candidates.after({ free: worn => Equipment.equipmentReplacementConflict(slot, worn),
+            wear: { selfId: Number(item.selfId), enchant: 0, slot } });
         const attack = caster ? 'mAtk' : 'pAtk';
         const attackGain = Math.max(0, Number(after[attack]) / Math.max(1, Number(before[attack])) - 1);
         const defenceGain = Math.max(0, 1 - Number(before.pDef) / Math.max(1, Number(after.pDef)));
         const magicGain = Math.max(0, 1 - Number(before.mDef) / Math.max(1, Number(after.mDef)));
         return { attack: attackGain, defence: threatMask === 1 ? defenceGain : Math.max(defenceGain, magicGain) };
-    }, state, timestamp);
+    };
 }
 // Damage per second in a 60-second rotation: each skill's reuse limits its
 // casts; attacks fill time left over. A second nuke adds its own casts.
@@ -253,7 +221,6 @@ function rotationRate(autoRate, casts, window = 60) {
     return (total + autoRate * left) / window;
 }
 function attackRate(profile) {
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Formulas = invoke('GameServer/Formulas');
     const autoRate = Formulas.calcPhysicalDamage(profile.pAtk, 0, profile.pDef, 0, { rng: () => 0.5 })
         * profile.atkSpd / 1000;
@@ -267,14 +234,11 @@ function attackRate(profile) {
     });
     return rotationRate(autoRate, casts);
 }
-function skillGain(state, book, before = null, beforeRate = null, timestamp = Date.now()) {
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const original = state.stats?.coldCombat || {};
-    const skills = Profile.skillSnapshotsFromRecords([...original.skills || [], { selfId: book.skillId, level: book.level }]);
-    const after = Profile.profileFor({ ...state, stats: { ...state.stats, coldCombat: { ...original, skills } } }, timestamp, { store: false });
-    before = before || Profile.profileFor(state, timestamp);
-    beforeRate = beforeRate ?? attackRate(before);
-    return { attack: Math.max(0, attackRate(after) / Math.max(0.001, beforeRate) - 1),
+// What learning a skill book's skill adds to the bot's 60-second rotation.
+function skillGain(state, book, timestamp = Date.now()) {
+    const { before, after: numbersAfter } = Profile.candidateProfiles(state, timestamp);
+    const after = numbersAfter({ skill: { selfId: book.skillId, level: book.level } });
+    return { attack: Math.max(0, attackRate(after) / Math.max(0.001, attackRate(before)) - 1),
         defence: Math.max(0, 1 - before.pDef / after.pDef, 1 - before.mDef / after.mDef) };
 }
 // A review judges the bot against every drop source of every candidate: its
@@ -283,7 +247,7 @@ function build(state, ctx, deps = {}) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('provider', 'request');
     const started = diagnostic ? performance.now() : 0;
-    const result = invoke('GameServer/Bot/Population/ColdCombatProfile').withEquipmentPreparation(() =>
+    const result = Profile.withEquipmentPreparation(() =>
         invoke('GameServer/Bot/AI/GearAcquisitionPlanner').withReadiness(() => buildProjection(state, ctx, deps)));
     if (diagnostic) {
         Diagnostics.count('provider', 'build', 'context_miss');
@@ -318,8 +282,6 @@ function buildProjection(state, ctx, deps) {
     };
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const timestamp = ctx.timestamp ?? Date.now();
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const ownBuild = Profile.buildGainsFor(state, timestamp);
     const magic = need('./BotImprovementPolicy').isCaster(state);
     const Recipes = invoke('GameServer/Items/C4RecipeItems'), Profit = need('./CraftProfitPolicy');
     // `nodes` is the current target: the real projection, or one gear
@@ -845,7 +807,7 @@ function buildProjection(state, ctx, deps) {
     const candidates = [];
     const planningState = preparation || state;
     const acquisitionRank = Progression.acquisitionRankFor(planningState, preparation ? undefined : progression);
-    const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, ownBuild, magic, ctx.gearThreatMask ?? 3);
+    const wornFor = wornReader(planningState), gainFor = gearGainReader(state, timestamp, {}, magic, ctx.gearThreatMask ?? 3);
     let futureGain;
     const acquisitionAllowed = id => {
         const item = need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id));
@@ -865,7 +827,7 @@ function buildProjection(state, ctx, deps) {
         if (Number(current?.selfId) === Number(item.selfId)) continue;
         const early = !!preparation && item.etc?.rank === 'c';
         const gain = early ? (futureGain ||= gearGainReader(preparation, timestamp,
-            Profile.buildGainsFor(preparation, timestamp, { preparation: true }), magic, ctx.gearThreatMask ?? 3))(item, slot) : gainFor(item, slot);
+            { preparation: true }, magic, ctx.gearThreatMask ?? 3))(item, slot) : gainFor(item, slot);
         const benefitHorizon = early ? futureHorizon : horizon;
         const currentPrice = current ? price(current.selfId) : 0;
         const market = invoke('GameServer/Bot/Economy/MarketCounters');

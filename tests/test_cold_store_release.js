@@ -10,7 +10,6 @@ fs.writeFileSync(process.env.L2NODE_CONFIG_FILE, `[Database]\npath=${directory}/
 require('../src/Global');
 invoke('GameServer/DataCache').init();
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Policy = require('../src/GameServer/Social/InteractionMemoryPolicy');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const { MarketBuyerWaiters } = require('../src/GameServer/Bot/Economy/MarketBuyerWaiters');
@@ -53,7 +52,6 @@ async function run() {
         Economy.forState(bot, dependencies);
     }
     assert.equal(Economy.size().context, 10);
-    assert.equal(Profile.size().ownerBuilds, 10);
     assert.equal(kernel.interactionMemory.snapshots.size, 10);
     assert.equal(kernel.buyerEvents.owners.size, 8);
     Economy.forGroup({ ...party, adena: 10000 }, members, dependencies);
@@ -88,7 +86,7 @@ async function run() {
     assert.deepEqual(kernel.interactionMemory.size(), { snapshots: 0, views: 0, fastLayers: 0, loading: 0 });
     assert.deepEqual(kernel.buyerEvents.size(), { owners: 0, items: 0 });
     assert.equal(Economy.size().context, 0); assert.equal(Economy.size().engine, 0);
-    assert.equal(Economy.size().groups, 0); assert.equal(Profile.size().ownerBuilds, 0);
+    assert.equal(Economy.size().groups, 0);
     assert.equal(kernel.versions.size, 10, 'numeric revisions intentionally survive to fence old proposals');
     assert.equal(kernel.heap.size, fixedAlarms, 'no released owner has a heap node');
     finishParty();

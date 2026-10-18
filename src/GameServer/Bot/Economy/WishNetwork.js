@@ -329,8 +329,8 @@ function moneyQueue(wishes, wallet, survivalReserve = 0, floor = 0) {
 // Per-actor results are a cache, not state: memory per bot is budgeted
 // (design 16.26). They serve the several readers of one decision (a commit,
 // a resolve, a hot tick); a bot's next decision rebuilds the cheap layer
-// anyway (new adena, exp), while the expensive one is kept per build
-// (ColdCombatProfile.buildGainsFor). So few are held, least recently used out.
+// anyway (new adena, exp), while the expensive one is kept per kit
+// (ColdCombatProfile.profileFor). So few are held, least recently used out.
 // Only the main thread holds them (its group solve and repeated readers hit).
 // The cold worker keeps the result in the held plan (EconomyContext cache,
 // 2048 plans), so a second per-actor copy there never hit and only cost

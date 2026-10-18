@@ -4,6 +4,7 @@ const Rules = invoke('GameServer/Items/C4EnchantRules');
 const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Tendency = require('../AI/TendencyRoll');
+const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const positive = value => Math.max(0, Number(value) || 0);
 function template(id) { return ItemIndex.find(invoke('GameServer/DataCache').items, id); }
 function instances(state) {
@@ -88,35 +89,31 @@ function enchantCost(item, from, to, scroll, config) {
     const zero = coefficients[0].a / (1 - coefficients[0].b);
     return { count: coefficients[from].a + coefficients[from].b * zero, reach: 1, lossChance: 0 };
 }
-// The share of the attack rate left without the worn weapon (bare, or the
-// best spare worn instead) is a gain of the build like any candidate: kept
-// per build in the gain store (gainFor), one entry for the bare remainder and
-// one per spare (the spares are not worn, so not in the build key: their
-// template, enchant and slot are in the candidate key). min(1, max(r) / c) is
-// max(min(1, r / c)) exactly, so the stored shares give the same income.
-function stuckCost(state, item, ctx, build = null) {
+// The share of the attack rate left without the worn weapon: bare, or the
+// best spare worn instead. candidates: the bot's candidateProfiles.
+function stuckCost(state, item, ctx, candidates = null) {
     if (!item.equipped || !adapter(item).isWeapon()) return 0;
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const timestamp = ctx.timestamp ?? Date.now();
-    build ||= Profile.buildGainsFor(state, timestamp);
+    candidates ||= Profile.candidateProfiles(state, ctx.timestamp ?? Date.now());
     const rate = profile => profile.pAtk * profile.atkSpd + profile.mAtk * profile.castSpd;
-    const key = `stuck:${item.selfId}:${item.slot}:${positive(item.enchant)}`;
-    let remainder = null;
-    const bare = () => remainder ||= changedInventory(state, item, { equipped: false });
-    const share = (candidate, after) => Profile.gainFor(build, candidate, (base = state, before = Profile.powerNumbers(build)) => ({
-        attack: Math.min(1, rate(Profile.powerFor({ ...base, inventory: after().inventory }, timestamp, { store: false }))
-            / Math.max(1, rate(before))), defence: 0 }), state, timestamp).attack;
-    let kept = share(key, bare);
+    const slot = slotOf(item), free = worn => worn === slot;
+    const share = wear => Math.min(1, rate(candidates.after({ free, wear })) / Math.max(1, rate(candidates.before)));
+    let kept = share(null);
     for (const spare of instances(state)) {
         if (spare.id === item.id || !adapter(spare).isWeapon()) continue;
-        kept = Math.max(kept, share(`${key}:${spare.selfId}.${positive(spare.enchant)}.${Number(spare.slot) || 0}`,
-            () => changedInventory(bare(), spare, { equipped: true })));
+        kept = Math.max(kept, share(wornRow(spare, spare.selfId, spare.enchant, slotOf(spare))));
     }
     const remainingIncome = ctx.hunt.perHour * kept;
     const lostPerHour = Math.max(0,ctx.hunt.perHour - remainingIncome);
     if (!lostPerHour) return 0;
     const replacement = positive(ctx.price(item.selfId));
     return remainingIncome > 0 ? replacement + lostPerHour * replacement / remainingIncome : Infinity;
+}
+function slotOf(item) {
+    return Number(item.slot) || Number(template(item.selfId)?.etc?.slot) || 0;
+}
+// An item instance worn as selfId at enchant in slot (a candidate's wear).
+function wornRow(item, selfId, enchant, slot) {
+    return { selfId: Number(selfId), objectId: Number(item.id), enchant: positive(enchant), slot };
 }
 function opportunities(state, ctx) {
     const scrolls = invoke('GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS;
@@ -125,30 +122,28 @@ function opportunities(state, ctx) {
     const config = Rules.configWith(globalThis.options?.default?.Enchant);
     const horizon = Valuation.decisionHorizon(state, ctx);
     const weight = (ctx.persona.primaryDrive === 'progression' ? 1 : .5) + Valuation.trait(ctx.persona, 'caution');
-    // Gains come from the build (design 16.5): remembered per build and
-    // candidate, so a review after an ordinary fight computes none of them.
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const timestamp = ctx.timestamp ?? Date.now();
-    const build = Profile.buildGainsFor(state, timestamp), magic = isCaster(state);
-    const value = (key, after) => {
-        const effect = Profile.gainFor(build, `${magic ? 'm' : 'p'}:${key}`, (base = state, before = Profile.powerNumbers(build)) =>
-            gainBetween(before, Profile.powerFor({ ...base, inventory: after().inventory }, timestamp, { store: false }), magic),
-            state, timestamp);
+    // Gains: the bot's kit profile against its numbers after the change
+    // (candidateProfiles), read once per review.
+    const timestamp = ctx.timestamp ?? Date.now(), magic = isCaster(state);
+    let candidates;
+    const read = () => candidates ||= Profile.candidateProfiles(state, timestamp);
+    const value = change => {
+        const effect = gainBetween(read().before, read().after(change), magic);
         return (effect.attack + effect.defence * ctx.deathHours) * horizon * weight;
     };
     const result = [];
     for (const { item, a, category } of targets(state)) {
         // What losing this weapon costs: once per item, only where a try can fail.
         let stuck = null;
-        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, build));
+        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, read()));
         const equipped = item.equipped;
         const buyer = !equipped && ctx.board?.first(item.selfId, 3, { excludeOwner: state.characterId });
         if (!equipped && !buyer && !ctx.board?.first(item.selfId, 1, { excludeOwner: state.characterId })) continue;
         const from = positive(item.enchant), cap = Rules.maxFor(category, config);
+        const slot = slotOf(item), free = worn => worn === slot;
         for (let to = from + 1; to <= Math.min(from + 3, cap || from + 3); to++) {
             const salePrice = !equipped && enchantedPrice(item, to, ctx);
-            const benefit = equipped ? value(`enchant:${item.selfId}:${item.slot}:${from}:${to}`,
-                () => changedInventory(state, item, { enchant: to })) : (ctx.hunt.perHour > 0
+            const benefit = equipped ? value({ free, wear: wornRow(item, item.selfId, to, slot) }) : (ctx.hunt.perHour > 0
                 ? Math.max(0, salePrice - enchantedPrice(item, from, ctx)) / ctx.hunt.perHour : 0);
             if (!(benefit > 0)) continue;
             const alternatives = Object.entries(scrolls).flatMap(([id, rule]) => {
@@ -188,9 +183,7 @@ function opportunities(state, ctx) {
         if (equipped && a.isWeapon()) for (const recipe of SA.options(7300, item.selfId, 'install')) {
             const materials = SA.costs(recipe);
             if (!Sources.hasSource(recipe.productId) || materials.some(mat => !Sources.hasSource(mat.selfId))) continue;
-            const product = { ...item, selfId: recipe.productId };
-            const benefit = value(`sa:${item.selfId}:${item.slot}:${from}:${recipe.productId}`,
-                () => changedInventory(state, item, product));
+            const benefit = value({ free, wear: wornRow(item, recipe.productId, from, slot) });
             const price = materials.reduce((sum, mat) => sum + ctx.price(mat.selfId) * mat.amount, 0);
             if (benefit > 0 && price > 0) result.push({ key: `sa:${item.id}:${recipe.id}`, kind: 'sa', objectId: item.id,
                 itemId: item.selfId, from, recipeId: recipe.id, npcId: 7300, materials, price, valueHours: benefit });
@@ -200,7 +193,7 @@ function opportunities(state, ctx) {
     if (slots.filter(Boolean).length < Henna.slotsForClass(state.stats?.classId || state.classId)) {
         for (const symbol of Henna.availableForClass(state.stats?.classId || state.classId)) {
             if (!Sources.hasSource(symbol.dyeSelfId) || slots.includes(symbol.id)) continue;
-            const benefit = value(`henna:${symbol.id}`, () => ({ ...state, stats: { ...state.stats, hennas: [...slots, symbol.id] } }));
+            const benefit = value({ hennas: [...slots, symbol.id] });
             if (benefit <= 0) continue;
             result.push({ key: `henna:${symbol.id}`, kind: 'henna', symbolId: symbol.id,
                 materials: [{ selfId: symbol.dyeSelfId, amount: symbol.dyeAmount }], fee: symbol.price,

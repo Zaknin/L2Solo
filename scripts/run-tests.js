@@ -371,6 +371,7 @@ const tests = [
     'tests/test_spot_stay_unsuitable.js',
     'tests/test_spot_locality_stay.js',
     'tests/test_spot_matchup_memo.js',
+    'tests/test_species_verdict_at_read.js',
     'tests/test_spot_index.js',
     'tests/test_bot_hunting_ground_rules.js',
     'tests/test_population_starter_party_grouping.js',
@@ -1105,6 +1106,7 @@ const tests = [
     'tests/test_unknown_recipe_earning.js',
     'tests/test_unknown_recipe_native.js',
     'tests/test_wish_gear_replacement.js',
+    'tests/test_kit_profile_gear_gain.js',
     'tests/test_wish_quantity_allocation.js',
 ];
 
@@ -1349,6 +1351,7 @@ const defaultConfigTests = new Set([
     'tests/test_unknown_recipe_earning.js',
     'tests/test_unknown_recipe_native.js',
     'tests/test_wish_gear_replacement.js',
+    'tests/test_kit_profile_gear_gain.js',
     'tests/test_wish_quantity_allocation.js',
 ]);
 // Gate: a test file nobody lists is a test CI never runs (E297). Checked before
