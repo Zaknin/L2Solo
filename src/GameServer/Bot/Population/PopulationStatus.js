@@ -199,7 +199,7 @@ const PopulationStatus = {
             const spot = SpotProfiles.findById(spotId);
             const present = spot ? farmIndex.physicalCount(spotId) : 0;
             if (!present) continue;
-            const capacity = Math.max(1, LevelingRoutes.capacityForSpot(spot));
+            const capacity = LevelingRoutes.roomForSpot(spot);
             farmCapacity.spots += 1;
             farmCapacity.maxReserved = Math.max(farmCapacity.maxReserved, present);
             if (present > capacity) {

@@ -155,7 +155,6 @@ async function run() {
     const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
     stub(Population, 'resolving', false); stub(Population, 'partyFormationRunning', false);
-    stub(Population, 'partyRequestCleanupRunning', false);
     stub(Config, 'enabled', true); stub(Config, 'backgroundPartyEnabled', true);
     stub(Database, 'pending', () => 1);
     stub(Coordinator, 'snapshot', () => ({ ready: true, snapshotsLoaded: true, queue: {} }));

@@ -2,7 +2,8 @@
 // background thread, against the bots that stand on the spot (ARCH-08-a).
 // A full spot leaves the bot standing there with a "was full" mark that its
 // next step's spot search reads; bots still on their way do not count; a safety
-// evacuation may exceed the spot by one bot; a party is checked as a whole;
+// evacuation may exceed the spot by one bot; a party is checked as a whole,
+// except at its own objective spot;
 // a near bot's spot change on main reaches the worker's index and counts.
 const assert = require('node:assert/strict');
 const path = require('node:path');
@@ -166,6 +167,9 @@ function bot(characterId, extra = {}) {
         assert(crowded.dirty[0] & crowded.bits.occupation && crowded.dirty[0] & crowded.bits.sources,
             'the leader\'s next step reconsiders the spot');
         assert.equal(crowded.dirty[1], 0, 'a member\'s own arrival is not checked');
+        const goal = { ...party, stats: { objective: { status: 'open', spotId: room.id } } };
+        assert.equal(await probe({ kind: 'party', spotId: room.id, party: goal }), null,
+            'the party\'s own objective spot admits it: a full roster does not bounce off its goal');
         assert.equal(await probe({ kind: 'party', spotId: room.id, party, remove: [101] }), null,
             'a party that fits the spot arrives without a mark');
 

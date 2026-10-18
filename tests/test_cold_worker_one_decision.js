@@ -89,6 +89,21 @@ module.exports.goalProbe = async (id) => {
         const moved = await step(timestamp + 3000);
         return { same, held, refusal, moved };
     } finally { Economy.forState = original; }
+};
+// A party member's step (no decision before its round): a level gained in
+// its round moves its kit, which its party step reads to open a re-plan; a
+// quiet step moves nothing.
+module.exports.kitProbe = async (id) => {
+    const entry = kernel.states.get(id), timestamp = Date.now();
+    const Data = invoke('GameServer/DataCache');
+    const step = (state, exp, at) => kernel.projectResolve(state, { patch: {}, debug: {}, events: [],
+        materialize: { exp, sp: 0, adena: 0, items: [] }, nextResolveAt: at + 60000 }, at);
+    const member = { ...entry.state, activity: 'grouped', party: { partyId: 'kit-party', leaderId: id } };
+    const first = await step(member, 0, timestamp);
+    const quiet = await step(first.state, 0, timestamp + 1000);
+    const gain = Number(Data.experience[quiet.state.level]) - Number(quiet.state.exp) + 1;
+    const levelUp = await step(quiet.state, gain, timestamp + 2000);
+    return { quiet: quiet.kitMoved, levelUp: levelUp.kitMoved, levels: [quiet.state.level, levelUp.state.level] };
 };`;
 const wrapper = String.raw`
 const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
@@ -97,8 +112,9 @@ const loaded = new Module(workerData.workerPath, module);
 loaded.filename = workerData.workerPath; loaded.paths = Module._nodeModulePaths(path.dirname(workerData.workerPath));
 loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.observer, workerData.workerPath);
 parentPort.on('message', message => {
-    if (!message.stepProbe && !message.goalProbe) return;
-    (message.stepProbe ? loaded.exports.stepProbe(message.stepProbe) : loaded.exports.goalProbe(message.goalProbe)).then(value => parentPort.postMessage({ probeId: message.msgId, value }))
+    const probe = ['stepProbe', 'goalProbe', 'kitProbe'].find(name => message[name]);
+    if (!probe) return;
+    loaded.exports[probe](message[probe]).then(value => parentPort.postMessage({ probeId: message.msgId, value }))
         .catch(error => parentPort.postMessage({ probeId: message.msgId, error: error.stack }));
 });`;
 
@@ -168,6 +184,13 @@ parentPort.on('message', message => {
         assert.equal(goal.held, '', 'the held decision holds on the warm state at the same goal revision');
         assert.equal(goal.refusal, 'goal', 'a moved goal revision refuses the held decision');
         assert.equal(goal.moved, 1, 'the next decision point after a goal change builds once');
+        worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'kit'), kitProbe: id });
+        const kitResponse = await wait(message => message.probeId === 'kit'); if (kitResponse.error) throw Error(kitResponse.error);
+        const kit = kitResponse.value;
+        console.log(JSON.stringify(kit));
+        assert.equal(kit.levels[1], kit.levels[0] + 1, 'the fixture member levels up in its round');
+        assert.equal(kit.quiet, false, 'a quiet party member step moves no kit');
+        assert.equal(kit.levelUp, true, 'a level gained in a party round is a kit event for the party step');
         console.log('One economy decision per far solo step passed');
     } finally { await worker?.terminate(); await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

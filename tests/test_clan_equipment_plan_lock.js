@@ -174,7 +174,9 @@ async function main() {
         assert.strictEqual(ClanEquipmentPartyPolicy.recordOutcome(
             { stats: { deaths: 0 } }, raidOutcome, raidParty.stats.objective, Date.now()
         ), raidOutcome, 'raid deaths must not create ordinary hunting-ground backoff');
-        assert.deepStrictEqual(await PopulationService.refreshBackgroundPartyRequirements([raidParty]), [],
+        PopulationService.partyRequirementRefreshDue.clear();
+        PopulationService.markPartyRequirementsDue(raidParty, null);
+        assert.strictEqual(PopulationService.partyRequirementRefreshDue.has(String(raidParty.partyId)), false,
             'ordinary equipment requirement refresh must not rewrite a started raid objective');
         PartyState.active = () => [{
             ...raidParty,
@@ -263,8 +265,9 @@ async function main() {
         GearAcquisitionPlanner.marketPlanForTarget = originalMarketPlanForTarget;
 
         const refreshParty = { partyId: 'bgp-clan-lock', status: 'active', leaderId: 1001, memberIds: [1001],
-            spotId: 'clan-spot', stats: { lastRequirementRefreshAt: 0, objective: { priority: 'required' } } };
-        assert.deepStrictEqual(await PopulationService.refreshBackgroundPartyRequirements([refreshParty]), ['bgp-clan-lock']);
+            spotId: 'clan-spot', stats: { objective: { priority: 'required' } } };
+        PopulationService.markPartyRequirementsDue(refreshParty, null);
+        assert(PopulationService.partyRequirementRefreshDue.has('bgp-clan-lock'), 'a new party is due for its member plans');
         const refreshed = await PopulationService.applyWorkerPartyRequirements(refreshParty, { memberPlans: [], requirementRefreshedAt: Date.now() });
         assert.deepStrictEqual(refreshed, [], 'a locked plan needs no party refresh write');
 

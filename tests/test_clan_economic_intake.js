@@ -76,7 +76,7 @@ function pureCases() {
     assert.equal(Crafting.recipeForProvider(recipe, { known: true }), recipe);
     const used = Demand.recipeIds({ recipeId: recipe.recipeId, componentRecipes: { 1890: 30, 1888: 31 } }, owns[0]);
     assert.deepEqual(used, [recipe.recipeId], 'owned intermediates need no extra component crafter');
-    const nativeOptions = { ...options, excludedTargetIds: excluded, occupancy: {}, capacityUnits: 3, clanShare: 0 };
+    const nativeOptions = { ...options, excludedTargetIds: excluded, clanShare: 0 };
     const clan = { id: 1, level: 0, members: owns, physicalMemberCount: 3, state: { mode: 'autonomous' } };
     const job = { clan, prospects: [external], prepared: { teams: {} } };
     const discovered = Demand.economicPlan(Planner.planForMember, job, owns[0], [], [], { ...nativeOptions, economicMode: 'discovery' });

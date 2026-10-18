@@ -6,6 +6,7 @@ const { isMainThread } = require('node:worker_threads');
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
+const PartyGoalCalculation = require('./PartyGoalCalculation');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
@@ -550,6 +551,9 @@ class ColdSimulationKernel {
         this.resolveSolo = options.resolveSolo;
         this.resolveParty = typeof options.resolveParty === 'function' ? options.resolveParty : null;
         this.planPartyRequirement = options.planPartyRequirement || null;
+        // The recruit check of a pending join, run at the leader's step
+        // (PartyGoalCalculation.recruitCheck in the worker).
+        this.reviewRecruits = options.reviewRecruits || null;
         // Numeric member ids only, bounded by active party rosters (<=9 each); dropped at completion, release or dissolve.
         this.partyRequirementProgress = new Map();
         this.planLifecycle = typeof options.planLifecycle === 'function' ? options.planLifecycle : null;
@@ -710,9 +714,6 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
-        if (entry.context?.requirementRefresh === false) {
-            this.partyRequirementProgress.delete(String(entry.context?.party?.partyId || current?.context?.party?.partyId || ''));
-        }
         let memoryChanged = false;
         if (entry.context?.interactionMemory) {
             if (entry.context.interactionMemory.ownerId !== characterId) throw new Error('interaction memory: wrong snapshot owner');
@@ -784,9 +785,11 @@ class ColdSimulationKernel {
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        // The bot's one record; its kept route (BotRoute.choose, the worker's
-        // planLifecycle) survives a new state: only its sections drop it.
-        this.states.set(characterId, { state, context: nextContext, version, route: current?.route || null });
+        // The bot's one record; its kept route (BotRoute.trip) survives a new
+        // state: only its step's drops clear it. The material memo is the
+        // background thread's own (partyRequestForPlan).
+        this.states.set(characterId, { state, context: nextContext, version, route: current?.route || null,
+            ...(current?.materialMemo ? { materialMemo: current.materialMemo } : {}) });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
@@ -1932,6 +1935,28 @@ class ColdSimulationKernel {
                 stats: { ...(run.party.stats || {}), ...(resolution.partyPatch?.stats || {}) },
                 nextResolveAt: resolution.nextResolveAt
             };
+            // The pending join main recorded (recruitBackgroundMembers): the
+            // recruit check runs here on this thread's copies of the recruits;
+            // the answer rides the leader's proposal (main commits a join). A
+            // recruit mid-step keeps the join pending for the next leader step;
+            // after a decline the next formation pass picks again.
+            let recruitCheck = null;
+            const pendingRecruits = run.party.stats?.pendingRecruits;
+            if (pendingRecruits && !meetingPending && resolvedParty.status !== 'dissolved') {
+                const ids = (pendingRecruits.ids || []).map(Number);
+                if (ids.some(id => this.busy(id))) recruitCheck = { outcome: 'unavailable' };
+                else {
+                    delete resolvedParty.stats.pendingRecruits;
+                    const recruits = ids.map(id => this.states.get(id)?.state);
+                    const free = recruits.length > 0 && recruits.every(recruit => recruit?.phase === 'cold'
+                        && !recruit.party?.partyId && !recruit.partyId);
+                    const checked = free && this.reviewRecruits
+                        ? this.reviewRecruits({ party: run.party, members: [...run.members, ...recruits], timestamp: startedAt }) : null;
+                    recruitCheck = checked ? { outcome: 'accepted', memberIds: run.party.memberIds, recruitIds: ids,
+                        sources: PartyGoalCalculation.sources(recruits), joint: checked }
+                        : { outcome: free ? 'declined' : 'gone' };
+                }
+            }
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
             const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
             // Collection quotas and their physical receipts share the same
@@ -1959,11 +1984,19 @@ class ColdSimulationKernel {
                     revision: Number(run.spot.raidAuthorityRevision || 0) + 1, snapshot };
             }
             let requirementMs = 0, lastRequirementPlanMs = 0;
+            // The open re-plan of the party's needs (members already planned).
+            // It opens on main's due mark (a member joined or left, the
+            // objective moved: run.requirementRefresh) or on a member whose
+            // step raised its build section (its kit moved, below), and
+            // closes when every member is planned or the party ends.
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            if (!meetingPending && run.requirementRefresh && !requirementProgress && !materialHunt) {
+            const openRequirements = reason => {
+                if (requirementProgress || meetingPending || materialHunt) return;
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
-            }
+                EconomyDiagnostics.count('party_replan', 'opened', reason);
+            };
+            if (run.requirementRefresh) openRequirements('event');
             const memberPlans = [];
             for (const { state, result } of resolution.memberResults || []) {
                 const id = Number(state.characterId);
@@ -1980,8 +2013,8 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.objective
                     );
                 }
-                if (!meetingPending && run.requirementRefresh && this.planPartyRequirement && projectedState
-                    && !materialHunt
+                if (projection?.kitMoved) openRequirements('kit');
+                if (requirementProgress && !meetingPending && !materialHunt && this.planPartyRequirement && projectedState
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
@@ -2029,12 +2062,13 @@ class ColdSimulationKernel {
                     partyResolution: id === Number(run.party.leaderId) ? {
                         partyId: run.party.partyId,
                         reviewGoals: !meetingPending,
-                        party: resolvedParty
+                        party: resolvedParty,
+                        ...(recruitCheck ? { recruitCheck } : {})
                     } : null
                 };
                 proposals.push(proposal);
             }
-            if (!meetingPending && run.requirementRefresh && !materialHunt) {
+            if (requirementProgress && !meetingPending && !materialHunt) {
                 const leader = proposals.find(proposal => proposal.partyResolution);
                 if (leader) {
                     leader.partyResolution.memberPlans = memberPlans;
@@ -2044,13 +2078,6 @@ class ColdSimulationKernel {
                     }
                 }
                 if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
-                // Preserve the first-refresh key shape used for byte admission.
-                for (const key of ['partyRequirementRefreshes', 'partyRequirementRefreshMs', 'partyRequirementRefreshMaxMs']) {
-                    if (!Object.hasOwn(this.stats, key)) this.stats[key] = 0;
-                }
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshes = Number(this.stats.partyRequirementRefreshes || 0) + 1);
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMs = requirementMs);
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMaxMs = Math.max(Number(this.stats.partyRequirementRefreshMaxMs || 0), requirementMs));
             }
             if (!current()) return;
             published = handled = true;

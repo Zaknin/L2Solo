@@ -57,8 +57,7 @@ const originals = {
 const originalFormationState = {
     resolving: PopulationService.resolving,
     partyFormationRunning: PopulationService.partyFormationRunning,
-    partyFormationPending: PopulationService.partyFormationPending,
-    nextPartyRequestCleanupAt: PopulationService.nextPartyRequestCleanupAt
+    partyFormationPending: PopulationService.partyFormationPending
 };
 
 async function run() {
@@ -140,7 +139,6 @@ async function run() {
     LifeState.cachedStatesForParties = () => Promise.resolve(new Map());
     PopulationService.resolving = false;
     PopulationService.partyFormationRunning = false;
-    PopulationService.nextPartyRequestCleanupAt = Infinity;
     await PopulationService.formBackgroundParties();
     assert.strictEqual(projectionCalls, 1, 'party formation must discover the complete lightweight candidate projection once');
 
@@ -204,9 +202,18 @@ async function run() {
     // Native physical preparation ends here; the original ownership checks
     // below use mocked assignments, not persisted cold-life membership rows.
     await Database.close();
-    ColdSimulationCoordinator.requestPartyGoals = async (party, selected, options) => ({ ok: true,
-        sources: require('../src/GameServer/Bot/Population/PartyGoalCalculation').sources(selected),
-        joint: require('../src/GameServer/Bot/Population/PartyGoalPolicy').recruitment(party, selected, { timestamp: options.timestamp }) });
+    // A far party (cold leader): the pass records the pending join for the
+    // leader's step and joins nobody itself.
+    const originalFind = PartyState.find;
+    PartyState.find = () => ({ ...party, status: 'active' });
+    const pendingPass = await PopulationService.recruitBackgroundMembers(candidates);
+    PartyState.find = originalFind;
+    assert.deepStrictEqual([...pendingPass], [3, 4], 'a far party claims its recruits for this pass');
+    assert.deepStrictEqual(saved.stats.pendingRecruits, { ids: [3, 4] }, 'a far party records the pending join');
+    assert.deepStrictEqual(saved.memberIds, [1, 2]);
+    assert.deepStrictEqual(assigned, [], 'a far party joins nobody before its leader\'s check');
+    // A party near the player (hot leader): the check runs here and joins.
+    members[0] = { ...members[0], phase: 'hot' };
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);
@@ -241,7 +248,7 @@ async function run() {
     const sharedMembers = new Map(sharedParties.map((sharedParty) => [
         sharedParty.partyId,
         sharedParty.memberIds.map((characterId, index) => ({
-            ...nativeRows[index], characterId,
+            ...nativeRows[index], characterId, phase: 'hot',
             name: `Member${characterId}`,
         }))
     ]));
@@ -336,53 +343,12 @@ async function run() {
 
     const electiveParty = { partyId: 'bgp_elective', leaderId: 11, memberIds: [11, 12], spotId: 'cruma', startedAt: 1 };
     const requiredParty = { partyId: 'bgp_required', leaderId: 21, memberIds: [21, 22], spotId: 'dion', startedAt: 2 };
-    const reclaimed = [];
-    const dissolvedReleases = [];
     const socialParty = { ...electiveParty, partyId: 'bgp_social', stats: { capacityPool: 'social' } };
     PartyState.active = () => [electiveParty, requiredParty, socialParty];
-    PartyState.setStatus = (partyId, status) => {
-        reclaimed.push({ partyId, status });
-        return Promise.resolve({ partyId, status });
-    };
-    LifeState.releaseDissolvedPartyMembers = (partyId, reason) => {
-        dissolvedReleases.push({ partyId, reason });
-        return Promise.resolve(2);
-    };
-    LifeState.partyRequirementCounts = () => Promise.resolve([
-        { partyId: 'bgp_elective', requiredMembers: 0 },
-        { partyId: 'bgp_required', requiredMembers: 2 }
-    ]);
     Config.maxBackgroundParties = 2;
     Config.partyFormationBatchSize = 2;
     assert.strictEqual(PopulationService.partyCapacityLimit(), 2, 'without a backlog the base party capacity must remain unchanged');
     assert.strictEqual(PopulationService.partyCapacityLimit(), 2, 'all requests share one capacity ceiling');
-    const released = await PopulationService.reviewBackgroundPartyDemand([
-        { characterId: 31 }, { characterId: 32 }, { characterId: 33 }, { characterId: 34 }
-    ]);
-    assert.deepStrictEqual(released, [], 'waiting candidates cannot evict an existing party');
-    assert.deepStrictEqual(reclaimed, []);
-    assert.deepStrictEqual(dissolvedReleases, []);
-
-    reclaimed.length = 0;
-    dissolvedReleases.length = 0;
-    const ordinaryRequiredA = { ...requiredParty, partyId: 'bgp_required_a', startedAt: 1, stats: { objective: { priority: 'required' } } };
-    const ordinaryRequiredB = { ...requiredParty, partyId: 'bgp_required_b', startedAt: 2, stats: { objective: { priority: 'required' } } };
-    PartyState.active = () => [ordinaryRequiredA, ordinaryRequiredB];
-    LifeState.partyRequirementCounts = () => Promise.resolve([
-        { partyId: 'bgp_required_a', requiredMembers: 2 },
-        { partyId: 'bgp_required_b', requiredMembers: 2 }
-    ]);
-    const clanWaiters = Array.from({ length: 5 }, (_, index) => ({
-        characterId: 40 + index,
-        stats: {
-            clanPartyObjective: {
-                status: 'open', priority: 'required', clanId: 77, clanOperation: 'equipment',
-                clanGoalKey: 'clan-equipment:77:40:88:7', objectiveKey: 'clan-route'
-            }
-        }
-    }));
-    const clanReleased = await PopulationService.reviewBackgroundPartyDemand(clanWaiters);
-    assert.deepStrictEqual(clanReleased, [], 'clan demand cannot evict another viable party');
 
     const activationOrder = [];
     ColdSimulationOwner.handoffToMain = async (state) => {

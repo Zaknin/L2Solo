@@ -162,13 +162,16 @@ async function commandChecks() {
     LifeEvents.recordMany = () => Promise.resolve(null);
     GlobalChat.maybeAnnounce = () => null;
     // The worker's plan is used as it is: a 'farm' plan has no drop source
-    // for main to re-check.
+    // for main to re-check. The plan arrives with the party request the
+    // worker built for it (main builds none).
     const command = (state, plan, context = {}, route = null) => {
         applied.length = 0;
         upserted.length = 0;
         reviewed.length = 0;
         return PopulationService.resolveColdState(state, {
-            precomputedPlan: { previousPlan: null, acquisitionPlan: plan, replanFailure: null },
+            precomputedPlan: { previousPlan: null, acquisitionPlan: plan, replanFailure: null,
+                partyRequest: invoke('GameServer/Bot/Population/PartyRequestPlanner')
+                    .partyRequestForPlan(state, plan, Date.now(), { economy: { worth: () => 0 } }) },
             precomputedResult: workerFight(),
             context,
             route

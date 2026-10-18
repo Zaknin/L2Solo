@@ -420,9 +420,13 @@ function rankedSpotIds(role, level, costs = { shots: 0, potions: 0 }, minGap = -
 }
 // The positive incomes of the role/level band at these consumable prices,
 // best first, ties to the spot whose level is closest to the bot's, then by
-// spot id; the first 64: [{ index, income }].
+// spot id; the first 64: [{ index, income }]. One basis per role and level
+// spans the widest band any reader asks (BASIS_MIN_GAP, the income route's);
+// a narrower minGap filters its rows, so the readers share one basis.
+const BASIS_MIN_GAP = -15;
 function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
-    const basisKey = `${role}:${level}:${minGap}:${Number(shots)}:${skill}`;
+    const basisGap = Math.min(minGap, BASIS_MIN_GAP);
+    const basisKey = `${role}:${level}:${basisGap}:${Number(shots)}:${skill}`;
     let basis = incomeBases.get(basisKey);
     if (basis) {
         incomeBases.delete(basisKey); incomeBases.set(basisKey, basis);
@@ -435,7 +439,7 @@ function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
         let count = 0;
         for (let index = 0; index < t.spots.length; index++) {
             const spot = t.spots[index];
-            if (spot[1] - level < minGap || spot[1] - level > 8) continue;
+            if (spot[1] - level < basisGap || spot[1] - level > 8) continue;
             const slot = memoValue(t, rates, spot[0], role, level, shots, skill);
             if (memoFlags[slot] & NO_ROW) continue;
             const at = slot * ROW_NUMBERS;
@@ -458,6 +462,7 @@ function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
     // combat/reward rows. Preserve every candidate, the exact prices and ties.
     const rows = [];
     for (let index = 0; index < basis.indexes.length; index++) {
+        if (t.spots[basis.indexes[index]][1] - level < minGap) continue;
         const income = basis.values[index * 3] - basis.values[index * 3 + 1] * costs.shots
             - basis.values[index * 3 + 2] * costs.potions;
         if (income > 0) rows.push({ index: basis.indexes[index], income });

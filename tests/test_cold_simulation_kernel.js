@@ -632,7 +632,78 @@ function claimAck(kernel, payload) {
     assert.deepStrictEqual(refreshProposal.partyResolution.memberPlans.map(row => row.characterId), [120], 'only changed requirement keys cross the worker boundary');
     assert.strictEqual(refreshProposal.partyResolution.requirementRefreshedAt, now);
     assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
-    assert(refreshKernel.snapshot().partyRequirementRefreshMaxMs < 20);
+
+    // A member whose own step moved its kit opens the re-plan with
+    // no due mark from main; members already passed wait for the next step.
+    for (const moved of [false, true]) {
+        const kitMessages = [], kitPlanned = [];
+        const kitKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state, kitMoved: moved && state.characterId === 121 }),
+            planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
+            emit: (type, payload) => kitMessages.push({ type, payload }) });
+        kitKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
+            partyMembers: refreshMembers, spot: { id: 'refresh-spot' } } });
+        kitKernel.upsert({ state: refreshMembers[1], context: {} }); kitKernel.tick();
+        const kitClaim = kitMessages.find(message => message.type === 'claim_request');
+        claimAck(kitKernel, { grants: kitClaim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `kit-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await kitKernel.resolveChain;
+        assert.deepStrictEqual(kitPlanned, moved ? [121] : [], 'a moved kit opens the re-plan at that member');
+        assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), moved,
+            'the re-plan stays open for the member passed before the raise');
+    }
+
+    // A pending join main recorded on the party row: the leader's step runs
+    // the recruit check on this thread's copy of the recruit, its proposal
+    // carries the answer, and the party row leaves the step without it.
+    // A recruit mid-step keeps the join pending; after a decline or gone recruit
+    // the next formation pass picks again.
+    for (const outcome of ['accepted', 'declined', 'gone', 'unavailable']) {
+        const joinMessages = [], reviewed = [];
+        const recruitId = outcome === 'gone' ? 999 : 122;
+        const joinParty = { ...refreshParty, partyId: `join-${outcome}`,
+            stats: { pendingRecruits: { ids: [recruitId] } } };
+        const joinMembers = refreshMembers.map(member => ({ ...member, party: { partyId: joinParty.partyId } }));
+        const joinKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state }),
+            reviewRecruits: ({ members }) => {
+                reviewed.push(members.map(member => member.characterId));
+                return outcome === 'accepted' ? { memberGoals: [], incomeReviews: [], lastIncomeReviewAt: now, agreement: null } : null;
+            },
+            emit: (type, payload) => joinMessages.push({ type, payload }) });
+        joinKernel.upsert({ state: joinMembers[0], context: { isPartyLeader: true, party: joinParty,
+            partyMembers: joinMembers, spot: { id: 'refresh-spot' } } });
+        joinKernel.upsert({ state: joinMembers[1], context: {} });
+        // The recruit is not due: it waits idle, not claimed by this tick.
+        if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }), context: {} });
+        if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
+            joinKernel.busy = id => Number(id) === 122 || busy(id); }
+        joinKernel.tick();
+        const joinClaim = joinMessages.find(message => message.type === 'claim_request');
+        claimAck(joinKernel, { grants: joinClaim.payload.candidates.filter(candidate => candidate.characterId !== 122)
+            .map(candidate => ({ ok: true, characterId: candidate.characterId, ownerId: 'cold_simulation_owner',
+                revision: candidate.expectedRevision + 1, leaseId: `join-${candidate.characterId}`,
+                leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await joinKernel.resolveChain;
+        const leader = joinMessages.find(message => message.type === 'proposal_batch').payload.proposals
+            .find(proposal => proposal.partyResolution);
+        assert.strictEqual(leader.partyResolution.recruitCheck.outcome, outcome);
+        assert.deepStrictEqual(leader.partyResolution.party.stats.pendingRecruits,
+            outcome === 'unavailable' ? { ids: [122] } : undefined,
+            'the party row leaves the leader\'s step without its pending join, unless a recruit is mid-step');
+        assert.deepStrictEqual(reviewed, ['gone', 'unavailable'].includes(outcome) ? [] : [[120, 121, 122]],
+            'the check reads the members with the recruit, once');
+        if (outcome === 'accepted') {
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.recruitIds, [122]);
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.memberIds, [120, 121]);
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.sources.map(row => [row.characterId, row.revision]), [[122, 3]]);
+        }
+    }
 
     for (const complete of [false, true]) {
         const materialMessages = [], objective = { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-spot' };

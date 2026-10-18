@@ -1437,7 +1437,9 @@ function publishDeferredPartyRequests(rows) {
     }
 }
 
-function expireStalePartyRequests(limit = 0) {
+// Start-up only: a request left open across a restart is deferred once here;
+// at run time each request expires at its own deadline (PartyAssemblyEvents).
+function expireStalePartyRequests() {
     const timestamp = now();
     const requiredMaxAge = PartyRequestPlanner.maxAgeMs('required');
     const preferredMaxAge = PartyRequestPlanner.maxAgeMs('preferred');
@@ -1445,22 +1447,13 @@ function expireStalePartyRequests(limit = 0) {
     // Spread the next eligible formation attempts over at most two minutes so
     // a restart cannot turn one historical queue into a new SQLite spike.
     const staggerMs = Math.min(120000, Math.max(0, Math.floor(cooldownMs / 2)));
-    const safeLimit = Math.max(0, Math.min(500, Number(limit) || 0));
-    const staleSelection = `phase = 'cold'
+    const target = `phase = 'cold'
         AND simulationOwner = 'legacy_main'
         AND (partyId IS NULL OR partyId = '')
         AND activity IN ('hunting', 'resting', 'party_wait')
         AND partyRequestStatus = 'open'
         AND partyRequestedAt <= ?
         AND (COALESCE(partyRequestPriority, '') <> 'required' OR partyRequestedAt <= ?)`;
-    const target = safeLimit > 0
-        ? `characterId IN (
-                SELECT characterId FROM ${TABLE}
-                WHERE ${staleSelection}
-                ORDER BY updatedAt ASC, characterId ASC
-                LIMIT ${safeLimit}
-            )`
-        : staleSelection;
     const sql = `UPDATE ${TABLE}
         SET statsJson = json_set(
                 COALESCE(statsJson, '{}'),
@@ -3806,10 +3799,6 @@ const BotLifeState = {
         }, { total: 0, required: 0, preferred: 0, blocked: 0, maxAgeMs: 0, requiredReasons: {} });
     },
 
-    expireStalePartyRequests(limit = 0) {
-        if (!initialized) return Promise.resolve(0);
-        return expireStalePartyRequests(limit);
-    },
 
     deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible_level_match') {
         if (!initialized) return Promise.resolve(0);

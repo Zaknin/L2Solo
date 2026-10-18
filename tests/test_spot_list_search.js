@@ -68,4 +68,39 @@ assert.equal(Spots.findForState(state, { ...options, excludedSpotIds: new Set([S
     'an avoided spot is skipped: the next one of the list');
 
 Spots.cache = originalCache;
+
+// The keep rule holds only a current spot the bot may hunt at its own level.
+// A recovery lowers the target level (29 -> 27); the current spot's own
+// match reads the ground there, the list walk at the bot's level. Here the
+// ground refuses the current spot at 29 and allows it at 27; both spots are
+// too thin to fit (density 2), so no spot of the list fits.
+{
+    const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+    const Ground = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
+    const exp = Number(Data.experience[28]) + 100000;
+    const base = { ...state, exp, spotId: 'cur', stats: { ...state.stats, classProgressionClassId: 12,
+        classProgressionLevel: 29 } };
+    const recovering = { ...base, stats: { ...base.stats,
+        huntingRecovery: Risk.recordRecovery(base, { deaths: 1, exp: exp - 100, expBeforeDeath: exp }) } };
+    assert.equal(Routes.targetLevelForState(recovering), 27, 'fixture: the recovery lowers the target level');
+    const thin = id => ({ id, name: id, minLevel: 25, maxLevel: 25, avgLevel: 25, density: 2, tags: [],
+        tagsAuthoritative: true, center: { locX: 50000, locY: 150000, locZ: -3000 },
+        npcEntries: [{ selfId: 156, count: 2 }], levelCounts: { 25: 2 } });
+    const catalogue = [thin('cur'), thin('other')];
+    const saved = { spotList: IncomeRoute.spotList, evaluate: Ground.evaluate, cache: Spots.cache };
+    try {
+        Spots.cache = catalogue;
+        IncomeRoute.spotList = () => ({ spoiler: () => null, ids: () => ['cur', 'other'] });
+        Ground.evaluate = (spot, actor, opts = {}) => ({
+            allowed: spot.id !== 'cur' || Number(opts.level ?? actor.level) < actor.level });
+        const search = { matchupProfiles: [mage], timestamp: at, profiles: catalogue };
+        assert(!SpotService.isSuitable(catalogue[0], 27) && !SpotService.isSuitable(catalogue[1], 27),
+            'fixture: no listed spot fits');
+        assert(Routes.isSpotAllowedForState(catalogue[1], recovering, search), 'fixture: the other spot is allowed');
+        assert.equal(Spots.findForState(recovering, search)?.id, 'other',
+            'a current spot refused at the bot\'s level is not kept: the first allowed spot of the list');
+    } finally {
+        IncomeRoute.spotList = saved.spotList; Ground.evaluate = saved.evaluate; Spots.cache = saved.cache;
+    }
+}
 console.log('spot list search tests passed');

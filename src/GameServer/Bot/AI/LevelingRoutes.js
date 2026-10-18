@@ -266,6 +266,12 @@ function capacityForSpot(spot = {}) {
     return Math.max(9, Math.min(36, densityCapacity));
 }
 
+// How many bots a spot holds: its capacity, never below one. The room check at
+// arrival and the status line's overfill count read this one rule.
+function roomForSpot(spot = {}) {
+    return Math.max(1, capacityForSpot(spot));
+}
+
 // Read-only result: shared by every search of the spot.
 function starterRegionsFor(spot = {}) {
     if (!spot || typeof spot !== 'object') return deriveStarterRegions(spot);
@@ -506,6 +512,7 @@ module.exports = {
     targetLevelForState,
     tagsForSpot,
     capacityForSpot,
+    roomForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
     spotAllowedReaderFor,

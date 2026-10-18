@@ -196,8 +196,7 @@ function huntIncome(state, timestamp = Date.now(), mode) {
     if (own?.perHour > 0) return { ...own, source: 'own' };
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
-    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
-    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const tableRole = Roles.tableRoleFor(state);
     const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true, rewardOptions);
     const progress = current || Table.best(tableRole, levelOf(state), true);
     const costs = consumablePrices(state);
@@ -212,8 +211,7 @@ function huntIncome(state, timestamp = Date.now(), mode) {
 // Adena per hour of repeatable hunting, independent of wallet and wishes.
 function huntHour(hunt, state = {}) {
     if (Number(hunt?.perHour) > 0) return Number(hunt.perHour);
-    const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || state.classId || 0);
-    const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+    const tableRole = Roles.tableRoleFor(state);
     const costs = consumablePrices(state);
     const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
     const table = invoke('GameServer/Bot/AI/SpotValueTable');
