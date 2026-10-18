@@ -363,7 +363,9 @@ function baseScore(spot, context) {
     return density * 3 - levelGap * 18 - peacePenalty;
 }
 
-function scoreSpot(spot, state = {}, options = {}) {
+// The leveling-guide route of one spot for this bot: the best scored of the
+// routes that apply. decorateSpot reads it; scoreSpot adds it to the score.
+function routeMatchFor(spot, state = {}, options = {}) {
     const tags = tagsForSpot(spot);
     const context = {
         state,
@@ -378,8 +380,13 @@ function scoreSpot(spot, state = {}, options = {}) {
             score: scoreRoute(route, spot, context, tags)
         }))
         .sort((a, b) => b.score - a.score);
-
     const routeMatch = matchingRoutes[0] || null;
+    return { route: routeMatch?.route || null, routeScore: routeMatch?.score || 0, tags,
+        role: context.role, mode: context.mode, level: context.level, context };
+}
+
+function scoreSpot(spot, state = {}, options = {}) {
+    const { route, routeScore, tags, context } = routeMatchFor(spot, state, options);
     const capacity = capacityForSpot(spot);
     const localityPenalty = localityPenaltyForSpot(spot, state, context, tags);
     const huntingGround = BotHuntingGroundPolicy.evaluate(spot, state, { ...options, ...context, tags });
@@ -390,14 +397,14 @@ function scoreSpot(spot, state = {}, options = {}) {
     const efficiencyAdjustment = economics ? economics.valueHours * 100 : 0;
     const targetMatchup = TargetMatchup.spotMatchup(spot, TargetMatchup.stateProfiles(state, { ...options, mode: context.mode }),
         safetyOptions(state, { ...options, mode: context.mode }));
-    const score = baseScore(spot, context) + (routeMatch ? routeMatch.score : 0)
+    const score = baseScore(spot, context) + routeScore
         + variation + efficiencyAdjustment - localityPenalty - huntingGroundPenalty
         - targetMatchup.penalty - (targetMatchup.eligible ? 0 : 10000);
 
     return {
         score,
-        route: routeMatch?.route || null,
-        routeScore: routeMatch?.score || 0,
+        route,
+        routeScore,
         tags,
         role: context.role,
         mode: context.mode,
@@ -510,6 +517,7 @@ module.exports = {
     isSpotAllowedForState,
     spotAllowedReaderFor,
     scoreSpot,
+    routeMatchFor,
     rankedSpots,
     bestSpot,
     decorateSpot
