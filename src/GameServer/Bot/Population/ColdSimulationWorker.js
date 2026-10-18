@@ -912,10 +912,17 @@ function soloArrival(state, result) {
 // the spot's standing bots that are not of this party plus the whole party
 // against the capacity, no overflow. Full -> the party's "was full" mark
 // (PartySpotRiskPolicy, read by its next spot search) and occupation and
-// sources raised on the leader; the members arrive and stand.
+// sources raised on the leader; the members arrive and stand. The party's own
+// objective spot (a clan goal, a material party) admits it: a pass read from
+// the goal the party carries, not a place held for it, so a full roster does
+// not bounce between its objective and a fallback spot.
 function partyArrival({ party, members, spotId }) {
     const arriving = new Set((party?.memberIds || []).map(String));
     if (!spotId || !arriving.size) return null;
+    if (String(spotId) === String(party.stats?.objective?.spotId ?? '')) {
+        economyDiagnostics.count('roomAtArrival', 'party', 'pass');
+        return null;
+    }
     const room = roomAtArrival(spotId, arriving);
     economyDiagnostics.count('roomAtArrival', 'party', 'checked');
     if (room) return null;
