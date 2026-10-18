@@ -866,7 +866,6 @@ function detachState(companionSession, plan = 'hunting', preserveTakeover = fals
     companionSession.followPlayerSession = null;
     companionSession.partyCompanion = false;
     if (!preserveTakeover) invoke('GameServer/Bot/Population/BotLifeState').releasePlayerPartyTakeover(companionSession);
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     refreshPartyMemberships([companionSession], invoke);
     companionSession.botStay = false;
     companionSession.stayLocation = null;
@@ -1136,7 +1135,6 @@ const PartyCompanionService = {
             bot.unselect?.();
             invoke('GameServer/Bot/BotAI').cancelScheduledTick(companionSession);
         });
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         refreshPartyMemberships(roster, invoke);
 
         leaderSession.dataSendToMe?.(ServerResponse.joinParty(1));
@@ -1193,7 +1191,6 @@ const PartyCompanionService = {
         companionSession.plan = 'following';
         companionSession.followPlayerSession = leaderSession;
         companionSession.partyCompanion = true;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         refreshPartyMemberships([companionSession], invoke);
         companionSession.botStay = false;
         companionSession.stayLocation = null;

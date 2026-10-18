@@ -390,7 +390,6 @@ const World = {
         this.updateUserLocation(session);
         if (restored) notifyUserChange(Number(session.actor.fetchId?.()));
         this.user.revision += 1;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     },
 
     removeUser(session) {
@@ -398,7 +397,6 @@ const World = {
         const wasPresent = this.user.sessions.includes(session);
         this.user.sessions = this.user.sessions.filter((ob) => ob !== session);
         this.user.revision += 1;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         // Build the packet after removal so its online object ID becomes zero.
         if (wasPresent) invoke('GameServer/Clan/ClanService').broadcastMemberPresence(session.actor);
     },
@@ -530,7 +528,6 @@ const World = {
         return records.map(record => record.session);
     },
 
-    pvpPartyMembershipIndex: true,
     pvpPartyMembershipKeys: PvpPartyMembershipKeys,
 
     pvpPartySessionsForKey(key) {

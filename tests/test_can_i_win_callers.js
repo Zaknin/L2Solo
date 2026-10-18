@@ -148,7 +148,6 @@ function defense(ownOptions, enemyOptions, traits) {
     const enemy = hotActor(enemyOptions);
     hotSession(enemy);
     World.user = { sessions: [own, enemy.session] };
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     return Risk.defenseDecision(own, [enemy]);
 }
 // U26: own side exact, the other side by its look; levels and prices are hidden.
@@ -174,7 +173,6 @@ assert.strictEqual(defense({ ...fresh, ...armed('c') }, armed('d'), { caution: 0
     const enemy = hotActor({ hp: 50 });
     hotSession(enemy);
     World.user = { sessions: [own, enemy.session] };
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'flee', 'defense: his wounds do not show');
     enemy.state.fetchCombats = () => true;
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'fight', 'defense: a worn attacker in combat stance');
@@ -191,7 +189,6 @@ assert.strictEqual(defense({ ...fresh, ...pet() }, {}, { caution: 0.8, assertive
     const own = hotSession(hotActor(fresh)), enemy = hotActor();
     hotSession(enemy);
     World.user = { sessions: [own, enemy.session] };
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     assert.strictEqual(Risk.defenseDecision(own, [enemy]).action, 'fight');
     const now = Date.now();
     const memory = MemoryPolicy.apply(MemoryPolicy.empty(own.actor.id), { key: 'u26-killed', at: now, type: 'killed',
@@ -221,7 +218,6 @@ assert.strictEqual(sighting({ ownPeople: 2, threatPeople: 2 }).action, 'fight', 
     const pk = hotActor(armed('c'));
     hotSession(pk);
     World.user = { sessions: [own, pk.session] };
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     const seen = Risk.sighting(own, pk);
     assert.deepStrictEqual([seen.ownLook.weapon, seen.threatLook.weapon, seen.threatPeople, seen.traits.caution, seen.fear], [1, 2, 1, 0.8, 0]);
     assert.strictEqual(sighting(seen).action, 'flee');

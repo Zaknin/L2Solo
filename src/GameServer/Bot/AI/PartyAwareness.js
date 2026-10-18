@@ -39,35 +39,25 @@ function isPartySession(session, leaderSession) {
     );
 }
 
-function partySessions(leaderSession) {
+// The one reader of a near party's members. A background party reads its
+// roster; any other party reads the world's party index group keyed by the
+// leader session (PvpPartyMembershipKeys), in registration order. A leader that
+// is not in its own group (a companion leading, or not registered yet) goes
+// first. Default keeps online, living members; includeDead keeps all of them.
+function partySessions(leaderSession, { includeDead = false } = {}) {
     if (!leaderSession) return [];
-    if (leaderSession.hotBackgroundPartyId) {
-        return invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession)
-            .filter(session => isOnlineActor(session.actor));
+    if (leaderSession.hotBackgroundPartyId && !leaderSession.partyCompanion) {
+        // lazy: cycle HotBackgroundParty loads PartyAwareness through its AI modules
+        const roster = invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession);
+        return includeDead ? roster : roster.filter(session => isOnlineActor(session.actor));
     }
-
-    return playerPartyCandidates(leaderSession).filter((session) => (
+    const members = world().pvpPartySessionsForKey(leaderSession);
+    if (!members.includes(leaderSession)) members.unshift(leaderSession);
+    return members.filter((session) => (
         session &&
         isPartySession(session, leaderSession) &&
-        isOnlineActor(session.actor)
+        (includeDead || isOnlineActor(session.actor))
     ));
-}
-
-// The sessions that can be in a player's party: the who-where map's party
-// group keyed by the leader session (PvpPartyMembershipKeys), in registration
-// order like the full session list, instead of every online session.
-function playerPartyCandidates(leaderSession) {
-    const World = world();
-    if (World.pvpPartyMembershipIndex !== true) return World.user?.sessions || [];
-    const members = World.pvpPartySessionsForKey(leaderSession);
-    if (members.includes(leaderSession)) return members;
-    // A leader that is itself a companion keys its own leader, yet stays in its party.
-    const leader = World.registeredActorById(actorId(leaderSession.actor));
-    if (leader?.session !== leaderSession) return members;
-    let at = members.length;
-    while (at > 0 && World.registeredActorById(actorId(members[at - 1].actor))?.order > leader.order) at -= 1;
-    members.splice(at, 0, leaderSession);
-    return members;
 }
 
 function partyActors(leaderSession) {

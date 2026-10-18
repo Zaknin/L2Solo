@@ -2221,7 +2221,8 @@ try {
     });
     assert.strictEqual(autoPullSkillCast, false, 'a mob already attacking its tank must not be taunted again');
     assert.strictEqual(engagedPulledTarget, autoPullTarget, 'the tank should fight the mob it already pulled');
-    const fallenAutoPullMember = fakeActor(2000098, { locX: 60, locY: 0 });
+    // Out of resurrection reach: no one can revive it this tick, so the pull rule decides.
+    const fallenAutoPullMember = fakeActor(2000098, { locX: 5000, locY: 0 });
     fallenAutoPullMember.state.dead = true;
     const fallenAutoPullSession = fakeSession('bot_auto_pull_fallen_member', fallenAutoPullMember);
     fallenAutoPullSession.followPlayerSession = healerLeaderSession;

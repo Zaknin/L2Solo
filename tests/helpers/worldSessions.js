@@ -1,7 +1,7 @@
 'use strict';
 
 // Party members are read from the world's who-where party group
-// (PartyAwareness.playerPartyCandidates -> World.pvpPartySessionsForKey),
+// (PartyAwareness.partySessions -> World.pvpPartySessionsForKey),
 // which only World.insertUser and World.refreshPartyMemberships fill. A plain
 // `World.user = { sessions }` registers nobody, so fixtures register their
 // sessions here as production does. Party fields (partyCompanion,

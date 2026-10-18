@@ -3,6 +3,7 @@ const SkillRankIndex = require('../../Skills/SkillRankIndex');
 const C4SkillRules = invoke('GameServer/Skills/C4SkillRules');
 const DataCache = invoke('GameServer/DataCache');
 const SkillModel = invoke('GameServer/Model/Skill');
+const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const PartyCombatState = invoke('GameServer/Bot/AI/PartyCombatState');
 
 const PARTY_REVIVE_TIMEOUT_MS = 60000;
@@ -27,12 +28,7 @@ function isCompanionOf(session, leaderSession) {
 
 function partySessions(leaderSession) {
     if (!leaderSession?.actor) return [];
-    if (leaderSession.hotBackgroundPartyId && !leaderSession.partyCompanion) {
-        return invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession);
-    }
-    if (leaderSession.partyRaidEngagement) return PartyCombatState.partySessions(leaderSession, { includeDead: true });
-    const BotManager = invoke('GameServer/Bot/BotManager');
-    return [leaderSession, ...(BotManager.sessions || []).filter((session) => isCompanionOf(session, leaderSession))];
+    return PartyAwareness.partySessions(leaderSession, { includeDead: true });
 }
 
 function isRescueMember(session, leaderSession) {

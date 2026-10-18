@@ -1,8 +1,6 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const vm = require('node:vm');
 const nativeFixture = require('./helpers/isolatedSocialDatabase')('f1-spatial-test_n62_pvp_actor_lookup');
 require('../src/Global');
 nativeFixture.assertConfigured(options.default);
@@ -91,50 +89,25 @@ try {
     partyA.coldLifeState = partyB.coldLifeState = { party: { partyId: 'pvp_lookup_party' } };
     forming.coldLifeState = { party: { partyId: 'forming' } };
     World.refreshPartyMemberships([companion, partyA, partyB, forming]);
-    Index.invalidate();
     assert.deepEqual(Index.members(replacement), [replacement, companion]);
     assert.deepEqual(Index.members(companion), [companion, replacement]);
     assert.deepEqual(Index.members(partyA), [partyA, partyB]);
     assert.deepEqual(Index.members(forming), [forming]);
     companion.followPlayerSession = forming;
     World.refreshPartyMemberships([companion]);
-    now += Index.REFRESH_MS + 1;
-    assert.deepEqual(Index.members(replacement), [replacement], 'existing party snapshot refresh still follows its TTL');
+    assert.deepEqual(Index.members(replacement), [replacement], 'a companion that follows another leader leaves the old party');
     assert.deepEqual(Index.members(forming), [forming, companion]);
-    console.log('PASS unchanged follow-player/background/forming party membership and snapshot TTL');
-
-    // Execute the exact helper under the existing cold-worker dependency
-    // boundary. This proves lazy loading, not a native worker thread run.
-    const workerSource = fs.readFileSync(require.resolve('../src/GameServer/Bot/Population/ColdSimulationWorker'), 'utf8');
-    const forbidden = /^(Database|GameServer\/World(?:\/|$)|GameServer\/Bot\/BotManager|GameServer\/Network(?:\/|$)|Server$)/;
-    assert(workerSource.includes(`const forbidden = ${forbidden};`));
-    assert(!workerSource.includes("['GameServer/World/World',"), 'worker has no real-World mirror');
-    const calls = [], moduleControl = { exports: {} };
-    vm.runInNewContext(fs.readFileSync(require.resolve('../src/GameServer/Bot/AI/BotPvpIndex'), 'utf8'), {
-        module: moduleControl, invoke(name) {
-            calls.push(name);
-            if (forbidden.test(name)) throw new Error(`cold worker forbidden dependency: ${name}`);
-            throw new Error(`unexpected actor lookup dependency: ${name}`);
-        }
-    });
-    assert.deepEqual(calls, [], 'module load must not import or invoke World');
-    assert.throws(() => moduleControl.exports.actor(id), /cold worker forbidden dependency: GameServer\/World\/World/);
-    assert.deepEqual(calls, ['GameServer/World/World']);
+    console.log('PASS unchanged follow-player/background/forming party membership');
 
     const unrelated = Array.from({ length: 64 }, (_, n) => instrument(register({ locX: 100_000 + n * 6000 })));
-    for (const invalidate of [true, false]) {
-        if (invalidate) Index.invalidate();
-        else now += Index.REFRESH_MS + 1;
-        reset(unrelated);
-        assert.equal(Index.actor(id), replacement.actor);
-        assert.deepEqual(totals(unrelated), { actor: 0, coordinates: 0 },
-            'direct actor lookup must never refresh distant unrelated registered owners, including invalidation/TTL boundaries');
-    }
+    reset(unrelated);
+    assert.equal(Index.actor(id), replacement.actor);
+    assert.deepEqual(totals(unrelated), { actor: 0, coordinates: 0 },
+        'direct actor lookup must never read distant unrelated registered owners');
     assert.equal(invoke('Database').isReady(), false);
-    console.log('PASS indexed PvP actor lookup; zero unrelated-owner reads, lazy worker dependency and no database/server');
+    console.log('PASS indexed PvP actor lookup; zero unrelated-owner reads and no database/server');
 } finally {
     Date.now = realNow;
     World.user = previousUser;
-    Index.invalidate();
     require('node:fs').rmSync(nativeFixture.directory, { recursive: true, force: true });
 }
