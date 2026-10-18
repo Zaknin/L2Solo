@@ -16,7 +16,10 @@ module.exports.nativeRecipeEarning = async (id, timestamp, refreshEconomy = fals
 };
 module.exports.nativeTownVisit = async (id, timestamp) => {
     const entry = kernel.states.get(Number(id));
-    const plan = await kernel.planLifecycle({ state: entry.state, context: entry.context, timestamp });
+    const lifecycle = await kernel.planLifecycle({ state: entry.state, context: entry.context, timestamp });
+    // The plan as main receives it: the step's economy stays in the worker.
+    const plan = lifecycle && { ...lifecycle };
+    if (plan) delete plan.economy;
     return { plan, forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };
 module.exports.nativeMeetingPreparation = async (id, timestamp, request) => {
