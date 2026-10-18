@@ -42,7 +42,7 @@ async function form(sides, context, valid) {
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, Number(existing?.updatedAt || 0) + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
         const assignments = states.map(s => Life.preparePartyAssignment({ ...s, activity: 'grouped', spotId: context.spotId },
-            partyId, Composition.roleForState(s), leaderId, null, context.spotId));
+            partyId, Composition.roleForState(s), leaderId, null));
         const result = await invoke('Database').commitBackgroundPartyMembership({ party: prepared.row, members: assignments,
             expectedPhase: 'hot', expectedPartyUpdatedAt: existing?.updatedAt ?? null, canCommitHot: canCommit,
             event: { characterId: leaderId, eventType: existing ? 'party_recruit' : 'party',

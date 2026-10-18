@@ -996,9 +996,7 @@ function shiftDueTimesByDowntime() {
 
 function hydrateCache() {
     return shiftDueTimesByDowntime().then(() => Database.execute([
-        `SELECT states.*, (SELECT spotId FROM bot_background_parties party
-            WHERE party.partyId = states.partyId AND party.status IN ('active', 'hot')) AS nativePartySpotId,
-            (SELECT json_group_array(json_object('slot', slot, 'symbolId', symbolId))
+        `SELECT states.*, (SELECT json_group_array(json_object('slot', slot, 'symbolId', symbolId))
             FROM character_hennas WHERE characterId = states.characterId) AS nativeHennas,
             EXISTS(SELECT 1 FROM character_quests WHERE characterId = states.characterId AND questId = 350 AND state = 'started') AS nativeCrystalQuest,
             CASE WHEN COALESCE(json_extract(states.statsJson, '$.coldCombat.skillSource'), '') NOT IN ('hot', 'database')
@@ -1011,10 +1009,6 @@ function hydrateCache() {
     ])).then(async (rows) => {
         for (const row of rows) {
             let state = normalize(row);
-            // Persist the old party's destination before a claim can reload
-            // its row. This uses the existing one-time startup repair pass.
-            const partySpotRepair = row.nativePartySpotId && state.stats.backgroundPartySpotId !== row.nativePartySpotId;
-            if (row.nativePartySpotId) state.stats.backgroundPartySpotId = row.nativePartySpotId;
             const storedHennas = state.stats.hennas;
             state.stats.hennas = [null,null,null];
             for (const symbol of parseJson(row.nativeHennas, [])) state.stats.hennas[symbol.slot - 1] = symbol.symbolId;
@@ -1022,7 +1016,7 @@ function hydrateCache() {
             if (row.nativeLearnedSkills != null) {
                 state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, parseJson(row.nativeLearnedSkills, []), now());
             }
-            if (row.nativeLearnedSkills != null || hennaRepair || partySpotRepair) {
+            if (row.nativeLearnedSkills != null || hennaRepair) {
                 // Startup repair precedes cache publication and worker reads.
                 // Use the existing guarded save; do not learn/spend here.
                 if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
@@ -2351,7 +2345,7 @@ const BotLifeState = {
             expectedPartyId: state.party.partyId };
     },
 
-    preparePartyAssignment(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null, partySpotId = null) {
+    preparePartyAssignment(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null) {
         if (!state || !partyId) return null;
         const hasPartyRequest = state.stats?.partyRequest?.status === 'open';
         const wasWaitingForParty = state.activity === 'party_wait'
@@ -2373,7 +2367,6 @@ const BotLifeState = {
                 role,
                 leaderId,
                 backgroundPartyId: partyId,
-                backgroundPartySpotId: partySpotId,
                 partyWaitUntil: null,
                 restUntil: wasWaitingForParty ? null : state.stats?.restUntil || null,
                 lastReason: wasWaitingForParty ? 'party_assigned' : state.stats?.lastReason,
@@ -2412,8 +2405,8 @@ const BotLifeState = {
         });
     },
 
-    assignParty(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null, partySpotId = null) {
-        const prepared = this.preparePartyAssignment(state, partyId, role, leaderId, partyNextResolveAt, partySpotId);
+    assignParty(state, partyId, role = 'dps', leaderId = 0, partyNextResolveAt = null) {
+        const prepared = this.preparePartyAssignment(state, partyId, role, leaderId, partyNextResolveAt);
         if (!prepared) return Promise.resolve(null);
 
         return save(prepared.row).then(() => {
@@ -3967,12 +3960,8 @@ const BotLifeState = {
         return cache.recent(cache.size);
     },
 
-    // The states a bounded allStates(limit) view leaves out (oldest updatedAt).
-    statesBeyondRecent(limit = 500) {
-        return cache.beyondRecent(recentLimit(limit));
-    },
-
-    // Spot occupancy kept up to date at every state write (SpotProfiles.currentOccupancy).
+    // Spot occupancy kept up to date at every state write (the hot body's kill
+    // share, SpotProfiles.spotHunters; the status line's per-spot count).
     occupancyIndex() {
         return cache.occupancy;
     },

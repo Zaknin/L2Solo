@@ -113,7 +113,7 @@ async function main() {
     for (const member of materialStates) assert.equal(Life.cachedState(member.characterId).party.partyId, materialParty.partyId);
     console.log('PASS native material membership commit with two needs, different clans and a remote support');
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const savedCapacity = { cache: Profiles.cache, occupancy: Profiles.currentOccupancy };
+    const savedCache = Profiles.cache;
     const limited = [];
     for (const stats of [
         { classId: 8, role: 'dps', equipmentPlan: { target: { selfId: 5726 } }, partyRequest: material },
@@ -124,17 +124,16 @@ async function main() {
         limited.push(await Life.upsertState({ ...member, level: 65,
             activity: 'hunting', spotId: 'event-fixture' }, 'limited_material_fixture'));
     }
-    const coreIds = limited.slice(0, 2).map(member => String(member.characterId));
     Profiles.cache = [{ id: 'event-fixture', capacity: 2, center: { locX: 0, locY: 0, locZ: 0 } }];
-    Profiles.currentOccupancy = () => ({ 'event-fixture': { count: 0, reservedCount: 2, capacity: 2,
-        reservedKeys: new Set(coreIds), retained: new Set(coreIds) } });
     try {
         const fitted = await Population.formBackgroundParties(limited);
         assert.equal(fitted.length, 1);
-        assert.deepEqual(new Set(fitted[0].memberIds), new Set(limited.slice(0, 2).map(member => member.characterId)),
-            'formation keeps the material core and reviews the smaller roster when a support cannot fit');
-        assert(!Life.cachedState(limited[2].characterId).party?.partyId);
-    } finally { Profiles.cache = savedCapacity.cache; Profiles.currentOccupancy = savedCapacity.occupancy; }
+        // Room is checked at arrival (ARCH-08-a), not at formation: a spot of
+        // capacity 2 does not cut the chosen support from the roster.
+        assert.deepEqual(new Set(fitted[0].memberIds), new Set(limited.map(member => member.characterId)),
+            'formation keeps every chosen member; the spot room is not a formation gate');
+        assert(Life.cachedState(limited[2].characterId).party?.partyId);
+    } finally { Profiles.cache = savedCache; }
     Population.started = false; Population.playerActivityProfile = savedProfile;
     Coordinator.requestPartyGoals = originalPartyGoals;
     Income.compare = originalIncome;

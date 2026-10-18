@@ -256,12 +256,6 @@ function deriveTags(spot) {
     return uniq(tags);
 }
 
-function occupancyForSpot(occupancy, spotId) {
-    const entry = occupancy instanceof Map ? occupancy.get(spotId) : occupancy?.[spotId];
-    if (entry && typeof entry === 'object') return Math.max(0, Number(entry.count || 0));
-    return Math.max(0, Number(entry || 0));
-}
-
 function capacityForSpot(spot = {}) {
     const explicit = Number(spot.capacity || 0);
     if (explicit > 0) return explicit;
@@ -270,6 +264,12 @@ function capacityForSpot(spot = {}) {
     // cells effectively bottomless and hid them from alternative planning.
     const densityCapacity = Math.round(Number(spot.density || 1) * 0.75);
     return Math.max(9, Math.min(36, densityCapacity));
+}
+
+// How many bots a spot holds: its capacity, never below one. The room check at
+// arrival and the status line's overfill count read this one rule.
+function roomForSpot(spot = {}) {
+    return Math.max(1, capacityForSpot(spot));
 }
 
 // Read-only result: shared by every search of the spot.
@@ -512,7 +512,7 @@ module.exports = {
     targetLevelForState,
     tagsForSpot,
     capacityForSpot,
-    occupancyForSpot,
+    roomForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
     spotAllowedReaderFor,

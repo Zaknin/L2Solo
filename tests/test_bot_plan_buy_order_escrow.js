@@ -123,7 +123,6 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         upsertState: LifeState.upsertState,
         createOrUpdate: PartyState.createOrUpdate,
         ensure: SpotProfiles.ensure,
-        currentOccupancy: SpotProfiles.currentOccupancy,
         ownerRecords: AfkTrade.ownerRecords,
         cachedState: LifeState.cachedState,
         npcEquipmentBridgePlan: GearAcquisitionPlanner.npcEquipmentBridgePlan,
@@ -140,7 +139,6 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         };
         AfkTrade.ownerRecords = () => [{ kind: 'buy_ad', storeType: AfkTrade.BUY, escrowAdena: price, lines: [] }];
         SpotProfiles.ensure = () => [];
-        SpotProfiles.currentOccupancy = () => ({});
         PartyState.createOrUpdate = async (party) => party;
         LifeState.upsertState = async (state) => state;
         const member = (characterId, equipmentPlan) => ({ ...afterPosting, characterId, name: `Member${characterId}`,
@@ -197,7 +195,6 @@ const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
         LifeState.upsertState = saved.upsertState;
         PartyState.createOrUpdate = saved.createOrUpdate;
         SpotProfiles.ensure = saved.ensure;
-        SpotProfiles.currentOccupancy = saved.currentOccupancy;
         AfkTrade.ownerRecords = saved.ownerRecords;
         LifeState.cachedState = saved.cachedState;
         GearAcquisitionPlanner.npcEquipmentBridgePlan = saved.npcEquipmentBridgePlan;

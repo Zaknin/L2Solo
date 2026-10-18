@@ -92,10 +92,6 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
         maxMarketPrice: marketBudget,
         spoilCapable: options.spoilCapable === true,
         allowRaidSources: options.allowRaidSources === true,
-        ...(options.occupancy ? { occupancy: options.occupancy } : {}),
-        ...(options.capacityUnits ? { capacityUnits: options.capacityUnits } : {}),
-        ...(options.reservationKey ? { reservationKey: options.reservationKey } : {}),
-        ...(options.maxReservationGroups ? { maxReservationGroups: options.maxReservationGroups } : {}),
         ...(options.excludedTargetIds ? { excludedTargetIds: options.excludedTargetIds } : {})
     };
     try {

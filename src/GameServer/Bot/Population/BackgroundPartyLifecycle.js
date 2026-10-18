@@ -77,7 +77,6 @@ function releaseMember(state, timestamp = Date.now(), reason = 'party_session_ro
             ...(state.stats || {}),
             ...(partyTravel ? { travel: null } : {}),
             backgroundPartyId: null,
-            backgroundPartySpotId: null,
             partyBreakReason: reason,
             ...(reason === 'clan_party_unsafe' ? { clanPartyObjective: null } : {}),
             partyRequest: !raidRelease && (reason === AssemblyRecovery.REASON

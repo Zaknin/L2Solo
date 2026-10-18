@@ -229,10 +229,6 @@ class LifeStateCache extends Map {
         return this.ordered.slice(0, limit).map((entry) => entry.state);
     }
 
-    beyondRecent(limit) {
-        return this.ordered.slice(limit).map((entry) => entry.state);
-    }
-
     // Walkers whose place on their run at `timestamp` (the straight-line
     // estimate between its ends) is within `radius` of `loc`. One pass over the
     // walkers, nothing stored: positions exist only while this asks. The

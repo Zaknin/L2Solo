@@ -1081,12 +1081,9 @@ class ColdSimulationCoordinator {
         // Every context of one spot catalog reads the same id table.
         const spots = SpotIndex.tableFor(profiles);
         const parties = new Map((BackgroundPartyState.active?.() || []).map((party) => [Number(party.leaderId || 0), party]));
-        let occupancy = {};
-        try { occupancy = SpotProfiles.currentOccupancy(profiles) || {}; } catch (_) { occupancy = {}; }
         return {
             spots,
             profiles,
-            occupancy,
             parties,
             partyGeneration: BackgroundPartyState.generation(),
             compactPartyMembers: options.compactPartyMembers === true,
@@ -1136,7 +1133,7 @@ class ColdSimulationCoordinator {
                     state.stats?.equipmentPlan,
                     // Preserve catalog identity for the planner's source-index cache.
                     index.profiles || [...index.spots.values()],
-                    { occupancy: index.occupancy, excludedSpotIds, timestamp }
+                    { excludedSpotIds, timestamp }
                 )?.spot || null;
             } catch (_) { fallbackSpot = null; }
         }
@@ -1151,7 +1148,6 @@ class ColdSimulationCoordinator {
                 ? { ...state, spotId: null }
                 : state;
         const options = {
-            occupancy: index.occupancy,
             capacityStates: routedMembers,
             excludedSpotIds,
             timestamp,
@@ -1193,8 +1189,7 @@ class ColdSimulationCoordinator {
             && LevelingRoutes.isSpotAllowedForState(wished, state, soloOptions())
             && (SpotService.isSuitable(wished, Number(state.level || 1), options)
                 || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state)
-                    && Number(wished.avgLevel || wished.minLevel || 1) >= Number(state.level || 1) - 15)
-            && SpotProfiles.hasCapacityForStates(wished, routedMembers, index.occupancy) ? wished : null;
+                    && Number(wished.avgLevel || wished.minLevel || 1) >= Number(state.level || 1) - 15) ? wished : null;
         const sharedSpot = party?.stats?.objective?.spotId;
         let selected = partyRoute && sharedSpot && !excludedSpotIds.has(String(sharedSpot))
             ? index.spots.get(String(sharedSpot)) || null : wishDestination || fallbackSpot;
@@ -1222,27 +1217,21 @@ class ColdSimulationCoordinator {
             if (repeatsCurrentGround || !destinationSafeForSolo) selected = null;
         }
         if (!selected && unsafeSoloGround) {
-            // Normal routing respects destination capacity. If every suitable
-            // field is full, that can leave a detached party member polling a
+            // No suitable field: a detached party member must not poll a
             // blocked dungeon forever. Only for this rare safety evacuation,
-            // choose the least-bad allowed field and let admission exceed its
-            // soft capacity by one.
+            // choose the least-bad allowed field near its level; the room
+            // there is checked at arrival, which lets it exceed a full spot
+            // by one (ARCH-08-a).
             const emergencyOptions = soloOptions();
-            const candidatesWithRoom = (index.profiles || [...index.spots.values()])
+            const nearLevel = (index.profiles || [...index.spots.values()])
                 .filter((profile) => profile.raidBoss !== true)
                 .filter((profile) => String(profile.id) !== String(currentId || ''))
                 .filter((profile) => !excludedSpotIds.has(String(profile.id)))
                 .filter((profile) => (
                     Number(profile.minLevel || 1) <= Number(state.level || 1) + 4
                     && Number(profile.maxLevel || profile.minLevel || 1) >= Number(state.level || 1) - 4
-                ))
-                .filter((profile) => SpotProfiles.hasCapacityForStates(
-                    profile,
-                    routedMembers,
-                    index.occupancy,
-                    { maxOverflowUnits: 1 }
                 ));
-            const emergencyCandidates = candidatesWithRoom.filter((profile) => (
+            const emergencyCandidates = nearLevel.filter((profile) => (
                 LevelingRoutes.isSpotAllowedForState(profile, state, emergencyOptions)
             ));
             const suitable = emergencyCandidates.filter((profile) => (
@@ -1265,12 +1254,6 @@ class ColdSimulationCoordinator {
         const materialReplan = materialRoute || materialHunt && String(selected.id) !== String(sharedSpot);
         if (String(selected.id) === String(currentId || '') && !repairingPartyPosition && !materialReplan
             && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
-
-        const reserved = partyRoute ? SpotProfiles.reservePartyCapacity(index.occupancy, selected, routedMembers)
-            : SpotProfiles.reserveCapacity(index.occupancy, selected, routedMembers, {
-            maxOverflowUnits: unsafeSoloGround ? 1 : 0
-        });
-        if (!reserved) return null;
 
         const members = partyRoute ? partyMembers : [state];
         const destinations = partyRoute ? SpotService.arrivalPointsForParty(members, selected) : {};
@@ -1339,14 +1322,13 @@ class ColdSimulationCoordinator {
                             : held.plan !== events.plan ? 'equipment_plan'
                                 : held.risk !== events.risk ? 'risk' : '');
         // Feasibility of the held spot: still in the catalog, not excluded,
-        // room for the bot, still safe for its kit (the profiles the search
-        // builds anyway). A held "no spot" has nothing to check.
+        // still safe for its kit (the profiles the search builds anyway); its
+        // room is checked at arrival. A held "no spot" has nothing to check.
         if (!reason && held.spotId !== null) {
             const spot = index.spots.get(held.spotId);
             reason = !spot ? 'spots'
                 : excludedSpotIds.has(held.spotId) ? 'risk'
-                    : !SpotProfiles.hasCapacityForStates(spot, [state], index.occupancy) ? 'capacity'
-                        : !LevelingRoutes.isSpotAllowedForState(spot, state, soloOptions()) ? 'unsafe' : '';
+                    : !LevelingRoutes.isSpotAllowedForState(spot, state, soloOptions()) ? 'unsafe' : '';
         }
         const why = reason ? [reason] : [];
         Hold.check('route', why);

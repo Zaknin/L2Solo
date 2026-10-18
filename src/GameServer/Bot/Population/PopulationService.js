@@ -696,8 +696,7 @@ function assignPartyMembers(members = [], party) {
             party.partyId,
             PartyComposition.roleForState(member),
             party.leaderId,
-            party.nextResolveAt,
-            party.spotId
+            party.nextResolveAt
         ).then((saved) => {
             if (saved) assigned.push(member);
             else failed.push(member);
@@ -732,23 +731,6 @@ function hydratePartyCandidates(candidates = []) {
             return hydrated;
         }).filter(Boolean);
     });
-}
-
-function fittingMaterialCandidates(candidates, objective, retained = []) {
-    const Material = require('./CraftMaterialParty');
-    if (!Material.isObjective(objective)) return candidates;
-    const spot = SpotProfiles.findById(objective.spotId);
-    if (!spot) return candidates;
-    const occupancy = SpotProfiles.currentOccupancy(SpotProfiles.ensure());
-    const selected = [...candidates];
-    while (selected.length && !SpotProfiles.hasCapacityForParty(spot, [...retained, ...selected], occupancy)) {
-        // New formation keeps its requested core; recruitment keeps every
-        // attached member. A smaller roster still needs worker consent.
-        const index = retained.length ? selected.length - 1 : selected.findLastIndex(member => !Material.requestOf(member));
-        if (index < 0) return [];
-        selected.splice(index, 1);
-    }
-    return selected;
 }
 
 // Writes recruits into a party: the leader elected over the whole roster, the
@@ -832,11 +814,6 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
     if (ClanEquipmentPartyPolicy.needsReview(party, selected)) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'clan_party_unsafe' });
     }
-    if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
-        const spot = SpotProfiles.findById(party.spotId);
-        if (spot && !SpotProfiles.reservePartyCapacity(SpotProfiles.currentOccupancy(SpotProfiles.ensure()), spot, selected))
-            return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'party_spot_capacity' });
-    }
 
     // Unit harnesses and startup fall back to the legacy composition API.
     // The live path below is one SQLite queue item and one bounded transaction.
@@ -859,8 +836,7 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
             preparedParty.snapshot.partyId,
             PartyComposition.roleForState(member),
             preparedParty.snapshot.leaderId,
-            preparedParty.snapshot.nextResolveAt,
-            preparedParty.snapshot.spotId
+            preparedParty.snapshot.nextResolveAt
         );
         return prepared && { ...prepared, expectedSimulationRevision: Number(member.simulation?.revision || 0),
             expectedSimulationLeaseId: String(member.simulation?.leaseId || '') };
@@ -941,7 +917,6 @@ async function createAndCommitBackgroundParty(members = [], objectiveOverride = 
 
 async function createBackgroundParty(members = [], objectiveOverride = null, options = {}) {
     const requested = objectiveOverride || members.map(partyObjectiveForState).find(objective => objective?.priority === 'required');
-    members = fittingMaterialCandidates(members, requested);
     if (members.length < Config.partyMinSize) return null;
     const workerMaterialFormation = require('./CraftMaterialParty').isObjective(requested) && members.some(member => member.phase === 'cold');
     if (!workerMaterialFormation && !requested?.clanGoalKey && requested?.sourceKind !== 'raid') {
@@ -2663,10 +2638,10 @@ const PopulationService = {
                     && (Material.isObjective(partyObjective) || !Material.requestOf(state))
                     && ClanEquipmentPartyPolicy.allowed(state, partyObjective)
                 ));
-                const recruits = fittingMaterialCandidates(PartyComposition.selectRecruits(members, nearby, {
+                const recruits = PartyComposition.selectRecruits(members, nearby, {
                     maxSize: partyLimits.maxSize,
                     levelRange: partyLimits.levelRange
-                }), partyObjective, members);
+                });
                 if (!recruits.length) return null;
                 return hydratePartyCandidates(recruits).then((hydratedRecruits) => {
                     if (hydratedRecruits.length !== recruits.length) return null;
@@ -3032,7 +3007,6 @@ const PopulationService = {
         // gear plan still needs the complete atlas.  Passing [] here turned every
         // in-progress craft route into `blocked` on its first travel tick.
         const spots = SpotProfiles.ensure();
-        const occupancy = SpotProfiles.currentOccupancy(spots);
         const buyOrderEscrow = BotAfkMarketService.buyOrderEscrow(state.characterId);
         let replanContext = { failure: workerPlan?.replanFailure || null, buyOrderEscrow };
         let acquisitionPlan = workerPlan?.acquisitionPlan || null;
@@ -3040,7 +3014,7 @@ const PopulationService = {
             && ['direct_drop', 'craft'].includes(acquisitionPlan.strategy)
             && !!acquisitionPlan.next?.spotId;
         if (workerPlanHasSource) {
-            acquisitionPlan = this.retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, occupancy, replanContext, startedAt);
+            acquisitionPlan = this.retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, replanContext, startedAt);
         }
         if (!acquisitionPlan) {
             acquisitionPlan = previousPlan;
@@ -3073,7 +3047,7 @@ const PopulationService = {
         const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
         const excludedSpotIds = SpotRiskPolicy.excludedSpotIdsForStates([plannedState], startedAt);
         const partyFallback = partyRouteWaiting && !passiveActivity
-            ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp: startedAt })
+            ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { excludedSpotIds, timestamp: startedAt })
             : null;
         const fallbackSpot = partyFallback?.spot || null;
         // A waiter that is resting finishes its rest first.
@@ -3257,12 +3231,11 @@ const PopulationService = {
         return COLD_RESOLVE_NEXT;
     },
 
-    retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, occupancy, replanContext, startedAt) {
+    retargetColdWorkerPlan(state, acquisitionPlan, previousPlan, spots, replanContext, startedAt) {
         const availableSource = GearAcquisitionPlanner.bestSourceForPlan(
             state,
             acquisitionPlan,
-            spots,
-            { occupancy }
+            spots
         );
         if (availableSource) {
             acquisitionPlan = GearAcquisitionPlanner.retargetPlanSource(state, acquisitionPlan, availableSource);
@@ -3271,7 +3244,7 @@ const PopulationService = {
                 state,
                 acquisitionPlan,
                 spots,
-                { occupancy, ...replanContext }
+                { ...replanContext }
             );
             acquisitionPlan = GearAcquisitionPlanner.finalizePlan(
                 state,

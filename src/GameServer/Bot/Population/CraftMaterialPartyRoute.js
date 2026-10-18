@@ -14,15 +14,14 @@ function select(party, members, profiles, options) {
     const alternatives = goals.map(goal => Material.campsFor(
         members.find(state => Number(state.characterId) === Number(goal.characterId)), goal.itemId, profiles, spoiler));
     const Index = invoke('GameServer/Bot/AI/SpotIndex'), Routes = invoke('GameServer/Bot/AI/LevelingRoutes');
-    const Spots = require('./SpotProfiles'), state = members.find(row => row.characterId === party.leaderId) || members[0];
+    const state = members.find(row => row.characterId === party.leaderId) || members[0];
     const routeOptions = { ...options, mode: 'party', capacityStates: members,
         matchupProfiles: invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(state, { ...options, mode: 'party', capacityStates: members }) };
     const candidates = alternatives[0].flatMap(row => {
         if (options.excludedSpotIds.has(String(row.spotId))
             || !alternatives.every(rows => rows.some(source => source.spotId === row.spotId))) return [];
         const spot = Index.spotById(profiles, row.spotId);
-        return spot && Spots.hasCapacityForParty(spot, members, options.occupancy)
-            && Routes.isSpotAllowedForState(spot, state, routeOptions) ? [spot] : [];
+        return spot && Routes.isSpotAllowedForState(spot, state, routeOptions) ? [spot] : [];
     });
     if (!candidates.length) return null;
     const spot = Routes.bestSpot(candidates, state, routeOptions)?.spot;

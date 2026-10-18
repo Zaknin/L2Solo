@@ -20,7 +20,6 @@ const DataCache = invoke('GameServer/DataCache');
 const { planForMember } = require('./ClanEquipmentPlanner');
 const PlanningWorker = require('./ClanPlanningCoordinator');
 const RosterDemand = require('./ClanRosterDemand');
-const MAX_CAPACITY_TARGET_RETRIES = 5;
 
 const metrics = {
     resolves: 0,
@@ -49,38 +48,6 @@ function parseJson(value, fallback = {}) {
 
 function recordReason(reason) {
     if (reason) DiagnosticConfig.developerDiagnostics && metrics.reasonCounts.set(reason, (metrics.reasonCounts.get(reason) || 0) + 1);
-}
-
-function reservationOptionsForClan(clan) {
-    return {
-        reservationKey: `clan-equipment:${number(clan?.id)}`,
-        maxReservationGroups: SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT
-    };
-}
-
-function reserveGoalCapacity(planning = {}, clan = {}, assignedMemberIds = [], selectedSpot = null) {
-    if (!selectedSpot) return { occupancy: planning.occupancy || {}, reserved: true };
-    let occupancy = planning.occupancy || {};
-    try {
-        // Candidate construction may await an LLM decision. Its planning
-        // snapshot can therefore be several seconds old by the time the goal
-        // is applied. Always rejoin the shared one-second occupancy snapshot
-        // here; reserveCapacity mutates that object so later clan actions in
-        // the same batch immediately observe this reservation.
-        occupancy = SpotProfiles.currentOccupancy(planning.spots || []) || occupancy;
-    } catch (_) {
-        // Keep deterministic harnesses and startup recovery best-effort when
-        // the world spot index is not ready yet.
-    }
-    return {
-        occupancy,
-        reserved: SpotProfiles.reserveCapacity(
-            occupancy,
-            selectedSpot,
-            assignedMemberIds.map((characterId) => ({ characterId })),
-            reservationOptionsForClan(clan)
-        )
-    };
 }
 
 function planningFingerprint(clan) {
@@ -794,13 +761,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     const recruitment = clan.state?.mode === 'autonomous' && !activeRaidPartyForClan(clan.id)
         ? await prepareRecruitment(clan, candidateSpots.filter(profile => profile.raidBoss), previousGoal, options) : null;
     const spots = recruitment ? [...candidateSpots.filter(profile => !profile.raidBoss), ...recruitment.raids] : candidateSpots;
-    const occupancy = options.occupancy || (() => {
-        try {
-            return SpotProfiles.currentOccupancy(spots) || {};
-        } catch (_) {
-            return {};
-        }
-    })();
     const previousMember = (clan.members || []).find((member) => (
         number(member.characterId ?? member.id) === number(previousGoal?.target?.memberId)
     ));
@@ -815,7 +775,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     const warehouseRows = await Database.fetchClanWarehouseItems(clan.id);
     const craftOptions = await craftingOptions(recruitment?.clan || clan);
     const previousMemberId = number(previousGoal?.target?.memberId);
-    const reservationOptions = reservationOptionsForClan(clan);
     // The clan pays what a member lacks for its goal from its free money (above
     // the clan hall's protected reserve).
     const clanShare = invoke('GameServer/ClanHall/Policy').freeAdena(warehouseRows, clan, clan.state?.mode, clan.state?.goal);
@@ -852,7 +811,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         if (workerFingerprint && Date.now() >= planningDeadline) throw planningDeferred('clan planning deadline');
         const member = members[index];
         const id = number(member.characterId ?? member.id);
-        const capacityUnits = equipmentRoster(clan, member, previousGoal).length;
         const memberSpots = spots.filter((spot) => spot.raidBoss !== true
             || (!recruitment || recruitment.teams[spot.id]?.memberIds.includes(id)) && ClanRaidPolicy.availableMember(member, spot,
                 new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean))));
@@ -860,13 +818,10 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             ...craftOptions,
             economicCraftAllowed: require('../Bot/Economy/ProductionPolicy').buyersDisabled() === false,
             ignoreExistingPlan: previousFulfilled && id === previousMemberId,
-            occupancy,
-            capacityUnits,
             spoilCapable,
             allowRaidSources: memberSpots.some((spot) => spot.raidBoss === true),
             maxExpectedKills: Config.equipmentMaxExpectedKills,
             clanShare,
-            ...reservationOptions,
             excludedTargetIds: options.excludedTargetIds || []
         };
         const nativePlan = async extra => {
@@ -936,8 +891,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         selection = null;
     }
     return {
-        spots,
-        occupancy,
         warehouseRows,
         plans,
         economy,
@@ -945,7 +898,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         previousFulfilled,
         workerFingerprint,
         beneficiaryFingerprints,
-        planningDeadline,
         recruitment
     };
 }
@@ -1142,38 +1094,6 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
             recruitmentDemand: demand, recruitmentScan: scan, suspension, retryable: true, reason: 'clan_planning_deferred', selection, plans };
     }
     const assignedMemberIds = team?.actualReady ? team.memberIds : equipmentRoster(clan, selection.member, previousGoal, selection.plan);
-    const selectedSpot = selection.plan?.next?.spotId
-        ? planning.spots.find((spot) => String(spot.id) === String(selection.plan.next.spotId))
-        : null;
-    const capacityReservation = reserveGoalCapacity(planning, clan, assignedMemberIds, selectedSpot);
-    if (!capacityReservation.reserved) {
-        recordReason('equipment_source_capacity_changed');
-        const retryCount = Math.max(0, number(options.capacityRetry));
-        // This is a rare post-planning race, not the normal clan planning
-        // path. Walk a few more nearby equipment targets before yielding the
-        // action; the ordinary cold flow still performs only one planning pass.
-        if (retryCount < MAX_CAPACITY_TARGET_RETRIES) {
-            const excludedTargetIds = [...new Set([
-                ...(options.excludedTargetIds || []).map(number).filter(Boolean),
-                number(selection.plan?.target?.selfId)
-            ].filter(Boolean))];
-            const retryPlanning = await planningForClan(clan, previousGoal, {
-                ...options,
-                spots: planning.spots,
-                occupancy: capacityReservation.occupancy,
-                planningDeadline: planning.planningDeadline,
-                excludedTargetIds
-            });
-            return resolveClan(clan, previousGoal, {
-                ...options,
-                planning: retryPlanning,
-                selectedCandidate: null,
-                excludedTargetIds,
-                capacityRetry: retryCount + 1
-            });
-        }
-        return { ok: true, skipped: true, reason: 'equipment_sources_exhausted', plans };
-    }
     const goal = Policy.buildGoal(clan, selection, previousGoal, Date.now(), {
         assignedMemberIds,
         roleFor: ClanPolicy.rosterRole
@@ -1257,7 +1177,6 @@ const ClanEquipmentService = {
     equipmentRoster,
     activeRaidPartyForClan,
     recordRaidFailure,
-    reserveGoalCapacity,
     releaseConflictingRosterParties,
     metrics() {
         if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };

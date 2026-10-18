@@ -1,13 +1,12 @@
 'use strict';
 
 const CharacterLocationIndex = require('../../World/CharacterLocationIndex');
-const Risk = require('./SpotRiskPolicy');
 const providers = new WeakMap();
 
 // Who stands on each spot and who is heading there, kept up to date at every
-// state write. SpotProfiles.indexedOccupancy turns it into the same snapshot
-// occupancySnapshot builds from a full state list, rebuilding only the spots
-// whose members changed instead of walking the whole population every second.
+// state write. Read only at a spot: the room check at arrival, the kill share,
+// the buff offer, and the status line's per-spot count. No place is held for a
+// bot ahead of its arrival.
 
 function stateKey(state = {}) {
     return String(state.characterId || state.name || state.stats?.generatedIndex || '');
@@ -17,35 +16,6 @@ function occupiedSpotId(state = {}) {
     if (state.activity === 'traveling' && state.stats?.travel?.spotId) return state.stats.travel.spotId;
     if (['merchant', 'shopping', 'crafting', 'traveling'].includes(state.activity)) return null;
     return state.spotId || null;
-}
-
-function farmIntentCandidate(state = {}) {
-    if (['merchant', 'shopping', 'crafting', 'dead'].includes(state.activity)) return null;
-    if ((state.party?.partyId || state.partyId) && state.stats?.backgroundPartySpotId)
-        return state.stats.backgroundPartySpotId;
-    const clanObjective = state.stats?.clanPartyObjective;
-    const request = state.stats?.partyRequest;
-    const plan = state.stats?.equipmentPlan;
-    if (clanObjective?.spotId && ['open', 'deferred'].includes(String(clanObjective.status || ''))) {
-        return clanObjective.spotId;
-    }
-    if (request?.spotId && ['open', 'deferred'].includes(String(request.status || ''))) return request.spotId;
-    if (plan?.status === 'active' && ['direct_drop', 'craft'].includes(plan.strategy) && plan.next?.spotId) {
-        return plan.next.spotId;
-    }
-    return null;
-}
-
-// A "was full" mark lives the holder's own steps: it changes only with a new
-// state, which every write hands to update(), so no pass refreshes it.
-function capacityBackedOff(state, spotId) {
-    return (state.stats?.capacityBackoffs || []).some(entry => String(entry.spotId) === String(spotId)
-        && Risk.markActive(entry, state));
-}
-
-function farmIntentSpotId(state = {}) {
-    const spotId = farmIntentCandidate(state);
-    return spotId && !capacityBackedOff(state, spotId) ? spotId : null;
 }
 
 function addMember(membersBySpot, spotId, key) {
@@ -70,8 +40,6 @@ class SpotOccupancyIndex {
         Object.defineProperty(this, 'locationIndex', { value: index, enumerable: true });
         this.places = new Map();
         this.physical = new Map();
-        this.reserved = new Map();
-        this.dirty = new Set();
     }
 
     update(state, options = {}) {
@@ -80,7 +48,7 @@ class SpotOccupancyIndex {
         if (ownsSources) {
             if (state === undefined) {
                 this.remove(key);
-                this.places.set(key, { record: null, spotId: null, intentSpotId: null,
+                this.places.set(key, { record: null, spotId: null,
                     get state() { return undefined; } });
                 return;
             }
@@ -104,16 +72,10 @@ class SpotOccupancyIndex {
         const state = record.source;
         const key = stateKey(state);
         const spotId = occupiedSpotId(state);
-        const candidate = farmIntentCandidate(state);
-        const intentSpotId = candidate && !capacityBackedOff(state, candidate) ? candidate : null;
         this.removePlace(key);
-        this.places.set(key, { record, spotId, intentSpotId,
+        this.places.set(key, { record, spotId,
             get state() { return record.source; } });
         addMember(this.physical, spotId, key);
-        addMember(this.reserved, spotId, key);
-        addMember(this.reserved, intentSpotId, key);
-        if (spotId) this.dirty.add(spotId);
-        if (intentSpotId) this.dirty.add(intentSpotId);
         return true;
     }
 
@@ -121,10 +83,6 @@ class SpotOccupancyIndex {
         const place = this.places.get(key);
         if (!place) return;
         removeMember(this.physical, place.spotId, key);
-        removeMember(this.reserved, place.spotId, key);
-        removeMember(this.reserved, place.intentSpotId, key);
-        if (place.spotId) this.dirty.add(place.spotId);
-        if (place.intentSpotId) this.dirty.add(place.intentSpotId);
         this.places.delete(key);
         return place;
     }
@@ -148,7 +106,7 @@ class SpotOccupancyIndex {
     }
 
     *members(spotId, kind) {
-        if (kind !== 'physical' && kind !== 'reserved') throw new TypeError('invalid_occupancy_membership');
+        if (kind !== 'physical') throw new TypeError('invalid_occupancy_membership');
         const { index } = providers.get(this);
         for (const key of this[kind].get(spotId) || []) {
             const record = this.places.get(key)?.record;
@@ -167,16 +125,17 @@ class SpotOccupancyIndex {
         return count;
     }
 
-    size() { return { owners: this.places.size, physical: this.physical.size, reserved: this.reserved.size }; }
+    // The spots with at least one bot indexed there (the status line's walk).
+    spotIds() { return this.physical.keys(); }
+
+    size() { return { owners: this.places.size, physical: this.physical.size }; }
 
     clear() {
-        for (const spotId of [...this.physical.keys(), ...this.reserved.keys()]) this.dirty.add(spotId);
         this.places.clear();
         this.physical.clear();
-        this.reserved.clear();
         const { index, ownsSources } = providers.get(this);
         if (ownsSources) index.clearSourceView('state');
     }
 }
 
-module.exports = { SpotOccupancyIndex, stateKey, occupiedSpotId, farmIntentSpotId };
+module.exports = { SpotOccupancyIndex, stateKey, occupiedSpotId };

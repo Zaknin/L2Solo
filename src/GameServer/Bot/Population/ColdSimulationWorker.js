@@ -95,7 +95,6 @@ const GearPlanSelection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyRequirementRefresh = invoke('GameServer/Bot/Population/PartyRequirementRefresh');
-const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
@@ -763,8 +762,6 @@ function safetyRepair(row) {
 
 }
 let planningNpcCatalog = ColdNpcPlanningCatalog.createLookup([], boardReady);
-let planningOccupancyCache = null;
-let planningOccupancyCachedAt = 0;
 // Personas come from the main thread's 'personas' table (BotPersona.loadAll).
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 BotPersona.useRowSource((characterId) => tables.rows('personas').get(characterId));
@@ -875,29 +872,18 @@ function pruneLookSeen(ownerId) {
     if (!seen.size) kernel.lookSeen.delete(Number(ownerId));
 }
 
-function currentPlanningOccupancy(timestamp = Date.now()) {
-    if (planningOccupancyCache && timestamp - planningOccupancyCachedAt < 1000) {
-        return planningOccupancyCache;
-    }
-    planningOccupancyCache = kernel
-        ? SpotProfiles.indexedOccupancy(kernel.occupancy, planningSpots)
-        : SpotProfiles.occupancySnapshot(planningSpots, []);
-    planningOccupancyCachedAt = timestamp;
-    return planningOccupancyCache;
-}
-
 // The cheap check `room` at arrival: the bots that stand on the spot in the
 // one "who stands here" index (kernel.occupancy), other than the arriving
 // ones, plus the arriving ones, against the spot's capacity. A bot traveling
 // there is indexed at its destination but does not stand there yet. Read once
 // when a trip ends; no place is held for a bot on its way. A raid boss spot or
-// a spot the catalog does not know has room, as hasCapacityForStates.
+// a spot the catalog does not know has room.
 const ROOM_SECTIONS = Object.freeze(['occupation', 'sources']);
 function roomAtArrival(spotId, arriving, overflow = 0) {
     const spot = SpotIndex.spotById(planningSpots, spotId);
     if (!spot || spot.raidBoss === true) return true;
     const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
-    return standing + arriving.size <= Math.max(1, LevelingRoutes.capacityForSpot(spot)) + overflow;
+    return standing + arriving.size <= LevelingRoutes.roomForSpot(spot) + overflow;
 }
 
 // A solo trip ends on a full spot: the bot stands there with a "was full"
@@ -1042,7 +1028,7 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
             return invoke('GameServer/Bot/Economy/EconomyContext').forState(member, {
                 timestamp, spots: planningSpots, board: boardReady(),
-                occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
+                workshop, routeRows,
                 // Never held: its occupation card moves the key off the bot's own plan and the
                 // worker entry keeps no graph nodes for withNodes, so it would only displace it (L133).
                 rememberContext: false,
@@ -1206,13 +1192,12 @@ function startKernel(config = {}) {
                 // Merged before the event check, whose dirty bits follow it.
                 ? { ...base, statsPacket: lifecyclePlan.statsPacket, statsPacketBeforeResolve: true }
                 : { ...base,
-                    // Spot crowding, as main gave the same leaf before (L25).
                     economyDepsFor: async projected => {
                         const context = kernel.states.get(Number(state.characterId))?.context || {};
                         const routeRows = await occupationFor(projected, timestamp, context, 'wish');
                         const workshop = await occupationFor(projected, timestamp,
                             { ...context, routeRows, routeKey: EconomicTrip.key(projected) });
-                        return { spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), workshop, routeRows,
+                        return { spots: planningSpots, workshop, routeRows,
                             board: boardReady(), buyOrderEscrow: context.buyOrderEscrow, goalRevision: context.goalRevision };
                     },
                     economyFor: async (projected, deps) => {
@@ -1293,7 +1278,7 @@ function startKernel(config = {}) {
         // (the build's baseline build fact); else one build on the same board
         // the step's build reads.
         planPartyRequirement: ({ state, context, timestamp, economy }) => PartyRequirementRefresh.plan(state, {
-            spots: planningSpots, occupancy: currentPlanningOccupancy(timestamp), timestamp,
+            spots: planningSpots, timestamp,
             preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
         }),
@@ -1308,14 +1293,13 @@ function startKernel(config = {}) {
             // even when the expensive wish calculation still holds.
             const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
             const spots = planningSpots;
-            const occupancy = currentPlanningOccupancy(timestamp);
             // GearPlanSelection uses EconomyContext's same prepared occupation
             // reader. No synchronous recipe scan can run through it.
             const routeRows = await occupationFor(state, timestamp, context, 'wish');
             const workshop = await occupationFor(state, timestamp,
                 { ...context, routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-            const deps = { spots, occupancy, timestamp, board: boardReady(),
+            const deps = { spots, timestamp, board: boardReady(),
                 buyOrderEscrow: context?.buyOrderEscrow, goalRevision: context?.goalRevision, workshop, routeRows };
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
@@ -1391,21 +1375,17 @@ function startKernel(config = {}) {
                 excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy: preparedEconomy
             } : GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
-                    spots, occupancy, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
+                    spots, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
                     planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
                 });
             const { replanContext, reusablePartyRequest, excludedSpotIds, economy } = selectedAcquisition;
             const acquisitionPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, preparedEconomy)
                 || selectedAcquisition.acquisitionPlan;
-            const reservedSpot = acquisitionPlan?.next?.spotId
-                ? SpotIndex.spotById(spots, acquisitionPlan.next.spotId)
-                : null;
-            if (reservedSpot) SpotProfiles.reserveCapacity(occupancy, reservedSpot, [state]);
             const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp,
                 { spots, economy, memo: kernel.states.get(Number(state.characterId)) });
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
-                ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp })
+                ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { excludedSpotIds, timestamp })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
             const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };

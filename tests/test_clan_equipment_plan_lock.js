@@ -53,7 +53,6 @@ async function main() {
     const originalSetPartyStatus = PartyState.setStatus;
     const originalCreateOrUpdate = PartyState.createOrUpdate;
     const originalSpotEnsure = SpotProfiles.ensure;
-    const originalCurrentOccupancy = SpotProfiles.currentOccupancy;
 
     let plannerCalls = 0;
     let savedParty = null;
@@ -207,7 +206,7 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: clanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.strictEqual(reroutedClanGoal.target.selfId, clanPlan.target.selfId,
             'clan planning must keep the goal item while another source for it is available');
         assert.strictEqual(reroutedClanGoal.next.spotId, 'alternate-clan-spot',
@@ -223,7 +222,7 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: clanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.strictEqual(replacementForUnavailableGoal.target.selfId, 9202,
             'a clan equipment goal with no available source must select the next attainable equipment target');
         assert.strictEqual(plannerCalls, 1,
@@ -249,11 +248,11 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: marketClanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.deepStrictEqual(preservedMarketGoal.market, marketClanPlan.market,
-            'market clan goals must not be rotated because farming spots are full');
+            'a funded market clan goal must be kept');
         assert.strictEqual(plannerCalls, 0,
-            'market clan goals must remain outside farm capacity planning');
+            'a kept market clan goal must not run target planning');
         GearAcquisitionPlanner.marketPlanForTarget = () => null;
         const unavailableMarketGoal = ClanEquipmentService.planForMember({
             characterId: 1001, name: 'ClanMember', level: 35, adena: 100000,
@@ -483,48 +482,6 @@ async function main() {
         assert.deepStrictEqual(reformed, { parties: 3, releasedMembers: 6 },
             'a clan equipment review must dissolve wrong-route, mixed, or foreign parties before rebuilding its roster');
 
-        const sharedOccupancy = {
-            'shared-clan-spot': {
-                count: 0,
-                reservedCount: 0,
-                capacity: 10,
-                retained: new Set(),
-                reservedKeys: new Set(),
-                reservationKeys: new Set(),
-                retainedReservationKeys: new Set()
-            }
-        };
-        SpotProfiles.currentOccupancy = () => sharedOccupancy;
-        const stalePlanning = {
-            spots: [{ id: 'shared-clan-spot', capacity: 10 }],
-            occupancy: {}
-        };
-        const selectedSpot = stalePlanning.spots[0];
-        const firstReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 77 },
-            [1001, 1002, 1003, 1004, 1005],
-            selectedSpot
-        );
-        const secondReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 78 },
-            [2001, 2002, 2003, 2004, 2005],
-            selectedSpot
-        );
-        const overbookedReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 79 },
-            [3001, 3002, 3003, 3004, 3005],
-            selectedSpot
-        );
-        assert.strictEqual(firstReservation.reserved, true);
-        assert.strictEqual(secondReservation.reserved, true);
-        assert.strictEqual(overbookedReservation.reserved, false,
-            'sequential clan reviews must share live reservations instead of overbooking stale planning snapshots');
-        assert.strictEqual(sharedOccupancy['shared-clan-spot'].reservedCount, 10,
-            'rejected clan reservations must not grow shared spot occupancy beyond capacity');
-
         console.log('Clan equipment plan lock checks passed');
     } finally {
         GearAcquisitionPlanner.planFor = originalPlanFor;
@@ -538,7 +495,6 @@ async function main() {
         PartyState.setStatus = originalSetPartyStatus;
         PartyState.createOrUpdate = originalCreateOrUpdate;
         SpotProfiles.ensure = originalSpotEnsure;
-        SpotProfiles.currentOccupancy = originalCurrentOccupancy;
     }
 }
 

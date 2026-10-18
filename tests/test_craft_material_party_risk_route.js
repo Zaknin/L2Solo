@@ -14,7 +14,7 @@ const Request = require('../src/GameServer/Bot/Population/PartyRequestPlanner');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const at = Date.now(), point = { locX: 145224, locY: 120001, locZ: -4500 };
-const profiles = ['danger', 'only-one-input', 'unsafe-source', 'full-source', 'common-source', 'cash-field'].map(id => ({
+const profiles = ['danger', 'only-one-input', 'unsafe-source', 'common-source', 'cash-field'].map(id => ({
     id, name: id, capacity: 5, center: point, npcSelfIds: [626, 627], minLevel: 60, maxLevel: 65, avgLevel: 62, density: 10 }));
 const byId = new Map(profiles.map(spot => [spot.id, spot]));
 const members = [1, 2, 3].map(characterId => ({ characterId, name: `Material${characterId}`, level: 65,
@@ -39,16 +39,14 @@ let party = { partyId: 'material-risk', leaderId: 1, memberIds: [1, 2, 3], statu
 const evidence = Risk.record(party, { debug: { fights: 3, wins: 0, spotId: 'danger' }, partyPatch: { stats: { deaths: 2 } } }, at);
 party = { ...party, stats: { ...party.stats, ...evidence.partyPatch.stats } };
 assert(Risk.excludedSpotIds(party, at).has('danger'), 'native risk evidence excludes the original camp');
-const options = { timestamp: at, excludedSpotIds: Risk.excludedSpotIds(party, at), occupancy: {
-    'full-source': { count: 5, reservedCount: 5, capacity: 5, retained: new Set(), reservedKeys: new Set() }
-} };
+const options = { timestamp: at, excludedSpotIds: Risk.excludedSpotIds(party, at) };
 const saved = [], replace = (object, key, value) => { saved.push(() => { object[key] = value; }); object[key] = value; };
 let checks = 0, spoiler = true, physicalSpotId = 'danger';
 const source = (id, npcId, kind = 'drop') => ({ spot: byId.get(id), kind, npcLevel: 60,
     reward: { selfId: npcId }, sourceCount: 1, totalCount: 1 });
 let sourceIndex = new Map([
-    [4108, ['danger', 'only-one-input', 'unsafe-source', 'full-source', 'common-source'].map(id => source(id, 626))],
-    [4104, ['danger', 'unsafe-source', 'full-source', 'common-source'].map(id => source(id, 627, 'spoil'))]
+    [4108, ['danger', 'only-one-input', 'unsafe-source', 'common-source'].map(id => source(id, 626))],
+    [4104, ['danger', 'unsafe-source', 'common-source'].map(id => source(id, 627, 'spoil'))]
 ]);
 replace(Planner, 'sourceIndexFor', () => sourceIndex);
 replace(Planner, 'itemDropYield', () => { checks++; return { expectedYield: 1 }; });
@@ -82,8 +80,8 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
     return { members: proposals.map(row => row.nextState), party: proposals.find(row => row.partyResolution).partyResolution.party };
 }
 async function main() {
-    // Four alternatives per need still leave a common source after the risk,
-    // combat and whole-roster capacity gates remove the other three.
+    // Three alternatives per need still leave a common source after the risk
+    // and combat gates remove the other two (room is checked at arrival).
     sourceIndex.get(4108).splice(1, 1);
     const selected = Route.select(party, members, profiles, options);
     assert.equal(selected?.spot.id, 'common-source');
@@ -93,7 +91,7 @@ async function main() {
     for (let i = 0; i < 100; i++) Route.select(party, members, profiles, options);
     assert.equal(checks, before, 'warm source reviews perform no new source traversal');
     const coordinator = new ColdSimulationCoordinator();
-    const index = { timestamp: at, profiles, spots: byId, occupancy: options.occupancy };
+    const index = { timestamp: at, profiles, spots: byId };
     const route = coordinator.routeFor(members[0], byId.get('danger'), party, members, index);
     assert.equal(route.spotId, 'common-source', 'the real coordinator cannot choose the unrelated cash camp');
     assert(route.materialSources);
@@ -103,13 +101,6 @@ async function main() {
     const displaced = { ...backedOffParty, spotId: physicalSpotId };
     assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), displaced, members, index)?.materialSources,
         'a previously displaced party repairs stale contract sources even when already at the selected camp');
-    const retainedOccupancy = { ...options.occupancy, 'common-source': { count: 3, reservedCount: 6, capacity: 5,
-        reservedKeys: new Set(['1', '2', '3', '4', '5', '6']), retained: new Set(['1', '2', '3', '4', '5']) } };
-    assert.equal(Spots.hasCapacityForStates(byId.get(physicalSpotId), members, retainedOccupancy), false);
-    assert.equal(Spots.hasCapacityForParty(byId.get(physicalSpotId), members, retainedOccupancy), true);
-    assert.equal(coordinator.routeFor(members[0], byId.get(physicalSpotId), displaced, members,
-        { ...index, occupancy: retainedOccupancy })?.spotId, 'common-source',
-    'surplus intentions cannot evict a fully retained party instead of repairing its material contract');
     physicalSpotId = 'danger';
     const original = JSON.stringify(party);
     const moved = await proposalsFor(party, members, route, at);
@@ -131,12 +122,12 @@ async function main() {
     spoiler = false;
     assert.equal(Route.select(party, members, profiles, options), null, 'spoil is not an executable source without a party spoiler');
     const evacuation = coordinator.routeFor(members[0], byId.get('danger'), party, members,
-        { ...index, occupancy: {} });
+        index);
     assert.equal(evacuation.spotId, 'cash-field', 'lack of materials must not prevent leaving the risky camp');
     assert.equal(evacuation.materialEvacuation, true);
     physicalSpotId = 'cash-field';
     assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), { ...backedOffParty, spotId: physicalSpotId }, members,
-        { ...index, occupancy: {} })?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
+        index)?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
     physicalSpotId = 'danger';
     const departed = await proposalsFor(party, members, evacuation, at);
     departed.party.stats.sessionExpiresAt = at + 1;
@@ -155,7 +146,7 @@ async function main() {
             departed.party.stats.travel.arrivalAt + 1), state.stats.partyRequest, 'native replanning preserves evacuation cooldown during recovery/travel');
     });
     const ordinary = { ...party, stats: { ...party.stats, objective: { spotId: 'danger' } } };
-    const normal = coordinator.routeFor(members[0], byId.get('danger'), ordinary, members, { ...index, occupancy: {} });
+    const normal = coordinator.routeFor(members[0], byId.get('danger'), ordinary, members, index);
     assert.equal(normal.spotId, 'cash-field');
     assert.equal(normal.materialEvacuation, undefined, 'ordinary and clan hunting keep their existing risk retreat');
     spoiler = true;
@@ -165,6 +156,6 @@ async function main() {
     const unfinished = Route.select(party, [finishedOwner, ...members.slice(1)], profiles, options);
     assert.equal(unfinished?.spot.id, 'common-source');
     assert.deepEqual(unfinished.sources.map(row => row.characterId), [2], 'a physically fulfilled owner no longer constrains the remaining material route');
-    console.log('PASS bounded material-source retreat, different drop/spoil mobs, native risk/capacity gates, atomic contract retarget, evacuation and personal cooldowns');
+    console.log('PASS bounded material-source retreat, different drop/spoil mobs, native risk gates, atomic contract retarget, evacuation and personal cooldowns');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => saved.reverse().forEach(restore => restore()));

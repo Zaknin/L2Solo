@@ -78,17 +78,6 @@ async function stored() {
         [novice.characterId]]))[0].statsJson).partyRequest.itemId, objective.itemId);
     await Parties.createOrUpdate(materialParty);
     const baseline = await stored();
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const savedProfiles = { cache: Profiles.cache, occupancy: Profiles.currentOccupancy };
-    Profiles.cache = [{ id: spotId, capacity: 2 }];
-    Profiles.currentOccupancy = () => ({ [spotId]: { count: 0, reservedCount: 2, capacity: 2,
-        reservedKeys: new Set([String(a.characterId), String(b.characterId)]),
-        retained: new Set([String(a.characterId), String(b.characterId)]) } });
-    try {
-        assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0);
-        assert.equal((await stored()).statsJson, baseline.statsJson);
-        assert(Life.cachedState(novice.characterId).stats.partyRequest);
-    } finally { Profiles.cache = savedProfiles.cache; Profiles.currentOccupancy = savedProfiles.occupancy; }
     // A far party (cold leader) records the pending join and runs no forecast.
     assert.deepEqual([...(await Population.recruitBackgroundMembers([novice]))], [novice.characterId]);
     const pendingRow = await stored();
@@ -142,8 +131,9 @@ async function stored() {
     assert.equal(Life.cachedState(novice.characterId).stats.partyRequest, null,
         'native assignment may clear the request only after its need is durable in the party');
     const members = JSON.parse(committed.memberIdsJson).map(id => Life.cachedState(id));
-    assert(members.every(member => member.stats.backgroundPartySpotId === spotId),
-        'the atomic join reserves the shared destination for retained members and newcomers');
+    assert(members.every(member => member.party?.partyId === 'material-recruit'
+        && member.stats.backgroundPartySpotId === undefined),
+        'the atomic join seats retained members and newcomers; the party alone keeps its spot');
     const paid = { ...committed.stats.agreement, help: { status: 'funded', helperIds: [b.characterId], remaining: 999 } };
     const merged = Material.agreement(members, objective, paid);
     assert.deepEqual(merged.help, paid.help, 'merging needs never rewrites a funded escrow');
