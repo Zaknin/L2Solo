@@ -1,5 +1,5 @@
 <a href="https://l2solo.com">
-<img alt="Lineage2 Solo local server" src="https://github.com/user-attachments/assets/34f25f32-ed7c-4d6d-9d85-ea12e3c56a46" />
+<img alt="Lineage2 Solo local server" src="https://github.com/user-attachments/assets/a75ad34c-6371-46f5-8f78-0447ccc333a3" />
 </a>
 
 
@@ -21,7 +21,7 @@ Support, updates, and communication. Join the Discord to stay up to date with de
 ⚔️ [Game client](https://drive.google.com/file/d/1u0nW3m9c6Hql8sR9POQAcvglxIno23lv/view?usp=sharing)
 Clean C4 client protocol 656
 
-🧩 [L2Solo client mod](https://drive.google.com/file/d/1u7zzKEUqDHQCBojFr3MeyYzDfWt4vkeY/view?usp=sharing)
+🧩 [L2Solo client mod](https://drive.google.com/file/d/1nDTPAHRFe2WQmt2IDfkBZMwEqVEYT4XD/view?usp=sharing)
 Optional but recommended for a better experience
 
 
@@ -35,6 +35,7 @@ Optional but recommended for a better experience
 
 
 ## Latest updates
+- **2026-10-18** A living world economy, market board, better bot progression
 - **2026-10-03** Bot and performance fixes, player-led raids, better observer, quests and more
 - **2026-09-29** Market, recipes, bot shoulshots craft, paid buffs, fixes and improvements
 - **2026-09-26** Bot raid boss farm, player bot party join, SA, fixes and updates
@@ -54,11 +55,11 @@ Optional but recommended for a better experience
 - **2026-08-27** Add LLM-driven clan management
 - **2026-08-26** Observer update, better and faster, player clan crest control, player clan goal control
 - **2026-08-25** Bot clans update follow-up, bug fixes
-- **2026-08-24** Bot clans, better cold/hot performance, bug fixes, and more
 
 <details>
 <summary>Earlier</summary>
 
+- **2026-08-24** Bot clans, better cold/hot performance, bug fixes, and more
 - **2026-08-20** Loot and mob skills bug fixes, bot social graph base
 - **2026-08-19** Runtime optimization, cold bot progression bottlenecks fix, bot equipment enchantment
 - **2026-08-18** Fixes, cold bots progression, better AI compatibility
@@ -74,7 +75,7 @@ Optional but recommended for a better experience
 
 </details>
 
-See full update log on our [Discord](https://discord.gg/dXsQ8SJA7k) server.
+See the full update log on our [Discord](https://discord.gg/dXsQ8SJA7k) server.
 
 ## Game Checklist
 
@@ -263,7 +264,7 @@ set `reasoningEffort` to `low`, `medium`, or `high` when the selected model
 benefits from explicit reasoning.
 
 Clan chat uses the same `model` and `partyRouterModel` settings. Names, roles,
-selected clanmates and follow-up messages are routed first; ambiguous messages
+selected clanmates, and follow-up messages are routed first; ambiguous messages
 use the routing model to choose one responder or ask for clarification. Both
 active and background clan bots can reply in the clan channel. This path is
 conversation-only, with no tools or game actions. The clan shares a bounded
