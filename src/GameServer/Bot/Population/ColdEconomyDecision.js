@@ -476,7 +476,7 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
     }
     if (card.data.byteLength > MAX_BYTES) return null;
     // Acceptance belongs to the build's output, even before its caller has
-    // published that packet. A later publication never restarts its delays.
+    // published that packet.
     const accepted = { card, eventProof, characterId: Number(state.characterId), decisionSeq: packet ? Number(packet.decisionSeq || 0) : undefined,
         activityLeaf: packet ? Number(packet.activityLeaf || 0) : undefined,
         focus: packet ? packet.wishFocus?.[0] ?? null : undefined, baseline: packet?.wishSections,
@@ -488,7 +488,7 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
     // lazy: cycle the shared sections also read the economy owner.
     const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
-        Sections.baselineIdentity(accepted.baseline), Sections.clockBytes(accepted.baseline)) : null;
+        Sections.baselineIdentity(accepted.baseline)) : null;
     // A card saved as null is rebuilt at restart: no prefix, or one over the saved field.
     if (diagnostic) Diagnostics.count('card', 'restart', accepted.saved ? 'armed'
         : restartProof ? 'oversize' : 'unarmed');
@@ -506,9 +506,7 @@ function restoreAdvisory(state, timestamp = Date.now()) {
     const decoded = RestartDecision.decode(state.stats?.wishAdvisory, timestamp, MAX_BYTES, Number(state.characterId),
         baseline, Sections.baselineIdentity(baseline));
     if (!decoded) return null;
-    const deadline = Sections.softDeadline(decoded.baseline, 'market'), clockBytes = Sections.clockBytes(decoded.baseline);
-    if (!Number.isFinite(deadline) || !Number.isSafeInteger(clockBytes) || clockBytes < 0 || timestamp >= deadline
-        || Buffer.byteLength(JSON.stringify({ wishAdvisory: decoded.saved })) + clockBytes > RestartDecision.MAX_BYTES) return null;
+    if (Buffer.byteLength(JSON.stringify({ wishAdvisory: decoded.saved })) > RestartDecision.MAX_BYTES) return null;
     if (Sections.decisionRefusal(state, decoded.decisionSeq, decoded.activityLeaf, decoded.focus)) return null;
     const { key, data, ...accepted } = decoded, card = readAdvisoryCard({ key, data });
     if (!card) return null;
@@ -630,8 +628,7 @@ function refusal(state, accepted, deps = {}, options = {}) {
     if (Number.isFinite(deps.goalRevision) && deps.goalRevision !== accepted.goalRevision) return 'goal';
     const why = [], verdict = {};
     const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
-        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()),
-        softPrefix: accepted.softPrefix === true, why, verdict });
+        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()), why, verdict });
     if (options.prepared) options.prepared.eventVerdict = verdict;
     return holds ? '' : `events:${why[0] || 'unproved'}`;
 }
@@ -689,8 +686,8 @@ function current(state, entry) {
 }
 // Place 'ready_card' (shadow, main thread, diagnostics only): would a key of
 // events (no exact wallet, MP or publication time) keep a card the exact key
-// missed? The wallet is read as the decision's own money bands
-// (DecisionSections.moneyEvent on the published wishSections), the echo
+// missed? The wallet is read as the decision's own hard money bands
+// (DecisionSections.moneyChanged on the published wishSections), the echo
 // from the attached advisory; the next accepted card is its same/new.
 function readyCardHold(state, decision) {
     const Sections = DecisionSections ||= require('../Economy/DecisionSections'); // lazy: cycle as the advisory readers above
@@ -701,9 +698,9 @@ function readyCardHold(state, decision) {
     else {
         const echo = Sections.decisionRefusal(state, advice.decisionSeq, advice.activityLeaf, advice.focus);
         if (echo) why.push(echo === 'wish_focus' ? 'focus' : echo);
-        else if (Sections.moneyEvent(state, advice.baseline, Date.now(),
+        else if (Sections.moneyChanged(state, advice.baseline,
             // lazy: cycle the main owner of the escrow; read only by this main-thread shadow.
-            invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId))) why.push('money');
+            invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId), false)) why.push('money');
     }
     Hold.check('ready_card', why);
     decision.shadowHeld = why.length ? null : why;

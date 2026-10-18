@@ -71,8 +71,8 @@ const notFull = Economy.stateForActor(actor, session);
 const filler = Array.from({ length: 80 }, () => item(1864));
 items.push(...filler); backpack.inventoryRevision++;
 const full = Economy.stateForActor(actor, session);
-const farChanged = Events.reconcile({ ...notFull, stats: { ...notFull.stats, wishSections: undefined } },
-    { ...full, stats: { ...full.stats, wishSections: undefined } }, Date.now());
+const farChanged = Sections.events({ ...notFull, stats: { ...notFull.stats, wishSections: undefined } },
+    { ...full, stats: { ...full.stats, wishSections: undefined } });
 assert(farChanged.includes('supply') && farChanged.includes('sources'), `a full bag is a far event: ${farChanged}`);
 assert.notEqual(Sections.semanticFacts(full).bag, Sections.semanticFacts(notFull).bag);
 

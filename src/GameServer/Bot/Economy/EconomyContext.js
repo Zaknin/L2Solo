@@ -25,9 +25,10 @@ const Warehouse = require('./PersonalWarehouseIndex');
 const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Recipes = require('../../Items/C4RecipeItems');
 const CraftInputReservations = require('./CraftInputReservations');
-const ProductionIndex = require('./RecipeProductionIndex');
 const Bytes = require('./CompactBytes');
+const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
 const Diagnostics = require('./EconomyDiagnostics');
+const PriceBelief = require('./PriceBelief');
 const Hold = require('./Hold');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
@@ -37,8 +38,8 @@ const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
 const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
-// The bounds of an event proof's packed and wire forms and of its read lists.
-const PROOF_RAW_BYTES = 65536, PROOF_SPOTS = 4096;
+// The bound of an event proof's packed and wire forms.
+const PROOF_RAW_BYTES = 65536;
 const SOURCE_MEMO_LIMIT = 8;
 // The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
 // 64-slot cache shrunk by them dropped a plan within ~2.5 s under a long cold queue, so every
@@ -54,7 +55,7 @@ function registerProvider(key, provider) {
     if (typeof provider !== 'function') throw new TypeError('invalid_economy_provider');
     extensions.set(key, provider); reset();
 }
-// actorKey -> { key, reads, plan, stateRef, gearThreat } of bots: bounded
+// actorKey -> { key, readIds, plan, stateRef, gearThreat } of bots: bounded
 // (WishNetwork.remember). The plan is data (planOf); a reader gets view().
 const cache = new Map();
 const sourceHolders = new Set(); // actor keys whose held entry keeps sourceSections, oldest first
@@ -144,15 +145,6 @@ function activityIdentity(leaf) {
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
 }
-function validProducerScope(value) {
-    return Array.isArray(value) && value.length === 2
-        && typeof value[0] === 'string' && /^recipe-production:[0-9]$/.test(value[0])
-        && typeof value[1] === 'string' && /^[a-f0-9]{64}$/.test(value[1]);
-}
-function producerScopeHolds(proof, deps) {
-    return validProducerScope(proof.producerScope) && validProducerScope(deps.producerScope)
-        && proof.producerScope[0] === deps.producerScope[0] && proof.producerScope[1] === deps.producerScope[1];
-}
 // A party as a key input: none is null whatever its representation (an
 // empty party record, a null id); a member is its party with the id and role.
 function partyInput(state) {
@@ -166,7 +158,7 @@ function inputKeyParts(state, deps = {}) {
     const items = Object.values(state.inventory || {}).map(rowKey).sort().join(',');
     // A native bag change, own sample or relation revision is an input event.
     // No timing poll, no world-wide counter: the board and the market are
-    // inputs only through the items the bot read (see `market` in forState).
+    // heard at the soft point, through the decision's watch list only.
     return [state.level, stats.classId, state.craftLevel ?? stats.dwarvenCraftLevel, items, positive(state.adena), stats.decisionSeq, stats.activityLeaf, stats.visitEvery?.[0], stats.visitEvery?.[1],
         deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
         Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
@@ -272,35 +264,21 @@ function bandsHold(state, bands = [], leaf = null) {
 }
 // The event part of the one verdict "the held plan is still valid" (L70),
 // read by the verdict (heldBuildVerdict), the card (ColdEconomyDecision
-// .canReuse) and the worker's transit hold. A raised event (wishDirty) and a
-// crafter's MP cut through at once; money is hard below the lower cash
-// bound or on a moved funding mark; soft money, observation and horizon
-// changes wait for their kind's delay since the last actual decision.
-// held: { baseline, mp, expPerHour, persona } of the last actual decision.
+// .canReuse) and the worker's transit hold. Only hard checks: a raised
+// event (wishDirty), a crafter's MP and hard money (below the lower bound or
+// a moved funding mark). Soft money, income and the market are the soft
+// point's (DecisionSections.softEvents, the end of the step), never here.
+// held: { baseline, mp, nativeCraftContinuation } of the last actual decision.
 // A failing check names itself in `why` (an array or null) and fails.
 const miss = (why, reason) => { why?.push(reason); return false; };
-// The soft events of the verdict: a money, observation or horizon change
-// once its kind's delay since the last actual decision has passed. The name
-// of the first one ('money' is also a hard money move), or null when quiet.
-// held: as in heldEventsQuiet (its mp is not read).
-function softEvent(state, held, timestamp, deps = {}, skipMoney = false) {
-    const baseline = held.baseline;
-    if (!skipMoney && Sections.moneyEvent(state, baseline, timestamp, deps.buyOrderEscrow)) return 'money';
-    // The bond only from a caller that read the memory: a step gate without
-    // it (the worker's transit hold) leaves the bond to the verdict.
-    const bondNow = Object.hasOwn(deps, 'memory') ? () => Providers.relationBond(state, deps) : null;
-    if (Sections.observationEvent(state, baseline, timestamp, deps.mode, bondNow)) return 'observation';
-    if (Sections.horizonEvent(state, baseline, held.expPerHour, held.persona, timestamp)) return 'horizon';
-    return null;
-}
 // why: an array that receives the failing event's name (L114 diagnostics).
-function heldEventsQuiet(state, held, timestamp, deps = {}, why = null, skipMoney = false) {
+function heldEventsQuiet(state, held, deps = {}, why = null, skipMoney = false) {
     const stats = state.stats || {};
     if (stats.wishDirty) return miss(why, 'wish_dirty');
     if (!held.nativeCraftContinuation && Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
         && Number(state.vitals?.mp) !== Number(held.mp)) return miss(why, 'crafter_mp');
-    const soft = softEvent(state, held, timestamp, deps, skipMoney);
-    return soft ? miss(why, soft) : true;
+    if (!skipMoney && Sections.moneyChanged(state, held.baseline, deps.buyOrderEscrow, false)) return miss(why, 'money');
+    return true;
 }
 // A quantity proof row (WishNetwork createQuantityInputs layout) of the
 // leaf's own progress: a stock row of its own root on its item, or a
@@ -320,7 +298,6 @@ function eventProofMissing(state, deps, plan) {
     if (!Warehouse.contentIdentity(state)) return 'warehouse';
     if (!ClanSupply.contentIdentity(state)) return 'clan_supply';
     if (!RecomputeGeneration.current()) return 'generation';
-    if (!validProducerScope(deps.producerScope)) return 'producer_scope';
     const baseline = plan.statsPacket.wishSections, leaf = plan.network?.activity;
     if (leaf === null ? plan.pending !== false || plan.intentPending !== false || plan.statsPacket.activityLeaf !== 0
         : !leaf?.activity) return 'leaf';
@@ -329,7 +306,7 @@ function eventProofMissing(state, deps, plan) {
 }
 // This proof is produced by the completed native build, shared by its cache
 // entry and compact execution card. It is never reconstructed from a later
-// publication. Market/occupancy reads retain their original soft deadline.
+// publication.
 function captureEventProof(state, deps = {}, options = {}) {
     const plan = options.plan, missing = eventProofMissing(state, deps, plan);
     // Diagnostics: per retained build, captured or the first missing input.
@@ -342,22 +319,14 @@ function captureEventProof(state, deps = {}, options = {}) {
             Number(plan.statsPacket.activityLeaf || 0), plan.network.focus?.[0] ?? null]),
         activity: activityIdentity(leaf),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
-        producerScope: Object.freeze([...deps.producerScope]),
         stockRoots: Object.freeze([...plan.stockRoots]),
         bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
-        market: options.reads, spots: options.spots,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
         restartable: !!RecomputeGeneration.current() && typeof deps.memoryIdentity === 'string'
             && deps.sourceReady === true });
 }
 
-// The held proof's soft sources still read the same with these resolved
-// deps: its producer scope, the market items and the spot crowd it read.
-// A failure inside the market delay is soft (the held build may stand).
-function softSourcesHold(proof, deps) {
-    return producerScopeHolds(proof, deps) && marketHolds(deps.board, proof.market || [], deps) && spotsHold(deps, proof.spots || []);
-}
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const refuse = (reason, names) => ({ valid: false, reason,
         touchedSections: names ? Sections.sectionMask(names) : 0 });
@@ -370,12 +339,9 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             && typeof row[0] === 'string' && Number.isSafeInteger(row[1]) && row[1] > 0)
         || !(proof.activity === null ? options.leaf === null && proof.decision[1] === 0
             : typeof proof.activity === 'string' && !!options.leaf?.activity)
-        || !validProducerScope(proof.producerScope)
         || !Array.isArray(proof.bands) || !Array.isArray(proof.liquidation?.rows)
         || proof.liquidation.rows.length > 8 || !proof.liquidation.rows.every(row => Array.isArray(row)
             && row.length === 2 && Number.isSafeInteger(row[0]) && row[0] > 0 && Number.isFinite(row[1]) && row[1] > 0)
-        || !options.softPrefix && (typeof proof.market?.[Symbol.iterator] !== 'function'
-            || typeof proof.spots?.[Symbol.iterator] !== 'function')
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
     const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
     if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at)) return refuse('baseline');
@@ -383,9 +349,6 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // its proof, or the request's clock runs before the proof's.
     if (proof.at !== baseline.at) return refuse('baseline_at');
     if (timestamp < proof.at) return refuse('baseline_clock');
-    if (options.softPrefix && (!proof.restartable || !proof.generation
-        || !Number.isFinite(Sections.softDeadline(baseline, 'market'))
-        || timestamp >= Sections.softDeadline(baseline, 'market'))) return refuse('restart_expired');
     const generation = RecomputeGeneration.current();
     if (!generation || proof.generation !== generation) return refuse('generation', ['build', 'sources']);
     if (activityIdentity(options.leaf) !== proof.activity) return refuse('activity', ['sources']);
@@ -397,9 +360,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const echo = Sections.decisionRefusal(state, ...proof.decision);
     if (echo) return refuse(echo, ['sources']);
     deps = resolved(state, deps);
-    if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)
-        || options.softPrefix && (typeof deps.memoryIdentity !== 'string' || deps.sourceReady !== true))
-        return refuse('unready');
+    if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)) return refuse('unready');
     const current = fieldActivity(state, options.activity, options.leaf);
     // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
     const raised = Diagnostics.active() ? [] : null;
@@ -413,14 +374,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (baseline.threat !== undefined && baseline.threat !== (deps.gearThreatMask ?? GearThreat.maskFor(current, deps)))
         return refuse('observation', ['occupation', 'benefits', 'sources']);
     const why = [];
-    if (!heldEventsQuiet(state, { baseline, mp: options.mp, expPerHour: baseline.expHour,
-        nativeCraftContinuation: deps.nativeCraftContinuation === true,
-        persona: personaOf(state, deps) }, timestamp, deps, why, options.rebuildBasis === true)) {
-        const reason = why[0];
-        return refuse(reason, reason === 'observation' ? ['occupation', 'benefits', 'sources']
-            : reason === 'horizon' ? ['benefits', 'sources']
-                : reason === 'money' ? ['money'] : ['sources']);
-    }
+    if (!heldEventsQuiet(state, { baseline, mp: options.mp, nativeCraftContinuation: deps.nativeCraftContinuation === true },
+        deps, why, options.rebuildBasis === true)) return refuse(why[0], why[0] === 'money' ? ['money'] : ['sources']);
     if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
@@ -484,13 +439,10 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (options.rebuildBasis) {
         // Reusing slow valuation facts is not permission to execute the old
         // activity with the new wallet. Admission and the network run again.
-        if (!softSourcesHold(proof, deps)) return refuse('market', ['sources', 'benefits']);
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
     const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
     if (leafWhy) return refuse(leafWhy.reason, leafWhy.sections);
-    if (!options.softPrefix && !softSourcesHold(proof, deps)
-        && Sections.softDue(baseline, 'market', timestamp)) return refuse('market', ['sources', 'benefits']);
     return { valid: true, reason: '', touchedSections: 0 };
 }
 function eventProofHolds(state, proof, deps = {}, options = {}) {
@@ -502,8 +454,7 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
         || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity',
-            'quantities', 'liquidation', 'producerScope', 'stockRoots', 'bands', 'hourAdena', 'market', 'spots', 'restartable'].includes(key))
-        || !validProducerScope(proof.producerScope)
+            'quantities', 'liquidation', 'stockRoots', 'bands', 'hourAdena', 'restartable'].includes(key))
         || !RecomputeGeneration.current() || proof.generation !== RecomputeGeneration.current()
         || !/^[a-f0-9]{64}$/.test(proof.generation)
         || proof.owner !== accepted.characterId || proof.at !== accepted.baseline?.at
@@ -518,7 +469,7 @@ function restartEventProof(proof, accepted) {
         // refused), the soft facts in the shared exact byte form, then the
         // quantity owner's opaque bytes to the end.
         const write = Bytes.writer();
-        write.byte(6); write.raw(Buffer.from(proof.generation, 'hex'));
+        write.byte(7); write.raw(Buffer.from(proof.generation, 'hex'));
         if (!Providers.packLiquidationInputs(proof.liquidation, write)) return null;
         write.list(proof.stockRoots, row => {
             if (!Array.isArray(row) || row.length !== 2) throw Error('restart stock root');
@@ -529,7 +480,6 @@ function restartEventProof(proof, accepted) {
             write.uint(row[0]); write.number(row[1]); write.number(row[2], true); write.number(row[3]);
         });
         write.number(proof.hourAdena);
-        if (!ProductionIndex.packScopeIdentity(proof.producerScope, write)) return null;
         write.raw(quantities);
         const bytes = write.finish();
         return bytes.byteLength <= PROOF_RAW_BYTES ? bytes : null;
@@ -542,34 +492,32 @@ function restoreEventProof(prefix, accepted) {
         || prefix.byteLength > PROOF_RAW_BYTES || !accepted?.card) return null;
     try {
         const read = Bytes.reader(prefix);
-        // A prefix of format 5 (it carried the deleted bag safety) is refused once.
-        if (read.byte() !== 6 || read.raw(32).toString('hex') !== generation) return null;
+        // A prefix of format 6 (it carried the deleted recipe producers' scope) is refused once.
+        if (read.byte() !== 7 || read.raw(32).toString('hex') !== generation) return null;
         const liquidation = Providers.unpackLiquidationInputs(read);
         const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
         const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
-        const hourAdena = read.number(), producerScope = ProductionIndex.unpackScopeIdentity(read);
+        const hourAdena = read.number();
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
-        const packed = producerScope ? Uint8Array.from(read.rest()) : null;
-        const quantities = packed && eachQuantityRow(packed, () => true) ? packed : null;
+        const packed = Uint8Array.from(read.rest());
+        const quantities = eachQuantityRow(packed, () => true) ? packed : null;
         if (!quantities || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
         return Object.freeze({ version: 2, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
-            quantities, liquidation, stockRoots, bands, hourAdena, producerScope });
+            quantities, liquidation, stockRoots, bands, hourAdena });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
-    if (!proof || proof.version !== 2 || !proof.market || !proof.spots || !validProducerScope(proof.producerScope)
+    if (!proof || proof.version !== 2
         || (proof.activity === null ? proof.decision?.[1] !== 0 : typeof proof.activity !== 'string')) return null;
     try {
-        const market = [...proof.market], spots = [...proof.spots];
-        if (market.length > PROOF_SPOTS || spots.length > PROOF_SPOTS) return null;
         if (!(proof.quantities instanceof Uint8Array)) return null;
         // Packed quantities cross as canonical base64 (receiveEventProof), so
         // this JSON size is the wire's.
-        const wire = { ...proof, market, spots, quantities: Buffer.from(proof.quantities).toString('base64') };
+        const wire = { ...proof, quantities: Buffer.from(proof.quantities).toString('base64') };
         return Buffer.byteLength(JSON.stringify(wire)) <= PROOF_RAW_BYTES ? wire : null;
     } catch (_) { return null; }
 }
@@ -643,19 +591,6 @@ function gatePlanDiff(state, held, fresh, deps, evidence = null) {
     }
     return 'same';
 }
-function occupancyToken(deps, id) {
-    const row = deps.occupancy?.get?.(id) || deps.occupancy?.[id];
-    return `${Number(row?.reservedCount ?? row?.count) || 0}`;
-}
-function spotsHold(deps, reads = []) {
-    if (typeof reads?.[Symbol.iterator] !== 'function') return false;
-    for (const row of reads) {
-        if (!Array.isArray(row) || row.length !== 2) return false;
-        const [id, token] = row;
-        if (occupancyToken(deps, id) !== token) return false;
-    }
-    return true;
-}
 function quantityBands(state, context, projection) {
     const bands = [], stock = new Map();
     for (const kind of ['shots', 'potions', 'scrolls']) {
@@ -709,17 +644,6 @@ function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBa
     return Number.isFinite(baseline?.bagValue)
         && Math.abs(value - baseline.bagValue)
             <= positive(hourAdena) * positive(baseline.incomeError);
-}
-// Each distinct token once, in first-seen order, and per [id, token] pair
-// the slot of its token in that list (HeldReads).
-function indexTokens(pairs) {
-    const tokens = [], slots = [], index = new Map();
-    for (const [, token] of pairs) {
-        let slot = index.get(token);
-        if (slot === undefined) { index.set(token, slot = tokens.length); tokens.push(token); }
-        slots.push(slot);
-    }
-    return { tokens, slots };
 }
 // A retained leaf is calculation data. Recheck its native source, physical
 // resources and funding now; execution still uses the existing command/CAS.
@@ -785,87 +709,47 @@ function heldLeafRefusal(state, leaf, deps, heldUnits, current = null, prepared 
     }
     return kind === 'resting' || kind === 'traveling' ? '' : LEAF_UNSUPPORTED;
 }
-// The market as an input of one bot: the board lines and the counter of each
-// item its review read, as tokens at the time of reading. The context stays
-// valid while every token holds; a deal or a line of another item, anywhere
-// in the world, rebuilds nobody (design 16.5). Not inputs, by the same rule:
-// the all-counter average a counter without its own move falls back to
-// (MarketCounters.moveOf) and PriceBelief's hourly demand cache.
-function marketToken(board, id, deps = {}) {
-    // Reserved negative ids name a whole board-side list (1 sell, 3 buy).
-    if (id < 0) return board?.itemIdsFingerprint?.(-id) ?? JSON.stringify([...(board?.itemIds?.(-id) || [])]);
-    const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
-    return `${board?.itemRevision ? board.itemRevision(id) : '-'}|${Counters.revisionOf(Counters.counterOf(id))}|${deps.workshopRevision?.(id) || 0}`;
-}
-function marketHolds(board, reads, deps) {
-    if (typeof reads?.[Symbol.iterator] !== 'function') return false;
-    for (const row of reads) {
-        if (!Array.isArray(row) || row.length !== 2) return false;
-        const [id, token] = row;
-        if (marketToken(board, id, deps) !== token) return false;
-    }
-    return true;
-}
-// A held entry's read set (items or spots with their tokens) in the build's
-// reading order, read as its Map was (has, set, keys, [id, token] pairs).
-// As Maps a bot's ~330 item reads and its spot reads held ~20 KB of the
-// ~37 KB entry (L104): here the ids sit in one array (Int32Array when all
-// are int32) and each distinct token once, with one index per id (~4 KB for
-// both). Reads joined after the store (a late price read of the served plan)
-// go to a small Map after them.
-class HeldReads {
-    constructor(map) {
-        const keys = [...map.keys()], { tokens, slots } = indexTokens(map);
-        this.ids = keys.every(id => (id | 0) === id) ? Int32Array.from(keys) : keys;
-        this.at = keys.length < 0xffff ? Uint16Array.from(slots) : Uint32Array.from(slots);
-        this.tokens = tokens;
-        this.added = null;
-    }
-    position(id) {
-        const at = this.ids.indexOf(id);
-        return at >= 0 || id === id ? at : this.ids.findIndex(key => key !== key); // NaN, as Map finds it
-    }
-    has(id) { return this.position(id) >= 0 || !!this.added?.has(id); }
-    set(id, token) {
-        const at = this.position(id);
-        if (at < 0) { (this.added ||= new Map()).set(id, token); return this; }
-        let slot = this.tokens.indexOf(token);
-        if (slot < 0) slot = this.tokens.push(token) - 1;
-        if (slot > 0xffff && this.at instanceof Uint16Array) this.at = Uint32Array.from(this.at);
-        this.at[at] = slot;
-        return this;
-    }
-    keys() { return this.added ? [...this.ids, ...this.added.keys()].values() : this.ids.values(); }
-    *[Symbol.iterator]() {
-        for (let i = 0; i < this.ids.length; i++) yield [this.ids[i], this.tokens[this.at[i]]];
-        if (this.added) yield* this.added;
-    }
-}
-function marketKey(reads) {
-    let hash = 0x811c9dc5;
-    for (const [id, token] of reads) {
-        const text = `${id}=${token};`;
-        for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
-    }
-    return hash.toString(16);
-}
 // Board reads of the review go through here while it is built, so each
-// item it looked at is remembered with its token. Later readers of
-// context.board (a market look, a sale) do not widen what the review
-// depends on.
-function watchedBoard(board, watch, watchList) {
+// item it looked at is reported once (deps.onSourceRead: the occupation
+// planner's dependencies). The market is no input of the held decision: it is
+// heard at the soft point through the watch list. Later readers of
+// context.board (a market look, a sale) report nothing.
+function watchedBoard(board, watch) {
     if (!board) return board;
     return Object.assign(Object.create(board), {
         first: (selfId, ...rest) => { watch(selfId); return board.first(selfId, ...rest); },
         list: (selfId, ...rest) => { watch(selfId); return board.list(selfId, ...rest); },
-        ...(board.itemIds ? { itemIds: (storeType, ...rest) => { watchList(-Number(storeType)); return board.itemIds(storeType, ...rest); } } : {}),
         ...(board.heads ? { heads: (selfId, ...rest) => { watch(selfId); return board.heads(selfId, ...rest); } } : {})
     });
+}
+// The decision's watch list, read by the soft point (DecisionSections
+// .softEvents): the wish roots it would buy (their sell lines, storeType 1)
+// and its sale rows (their buy lines, 3), each [itemId, storeType, reference
+// price, error], at most Sections.MARKET_WATCH. buyValue/sellValue: the
+// build's price of an item on that side; errorOf: the bot's error on it.
+// The reference is the better of that price and the board head the build
+// saw (excluding the bot's own line): the head is one input of the price
+// belief, so a far cheaper ask stays below the believed price after the
+// rebuild and would cross at every step; the decision already weighed it.
+// Only a newer, clearly better line crosses.
+function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf) {
+    const rows = [], exclude = { excludeOwner: ownerId };
+    const add = (id, storeType, value) => {
+        if (rows.length >= Sections.MARKET_WATCH || !(id > 0) || !(value > 0)
+            || rows.some(row => row[0] === id && row[1] === storeType)) return;
+        const head = board?.first(id, storeType, exclude)?.price;
+        const reference = !(head > 0) ? value : storeType === SELL ? Math.min(value, head) : Math.max(value, head);
+        // Rounded: the baseline is saved with the bot (a few bytes per row).
+        rows.push([id, storeType, Math.round(reference), Math.round(errorOf(id) * 1000) / 1000]);
+    };
+    for (const wish of queue) { const id = Number(wish.object?.itemId); if (id > 0) add(id, SELL, buyValue(id)); }
+    for (const [id] of sales) add(Number(id), BUY, sellValue(id));
+    return rows;
 }
 function defaultProducerSource(state, board) {
     const index = invoke('GameServer/Bot/Population/ColdOccupationSources').recipeIndex(board);
     const level = invoke('GameServer/Bot/Economy/CraftEligibility').craftLevelFor(state), scope = index.scopeFor(level);
-    return { recipes: index.rowsFor(level), scope, revision: index.revision(scope), identity: index.contentIdentity(scope) };
+    return { recipes: index.rowsFor(level), scope, revision: index.revision(scope) };
 }
 // The deps a full resolve made, with the state it was made for: a check
 // inside the same build (heldBuildVerdict, acceptedActivityHolds) is given
@@ -895,14 +779,12 @@ function resolved(state, deps, production = true) {
             const source = deps.producerSource(state, deps.board);
             deps.producerRecipes = source?.recipes;
             deps.producerRevision = source?.revision;
-            deps.producerScope = [source?.scope, source?.identity];
             if (source?.scope != null) deps.onSourceScope?.(source.scope);
         }
         if (isMainThread && !Object.hasOwn(deps, 'workshop')) deps.workshop = craftIncome(state);
         if (isMainThread && !Object.hasOwn(deps, 'workshops')) {
             const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
             deps.workshops = Workshops.publicForRecipe;
-            deps.workshopRevision = Workshops.publicRecipeDigest;
         }
         if (isMainThread && !Object.hasOwn(deps, 'knownRecipes')) {
             const Workshops = invoke('GameServer/Bot/Economy/CraftWorkshopService');
@@ -932,13 +814,12 @@ function personaOf(state, deps) {
     return deps.persona || invoke('GameServer/Bot/AI/BotPersona').of(state) || { traits: {}, understanding: 0.3 };
 }
 function pricing(state, persona, board, timestamp, deps, read = () => {}, prices = new Map()) {
-    const Belief = invoke('GameServer/Bot/Economy/PriceBelief');
     const knowledgeEnabled = deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled();
     const priceCtx = { characterId: state.characterId, understanding: persona.understanding ?? 0.3,
         marketTrades: state.marketTrades, knowledgeEnabled, board, timestamp };
     const beliefs = new Map();
     const beliefFor = id => {
-        if (!beliefs.has(Number(id))) beliefs.set(Number(id), Belief.prior(id, priceCtx) || null);
+        if (!beliefs.has(Number(id))) beliefs.set(Number(id), PriceBelief.prior(id, priceCtx) || null);
         return beliefs.get(Number(id));
     };
     return { knowledgeEnabled, prices, beliefs, beliefFor, price: id => {
@@ -1046,7 +927,7 @@ function kitReader(data, price, scrollUseHours) {
 // search would, and a price that came out different searches afresh. The
 // record travels only by deps (the cold worker passes its basics' record);
 // select returns plain data (no closure over price).
-function incomeRouteFor(state, deps, timestamp, price, keep, watchSpot) {
+function incomeRouteFor(state, deps, timestamp, price, keep) {
     const required = GearProgression.assess(state).required;
     const prepared = deps.preparedIncomeRoute;
     if (prepared && prepared.state === state && prepared.timestamp === timestamp && prepared.spots === deps.spots
@@ -1056,25 +937,14 @@ function incomeRouteFor(state, deps, timestamp, price, keep, watchSpot) {
         for (let i = 0; i < prepared.reads.length; i += 2) {
             if (!Object.is(price(prepared.reads[i]), prepared.reads[i + 1])) same = false;
         }
-        if (same) {
-            for (const id of prepared.spotIds) watchSpot?.(id);
-            keep?.(prepared); return prepared.route;
-        }
+        if (same) { keep?.(prepared); return prepared.route; }
     }
-    const reads = keep ? [] : null, spotIds = keep ? new Set() : null;
-    const noteSpot = id => { spotIds?.add(id); watchSpot?.(id); };
-    const occupancy = keep || watchSpot ? new Proxy(deps.occupancy || {}, {
-        get: (target, id) => {
-            if (id === 'get') return key => { noteSpot(key); return target.get?.(key); };
-            if (typeof id === 'string') noteSpot(id);
-            return Reflect.get(target, id, target);
-        }
-    }) : deps.occupancy;
-    const route = IncomeRoute.select(state, { ...deps, timestamp, required, occupancy,
+    const reads = keep ? [] : null;
+    const route = IncomeRoute.select(state, { ...deps, timestamp, required,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
     if (Diagnostics.active()) countIncomeRoute(state, deps, timestamp, route);
     keep?.({ state, timestamp, spots: deps.spots, occupancy: deps.occupancy, mode: deps.mode,
-        maxChecks: deps.maxChecks, required, reads, spotIds: [...spotIds], route });
+        maxChecks: deps.maxChecks, required, reads, route });
     return route;
 }
 // Shadow (no behaviour): would the held build's income route serve this
@@ -1089,13 +959,13 @@ function countIncomeRoute(state, deps, timestamp, route) {
     const now = route ? routeName(route.spot.id, route.row.useShots) : 'none';
     Diagnostics.count('context', 'income_route', `${plan.timestamp === timestamp ? 'step_' : ''}${before === now ? 'same' : 'new'}`);
 }
-function foundation(state, deps, persona, timestamp, price, keepRoute = null, watchSpot = null) {
+function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const role = state.party?.role || state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
     const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
     let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
-    const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute, watchSpot);
+    const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
     if (incomeRoute) {
         const row = incomeRoute.row;
         hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
@@ -1227,24 +1097,18 @@ function forState(state = {}, deps = {}) {
     const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
     const facts = requestFacts(current, deps);
     const key = inputName(facts, deps.gearThreatMask);
-    // The held build's market items and spot crowd still read the same: read once per request.
-    let readsHeld = null;
-    const heldReadsHold = () => readsHeld ??= !held || marketHolds(sourceBoard, held.reads, deps) && spotsHold(deps, held.spotReads);
     const eventVerdict = activeEvents || diagnostic ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
         mp: held?.mp, timestamp, facts }) : { valid: false, reason: 'unproved', touchedSections: 0 };
     // A caller that needs the member's graph nodes (a worker group solve)
     // builds unless the held entry kept them (the main thread keeps them);
-    // such a request is no hold answer and is not counted. A market item or
-    // spot crowd read after the proof was taken (a late price read of the
-    // served plan) is soft as the proof's own reads (L70).
+    // such a request is no hold answer and is not counted.
     const holdWhy = !activeEvents ? null : !eventVerdict.valid ? [eventVerdict.reason || 'unproved']
-        : deps.withNodes && !held.projection ? null
-            : heldReadsHold() || !Sections.softDue(held.plan.statsPacket?.wishSections, 'market', timestamp) ? [] : ['market'];
+        : deps.withNodes && !held.projection ? null : [];
     if (holdWhy && diagnostic) Hold.check('economy', holdWhy, deps);
     if (holdWhy?.length === 0) {
-        if (deps.onSourceRead) for (const id of held.reads.keys()) if (id > 0) deps.onSourceRead(id);
+        if (deps.onSourceRead) for (const id of held.readIds) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
             if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_hit', deps.advisoryRefusal);
@@ -1259,9 +1123,8 @@ function forState(state = {}, deps = {}) {
             held.stateRef = new WeakRef(state);
             remember(cache, actorKey, held, RETAIN_LIMIT);
         }
-        // A late price read of a held plan joins its inputs, as in its build.
-        const late = id => { id = Number(id); if (held.reads.has(id)) return;
-            held.reads.set(id, marketToken(sourceBoard, id, deps)); deps.onSourceRead?.(id); };
+        // A late price read of a held plan is reported as in its build.
+        const late = id => deps.onSourceRead?.(Number(id));
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection });
     }
     // A lost graph cache still has the bot's accepted execution card. Compare
@@ -1271,7 +1134,7 @@ function forState(state = {}, deps = {}) {
     const eventShadow = candidate ? { accepted: candidate,
         verdict: heldBuildVerdict(state, candidate.eventProof, deps, {
             baseline: candidate.baseline, activity: candidate.activity, leaf: candidate.card?.activity,
-            mp: candidate.mp, timestamp, softPrefix: candidate.softPrefix === true }) } : null;
+            mp: candidate.mp, timestamp }) } : null;
     const basis = activeEvents && eventVerdict.reason === 'money' && heldBuildVerdict(state, held.plan.eventProof, deps, {
         baseline: held.plan.statsPacket.wishSections, activity: held.activity, leaf: held.plan.network?.activity,
         heldUnits: held.heldUnits, craftReservations: held.craftReservations, mp: held.mp, timestamp, facts,
@@ -1285,16 +1148,19 @@ function forState(state = {}, deps = {}) {
     const diagnosticReason = !diagnostic ? null : !held ? deps.rememberContext === false ? 'unkept_caller' : 'not_retained'
         : held.key !== key ? 'input_dependency_changed'
         : !eventVerdict.valid ? 'held_refused'
-        : deps.withNodes && !held.projection ? 'nodes_needed'
-        : activeEvents ? 'market' : 'hold_off';
+        : deps.withNodes && !held.projection ? 'nodes_needed' : 'hold_off';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let elapsed = 0, gate = null, gateDiff = null, gateSoft = null, gateEvidence = null;
+    let elapsed = 0, gate = null, gateDiff = null, gateEvidence = null;
     if (diagnostic) {
         gate = held?.plan.eventProof ? eventVerdict.valid ? 'would_hold' : eventVerdict.reason
             : held ? 'unproved' : 'no_held';
         Diagnostics.count('context', 'gate', gate);
     }
-    const reads = new Map();
+    // The items the review read, each reported once (deps.onSourceRead, the
+    // occupation planner's dependencies) and kept with the held entry
+    // (held.readIds) so that a hit reports them again. No token: the market
+    // is heard at the soft point through the watch list.
+    let readIds = new Set();
     let building = true;
     // MVP-6 Bounds: while a gear candidate's arena is built its reads wait
     // in its own scope; the provider keeps the scopes whose descriptors
@@ -1302,36 +1168,17 @@ function forState(state = {}, deps = {}) {
     // inputs of the review.
     let scope = null;
     const nodeScopes = [];
-    const spotReads = new Map();
-    // Once the entry is stored, the read sets it holds: a late read of this
-    // build's own view joins them, as it joined the Maps they were made from.
-    let heldReads = null, heldSpots = null;
     const bagToken = id => JSON.stringify([state.inventory?.[id] || null, state.acceptedIncoming?.[id] || 0]);
     const bagIds = () => Object.keys(state.inventory || {}).filter(id => Number(id) !== 57);
     // ARCH-NOTE: PERF: the build is one synchronous call (its generators are
-    // drained inside it; board, counter and workshop deltas and occupancy
-    // reservations apply between calls), so an item's market token and a
-    // spot's occupancy token are constant while it runs: each is built once
-    // per build. The bag (state.inventory rows, state.acceptedIncoming) is
-    // not mutated during the build either: an item's bag token and the bag's
-    // id list are built once too. A late read through the view (after either
-    // return below) builds it fresh, as its inputs may have moved since.
-    // Dies at return.
+    // drained inside it). The bag (state.inventory rows, state.acceptedIncoming)
+    // is not mutated during the build: an item's bag token and the bag's id
+    // list are built once per build. A late read through the view (after
+    // either return below) builds it fresh, as its inputs may have moved
+    // since. Dies at return.
     let tokensLive = true, liveBagIds = null, liveBagKeys = null;
-    const marketTokens = new Map(), spotTokens = new Map(), bagTokens = new Map();
-    const endTokens = () => { tokensLive = false; marketTokens.clear(); spotTokens.clear(); bagTokens.clear(); liveBagIds = liveBagKeys = null; };
-    const tokenOf = id => {
-        if (!tokensLive) return marketToken(sourceBoard, id, deps);
-        let token = marketTokens.get(id);
-        if (token === undefined) marketTokens.set(id, token = marketToken(sourceBoard, id, deps));
-        return token;
-    };
-    const spotTokenOf = id => {
-        if (!tokensLive) return occupancyToken(deps, id);
-        let token = spotTokens.get(id);
-        if (token === undefined) spotTokens.set(id, token = occupancyToken(deps, id));
-        return token;
-    };
+    const bagTokens = new Map();
+    const endTokens = () => { tokensLive = false; bagTokens.clear(); liveBagIds = liveBagKeys = null; };
     const bagTokenOf = id => {
         if (!tokensLive) return bagToken(id);
         const at = String(id); // the property key bagToken reads
@@ -1343,20 +1190,22 @@ function forState(state = {}, deps = {}) {
     const wholeBagKeys = () => tokensLive ? liveBagKeys ??= JSON.stringify(wholeBagIds().slice().sort())
         : JSON.stringify(bagIds().sort());
     const read = id => { id = Number(id);
-        // PERF L128: every write goes to every open scope at once, so a key the innermost scope already holds with this
-        // token is held by all outer scopes too and the loop would change nothing (a Map.set on a held key keeps its place).
+        if (!(id > 0)) return;
+        // Every open node scope notes the id once (an id the innermost holds,
+        // every outer one holds too): a memoized node reports it again.
         const top = nodeScopes[nodeScopes.length - 1];
-        if (top) { const held = tokenOf(id); if (held === undefined || top.items.get(id) !== held) for (const local of nodeScopes) local.items.set(id, tokenOf(id)); }
-        const into = heldReads || reads;
-        if (into.has(id)) return;
-        if (scope) { if (!scope.has(id)) scope.set(id, tokenOf(id)); return; }
-        into.set(id, tokenOf(id)); deps.onSourceRead?.(id);
+        if (top && !top.items.has(id)) for (const local of nodeScopes) local.items.add(id);
+        // After the build (a late read through its view) nothing is kept.
+        if (!readIds) { deps.onSourceRead?.(id); return; }
+        if (readIds.has(id)) return;
+        if (scope) { scope.add(id); return; }
+        readIds.add(id); deps.onSourceRead?.(id);
     };
     const watch = id => { if (building) read(id); };
     const persona = personaOf(state, deps);
     const cash = Sections.bounds(positive(state.adena));
     const budget = Sections.bounds(Funding.budget(state, deps.buyOrderEscrow));
-    const board = watchedBoard(sourceBoard, watch, id => { if (building) reads.set(id, tokenOf(id)); });
+    const board = watchedBoard(sourceBoard, watch);
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
     const { price, prices, beliefs, beliefFor, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read,
@@ -1365,14 +1214,9 @@ function forState(state = {}, deps = {}) {
     // one): its solo matchup profiles serve the providers' source route reader.
     let incomeRecord = null;
     const base = basis ? foundationFromPlan(state, basis, deps, price)
-        : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; },
-            id => spotReads.set(id, spotTokenOf(id)));
-    if (basis) {
-        // These facts still belong to the accepted basis. Retain their
-        // original tokens; a later read must not renew an untouched input.
-        for (const [id, token] of held.reads) { reads.set(id, token); if (id > 0) deps.onSourceRead?.(id); }
-        for (const [id, token] of held.spotReads) spotReads.set(id, token);
-    }
+        : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
+    // These facts still belong to the accepted basis: its items stay read.
+    if (basis) for (const id of held.readIds) read(id);
     const quantityInputs = createQuantityInputs();
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         quantityInputs,
@@ -1385,12 +1229,11 @@ function forState(state = {}, deps = {}) {
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
         budgetBoundary: budget.watch,
-        // Every evaluated source participates in admission/ranking, including a losing candidate.
-        sourceSpot: id => { const token = spotTokenOf(id);
-            (heldSpots || spotReads).set(id, token);
-            const top = nodeScopes[nodeScopes.length - 1];
-            if (top && (token === undefined || top.spots.get(id) !== token)) for (const local of nodeScopes) local.spots.set(id, token); },
-        nodeInputs: { begin: () => { const local = { items: new Map(), spots: new Map(), bag: new Map() }; nodeScopes.push(local); return local; },
+        // The per-node source memo: its inputs are the bag only (prices and
+        // spots are none; a new decision voids the memo through the sources
+        // key). The item ids a node read are kept without a token, only so
+        // that a reused node reports them again (deps.onSourceRead).
+        nodeInputs: { begin: () => { const local = { items: new Set(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
             bag: id => { if (!(Number(id) > 0) || !nodeScopes.length) return;
                 const token = bagTokenOf(id);
@@ -1401,16 +1244,11 @@ function forState(state = {}, deps = {}) {
                 const token = wholeBagKeys();
                 const top = nodeScopes[nodeScopes.length - 1];
                 if (token === undefined || top.bag.get(-1) !== token) for (const local of nodeScopes) local.bag.set(-1, token); },
-            holds: input => (!deps.workshops || !!deps.workshopRevision || !!deps.inputKey)
-                && marketHolds(sourceBoard, input.items || [], deps)
-                && input.spots.every(([id, token]) => spotTokenOf(id) === token)
-                && (input.bag || []).every(([id, token]) => (id === -1 ? wholeBagKeys() : bagTokenOf(id)) === token),
-            keep: input => { for (const [id] of input.items) read(id);
-                for (const [id] of input.spots) context.sourceSpot(id);
+            holds: input => (input.bag || []).every(([id, token]) => (id === -1 ? wholeBagKeys() : bagTokenOf(id)) === token),
+            keep: input => { for (const id of input.items || []) read(id);
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
-        readScope: { open: () => (scope = new Map()), close: () => { scope = null; },
-            keep: kept => { const into = heldReads || reads;
-                for (const [id, token] of kept) if (!into.has(id)) { into.set(id, token); deps.onSourceRead?.(id); } } } };
+        readScope: { open: () => (scope = new Set()), close: () => { scope = null; },
+            keep: kept => { for (const id of kept) read(id); } } };
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
         ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
@@ -1422,7 +1260,7 @@ function forState(state = {}, deps = {}) {
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
     const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
-    context.spotValue = (spot, ...args) => { context.sourceSpot(spot.id); return readSpot(spot, ...args); };
+    context.spotValue = readSpot;
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
         // settlement/preparation owner. Never replace unknown stock with zero
@@ -1437,8 +1275,8 @@ function forState(state = {}, deps = {}) {
         context.statsPacket = { wishFocus: context.network.focus, dormantWishes: context.network.dormant,
             decisionSeq: context.network.decisionSeq, activityLeaf: context.network.activityLeaf,
             money: state.stats?.money || [0, 0, base.survivalReserve, 0], stockTargets: state.stats?.stockTargets || stockTargets(base) };
-        endTokens();
-        return view(state, planOf(context, base, { key, market: null, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
+        endTokens(); readIds = null;
+        return view(state, planOf(context, base, { key, tripHour, prices }), deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip });
     }
     // One stock reader for the provider's gear witnesses and the network
     // build; the projection is read lazily once it exists (stock roots).
@@ -1460,8 +1298,7 @@ function forState(state = {}, deps = {}) {
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
         object: workshop.productId, incomePerHour: workshop.incomePerHour,
         cycleHours: workshop.cycleHours, repeatable: true });
-    const market = marketKey(reads);
-    const networkKey = `${key}#${market}`;
+    const networkKey = key;
     const choiceBands = quantityBands(state, context, projection);
     // Above a native stock target, exact quantities are execution facts.
     // Unused free loot is compared with the last decision's own value/error,
@@ -1469,21 +1306,16 @@ function forState(state = {}, deps = {}) {
     const choiceShape = sectionKeys(state, deps, choiceBands.map(([id, low, high]) => [id, low, high, high === null ? low : 1]));
     const bagValue = choiceBagValue(state, choiceBands, context.buyback);
     const acceptedSections = state.stats?.wishSections;
-    context.choiceInputs = Sections.hash([choiceShape.structural,
-        [...reads].sort(([a], [b]) => a - b), [...spotReads].sort(([a], [b]) => String(a).localeCompare(String(b)))]);
+    context.choiceInputs = Sections.hash([choiceShape.structural]);
     const unchangedChoice = Number(acceptedSections?.choices) === context.choiceInputs
-        && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
-        && heldReadsHold();
+        && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue);
     context.choiceBagValue = unchangedChoice ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
-    // raised section, or a soft change once its kind's delay since the last
-    // decision has passed (money, observation, horizon; the market items and
-    // spot crowd the held build read). A rebuild where only noise moved keeps
-    // them. A crafter's MP fences its plan (sources), not its goal: no event.
+    // raised section (a soft one was raised by the soft point at the end of a
+    // step). A rebuild where only noise moved keeps them. A crafter's MP
+    // fences its plan (sources), not its goal: no event.
     const dirty = (Number(state.stats?.wishDirty) || 0) | (activeEvents ? context.touchedSections : 0);
-    const soft = dirty ? null
-        : softEvent(state, { baseline: acceptedSections, expPerHour: acceptedSections?.expHour, persona }, timestamp, deps);
-    const reconsider = dirty !== 0 || soft !== null;
+    const reconsider = dirty !== 0;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
@@ -1492,8 +1324,7 @@ function forState(state = {}, deps = {}) {
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         reconsider,
         // Diagnostics only: the events that re-weigh (network:reconsider), 'quiet' for none.
-        reconsiderReasons: !diagnostic ? null : dirty ? Sections.sectionNames(dirty)
-            : [soft === null ? 'quiet' : soft === 'money' ? 'soft_money' : soft],
+        reconsiderReasons: !diagnostic ? null : dirty ? Sections.sectionNames(dirty) : ['quiet'],
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,
@@ -1521,12 +1352,20 @@ function forState(state = {}, deps = {}) {
     const watchedItem = Number(watchedWish?.object?.itemId);
     const belief = beliefs.get(watchedItem) || (basis && watchedItem > 0 ? beliefFor(watchedItem) : null);
     const moneyError = belief ? knowledgeEnabled
-        ? positive(watchedWish.price) * Math.expm1(invoke('GameServer/Bot/Economy/PriceBelief').sigma(belief)) : 0 : -1;
+        ? positive(watchedWish.price) * Math.expm1(PriceBelief.sigma(belief)) : 0 : -1;
+    // The bot's error on an item's price, as moneyError reads it (0 without
+    // price knowledge or without a belief).
+    const priceError = id => {
+        const known = knowledgeEnabled && (beliefs.get(id) || beliefFor(id));
+        return known ? Math.expm1(PriceBelief.sigma(known)) : 0;
+    };
+    const watchRows = marketWatchRows(network.queue, context.liquidationInputs?.rows || [], sourceBoard,
+        Number(state.characterId), price, id => context.worth(id) ?? price(id), priceError);
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
         { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, current === state ? facts : requestFacts(state, deps),
-        Providers.relationBond(state, deps));
+        Providers.relationBond(state, deps), watchRows);
     // The trigger is not the calculation basis. Only the proven money path
     // kept the original valuation inputs; a fresh fallback adopted all of
     // them and must publish matching baselines, including downstream money.
@@ -1547,10 +1386,7 @@ function forState(state = {}, deps = {}) {
         if (gate === 'would_hold') {
             gateEvidence = {};
             gateDiff = gatePlanDiff(state, held, context, deps, gateEvidence);
-            // A diff while the held proof's own soft sources moved inside their
-            // delay is by design (<diff>_soft); the bare <diff> read them intact.
-            gateSoft = gateDiff === 'same' ? null : Number(!softSourcesHold(held.plan.eventProof, deps));
-            Diagnostics.count('context', 'gate_plan', gateSoft ? `${gateDiff}_soft` : gateDiff);
+            Diagnostics.count('context', 'gate_plan', gateDiff);
             if (gateDiff === 'focus') {
                 // Each marginal shares the focus denominator; these are not paired transitions.
                 Diagnostics.count('context', 'gate_focus_held', focusKind(held.plan.network.focus?.[0]));
@@ -1577,8 +1413,8 @@ function forState(state = {}, deps = {}) {
         // funded witness has both equal, and its evidence needs the bytes.
         heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0] === held.plan.network.focus?.[0] ? undefined : network.focus?.[0],
         heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key === held.plan.network.activity?.key ? undefined : network.activity?.key,
-        reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : soft || 'quiet',
-        soft: gateSoft, ...gateEvidence });
+        reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : 'quiet',
+        ...gateEvidence });
     else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
@@ -1591,7 +1427,7 @@ function forState(state = {}, deps = {}) {
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
         ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
-    const plan = planOf(context, base, { key, market, tripHour, projection, knowledgeEnabled, prices });
+    const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     // Source memo belongs only to the bounded cache owner. A planning view
     // or a group closure must never retain a second copy outside that cap.
@@ -1604,8 +1440,7 @@ function forState(state = {}, deps = {}) {
         // Its own activity: the later reuse verdict reads the held build
         // with it. The source sections are read only to reuse the source memo, so
         // they are kept with it and dropped with it (L104).
-        heldReads = new HeldReads(reads); heldSpots = new HeldReads(spotReads);
-        plan.eventProof = captureEventProof(state, deps, { plan, reads: heldReads, spots: heldSpots });
+        plan.eventProof = captureEventProof(state, deps, { plan });
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
@@ -1613,7 +1448,7 @@ function forState(state = {}, deps = {}) {
         remember(cache, actorKey, { key,
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
-            reads: heldReads, spotReads: heldSpots, plan, stateRef: new WeakRef(state), gearThreat,
+            readIds: Int32Array.from(readIds), plan, stateRef: new WeakRef(state), gearThreat,
             sections: retainedSourceMemo ? sections : null,
             activity: state.activity,
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
@@ -1626,6 +1461,7 @@ function forState(state = {}, deps = {}) {
             }
         }
     }
+    readIds = null;
     return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
         eventShadow });
 }
@@ -1707,11 +1543,11 @@ function planPrices(prices, kit, context) {
     for (const id of ids) if (prices.has(Number(id))) kept.set(Number(id), prices.get(Number(id)));
     return kept;
 }
-function planOf(context, base, { key, market, tripHour, projection = null, knowledgeEnabled, prices }) {
+function planOf(context, base, { key, tripHour, projection = null, knowledgeEnabled, prices }) {
     const stockRoots = new Map();
     for (const node of projection?.nodes || [])
         if (node.key.startsWith('stock:') && !stockRoots.has(node.key)) stockRoots.set(node.key, node.object?.itemId);
-    return { pending: !projection, key, market, actorKey: context.actorKey, timestamp: context.timestamp,
+    return { pending: !projection, key, actorKey: context.actorKey, timestamp: context.timestamp,
         gearThreatMask: context.gearThreatMask, persona: context.persona, hunt: context.hunt,
         riskWeight: context.riskWeight, bestSpotId: context.bestSpotId, deathHours: context.deathHours,
         lostGearHours: context.lostGearHours, karmaHours: context.karmaHours, expectedDeathHours: context.expectedDeathHours,
@@ -1766,7 +1602,7 @@ function view(state, plan, deps, built = {}) {
     // calculations is never a retained permission to spend an old balance.
     const funding = moneyQueue(plan.network.queue, Funding.budget(state, deps.buyOrderEscrow),
         plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
-    const inputKey = plan.market === null ? plan.key : `${plan.key}#${plan.market}`;
+    const inputKey = plan.key;
     const network = { ...plan.network, inputKey, ...funding };
     const statsPacket = plan.pending ? plan.statsPacket : { ...plan.statsPacket,
         money: Funding.packetFor(network, plan.hourAdena, plan.survivalReserve) };
@@ -1869,12 +1705,12 @@ function forGroup(group, members, deps = {}) {
     const actorKey = `group:${group.id || group.partyId}`;
     const proposal = deps.rememberGroup === false || String(group.id || group.partyId || '').startsWith('proposal:');
     const wallet = positive(group.adena ?? group.wallet);
-    // Each member's network key (its decided facts and the market items its
-    // review read) and its plan's echo (decision sequence, leaf, focus): the
-    // facts do not move with a member's own decision, so with the echo equal
-    // keys are equal member plans (perf C1: a member's later view is a new
-    // object over the same plan). A party keeps its group answer until a
-    // member's facts, market reads, decision sequence, leaf or focus move.
+    // Each member's network key (its decided facts) and its plan's echo
+    // (decision sequence, leaf, focus): the facts do not move with a member's
+    // own decision, so with the echo equal keys are equal member plans (perf
+    // C1: a member's later view is a new object over the same plan). A party
+    // keeps its group answer until a member's facts, decision sequence, leaf
+    // or focus move (a watched market crossing moves the sequence).
     const key = [wallet, ...contexts.map(({ inputKey, statsPacket: packet }) =>
         `${inputKey}:${packet?.decisionSeq}:${packet?.activityLeaf}:${packet?.wishFocus?.[0]}`)].join('|');
     const held = proposal ? null : groups.get(actorKey);

@@ -13,6 +13,7 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Consumption = require('../Economy/ConsumptionDiagnostics');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const DecisionEvents = require('../AI/DecisionEvents');
+const DecisionSections = require('../Economy/DecisionSections');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
@@ -2733,6 +2734,7 @@ const BotLifeState = {
         // dirty bits after it (seen by the next decision point).
         const beforeResolvePacket = options.statsPacketBeforeResolve === true && options.statsPacket;
         if (beforeResolvePacket) Object.assign(nextState.stats, beforeResolvePacket);
+        let hard = [];
         if (state.activity === 'hunting') {
             // A round records its rewards/resources/sample immediately. It
             // renews the decision only for a meaningful dependent event; a
@@ -2743,8 +2745,14 @@ const BotLifeState = {
                 // lazy: worker the native market owner is main-thread only; workers receive their mirrored escrow.
                 escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
             }
-            DecisionEvents.reconcile(state, nextState, timestamp, escrow);
+            hard = DecisionSections.events(state, nextState, escrow);
         }
+        // The soft point (background thread, every far step, whatever its
+        // round): money, income and the watched market against the bot's own
+        // error; raised with the round's hard events in one bump.
+        const soft = !isMainThread && typeof options.softInputFor === 'function'
+            ? DecisionSections.softEvents(nextState, nextState.stats.wishSections, options.softInputFor(nextState, timestamp)) : [];
+        DecisionEvents.raiseSections(state, nextState, hard, soft);
         // The worker's post-round economy ask: only a step that took no
         // decision before its round (a party member, a held transit).
         if (!isMainThread && !state.stats?.tradeMeeting && !beforeResolvePacket) {

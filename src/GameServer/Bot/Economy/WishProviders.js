@@ -347,7 +347,6 @@ function buildProjection(state, ctx, deps) {
     // existing 16,384-entry yield bound and atlas counts, no per-bot retention.
     // Shared-host offline result only; not a live throughput/budget claim.
     const spotValue = spot => {
-        ctx.sourceSpot?.(spot.id);
         if (!sourceValues.has(spot)) sourceValues.set(spot, ctx.spotValue(spot));
         return sourceValues.get(spot);
     };
@@ -417,7 +416,7 @@ function buildProjection(state, ctx, deps) {
                 for (const [reason, amount] of reasons) Diagnostics.count('provider', 'source_fact', reason, amount);
                 Diagnostics.count('provider', 'source_path', best ? 'ready' : reasons.size ? 'refused' : 'no_source');
             }
-            farmFacts.set(factsKey, { best, inputs: input && { items: [...input.items], spots: [...input.spots], bag: [...input.bag] } });
+            farmFacts.set(factsKey, { best, inputs: input && { items: [...input.items], bag: [...input.bag] } });
             } finally { if (input) ctx.nodeInputs.end(); }
         }
         const { best, inputs } = farmFacts.get(factsKey);
@@ -599,7 +598,7 @@ function buildProjection(state, ctx, deps) {
             for (const path of paths) path.acquisitionOrder = ['craft', 'mammon_unseal'].includes(path.kind) ? 1 : path.kind === 'buy' ? 2 : 3;
         const node = { key, object: Number(id), price: price(id), ...(exitValue === undefined ? {} : { exitValue }), paths: paths.slice(0, 4) };
         descriptors.set(key, node);
-        if (local) descriptorInputs.set(key, { items: [...local.items], spots: [...local.spots], bag: [...local.bag] });
+        if (local) descriptorInputs.set(key, { items: [...local.items], bag: [...local.bag] });
         if (scratch && readScope) builtBy.set(key, readScope);
         add(node);
         preparingItems.delete(key);
