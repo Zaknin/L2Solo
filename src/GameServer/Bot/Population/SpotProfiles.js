@@ -265,6 +265,15 @@ const SpotProfiles = {
         // reads its leader's list (its party role when it has one, the
         // simplest reading); a list for the party's main role would be read
         // once per party search.
+        // options.hasRoom(spotId): the worker's own exact index, a filter
+        // here (ROUTE-ROOM): a spot other than the current one with no room
+        // for the bot is skipped, as in the near-level fallback below; the
+        // room is checked again at arrival. Main passes none: no filter.
+        const full = (spot) => {
+            if (!options.hasRoom || options.hasRoom(spot.id)) return false;
+            Diagnostics.count('spot_list', 'skip', 'full');
+            return true;
+        };
         let pick = null, firstAllowed = null, currentListed = false;
         for (const shots of [true, false]) {
             for (const id of list.ids(shots, targetLevel)) {
@@ -274,6 +283,7 @@ const SpotProfiles = {
                 if (!spot || spot.raidBoss === true || excludedSpotIds.has(String(spot.id)) || foreign(spot)) continue;
                 const isCurrent = currentSpot && spot.id === currentSpot.id;
                 if (isCurrent && mustRelocate) continue;
+                if (!isCurrent && full(spot)) continue;
                 const fits = SpotService.isSuitable(spot, targetLevel, options);
                 if (!fits && firstAllowed && !isCurrent) continue;
                 // The keep rule below holds only a current spot this reader
@@ -306,7 +316,8 @@ const SpotProfiles = {
         // without a spot, the simplest option is the list again with the
         // income route's wider minGap (-15).
         const candidates = spotsNearLevel(profiles, targetLevel)
-            .filter((profile) => !excludedSpotIds.has(String(profile.id)))
+            .filter((profile) => !excludedSpotIds.has(String(profile.id))
+                && (profile.id === currentSpot?.id || !full(profile)))
             .filter((profile) => homeAllowed(profile));
         const relocationCandidates = mustRelocate
             ? candidates.filter((profile) => profile.id !== currentSpot.id)

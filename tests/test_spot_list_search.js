@@ -66,6 +66,11 @@ assert.equal(chosen.route?.id ?? null, route?.id ?? null, 'the chosen spot carri
 const next = listed.find(spot => spot.id !== first.id && SpotService.isSuitable(spot, level));
 assert.equal(Spots.findForState(state, { ...options, excludedSpotIds: new Set([String(first.id)]) })?.id, next?.id,
     'an avoided spot is skipped: the next one of the list');
+// ROUTE-ROOM: the worker passes its own room filter; main passes none.
+assert.equal(Spots.findForState(state, { ...options, hasRoom: id => String(id) !== String(first.id) })?.id, next?.id,
+    'a full spot of the list is skipped: the next one of the list');
+assert.equal(Spots.findForState(state, { ...options, hasRoom: () => true })?.id, chosen.id,
+    'a filter that finds room everywhere changes nothing');
 
 Spots.cache = originalCache;
 
@@ -99,6 +104,36 @@ Spots.cache = originalCache;
         assert(Routes.isSpotAllowedForState(catalogue[1], recovering, search), 'fixture: the other spot is allowed');
         assert.equal(Spots.findForState(recovering, search)?.id, 'other',
             'a current spot refused at the bot\'s level is not kept: the first allowed spot of the list');
+    } finally {
+        IncomeRoute.spotList = saved.spotList; Ground.evaluate = saved.evaluate; Spots.cache = saved.cache;
+    }
+}
+// ROUTE-ROOM: the room filter on thin spots (density 2: none fits) the
+// ground allows; the bot's own level, no recovery.
+{
+    const Ground = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
+    const exp = Number(Data.experience[28]) + 100000;
+    const bot = { ...state, exp, stats: { ...state.stats, classProgressionClassId: 12, classProgressionLevel: 29 } };
+    const thin = (id, density = 2) => ({ id, name: id, minLevel: 25, maxLevel: 25, avgLevel: 25, density, tags: [],
+        tagsAuthoritative: true, center: { locX: 50000, locY: 150000, locZ: -3000 },
+        npcEntries: [{ selfId: 156, count: density }], levelCounts: { 25: density } });
+    const saved = { spotList: IncomeRoute.spotList, evaluate: Ground.evaluate, cache: Spots.cache };
+    try {
+        Ground.evaluate = () => ({ allowed: true });
+        const search = (catalogue, ids, hasRoom) => {
+            Spots.cache = catalogue;
+            IncomeRoute.spotList = () => ({ spoiler: () => null, ids: () => ids });
+            return { matchupProfiles: [mage], timestamp: at, profiles: catalogue, ...(hasRoom ? { hasRoom } : {}) };
+        };
+        const current = [thin('cur'), thin('other')];
+        assert.equal(Spots.findForState({ ...bot, spotId: 'cur' }, search(current, ['other', 'cur'], () => false))?.id,
+            'cur', 'the current spot is kept even when it counts as full');
+
+        const listed = [thin('a'), thin('b', 3), thin('c')];
+        assert.equal(Spots.findForState(bot, search(listed, ['a']))?.id, 'a',
+            'without a filter (main) the listed spot is taken, full or not');
+        assert.equal(Spots.findForState(bot, search(listed, ['a'], id => id === 'c'))?.id, 'c',
+            'every listed spot full: the near-level fallback skips the full ones too');
     } finally {
         IncomeRoute.spotList = saved.spotList; Ground.evaluate = saved.evaluate; Spots.cache = saved.cache;
     }
