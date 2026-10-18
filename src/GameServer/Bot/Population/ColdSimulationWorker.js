@@ -1187,8 +1187,9 @@ function startKernel(config = {}) {
             };
             // Accepted custody owns the next physical transition. Resume the
             // original economic plan after the meeting releases the actor.
+            const kitMoved = DecisionSections.kitMoved(state, projected);
             if (state.stats?.tradeMeeting) return { state: projected,
-                durable: Object.keys(durable).length ? durable : null };
+                durable: Object.keys(durable).length ? durable : null, kitMoved };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
@@ -1199,7 +1200,7 @@ function startKernel(config = {}) {
             return {
                 state: projected,
                 // A member's kit event, read by its party step (worker-local).
-                kitMoved: DecisionSections.kitMoved(state, projected),
+                kitMoved,
                 economyEdges,
                 ...(economyPlan ? { economyPlan } : {}),
                 ...(market ? { market } : {}),

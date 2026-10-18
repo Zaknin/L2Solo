@@ -57,8 +57,7 @@ const originals = {
 const originalFormationState = {
     resolving: PopulationService.resolving,
     partyFormationRunning: PopulationService.partyFormationRunning,
-    partyFormationPending: PopulationService.partyFormationPending,
-    nextPartyRequestCleanupAt: PopulationService.nextPartyRequestCleanupAt
+    partyFormationPending: PopulationService.partyFormationPending
 };
 
 async function run() {
@@ -140,7 +139,6 @@ async function run() {
     LifeState.cachedStatesForParties = () => Promise.resolve(new Map());
     PopulationService.resolving = false;
     PopulationService.partyFormationRunning = false;
-    PopulationService.nextPartyRequestCleanupAt = Infinity;
     await PopulationService.formBackgroundParties();
     assert.strictEqual(projectionCalls, 1, 'party formation must discover the complete lightweight candidate projection once');
 
@@ -216,6 +214,10 @@ async function run() {
     assert.deepStrictEqual(assigned, [], 'a far party joins nobody before its leader\'s check');
     // A party near the player (hot leader): the check runs here and joins.
     members[0] = { ...members[0], phase: 'hot' };
+    party.stats.declinedRecruits = [3, 4];
+    assert.strictEqual((await PopulationService.recruitBackgroundMembers(candidates)).size, 0,
+        'recruits the leader\'s step declined are not picked again before a party event');
+    delete party.stats.declinedRecruits;
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);

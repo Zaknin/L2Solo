@@ -7,6 +7,8 @@ const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const PartyGoalCalculation = require('./PartyGoalCalculation');
+// Recruits a party keeps as declined until its next member, objective or kit event.
+const DECLINED_RECRUITS_MAX = 16;
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
@@ -1910,21 +1912,29 @@ class ColdSimulationKernel {
             };
             // The pending join main recorded (recruitBackgroundMembers): the
             // recruit check runs here on this thread's copies of the recruits;
-            // the answer rides the leader's proposal (main commits a join) and
-            // the party row leaves this step without it either way.
+            // the answer rides the leader's proposal (main commits a join). A
+            // recruit mid-step keeps the join pending for the next leader step;
+            // recruits declined or gone are kept on the row (declinedRecruits)
+            // so the formation pass does not pick them again until a party
+            // event (below) clears the list.
             let recruitCheck = null;
             const pendingRecruits = run.party.stats?.pendingRecruits;
             if (pendingRecruits && !meetingPending && resolvedParty.status !== 'dissolved') {
-                delete resolvedParty.stats.pendingRecruits;
-                const recruits = (pendingRecruits.ids || []).map(id => this.states.get(Number(id))?.state);
-                const free = recruits.length > 0 && recruits.every(recruit => recruit?.phase === 'cold'
-                    && !recruit.party?.partyId && !recruit.partyId);
-                const checked = free && this.reviewRecruits
-                    ? this.reviewRecruits({ party: run.party, members: [...run.members, ...recruits], timestamp: startedAt }) : null;
-                recruitCheck = checked ? { outcome: 'accepted', memberIds: run.party.memberIds,
-                    recruitIds: recruits.map(recruit => Number(recruit.characterId)),
-                    sources: PartyGoalCalculation.sources(recruits), joint: checked }
-                    : { outcome: free ? 'declined' : 'unavailable' };
+                const ids = (pendingRecruits.ids || []).map(Number);
+                if (ids.some(id => this.busy(id))) recruitCheck = { outcome: 'unavailable' };
+                else {
+                    delete resolvedParty.stats.pendingRecruits;
+                    const recruits = ids.map(id => this.states.get(id)?.state);
+                    const free = recruits.length > 0 && recruits.every(recruit => recruit?.phase === 'cold'
+                        && !recruit.party?.partyId && !recruit.partyId);
+                    const checked = free && this.reviewRecruits
+                        ? this.reviewRecruits({ party: run.party, members: [...run.members, ...recruits], timestamp: startedAt }) : null;
+                    recruitCheck = checked ? { outcome: 'accepted', memberIds: run.party.memberIds, recruitIds: ids,
+                        sources: PartyGoalCalculation.sources(recruits), joint: checked }
+                        : { outcome: free ? 'declined' : 'gone' };
+                    if (!checked) resolvedParty.stats.declinedRecruits = [...new Set([
+                        ...(run.party.stats?.declinedRecruits || []), ...ids])].slice(-DECLINED_RECRUITS_MAX);
+                }
             }
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
             const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
@@ -1959,12 +1969,15 @@ class ColdSimulationKernel {
             // step raised its build section (its kit moved, below), and
             // closes when every member is planned or the party ends.
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            const openRequirements = () => {
+            let partyEvent = false;
+            const openRequirements = reason => {
+                partyEvent = true;
                 if (requirementProgress || meetingPending || materialHunt) return;
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
+                EconomyDiagnostics.count('party_replan', 'opened', reason);
             };
-            if (run.requirementRefresh) openRequirements();
+            if (run.requirementRefresh) openRequirements('event');
             const memberPlans = [];
             for (const { state, result } of resolution.memberResults || []) {
                 const id = Number(state.characterId);
@@ -1981,7 +1994,7 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.objective
                     );
                 }
-                if (projection?.kitMoved) openRequirements();
+                if (projection?.kitMoved) openRequirements('kit');
                 if (requirementProgress && !meetingPending && !materialHunt && this.planPartyRequirement && projectedState
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
@@ -2046,6 +2059,12 @@ class ColdSimulationKernel {
                     }
                 }
                 if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
+            }
+            // A member, objective or kit event makes the declined recruits worth
+            // a new check: the list leaves the row with this step's write.
+            if (partyEvent && resolvedParty.stats.declinedRecruits && !recruitCheck) {
+                delete resolvedParty.stats.declinedRecruits;
+                if (atomicParty) memoryGroup.partyChanges[0].statsJson = JSON.stringify(resolvedParty.stats);
             }
             if (!current()) return;
             published = handled = true;

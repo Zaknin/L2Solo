@@ -654,11 +654,13 @@ function claimAck(kernel, payload) {
     // A pending join main recorded on the party row: the leader's step runs
     // the recruit check on this thread's copy of the recruit, its proposal
     // carries the answer, and the party row leaves the step without it.
-    for (const outcome of ['accepted', 'declined', 'unavailable']) {
+    // A recruit mid-step keeps the join pending; recruits declined or gone stay
+    // on the row as declined until a party event.
+    for (const outcome of ['accepted', 'declined', 'gone', 'unavailable']) {
         const joinMessages = [], reviewed = [];
-        const recruitId = outcome === 'unavailable' ? 999 : 122;
+        const recruitId = outcome === 'gone' ? 999 : 122;
         const joinParty = { ...refreshParty, partyId: `join-${outcome}`,
-            stats: { pendingRecruits: { ids: [recruitId] } } };
+            stats: { pendingRecruits: { ids: [recruitId] }, declinedRecruits: [77] } };
         const joinMembers = refreshMembers.map(member => ({ ...member, party: { partyId: joinParty.partyId } }));
         const joinKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
             resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
@@ -672,7 +674,10 @@ function claimAck(kernel, payload) {
         joinKernel.upsert({ state: joinMembers[0], context: { isPartyLeader: true, party: joinParty,
             partyMembers: joinMembers, spot: { id: 'refresh-spot' } } });
         joinKernel.upsert({ state: joinMembers[1], context: {} });
-        if (outcome !== 'unavailable') joinKernel.upsert({ state: state(122), context: {} });
+        // The recruit is not due: it waits idle, not claimed by this tick.
+        if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }), context: {} });
+        if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
+            joinKernel.busy = id => Number(id) === 122 || busy(id); }
         joinKernel.tick();
         const joinClaim = joinMessages.find(message => message.type === 'claim_request');
         claimAck(joinKernel, { grants: joinClaim.payload.candidates.filter(candidate => candidate.characterId !== 122)
@@ -683,15 +688,42 @@ function claimAck(kernel, payload) {
         const leader = joinMessages.find(message => message.type === 'proposal_batch').payload.proposals
             .find(proposal => proposal.partyResolution);
         assert.strictEqual(leader.partyResolution.recruitCheck.outcome, outcome);
-        assert.strictEqual(leader.partyResolution.party.stats.pendingRecruits, undefined,
-            'the party row leaves the leader\'s step without its pending join');
-        assert.deepStrictEqual(reviewed, outcome === 'unavailable' ? [] : [[120, 121, 122]],
+        assert.deepStrictEqual(leader.partyResolution.party.stats.pendingRecruits,
+            outcome === 'unavailable' ? { ids: [122] } : undefined,
+            'the party row leaves the leader\'s step without its pending join, unless a recruit is mid-step');
+        assert.deepStrictEqual(leader.partyResolution.party.stats.declinedRecruits,
+            ['declined', 'gone'].includes(outcome) ? [77, recruitId] : [77], 'a refused recruit is kept as declined');
+        assert.deepStrictEqual(reviewed, ['gone', 'unavailable'].includes(outcome) ? [] : [[120, 121, 122]],
             'the check reads the members with the recruit, once');
         if (outcome === 'accepted') {
             assert.deepStrictEqual(leader.partyResolution.recruitCheck.recruitIds, [122]);
             assert.deepStrictEqual(leader.partyResolution.recruitCheck.memberIds, [120, 121]);
             assert.deepStrictEqual(leader.partyResolution.recruitCheck.sources.map(row => [row.characterId, row.revision]), [[122, 3]]);
         }
+    }
+
+    // A member or objective event (main's due mark) clears the declined list.
+    for (const event of [false, true]) {
+        const clearMessages = [];
+        const clearParty = { ...refreshParty, partyId: `declined-${event}`, stats: { declinedRecruits: [77] } };
+        const clearMembers = refreshMembers.map(member => ({ ...member, party: { partyId: clearParty.partyId } }));
+        const clearKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state }), planPartyRequirement: ({ state }) => ({ acquisitionPlan: state.stats.equipmentPlan }),
+            emit: (type, payload) => clearMessages.push({ type, payload }) });
+        clearKernel.upsert({ state: clearMembers[0], context: { isPartyLeader: true, party: clearParty,
+            partyMembers: clearMembers, spot: { id: 'refresh-spot' }, requirementRefresh: event } });
+        clearKernel.upsert({ state: clearMembers[1], context: {} }); clearKernel.tick();
+        const clearClaim = clearMessages.find(message => message.type === 'claim_request');
+        claimAck(clearKernel, { grants: clearClaim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `clear-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await clearKernel.resolveChain;
+        const clearLeader = clearMessages.find(message => message.type === 'proposal_batch').payload.proposals
+            .find(proposal => proposal.partyResolution);
+        assert.deepStrictEqual(clearLeader.partyResolution.party.stats.declinedRecruits, event ? undefined : [77],
+            'declined recruits wait for a party event');
     }
 
     for (const complete of [false, true]) {
