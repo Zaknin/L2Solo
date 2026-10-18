@@ -12,6 +12,7 @@ const ClanSupply = require('../../Clan/ClanSupplyPolicy');
 const Providers = require('./WishProviders');
 const Floor = require('../Population/SurvivalFloor');
 const InventoryLimits = require('../../Inventory/InventoryLimits');
+const Diagnostics = require('./EconomyDiagnostics');
 const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
 const DataCache = invoke('GameServer/DataCache');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -194,16 +195,21 @@ function incomeError(state, persona) {
     return Learning.knowledgeEnabled() ? Learning.stageError(Learning.INCOME_ERROR_FLOOR + .25 * (1 - Number(persona?.understanding ?? .3)),
         Learning.INCOME_ERROR_FLOOR, state.stats?.lifelongKills ?? state.stats?.fightsWon ?? 0, Learning.gradeOfLevel(state.level)) : 0;
 }
-function sample(state, timestamp = Date.now(), mode) {
-    const rows = Hunt.sampledRows(state, timestamp, mode);
+// A sample row: the spot, exp and net income per ms of its cycle.
+function sampleOf(rows) {
     return rows.map(row => [hash(row.spotId), row.exp / row.cycleMs,
         (positive(row.adena) + positive(row.loot) - positive(row.costs)) / row.cycleMs]);
 }
-function learnedChange(current, previous, error, share, previousShare) {
+function sample(state, timestamp = Date.now(), mode) {
+    return sampleOf(Hunt.sampledRows(state, timestamp, mode));
+}
+// noise: each current row's own noise (BotHuntEfficiency.record); a drift
+// inside the larger of the bot's error and that noise is no change.
+function learnedChange(current, previous, error, share, previousShare, noise = []) {
     if (current.length !== previous.length) return true;
     return current.some((row, at) => row[0] !== previous[at]?.[0] || row.slice(1).some((value, index) => {
         const old = Number(previous[at]?.[index + 1]) * previousShare;
-        return !Number.isFinite(old) || Math.abs(value * share - old) > Math.abs(old) * error;
+        return !Number.isFinite(old) || Math.abs(value * share - old) > Math.abs(old) * Math.max(error, noise[at] || 0);
     }));
 }
 // The learned frustration the decision weighed its risk with (riskWeight's
@@ -220,7 +226,7 @@ function bondChanged(baseline, bondNow, error) {
 }
 function observationChanged(state, baseline, timestamp, mode, bondNow = null) {
     if (!baseline) return true;
-    const current = sample(state, timestamp, mode);
+    const rows = Hunt.sampledRows(state, timestamp, mode), current = sampleOf(rows);
     const previous = sampleRows(Object.hasOwn(baseline, 'sample') ? baseline.sample : []);
     const share = Hunt.onSpotShare(state), previousShare = baseline.share ?? 1;
     const error = positive(baseline.incomeError);
@@ -230,7 +236,7 @@ function observationChanged(state, baseline, timestamp, mode, bondNow = null) {
     return !observationBaselineValid(baseline, previous) || !Number.isFinite(share)
         || Math.abs(share - previousShare) > previousShare * error
         || Number.isFinite(frustration) && Math.abs(frustrationOf(state) - frustration) > (1 + frustration) * error
-        || learnedChange(current, previous, error, share, previousShare)
+        || learnedChange(current, previous, error, share, previousShare, rows.map(row => positive(row.noise)))
         || bondChanged(baseline, bondNow, error);
 }
 function bounds(wallet) {
@@ -274,11 +280,19 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
 function softEvents(state, baseline, input) {
     if (!baseline) return NONE;
     let sections = NONE;
-    const add = names => { sections = sections === NONE ? [...names] : [...new Set([...sections, ...names])]; };
-    if (meaningfulMoney(state, baseline, input.buyOrderEscrow)) add(SOFT_SECTIONS.money);
+    // Diagnostics only: soft:step:far counts the soft points, soft:raise:<source>
+    // the raises by source (the observation share per far step is read live).
+    const diagnostic = Diagnostics.active();
+    if (diagnostic) Diagnostics.count('soft', 'step', 'far');
+    const add = source => {
+        const names = SOFT_SECTIONS[source];
+        sections = sections === NONE ? [...names] : [...new Set([...sections, ...names])];
+        if (diagnostic) Diagnostics.count('soft', 'raise', source);
+    };
+    if (meaningfulMoney(state, baseline, input.buyOrderEscrow)) add('money');
     const bondNow = () => Providers.relationBond(state, { memory: input.memory?.() ?? null });
-    if (observationChanged(state, baseline, input.timestamp, undefined, bondNow)) add(SOFT_SECTIONS.observation);
-    if (input.board && marketCrossed(input.board, baseline.marketWatch, Number(state.characterId))) add(SOFT_SECTIONS.market);
+    if (observationChanged(state, baseline, input.timestamp, undefined, bondNow)) add('observation');
+    if (input.board && marketCrossed(input.board, baseline.marketWatch, Number(state.characterId))) add('market');
     return sections;
 }
 const NONE = Object.freeze([]);

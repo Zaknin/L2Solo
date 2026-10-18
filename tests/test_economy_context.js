@@ -422,6 +422,13 @@ async function run() {
         const rebuilt = Economy.forState(native, { board: softBoard, timestamp: T + 2000 }).statsPacket.wishSections;
         assert.deepEqual(Sections.softEvents(published, rebuilt, { board: softBoard, buyOrderEscrow: 0, timestamp: T + 3000,
             memory: () => null }).filter(name => name === 'sources'), [], 'a decision that saw the cheap line does not cross on it again');
+        // A sale of an item the bot has no use for (worth 0) is watched at its price.
+        const junk = Economy.forState({ ...native, characterId: 990026, inventory: { ...native.inventory,
+            1872: { selfId: 1872, amount: 200 } } }, { board: softBoard, timestamp: T + 4000 });
+        assert.equal(junk.worth(1872), 0, 'fixture: the junk item is worth nothing to the bot');
+        assert(junk.statsPacket.wishSections.marketWatch?.some(row => row[0] === 1872 && row[1] === 3 && row[2] > 0),
+            `a liquidation of a zero-usefulness item is watched on the buy side: ${JSON.stringify(junk.statsPacket.wishSections.marketWatch)}`);
+        Economy.forget(990026);
         Economy.forget(native.characterId);
         // One raise per step: the round's and the soft point's sections in one
         // bump, ORed into the bits raised before.
