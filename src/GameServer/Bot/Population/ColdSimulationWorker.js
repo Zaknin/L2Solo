@@ -1609,7 +1609,7 @@ function startKernel(config = {}) {
             competition: competitionCandidates?.snapshot() || null,
             ...(Config.developerDiagnostics ? {
             tables: tables.summary(),
-            developerDiagnostics: economyDiagnostics.metrics(),
+            developerDiagnostics: economyDiagnostics.delta(),
             ...heapTelemetry.snapshot(),
             caches: { spotValue: SpotValueTable.cacheStats(), kitProfiles: ColdCombatProfile.kitStoreSize() },
             heapUsed: process.memoryUsage().heapUsed,
@@ -1620,7 +1620,9 @@ function startKernel(config = {}) {
             } : {})
         };
         try {
-            if (!send('heartbeat', heartbeat) && competition) {
+            if (send('heartbeat', heartbeat)) {
+                if (Config.developerDiagnostics) economyDiagnostics.deltaSent();
+            } else if (competition) {
                 if (Config.developerDiagnostics) competition.report.deliverySendFailures = (competition.report.deliverySendFailures || 0) + 1;
             }
         } catch {
@@ -1792,6 +1794,9 @@ async function handle(message) {
         break;
     case 'throttle':
         kernel?.setMaxInFlight(payload.maxInFlight);
+        break;
+    case 'diagnostics_resync':
+        economyDiagnostics.requestFull();
         break;
     case 'competition_release':
         if (Object.hasOwn(payload, 'receipt') && !competitionCandidates?.receipt(payload.receipt)) break;

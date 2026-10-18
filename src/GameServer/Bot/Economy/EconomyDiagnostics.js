@@ -32,6 +32,9 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     const summaryReserve = Math.min(capacity - 1, Math.ceil(capacity * LIMITS.owners / LIMITS.perSecond));
     let rows = null, bytes = 0, selected = null, explicit = null, selectionKey = null;
     let counters = null, durations = null, transport = null, inFlight = null;
+    // Heartbeat delta bookkeeping (worker thread): keys changed since the last delta that was really sent.
+    const dirtyKeys = new Set(), dirtyLayers = new Set();
+    let sentSeq = 0, needFull = true, deltaDropped = false;
     let selectionListener = null;
     let seq = 0, second = -1, rate = 0, mismatchRate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
     let drops = null;
@@ -44,6 +47,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         const key = `${String(layer).slice(0, 32)}:${String(outcome).slice(0, 32)}:${String(reason).slice(0, 48)}`;
         const slot = counters.has(key) || counters.size < LIMITS.keys - 1 ? key : 'overflow';
         counters.set(slot, (counters.get(slot) || 0) + amount);
+        dirtyKeys.add(slot);
     }
     function duration(layer, ms) {
         if (!active() || !Number.isFinite(ms) || ms < 0) return;
@@ -54,6 +58,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         if (!row) { row = { count: 0, totalMs: 0, maxMs: 0, next: 0, samples: [] }; durations.set(layer, row); }
         row.count++; row.totalMs += ms; row.maxMs = Math.max(row.maxMs, ms);
         row.samples[row.next] = ms; row.next = (row.next + 1) % LIMITS.durationSamples;
+        dirtyLayers.add(layer);
     }
     // Wall time of the consecutive parts of one call: lap(part) closes the part
     // since the previous lap, done() records each part as layer prefix+part.
@@ -178,11 +183,13 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     }
     function disconnect() { if (inFlight) lose('transport', inFlight.count); inFlight = null; transport = null; }
     function stop() { disconnect(); if (rows?.length) lose('stop', rows.length); rows = null; bytes = 0;
-        selected = null; explicit = null; selectionKey = null; selectionListener = null; counters = null; durations = null; drops = null; }
+        selected = null; explicit = null; selectionKey = null; selectionListener = null; counters = null; durations = null; drops = null;
+        dirtyKeys.clear(); dirtyLayers.clear(); }
     function omitAggregatesOnOverflow(message, reason) {
         if (!active() || reason !== 'message_too_large' || message?.type !== 'heartbeat'
             || !Object.hasOwn(message.payload || {}, 'developerDiagnostics')) return false;
         delete message.payload.developerDiagnostics;
+        deltaDropped = true;
         count('transport', 'aggregate_drop', 'heartbeat_size');
         return true;
     }
@@ -198,11 +205,28 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     function metrics() {
         if (!active()) return { enabled: false };
         return { enabled: true, thread, counts: counters ? Object.fromEntries(counters) : {},
-            durations: durations ? Object.fromEntries([...durations].map(([layer, row]) => [layer,
-                { count: row.count, totalMs: row.totalMs, maxMs: row.maxMs, samples: row.samples.slice() }])) : {},
+            durations: durations ? Object.fromEntries([...durations].map(([layer, row]) => [layer, layerRow(row)])) : {},
             detail: stats() };
     }
-    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, laps, metrics, stats, omitAggregatesOnOverflow,
+    const layerRow = row => ({ count: row.count, totalMs: row.totalMs, maxMs: row.maxMs, samples: row.samples.slice() });
+    // The heartbeat form of metrics(): only the keys and layers changed since the last delta that was sent
+    // (everything when a full table is due). Clears nothing: deltaSent() does, after the send succeeded.
+    function delta() {
+        if (!active()) return { enabled: false };
+        deltaDropped = false;
+        const counts = {}, rows = {};
+        const keys = needFull ? (counters?.keys() || []) : dirtyKeys;
+        for (const key of keys) counts[key] = counters.get(key);
+        const layers = needFull ? (durations?.keys() || []) : dirtyLayers;
+        for (const layer of layers) rows[layer] = layerRow(durations.get(layer));
+        return { enabled: true, thread, seq: sentSeq + 1, full: needFull, counts, durations: rows, detail: stats() };
+    }
+    function deltaSent() {
+        if (deltaDropped) return;
+        dirtyKeys.clear(); dirtyLayers.clear(); needFull = false; sentSeq += 1;
+    }
+    function requestFull() { needFull = true; }
+    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, laps, metrics, delta, deltaSent, requestFull, stats, omitAggregatesOnOverflow,
         noteDropped(amount) { if (active() && Number.isSafeInteger(amount) && amount > 0) lose('upstream', amount); },
         connect(send) { if (!detail()) return false; transport = send; pump(); return true; } };
 }

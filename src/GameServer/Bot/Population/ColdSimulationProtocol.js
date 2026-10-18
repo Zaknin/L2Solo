@@ -28,6 +28,7 @@ const MAIN_TYPES = new Set([
     'pause',
     'resume',
     'throttle',
+    'diagnostics_resync',
     'competition_release',
     'shutdown'
 ]);

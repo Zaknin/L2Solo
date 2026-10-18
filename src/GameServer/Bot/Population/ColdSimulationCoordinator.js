@@ -217,6 +217,9 @@ class ColdSimulationCoordinator {
         this.lastHeartbeatAt = 0;
         this.lastWatchdogAt = 0;
         this.lastWorkerSnapshot = {};
+        this.workerDiagnostics = null;
+        this.workerDiagnosticsSeq = 0;
+        this.diagnosticsResyncAt = 0;
         this.partyReviews = { committed: 0, departed: 0, dissolved: 0, reasons: {}, recent: [] };
         this.workerMaxInFlight = null;
         this.restartCount = 0;
@@ -479,6 +482,9 @@ class ColdSimulationCoordinator {
         if (this.worker || this.stopping) return;
         this.cancelLeaseRenewalRound();
         this.workerEpoch = `cold-worker:${process.pid}:${randomUUID()}`;
+        this.workerDiagnostics = null;
+        this.workerDiagnosticsSeq = 0;
+        this.diagnosticsResyncAt = 0;
         this.competitionFrameAdmission = null;
         this.projectionRetention.reset();
         this.ready = false;
@@ -512,6 +518,29 @@ class ColdSimulationCoordinator {
     recordInvalid(reason = 'unknown') {
         DiagnosticConfig.developerDiagnostics && (this.counters.invalidMessages += 1);
         DiagnosticConfig.developerDiagnostics && (this.counters.invalidReasons[reason] = Number(this.counters.invalidReasons[reason] || 0) + 1);
+    }
+
+    // The worker's heartbeat carries only the counters changed since its last sent delta. This keeps the
+    // table metrics() would give; readers take it from lastWorkerSnapshot.developerDiagnostics and must not modify it.
+    mergeDiagnostics(delta) {
+        if (delta?.enabled !== true) return;
+        if (delta.full === true) {
+            const { enabled, thread, counts, durations, detail } = delta;
+            this.workerDiagnostics = { enabled, thread, counts: { ...counts }, durations: { ...durations }, detail };
+        } else if (this.workerDiagnostics && delta.seq === this.workerDiagnosticsSeq + 1) {
+            const table = this.workerDiagnostics;
+            Object.assign(table.counts, delta.counts);
+            Object.assign(table.durations, delta.durations);
+            table.detail = delta.detail;
+        } else {
+            // A gap, a repeat, or a delta before any full table: ask for a full one, at most once per 5 s.
+            if (Date.now() - this.diagnosticsResyncAt > 5000) {
+                this.diagnosticsResyncAt = Date.now();
+                this.post('diagnostics_resync', {});
+            }
+            return;
+        }
+        this.workerDiagnosticsSeq = delta.seq;
     }
 
     post(type, payload = {}, msgId = null, bytes = null) {
@@ -909,7 +938,8 @@ class ColdSimulationCoordinator {
             break;
         case 'heartbeat':
             this.lastHeartbeatAt = Date.now();
-            this.lastWorkerSnapshot = payload;
+            this.mergeDiagnostics(payload.developerDiagnostics);
+            this.lastWorkerSnapshot = { ...payload, developerDiagnostics: this.workerDiagnostics };
             if (!this.stopping) Metrics.recordColdSafetyTotals(epoch, payload.safety);
             this.handleCompetitionForecast(payload.competition, worker, epoch);
             break;
