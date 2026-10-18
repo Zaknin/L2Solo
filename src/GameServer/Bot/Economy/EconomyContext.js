@@ -936,7 +936,9 @@ function buildForState(state, deps) {
         : urgent.key === 'stock:potions' ? base.stock('potions').targetHours : projection.horizon;
     Object.assign(context, valueReaders(state, network, projection.values, persona, knowledgeEnabled,
         base.kitCost, () => context.statsPacket.money));
-    context.watchList = invoke('GameServer/Bot/Economy/TradeIntent').project(state, network, projection, id => context.worth(id) ?? price(id));
+    const boardRules = require('../../AfkTrade/BoardRules');
+    context.watchList = invoke('GameServer/Bot/Economy/TradeIntent').project(state, network, projection, id => context.worth(id) ?? price(id),
+        boardRules.BOT_SHOP_LINES + boardRules.BOT_RECORDS.buy_ad);
     context.intentPending = context.watchList === null;
     context.watchList ||= [];
     const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');

@@ -20,6 +20,7 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_bot_afk_buy_shop.js',
     'tests/test_native_board.js',
     'tests/test_c4_import_integration.js',
     'tests/test_generated_cold_loadout.js',
@@ -226,6 +227,9 @@ const tests = [
     'tests/test_shot_stock_weapon_rank.js',
     'tests/test_shot_stock_restart_persistence.js',
     'tests/test_shot_economy.js',
+    'tests/test_live_player_store_purchase.js',
+    'tests/test_live_player_market_services.js',
+    'tests/test_live_player_shot_craft_order.js',
     'tests/test_shot_market_restock.js',
     'tests/test_cold_shot_economy.js',
     'tests/test_shot_economy_persistence.js',
@@ -1018,6 +1022,7 @@ const tests = [
     'tests/test_cold_meeting_travel.js',
     'tests/test_bot_meeting_travel.js',
     'tests/test_hot_meeting_ai_ownership.js',
+    'tests/test_hot_meeting_materialization.js',
     'tests/test_meeting_lifecycle_pending.js',
     'tests/test_meeting_snapshot_refresh.js',
     'tests/test_meeting_worker_transport.js',
@@ -1399,6 +1404,7 @@ const defaultConfigTests = new Set([
     'tests/test_cold_meeting_travel.js',
     'tests/test_bot_meeting_travel.js',
     'tests/test_hot_meeting_ai_ownership.js',
+    'tests/test_hot_meeting_materialization.js',
     'tests/test_meeting_lifecycle_pending.js',
     'tests/test_meeting_snapshot_refresh.js',
     'tests/test_meeting_worker_transport.js',

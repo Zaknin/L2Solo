@@ -7,6 +7,56 @@ const byRecipe = new Map();
 const owners = new Map();
 const publicDigests = new Map(), publicScopeDigests = new Map();
 const publicCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
+const playerCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
+const playerShops = new Map();
+function registerPlayer(session) {
+    const id = Number(session?.actor?.fetchId?.());
+    if (!id || String(session.accountId || '').startsWith('bot_')) return;
+    const prior = playerShops.get(id);
+    playerShops.set(id, { session, actor: session.actor, rows: prior?.rows || [] });
+    refreshPlayers();
+}
+function refreshPlayers() {
+    const World = invoke('GameServer/World/World');
+    const Manufacture = invoke('GameServer/Crafting/ManufactureShop');
+    for (const [id, owned] of playerShops) {
+        const { session, actor } = owned;
+        const rows = [];
+        if (session.actor === actor && (World.user?.sessions || []).includes(session)
+            && actor.fetchIsOnline?.() !== false && !actor.isDead?.()
+            && Number(actor.fetchPrivateStoreType?.()) === Manufacture.MANUFACTURE) {
+            const town = invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor);
+            if (!town) {
+                for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
+                owned.rows = [];
+                continue;
+            }
+            for (const entry of Manufacture.shop(actor).entries) {
+                const recipe = recipes().resolveByRecipeId(entry.recipeId);
+                if (!recipe || !Number.isSafeInteger(entry.price) || entry.price < 0) continue;
+                const capacity = Math.min(64, Math.floor(Number(actor.fetchMp?.() || 0) / Math.max(1, recipe.mpCost)));
+                if (capacity) rows.push([id, recipe.recipeId, entry.price, town,
+                    actor.fetchLocX(), actor.fetchLocY(), actor.fetchLocZ(), capacityBucket(capacity)]);
+            }
+        }
+        if (JSON.stringify(rows) === JSON.stringify(owned.rows)) continue;
+        for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
+        for (const row of rows) { togglePublicDigest(row); playerCandidates.put(`p:${id}:${row[1]}`, { ...candidateRow(row), playerWorkshop: true }); }
+        owned.rows = rows;
+        if (session.actor !== actor || !(World.user?.sessions || []).includes(session)) playerShops.delete(id);
+    }
+}
+function playerLookup(ownerId, recipeId, customer) {
+    if (customer?.phase !== 'hot') return null;
+    refreshPlayers();
+    const owner = playerShops.get(Number(ownerId));
+    const row = owner?.rows.find(entry => entry[1] === Number(recipeId));
+    if (!row) return null;
+    const recipe = recipes().resolveByRecipeId(recipeId);
+    return { playerWorkshop: true, recipe, price: row[2], entryPrice: row[2], session: owner.session,
+        state: { characterId: Number(ownerId), currentRegion: row[3],
+            loc: { locX: row[4], locY: row[5], locZ: row[6] }, vitals: { mp: row[7] * Math.max(1, recipe.mpCost) } } };
+}
 function togglePublicDigest(row, direction = 1) {
     const productId = Number(recipes().resolveByRecipeId(row[1])?.productId || 0);
     if (!productId) return;
@@ -20,10 +70,12 @@ function togglePublicDigest(row, direction = 1) {
     }
 }
 function publicRecipeDigest(productId) {
+    refreshPlayers();
     const value = publicDigests.get(Number(productId));
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
 function publicScopeDigest(scope) {
+    refreshPlayers();
     const value = publicScopeDigests.get(scope);
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
@@ -167,6 +219,7 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
     const database = invoke('Database');
     let customer = life().cachedState(customerId);
     let admitted = null;
+    let liveOrder = false, liveCommitted = false;
     try {
         // Recovery retains the original identity and precedes the current
         // quote, recipe book and already-consumed material checks.
@@ -177,6 +230,21 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
                 economyCommand: admitted.command });
             if (result.customerState) Commit.acceptRow(result.customerState);
             if (result.crafterState) Commit.acceptRow(result.crafterState);
+            return result;
+        }
+        const player = playerLookup(ownerId, recipeId, customer);
+        if (player) {
+            liveOrder = true;
+            const session = (invoke('GameServer/World/World').user?.sessions || [])
+                .find(entry => Number(entry.actor?.fetchId?.()) === Number(customerId));
+            if (!session || !customer || expectedPrice !== null && Number(expectedPrice) !== player.price)
+                throw Error('workshop price changed');
+            admitted = await Commit.admit(customer, Commit.KINDS.craft);
+            const result = await invoke('GameServer/Crafting/ManufactureShop').craft(session, Number(ownerId), Number(recipeId), random,
+                { botOrder: true, batches, expectedPrice: player.price, funding, economyCommand: admitted.command });
+            if (!result || !result.committed) throw Error('player_workshop_unavailable');
+            liveCommitted = true;
+            if (result.customerState) Commit.acceptRow(result.customerState);
             return result;
         }
         const crafter = life().cachedState(ownerId);
@@ -214,7 +282,7 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
     } catch (error) {
         // The caller keeps this bounded original header when delivery fails;
         // no new attempt is inferred from the leftover materials.
-        if (admitted) error.economyCommand = admitted.command;
+        if (admitted && (!liveOrder || liveCommitted)) error.economyCommand = admitted.command;
         throw error;
     } finally {
         if (admitted) Commit.finish(customerId, admitted.command);
@@ -293,6 +361,8 @@ function crafterCandidates(limit = 16) {
 }
 
 function lookup(ownerId, recipeId, customer) {
+    const player = playerLookup(ownerId, recipeId, customer);
+    if (player) return player;
     const state = byRecipe.get(Number(recipeId))?.get(Number(ownerId));
     if (!state || life().cachedState(ownerId) !== state) return null;
     return { state, recipe: recipes().resolveByRecipeId(recipeId), ...quote(state, customer, recipeId) };
@@ -325,8 +395,10 @@ function buildPublicRecipeRows(ownerId) {
     }
     return result;
 }
-function publicForRecipe(recipeId, customer = {}) {
-    return publicCandidates.candidates(recipeId, customer.characterId);
+function* publicForRecipe(recipeId, customer = {}) {
+    refreshPlayers();
+    yield* publicCandidates.candidates(recipeId, customer.characterId);
+    if (customer.phase === 'hot') yield* playerCandidates.candidates(recipeId, customer.characterId);
 }
 function* publicRows() {
     for (const id of owners.keys()) for (const row of publicRecipeRows(id)) yield [`w:${id}:${row[1]}`, ...row];
@@ -367,4 +439,4 @@ async function publishDemand(state, recipe, productPrice, context) {
     }
     return state;
 }
-module.exports = { init, register, remove, recipesChanged, knownFor, cachedRecipes, bookFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };
+module.exports = { init, register, registerPlayer, remove, recipesChanged, knownFor, cachedRecipes, bookFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };

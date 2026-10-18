@@ -36,6 +36,13 @@ assert(v8.serialize(largestBaseline).byteLength - v8.serialize(decision).byteLen
     'an exact native inventory baseline adds at most 32 wire bytes');
 assert.deepEqual([...decision.usefulness.slice(0, 2)], [2000, 41], 'demands override projected values');
 assert.equal(decision.watch.length, 3); assert.equal(decision.materials.length, 8);
+const eight = compact(structuredClone(capture({ ...economy,
+    watchList: Array.from({ length: 8 }, (_, i) => ({ itemId: 100 + i, amount: 2, worth: 12000, kind: 'book' })) }, state)));
+assert.equal(eight.watch.length, 8);
+assert.deepEqual(eight.materials, decision.materials, 'extended watch counts preserve following native fields');
+assert.deepEqual(eight.wish, decision.wish);
+assert.equal(eight.activity.itemId, decision.activity.itemId);
+assert(v8.serialize(eight).byteLength <= 800, 'eight purchase requests share the existing card budget');
 const transported = compact(structuredClone(decision));
 assert.deepEqual(transported.watch, decision.watch); assert.deepEqual(transported.materials, decision.materials);
 assert.deepEqual([...transported.usefulness], [...decision.usefulness]); assert.equal(transported.inputHash, decision.inputHash);

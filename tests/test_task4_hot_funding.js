@@ -29,7 +29,7 @@ const deps = {
     'GameServer/Bot/Population/BotLifeState': { inventorySummaryFromItems: () => ({}) },
     'GameServer/Bot/AI/GearAcquisitionPlanner': {},
     'GameServer/Bot/Economy/PurchaseFunding': Funding,
-    'GameServer/Bot/Economy/MarketOpportunity': { bestOffer: (_id, options) => { budget = options.budget; return offer; },
+    'GameServer/Bot/Economy/MarketOpportunity': { bestHotOffer: (_id, options) => { budget = options.budget; return offer; },
         offerTarget: () => ({ town: 'Giran' }) },
     'GameServer/Bot/Economy/TownNpcCatalog': {},
     'GameServer/Bot/AI/BotMammonUnseal': { plan: () => null },
