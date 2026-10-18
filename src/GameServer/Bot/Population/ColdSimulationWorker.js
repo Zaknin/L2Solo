@@ -116,6 +116,7 @@ const RequiredPartyFormation = require('./RequiredPartyFormation');
 const { ColdCompetitionMonitor } = require('./ColdCompetitionMonitor');
 const ColdCompetitionCandidates = require('./ColdCompetitionCandidates');
 const { ColdSimulationKernel } = require('./ColdSimulationKernel');
+const PartyGoalCalculation = require('./PartyGoalCalculation');
 const { beginHuntingTrip } = require('./HuntingTravel');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableMirror = require('./TableMirror');
@@ -1256,8 +1257,9 @@ function startKernel(config = {}) {
             };
             // Accepted custody owns the next physical transition. Resume the
             // original economic plan after the meeting releases the actor.
+            const kitMoved = DecisionSections.kitMoved(state, projected);
             if (state.stats?.tradeMeeting) return { state: projected,
-                durable: Object.keys(durable).length ? durable : null };
+                durable: Object.keys(durable).length ? durable : null, kitMoved };
             const context = kernel.states.get(Number(state.characterId))?.context || {};
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { ...context, stock: economy.stock('shots'), economy }, 'action') : null;
@@ -1267,6 +1269,8 @@ function startKernel(config = {}) {
             const market = reviewMarket(projected, timestamp, economy);
             return {
                 state: projected,
+                // A member's kit event, read by its party step (worker-local).
+                kitMoved,
                 economyEdges,
                 ...(economyPlan ? { economyPlan } : {}),
                 ...(market ? { market } : {}),
@@ -1293,6 +1297,8 @@ function startKernel(config = {}) {
             preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
             planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
         }),
+        reviewRecruits: ({ party, members, timestamp }) => PartyGoalCalculation.recruitCheck(party, members,
+            { spots: planningSpots, timestamp }),
         planLifecycle: async ({ state, context, timestamp }) => {
             if (state.stats?.tradeMeeting) return null;
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
@@ -1395,7 +1401,8 @@ function startKernel(config = {}) {
                 ? SpotIndex.spotById(spots, acquisitionPlan.next.spotId)
                 : null;
             if (reservedSpot) SpotProfiles.reserveCapacity(occupancy, reservedSpot, [state]);
-            const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp, { spots, economy });
+            const partyRequest = PartyRequestPlanner.partyRequestForPlan(state, acquisitionPlan, timestamp,
+                { spots, economy, memo: kernel.states.get(Number(state.characterId)) });
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { occupancy, excludedSpotIds, timestamp })

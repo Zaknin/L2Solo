@@ -2243,7 +2243,13 @@ class ColdSimulationCoordinator {
         await step('party', async () => {
             if (entry.proposal.partyResolution?.party) {
                 const party = entry.proposal.partyResolution.party;
-                if (!committedPartyRow) await BackgroundPartyState.createOrUpdate(party);
+                // A pending join main recorded after the worker took its copy of
+                // the row outlives this blind write; a step that read it answers
+                // it (recruitCheck) and writes the row without it.
+                const pending = !committedPartyRow && !entry.proposal.partyResolution.recruitCheck && party.status !== 'dissolved'
+                    && BackgroundPartyState.find(party.partyId)?.stats?.pendingRecruits;
+                if (!committedPartyRow) await BackgroundPartyState.createOrUpdate(pending
+                    ? { ...party, stats: { ...(party.stats || {}), pendingRecruits: pending } } : party);
                 if (!committedPartyRow && party.stats?.raidEncounter?.status === 'defeated') {
                     await invoke('GameServer/Bot/Population/ColdRaidWorldBridge').settle(party)
                         .catch((error) => utils.infoWarn('RaidBoss', 'cold raid settlement failed for %s: %s',
@@ -2299,6 +2305,11 @@ class ColdSimulationCoordinator {
             later('partyPlans', () => this.population.applyWorkerPartyRequirements(
                 BackgroundPartyState.find(entry.proposal.partyResolution.partyId) || entry.proposal.partyResolution.party,
                 entry.proposal.partyResolution));
+        }
+        // The recruit check the leader's step ran on the party's pending join.
+        if (entry.proposal.partyResolution?.recruitCheck && this.population?.applyWorkerPartyJoin) {
+            later('partyJoin', () => this.population.applyWorkerPartyJoin(entry.proposal.partyResolution.partyId,
+                entry.proposal.partyResolution.recruitCheck));
         }
         if (entry.proposal.buffOffer) {
             await step('buff', () => invoke('GameServer/Bot/Economy/ColdBuffService')

@@ -72,14 +72,20 @@ try {
     // the next cold review instead of permanently losing later sources.
     index = new Map([[4097, entries.map((entry, i) => i < Material.MAX_SOURCE_CHECKS
         ? { ...entry, npcLevel: 1 } : entry)]]);
-    const boundedEconomy = { ...economy, plan: {} }, inspectedBefore = inspected, routesBefore = routeChecks;
-    assert.equal(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp }), null);
-    assert.equal(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp: timestamp + 1 }), null);
+    // memo: the bot's record in the background thread, which keeps the negative.
+    const memo = {}, inspectedBefore = inspected, routesBefore = routeChecks;
+    assert.equal(Material.request(state, plan, { spots, economy, memo, timestamp }), null);
+    assert.equal(Material.request(state, plan, { spots, economy: { ...economy }, memo, timestamp: timestamp + 1 }), null);
     assert.equal(inspected, inspectedBefore);
-    assert.equal(routeChecks, routesBefore, 'a cached negative repeats no safety checks');
-    assert(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp: timestamp + Material.REVIEW_MS }));
+    assert.equal(routeChecks, routesBefore, 'a cached negative repeats no safety checks, whatever economy object is passed');
+    // A raised section (the decision sequence moved) re-checks before the review time.
+    const raised = { ...state, stats: { ...state.stats, decisionSeq: Number(state.stats?.decisionSeq || 0) + 1 } };
+    assert(Material.request(raised, plan, { spots, economy, memo, timestamp: timestamp + 2 }),
+        'a moved decision re-checks the camps');
     assert.equal(inspected - inspectedBefore, entries.length - Material.MAX_SOURCE_CHECKS,
         'a later review reaches valid sources after the rejected first bounded page');
+    assert(Material.request(state, plan, { spots, economy, memo, timestamp: timestamp + Material.REVIEW_MS }),
+        'the negative ends at its review time');
     const equippedB = {};
     const role = Planner.roleFor(state);
     for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: state.classId, level: 40 }).items) {

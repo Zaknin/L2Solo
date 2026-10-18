@@ -470,5 +470,13 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     if (previousFact('stores') !== current.stores) raise('stores');
     return [...sections];
 }
-module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
+// The kit fact each economy build records in its baseline moved between two
+// states of one bot: a party member's kit event. A party member's step raises
+// no hard event (they run in hunting rounds only); its own post-round build
+// names the kit change in its baseline instead. A step with no build (a held
+// decision) keeps the baseline, so it reads as no move.
+function kitMoved(before, after) {
+    return (before?.stats?.wishSections?.build ?? null) !== (after?.stats?.wishSections?.build ?? null);
+}
+module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, kitMoved, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
     MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

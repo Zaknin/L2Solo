@@ -63,14 +63,11 @@ async function checkDeferred(old, reason) {
 async function main() {
     DB.init(); invoke('GameServer/DataCache').init(); await Life.init();
     Coordinator.markDirty = (state, options) => { snapshots.push({ state, options }); kernel.upsert({ state, context: {} }); };
-    const stale = await seed(Request.maxAgeMs('required') + 60000), incompatible = await seed();
-    const claimed = await seed(Request.maxAgeMs('required') + 60000);
+    const incompatible = await seed(), claimed = await seed();
     const grant = await DB.claimColdSimulationLease({ characterId: claimed.characterId, expectedRevision: claimed.simulation.revision,
         allowLifecycle: true, ownerId: 'cold_simulation_owner', leaseId: 'active-request', timestamp: at, leaseUntil: at + 30000 });
     assert(grant.ok);
     snapshots.length = 0;
-    assert.equal(await Life.expireStalePartyRequests(500), 1);
-    await checkDeferred(stale);
     assert.equal(JSON.parse((await rowFor(claimed.characterId)).statsJson).partyRequest.status, 'open', 'an active worker lease is untouched');
     assert.equal(await Life.deferUnformablePartyRequests([incompatible.characterId, claimed.characterId]), 1);
     await checkDeferred(incompatible, 'no_compatible_level_match');

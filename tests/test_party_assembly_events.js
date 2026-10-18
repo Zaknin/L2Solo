@@ -72,8 +72,7 @@ async function main() {
         at: options.prepared.timestamp, soloSource: null, partySource: null });
     disposers.push(() => { Income.compare = originalIncome; });
     Coordinator.requestPartyGoals = async (party, selected) => ({ ok: true,
-        sources: GoalCalculation.sources(selected), joint: party.stats?.recruitmentReview
-            ? GoalPolicy.recruitment(party, selected) : GoalPolicy.joint(party, selected) });
+        sources: GoalCalculation.sources(selected), joint: GoalPolicy.joint(party, selected) });
     const clock = { now: Date.now() }, jobs = registry(clock);
     const driver = new PartyAssemblyEvents({ registry: jobs, life: Life, parties: Parties,
         classify: state => Population.partyAssemblyInput(state),
@@ -171,13 +170,40 @@ async function main() {
         assert.equal(memberQueries, 0, 'five-party recruitment reads no member DB rows');
         assert.equal(publications, 0, 'member reads publish nothing');
         assert.equal(Life.cachedState(freshId).level, 11, 'a stale DB row cannot overwrite the newer cache');
-        Population.partyRequirementRefreshDue.clear();
-        await Population.reviewBackgroundPartyDemand([]);
-        assert.equal(Population.partyRequirementRefreshDue.size, 0, 'no required waiters marks no refresh');
-        await Population.reviewBackgroundPartyDemand([{ characterId: 999 }]);
-        assert.equal(Population.partyRequirementRefreshDue.size, Config.partyRequirementRefreshBatchSize);
+        // A party is due for its member plans only when its roster, its
+        // objective or its pending recruits change, never on its own plan write.
+        const due = Population.partyRequirementRefreshDue, base = cacheParties[0], id = base.partyId;
+        due.clear();
+        Population.markPartyRequirementsDue({ ...base, stats: { acquisitionGoal: { status: 'active' } } }, base);
+        assert.equal(due.size, 0, 'the apply\'s own goal write marks nothing');
+        Population.markPartyRequirementsDue({ ...base, memberIds: [...base.memberIds, 999] }, base);
+        assert(due.has(id), 'a new member marks the party due');
+        due.clear();
+        Population.markPartyRequirementsDue({ ...base, stats: { objective: { objectiveKey: 'spot:B' } } }, base);
+        assert(due.has(id), 'a new objective marks the party due');
+        Population.markPartyRequirementsDue({ ...base, status: 'dissolved' }, base);
+        assert.equal(due.size, 0, 'a dissolved party drops its mark');
     } finally { DB.execute = originalExecute; Parties.active = originalActive; unpublish(); Population.partyRequirementRefreshDue?.clear(); }
     console.log('PASS five-party cache reads, no publications, cache authority and addressed refresh marks');
+
+    // The apply's own party write (its new objective) publishes through the
+    // same subscription as any change; the due delete after its last write
+    // erases that mark, so a re-plan never triggers the next one.
+    {
+        const owner = await seed(), other = await seed(), partyId = 'apply-own-write';
+        for (const member of [owner, other]) await Life.upsertState({ ...member, activity: 'grouped',
+            party: { partyId, leaderId: owner.characterId } }, 'apply_fixture');
+        await Parties.createOrUpdate({ partyId, leaderId: owner.characterId, memberIds: [owner.characterId, other.characterId],
+            status: 'active', spotId: 'event-fixture', stats: { objective: { objectiveKey: 'spot:old' } } });
+        const unsubscribe = Parties.subscribeChanges((party, previous) => Population.markPartyRequirementsDue(party, previous));
+        try {
+            Population.partyRequirementRefreshDue.clear();
+            await Population.applyWorkerPartyRequirements(Parties.find(partyId), { memberPlans: [], requirementRefreshedAt: true });
+            assert.equal(Parties.find(partyId).stats.objective, null, 'the apply wrote its own new objective');
+            assert.equal(Population.partyRequirementRefreshDue.has(partyId), false, 'the apply\'s own writes leave no mark');
+        } finally { unsubscribe(); Population.partyRequirementRefreshDue.clear(); }
+    }
+    console.log('PASS the re-plan apply marks nothing by its own writes');
 
     const stampCache = new Cache(), stampTick = { now: Date.now() }, stampRegistry = registry(stampTick);
     let stampPartyListener;

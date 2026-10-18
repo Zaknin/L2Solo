@@ -98,6 +98,8 @@ function clanPartyObjectiveForState(state) {
     return objective && ['open', 'deferred'].includes(objective.status) ? objective : null;
 }
 
+// options: spots, economy (the bot's own economy, built in the background
+// thread; required, no build here) and memo (the bot's worker record).
 function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) {
     const previous = state?.stats?.partyRequest;
     const Material = require('./CraftMaterialParty');
@@ -119,7 +121,7 @@ function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) 
     let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan)
         || Material.request(state, plan, { ...options, timestamp }) || sharedTarget;
     if (objective?.priority === 'required' && objective.itemId && !objective.clanGoalKey && !objective.helpDeal) {
-        const context = options.economy || invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state);
+        const context = options.economy;
         const amount = Math.max(1, Math.floor(Number(objective.materialParty ? objective.amount : plan?.next?.amount || 1)));
         // ARCH-NOTE: party value is pending; the help fee buys progress on its requested item.
         const fee = Math.floor(Math.min(invoke('GameServer/Bot/Economy/PurchaseFunding').spendable(state, 0, { itemId: objective.itemId }),

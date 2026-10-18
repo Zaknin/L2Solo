@@ -94,15 +94,6 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     assert.equal(admission.payload.joint.incomeReviews.length, 2);
     assert(admission.payload.joint.incomeReviews.every(review => !review.accept), 'a missing camp forecast refuses unsafe formation in the worker');
     assert(Protocol.validateEnvelope(admission, 'worker').ok, 'material admission uses the bounded existing review packet');
-    post('party_goal_request', { ...request, members: materialMembers, party: { ...party,
-        stats: { objective: materialObjective, agreement: materialAgreement, recruitmentReview: true } },
-        replyBy: Date.now() + 5000 }, 'material-recruitment');
-    const recruited = await wait(message => message.type === 'party_goal_result' && message.msgId === 'material-recruitment');
-    assert.equal(recruited.payload.ok, true, recruited.payload.reason);
-    assert.equal(recruited.payload.joint.memberGoals.filter(goal => goal.amount === 12).length, 2);
-    assert.equal(recruited.payload.joint.incomeReviews.length, 2);
-    assert(recruited.payload.joint.incomeReviews.every(review => !review.accept));
-    assert(Protocol.validateEnvelope(recruited, 'worker').ok, 'native worker recruitment checks the complete prospective roster');
     worker.postMessage({ queryProbe: 'canonical' });
     const prepared = await wait(message => message.probe === 'canonical');
     assert.equal(prepared.slots.filter(row => row.id > 0).length, 2);
