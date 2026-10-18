@@ -1,3 +1,6 @@
+// Only tests call this module since the main-thread party resolver was removed
+// (ARCH-18). Kept, not deleted, because the recruitment text and its agreement
+// wording are covered by tests; delete it with them if no live caller returns.
 const ActorQueries = require('../../World/ActorSpatialQueries');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');

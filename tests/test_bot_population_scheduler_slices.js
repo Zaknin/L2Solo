@@ -11,8 +11,6 @@ const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const PersistentStateRetention = invoke('GameServer/Bot/Population/PersistentStateRetention');
 const Database = invoke('Database');
 
-const originalSliceMs = Config.schedulerSliceMs;
-const originalYield = PopulationService.yieldSchedulerSlice;
 const originalRealPlayerSessions = PopulationService.realPlayerSessions;
 const originalEventLoopLag = Metrics.currentEventLoopLag;
 const originalIdleMaxResolves = Config.schedulerIdleMaxResolvesPerTick;
@@ -36,23 +34,6 @@ const originalNextWalResetAt = PopulationService.nextWalResetAt;
 const originalLastWalResetResult = PopulationService.lastWalResetResult;
 
 async function run() {
-    const values = [];
-    const yields = [];
-    Config.schedulerSliceMs = 1;
-    PopulationService.yieldSchedulerSlice = async (startedAt) => {
-        yields.push(Date.now() - startedAt);
-    };
-
-    const results = await PopulationService.runInSchedulerSlices([1, 2, 3], async (value) => {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        values.push(value);
-        return value * 2;
-    });
-
-    assert.deepStrictEqual(values, [1, 2, 3], 'scheduler work must stay ordered');
-    assert.deepStrictEqual(results, [2, 4, 6], 'scheduler work results must be retained');
-    assert.strictEqual(yields.length, 3, 'each over-budget scheduler slice must yield before more work');
-
     PopulationService.playerActivityProfile = () => ({ protected: false, activeParty: false, realPlayers: 0, companionCount: 0, mode: 'idle' });
     Metrics.currentEventLoopLag = () => 0;
     Config.schedulerIdleMaxResolvesPerTick = 1000;
@@ -301,10 +282,8 @@ run()
         process.exitCode = 1;
     })
     .finally(() => {
-        Config.schedulerSliceMs = originalSliceMs;
         Config.schedulerIdleMaxResolvesPerTick = originalIdleMaxResolves;
         Config.schedulerLagAbortMs = originalLagAbort;
-        PopulationService.yieldSchedulerSlice = originalYield;
         PopulationService.realPlayerSessions = originalRealPlayerSessions;
         PopulationService.playerActivityProfile = originalActivityProfile;
         BotWarehouse.cleanupHistoricalBatch = originalWarehouseCleanup;

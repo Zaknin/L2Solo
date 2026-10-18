@@ -59,9 +59,6 @@ let coordinator = null;
     await coordinator.start({
         executeWorkerLifecycleCommand() {
             throw new Error('main_resolver_must_not_run_for_simple_lifecycle');
-        },
-        resolveBackgroundParty() {
-            throw new Error('party_resolver_must_not_run_for_simple_lifecycle');
         }
     });
 

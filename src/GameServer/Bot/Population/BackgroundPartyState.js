@@ -458,26 +458,6 @@ const BackgroundPartyState = {
         return activeOf(new Set((partyIds || []).map(String)), reader);
     },
 
-    due(limit = 10, at = now()) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(100, Number(limit) || 10));
-
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE status = 'active'
-            AND (nextResolveAt IS NULL OR nextResolveAt <= ?)
-            ORDER BY COALESCE(nextResolveAt, 0) ASC
-            LIMIT ${safeLimit}`,
-            [at]
-        ]).then((rows) => rows.map((row) => {
-            const party = normalize(row);
-            return acceptedParty(party);
-        })).catch((err) => {
-            utils.infoWarn('BotParty', 'failed to fetch due background parties: %s', err.message);
-            return [];
-        });
-    },
-
     setStatus(partyId, status = 'inactive') {
         const party = this.find(partyId);
         if (!party) return Promise.resolve(null);

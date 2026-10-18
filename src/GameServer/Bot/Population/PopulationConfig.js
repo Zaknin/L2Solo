@@ -104,7 +104,6 @@ const DEFAULTS = {
     // The persistent world is resolved in bounded batches so population
     // expansion never becomes a database spike after a restart.
     maxResolvesPerTick: 25,
-    maxPartyResolvesPerTick: 3,
     // Historical gear debt is repaired only while the server is player-idle.
     // Each pass advances by owner id and performs at most one tiny atomic
     // transaction per owner, so cleanup cannot become a startup table sweep.

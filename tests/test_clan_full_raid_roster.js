@@ -481,47 +481,8 @@ async function main() {
         // Admission before any hit also survives phase transfer without
         // manufacturing an active encounter or earned fight.
         await phase('cold'); assert(!Roster.held(party));
-        const Legacy = require('../src/GameServer/Bot/Population/ColdRaidLegacyCommit');
-        const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
-        const Encounter = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
-        const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
-        const Bridge = require('../src/GameServer/Bot/Population/ColdRaidWorldBridge');
-        const originalResolve = Resolver.resolve, originalCommit = Database.commitAndReleaseColdSimulationLeases;
-        const originalSettle = Bridge.settle, originalDecorate = Scope.decorateSpot, originalPrepare = Authority.prepare;
-        let bridgeCalls = 0, race = true;
-        try {
-            Scope.decorateSpot = () => ({ ...spot, raidAuthorityRevision: Authority.get('raid:10137').revision,
-                raidAuthority: Authority.get('raid:10137').snapshot });
-            Authority.prepare = () => true; // Native world physics is outside this isolated SQLite fixture.
-            Bridge.settle = async () => { bridgeCalls++; assert.equal((await query('SELECT status FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0].status, 'dissolved'); };
-            Resolver.resolve = input => {
-                const accepted = Roster.admission(input.party, input.members, input.spot, { owner: input.raidOwner, arrived: true, timestamp: input.timestamp });
-                if (!accepted.ok) return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
-                    materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: null } })), events: [], nextResolveAt: null,
-                    partyPatch: { status: 'dissolved', stats: { partyBreakReason: accepted.reason } }, debug: { fights: 0, wins: 0 } };
-                const snapshot = Encounter.record(input.party, Encounter.begin(input.party, input.spot, 10137, input.timestamp),
-                    { won: true, encounter: null }, input.timestamp);
-                return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
-                    materialize: { exp: 100, sp: 0, adena: 0, items: [] }, nextResolveAt: Date.now() + 30000 } })), events: [],
-                nextResolveAt: null, partyPatch: { status: 'dissolved', stats: { raidEncounter: snapshot, raidAdmission: accepted.proof } }, debug: { fights: 1, wins: 1 } };
-            };
-            Database.commitAndReleaseColdSimulationLeases = async requests => {
-                if (race) { race = false; await query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]); }
-                return originalCommit.call(Database, requests);
-            };
-            const denied = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(!denied.ok && denied.detail === 'raid_roster_member_changed', JSON.stringify(denied)); assert.equal(bridgeCalls, 0);
-            await query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]);
-            const won = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(won.ok, JSON.stringify(won)); assert.equal(bridgeCalls, 1);
-            const replay = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(!replay.ok); assert.equal(bridgeCalls, 1, 'replay never reaches world bridge a second time');
-        } finally {
-            Resolver.resolve = originalResolve; Database.commitAndReleaseColdSimulationLeases = originalCommit;
-            Bridge.settle = originalSettle; Scope.decorateSpot = originalDecorate; Authority.prepare = originalPrepare;
-        }
         await nativeImpactCases(sessions, registry);
-        console.log('Full clan raid roster: native formation/worker, exact9 admission, atomic races/replay, held casualties/recovery/handoff and hot first-strike race passed');
+        console.log('Full clan raid roster: native formation/worker, exact9 admission, held casualties/recovery/handoff and hot first-strike race passed');
     } finally {
         Catalog.findById = old.find; Scope.projectSource = old.project; invoke('GameServer/Bot/AI/SpotService').containsLocation = old.contains;
         World.registeredActorById = old.registered; Index.bossByTemplateId = old.boss; Life.partySessionSnapshot = old.snapshot;

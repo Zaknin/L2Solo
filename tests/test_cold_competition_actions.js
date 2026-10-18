@@ -181,12 +181,6 @@ async function run() {
         socialParty = await Population.formCompetitionParty([Life.cachedState(9), Life.cachedState(10)], { spotId: 'test', npcId: 10 });
         assert(socialParty?.partyId, 'real population formation must create a social party');
         assert.strictEqual(socialParty.stats.capacityPool, undefined);
-        const dueReview = await Party.createOrUpdate({ ...socialParty,
-            stats: { ...socialParty.stats, sessionExpiresAt: Date.now() - 1 } });
-        const reviewed = await Population.resolveBackgroundParty(dueReview);
-        assert.strictEqual(reviewed.ok, true, JSON.stringify(reviewed));
-        assert.strictEqual(reviewed.party.status, 'active', 'legacy runtime must review rather than expire a new productive goal');
-        assert(reviewed.party.stats.sessionReview.nextAt > Date.now());
     } finally { Spots.findById = originalFind; Coordinator.requestPartyGoals = originalPartyGoals; }
     const runtimeMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
     await runtimeMemory.ensureMany([13, 14, 15, 16, 17, 18]);

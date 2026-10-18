@@ -2089,67 +2089,6 @@ const BotLifeState = {
         return cache.walkers.size;
     },
 
-    dueCold(limit = 10, at = now()) {
-        if (!initialized) return Promise.resolve([]);
-        const safeLimit = Math.max(1, Math.min(100, Number(limit) || 10));
-        // A changed drop model can make an active direct-drop route unsafe.
-        // Pull only fighting bots forward: resting and travelling states are
-        // intentionally event-scheduled and cannot hurt themselves while
-        // they wait for their persisted deadline.
-        const staleRateModelPlan = `json_extract(statsJson, '$.equipmentPlan.status') = 'active'
-                AND json_extract(statsJson, '$.equipmentPlan.expectedKills') IS NOT NULL
-                AND COALESCE(CAST(json_extract(statsJson, '$.equipmentPlan.rateModelVersion') AS INTEGER), 0) < ${GearAcquisitionPlanner.RATE_MODEL_VERSION}`;
-        const pendingEquipmentSpotReplan = `activity IN ('hunting', 'resting')
-                AND json_extract(statsJson, '$.equipmentPlan.status') = 'active'
-                AND json_extract(statsJson, '$.equipmentPlan.next.spotId') IS NOT NULL
-                AND json_extract(statsJson, '$.equipmentPlan.next.spotId') <> COALESCE(spotId, '')`;
-
-        return Database.execute([
-            `SELECT * FROM ${TABLE}
-            WHERE phase = 'cold'
-            AND activity <> 'pk_hunting'
-            AND (partyId IS NULL OR partyId = '')
-            AND simulationOwner = 'legacy_main'
-            -- Craft-service stations are materialized on demand: they do
-            -- not belong in the combat scheduler's periodic queue.
-            AND NOT (activity = 'crafting' AND json_extract(statsJson, '$.craftShop') IS NOT NULL)
-            AND (
-                nextResolveAt IS NULL OR nextResolveAt <= ?
-                OR (activity = 'hunting' AND (${staleRateModelPlan}))
-            )
-            -- Travel, the arrived market action, and crafting are finite
-            -- state transitions. They must outrank a large resting/hunting
-            -- backlog, otherwise a bot can remain at a market or station
-            -- for minutes after it is already due.
-            ORDER BY CASE
-                -- Replan active combat before it can continue using a stale
-                -- target level or drop-rate estimate.
-                WHEN ${staleRateModelPlan} THEN 0
-                WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1
-                -- An active equipment plan whose next source is elsewhere
-                -- must get a chance to start gatekeeper travel before the
-                -- ordinary hunting backlog keeps resolving the old spot.
-                WHEN ${pendingEquipmentSpotReplan} THEN 2
-                -- Startup craft recovery is a one-shot replan.  Serve it
-                -- before the normal hunting backlog so a repaired station
-                -- wait immediately selects its missing raw material.
-                WHEN json_extract(statsJson, '$.lastReason') = 'startup_craft_wait_recovery' THEN 3
-                WHEN activity = 'dead' THEN 4
-                ELSE 5
-            END ASC,
-            COALESCE(nextResolveAt, 0) ASC
-            LIMIT ${safeLimit}`,
-            [at]
-        ]).then((rows) => rows.map((row) => {
-            const state = normalize(row);
-            cache.set(state.characterId, state);
-            return state;
-        })).catch((err) => {
-            utils.infoWarn('BotLife', 'failed to fetch due cold states: %s', err.message);
-            return [];
-        });
-    },
-
     pendingClassProgressionMigration() { return classMigrationCandidates.size; },
 
     subscribeClassProgressionMigration(listener) {

@@ -128,11 +128,8 @@ function partyChecks() {
         ...(backoff ? { cause: 'death_pressure', spotBackoff: backoff } : {}),
         to: destination, destinations: { [member.characterId]: destination } });
     for (const backoff of [null, { spotId: oldSpot.id, reason: 'death_pressure', startedAt: at, until: at + 3600000 }]) {
-        const fromMain = PopulationService.beginPartySpotTravel(member, newSpot, at,
-            { destination, ...(backoff ? { spotBackoff: backoff } : {}) });
         const fromKernel = beginHuntingTrip(member, partyRoute(backoff), at);
-        assert.deepStrictEqual(fromMain, fromKernel, `party trips${backoff ? ' under pressure' : ''}: one state`);
-        assert.deepStrictEqual(fromMain.stats.spotRisk, member.stats.spotRisk,
+        assert.deepStrictEqual(fromKernel.stats.spotRisk, member.stats.spotRisk,
             'a party trip leaves the member\'s solo risk alone');
     }
 }

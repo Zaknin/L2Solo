@@ -316,19 +316,8 @@ try {
                 const classUpdate = classUpdates.at(-1);
                 assert(classUpdate, 'migration must persist the profession on the physical character');
                 assert.ok([36, 37].includes(classUpdate.classId), 'migration must use the physical character class as its source of truth');
-                return BotLifeState.dueCold(5, 1000);
             }))
         .then(() => {
-            const due = statements.find((entry) => entry.sql.includes("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"));
-            assert(due.sql.includes('rateModelVersion'), 'due cold states must prioritize persisted plans from an older drop-rate model');
-            assert(due.sql.includes(`< ${GearPlanner.RATE_MODEL_VERSION}`), 'due cold states must prioritize plans from the current model rollout rather than a stale hard-coded version');
-            assert(due.sql.includes("OR (activity = 'hunting' AND (json_extract(statsJson, '$.equipmentPlan.status') = 'active'"), 'only active stale combat plans must bypass their old next-resolve deadline for an immediate safety replan');
-            const stalePlanOrder = due.sql.indexOf("WHEN json_extract(statsJson, '$.equipmentPlan.status') = 'active'");
-            assert(stalePlanOrder >= 0 && stalePlanOrder < due.sql.indexOf("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"), 'a stale active plan must outrank ordinary market, travel, and crafting transitions');
-            assert(due.sql.includes("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"), 'due cold states must promptly finish market, travel, and crafting transitions after an urgent combat-safety replan');
-            assert(due.sql.includes("json_extract(statsJson, '$.equipmentPlan.next.spotId')"), 'due cold states must prioritize active gear plans whose source spot differs from the saved spot');
-            assert(due.sql.includes("startup_craft_wait_recovery"), 'startup craft recovery must immediately replan before the ordinary hunting backlog');
-            assert(due.sql.includes('COALESCE(nextResolveAt, 0) ASC'), 'due cold states must remain fair by schedule within each lifecycle bucket');
             const current = BotLifeState.cachedState(42);
             return BotLifeState.upsertState({ ...current,
                 stats: { ...current.stats, partyRequest: { ...current.stats.partyRequest, status: 'open' } }

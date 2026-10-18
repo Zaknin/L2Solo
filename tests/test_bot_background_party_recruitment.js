@@ -333,11 +333,6 @@ async function run() {
         'clan-route',
         'a stale personal request must not hide the durable clan party objective'
     );
-    assert.strictEqual(
-        PopulationService.partyTargetNpcId({ stats: { objective: { strategy: 'craft', npcId: 701 } } }, { stats: {} }),
-        701,
-        'craft acquisition objectives must forward their material NPC to party combat'
-    );
 
     const electiveParty = { partyId: 'bgp_elective', leaderId: 11, memberIds: [11, 12], spotId: 'cruma', startedAt: 1 };
     const requiredParty = { partyId: 'bgp_required', leaderId: 21, memberIds: [21, 22], spotId: 'dion', startedAt: 2 };
