@@ -28,11 +28,13 @@ function freeze(value) {
 // Only derived memberships/keys, current record references and scalar clocks.
 // The packet/state always comes from the one canonical provider at use time.
 class ColdCompetitionCandidates {
-    constructor({ records, packets, memory, monitor, deadlines, sequence = null, fitsFrame = () => true, frameSizing = null }) {
-        if ([records, packets].some(read => typeof read !== 'function') || !memory || !monitor || !deadlines) {
+    // leaderParty(id): the party row a bot leads, or null (the worker's
+    // parties table, ColdSimulationKernel.leaderParty); partyChanged follows it.
+    constructor({ records, packets, memory, monitor, deadlines, leaderParty = () => null, sequence = null, fitsFrame = () => true, frameSizing = null }) {
+        if ([records, packets, leaderParty].some(read => typeof read !== 'function') || !memory || !monitor || !deadlines) {
             throw new TypeError('invalid_competition_candidates');
         }
-        Object.assign(this, { records, packets, memory, monitor, deadlines, sequence, fitsFrame, frameSizing });
+        Object.assign(this, { records, packets, memory, monitor, deadlines, leaderParty, sequence, fitsFrame, frameSizing });
         this.spots = new Map(); this.parties = new Map(); this.partyHunters = new Map();
         this.memberParties = new Map(); this.relationOwners = new StableOwnerMap(); this.clans = new Map(); this.units = new Map();
         this.pendingSpots = new Map(); this.pendingActors = new Map(); this.policyDeadlines = new Map();
@@ -77,7 +79,7 @@ class ColdCompetitionCandidates {
         const ordered = [...metadata.contributors].sort((a, b) => a[metaKey].sequence - b[metaKey].sequence);
         let winner = null, winnerParty = null;
         for (const record of ordered) {
-            const party = this.packets(record.id)?.context?.party;
+            const party = this.leaderParty(record.id);
             if (!party || party.partyId !== key) continue;
             if (!winnerParty || Number(party.updatedAt || 0) > Number(winnerParty.updatedAt || 0)) {
                 winner = record; winnerParty = party;
@@ -100,7 +102,7 @@ class ColdCompetitionCandidates {
             if (meta.party) drop(this.partyHunters, meta.party, record);
             this.queueSpot(meta.spot);
         }
-        if (meta.contextParty != null) this.parties.get(meta.contextParty)?.contributors.delete(record);
+        if (meta.ledParty != null) this.parties.get(meta.ledParty)?.contributors.delete(record);
         drop(this.units, meta.unit, record); drop(this.clans, meta.clan, record);
         for (const target of meta.targets) drop(this.relationOwners, target, meta.id);
         if (meta.deadlineToken != null) this.deadlines.cancelDecisionDeadline(meta.deadlineKey, meta.deadlineToken);
@@ -115,12 +117,12 @@ class ColdCompetitionCandidates {
         // Kernel captures old packet BEFORE publication, including same-source
         // context replacement; old grouping tags are stored only as metadata.
         if (previousRecord && previousPacket && previousRecord.source !== previousPacket.state) return;
-        const affected = new Set([old?.contextParty, old?.party]);
+        const affected = new Set([old?.ledParty, old?.party]);
         const sequence = this.sequence?.(id) ?? old?.sequence ?? ++this.nextSequence;
         this.detach(previousRecord || record, old);
         const state = packet.state, context = packet.context || {};
         const meta = { id, sequence, hunter: baseHunter(state, context), spot: state.spotId,
-            party: partyOf(state), contextParty: context.party?.partyId ?? null, unit: unitOf(state),
+            party: partyOf(state), ledParty: this.leaderParty(id)?.partyId ?? null, unit: unitOf(state),
             clan: this.memory.clanSocial?.identity({ id, clanId: Number(state.stats?.clanId || 0) }).clanId
                 ?? Number(state.stats?.clanId || 0), targets: [], deadlineKey: {}, deadlineToken: null };
         record[metaKey] = meta;
@@ -131,12 +133,16 @@ class ColdCompetitionCandidates {
             if (meta.party) add(this.partyHunters, meta.party, record);
             this.queueSpot(meta.spot);
         }
-        if (meta.contextParty != null) this.party(meta.contextParty).contributors.add(record);
-        affected.add(meta.contextParty); affected.add(meta.party);
+        if (meta.ledParty != null) this.party(meta.ledParty).contributors.add(record);
+        affected.add(meta.ledParty); affected.add(meta.party);
         for (const key of affected) if (key != null) this.refreshParty(key);
         this.memoryChanged(id);
         this.armEligibility(record, packet);
         this.queueActor(id); this.notifyIncoming(id);
+    }
+    // A party row changed (the parties watch): its leader's grouping is re-read.
+    partyChanged(leaderId) {
+        this.ownerChanged(Number(leaderId));
     }
     ownerRemoved(id, expectedRecord, expectedPacket) {
         const current = this.records(id);
@@ -144,7 +150,7 @@ class ColdCompetitionCandidates {
         const meta = expectedRecord?.[metaKey];
         if (!meta || expectedPacket?.state !== expectedRecord.source) return false;
         this.detach(expectedRecord, meta);
-        for (const key of new Set([meta.contextParty, meta.party])) if (key != null) this.refreshParty(key);
+        for (const key of new Set([meta.ledParty, meta.party])) if (key != null) this.refreshParty(key);
         this.queueActor(id); this.notifyIncoming(id);
         return true;
     }
@@ -169,7 +175,7 @@ class ColdCompetitionCandidates {
         for (const clan of removed) this.clanChanged(clan);
     }
     armEligibility(record, packet) {
-        const meta = record[metaKey], state = packet.state, party = packet.context?.party;
+        const meta = record[metaKey], state = packet.state, party = this.leaderParty(meta.id);
         const at = this.deadlines.now();
         const times = [state.stats?.revengeUntil, state.stats?.coldCompetition?.conflictUntil,
             state.stats?.pvpEncounter?.expiresAt, party?.stats?.coldCompetition?.conflictUntil]
@@ -180,7 +186,7 @@ class ColdCompetitionCandidates {
             if (this.stopped || this.records(meta.id) !== record || record[metaKey] !== stamp) return;
             meta.deadlineToken = null;
             this.queueRecord(record); this.notifyIncoming(meta.id);
-            for (const hunter of this.partyHunters.get(meta.contextParty) || []) this.queueRecord(hunter);
+            for (const hunter of this.partyHunters.get(meta.ledParty) || []) this.queueRecord(hunter);
             // The next distinct authored expiry is genuine evidence, not a poll.
             this.armEligibility(record, this.packets(meta.id));
         });
@@ -202,7 +208,7 @@ class ColdCompetitionCandidates {
     }
     currentParty(key) {
         const winner = this.parties.get(key)?.winner;
-        return winner ? this.packets(winner.id)?.context?.party : null;
+        return winner ? this.leaderParty(winner.id) : null;
     }
     targetForParty(key) {
         const party = this.currentParty(key);

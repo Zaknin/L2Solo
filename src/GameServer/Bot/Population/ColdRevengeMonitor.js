@@ -15,8 +15,11 @@ function nearby(a, b) {
         && Math.abs(a?.loc?.locZ - b?.loc?.locZ) <= 500;
 }
 class ColdRevengeMonitor {
-    constructor({ onCooldown = () => {} } = {}) {
+    // leaderParty(characterId): the party row a bot leads, or null (the
+    // worker's parties table, ColdSimulationKernel.leaderParty).
+    constructor({ onCooldown = () => {}, leaderParty = () => null } = {}) {
         this.onCooldown = onCooldown;
+        this.leaderParty = leaderParty;
         this.cursor = 0; this.cooldowns = new Map(); this.report = { evaluated: 0, intents: 0 };
     }
     sample(entries, memory, at, personaFor) {
@@ -34,7 +37,8 @@ class ColdRevengeMonitor {
         const events = [];
         const identity = s => ({ id: s.characterId, clanId: Number(s.stats?.clanId || 0), partyId: partyId(s) });
         const participant = e => ({ id: e.state.characterId, name: e.state.name, partyId: partyId(e.state),
-            size: e.context?.party?.memberIds?.length || 1, partyUpdatedAt: e.context?.party?.updatedAt,
+            size: this.leaderParty(e.state.characterId)?.memberIds?.length || 1,
+            partyUpdatedAt: this.leaderParty(e.state.characterId)?.updatedAt,
             revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.revision(e.state.characterId) });
         const examined = Math.min(MAX_ACTORS, actors.length);
         Object.assign(this.report, { at, active: actors.length, sampledActors: examined, overflow: false });

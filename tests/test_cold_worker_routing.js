@@ -13,7 +13,6 @@ const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpc
 const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const {
     ColdSimulationCoordinator,
-    compactPartyMemberContext,
     npcPlanningCatalogRows
 } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 
@@ -72,71 +71,14 @@ try {
     assert(MarketOpportunity.npcOffers(dGradeNpcPlan.target.selfId, dGradeNpcPlan.market.town)
         .some((offer) => offer.available), 'the selected D-grade destination must expose the persisted NPC offer');
 
-    const compact = compactPartyMemberContext({
-        characterId: 11,
-        phase: 'cold',
-        activity: 'grouped',
-        party: { partyId: 'compact-party', leaderId: 11 },
-        simulation: { ownerId: 'legacy_main', revision: 17 },
-        stats: { equipmentPlan: { huge: 'x'.repeat(20000) } },
-        inventorySummary: 'x'.repeat(20000)
-    });
-    assert.strictEqual(compact.characterId, 11);
-    assert.strictEqual(compact.partyId, 'compact-party');
-    assert.strictEqual(compact.party.partyId, 'compact-party');
-    assert.strictEqual(compact.simulation.revision, 17);
-    assert.strictEqual(compact.compact, true);
-    assert(Buffer.byteLength(JSON.stringify(compact)) < 512,
-        'party context should not repeat the full inventory and equipment state');
-
-    const fullMember = {
-        characterId: 12,
-        phase: 'cold',
-        activity: 'resting',
-        party: { partyId: 'compact-party' },
-        simulation: { ownerId: 'legacy_main', revision: 18 },
-        stats: { huge: 'x'.repeat(20000) },
-        inventorySummary: 'x'.repeat(20000)
-    };
-    LifeState.cachedState = (characterId) => Number(characterId) === 11
-        ? { ...fullMember, characterId: 11 }
-        : fullMember;
-    const contextCoordinator = new ColdSimulationCoordinator();
-    const compactContext = contextCoordinator.contextFor({
-        characterId: 11,
-        phase: 'cold',
-        activity: 'resting',
-        loc: { locX: 1, locY: 2, locZ: 3 },
-        stats: {}
-    }, {
-        spots: new Map(),
-        parties: new Map([[
-            11,
-            { partyId: 'compact-party', leaderId: 11, memberIds: [11, 12] }
-        ]]),
-        compactPartyMembers: true
-    });
-    assert(compactContext.partyMembers.every((member) => member.compact === true),
-        'snapshot party context must compact every already-loaded member');
-    assert(compactContext.partyMembers.every((member) => !member.inventorySummary),
-        'snapshot party context must omit duplicated inventory payloads');
-    const mixedContext = contextCoordinator.contextFor({
-        characterId: 11,
-        phase: 'cold',
-        activity: 'resting',
-        loc: { locX: 1, locY: 2, locZ: 3 },
-        stats: {}
-    }, {
-        spots: new Map(),
-        parties: new Map([[
-            11,
-            { partyId: 'compact-party', leaderId: 11, memberIds: [11, 12] }
-        ]]),
-        compactPartyMemberIds: new Set([11])
-    });
-    assert.strictEqual(mixedContext.partyMembers[0].compact, true);
-    assert(mixedContext.partyMembers[1].inventorySummary,
-        'a member omitted from the bootstrap set must retain a full fallback state');
+    // Party, leadership, memory, pressure, goal revision and escrow are
+    // worker tables: a bot's context carries none of them.
+    const tableFree = new ColdSimulationCoordinator().contextFor({
+        characterId: 11, phase: 'cold', activity: 'resting', loc: { locX: 1, locY: 2, locZ: 3 }, stats: {}
+    }, { spots: new Map(), profiles: new Map() });
+    for (const key of ['party', 'partyMembers', 'isPartyLeader', 'interactionMemory', 'pressure', 'goalRevision', 'buyOrderEscrow']) {
+        assert(!Object.hasOwn(tableFree, key), `${key} is a worker table, not context`);
+    }
 
     const currentSpot = { id: 'starter-field', name: 'Starter fields' };
     const targetSpot = {
@@ -277,8 +219,7 @@ try {
     const raidContext = coordinator.contextFor(
         raidMembers[0],
         {
-            spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]]),
-            parties: new Map()
+            spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]])
         }
     );
     assert.strictEqual(raidContext.spot.id, raidSpot.id,
@@ -483,12 +424,6 @@ try {
         const validMembers = displacedMembers.map(m => ({ ...m, loc: dungeonPoint }));
         assert.strictEqual(routeFor(validMembers[0], lair, displacedParty, validMembers, [lair]), null,
             'valid positions do not cause endless repair journeys');
-        // The worker's party context stays compact: the party run routes
-        // over the worker's own full member states.
-        LifeState.cachedState = id => displacedMembers.find(m => m.characterId === id);
-        const context = coordinator.contextFor(displacedMembers[0], { spots: new Map([[lair.id, lair]]),
-            parties: new Map([[displacedParty.leaderId, displacedParty]]), compactPartyMembers: true });
-        assert(context.partyMembers.every(m => m.compact));
 
         // The leader is already here, but two teammates still occupy another spot.
         const joiningMembers = [displacedMembers[0],

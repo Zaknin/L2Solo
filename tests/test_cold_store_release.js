@@ -47,10 +47,12 @@ async function run() {
     const party = { partyId: 'release-party', leaderId: 9, memberIds: [9, 10], stats: {}, nextResolveAt: now - 1 };
     for (let id = 1; id <= 10; id++) {
         const bot = members.find(member => member.characterId === id) || state(id);
-        const context = id === 9 ? { isPartyLeader: true, party, partyMembers: members } : {};
-        kernel.upsert({ state: bot, context: { ...context, interactionMemory: Policy.empty(id) } });
+        kernel.upsert({ state: bot, context: {} });
+        // The memory table's row (the worker's memory watch).
+        kernel.interactionMemory.accept(Policy.empty(id));
         Economy.forState(bot, dependencies);
     }
+    kernel.partyPut(party.partyId, party);
     assert.equal(Economy.size().context, 10);
     assert.equal(kernel.interactionMemory.snapshots.size, 10);
     assert.equal(kernel.buyerEvents.owners.size, 8);
@@ -83,7 +85,8 @@ async function run() {
     assert.equal(kernel.dirty.size, 0, 'release removes uncommitted proposals in the same call');
     assert.equal(kernel.partyRuns.size, 0, 'release invalidates the retained party resolver');
     for (const [name, count] of Object.entries(kernel.storeSizes())) assert.equal(count, 0, `${name} retains no released owner`);
-    assert.deepEqual(kernel.interactionMemory.size(), { snapshots: 0, views: 0, fastLayers: 0, loading: 0 });
+    // The memory table owns its rows' lifetime: a release keeps them until main removes the row.
+    assert.equal(kernel.interactionMemory.snapshots.size, 10);
     assert.deepEqual(kernel.buyerEvents.size(), { owners: 0, items: 0 });
     assert.equal(Economy.size().context, 0); assert.equal(Economy.size().engine, 0);
     assert.equal(Economy.size().groups, 0);

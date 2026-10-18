@@ -145,9 +145,11 @@ async function main() {
         const workerMembers = members.map((s, index) => ({ ...s,
             loc: { ...point, locZ: index ? 160 : point.locZ },
             timing: { lastResolvedAt: now - 45000, nextResolveAt: now - 1 } }));
+        // The party row comes from main's parties table, the members from their snapshot rows.
+        send('table_page', { tables: [{ name: 'parties', from: null, to: 0, full: true,
+            rows: [[workerParty.partyId, workerParty]], removed: [], last: true }] });
         send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state,
-            context: state.characterId === 1 ? { isPartyLeader: true, party: workerParty,
-                partyMembers: workerMembers, spot } : {} })) });
+            context: state.characterId === 1 ? { spot } : {} })) });
         const claim = await until(m => m.type === 'claim_request');
         send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
             ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,

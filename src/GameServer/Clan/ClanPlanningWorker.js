@@ -32,6 +32,12 @@ ClanSupplies.useRowSource(id => tables.rows('clan_supplies').get(id), () => tabl
 PersonalWarehouse.useRowSource(id => tables.rows('personal_warehouse').get(id), () => tables.ready('personal_warehouse'));
 const boardIndex = new BoardIndex();
 tables.watch('board', boardIndex.follower());
+// The channel sends every table to every worker; this one reads none of the
+// cold worker's tables (memory ~one row per bot, parties, goals, pressure),
+// so it keeps no rows of them.
+for (const name of ['memory', 'parties', 'goals', 'pressure']) {
+    tables.watch(name, { reset() {}, put() {}, remove() {} }, { retain: false });
+}
 const originalInvoke = global.invoke;
 const indexOffers = (rows = []) => {
     const index = new Map();

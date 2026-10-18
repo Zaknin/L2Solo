@@ -14,6 +14,10 @@ const {
 } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
 
+// The facts a kernel gives the free functions (its parties table, its
+// states, the board's escrow) for a bot that leads `party`.
+const leading = (party, members = []) => ({ leaderParty: () => party, partyMembers: () => members, buyOrderEscrow: () => 0 });
+
 function state(characterId = 1, overrides = {}) {
     return {
         characterId,
@@ -345,7 +349,7 @@ function claimAck(kernel, payload) {
         adena: 1000,
         stats: { equipmentPlan: { strategy: 'market', market: { price: 500, reserve: 100 } } }
     })), 'command');
-    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), { isPartyLeader: true }), 'party');
+    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), {}, leading({ partyId: 'party', leaderId: 2 })), 'party');
 
     // An absent main decision sends target 0; the worker's own hunting pick
     // remains the target for the native solo resolver.
@@ -414,8 +418,8 @@ function claimAck(kernel, payload) {
     const waitingMembers = [720, 721, 722].map(id => state(id, { party: { partyId: 'after-commands' },
         timing: { nextResolveAt: now - 1000 } }));
     const waitingParty = { partyId: 'after-commands', leaderId: 720, memberIds: [720, 721, 722] };
-    waitingMembers.forEach((s, i) => commandPressureKernel.upsert({ state: s,
-        context: { isPartyLeader: i === 0, party: waitingParty, partyMembers: waitingMembers } }));
+    waitingMembers.forEach(s => commandPressureKernel.upsert({ state: s, context: {} }));
+    commandPressureKernel.partyPut(waitingParty.partyId, waitingParty);
     commandPressureKernel.tick();
     assert.strictEqual(commandPressureKernel.commanding.size, 2,
         'lifecycle commands must share the ownership limit with combat claims');
@@ -573,7 +577,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => partyMessages.push({ type, payload }),
         now: () => now
     });
-    partyKernel.upsert({ state: members[0], context: { isPartyLeader: true, party, partyMembers: members, spot: { id: 'party-spot' } } });
+    partyKernel.upsert({ state: members[0], context: { spot: { id: 'party-spot' } } });
+    partyKernel.partyPut(party.partyId, party);
     partyKernel.upsert({ state: members[1], context: {} });
     partyKernel.upsert({
         state: {
@@ -619,9 +624,9 @@ function claimAck(kernel, payload) {
         planPartyRequirement: ({ state }) => { refreshed.push(state.characterId); return { acquisitionPlan: state.characterId === 120
             ? { status: 'active', strategy: 'market', target: { selfId: 55 } } : state.stats.equipmentPlan }; },
         emit: (type, payload) => refreshMessages.push({ type, payload }) });
-    refreshKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
-        partyMembers: refreshMembers, spot: { id: 'refresh-spot' }, requirementRefresh: true } });
-    refreshKernel.upsert({ state: refreshMembers[1], context: {} }); refreshKernel.tick();
+    refreshKernel.upsert({ state: refreshMembers[0], context: { spot: { id: 'refresh-spot' } } });
+    refreshKernel.upsert({ state: refreshMembers[1], context: {} });
+    refreshKernel.partyPut(refreshParty.partyId, { ...refreshParty, requirementRefresh: true }); refreshKernel.tick();
     const refreshClaim = refreshMessages.find(message => message.type === 'claim_request');
     claimAck(refreshKernel, { grants: refreshClaim.payload.candidates.map(candidate => ({ ok: true,
         characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
@@ -643,9 +648,9 @@ function claimAck(kernel, payload) {
             projectResolve: state => ({ state, kitMoved: moved && state.characterId === 121 }),
             planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
             emit: (type, payload) => kitMessages.push({ type, payload }) });
-        kitKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
-            partyMembers: refreshMembers, spot: { id: 'refresh-spot' } } });
-        kitKernel.upsert({ state: refreshMembers[1], context: {} }); kitKernel.tick();
+        kitKernel.upsert({ state: refreshMembers[0], context: { spot: { id: 'refresh-spot' } } });
+        kitKernel.upsert({ state: refreshMembers[1], context: {} });
+        kitKernel.partyPut(refreshParty.partyId, refreshParty); kitKernel.tick();
         const kitClaim = kitMessages.find(message => message.type === 'claim_request');
         claimAck(kitKernel, { grants: kitClaim.payload.candidates.map(candidate => ({ ok: true,
             characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
@@ -676,9 +681,9 @@ function claimAck(kernel, payload) {
                 return outcome === 'accepted' ? { memberGoals: [], incomeReviews: [], lastIncomeReviewAt: now, agreement: null } : null;
             },
             emit: (type, payload) => joinMessages.push({ type, payload }) });
-        joinKernel.upsert({ state: joinMembers[0], context: { isPartyLeader: true, party: joinParty,
-            partyMembers: joinMembers, spot: { id: 'refresh-spot' } } });
+        joinKernel.upsert({ state: joinMembers[0], context: { spot: { id: 'refresh-spot' } } });
         joinKernel.upsert({ state: joinMembers[1], context: {} });
+        joinKernel.partyPut(joinParty.partyId, joinParty);
         // The recruit is not due: it waits idle, not claimed by this tick.
         if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }), context: {} });
         if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
@@ -721,9 +726,9 @@ function claimAck(kernel, payload) {
             projectResolve: state => ({ state }),
             planPartyRequirement: () => { throw Error('a material hunt rebuilt its wish plan'); },
             emit: (type, payload) => materialMessages.push({ type, payload }) });
-        materialKernel.upsert({ state: materialMembers[0], context: { isPartyLeader: true, party: materialParty,
-            partyMembers: materialMembers, spot: { id: objective.spotId }, requirementRefresh: true } });
-        materialKernel.upsert({ state: materialMembers[1], context: {} }); materialKernel.tick();
+        materialKernel.upsert({ state: materialMembers[0], context: { spot: { id: objective.spotId } } });
+        materialKernel.upsert({ state: materialMembers[1], context: {} });
+        materialKernel.partyPut(materialParty.partyId, { ...materialParty, requirementRefresh: true }); materialKernel.tick();
         const claim = materialMessages.find(message => message.type === 'claim_request');
         claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
             characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
@@ -759,11 +764,9 @@ function claimAck(kernel, payload) {
         emit: (type, payload, msgId) => stalePartyMessages.push({ type, payload, msgId }),
         now: () => stalePartyNow
     });
-    stalePartyKernel.upsert({
-        state: stalePartyMembers[0],
-        context: { isPartyLeader: true, party: staleParty, partyMembers: stalePartyMembers, spot: { id: 'stale-party-spot' } }
-    });
+    stalePartyKernel.upsert({ state: stalePartyMembers[0], context: { spot: { id: 'stale-party-spot' } } });
     stalePartyKernel.upsert({ state: stalePartyMembers[1], context: {} });
+    stalePartyKernel.partyPut(staleParty.partyId, staleParty);
     stalePartyKernel.tick();
     const stalePartyClaim = stalePartyMessages.shift();
     const leaderCandidate = stalePartyClaim.payload.candidates.find((candidate) => candidate.characterId === 220);
@@ -807,7 +810,7 @@ function claimAck(kernel, payload) {
             ...stalePartyMembers[0],
             simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
         },
-        context: { isPartyLeader: true, party: staleParty, partyMembers: stalePartyMembers, spot: { id: 'stale-party-spot' } }
+        context: { spot: { id: 'stale-party-spot' } }
     }] });
     stalePartyNow += 1000;
     stalePartyKernel.tick();
@@ -848,11 +851,9 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiredPartyMessages.push({ type, payload }),
         now: () => now
     });
-    expiredPartyKernel.upsert({
-        state: expiredPartyMembers[0],
-        context: { isPartyLeader: true, party: expiredParty, partyMembers: expiredPartyMembers, spot: { id: 'old-party-spot' } }
-    });
+    expiredPartyKernel.upsert({ state: expiredPartyMembers[0], context: { spot: { id: 'old-party-spot' } } });
     expiredPartyKernel.upsert({ state: expiredPartyMembers[1], context: {} });
+    expiredPartyKernel.partyPut(expiredParty.partyId, expiredParty);
     expiredPartyKernel.tick();
     const expiredClaim = expiredPartyMessages.shift();
     assert.strictEqual(expiredClaim.type, 'claim_request');
@@ -904,16 +905,9 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiryScheduleMessages.push({ type, payload }),
         now: () => expiryScheduleNow
     });
-    expiryScheduleKernel.upsert({
-        state: expiryScheduleMembers[0],
-        context: {
-            isPartyLeader: true,
-            party: expiryScheduleParty,
-            partyMembers: expiryScheduleMembers,
-            spot: { id: 'scheduled-expiry-spot' }
-        }
-    });
+    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[0], context: { spot: { id: 'scheduled-expiry-spot' } } });
     expiryScheduleKernel.upsert({ state: expiryScheduleMembers[1], context: {} });
+    expiryScheduleKernel.partyPut(expiryScheduleParty.partyId, expiryScheduleParty);
     expiryScheduleKernel.tick();
     assert.strictEqual(expiryScheduleMessages.length, 0,
         'a valid party must remain scheduled until its earliest resolve or expiry');
@@ -931,33 +925,30 @@ function claimAck(kernel, payload) {
         timing: { lastResolvedAt: expiryScheduleNow - 1000, nextResolveAt: null },
         party: { partyId: 'party-row-scheduled', leaderId: 27 }
     });
-    const partyDueContext = {
-        isPartyLeader: true,
-        party: {
-            partyId: 'party-row-scheduled',
-            leaderId: 27,
-            memberIds: [27, 28],
-            nextResolveAt: partyDue,
-            stats: { sessionExpiresAt: expiryScheduleNow + 60000 }
-        },
-        partyMembers: [partyDueLeader, partyDueMember]
+    const partyDueParty = {
+        partyId: 'party-row-scheduled',
+        leaderId: 27,
+        memberIds: [27, 28],
+        nextResolveAt: partyDue,
+        stats: { sessionExpiresAt: expiryScheduleNow + 60000 }
     };
-    assert.strictEqual(nextDueAt(partyDueLeader, expiryScheduleNow, partyDueContext), partyDue,
+    const partyDueFacts = leading(partyDueParty, [partyDueLeader, partyDueMember]);
+    assert.strictEqual(nextDueAt(partyDueLeader, expiryScheduleNow, {}, false, partyDueFacts), partyDue,
         'a newly assigned leader with no personal due time must use the durable party schedule');
     assert.strictEqual(nextDueAt({
         ...partyDueLeader,
         timing: { ...partyDueLeader.timing, nextResolveAt: expiryScheduleNow + 1000 }
-    }, expiryScheduleNow, partyDueContext), partyDue,
+    }, expiryScheduleNow, {}, false, partyDueFacts), partyDue,
         'a stale leader schedule must not outrun the authoritative party row');
 
     const priorityParty = {
-        ...partyDueContext.party,
+        ...partyDueParty,
         nextResolveAt: expiryScheduleNow
     };
-    const priorityContext = { ...partyDueContext, party: priorityParty };
     const partyCapacityKernel = recordingKernel({ now: () => expiryScheduleNow, resolveSolo: resolver });
-    partyCapacityKernel.upsert({ state: partyDueLeader, context: priorityContext });
+    partyCapacityKernel.upsert({ state: partyDueLeader, context: {} });
     partyCapacityKernel.upsert({ state: partyDueMember, context: {} });
+    partyCapacityKernel.partyPut(priorityParty.partyId, priorityParty);
     assert.deepStrictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 1), [],
         'an atomic party claim must wait when the current capacity cannot fit every member');
     assert.strictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 2).length, 2,
@@ -984,15 +975,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => singletonMessages.push({ type, payload }),
         now: () => singletonNow
     });
-    singletonKernel.upsert({
-        state: singletonMember,
-        context: {
-            isPartyLeader: true,
-            party: singletonParty,
-            partyMembers: [singletonMember],
-            spot: { id: 'singleton-spot' }
-        }
-    });
+    singletonKernel.upsert({ state: singletonMember, context: { spot: { id: 'singleton-spot' } } });
+    singletonKernel.partyPut(singletonParty.partyId, singletonParty);
     singletonKernel.tick();
     const singletonClaim = singletonMessages.shift();
     assert.strictEqual(singletonClaim.type, 'claim_request', 'invalid singleton must enter the cleanup path immediately');
@@ -1063,16 +1047,9 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => partyRouteMessages.push({ type, payload }),
         now: () => now
     });
-    partyRouteKernel.upsert({
-        state: partyRouteMembers[0],
-        context: {
-            isPartyLeader: true,
-            party: partyRouteParty,
-            partyMembers: partyRouteMembers,
-            spot: { id: 'starter-field' }
-        }
-    });
+    partyRouteKernel.upsert({ state: partyRouteMembers[0], context: { spot: { id: 'starter-field' } } });
     partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });
+    partyRouteKernel.partyPut(partyRouteParty.partyId, partyRouteParty);
     // A member's kept solo route: a new state keeps it, the party run's
     // claim takes the member and drops it.
     partyRouteKernel.states.get(31).route = { spotId: 'solo-kept' };
@@ -1111,23 +1088,9 @@ function claimAck(kernel, payload) {
         now: () => now
     });
     const compactLeader = state(35, { party: { partyId: 'compact-party' } });
-    const compactMember = {
-        characterId: 36,
-        phase: 'cold',
-        activity: 'grouped',
-        partyId: 'compact-party',
-        party: { partyId: 'compact-party' },
-        simulation: { ownerId: 'legacy_main', revision: 3 },
-        compact: true
-    };
-    compactFallbackKernel.upsert({
-        state: compactLeader,
-        context: {
-            isPartyLeader: true,
-            party: { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] },
-            partyMembers: [compactLeader, compactMember]
-        }
-    });
+    // The member's state never reached this kernel: the party waits for it.
+    compactFallbackKernel.upsert({ state: compactLeader, context: {} });
+    compactFallbackKernel.partyPut('compact-party', { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] });
     compactFallbackKernel.tick();
     assert(!compactFallbackMessages.some((entry) => entry.type === 'claim_request'),
         'a compact party reference must wait until its full authoritative state is loaded');
@@ -1344,8 +1307,8 @@ function claimAck(kernel, payload) {
     const partialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
         maxInFlight: 8, maxAtomicPartySize: 9, emit: (type, payload) => partialMessages.push({ type, payload }) });
     const clanMembers = Array.from({ length: 9 }, (_, i) => state(500 + i, { party: { partyId: 'nine' } }));
-    clanMembers.forEach((s, i) => partialKernel.upsert({ state: s, context: { isPartyLeader: i === 0,
-        party: { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) }, partyMembers: clanMembers } }));
+    clanMembers.forEach(s => partialKernel.upsert({ state: s, context: {} }));
+    partialKernel.partyPut('nine', { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) });
     for (let id = 600; id < 605; id++) {
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
             token: { ...oversizedProposal.token, characterId: id }, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
@@ -1381,14 +1344,9 @@ function claimAck(kernel, payload) {
     };
     throttledPartyKernel.upsert({ state: state(39), context: { spot: { id: 'spot' } } });
     throttledPartyMembers.forEach((member, index) => throttledPartyKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: throttledParty,
-            partyMembers: throttledPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
+        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
     }));
+    throttledPartyKernel.partyPut(throttledParty.partyId, throttledParty);
     throttledPartyKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
     throttledPartyKernel.tick();
     const throttledClaim = throttledPartyMessages.find((entry) => entry.type === 'claim_request');
@@ -1411,14 +1369,9 @@ function claimAck(kernel, payload) {
         maxAtomicPartySize: 5
     });
     throttledPartyMembers.forEach((member, index) => atomicBurstKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: throttledParty,
-            partyMembers: throttledPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
+        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
     }));
+    atomicBurstKernel.partyPut(throttledParty.partyId, throttledParty);
     atomicBurstKernel.tick();
     const atomicBurstClaim = atomicBurstMessages.find((entry) => entry.type === 'claim_request');
     assert.deepStrictEqual(
@@ -1447,14 +1400,9 @@ function claimAck(kernel, payload) {
         memberIds: oversizedPartyMembers.map((member) => member.characterId)
     };
     oversizedPartyMembers.forEach((member, index) => boundedBurstKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: oversizedParty,
-            partyMembers: oversizedPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
+        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
     }));
+    boundedBurstKernel.partyPut(oversizedParty.partyId, oversizedParty);
     boundedBurstKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
     boundedBurstKernel.tick();
     const boundedBurstClaim = boundedBurstMessages.find((entry) => entry.type === 'claim_request');
@@ -1476,8 +1424,9 @@ function claimAck(kernel, payload) {
     const capacityParty = { partyId: 'capacity-party', leaderId: 40, memberIds: capacityMembers.map((member) => member.characterId) };
     capacityMembers.forEach((member, index) => capacityKernel.upsert({
         state: member,
-        context: index === 0 ? { isPartyLeader: true, party: capacityParty, partyMembers: capacityMembers, spot: { id: 'spot' } } : {}
+        context: index === 0 ? { spot: { id: 'spot' } } : {}
     }));
+    capacityKernel.partyPut(capacityParty.partyId, capacityParty);
     for (let id = 1000; id < 1062; id++) capacityKernel.claiming.add(id);
     capacityKernel.tick();
     assert(!capacityMessages.some((entry) => entry.type === 'claim_request'), 'a party must wait when remaining capacity cannot admit every member');

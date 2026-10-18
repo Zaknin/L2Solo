@@ -8,8 +8,9 @@ const { COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES } = require('./ColdEconomyD
 const MAX_PLAN_PAYLOAD_BYTES = MAX_BYTES - COMMAND_HEADER_BYTES - 32 - 8;
 
 // Arrival and recovery are natural decision points; ordinary counts/XP/wallet
-// changes do not schedule main-thread economic work.
-function edges(before, after, context = {}, options = {}) {
+// changes do not schedule main-thread economic work. options.buyOrderEscrow:
+// the adena the bot's buy orders hold (the worker's board sum).
+function edges(before, after, options = {}) {
     if (!after || ['resting', 'traveling'].includes(after.activity)
         || after.party?.partyId || after.partyId) return 0;
     const oldBag = before?.inventory || {}, bag = after.inventory || {};
@@ -25,8 +26,8 @@ function edges(before, after, context = {}, options = {}) {
         if (!(id > 0) || !(keep > 0)) continue;
         if ((Number(oldBag[id]?.amount || 0) >= keep) !== (Number(bag[id]?.amount || 0) >= keep)) bits |= 2;
     }
-    if (!Funding.moneyReached(before, context.buyOrderEscrow)
-        && Funding.moneyReached(after, context.buyOrderEscrow)) bits |= 4;
+    if (!Funding.moneyReached(before, options.buyOrderEscrow)
+        && Funding.moneyReached(after, options.buyOrderEscrow)) bits |= 4;
     if (after.activity === 'shopping' && before?.activity === 'traveling') bits |= 8;
     // Rest blocks actions, so stock/loot changes may have passed without
     // preparation. Reconsider them once the bot can act again. A goal change

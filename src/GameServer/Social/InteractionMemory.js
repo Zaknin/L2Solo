@@ -14,6 +14,9 @@ class InteractionMemory {
         this.clanSocial = null;
         this.fastLayers = new Map();
         this.playingHours = () => undefined;
+        // Called with the owner id after each accepted snapshot (main's
+        // runtime publishes it; a worker instance keeps none).
+        this.onAccept = null;
     }
 
     accept(snapshot) {
@@ -38,6 +41,7 @@ class InteractionMemory {
         if (snapshot.fast) this.fastLayers.set(copy.ownerId, new Map(snapshot.fast));
         this.snapshots.set(copy.ownerId, copy);
         this.views.set(copy.ownerId, Policy.view(copy, () => this.playingHours(copy.ownerId), this.fastLayers.get(copy.ownerId), copy));
+        this.onAccept?.(copy.ownerId);
         return true;
     }
 

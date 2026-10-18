@@ -9,7 +9,18 @@ const spot = { id: 'test', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 20 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`, phase: 'cold',
     activity: 'hunting', level: 40, spotId: 'test', vitals: { hp: 100 }, stats: {} }, context: { spot, targetNpcId: 10 } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
-const make = (capacity = 2) => new ColdCompetitionMonitor({ capacityForSpot: () => capacity, personaFor: () => ({ traits: {} }) });
+// The worker's parties table as a fixture states it: the row a bot leads is
+// the party its own entry carries when it is that party's leader.
+const leaderParties = input => new Map(input.filter(e => e.context?.party
+    && Number(e.context.party.leaderId) === Number(e.state.characterId)).map(e => [Number(e.state.characterId), e.context.party]));
+const make = (capacity = 2, options = {}) => {
+    let led = new Map();
+    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => capacity, personaFor: () => ({ traits: {} }), ...options,
+        leaderParty: id => led.get(Number(id)) || null });
+    const sample = monitor.sample.bind(monitor);
+    monitor.sample = (input, ...rest) => { led = leaderParties(input); return sample(input, ...rest); };
+    return monitor;
+};
 const monitor = make(), pristine = JSON.stringify(entries);
 monitor.sample(entries, memory, at);
 assert.strictEqual(monitor.snapshot().evaluated, 0, 'bootstrap must not create catch-up encounters');
@@ -99,7 +110,7 @@ for (const event of recovery.snapshot().recent) {
     assert.strictEqual(side.size, 2, 'nearby resting members remain part of the actual party roster');
     assert.strictEqual(side.activeSize, 1);
     assert.strictEqual(side.id, 2, 'the resting member never initiates a resource encounter');
-    assert.strictEqual(side.partyUpdatedAt, at, 'older teammate context cannot overwrite the current roster');
+    assert.strictEqual(side.partyUpdatedAt, at, 'a member\'s older copy cannot replace the leader\'s row');
 }
 // A pair's four decision rolls come from the pair itself: a second hunter on
 // the party side (who must then be picked) leaves the same pair's rolls as they were.
@@ -141,8 +152,8 @@ for (const kind of ['solo', 'party', 'member']) {
         e.context.party.stats.coldCompetition = { conflictUntil: until };
     });
     else cooling.at(-1).state.stats.coldCompetition = { conflictUntil: until };
-    const guarded = new ColdCompetitionMonitor({ capacityForSpot: () => 0.5,
-        personaFor: () => ({ traits: { ambition: 1, assertiveness: 1, caution: 0, empathy: 0, sociability: 0 } }) });
+    const guarded = make(0.5,
+        { personaFor: () => ({ traits: { ambition: 1, assertiveness: 1, caution: 0, empathy: 0, sociability: 0 } }) });
     for (let i = 0; i < 60; i++) guarded.sample(cooling, memory, at + i * INTERVAL_MS);
     assert.strictEqual(guarded.snapshot().outcomes.contest || 0, 0, `${kind}: actual conflict cooldown suppresses new disputes`);
     assert(guarded.snapshot().evaluated > 0, `${kind}: cooling down a conflict still permits peaceful decisions`);

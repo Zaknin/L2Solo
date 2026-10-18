@@ -13,6 +13,7 @@ const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
+const { pressureFor } = require('./PopulationPressure');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
 const BotErrands = require('./BotErrands');
@@ -168,8 +169,14 @@ function deterministicRandom(state = {}) {
     };
 }
 
-function partySessionExpiryAt(state = {}, context = {}, partySession = {}) {
-    const party = context?.party || null;
+// The facts the kernel reads from its worker tables, not from a context: the
+// party a bot leads ('parties'), that party's member states (the kernel's
+// own records) and the adena its buy orders hold (the board). A caller
+// without a kernel (BotLifeState, a test) reads none.
+const NO_FACTS = Object.freeze({ leaderParty: () => null, partyMembers: () => [], buyOrderEscrow: () => 0 });
+
+// party: the party row this bot leads, or null.
+function partySessionExpiryAt(state = {}, party = null, partySession = {}) {
     const partyId = party?.partyId || state.party?.partyId || state.partyId || '';
     if (!partyId) return 0;
 
@@ -190,23 +197,22 @@ function partySessionExpiryAt(state = {}, context = {}, partySession = {}) {
     return BackgroundPartyLifecycle.rotationExpiry(partyId, startedAt, partySession);
 }
 
-function partyIntegrityInvalid(context = {}, partySession = {}) {
-    const party = context?.party || null;
+// party: the party row this bot leads, or null; members: its member states.
+function partyIntegrityInvalid(party, members, partySession = {}) {
     if (!party) return false;
     const minSize = Math.max(2, Number(partySession.partyMinSize) || 2);
     const declaredMemberIds = Array.isArray(party.memberIds) && party.memberIds.length
         ? [...new Set(party.memberIds.map(Number).filter(Boolean))]
         : [];
     if (declaredMemberIds.length < minSize) return true;
-    if (!Array.isArray(context.partyMembers)) return false;
     const partyId = String(party.partyId || '');
-    const attachedCount = context.partyMembers.filter((member) => (
+    const attachedCount = members.filter((member) => (
         String(member?.party?.partyId || member?.partyId || '') === partyId
     )).length;
     return attachedCount < minSize || attachedCount !== declaredMemberIds.length;
 }
 
-function nextDueAt(state = {}, timestamp = Date.now(), context = {}, partySession = {}, meetingPending = false) {
+function nextDueAt(state = {}, timestamp = Date.now(), partySession = {}, meetingPending = false, facts = NO_FACTS) {
     const stateDue = Number(state.timing?.nextResolveAt || 0);
     // Shared hunt/review snapshots may have advanced the personal timer.
     // An accepted obligation keeps its own physical transition deadline,
@@ -219,12 +225,11 @@ function nextDueAt(state = {}, timestamp = Date.now(), context = {}, partySessio
     // The party row is the durable scheduling authority for a party resolve.
     // A freshly assigned leader can briefly carry no personal due time, and
     // later leader snapshots can also lag behind an advanced party schedule.
-    const partyDue = context?.isPartyLeader
-        ? Number(context.party?.nextResolveAt || 0)
-        : 0;
+    const party = facts.leaderParty(state.characterId);
+    const partyDue = party ? Number(party.nextResolveAt || 0) : 0;
     const due = partyDue > 0 ? partyDue : stateDue;
-    if (partyIntegrityInvalid(context, partySession)) return timestamp;
-    const sessionExpiry = meetingPending ? 0 : partySessionExpiryAt(state, context, partySession);
+    if (party && partyIntegrityInvalid(party, facts.partyMembers(party), partySession)) return timestamp;
+    const sessionExpiry = meetingPending ? 0 : partySessionExpiryAt(state, party, partySession);
     if (sessionExpiry > 0) return due > 0 ? Math.min(due, sessionExpiry) : sessionExpiry;
     return due > 0 ? due : Math.max(0, Number(state.updatedAt || timestamp));
 }
@@ -305,15 +310,16 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 // require() inside lifecycleKind ran per inventory item on every row.
 let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
-function lifecycleKind(state = {}, context = {}) {
+function lifecycleKind(state = {}, context = {}, facts = NO_FACTS) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
+    const leads = facts.leaderParty(state.characterId) !== null;
     // Paid personal journeys retain the existing group writer.
-    if (state.party?.partyId) return context.isPartyLeader ? 'party' : 'party_member';
+    if (state.party?.partyId) return leads ? 'party' : 'party_member';
     if (state.stats?.tradeMeeting) return ['traveling', 'dead', 'resting', 'fighting'].includes(state.activity) ? 'resolver' : 'event_driven';
     // A solo bot washing karma (ColdKarmaPolicy.active) is planned by the
     // resolver. The test is repeated here: ColdKarmaPolicy loads spot modules.
     if (Number(state.stats?.karma || 0) > 0) return 'resolver';
-    if (context.isPartyLeader) return 'party';
+    if (leads) return 'party';
     if (state.activity === 'crafting' && state.stats?.craftShop) return 'event_driven';
     const stats = state.stats || {};
     const plan = stats.equipmentPlan || {};
@@ -333,8 +339,8 @@ function lifecycleKind(state = {}, context = {}) {
         const price = Math.max(0, Number(plan.market?.price || 0));
         const reserve = Math.max(0, Number(plan.market?.reserve || 0));
         if (state.activity !== 'hunting'
-            || (price > 0 && (plan.weaponBridge ? PurchaseFunding.budget(state, PurchaseFunding.tripEscrow(plan, context.buyOrderEscrow))
-                : PurchaseFunding.spendable(state, PurchaseFunding.tripEscrow(plan, context.buyOrderEscrow),
+            || (price > 0 && (plan.weaponBridge ? PurchaseFunding.budget(state, PurchaseFunding.tripEscrow(plan, facts.buyOrderEscrow(state.characterId)))
+                : PurchaseFunding.spendable(state, PurchaseFunding.tripEscrow(plan, facts.buyOrderEscrow(state.characterId)),
                     { itemId: plan.target?.selfId })) >= price)) return 'command';
     }
     if ((ClanPartyDuty ||= require('./ClanPartyDuty')).waiting(state)) return 'resolver';
@@ -361,14 +367,14 @@ function isSchedulableKind(kind) {
 
 // A caller that already read this state's kind in the same call passes it;
 // otherwise the kind is read only when the cheap meeting test passes.
-function playerWaitingTransition(state, context, kind = null) {
+function playerWaitingTransition(state, context, kind = null, facts = NO_FACTS) {
     return context?.playerWaiting === true && !!state?.stats?.tradeMeeting
-        && (kind ?? lifecycleKind(state, context)) === 'resolver';
+        && (kind ?? lifecycleKind(state, context, facts)) === 'resolver';
 }
 
-function meetingTravelTransition(state, context, kind = null) {
+function meetingTravelTransition(state, context, kind = null, facts = NO_FACTS) {
     return state?.activity === 'traveling' && !!state.stats?.tradeMeeting
-        && (kind ?? lifecycleKind(state, context)) === 'resolver';
+        && (kind ?? lifecycleKind(state, context, facts)) === 'resolver';
 }
 
 // A lifecycle plan as main receives it: the step's economy object stays in
@@ -594,6 +600,13 @@ class ColdSimulationKernel {
         this.states = new RetainedStateMap(CharacterStateSources.attachKernel(options.stateSources || CharacterStateSources.standalone()), options.shotIndex, this.now);
         this.occupancy = new SpotOccupancyIndex({ locationIndex: this.states.locationIndex });
         this.interactionMemory = new (require('../../Social/InteractionMemory'))();
+        // Worker tables the steps read (partyPut, pressureRow): party rows by
+        // party id, each member's party id, the director's one pressure row.
+        this.parties = new Map();
+        this.partyByMember = new Map();
+        this.pressureRow = null;
+        // The adena a bot's buy orders hold (the worker sums its board rows).
+        this.escrowOf = typeof options.buyOrderEscrow === 'function' ? options.buyOrderEscrow : () => 0;
         this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
         this.interactionMemory.clanSocial = new (require('../../Clan/ClanSocialView'))();
         this.versions = new Map();
@@ -659,48 +672,121 @@ class ColdSimulationKernel {
         };
     }
 
-    dueAt(state, context = {}, timestamp = this.now()) {
+    dueAt(state, timestamp = this.now()) {
         // Compact catalog members carry no stats. Read the current roster
         // locally; no additional snapshot fields or population scan.
+        const party = this.leaderParty(state.characterId);
         const meetingPending = !!state.stats?.tradeMeeting
-            || (context.party?.memberIds || []).some(id => this.states.get(Number(id))?.state.stats?.tradeMeeting);
-        if (meetingPending && context.isPartyLeader) {
-            if (context.party?.stats?.objective?.sourceKind === 'raid'
-                && context.party.stats?.raidEncounter?.status === 'defeated') return timestamp;
+            || (party?.memberIds || []).some(id => this.states.get(Number(id))?.state.stats?.tradeMeeting);
+        if (meetingPending && party) {
+            if (party.stats?.objective?.sourceKind === 'raid'
+                && party.stats?.raidEncounter?.status === 'defeated') return timestamp;
             // Existing accepted meetings keep the group writer. Its deadline
             // is the next physical transition, not a later hunt/review timer.
             let transitionDue = Infinity;
-            for (const id of context.party?.memberIds || []) {
+            for (const id of party.memberIds || []) {
                 const member = Number(id) === Number(state.characterId) ? state : this.states.get(Number(id))?.state;
                 if (!member || !(member.stats?.tradeMeeting || ['resting', 'dead'].includes(member.activity))) continue;
                 if (!['traveling', 'resting', 'dead', 'fighting'].includes(member.activity)) continue;
-                const due = nextDueAt(member, timestamp, {}, this.partySession, true);
+                const due = nextDueAt(member, timestamp, this.partySession, true);
                 if (due > 0) transitionDue = Math.min(transitionDue, due);
             }
             if (Number.isFinite(transitionDue)) return transitionDue;
         }
-        return nextDueAt(state, timestamp, context, this.partySession, meetingPending);
+        return nextDueAt(state, timestamp, this.partySession, meetingPending, this);
     }
 
+    // The 'parties' table (ColdSimulationWorker watch): the rows by party id
+    // and each member's party id. A bot leads the party its row names it
+    // leader of; the rows are the mirror's own objects, never copied.
+    // Each returns the row it replaced (put, remove) or the old leaders (reset).
+    partyPut(partyId, row) {
+        const previous = this.partyUnindex(partyId);
+        this.parties.set(partyId, row);
+        for (const id of row.memberIds || []) this.partyByMember.set(Number(id), partyId);
+        this.refreshLeaderSchedule(row.leaderId);
+        if (previous && Number(previous.leaderId) !== Number(row.leaderId)) this.refreshLeaderSchedule(previous.leaderId);
+        return previous;
+    }
+
+    partyRemove(partyId) {
+        const previous = this.partyUnindex(partyId);
+        if (previous) this.refreshLeaderSchedule(previous.leaderId);
+        return previous;
+    }
+
+    // A full copy follows: the old leaders are re-read without their rows,
+    // the copy's rows schedule their own leaders as they arrive.
+    partyReset() {
+        const leaders = [...this.parties.values()].map(party => party.leaderId);
+        this.parties.clear();
+        this.partyByMember.clear();
+        for (const id of leaders) this.refreshLeaderSchedule(id);
+        return leaders;
+    }
+
+    partyUnindex(partyId) {
+        const previous = this.parties.get(partyId);
+        if (!previous) return null;
+        this.parties.delete(partyId);
+        for (const id of previous.memberIds || []) {
+            if (this.partyByMember.get(Number(id)) === partyId) this.partyByMember.delete(Number(id));
+        }
+        return previous;
+    }
+
+    // The party row this bot is a member of, or null.
+    partyOf(characterId) {
+        const partyId = this.partyByMember.get(Number(characterId));
+        return partyId === undefined ? null : this.parties.get(partyId) || null;
+    }
+
+    // The party row this bot leads, or null (lifecycleKind, nextDueAt).
+    leaderParty(characterId) {
+        const party = this.partyOf(characterId);
+        return party && Number(party.leaderId) === Number(characterId) ? party : null;
+    }
+
+    // The member states of a party row the kernel holds (nextDueAt).
+    partyMembers(party) {
+        const members = [];
+        for (const id of party?.memberIds || []) {
+            const member = this.states.get(Number(id))?.state;
+            if (member) members.push(member);
+        }
+        return members;
+    }
+
+    buyOrderEscrow(characterId) {
+        return Number(this.escrowOf(Number(characterId)) || 0);
+    }
+
+    // A follower's change moves its leader's due time (a meeting leg, a
+    // transition). Its native membership points to the leader.
     refreshPartyMeetingLeader(characterId, previous) {
         const current = this.states.get(characterId);
-        // Followers receive no party context: their native membership points
-        // to the already indexed leader. Never scan the population to find it.
         const membership = current?.state?.party;
-        const leaderId = Number(membership?.leaderId || current?.context?.party?.leaderId);
+        const leaderId = Number(membership?.leaderId || this.partyOf(characterId)?.leaderId);
         if (!leaderId || leaderId === characterId) return;
-        const leader = this.states.get(leaderId), party = leader?.context?.party;
+        const party = this.leaderParty(leaderId);
         if (!party || String(membership?.partyId || '') !== String(party.partyId || '')
             || !(party.memberIds || []).some(id => Number(id) === characterId)) return;
         if (previous && current.state.activity === previous.state.activity
             && !!current.state.stats?.tradeMeeting === !!previous.state.stats?.tradeMeeting
-            && nextDueAt(current.state, this.now(), {}, this.partySession, true)
-                === nextDueAt(previous.state, this.now(), {}, this.partySession, true)) return;
-        if (this.busy(leaderId) || lifecycleKind(leader.state, leader.context) !== 'party') return;
-        const due = this.dueAt(leader.state, leader.context), scheduled = this.scheduleTokens.get(leaderId);
-        if (scheduled?.version === leader.version && scheduled.dueAt === due
-            && scheduled.heapEntry.playerWaiting === playerWaitingTransition(leader.state, leader.context, 'party')) return;
-        this.schedule(leaderId, leader.version, due, 'party');
+            && nextDueAt(current.state, this.now(), this.partySession, true)
+                === nextDueAt(previous.state, this.now(), this.partySession, true)) return;
+        this.refreshLeaderSchedule(leaderId);
+    }
+
+    // A leader's due time follows its party row (the parties watch) and its
+    // followers (refreshPartyMeetingLeader); the version stays.
+    refreshLeaderSchedule(leaderId) {
+        const id = Number(leaderId), leader = this.states.get(id);
+        if (!id || !leader || this.busy(id)) return;
+        const scheduled = this.scheduleTokens.get(id);
+        if (!scheduled) { this.ensureScheduled(id); return; }
+        const due = this.dueAt(leader.state);
+        if (scheduled.dueAt !== due) this.schedule(id, leader.version, due);
     }
 
     upsert(entry = {}) {
@@ -714,26 +800,8 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
-        let memoryChanged = false;
-        if (entry.context?.interactionMemory) {
-            if (entry.context.interactionMemory.ownerId !== characterId) throw new Error('interaction memory: wrong snapshot owner');
-            memoryChanged = this.interactionMemory.accept(entry.context.interactionMemory);
-            const { interactionMemory, ...context } = entry.context;
-            entry = { ...entry, context };
-        }
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
-        const retainedState = current && incomingRevision < currentRevision ? current.state : state;
-        const membership = retainedState.party?.partyId || retainedState.partyId;
-        // A departure snapshot can be prepared before the old party dissolves.
-        // Its catalog context must not turn the now-solo former leader back
-        // into a party writer and strand a paid town trip behind old members.
-        if (entry.context?.isPartyLeader && (!membership
-            || String(membership) !== String(entry.context.party?.partyId || ''))) {
-            entry = { ...entry, context: { ...entry.context, isPartyLeader: false,
-                party: null, partyMembers: [], requirementRefresh: false, targetNpcId: null,
-                raidOwner: null } };
-        }
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
@@ -741,7 +809,6 @@ class ColdSimulationKernel {
             // still accepting refreshed routing/party context.
             if (entry.context) this.states.set(characterId, { ...current, context: entry.context });
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
-            if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
             this.refreshCommandSource(characterId);
             this.buyerStateChanged(characterId);
             this.ensureScheduled(characterId);
@@ -754,14 +821,14 @@ class ColdSimulationKernel {
         // kind also reads the clock, so it is never kept past this call).
         let nextDue = null, nextKind = null, unchanged = false;
         if (current && incomingRevision === currentRevision) {
-            const due = this.dueAt(state, nextContext);
+            const due = this.dueAt(state);
             // dueAt reads this bot's stored row for a meeting in its party;
             // here that row is still the old one, so a due read while the
             // meeting flag clears is read again after the store.
             if (!current.state.stats?.tradeMeeting || state.stats?.tradeMeeting) nextDue = due;
-            if (this.dueAt(current.state, current.context) === due) {
-                nextKind = lifecycleKind(state, nextContext);
-                unchanged = lifecycleKind(current.state, current.context) === nextKind;
+            if (this.dueAt(current.state) === due) {
+                nextKind = lifecycleKind(state, nextContext, this);
+                unchanged = lifecycleKind(current.state, current.context, this) === nextKind;
             }
         }
         if (unchanged) {
@@ -775,7 +842,6 @@ class ColdSimulationKernel {
             });
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
-            if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
             this.refreshCommandSource(characterId);
             this.buyerStateChanged(characterId);
@@ -792,7 +858,6 @@ class ColdSimulationKernel {
             ...(current?.materialMemo ? { materialMemo: current.materialMemo } : {}) });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
-        if (memoryChanged) this.decisionEvents?.memoryChanged(characterId);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
         this.refreshCommandSource(characterId);
         this.buyerStateChanged(characterId);
@@ -814,7 +879,7 @@ class ColdSimulationKernel {
         if (!isMainThread && typeof invoke === 'function') invoke('GameServer/Bot/AI/BotPersona').forget(id);
         const current = this.states.get(id);
         const partyId = String(this.inFlight.get(id)?.partyId || this.claimAttempts.get(id)?.partyId
-            || current?.context?.party?.partyId || current?.state?.party?.partyId || '');
+            || this.partyOf(id)?.partyId || current?.state?.party?.partyId || '');
         if (partyId && typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forgetGroup(partyId);
         this.partyRequirementProgress.delete(partyId);
         const run = this.partyRuns.get(partyId);
@@ -835,7 +900,6 @@ class ColdSimulationKernel {
         this.buyerWakeups.delete(id);
         this.lookSeen.delete(id);
         this.decisionEvents?.ownerRemoved(id, previousRecord, current);
-        this.interactionMemory.forget(id);
         this.versions.set(id, Number(this.versions.get(id) || 0) + 1);
         this.heap.remove(this.scheduleTokens.get(id)?.heapEntry);
         this.scheduleTokens.delete(id);
@@ -856,8 +920,8 @@ class ColdSimulationKernel {
         const current = this.states.get(id);
         const heapEntry = { characterId: id, version: Number(version),
             dueAt: Number(dueAt || this.now()), scheduleToken: token,
-            playerWaiting: playerWaitingTransition(current?.state, current?.context, kind),
-            meetingTravel: meetingTravelTransition(current?.state, current?.context, kind) };
+            playerWaiting: playerWaitingTransition(current?.state, current?.context, kind, this),
+            meetingTravel: meetingTravelTransition(current?.state, current?.context, kind, this) };
         this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
         this.heap.push(heapEntry);
     }
@@ -1014,7 +1078,7 @@ class ColdSimulationKernel {
 
     needsNormalSchedule(characterId) {
         const entry = this.states.get(Number(characterId));
-        return !!entry && isSchedulableKind(lifecycleKind(entry.state, entry.context));
+        return !!entry && isSchedulableKind(lifecycleKind(entry.state, entry.context, this));
     }
 
     buyerStateChanged(characterId) {
@@ -1042,16 +1106,16 @@ class ColdSimulationKernel {
         }
         if (this.hasNormalCoverage(id)) {
             const scheduled = this.scheduleTokens.get(id);
-            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context, kind)
-                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context, kind)) {
+            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context, kind, this)
+                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context, kind, this)) {
                 this.schedule(id, current.version, scheduled.dueAt, kind);
             }
             return false;
         }
         if (this.hasAcceptedPartyGrant(id)) return false;
-        kind ??= lifecycleKind(current.state, current.context);
+        kind ??= lifecycleKind(current.state, current.context, this);
         if (!isSchedulableKind(kind)) return false;
-        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state, current.context), kind);
+        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state), kind);
         return true;
     }
 
@@ -1115,7 +1179,7 @@ class ColdSimulationKernel {
                 continue;
             }
             const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
-                ? 'command' : lifecycleKind(current.state, current.context);
+                ? 'command' : lifecycleKind(current.state, current.context, this);
             if (kind === 'resolver') {
                 this.claiming.add(id);
                 this.claimStartedAt.set(id, this.now());
@@ -1127,30 +1191,21 @@ class ColdSimulationKernel {
                     context: current.context
                 });
             } else if (kind === 'party') {
-                const party = current.context.party;
-                const contextMembers = current.context.partyMembers || [];
-                const declaredMemberIds = Array.isArray(party?.memberIds) && party.memberIds.length
-                    ? party.memberIds
+                // The party row (the 'parties' table) without its two
+                // published fields, which the run keeps beside it.
+                const row = this.leaderParty(id);
+                const { raidOwner = null, requirementRefresh = false, ...party } = row || {};
+                const declaredMemberIds = Array.isArray(row?.memberIds) && row.memberIds.length
+                    ? row.memberIds
                     : [id];
                 const memberIds = [...new Set(declaredMemberIds.map(Number).filter(Boolean))];
-                const missingMemberState = memberIds.some((memberId) => {
-                    if (this.states.get(memberId)?.state) return false;
-                    const fallback = contextMembers.find((member) => Number(member.characterId) === memberId);
-                    return !fallback || fallback.compact === true;
-                });
-                if (missingMemberState) {
+                // Revision fencing reads the kernel's own per-bot states; a
+                // member it does not hold yet waits for its snapshot.
+                if (memberIds.some((memberId) => !this.states.get(memberId)?.state)) {
                     this.requeue(id, this.now() + 1000);
                     continue;
                 }
-                // The leader context is a catalog snapshot and can lag behind
-                // commit ACKs for individual members. Revision fencing must use
-                // the kernel's authoritative per-bot state map or every party
-                // refresh will issue a storm of correctly rejected stale CASes.
-                const members = memberIds.map((memberId) => (
-                    this.states.get(memberId)?.state
-                    || contextMembers.find((member) => Number(member.characterId) === memberId)
-                    || null
-                )).filter(Boolean);
+                const members = memberIds.map((memberId) => this.states.get(memberId).state);
                 const attachedMembers = members.filter((member) => (
                     String(member.party?.partyId || member.partyId || '') === String(party?.partyId || '')
                 ));
@@ -1191,7 +1246,7 @@ class ColdSimulationKernel {
                     this.schedule(id, current.version, this.now() + 250);
                     continue;
                 }
-                if (!party || !partyMembers.length
+                if (!row || !partyMembers.length
                     || candidateMemberIds.some((memberId) => this.claiming.has(memberId) || this.inFlight.has(memberId))) {
                     this.requeue(id, this.now() + 1000);
                     continue;
@@ -1214,11 +1269,12 @@ class ColdSimulationKernel {
                 };
                 this.partyRuns.set(String(party.partyId), {
                     purpose,
-                    requirementRefresh: current.context.requirementRefresh === true,
+                    requirementRefresh: requirementRefresh === true,
+                    raidOwner,
                     party,
                     members: partyMembers,
                     spot: current.context.spot,
-                    pressure: current.context.pressure || {},
+                    pressure: pressureFor(current.state, this.pressureRow),
                     targetNpcId: Number(current.context.targetNpcId || 0),
                     grants: new Map(),
                     rejected: false,
@@ -1396,7 +1452,7 @@ class ColdSimulationKernel {
                 state: resolveState,
                 spot: current.context.spot || null,
                 spotHunters: this.spotHunters(current.context.spot),
-                pressure: current.context.pressure || {},
+                pressure: pressureFor(current.state, this.pressureRow),
                 targetNpcId: Number(current.context.targetNpcId || lifecyclePlan?.targetNpcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
                 elapsedMs,
@@ -1455,10 +1511,8 @@ class ColdSimulationKernel {
                 this.inFlight.delete(Number(id));
                 this.dirty.delete(Number(id));
             });
-            const leader = [...this.states.entries()].find(([, entry]) => (
-                entry.context?.isPartyLeader && String(entry.context?.party?.partyId || '') === partyId
-            ));
-            if (leader) this.requeue(leader[0], timestamp + 1000);
+            const leaderId = Number(this.parties.get(partyId)?.leaderId || 0);
+            if (leaderId && this.states.has(leaderId)) this.requeue(leaderId, timestamp + 1000);
             DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += members.length);
         }
         expiredLeases.filter(([, active]) => !active.partyId).forEach(([id]) => {
@@ -1625,7 +1679,7 @@ class ColdSimulationKernel {
             && grant.leaseId === token.leaseId && grant.characterId === id;
         const active = this.inFlight.get(id);
         if (active) return same(active.grant) ? active : null;
-        const partyId = entry.state.party?.partyId || entry.state.partyId || entry.context?.party?.partyId;
+        const partyId = entry.state.party?.partyId || entry.state.partyId || this.partyOf(id)?.partyId;
         const run = this.partyRuns.get(String(partyId || ''));
         if (!liveRuns.has(run)) liveRuns.set(run, this.livePartialRun(run));
         return liveRuns.get(run) && same(run.grants.get(id)) ? run : null;
@@ -1908,7 +1962,7 @@ class ColdSimulationKernel {
                 episodeId: run.grants.get(Number(run.party.leaderId))?.leaseId,
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 party: run.party,
-                raidOwner: this.states.get(Number(run.party.leaderId))?.context?.raidOwner || null,
+                raidOwner: run.raidOwner || null,
                 members: run.members,
                 spot: run.spot,
                 pressure: run.pressure,
@@ -2018,8 +2072,7 @@ class ColdSimulationKernel {
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
-                    const selection = await this.planPartyRequirement({ state: projectedState,
-                        context: this.states.get(id)?.context || {}, timestamp: startedAt,
+                    const selection = await this.planPartyRequirement({ state: projectedState, timestamp: startedAt,
                         economy: projection?.economy });
                     lastRequirementPlanMs = performance.now() - planningStarted;
                     requirementMs += lastRequirementPlanMs;
@@ -2128,7 +2181,7 @@ class ColdSimulationKernel {
                 state: resolveState,
                 spot,
                 spotHunters: this.spotHunters(spot),
-                pressure: active.context.pressure || {},
+                pressure: pressureFor(active.state, this.pressureRow),
                 targetNpcId: Number(lifecyclePlan?.targetNpcId || lifecyclePlan?.acquisitionPlan?.next?.npcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) ||
                     active.context.targetNpcId || 0),
@@ -2144,7 +2197,7 @@ class ColdSimulationKernel {
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;
-            const priority = playerWaitingTransition(active.state, active.context) ? 'P0'
+            const priority = playerWaitingTransition(active.state, active.context, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
                 proposalId: `${active.grant.leaseId}:${active.grant.revision}`,
@@ -2403,7 +2456,7 @@ class ColdSimulationKernel {
                 || (!active && pending.version !== this.versions.get(id))
                 || Number(active?.grant.leaseUntil || pending.token.leaseUntil) <= this.now()) return;
             this.pendingReleases.delete(id);
-            this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || this.states.get(id)?.context?.party?.partyId || ''));
+            this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || this.partyOf(id)?.partyId || ''));
             this.lookSeen.delete(id);
             this.inFlight.delete(id);
             if (result.state) this.upsert(result);
@@ -2547,11 +2600,11 @@ class ColdSimulationKernel {
         if (!DiagnosticConfig.developerDiagnostics) return this.heartbeatSnapshot();
         const now = this.now();
         const due = [...this.states.values()].filter((entry) => (
-            isSchedulableKind(lifecycleKind(entry.state, entry.context))
-            && this.dueAt(entry.state, entry.context, now) <= now
+            isSchedulableKind(lifecycleKind(entry.state, entry.context, this))
+            && this.dueAt(entry.state, now) <= now
         ));
         const oldestDueAt = due.reduce((oldest, entry) => (
-            Math.min(oldest, this.dueAt(entry.state, entry.context, now))
+            Math.min(oldest, this.dueAt(entry.state, now))
         ), now);
         const oldestDirtyAt = [...this.dirty.values()].reduce((oldest, proposal) => (
             Math.min(oldest, Number(proposal.enqueuedAt || now))
