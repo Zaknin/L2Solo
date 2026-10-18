@@ -51,6 +51,16 @@ async function run() {
     const snapshot = prepared.snapshot || prepared.state || prepared;
     const stats = snapshot.stats || JSON.parse(prepared.row.statsJson);
     assert.strictEqual(JSON.stringify(stats.spotRisk), before, 'party combat leaves solo risk history untouched');
+    // A saved party row's clock marks become steps of the party's rounds once, at load.
+    const loadedAt = 2_000_000, clockParty = { partyId: 'clock-party', memberIds: [1, 2] };
+    clockParty.stats = Party.marksInSteps({ partySpotRisk: { partyId: 'clock-party', rosterKey: '1,2', rounds: 4,
+        spotBackoffs: [{ spotId: 'risky', startedAt: 1, until: loadedAt + 3 * 60000 }] },
+    coldCompetition: { avoid: { spotId: 'contested', until: loadedAt + 2 * 60000 } } }, 'clock-party', loadedAt);
+    assert.deepStrictEqual([...Party.excludedSpotIds(clockParty)].sort(), ['contested', 'risky']);
+    const roundsLater = n => ({ ...clockParty, stats: { ...clockParty.stats,
+        partySpotRisk: { ...clockParty.stats.partySpotRisk, rounds: 4 + n } } });
+    assert.deepStrictEqual([...Party.excludedSpotIds(roundsLater(2))], ['risky'], 'two minutes of avoid last two rounds');
+    assert.deepStrictEqual([...Party.excludedSpotIds(roundsLater(3))], [], 'three minutes of a death mark last three rounds');
     console.log('Party risk: isolated history, persistence, roster changes, real group failures and uncontaminated solo state passed.');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

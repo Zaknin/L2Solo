@@ -158,6 +158,34 @@ function markActive(entry, state = {}) {
     return Number(entry?.untilStep) > stepCount(state);
 }
 
+// One-time migration of saved wall-clock marks (until, no untilStep), run
+// where a saved row becomes a state: the time left becomes steps of the
+// holder's counter, one step ~ the default one-minute resolve period; an
+// expired mark is dropped. No decision reads a clock.
+const MIGRATION_STEP_MS = 60000;
+function clockMark(entry) {
+    return !!entry && entry.until !== undefined && entry.untilStep === undefined;
+}
+function markInSteps(entry, counter, now) {
+    if (!clockMark(entry)) return entry;
+    const left = Math.ceil(Math.max(0, Number(entry.until) - now) / MIGRATION_STEP_MS);
+    if (!(left > 0)) return null;
+    const next = { ...entry, untilStep: counter + left };
+    delete next.until;
+    return next;
+}
+function marksInSteps(stats, now = Date.now(), counter = stepCount({ stats })) {
+    if (!stats || typeof stats !== 'object') return stats;
+    for (const key of ['spotBackoffs', 'capacityBackoffs', 'clanHuntBackoffs']) {
+        if (Array.isArray(stats[key]) && stats[key].some(clockMark)) {
+            stats[key] = stats[key].map(entry => markInSteps(entry, counter, now)).filter(Boolean);
+        }
+    }
+    const avoid = stats.coldCompetition?.avoid;
+    if (clockMark(avoid)) stats.coldCompetition = { ...stats.coldCompetition, avoid: markInSteps(avoid, counter, now) };
+    return stats;
+}
+
 function activeBackoffs(state = {}) {
     return (Array.isArray(state.stats?.spotBackoffs) ? state.stats.spotBackoffs : [])
         .filter((entry) => normalizedSpotId(entry?.spotId) && markActive(entry, state))
@@ -274,6 +302,7 @@ module.exports = {
     BACKOFF_STEPS,
     MAX_BACKOFF_STEPS,
     MAX_BACKOFFS,
+    marksInSteps,
     ROUTE_CAPACITY_RETRY_MS,
     CAPACITY_BACKOFF_STEPS,
     MAX_FAILED_HUNTS,

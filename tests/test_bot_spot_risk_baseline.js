@@ -160,15 +160,36 @@ async function run() {
         'a persisted pre-attempts backoff must count as the first failed visit');
     assert.strictEqual(legacyRepeatedBackoff.stats.spotBackoffs[0].untilStep - 7, SpotRiskPolicy.BACKOFF_STEPS * 2,
         'returning after a legacy backoff must use the second-attempt duration');
-    const cappedBackoff = SpotRiskPolicy.withBackoff(atStep(state, 40), {
-        spotId: 'over_cap_spot', reason: 'death_pressure', startedAt: 12000, attempts: 9,
+    const cappedBackoff = SpotRiskPolicy.withBackoff(atStep({ ...state, stats: { ...state.stats,
+        spotBackoffs: [{ spotId: 'over_cap_spot', reason: 'death_pressure', startedAt: 11000, attempts: 9, untilStep: 30 }] } }, 40), {
+        spotId: 'over_cap_spot', reason: 'death_pressure', startedAt: 12000,
         untilStep: 40 + SpotRiskPolicy.MAX_BACKOFF_STEPS * 2
     }, 12000);
-    assert(cappedBackoff.stats.spotBackoffs[0].untilStep - 40 <= SpotRiskPolicy.MAX_BACKOFF_STEPS,
-        'a copied mark must not extend a spot backoff beyond the maximum duration');
-    assert(!SpotRiskPolicy.excludedSpotIdsForStates([{ stats: { stepCount: 3,
-        spotBackoffs: [{ spotId: 'clock_spot', startedAt: 1, until: Number.MAX_SAFE_INTEGER }] } }]).has('clock_spot'),
-        'a saved mark of the former clock reads as forgotten');
+    assert.strictEqual(cappedBackoff.stats.spotBackoffs[0].attempts, 10);
+    assert.strictEqual(cappedBackoff.stats.spotBackoffs[0].untilStep - 40, SpotRiskPolicy.MAX_BACKOFF_STEPS,
+        'a tenth visit and a copied longer mark both stop at the maximum duration');
+
+    // A saved mark of the former clock becomes steps once, when its row loads:
+    // the minutes it had left are steps of the holder's counter.
+    const loadedAt = 1_000_000;
+    const loaded = SpotRiskPolicy.marksInSteps({ stepCount: 3,
+        spotBackoffs: [{ spotId: 'clock_spot', startedAt: 1, until: loadedAt + 5 * 60000 },
+            { spotId: 'old_clock_spot', startedAt: 1, until: loadedAt - 1 }],
+        capacityBackoffs: [{ spotId: 'full_spot', until: loadedAt + 1 }],
+        coldCompetition: { avoid: { spotId: 'avoided_spot', until: loadedAt + 10 * 60000 } } }, loadedAt);
+    assert.deepStrictEqual([...SpotRiskPolicy.excludedSpotIdsForStates([{ stats: loaded }])].sort(),
+        ['avoided_spot', 'clock_spot', 'full_spot'], 'a loaded clock mark with time left still excludes its spot');
+    assert.deepStrictEqual(loaded.spotBackoffs.map(entry => entry.spotId), ['clock_spot'], 'an expired clock mark is dropped');
+    assert.deepStrictEqual([...SpotRiskPolicy.excludedSpotIdsForStates([{ stats: { ...loaded, stepCount: 3 + 5 } }])].sort(),
+        ['avoided_spot'], 'five minutes left last five steps, one second one step');
+    assert.deepStrictEqual([...SpotRiskPolicy.excludedSpotIdsForStates([{ stats: { ...loaded, stepCount: 3 + 10 } }])], [],
+        'ten minutes of avoid last ten steps');
+    const reloaded = LifeState.acceptLifecycleRow({ characterId: 993, name: 'ClockMarkProbe', phase: 'cold',
+        activity: 'hunting', spotId: 'other_spot', simulationRevision: 1, updatedAt: 1,
+        statsJson: JSON.stringify({ stepCount: 7, spotBackoffs: [{ spotId: 'row_spot', startedAt: 1, until: Date.now() + 2 * 60000 }] }) });
+    assert(SpotRiskPolicy.excludedSpotIdsForStates([reloaded]).has('row_spot'), 'a saved row is converted where it becomes a state');
+    assert(!SpotRiskPolicy.excludedSpotIdsForStates([atStep(reloaded, 7 + 2)]).has('row_spot'),
+        'the converted mark counts the bot\'s own steps');
     console.log('Bot spot risk baseline checks passed');
 }
 

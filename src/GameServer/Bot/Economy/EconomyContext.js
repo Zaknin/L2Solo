@@ -345,7 +345,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         || proof.liquidation.rows.length > 8 || !proof.liquidation.rows.every(row => Array.isArray(row)
             && row.length === 2 && Number.isSafeInteger(row[0]) && row[0] > 0 && Number.isFinite(row[1]) && row[1] > 0)
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
-    const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
+    const baseline = options.baseline;
     if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at)) return refuse('baseline');
     // The baseline belongs to this proof (identity of `at`, not an order of
     // two times: a request's own clock is no decision input).
@@ -436,13 +436,13 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         });
     if (!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
         return refuse('liquidation', ['sources', 'money']);
-    const input = { heldUnits, current: null, prepared: { liquidation: liquidation.candidates }, timestamp };
+    const input = { heldUnits, current: null, prepared: { liquidation: liquidation.candidates } };
     if (options.rebuildBasis) {
         // The basis keeps the held foundation (its hunt and best spot), so a
         // spot the bot now avoids refuses it, as before the table. The other
         // rows judge the old activity, which this rebuild re-weighs anyway: a
         // purchase's funds check would refuse every basis a money drop asks for.
-        const spot = leaf?.activity === 'hunting' ? spotExcluded(state, leaf, deps, input) : '';
+        const spot = leaf?.activity === 'hunting' ? spotExcluded(state, leaf) : '';
         if (spot) return refuse(spot.reason, spot.sections);
         // Reusing slow valuation facts is not permission to execute the old
         // activity with the new wallet. Admission and the network run again.
@@ -669,8 +669,8 @@ const withHeldUnits = (leaf, heldUnits) => ColdEconomyDecision.ownItem(leaf) !==
     ? { ...leaf, heldAtDecision: heldUnits } : leaf;
 // The hunting spot against the bot's marks (died here, was full, avoided a
 // quarrel) and its death pressure: the one exclusion read of a decision.
-function spotExcluded(state, leaf, deps, input) {
-    return SpotRiskPolicy.excludedSpotIdsForStates([state], input.timestamp).has(String(leaf.spotId)) ? EXCLUDED : '';
+function spotExcluded(state, leaf) {
+    return SpotRiskPolicy.excludedSpotIdsForStates([state]).has(String(leaf.spotId)) ? EXCLUDED : '';
 }
 // A trade leaf's town route: known and its fees payable now.
 function tradeRoute(state, leaf, deps) {
@@ -679,7 +679,7 @@ function tradeRoute(state, leaf, deps) {
     return route?.known && Number.isFinite(route.fees) && route.fees <= positive(state.adena) ? { trip, route } : null;
 }
 const LEAF_CHECKS = Object.freeze({
-    hunting: (state, leaf, deps, input) => spotExcluded(state, leaf, deps, input)
+    hunting: (state, leaf, deps, input) => spotExcluded(state, leaf)
         || (ColdEconomyDecision.materialHunt(leaf)
             && ColdEconomyDecision.remainingToOrder(withHeldUnits(leaf, input.heldUnits), state) <= 0 ? MATERIAL_DONE : ''),
     shopping: (state, leaf, deps, input) => {

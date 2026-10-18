@@ -239,6 +239,7 @@ async function run() {
         }, { timestamp: at + i, persist: false, projectClassProgression: true });
     }
     assert.strictEqual(stalled.stats.spotRisk.failedHunts, 3);
+    assert.strictEqual(Risk.stepCount(stalled), Risk.stepCount(state) + 3, 'each resolved step moves the bot\'s counter by exactly one');
     assert(stalled.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && entry.reason === 'failed_hunts'),
         'abandoned real fights must exclude the failing ground through the existing routing policy');
     assert.strictEqual(stalled.stats.deaths, 0, 'an abandoned fight is not a death');

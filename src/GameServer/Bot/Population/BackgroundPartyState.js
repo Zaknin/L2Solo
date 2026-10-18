@@ -3,6 +3,7 @@ const Diagnostics = require('../Economy/EconomyDiagnostics');
 const Database = invoke('Database');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const PartyRisk = require('./PartySpotRiskPolicy');
 
 const TABLE = 'bot_background_parties';
 const cache = new Map();
@@ -168,7 +169,7 @@ function normalizeMembership(party = {}) {
 
 function normalize(row) {
     const startedAt = Number(row.startedAt || 0);
-    const stats = parseJson(row.statsJson, {});
+    const stats = PartyRisk.marksInSteps(parseJson(row.statsJson, {}), row.partyId || '', Date.now());
     if (row.status === 'active' && startedAt && !Number(stats.sessionExpiresAt || 0)) {
         stats.sessionExpiresAt = rotationExpiry(row.partyId, startedAt);
     }

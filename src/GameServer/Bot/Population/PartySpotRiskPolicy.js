@@ -22,6 +22,17 @@ function memory(party, stats) {
 function rounds(party) {
     return state(party).stats.stepCount;
 }
+// One-time migration of a saved party row's wall-clock marks
+// (SpotRiskPolicy.marksInSteps) on the party's own rounds.
+function marksInSteps(stats, partyId, now) {
+    const counter = rounds({ partyId, stats });
+    Risk.marksInSteps(stats, now, counter);
+    const memory = stats?.partySpotRisk;
+    if (Array.isArray(memory?.spotBackoffs)) {
+        stats.partySpotRisk = { ...memory, spotBackoffs: Risk.marksInSteps({ spotBackoffs: memory.spotBackoffs }, now, counter).spotBackoffs };
+    }
+    return stats;
+}
 function excludedSpotIds(party, timestamp) {
     return Risk.excludedSpotIdsForStates([state(party)], timestamp);
 }
@@ -50,4 +61,4 @@ function record(party, result, timestamp) {
     return { ...result, partyPatch: { ...result.partyPatch, stats: { ...result.partyPatch?.stats,
         partySpotRisk: memory(party, { ...previous, spotRisk, stepCount }) } } };
 }
-module.exports = { rosterKey, rounds, excludedSpotIds, backoff, withBackoff, record };
+module.exports = { rosterKey, rounds, marksInSteps, excludedSpotIds, backoff, withBackoff, record };

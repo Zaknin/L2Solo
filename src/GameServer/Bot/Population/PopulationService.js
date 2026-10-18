@@ -773,7 +773,7 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
         && !invoke('GameServer/AfkTrade/TradeMeetingService').canJoinParty(member.characterId, member))) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'party_trade_busy' });
     }
-    if (ClanEquipmentPartyPolicy.needsReview(party, selected, Date.now())) {
+    if (ClanEquipmentPartyPolicy.needsReview(party, selected)) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'clan_party_unsafe' });
     }
     if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {

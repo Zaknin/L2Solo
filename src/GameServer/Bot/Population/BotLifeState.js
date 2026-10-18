@@ -549,7 +549,7 @@ function compactResolveDebug(debug = {}) {
 }
 
 function normalize(row) {
-    const stats = parseJson(row.statsJson, {});
+    const stats = SpotRiskPolicy.marksInSteps(parseJson(row.statsJson, {}), Date.now());
     delete stats.marketTrades;
     delete stats.priceBeliefs;
     // The retired combat profile hold record (no reader).
@@ -2748,9 +2748,9 @@ const BotLifeState = {
             hard = DecisionSections.events(state, nextState, escrow);
         }
         // The bot's step counter, the clock of its spot marks (SpotRiskPolicy):
-        // +1 once per far step, here in the background thread only. Main never
-        // moves it, so a near bot's marks wait until it is far again.
-        if (!isMainThread) nextState.stats.stepCount = SpotRiskPolicy.stepCount(state) + 1;
+        // +1 once per resolved step, whichever thread resolves it (hot actor
+        // sessions never come here, so a near bot's marks wait until it is far).
+        nextState.stats.stepCount = SpotRiskPolicy.stepCount(state) + 1;
         // The soft point (background thread, every far step, whatever its
         // round): money, income and the watched market against the bot's own
         // error; raised with the round's hard events in one bump.

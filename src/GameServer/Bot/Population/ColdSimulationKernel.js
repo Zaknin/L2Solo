@@ -16,6 +16,7 @@ const BotErrands = require('./BotErrands');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 const C4Unseal = require('../../Items/C4Unseal');
+const ClanEquipment = require('./ClanEquipmentPartyPolicy');
 
 class DueHeap {
     constructor() {
@@ -1741,7 +1742,7 @@ class ColdSimulationKernel {
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
             if (!meetingPending && !rescuing && !require('./CraftMaterialPartyRoute').evacuating(run.party)
                 && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
-                || require('./ClanEquipmentPartyPolicy').needsReview(run.party, run.members, startedAt)
+                || ClanEquipment.needsReview(run.party, run.members)
                 || equipmentBridgeReview)) {
                 const review = BackgroundPartyLifecycle.review(run.party, run.members, startedAt, {
                     ...this.partySession,

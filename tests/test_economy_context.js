@@ -287,7 +287,7 @@ async function run() {
     // enchant level read; one without an object (an exchange) holds by its
     // bag rows. A failed row names itself and lights its own sections.
     {
-        const check = (state, leaf) => Economy.leafCheck(state, leaf, {}, { heldUnits: undefined, timestamp: 0 });
+        const check = (state, leaf) => Economy.leafCheck(state, leaf, {}, { heldUnits: undefined });
         const leaf = improvement => ({ activity: 'improving', improvement });
         const bag = enchant => ({ ...base, inventory: { 1310: { selfId: 1310, amount: 1, instances: [{ id: 77, enchant }] } } });
         const enchant = { kind: 'enchant', itemId: 1310, objectId: 77, from: 2, to: 3 };

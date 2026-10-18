@@ -6565,6 +6565,9 @@ const Database = {
             partyStats.sessionReview = null;
             partyStats.lastProgressAt = timestamp;
             partyStats.partySpotRisk = null;
+            // The takeover ends the party's competition episode: its avoid
+            // counts the party rounds just reset with partySpotRisk.
+            if (partyStats.coldCompetition?.avoid) partyStats.coldCompetition = { ...partyStats.coldCompetition, avoid: null };
             partyStats.hotLifecycle = phase === 'hot'
                 ? { startedAt: timestamp, reason: 'player_party_released' }
                 : null;
