@@ -220,7 +220,7 @@ async function checkMissingSpotRecovery() {
     }
     assert(Population.canResumeAffordableMarketPlan(buyer, at),
         'the original funded compatible bridge remains eligible for a market review before another fight');
-    const originals = { ensure: Spots.ensure, occupancy: Spots.currentOccupancy, find: Spots.findForState,
+    const originals = { ensure: Spots.ensure, find: Spots.findForState,
         save: Life.upsertState, cachedState: Life.cachedState };
     const state = { ...polearm, characterId: 100, phase: 'cold', activity: 'hunting', inventory: {},
         adena: 0, stats: { classId: 3 }, timing: { nextResolveAt: 1 } };
@@ -230,7 +230,6 @@ async function checkMissingSpotRecovery() {
     const originalReview = Goals.review;
     try {
         Spots.ensure = () => [];
-        Spots.currentOccupancy = () => ({});
         Spots.findForState = () => null;
         Life.upsertState = async (next, reason) => { savedReason = reason; saves += 1; return next; };
         Events.recordMany = async () => [];
@@ -279,7 +278,7 @@ async function checkMissingSpotRecovery() {
         assert.strictEqual(staleTrip.state, current);
         assert.strictEqual(saves, savesBeforeStaleTrip, 'the stale market trip must not write another lifecycle state');
     } finally {
-        Spots.ensure = originals.ensure; Spots.currentOccupancy = originals.occupancy;
+        Spots.ensure = originals.ensure;
         Spots.findForState = originals.find; Life.upsertState = originals.save;
         Life.cachedState = originals.cachedState;
         Events.recordMany = originalEvents;

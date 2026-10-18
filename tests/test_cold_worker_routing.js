@@ -108,7 +108,6 @@ try {
             11,
             { partyId: 'compact-party', leaderId: 11, memberIds: [11, 12] }
         ]]),
-        occupancy: {},
         compactPartyMembers: true
     });
     assert(compactContext.partyMembers.every((member) => member.compact === true),
@@ -127,7 +126,6 @@ try {
             11,
             { partyId: 'compact-party', leaderId: 11, memberIds: [11, 12] }
         ]]),
-        occupancy: {},
         compactPartyMemberIds: new Set([11])
     });
     assert.strictEqual(mixedContext.partyMembers[0].compact, true);
@@ -170,7 +168,7 @@ try {
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: {}
-    }, currentSpot, null, [], { occupancy: {}, spots: new Map(), wishLeaf: null });
+    }, currentSpot, null, [], { spots: new Map(), wishLeaf: null });
     assert.strictEqual(solo.mode, 'solo');
     assert.strictEqual(solo.spotId, targetSpot.id);
     assert.deepStrictEqual(solo.destinations['1'], destinationFor({ characterId: 1 }));
@@ -202,7 +200,7 @@ try {
             currentSpot,
             raidParty,
             raidMembers,
-            { spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]]), occupancy: {} }
+            { spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]]) }
         ),
         null,
         'a cold raid party already at its virtual raid spot must not repeat the same 25-second travel'
@@ -211,8 +209,7 @@ try {
         raidMembers[0],
         {
             spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]]),
-            parties: new Map(),
-            occupancy: {}
+            parties: new Map()
         }
     );
     assert.strictEqual(raidContext.spot.id, raidSpot.id,
@@ -223,7 +220,7 @@ try {
         spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 },
         stats: { coldCompetition: { avoid: { spotId: currentSpot.id, untilStep: 10 } } } };
     const savedIndex = coordinator.contextIndex;
-    coordinator.contextIndex = () => ({ spots: new Map([[currentSpot.id, currentSpot], [targetSpot.id, targetSpot]]), occupancy: {} });
+    coordinator.contextIndex = () => ({ spots: new Map([[currentSpot.id, currentSpot], [targetSpot.id, targetSpot]]) });
     SpotProfiles.findForState = (state, options) => {
         assert(options.excludedSpotIds.has(currentSpot.id), 'voluntary avoidance reaches the real route selector');
         assert.strictEqual(options.timestamp, retreatAt);
@@ -239,7 +236,7 @@ try {
     coordinator.contextIndex = savedIndex;
     SpotProfiles.findForState = routeTargetForState;
 
-    const sharedIndex = { occupancy: {}, spots: new Map(), wishLeaf: null };
+    const sharedIndex = { spots: new Map(), wishLeaf: null };
     const batchRouteFor = (characterId) => coordinator.routeFor({
         characterId,
         phase: 'cold',
@@ -249,13 +246,16 @@ try {
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: {}
     }, currentSpot, null, [], sharedIndex);
-    assert(batchRouteFor(20), 'the first cold decision must reserve an available destination');
-    assert(batchRouteFor(21), 'the second cold decision may consume the final destination slot');
-    assert.strictEqual(batchRouteFor(22), null,
-        'later decisions in the same cold snapshot must not overbook the reserved destination');
+    // No place is held ahead of arrival (ARCH-08-c): every decision of one
+    // context gets the destination; its room is checked when each bot arrives
+    // (test_room_at_arrival.js). The spot's capacity is 2.
+    assert(batchRouteFor(20), 'the first cold decision routes to the destination');
+    assert(batchRouteFor(21), 'the second cold decision routes to the destination');
+    assert.strictEqual(batchRouteFor(22)?.spotId, targetSpot.id,
+        'a third decision is not refused at planning: the room is checked at arrival');
 
     // "Was full" marks (the arrival check itself: test_room_at_arrival.js):
-    // a chain of them, and the phantom places and searches they clear.
+    // a chain of them, and the searches they clear.
     const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
     const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
     const markedState = Risk.withCapacityBackoff({
@@ -278,18 +278,6 @@ try {
         'the whole chain expires one backoff after the last full spot');
     assert.strictEqual(markedState.stats.lastReason, 'route_capacity_full');
     assert.strictEqual(markedState.stats.spotBackoffs, undefined);
-    for (const intent of [
-        { equipmentPlan: { status: 'active', strategy: 'craft', next: { spotId: targetSpot.id } } },
-        { partyRequest: { status: 'open', spotId: targetSpot.id } },
-        { clanPartyObjective: { status: 'deferred', spotId: targetSpot.id } }
-    ]) {
-        const waiting = { activity: 'hunting', stats: { ...intent,
-            capacityBackoffs: markedState.stats.capacityBackoffs } };
-        assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1)), null,
-            'an intent on a spot found full must not hold a phantom place there');
-        assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)), targetSpot.id);
-    }
-
     const originalCache = SpotProfiles.cache;
     const savedFind = SpotProfiles.findForState;
     const savedPhysical = SpotService.findCurrentSpot;
@@ -299,8 +287,8 @@ try {
         SpotProfiles.findForState = originalFindForState;
         SpotService.findCurrentSpot = () => null;
         const rerouted = SpotProfiles.findForState({ ...markedState, level: 16 },
-            { timestamp: 3000, occupancy: {} });
-        assert.strictEqual(rerouted?.id, free.id, 'the next search after a full arrival takes a free alternative even with an older occupancy snapshot');
+            { timestamp: 3000 });
+        assert.strictEqual(rerouted?.id, free.id, 'the next search after a full arrival takes a free alternative');
     } finally {
         SpotProfiles.cache = originalCache;
         SpotProfiles.findForState = savedFind;
@@ -318,17 +306,6 @@ try {
         tagsAuthoritative: true
     };
     const emergencyIndex = {
-        occupancy: {
-            [targetSpot.id]: {
-                count: 2,
-                reservedCount: 2,
-                capacity: 2,
-                retained: new Set(['20', '21']),
-                reservedKeys: new Set(['20', '21']),
-                reservationKeys: new Set(),
-                retainedReservationKeys: new Set()
-            }
-        },
         profiles: [targetSpot],
         spots: new Map([[targetSpot.id, targetSpot]])
     };
@@ -375,8 +352,7 @@ try {
         const outOfRange = Array.from({ length: 100 }, (_, i) => ({
             ...targetSpot, id: `out-of-range-${i}`, minLevel: 70, maxLevel: 80
         }));
-        const fullSpot = { ...targetSpot, id: 'evacuation-full' };
-        const catalog = [...outOfRange, fullSpot, ...alternatives];
+        const catalog = [...outOfRange, ...alternatives];
         const evacuationState = {
             characterId: 26, phase: 'cold', activity: 'hunting', level: 22,
             spotId: dangerousSpot.id, currentRegion: dangerousSpot.name,
@@ -384,18 +360,15 @@ try {
         };
         const routeAgain = () => coordinator.routeFor(evacuationState,
             unqualifiedCurrentSpot, null, [], {
-                profiles: catalog, spots: new Map(catalog.map(spot => [spot.id, spot])),
-                occupancy: { [fullSpot.id]: {
-                    reservedCount: 3, capacity: 2, reservedKeys: new Set(['20', '21', '22'])
-                } }
+                profiles: catalog, spots: new Map(catalog.map(spot => [spot.id, spot]))
             });
         const first = routeAgain();
         assert(first && alternatives.some(spot => spot.id === first.spotId),
-            'evacuation must still choose a safe destination with room');
+            'evacuation must still choose a safe destination');
         assert(profileBuilds <= 3,
             `evacuation must reuse combat profiles across candidates; built ${profileBuilds}`);
-        assert(!checkedSpots.some(id => id.startsWith('out-of-range-') || id === fullSpot.id),
-            'level and capacity exclusions must run before expensive combat checks');
+        assert(!checkedSpots.some(id => id.startsWith('out-of-range-')),
+            'level exclusions must run before expensive combat checks');
         const firstBuilds = profileBuilds;
         const second = routeAgain();
         assert.strictEqual(second.spotId, first.spotId);
@@ -418,7 +391,7 @@ try {
         { characterId: 2, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 }, stats: {} },
         { characterId: 3, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 4, locY: 5, locZ: 6 }, stats: {} }
     ];
-    const partyRoute = coordinator.routeFor(members[0], currentSpot, party, members, { occupancy: {}, spots: new Map(), wishLeaf: null });
+    const partyRoute = coordinator.routeFor(members[0], currentSpot, party, members, { spots: new Map(), wishLeaf: null });
     assert.strictEqual(partyRoute.mode, 'party');
     assert.strictEqual(Object.keys(partyRoute.destinations).length, 2);
     assert.deepStrictEqual(partyRoute.destinations['3'], destinationFor(members[1]));
@@ -432,11 +405,8 @@ try {
     SpotProfiles.findForState = () => lair;
     SpotService.arrivalPointForState = () => dungeonPoint;
     try {
-        const repairOccupancy = { [lair.id]: { count: 2, reservedCount: 2, capacity: 2,
-            retained: new Set(['2', '3']), reservedKeys: new Set(['2', '3']) } };
-        const repairedRoute = coordinator.routeFor(displacedMembers[0], lair, displacedParty, displacedMembers, { occupancy: repairOccupancy });
+        const repairedRoute = coordinator.routeFor(displacedMembers[0], lair, displacedParty, displacedMembers, {});
         assert(repairedRoute?.needed);
-        assert.strictEqual(repairOccupancy[lair.id].reservedCount, 2, 'position repair does not reserve existing members twice');
         assert.strictEqual(repairedRoute.cause, 'position_mismatch');
         assert.strictEqual(repairedRoute.reason, 'party_spot_replan');
         const Kernel = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -448,15 +418,15 @@ try {
         assert.strictEqual(arrived.spotId, lair.id);
         for (const patch of [{ phase: 'hot' }, { activity: 'resting' }, { stats: { pvpEncounter: { key: 'fighting' } } }]) {
             const blockedMembers = [displacedMembers[0], { ...displacedMembers[1], ...patch }];
-            assert.strictEqual(coordinator.routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, { occupancy: {}, spots: new Map(), wishLeaf: null }), null);
+            assert.strictEqual(coordinator.routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, { spots: new Map(), wishLeaf: null }), null);
         }
         const validMembers = displacedMembers.map(m => ({ ...m, loc: dungeonPoint }));
-        assert.strictEqual(coordinator.routeFor(validMembers[0], lair, displacedParty, validMembers, { occupancy: {}, spots: new Map(), wishLeaf: null }), null,
+        assert.strictEqual(coordinator.routeFor(validMembers[0], lair, displacedParty, validMembers, { spots: new Map(), wishLeaf: null }), null,
             'valid positions do not cause endless repair journeys');
         // Route planning uses full cached members even when the worker payload is compact.
         LifeState.cachedState = id => displacedMembers.find(m => m.characterId === id);
         const context = coordinator.contextFor(displacedMembers[0], { spots: new Map([[lair.id, lair]]),
-            parties: new Map([[displacedParty.leaderId, displacedParty]]), occupancy: repairOccupancy, compactPartyMembers: true });
+            parties: new Map([[displacedParty.leaderId, displacedParty]]), compactPartyMembers: true });
         assert(context.partyMembers.every(m => m.compact));
         assert.strictEqual(context.route.cause, 'position_mismatch');
 
@@ -465,25 +435,11 @@ try {
             { ...displacedMembers[1], spotId: currentSpot.id },
             { ...displacedMembers[1], characterId: 4, spotId: currentSpot.id }];
         const joiningParty = { ...displacedParty, memberIds: [2, 3, 4] };
-        const occupied = { [lair.id]: { count: 3, reservedCount: 3, capacity: 4,
-            retained: new Set(['2', '8', '9']), reservedKeys: new Set(['2', '8', '9']) } };
-        assert.strictEqual(coordinator.routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, { occupancy: occupied }), null,
-            'repair cannot bring two unreserved members into one remaining slot');
-        assert.strictEqual(occupied[lair.id].reservedCount, 3);
-        assert.deepStrictEqual([...occupied[lair.id].reservedKeys], ['2', '8', '9'], 'rejected repair leaves reservations unchanged');
-        occupied[lair.id].reservedKeys.delete('9');
-        occupied[lair.id].retained.delete('9');
-        occupied[lair.id].count = occupied[lair.id].reservedCount = 2;
-        assert(coordinator.routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, { occupancy: occupied })?.needed,
-            'repair can proceed when both missing reservations fit');
-        assert.strictEqual(occupied[lair.id].reservedCount, 4);
-        assert(occupied[lair.id].reservedKeys.has('3') && occupied[lair.id].reservedKeys.has('4'));
-        assert.strictEqual(SpotProfiles.reserveCapacity(occupied, lair, [{ characterId: 5 }]), false,
-            'later routes must see the space taken by the arriving party');
-        // Fixing coordinates of already counted hunters must also work on an overfull spot.
-        occupied[lair.id].capacity = 3;
-        assert(coordinator.routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, { occupancy: occupied })?.needed);
-        assert.strictEqual(occupied[lair.id].reservedCount, 4, 'repeated repair cannot add reservations');
+        // No place is held at planning (ARCH-08-c): the repair brings the
+        // missing members whatever the crowd; the party's room is checked at
+        // its arrival (test_room_at_arrival.js).
+        assert(coordinator.routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, {})?.needed,
+            'repair brings the missing members without a reservation');
     } finally {
         SpotService.findCurrentSpot = () => currentSpot;
         SpotProfiles.findForState = routeTargetForState;
@@ -507,7 +463,7 @@ try {
         currentSpot,
         party,
         pressuredMembers,
-        { occupancy: {}, timestamp: 5000 }
+        { timestamp: 5000 }
     );
     assert(!personalPressureRoute.spotBackoff,
         'a member solo death history must not force the whole party to retreat');
@@ -518,7 +474,7 @@ try {
     }, 5000);
     const pressuredParty = { ...party, ...failedGroup.partyPatch };
     const pressuredPartyRoute = coordinator.routeFor(
-        members[0], currentSpot, pressuredParty, members, { occupancy: {}, timestamp: 5000 }
+        members[0], currentSpot, pressuredParty, members, { timestamp: 5000 }
     );
     assert.strictEqual(pressuredPartyRoute.reason, 'party_spot_replan');
     assert.strictEqual(pressuredPartyRoute.cause, 'death_pressure');
@@ -569,7 +525,6 @@ try {
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: { equipmentPlan: requestPlan, partyRequest: request }
     }, currentSpot, null, [], {
-        occupancy: {},
         spots: new Map([[fallbackSpot.id, fallbackSpot]])
     });
     assert.strictEqual(fallbackRoute.spotId, fallbackSpot.id,
@@ -599,8 +554,7 @@ try {
                 }, partyRequest: request }
             }, currentSpot, null, [], {
                 profiles,
-                spots: new Map(profiles.map((spot) => [spot.id, spot])),
-                occupancy: {}
+                spots: new Map(profiles.map((spot) => [spot.id, spot]))
             });
         }
         // b93aef45 keeps one static reward atlas per rewards/npcs table, so the
