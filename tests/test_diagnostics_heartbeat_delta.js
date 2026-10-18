@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 require('../src/Global');
+invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true;
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const { create } = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');

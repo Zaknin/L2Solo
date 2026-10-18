@@ -543,6 +543,17 @@ class ColdSimulationCoordinator {
         this.workerDiagnosticsSeq = delta.seq;
     }
 
+    // With diagnostics off the payload is stored as sent; with them on the kept table stands in for the delta,
+    // also on a trimmed beat and on the "snapshots loaded" payload, which carry none.
+    storeWorkerSnapshot(payload, heartbeat) {
+        if (!DiagnosticConfig.developerDiagnostics) {
+            this.lastWorkerSnapshot = payload;
+            return;
+        }
+        if (heartbeat) this.mergeDiagnostics(payload.developerDiagnostics);
+        this.lastWorkerSnapshot = { ...payload, developerDiagnostics: this.workerDiagnostics };
+    }
+
     post(type, payload = {}, msgId = null, bytes = null) {
         if (!this.worker || !this.workerEpoch) return null;
         const entries = type === 'snapshot_page' ? payload.rows
@@ -871,7 +882,7 @@ class ColdSimulationCoordinator {
                 await this.sendSnapshots(true);
             } else if (payload.phase === 'snapshots_loaded') {
                 this.snapshotsLoaded = true;
-                this.lastWorkerSnapshot = payload;
+                this.storeWorkerSnapshot(payload, false);
                 utils.infoSuccess('ColdWorker', 'ready states=%d queueHead=%s', Number(payload.states || 0), payload.queueHead?.kind || 'unknown');
             } else if (payload.phase === 'state_loaded') {
                 const waiter = this.waiters.get(message.msgId);
@@ -938,8 +949,7 @@ class ColdSimulationCoordinator {
             break;
         case 'heartbeat':
             this.lastHeartbeatAt = Date.now();
-            this.mergeDiagnostics(payload.developerDiagnostics);
-            this.lastWorkerSnapshot = { ...payload, developerDiagnostics: this.workerDiagnostics };
+            this.storeWorkerSnapshot(payload, true);
             if (!this.stopping) Metrics.recordColdSafetyTotals(epoch, payload.safety);
             this.handleCompetitionForecast(payload.competition, worker, epoch);
             break;
