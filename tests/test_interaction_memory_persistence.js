@@ -108,7 +108,6 @@ async function run() {
         const kernel = new ColdSimulationKernel({ resolveSolo: () => ({}) });
         const coordinator = new ColdSimulationCoordinator();
         coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-        coordinator.routeFor = () => null;
         const coldState = { characterId: 1, phase: 'cold', activity: 'hunting', stats: {},
             simulation: { revision: 5 }, timing: { nextResolveAt: Date.now() + 60000 } };
         const oldPage = coordinator.snapshotEntry(coldState);

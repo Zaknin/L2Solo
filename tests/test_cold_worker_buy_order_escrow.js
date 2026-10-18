@@ -155,7 +155,7 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
             const members = [member(leaderId, wallet, robe), member(leaderId + 1, bridgeWallet, 58)];
             return members.map((state, index) => ({ state, context: {
                 buyOrderEscrow: index ? 0 : escrow,
-                ...(index ? {} : { isPartyLeader: true, party, partyMembers: members, spot, route: null })
+                ...(index ? {} : { isPartyLeader: true, party, partyMembers: members, spot })
             } }));
         };
         const bridge = GearAcquisitionPlanner.npcEquipmentBridgePlan(partyRows('p', 20, bridgeWallet, 0)[0].state, plannerOptions);

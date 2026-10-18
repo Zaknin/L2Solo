@@ -1852,7 +1852,7 @@ class ColdSimulationKernel {
             // One search per party run, not kept: the party's objective spot and
             // risk marks (on the party record) have no event to the leader.
             const route = !meetingPending && !rescuing && this.partyRoute ? this.partyRoute({
-                leader: run.members.find(member => Number(member.characterId) === Number(run.purpose.leaderId)) || run.members[0],
+                leader: run.members.find(member => Number(member.characterId) === Number(run.party?.leaderId)) || run.members[0],
                 party: run.party, members: run.members, spot: run.spot, timestamp: startedAt }) : null;
             if (route?.needed) {
                 const arrivalAt = startedAt + Math.max(1000, Number(route.travelMs) || HUNTING_TRAVEL_MS);

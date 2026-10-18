@@ -96,7 +96,7 @@ async function main() {
         kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, route: null, requestId, grants: held });
+    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, requestId, grants: held });
     await kernel.resolvePartyGrant(party.partyId);
     const batch = messages.find(m => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
@@ -147,7 +147,7 @@ async function main() {
             timing: { lastResolvedAt: now - 45000, nextResolveAt: now - 1 } }));
         send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state,
             context: state.characterId === 1 ? { isPartyLeader: true, party: workerParty,
-                partyMembers: workerMembers, spot, route: null } : {} })) });
+                partyMembers: workerMembers, spot } : {} })) });
         const claim = await until(m => m.type === 'claim_request');
         send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
             ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,

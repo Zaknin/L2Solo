@@ -35,8 +35,7 @@ async function main() {
     const oldParty = { partyId: 'old-departed-party', status: 'active', leaderId: id,
         memberIds: [id, id + 1], nextResolveAt: at + 3600000 };
     const staleContext = { isPartyLeader: true, party: oldParty,
-        partyMembers: [{ characterId: id + 1, compact: true }], targetNpcId: 1005,
-        route: { mode: 'party', spotId: 'old-hunt' }, requirementRefresh: true };
+        partyMembers: [{ characterId: id + 1, compact: true }], targetNpcId: 1005, requirementRefresh: true };
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: input => Resolver.resolveSolo(input),
         projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result, { timestamp, persist: false }),
         emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
@@ -45,7 +44,6 @@ async function main() {
     assert.equal(current.context.isPartyLeader, false, 'a departed leader cannot inherit the active old party context');
     assert.equal(current.context.party, null);
     assert.equal(current.context.targetNpcId, null, 'the solo trip cannot retain a former party target');
-    assert.equal(current.context.route, null);
     assert.equal(staleContext.party, oldParty, 'the shared catalog object is not mutated');
     assert.equal(kernel.scheduleTokens.get(id).dueAt, paid.timing.nextResolveAt, 'arrival owns the deadline, not the old hunt');
     kernel.tick();

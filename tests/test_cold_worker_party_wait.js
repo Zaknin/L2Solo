@@ -96,7 +96,7 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
                 stats: { generatedCold: true, classId: 0, role: 'dps', equipment: [],
                     ...(scenario.resting ? { restUntil: now + 60000 } : {}) }
             },
-            context: { spot: current, route: null }
+            context: { spot: current }
         }));
         send('snapshot_page', { done: true, rows });
         const proposals = new Map();
@@ -130,7 +130,11 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
 
         assert.strictEqual(planned(101).spotId, scenarios[101].planned.spotId,
             'a required waiter takes the safe fallback of its plan');
-        assert.strictEqual(planned(101).activity, 'hunting');
+        // The step that chose the fallback also starts the trip there (the
+        // route is the worker's own): no step hunts the old ground under the
+        // new spot id.
+        assert.strictEqual(planned(101).activity, 'traveling', 'the waiter leaves for its fallback in the same step');
+        assert.strictEqual(planned(101).stats.travel?.spotId, other.id);
         assert.strictEqual(planned(101).stats.partyRequest.priority, 'required');
 
         assert.strictEqual(planned(102).spotId, scenarios[102].planned.spotId);

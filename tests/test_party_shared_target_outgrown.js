@@ -56,7 +56,7 @@ assert.deepStrictEqual(review(partyFor(sharedTarget), membersFor(12), null).stat
         kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members, spot: elpy, route: null, requestId, grants: held });
+    kernel.partyRuns.set(party.partyId, { party, members, spot: elpy, requestId, grants: held });
     await kernel.resolvePartyGrant(party.partyId);
     const batch = messages.find((m) => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));

@@ -2,7 +2,7 @@ const assert = require('assert');
 
 require('../src/Global');
 
-// A hunting trip starts from the route the coordinator chose (beginHuntingTrip)
+// A hunting trip starts from the bot's route (BotRoute, beginHuntingTrip)
 // or from a spot main chose itself (PopulationService). For the same bot and
 // destination both must write the same trip.
 
@@ -53,7 +53,7 @@ function hunter(characterId, stats = {}) {
     };
 }
 
-// The route the coordinator (routeFor) writes for a solo trip to newSpot.
+// The route BotRoute.record writes for a solo trip to newSpot.
 function soloRoute(plan, backoff = null) {
     return {
         needed: true, mode: 'solo', currentSpotId: oldSpot.id, spotId: newSpot.id, regionName: newSpot.name,

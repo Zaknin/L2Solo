@@ -11,7 +11,7 @@ const Routes = invoke('GameServer/Bot/AI/LevelingRoutes'), Spots = invoke('GameS
 const Service = invoke('GameServer/Bot/AI/SpotService'), Matchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const Rewards = require('../src/GameServer/Bot/Population/ColdKillRewards');
 const Request = require('../src/GameServer/Bot/Population/PartyRequestPlanner');
-const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const at = Date.now(), point = { locX: 145224, locY: 120001, locZ: -4500 };
 const profiles = ['danger', 'only-one-input', 'unsafe-source', 'common-source', 'cash-field'].map(id => ({
@@ -64,6 +64,8 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
     const messages = [], kernel = new ColdSimulationKernel({ now: () => timestamp,
         resolveSolo: () => { throw Error('no solo combat during evacuation'); },
         resolveParty: () => { throw Error('no party combat during travel'); },
+        // The party run's route (the worker's BotRoute.route).
+        partyRoute: () => route,
         emit: (type, payload) => messages.push({ type, payload }) });
     const requestId = 'material-risk-claim';
     const grants = new Map(roster.map(state => [state.characterId, { characterId: state.characterId,
@@ -72,7 +74,7 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
         kernel.upsert({ state, context: {} });
         kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
     }
-    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), route, requestId, grants });
+    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), requestId, grants });
     await kernel.resolvePartyGrant(currentParty.partyId);
     const proposals = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(proposals, JSON.stringify(messages));
@@ -90,16 +92,16 @@ async function main() {
     const before = checks;
     for (let i = 0; i < 100; i++) Route.select(party, members, profiles, options);
     assert.equal(checks, before, 'warm source reviews perform no new source traversal');
-    const coordinator = new ColdSimulationCoordinator();
-    const index = { timestamp: at, profiles, spots: byId };
-    const route = coordinator.routeFor(members[0], byId.get('danger'), party, members, index);
-    assert.equal(route.spotId, 'common-source', 'the real coordinator cannot choose the unrelated cash camp');
+    const routeFor = (state, currentSpot, currentParty, roster) => BotRoute.route(state, currentSpot, currentParty, roster,
+        { spots: profiles, timestamp: at });
+    const route = routeFor(members[0], byId.get('danger'), party, members);
+    assert.equal(route.spotId, 'common-source', 'the real route search cannot choose the unrelated cash camp');
     assert(route.materialSources);
     assert.equal(route.cause, 'death_pressure');
     physicalSpotId = 'common-source';
     const backedOffParty = Risk.withBackoff(party, Risk.backoff(party, 'danger', at), at);
     const displaced = { ...backedOffParty, spotId: physicalSpotId };
-    assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), displaced, members, index)?.materialSources,
+    assert(routeFor(members[0], byId.get(physicalSpotId), displaced, members)?.materialSources,
         'a previously displaced party repairs stale contract sources even when already at the selected camp');
     physicalSpotId = 'danger';
     const original = JSON.stringify(party);
@@ -121,13 +123,12 @@ async function main() {
 
     spoiler = false;
     assert.equal(Route.select(party, members, profiles, options), null, 'spoil is not an executable source without a party spoiler');
-    const evacuation = coordinator.routeFor(members[0], byId.get('danger'), party, members,
-        index);
+    const evacuation = routeFor(members[0], byId.get('danger'), party, members);
     assert.equal(evacuation.spotId, 'cash-field', 'lack of materials must not prevent leaving the risky camp');
     assert.equal(evacuation.materialEvacuation, true);
     physicalSpotId = 'cash-field';
-    assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), { ...backedOffParty, spotId: physicalSpotId }, members,
-        index)?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
+    assert(routeFor(members[0], byId.get(physicalSpotId), { ...backedOffParty, spotId: physicalSpotId }, members)
+        ?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
     physicalSpotId = 'danger';
     const departed = await proposalsFor(party, members, evacuation, at);
     departed.party.stats.sessionExpiresAt = at + 1;
@@ -146,7 +147,7 @@ async function main() {
             departed.party.stats.travel.arrivalAt + 1), state.stats.partyRequest, 'native replanning preserves evacuation cooldown during recovery/travel');
     });
     const ordinary = { ...party, stats: { ...party.stats, objective: { spotId: 'danger' } } };
-    const normal = coordinator.routeFor(members[0], byId.get('danger'), ordinary, members, index);
+    const normal = routeFor(members[0], byId.get('danger'), ordinary, members);
     assert.equal(normal.spotId, 'cash-field');
     assert.equal(normal.materialEvacuation, undefined, 'ordinary and clan hunting keep their existing risk retreat');
     spoiler = true;

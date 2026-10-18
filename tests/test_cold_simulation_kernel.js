@@ -291,8 +291,9 @@ function claimAck(kernel, payload) {
                 debug: { activity: current.activity }
             };
         },
-        planLifecycle: ({ state: current, context, timestamp }) => ({
-            plannedState: beginHuntingTrip(current, context.route, timestamp) || current
+        // The worker's plan starts the bot's own route (BotRoute) in its step.
+        planLifecycle: ({ state: current, timestamp }) => ({
+            plannedState: beginHuntingTrip(current, route, timestamp) || current
         }),
         emit: () => {},
         now: () => 5000
@@ -304,7 +305,7 @@ function claimAck(kernel, payload) {
             loc: { locX: 115000, locY: -176000, locZ: -1000 },
             timing: { lastResolvedAt: 1000, nextResolveAt: 2000 }
         }),
-        context: { spot: { id: 'starter-field' }, route }
+        context: { spot: { id: 'starter-field' } }
     });
     routeKernel.tick();
     claimAck(routeKernel, { grants: [{
@@ -983,6 +984,7 @@ function claimAck(kernel, payload) {
     const partyRouteKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('party combat must not run during route travel'); },
+        partyRoute: () => partyRoute,
         emit: (type, payload) => partyRouteMessages.push({ type, payload }),
         now: () => now
     });
@@ -992,8 +994,7 @@ function claimAck(kernel, payload) {
             isPartyLeader: true,
             party: partyRouteParty,
             partyMembers: partyRouteMembers,
-            spot: { id: 'starter-field' },
-            route: partyRoute
+            spot: { id: 'starter-field' }
         }
     });
     partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });

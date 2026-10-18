@@ -10,6 +10,7 @@ const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpcPlanningCatalog');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const {
     ColdSimulationCoordinator,
     compactPartyMemberContext,
@@ -23,6 +24,11 @@ const originalFindCurrentSpot = SpotService.findCurrentSpot;
 const originalArrivalPointForState = SpotService.arrivalPointForState;
 const originalSafeFallbackForPlan = GearAcquisitionPlanner.safeFallbackForPlan;
 const originalCachedState = LifeState.cachedState;
+const originalEnsure = SpotProfiles.ensure;
+// One search and its trip over the catalog `spots` (the route a far bot's
+// step or a party run starts).
+const routeFor = (state, currentSpot, party, members, spots = [], timestamp = Date.now()) =>
+    BotRoute.route(state, currentSpot, party, members || [], { spots, timestamp });
 
 try {
     const npcCatalogRows = npcPlanningCatalogRows();
@@ -160,7 +166,7 @@ try {
     SpotProfiles.findForState = routeTargetForState;
 
     const coordinator = new ColdSimulationCoordinator();
-    const solo = coordinator.routeFor({
+    const solo = routeFor({
         characterId: 1,
         phase: 'cold',
         activity: 'hunting',
@@ -168,10 +174,30 @@ try {
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: {}
-    }, currentSpot, null, [], { spots: new Map(), wishLeaf: null });
+    }, currentSpot, null, [], [currentSpot, targetSpot]);
     assert.strictEqual(solo.mode, 'solo');
     assert.strictEqual(solo.spotId, targetSpot.id);
     assert.deepStrictEqual(solo.destinations['1'], destinationFor({ characterId: 1 }));
+
+    // The step's own hunting leaf names the trip when the bot may hunt there;
+    // otherwise (raid profile, a spot avoided by its risk marks) the bot's
+    // route search decides.
+    const leafHunter = { characterId: 9, phase: 'cold', activity: 'hunting', level: 18, spotId: currentSpot.id,
+        loc: { locX: 1, locY: 2, locZ: 3 }, stats: {} };
+    const leafAt = Date.now();
+    const wishedTrip = BotRoute.leafChoice(leafHunter, { activity: 'hunting', spotId: targetSpot.id },
+        { spots: [currentSpot, targetSpot], timestamp: leafAt });
+    assert.strictEqual(wishedTrip?.spotId, targetSpot.id, 'the leaf\'s spot is the trip of its own step');
+    assert.strictEqual(BotRoute.record(leafHunter, wishedTrip, null, [],
+        { spots: [currentSpot, targetSpot], currentSpot, timestamp: leafAt })?.spotId, targetSpot.id);
+    assert.strictEqual(BotRoute.leafChoice(leafHunter, { activity: 'hunting', spotId: 'raid:1' },
+        { spots: [currentSpot, { ...targetSpot, id: 'raid:1', raidBoss: true }], timestamp: leafAt }), null,
+        'a raid profile is never a solo leaf trip');
+    const avoiding = { ...leafHunter, stats: { coldCompetition: { avoid: { spotId: targetSpot.id, untilStep: 10 } } } };
+    assert.strictEqual(BotRoute.leafChoice(avoiding, { activity: 'hunting', spotId: targetSpot.id },
+        { spots: [currentSpot, targetSpot], timestamp: leafAt }), null, 'an avoided spot is not a leaf trip');
+    assert.strictEqual(BotRoute.leafChoice(leafHunter, { activity: 'resting' },
+        { spots: [currentSpot, targetSpot], timestamp: leafAt }), null);
 
     const raidSpot = {
         id: 'raid:10103',
@@ -195,13 +221,7 @@ try {
         stats: { objective: { sourceKind: 'raid', spotId: raidSpot.id, raidBossTemplateId: 10103 } }
     };
     assert.strictEqual(
-        coordinator.routeFor(
-            raidMembers[0],
-            currentSpot,
-            raidParty,
-            raidMembers,
-            { spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]]) }
-        ),
+        routeFor(raidMembers[0], currentSpot, raidParty, raidMembers, [currentSpot, raidSpot]),
         null,
         'a cold raid party already at its virtual raid spot must not repeat the same 25-second travel'
     );
@@ -219,8 +239,7 @@ try {
     const retreatState = { characterId: 2, phase: 'cold', activity: 'hunting', level: 16,
         spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 },
         stats: { coldCompetition: { avoid: { spotId: currentSpot.id, untilStep: 10 } } } };
-    const savedIndex = coordinator.contextIndex;
-    coordinator.contextIndex = () => ({ spots: new Map([[currentSpot.id, currentSpot], [targetSpot.id, targetSpot]]) });
+    SpotProfiles.ensure = () => [currentSpot, targetSpot];
     SpotProfiles.findForState = (state, options) => {
         assert(options.excludedSpotIds.has(currentSpot.id), 'voluntary avoidance reaches the real route selector');
         assert.strictEqual(options.timestamp, retreatAt);
@@ -233,11 +252,10 @@ try {
     SpotProfiles.findForState = () => null;
     assert.strictEqual(coordinator.competitionActions.retreatRoute([retreatState], null, { spotId: currentSpot.id }, retreatAt), null,
         'no suitable destination means no invented successful retreat');
-    coordinator.contextIndex = savedIndex;
+    SpotProfiles.ensure = originalEnsure;
     SpotProfiles.findForState = routeTargetForState;
 
-    const sharedIndex = { spots: new Map(), wishLeaf: null };
-    const batchRouteFor = (characterId) => coordinator.routeFor({
+    const batchRouteFor = (characterId) => routeFor({
         characterId,
         phase: 'cold',
         activity: 'hunting',
@@ -245,7 +263,7 @@ try {
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: {}
-    }, currentSpot, null, [], sharedIndex);
+    }, currentSpot, null, [], [currentSpot, targetSpot]);
     // No place is held ahead of arrival (ARCH-08-c): every decision of one
     // context gets the destination; its room is checked when each bot arrives
     // (test_room_at_arrival.js). The spot's capacity is 2.
@@ -305,17 +323,13 @@ try {
         tags: ['dungeon', 'catacomb'],
         tagsAuthoritative: true
     };
-    const emergencyIndex = {
-        profiles: [targetSpot],
-        spots: new Map([[targetSpot.id, targetSpot]])
-    };
     const unqualifiedCurrentSpot = {
         id: 'dangerous-room-grid-without-area',
         name: 'Nearby ordinary fields'
     };
     SpotService.findCurrentSpot = () => unqualifiedCurrentSpot;
     SpotProfiles.findForState = () => unqualifiedCurrentSpot;
-    const emergencyRoute = coordinator.routeFor({
+    const emergencyRoute = routeFor({
         characterId: 24,
         phase: 'cold',
         activity: 'hunting',
@@ -324,7 +338,7 @@ try {
         currentRegion: dangerousSpot.name,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: { routeMode: 'party' }
-    }, unqualifiedCurrentSpot, null, [], emergencyIndex);
+    }, unqualifiedCurrentSpot, null, [], [targetSpot]);
     assert(emergencyRoute, 'a detached solo bot must receive a route out of party-only content');
     assert.strictEqual(emergencyRoute.spotId, targetSpot.id);
     assert.strictEqual(emergencyRoute.reason, 'unsafe_ground_evacuation');
@@ -358,10 +372,7 @@ try {
             spotId: dangerousSpot.id, currentRegion: dangerousSpot.name,
             loc: { locX: 1, locY: 2, locZ: 3 }, stats: { routeMode: 'party' }
         };
-        const routeAgain = () => coordinator.routeFor(evacuationState,
-            unqualifiedCurrentSpot, null, [], {
-                profiles: catalog, spots: new Map(catalog.map(spot => [spot.id, spot]))
-            });
+        const routeAgain = () => routeFor(evacuationState, unqualifiedCurrentSpot, null, [], catalog);
         const first = routeAgain();
         assert(first && alternatives.some(spot => spot.id === first.spotId),
             'evacuation must still choose a safe destination');
@@ -391,7 +402,7 @@ try {
         { characterId: 2, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 }, stats: {} },
         { characterId: 3, phase: 'cold', activity: 'grouped', level: 16, spotId: currentSpot.id, loc: { locX: 4, locY: 5, locZ: 6 }, stats: {} }
     ];
-    const partyRoute = coordinator.routeFor(members[0], currentSpot, party, members, { spots: new Map(), wishLeaf: null });
+    const partyRoute = routeFor(members[0], currentSpot, party, members, [currentSpot, targetSpot]);
     assert.strictEqual(partyRoute.mode, 'party');
     assert.strictEqual(Object.keys(partyRoute.destinations).length, 2);
     assert.deepStrictEqual(partyRoute.destinations['3'], destinationFor(members[1]));
@@ -405,7 +416,7 @@ try {
     SpotProfiles.findForState = () => lair;
     SpotService.arrivalPointForState = () => dungeonPoint;
     try {
-        const repairedRoute = coordinator.routeFor(displacedMembers[0], lair, displacedParty, displacedMembers, {});
+        const repairedRoute = routeFor(displacedMembers[0], lair, displacedParty, displacedMembers, [lair]);
         assert(repairedRoute?.needed);
         assert.strictEqual(repairedRoute.cause, 'position_mismatch');
         assert.strictEqual(repairedRoute.reason, 'party_spot_replan');
@@ -418,17 +429,17 @@ try {
         assert.strictEqual(arrived.spotId, lair.id);
         for (const patch of [{ phase: 'hot' }, { activity: 'resting' }, { stats: { pvpEncounter: { key: 'fighting' } } }]) {
             const blockedMembers = [displacedMembers[0], { ...displacedMembers[1], ...patch }];
-            assert.strictEqual(coordinator.routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, { spots: new Map(), wishLeaf: null }), null);
+            assert.strictEqual(routeFor(blockedMembers[0], lair, displacedParty, blockedMembers, [lair]), null);
         }
         const validMembers = displacedMembers.map(m => ({ ...m, loc: dungeonPoint }));
-        assert.strictEqual(coordinator.routeFor(validMembers[0], lair, displacedParty, validMembers, { spots: new Map(), wishLeaf: null }), null,
+        assert.strictEqual(routeFor(validMembers[0], lair, displacedParty, validMembers, [lair]), null,
             'valid positions do not cause endless repair journeys');
-        // Route planning uses full cached members even when the worker payload is compact.
+        // The worker's party context stays compact: the party run routes
+        // over the worker's own full member states.
         LifeState.cachedState = id => displacedMembers.find(m => m.characterId === id);
         const context = coordinator.contextFor(displacedMembers[0], { spots: new Map([[lair.id, lair]]),
             parties: new Map([[displacedParty.leaderId, displacedParty]]), compactPartyMembers: true });
         assert(context.partyMembers.every(m => m.compact));
-        assert.strictEqual(context.route.cause, 'position_mismatch');
 
         // The leader is already here, but two teammates still occupy another spot.
         const joiningMembers = [displacedMembers[0],
@@ -438,7 +449,7 @@ try {
         // No place is held at planning (ARCH-08-c): the repair brings the
         // missing members whatever the crowd; the party's room is checked at
         // its arrival (test_room_at_arrival.js).
-        assert(coordinator.routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, {})?.needed,
+        assert(routeFor(joiningMembers[0], lair, joiningParty, joiningMembers, [lair])?.needed,
             'repair brings the missing members without a reservation');
     } finally {
         SpotService.findCurrentSpot = () => currentSpot;
@@ -458,13 +469,8 @@ try {
             }
         }
     ];
-    const personalPressureRoute = coordinator.routeFor(
-        pressuredMembers[0],
-        currentSpot,
-        party,
-        pressuredMembers,
-        { timestamp: 5000 }
-    );
+    const personalPressureRoute = routeFor(pressuredMembers[0], currentSpot, party, pressuredMembers,
+        [currentSpot, targetSpot], 5000);
     assert(!personalPressureRoute.spotBackoff,
         'a member solo death history must not force the whole party to retreat');
     const partyRisk = require('../src/GameServer/Bot/Population/PartySpotRiskPolicy');
@@ -473,9 +479,8 @@ try {
         partyPatch: { stats: { deaths: 2 } }
     }, 5000);
     const pressuredParty = { ...party, ...failedGroup.partyPatch };
-    const pressuredPartyRoute = coordinator.routeFor(
-        members[0], currentSpot, pressuredParty, members, { timestamp: 5000 }
-    );
+    const pressuredPartyRoute = routeFor(members[0], currentSpot, pressuredParty, members,
+        [currentSpot, targetSpot], 5000);
     assert.strictEqual(pressuredPartyRoute.reason, 'party_spot_replan');
     assert.strictEqual(pressuredPartyRoute.cause, 'death_pressure');
     assert.strictEqual(pressuredPartyRoute.spotBackoff.spotId, currentSpot.id,
@@ -516,7 +521,7 @@ try {
 
     const fallbackSpot = { id: 'solo-fallback', name: 'Solo fallback' };
     GearAcquisitionPlanner.safeFallbackForPlan = () => ({ spotId: fallbackSpot.id, npcId: 321 });
-    const fallbackRoute = coordinator.routeFor({
+    const fallbackRoute = routeFor({
         characterId: 5,
         phase: 'cold',
         activity: 'hunting',
@@ -524,9 +529,7 @@ try {
         spotId: currentSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
         stats: { equipmentPlan: requestPlan, partyRequest: request }
-    }, currentSpot, null, [], {
-        spots: new Map([[fallbackSpot.id, fallbackSpot]])
-    });
+    }, currentSpot, null, [], [fallbackSpot]);
     assert.strictEqual(fallbackRoute.spotId, fallbackSpot.id,
         'a bot waiting for a required party must route to a safe fallback instead of its party-only source');
 
@@ -541,7 +544,7 @@ try {
     };
     try {
         for (const characterId of [51, 52]) {
-            coordinator.routeFor({
+            routeFor({
                 characterId,
                 phase: 'cold',
                 activity: 'hunting',
@@ -552,10 +555,7 @@ try {
                     status: 'active', strategy: 'direct_drop',
                     partyNeed: 'required', target: { selfId: 1 }
                 }, partyRequest: request }
-            }, currentSpot, null, [], {
-                profiles,
-                spots: new Map(profiles.map((spot) => [spot.id, spot]))
-            });
+            }, currentSpot, null, [], profiles);
         }
         // b93aef45 keeps one static reward atlas per rewards/npcs table, so the
         // atlas built by an earlier route in this file may already serve both.
@@ -572,4 +572,5 @@ try {
     SpotService.arrivalPointForState = originalArrivalPointForState;
     GearAcquisitionPlanner.safeFallbackForPlan = originalSafeFallbackForPlan;
     LifeState.cachedState = originalCachedState;
+    SpotProfiles.ensure = originalEnsure;
 }

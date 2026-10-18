@@ -5,7 +5,7 @@ const world = require('./fixtures/native_stock_world')();
 require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
-const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const Lifecycle = require('../src/GameServer/Bot/Population/BackgroundPartyLifecycle');
 const Material = require('../src/GameServer/Bot/Population/CraftMaterialParty');
 const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
@@ -50,8 +50,7 @@ const at = Date.now(), ids = [];
     Life.allStates = () => { throw Error('party gathering scanned the population'); };
     let route;
     try {
-        route = Coordinator.routeFor(members[0], null, party, members,
-            { spots: new Map([[spot.id, spot]]), timestamp: at });
+        route = BotRoute.route(members[0], null, party, members, { spots: [spot], timestamp: at });
     } finally { Life.allStates = allStates; }
     assert(route?.needed && route.mode === 'party');
     const departed = members.map(state => beginHuntingTrip(state, route, at));

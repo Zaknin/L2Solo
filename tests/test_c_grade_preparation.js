@@ -327,7 +327,7 @@ const clanTrip = Improvement.acquisitionTravel({ ...outside, clanId: 1 }, readyC
 assert.equal(clanTrip.stats.travel.townName, 'Giran', 'the clan member can reach its own C exchange station');
 assert(clanTrip.adena < outside.adena);
 assert.equal(Improvement.acquisitionTravel({ ...outside, level: 33, clanId: 1 }, readyCrystals.network.activity, timestamp), null);
-assert.equal(invoke('GameServer/Bot/Population/ColdSimulationCoordinator').routeFor(outside, null, null, [], {}), null,
+assert.equal(require('../src/GameServer/Bot/Population/BotRoute').route(outside, null, null, [], { spots: [], timestamp }), null,
     'a ready NPC operation suppresses the competing hunting route');
 const npcInput = review(stocked, new BoardIndex(), { npcOffersFor: id => id === spareId
     ? [{ selfId: id, price: 1, sourceType: 'npc', town: 'Giran', available: true }] : [] });
