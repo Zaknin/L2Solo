@@ -571,7 +571,7 @@ function ownerLimit() {
 function kitEntry(state, timestamp, options) {
     const owner = Number(state.characterId);
     if (!(owner > 0) || options.store === false) return buildKit(state, timestamp, 0);
-    const kit = buildHash(kitEvents(state).join('|')), slot = options.preparation === true ? 'preparation' : 'own';
+    const kit = buildHash((options.kitHashes || kitEvents(state)).join('|')), slot = options.preparation === true ? 'preparation' : 'own';
     let entry = kitProfiles.get(owner);
     const hit = entry?.[slot]?.kit === kit;
     Diagnostics.count('combat_profile', 'kit', hit ? 'hit' : 'miss');
@@ -586,7 +586,8 @@ function kitEntry(state, timestamp, options) {
 }
 
 // The bot's unbuffed day profile, kept per kit. options: store (false: a
-// what-if state), preparation (true: the preparation slot); the timestamp
+// what-if state), preparation (true: the preparation slot), kitHashes (the
+// state's kitEvents when the caller already holds them); the timestamp
 // does not change the result.
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
     return kitEntry(state, timestamp, options).profile;

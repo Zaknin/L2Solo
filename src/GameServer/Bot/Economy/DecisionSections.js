@@ -89,19 +89,20 @@ function sectionNames(bits) {
     return names;
 }
 // The kit fact of a view: class, level, worn gear, hennas, skills, the hot
-// capture (view.combat, ColdCombatProfile.combatView's parts), the craft
+// capture (view.kitHashes: ColdCombatProfile.kitHash of combatView's parts,
+// hashed once per view), the craft
 // (level, station, workshop), the soul crystal quest and the karma flip that
 // closes the towns. Effects and night are no economy input, so a buff or the
 // day/night flip moves no fact; the clan is a relations fact; the recipe book
 // is its own fact. Its parts do not read the clock.
 function kitFact(view) {
-    return hash([CombatProfile.kitHash(view.combat), view.craftLevel, view.craftStationId, view.workshop,
+    return hash([view.kitHashes, view.craftLevel, view.craftStationId, view.workshop,
         view.soulCrystalQuest, view.closesTowns]);
 }
 // The kit part of the far reader (stateView), without the bag scan.
 function kitView(state) {
     const stats = state.stats || {};
-    return { combat: CombatProfile.combatView(state), craftLevel: state.craftLevel ?? stats.dwarvenCraftLevel,
+    return { kitHashes: CombatProfile.kitHash(CombatProfile.combatView(state)), craftLevel: state.craftLevel ?? stats.dwarvenCraftLevel,
         craftStationId: stats.craftStationId ?? null, workshop: stats.workshop,
         soulCrystalQuest: !!stats.soulCrystalQuest, closesTowns: Karma.closesTowns(stats.karma) };
 }
@@ -340,7 +341,9 @@ function stateView(state, recipes = null) {
     view.stores = storesOf(state);
     // The bag full: its slot limit (the full-bag sale itself is SurvivalFloor's).
     view.bagFull = Number(bag.slots >= InventoryLimits.forState(state));
-    view.weight = Floor.weightPenalty(bag.load, CombatProfile.profileFor(state).maxLoad);
+    // The kit profile store reads the kit by the hashes this view already holds.
+    view.weight = Floor.weightPenalty(bag.load,
+        CombatProfile.profileFor(state, Date.now(), { kitHashes: view.kitHashes }).maxLoad);
     return view;
 }
 // The tables main keeps about the bot: the clan's material demand, the
@@ -389,7 +392,9 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
         ? after.stats?.wishSections : null;
     const previous = represented || before.stats?.wishSections || {};
     let original;
-    const previousFact = key => previous[key] ?? (original ||= semanticFacts(before))[key];
+    // A fact the baseline kept as null (no recipe book read) is kept: only a
+    // fact the baseline lacks reads the state before.
+    const previousFact = key => Object.hasOwn(previous, key) ? previous[key] : (original ||= semanticFacts(before))[key];
     // No memory and no recipe book here: the relations and the recipes the
     // decision kept stand until the next verdict, which reads both.
     const current = { ...semanticFacts(after), relations: previousFact('relations'), recipes: previousFact('recipes') };
