@@ -26,7 +26,7 @@ const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartySt
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Protocol = require('./ColdSimulationProtocol');
-const { ColdEconomyDecisions, wireAdvisory } = require('./ColdEconomyDecision');
+const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
@@ -899,7 +899,7 @@ class ColdSimulationCoordinator {
                     };
                     const decision = payload.economyDecision;
                     if (!decision || decision.updatedAt !== Number(state.updatedAt || 0)
-                        || decision.key !== invoke('GameServer/Bot/Population/ColdEconomyDecision').stateKey(state)) break;
+                        || !echoHolds(state, decision.echo)) break;
                     this.economyDecisions.hold(id, decision);
                     try {
                         const result = await invoke('GameServer/Bot/Economy/BotAfkMarketService').executePlan(state, payload.economyPlan, { beforeWrite, preparedState: state })
@@ -910,16 +910,16 @@ class ColdSimulationCoordinator {
             } else if (payload.phase === 'economy_decided' && !this.stopping) {
                 const id = Number(payload.characterId), state = LifeState.cachedState(id);
                 const decision = payload.economyDecision ? invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(payload.economyDecision) : null;
-                // Same worker generation plus the exact captured owner facts
-                // fence hot publications; they never authorize native spending.
+                // Same worker generation plus the publication and the decision's
+                // echo fence hot publications; they never authorize native spending.
                 if (state?.phase === 'hot' && decision && decision.updatedAt === Number(state.updatedAt || 0)
-                    && decision.key === invoke('GameServer/Bot/Population/ColdEconomyDecision').stateKey(state)) {
+                    && echoHolds(state, decision.echo)) {
                     this.economyDecisions.accept(id, decision, null, state);
                     if (decision.feasibility) invoke('GameServer/Bot/Economy/HotBoardReviewService').preparedOwner(id);
                 }
             } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
                 this.economyDecisions.staleWorkshop(Number(payload.characterId),
-                    { updatedAt: Number(payload.updatedAt), key: payload.key });
+                    { updatedAt: Number(payload.updatedAt), echo: payload.echo });
             }
             break;
         case 'claim_request':

@@ -30,7 +30,7 @@ module.exports = async function withNativeEconomyInput(state, consume, timestamp
     assert.deepEqual(state, before, 'the actual worker leaves the main input unchanged');
     const native = Decision.compact(captured.decision);
     assert.equal(native.updatedAt, Number(state.updatedAt || 0));
-    assert.equal(native.key, Decision.stateKey(state));
+    assert.deepEqual(native.echo, Decision.stateEcho({ ...state, stats: { ...state.stats, ...captured.statsPacket } }));
     assert.deepEqual(captured.forbiddenLoaded, []);
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     assert.equal(accepted.adena, state.adena, 'packet publication retains the original wallet');

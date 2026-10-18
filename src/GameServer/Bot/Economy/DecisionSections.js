@@ -65,6 +65,22 @@ function sectionBit(name) {
 function sectionMask(names) {
     return names.reduce((bits, name) => bits | sectionBit(name), 0);
 }
+// The computed pieces of a decision and the sections each reads: at the
+// decision point a piece is reused while none of its sections is raised
+// (EconomyContext.forState's mask), rebuilt when one is.
+// foundation: hunt income, risk, death and kit hours, stock targets, the
+// survival reserve (kit, profile, consumables, the observation; not money).
+// Of the relations fact it reads only the party role (its spot value table
+// and hunt income); relations is in its list for it, so a party join
+// rebuilds it (a deviation from the spec's four sections).
+// sources: the source walk (worn gear and level; party, clan, role;
+// exclusions, risk, hunt rows; the plan, persona, craft station, trades;
+// the hour adena and the money mark). weighing: focus, step and money queue.
+const COMPUTED = Object.freeze({
+    foundation: sectionMask(['build', 'combat', 'supply', 'occupation', 'relations']),
+    sources: sectionMask(['build', 'relations', 'occupation', 'sources', 'money']),
+    weighing: sectionMask(SECTIONS)
+});
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,
 // skills, craft); bag: the bag full or its weight level, which changes the
@@ -172,7 +188,7 @@ function carrySectionBaseline(previous, current, updated) {
     };
     carry(sectionBit('money'), ['wallet', 'cashBounds', 'budgetBounds', 'funding', 'moneyError']);
     carry(sectionBit('occupation') | sectionBit('build'), ['sample', 'share', 'incomeError', 'frustration', 'bond']);
-    carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['choices', 'bagValue']);
+    carry(sectionBit('money') | sectionBit('sources') | sectionBit('supply'), ['bagValue']);
     return current;
 }
 function incomeError(state, persona) {
@@ -249,7 +265,7 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     const share = Hunt.onSpotShare(state);
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
-        choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
+        bagValue: positive(context.choiceBagValue),
         ...(facts || semanticFacts(state)), threat: context.gearThreatMask,
         frustration: frustrationOf(state), ...(bond ? { bond } : {}),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
@@ -454,5 +470,5 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     if (previousFact('stores') !== current.stores) raise('stores');
     return [...sections];
 }
-module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
+module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
     MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

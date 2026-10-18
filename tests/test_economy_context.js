@@ -282,6 +282,56 @@ async function run() {
         assert(Economy.restoreEventProof(bytes, accepted), 'fixture: the generation is back');
         Economy.forget(native.characterId);
     }
+    // The sections mask decides which held piece a rebuild reuses: a source
+    // raise keeps the foundation (hunt, kit) and rebuilds the source walk; a
+    // build raise rebuilds both. A rebuild's money bounds are its own weighing's,
+    // never the last decision's. A build without a held entry re-weighs no event.
+    {
+        const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const diagnosticsBefore = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        try {
+            const T = Date.now(), native = { ...base, characterId: 990027 };
+            const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
+            const delta = (before, key) => (counts()[key] || 0) - (before[key] || 0);
+            const held = Economy.forState(native, { timestamp: T });
+            assert(held.plan.hunt && typeof held.plan.kit === 'object' && held.plan.kit, 'fixture: a held hunt and kit');
+            const stale = { wallet: 7, cashBounds: [-3, 11], budgetBounds: [-5, 13], moneyError: 0.5 };
+            const raised = (from, bit) => ({ ...native, stats: { ...native.stats, ...from.statsPacket,
+                decisionSeq: from.statsPacket.decisionSeq + 1, wishDirty: Sections.sectionBit(bit),
+                wishSections: { ...from.statsPacket.wishSections, ...stale } } });
+            let before = counts();
+            const sources = Economy.forState(raised(held, 'sources'), { timestamp: T });
+            assert.notEqual(sources.plan, held.plan, 'a raised source section rebuilds');
+            assert.equal(sources.plan.hunt, held.plan.hunt, 'a source raise keeps the foundation hunt');
+            assert.equal(sources.plan.kit, held.plan.kit, 'a source raise keeps the foundation kit');
+            assert.equal(delta(before, 'source_memo:miss:sections'), 1, 'a source raise rebuilds the source walk');
+            assert.equal(delta(before, 'context:foundation:kept'), 1, 'the kept foundation is counted');
+            assert.notDeepEqual(sources.statsPacket.wishSections.cashBounds, stale.cashBounds,
+                'the rebuild records its own money bounds, not the last decision\'s');
+            Economy.forget(native.characterId);
+            const again = Economy.forState(native, { timestamp: T });
+            before = counts();
+            const build = Economy.forState(raised(again, 'build'), { timestamp: T });
+            assert.notEqual(build.plan.hunt, again.plan.hunt, 'a build raise rebuilds the foundation');
+            assert.equal(delta(before, 'source_memo:miss:sections'), 1, 'a build raise rebuilds the source walk');
+            assert.equal(delta(before, 'context:foundation:built'), 1, 'the rebuilt foundation is counted');
+            // No held entry (a deploy, an eviction) and nothing raised: every
+            // piece is built, no event re-weighs the published focus and step.
+            const published = { ...native, stats: { ...native.stats, ...build.statsPacket, wishDirty: 0 } };
+            Economy.forget(native.characterId);
+            before = counts();
+            Economy.forState(published, { timestamp: T });
+            const named = Object.keys(counts()).filter(key => key.startsWith('network:reconsider:')
+                && !key.startsWith('network:reconsider:quiet:') && delta(before, key) > 0);
+            assert.deepEqual(named, [], 'a build without a held entry re-weighs no event');
+            assert(Object.keys(counts()).some(key => key.startsWith('network:reconsider:quiet:') && delta(before, key) > 0),
+                'fixture: the held focus was weighed (a quiet reconsider counted)');
+        } finally {
+            Config.developerDiagnostics = diagnosticsBefore;
+            Economy.forget(990027);
+        }
+    }
     // The cheap check by kind of leaf: an enchant or special-ability decision
     // names its object: it holds while that object is in the bag at the
     // enchant level read; one without an object (an exchange) holds by its

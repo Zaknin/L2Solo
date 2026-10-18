@@ -2213,31 +2213,17 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         else if (safeSpoils < spoils.count) safeBuckets.push(sourceTailBucket('party_needed', spoils, safeRanks));
         safeBuckets.sort((a, b) => a.firstOrdinal - b.firstOrdinal);
     }
-    // Sampled owners walk every eligible record too (below): the counts as
-    // they were before this call and the spot value reads in order.
-    const shadow = Diagnostics.active() && Diagnostics.enabled(state.characterId);
-    const fullCounts = shadow && counts ? new Map(counts) : null, boundSpotIds = shadow ? [] : null;
     // The 'source' steps stay as many as the full walk takes.
-    const ready = yield* walk(safeOrdinals, safeBuckets, counts, true, rules.eligible.length + (counts ? rules.staticBuckets.length : 0), boundSpotIds);
+    const ready = yield* walk(safeOrdinals, safeBuckets, counts, true, rules.eligible.length + (counts ? rules.staticBuckets.length : 0));
     if (Diagnostics.active()) {
         Diagnostics.count('source_bound', 'skip', 'records', rules.eligible.length - safeOrdinals.length);
         Diagnostics.count('source_bound', 'walk', 'records', safeOrdinals.length);
-    }
-    if (shadow) {
-        // Drained here: the caller sees no step of it. In a 'new' case its
-        // extra spot and trip reads go through the caller's own readers.
-        const fullSpotIds = [], full = walk(rules.eligible, counts ? rules.staticBuckets : [], fullCounts, false, 0, fullSpotIds);
-        let step;
-        do step = full.next(); while (!step.done);
-        const moved = sourceWalkMoved(ready, step.value, counts, fullCounts, boundSpotIds, fullSpotIds);
-        Diagnostics.count('source_bound', 'compare', moved ? 'new' : 'same');
-        if (moved) Diagnostics.push({ owner: Number(state.characterId), phase: 'source_bound', outcome: 'new', moved, item: Number(itemId) });
     }
     return ready;
 
     // One walk over ordinals (null: every record) merged with refusal buckets.
     // bounded: the ordinals are the bot's solo-safe records already.
-    function* walk(ordinals, buckets, tally, bounded, plannedTurns, spotIds = null) {
+    function* walk(ordinals, buckets, tally, bounded, plannedTurns) {
         const facts = [], length = ordinals ? ordinals.length : entries.length;
         let bestCost, partyNeeded = 0;
         let cursor = 0, bucketCursor = 0, processed = 0;
@@ -2287,7 +2273,6 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
             if (!reason) {
                 status = 'unknown';
                 row = spotValue(entry.spot);
-                if (spotIds) spotIds.push(spot.id);
                 perHour = Number(row?.kills) * expectedYield
                     * Number(entry.sourceCount || 0) / Math.max(1, Number(entry.totalCount || 0));
                 if (!(perHour > 0)) reason = 'yield';
@@ -2342,29 +2327,6 @@ function sourceSpotOccupied(spot, state, occupancy, verdicts) {
         verdicts.set(spot, full);
     }
     return full;
-}
-
-// The first field in which the bounded walk's answer differs from the full
-// walk's ('' when none): the ready facts, the counts in key order, the spot
-// value reads in order.
-function sourceWalkMoved(facts, fullFacts, counts, fullCounts, spotIds, fullSpotIds) {
-    if (facts.length !== fullFacts.length) return 'best';
-    for (let index = 0; index < facts.length; index++) {
-        const fact = facts[index], full = fullFacts[index];
-        if (fact.kind !== full.kind || fact.spotId !== full.spotId || fact.npcId !== full.npcId
-            || !Object.is(fact.costHours, full.costHours) || fact.town !== full.town) return 'best';
-    }
-    if (counts) {
-        if (counts.size !== fullCounts.size) return 'counts';
-        const fullEntries = fullCounts.entries();
-        for (const [reason, amount] of counts) {
-            const [fullReason, fullAmount] = fullEntries.next().value;
-            if (reason !== fullReason || amount !== fullAmount) return 'counts';
-        }
-    }
-    if (spotIds.length !== fullSpotIds.length) return 'spots';
-    for (let index = 0; index < spotIds.length; index++) if (spotIds[index] !== fullSpotIds[index]) return 'spots';
-    return '';
 }
 
 // A party_needed or spoil_skill tail of one kind of a fact row, from rank

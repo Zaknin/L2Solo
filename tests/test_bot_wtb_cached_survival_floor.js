@@ -37,7 +37,7 @@ const base = { characterId: 7, phase: 'cold', activity: 'resting', level: 40, ad
         const watch = Decision.economyFor(current).watchList;
         assert(watch.length > 0 && watch.every(row => row.itemId !== 32),
             'the actual worker captured a different watch, not a handwritten decision');
-        const originalKey = Decision.stateKey(current);
+        const originalEcho = Decision.stateEcho(current);
         const originalDecision = Coordinator.economyDecisions.decided(current);
         const packet = structuredClone(current.stats.money);
         const ordinary = await Market.reconcile(current, { type: 'recover', status: 'active', plan: { kind: 'rest' } });
@@ -47,7 +47,7 @@ const base = { characterId: 7, phase: 'cold', activity: 'resting', level: 40, ad
         // Change only the declared new native HP observation, without changing
         // activity, timestamp, classes, money, old order or cached decision.
         current = { ...native.state, vitals: { ...native.state.vitals, hp: 0 } };
-        assert.strictEqual(Decision.stateKey(current), originalKey);
+        assert.deepStrictEqual(Decision.stateEcho(current), originalEcho);
         assert.strictEqual(Coordinator.economyDecisions.decided(current), originalDecision,
             'the pre-floor genuine cached capability remains exactly present');
         assert.deepStrictEqual(Decision.economyFor(current).watchList, watch);
@@ -73,7 +73,7 @@ const base = { characterId: 7, phase: 'cold', activity: 'resting', level: 40, ad
         assert.strictEqual(current.adena, 20000);
         assert.deepStrictEqual(current.stats.money, packet);
         console.log(JSON.stringify({ scope: 'native cached worker watch plus true survival-floor consumer',
-            originalHP: 40, observedHP: 0, activityUnchanged: current.activity, originalKey, watch,
+            originalHP: 40, observedHP: 0, activityUnchanged: current.activity, originalEcho, watch,
             packet, nativeDecisionRetained: true, protectedRefundWriterCalls: 0,
             npcRefundWriterCalls: closes.length, physicalSQLiteSettlementClaim: false }));
         console.log('Cached native WTB floor controls passed');

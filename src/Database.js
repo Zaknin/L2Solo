@@ -27,7 +27,6 @@ const ColdProtocol = require('./GameServer/Bot/Population/ColdSimulationProtocol
 const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCheckpoint');
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
-const Hold = require('./GameServer/Bot/Economy/Hold');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
@@ -2647,27 +2646,19 @@ function nativeColdCombatSkillsUnsafe(characterId, combat) {
     return coldCombatSkillsUnsafe(characterId, combat).kit;
 }
 
-// The kit and how it was reached: 'skipped' (the hold kept it: its stamp is
-// the row's skillsRevision, so the learned rows are those it was built from),
-// 'same' (the rows rebuilt it unchanged), 'stamped' (unchanged, the stamp
-// moved) or 'rebuilt'. With the row's skillsRevision the kit carries it as
-// its stamp; without it (a save or party write) a kit keeps the stamp it has:
-// it was built from the rows at or after that stamp, so an equal stamp still
-// proves the rows.
-const SKILLS_HOLD = 'commit_skills';
+// The kit and how it was reached, from the learned rows read on every
+// commit: 'same' (the rows rebuilt it unchanged), 'stamped' (unchanged, the
+// stamp moved) or 'rebuilt'. With the row's skillsRevision the kit carries it
+// as its stamp; without it (a save or party write) a kit keeps the stamp it
+// has: it was built from the rows at or after that stamp, so an equal stamp
+// still proves the rows.
 function coldCombatSkillsUnsafe(characterId, combat, skillsRevision) {
     if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return { kit: combat, outcome: 'same' };
     const native = combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database';
     const known = skillsRevision !== undefined;
-    const why = !known || !Hold.asked(SKILLS_HOLD) ? null
-        : native && combat.skillsRevision === skillsRevision ? [] : [combat.skillsRevision === undefined ? 'unproved' : 'skills'];
-    if (why && Hold.check(SKILLS_HOLD, why)) return { kit: combat, outcome: 'skipped' };
-    const started = why ? performance.now() : 0;
     const learned = ColdCombatProfile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
     const held = Array.isArray(combat.skills) ? combat.skills : null;
     const same = held && native && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill));
-    // Shadow: a quiet verdict whose rebuild would move the kit is a missed event.
-    if (why) Hold.compare(SKILLS_HOLD, { characterId }, why, () => same ? '' : 'skills', performance.now() - started);
     if (same) {
         return !known || combat.skillsRevision === skillsRevision ? { kit: combat, outcome: 'same' }
             : { kit: { ...combat, skillsRevision }, outcome: 'stamped' };

@@ -2758,7 +2758,7 @@ const BotLifeState = {
             ? DecisionSections.softEvents(nextState, nextState.stats.wishSections, options.softInputFor(nextState, timestamp)) : [];
         DecisionEvents.raiseSections(state, nextState, hard, soft);
         // The worker's post-round economy ask: only a step that took no
-        // decision before its round (a party member, a held transit).
+        // decision before its round (a party member).
         if (!isMainThread && !state.stats?.tradeMeeting && !beforeResolvePacket) {
             const economyDeps = typeof options.economyDepsFor === 'function'
                 ? await options.economyDepsFor(nextState) : options.economyDeps || {};

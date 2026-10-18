@@ -1,8 +1,11 @@
 'use strict';
 const assert = require('node:assert/strict');
+// The card's echo check reads the economy's sections (invoke-loaded modules).
+require('../src/Global');
 require('../src/GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true;
 const { ColdOccupationPlanner } = require('../src/GameServer/Bot/Population/ColdOccupationPlanner');
-const { compact, capture, ColdEconomyDecisions, stateKey } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const { compact, capture, ColdEconomyDecisions, stateEcho } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const Sections = require('../src/GameServer/Bot/Economy/DecisionSections');
 
 const posted = [], tokens = new Map(), callbacks = [], working = [];
 const planner = new ColdOccupationPlanner({ schedule: callback => callbacks.push(callback), now: () => 0,
@@ -139,9 +142,13 @@ for (const workshop of [{ known: false }, { known: true, recipeId: 0, productId:
     else { assert.equal(decision.workshop.incomePerHour, workshop.incomePerHour); assert.equal(decision.workshop.cycleHours, workshop.cycleHours); }
     const decisions = new ColdEconomyDecisions(); decisions.accept(7, decision);
     assert.equal(decisions.workshopFor(state).known, workshop.known);
-    assert.equal(decisions.workshopFor({ ...state, adena: 0 }).known, false, 'wallet changes invalidate captured occupation');
-    assert.equal(decisions.workshopFor({ ...state, vitals: { mp: 0 } }).known, false, 'MP changes invalidate captured occupation');
-    decisions.staleWorkshop(7, { key: stateKey(state), updatedAt: state.updatedAt });
+    // The card belongs to its decision: a later publication, a raised
+    // section (a wallet move raises money) or another decision drops it.
+    assert.equal(decisions.workshopFor({ ...state, updatedAt: state.updatedAt + 1 }).known, false, 'a later publication invalidates captured occupation');
+    assert.equal(decisions.workshopFor({ ...state, adena: 0, stats: { ...state.stats, wishDirty: Sections.sectionMask(['money']) } }).known, false,
+        'a raised money section invalidates captured occupation');
+    assert.equal(decisions.workshopFor({ ...state, stats: { ...state.stats, decisionSeq: 1 } }).known, false, 'another decision invalidates captured occupation');
+    decisions.staleWorkshop(7, { echo: stateEcho(state), updatedAt: state.updatedAt });
     assert.equal(decisions.workshopFor(state).known, false, 'used-source retirement preserves explicit unknown');
 }
 console.log('PASS pinned FIFO contexts, exact resumable progress, used-source restarts, 32-unit portions and binary workshop NaN');
