@@ -1,7 +1,7 @@
 'use strict';
 
-// The existing stats update carries one bounded decision, never its graph or
-// process-local market tokens. The economy owner validates the saved proof.
+// The existing stats update carries one bounded decision, never its graph.
+// The economy owner validates the saved proof.
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const MAX_BYTES = 1024, MAX_PLAIN_BYTES = 16384;
 // 4: the restart prefix inside is format 4; an older card is refused before inflate.
@@ -15,10 +15,9 @@ function cardData(value, maxBytes) {
         ? Uint8Array.from(bytes).buffer : null;
 }
 
-function encode(accepted, baselineIdentity, clockBytes = 0) {
+function encode(accepted, baselineIdentity) {
     if (!(accepted?.eventProof instanceof Uint8Array) || !(accepted.card?.data instanceof ArrayBuffer)
-        || typeof baselineIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(baselineIdentity)
-        || !Number.isSafeInteger(clockBytes) || clockBytes < 0 || clockBytes >= MAX_BYTES) return null;
+        || typeof baselineIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(baselineIdentity)) return null;
     try {
         const metadata = Buffer.from(JSON.stringify([accepted.card.key, accepted.decisionSeq, accepted.activityLeaf,
             accepted.focus, accepted.activity, accepted.mp, accepted.characterId]));
@@ -30,7 +29,7 @@ function encode(accepted, baselineIdentity, clockBytes = 0) {
         Buffer.from(baselineIdentity, 'hex').copy(plain, 4);
         metadata.copy(plain, 36); card.copy(plain, 36 + metadata.length); proof.copy(plain, 36 + metadata.length + card.length);
         const value = [VERSION, deflateRawSync(plain, { level: 6 }).toString('base64')];
-        return Buffer.byteLength(JSON.stringify({ wishAdvisory: value })) + clockBytes <= MAX_BYTES ? value : null;
+        return Buffer.byteLength(JSON.stringify({ wishAdvisory: value })) <= MAX_BYTES ? value : null;
     } catch (_) { return null; }
 }
 
@@ -56,14 +55,12 @@ function decode(value, timestamp, maxCardBytes, characterId, baseline, baselineI
             || row[3] !== null && (typeof row[3] !== 'string' || row[3].length > 128)
             || typeof row[4] !== 'string' || !Number.isFinite(row[5])
             || !Number.isSafeInteger(row[6]) || row[6] <= 0 || row[6] !== characterId) return null;
-        const at = baseline?.at, ages = baseline?.ages;
-        if (!Number.isFinite(at) || !Number.isFinite(timestamp) || timestamp < at
-            || ages !== undefined && (!Array.isArray(ages) || ages.length !== 4
-                || ages.some(age => !Number.isFinite(age) || age < 0))) return null;
+        const at = baseline?.at;
+        if (!Number.isFinite(at) || !Number.isFinite(timestamp) || timestamp < at) return null;
         const data = Uint8Array.from(plain.subarray(cardAt, cardAt + cardSize)).buffer;
         return { key: row[0], data, decisionSeq: row[1], activityLeaf: row[2], focus: row[3], baseline,
             activity: row[4], mp: row[5], eventProof: Uint8Array.from(plain.subarray(cardAt + cardSize)),
-            characterId: row[6], saved: value, softPrefix: true };
+            characterId: row[6], saved: value };
     } catch (_) { return null; }
 }
 

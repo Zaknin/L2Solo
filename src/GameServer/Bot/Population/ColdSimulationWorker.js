@@ -266,7 +266,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             const Context = invoke('GameServer/Bot/Economy/EconomyContext');
             // Fresh physical incoming is delivered in the native owner snapshot.
             // Reuse the bounded graph/seed; no price or private plan from another actor.
-            const economy = Context.forState(input.state, { board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
+            const economy = Context.forState(input.state, { board: input.board, routeRows, workshops: workshopsFor,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, workshop: noWorkshop(),
                 buyOrderEscrow: input.buyOrderEscrow, npcOffersFor: OccupationSources.npcOffersFor,
                 // A meeting review (its own workshop input, maybe the meeting's incoming) never
@@ -354,7 +354,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         if (input.mode === 'refresh') {
             const routeRows = input.routeRows || (yield* EconomicTrip.prepare(input.state));
             input.economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(input.state, {
-                board: input.board, routeRows, workshops: workshopsFor, workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
+                board: input.board, routeRows, workshops: workshopsFor,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
                 buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
                 rememberContext: false, caller: 'economy_refresh', trigger: 'native_own_action' });
@@ -844,7 +844,7 @@ function compareTransit(transit, state, plannedState, statsPacket, previousPlan)
 // quiet skips the whole lifecycle result (plan, stats packet, card, advisory)
 // and resolves its incoming state. Null outside the place, else
 // { why, held, startedAt }.
-function transitHold(state, previousPlan, nativeReplan, context, timestamp) {
+function transitHold(state, previousPlan, nativeReplan, context) {
     if (!Hold.asked('transit', context)) return null;
     const travel = state.activity === 'traveling' && BackgroundResolver.travelRecord(state.stats?.travel);
     if (!travel && state.activity !== 'dead' && !(state.activity === 'resting' && Number(state.stats?.restUntil || 0) > 0)) return null;
@@ -856,8 +856,7 @@ function transitHold(state, previousPlan, nativeReplan, context, timestamp) {
     // Failure counters and recovery deadlines are the rebuild's to act on.
     else if (nativeReplan.failure || nativeReplan.invalidSource || nativeReplan.levelingRecovery) why.push('native');
     // No held MP (wishSections keeps none): a crafter refuses on crafter_mp.
-    else EconomyContext.heldEventsQuiet(state, { baseline, expPerHour: baseline.expHour, persona: BotPersona.of(state) },
-        timestamp, { buyOrderEscrow: context?.buyOrderEscrow }, why);
+    else EconomyContext.heldEventsQuiet(state, { baseline }, { buyOrderEscrow: context?.buyOrderEscrow }, why);
     return { why, held: Hold.check('transit', why, context), startedAt: performance.now() };
 }
 // L115: a publication the event proof refuses drops the advice, counted by
@@ -875,12 +874,11 @@ function rememberWishAdvisory(owner, advisory, seen = null, deps = null) {
     }
     if (advisory?.eventProof && seen
         && !ColdEconomyDecision.advisoryPublicationHolds(seen, advisory, current.context.wishAdvisory)) return;
-    // Validate this publication against the original build's proof; it does
-    // not renew soft clocks.
+    // Validate this publication against the original build's proof.
     const why = diagnostic ? [] : undefined;
     const Economy = advisory && seen && deps ? EconomyContext : null;
     const options = advisory && deps ? { baseline: advisory.baseline, activity: advisory.activity,
-        leaf: advisory.card?.activity, mp: advisory.mp, softPrefix: advisory.softPrefix === true,
+        leaf: advisory.card?.activity, mp: advisory.mp,
         timestamp: Number(deps.timestamp || Date.now()), why } : null;
     if (advisory && seen && (!Economy || !(advisory.eventProof && Economy.eventProofHolds(seen, advisory.eventProof, deps, options)))) {
         if (diagnostic) economyDiagnostics.count('card', 'drop', `remember:${deps ? why[0] || 'unknown' : 'no_deps'}`);
@@ -1168,11 +1166,17 @@ function startKernel(config = {}) {
             // the round below: that is its one decision point.
             const stepEconomy = lifecyclePlan?.economy || null;
             let economy = stepEconomy, seenKey = null, refreshed = null, observedDeps = null, economyEdges = null;
+            const escrowOf = () => kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow || 0;
             const base = {
                 persist: false,
                 timestamp,
                 projectClassProgression: true,
-                moneyEscrowFor: () => kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow || 0
+                moneyEscrowFor: escrowOf,
+                // The soft point's inputs (BotLifeState.prepareResolve, every
+                // step): the board mirror (null until ready), the escrow and
+                // the bot's memory rows, read only when its bond is compared.
+                softInputFor: (projected, at) => ({ board: boardReady(), buyOrderEscrow: escrowOf(), timestamp: at,
+                    memory: () => kernel.interactionMemory.relationRows(Number(projected.characterId)) })
             };
             const resolved = await LifeStateProjector.prepareResolve(state, result, stepEconomy
                 // Merged before the event check, whose dirty bits follow it.
@@ -1279,7 +1283,7 @@ function startKernel(config = {}) {
             const nativeReplan = GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
             // A held transit step resolves its incoming state, as a trade
             // meeting does: the kernel takes the state when there is no plan.
-            const transit = transitHold(state, previousPlan, nativeReplan, context, timestamp);
+            const transit = transitHold(state, previousPlan, nativeReplan, context);
             if (transit?.held) return null;
             const spots = planningSpots;
             const occupancy = currentPlanningOccupancy(timestamp);
@@ -1508,10 +1512,9 @@ function startKernel(config = {}) {
             const index = OccupationSources.recipeIndex(board);
             const level = invoke('GameServer/Bot/Economy/CraftShopService').craftLevelFor(state);
             const scope = index.scopeFor(level);
-            return { recipes: index.rowsFor(level), scope, revision: index.revision(scope), identity: index.contentIdentity(scope) };
+            return { recipes: index.rowsFor(level), scope, revision: index.revision(scope) };
         },
         workshops: workshopsFor,
-        workshopRevision: id => workshopRevisions.get(Number(id)) || 0,
         npcOffersFor: OccupationSources.npcOffersFor,
         workshop: id => {
             const entry = kernel.states.get(Number(id));
