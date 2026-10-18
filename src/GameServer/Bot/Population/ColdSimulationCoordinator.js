@@ -16,10 +16,7 @@ const DataCache = invoke('GameServer/DataCache');
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
-const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
-const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
-const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
 const Director = invoke('GameServer/Bot/Population/PopulationDirector');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
@@ -39,14 +36,10 @@ const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const RecomputeGeneration = require('./RecomputeGeneration');
-const Hold = require('../Economy/Hold');
-const { fnv1a32 } = require('../Fnv1a');
-const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const GoalService = invoke('GameServer/Bot/Goals/GoalService');
-const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 
-const ColdTrip = require('./ColdTrip');
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
+const BotRoute = require('./BotRoute');
 // Private main-thread provenance survives the queue's shallow clone but is
 // excluded from JSON/wire sizing and cannot be supplied by a Worker message.
 const PROPOSAL_SOURCE = Symbol('cold-proposal-source');
@@ -117,14 +110,6 @@ function compactPartyMemberContext(state = {}) {
         },
         compact: true
     };
-}
-
-// The name of the first kit part (ColdCombatProfile.KIT_EVENTS) whose hash
-// differs between the held and the current kitEvents, or ''.
-function movedKitPart(held, current) {
-    const names = ColdCombatProfile.KIT_EVENTS;
-    for (let index = 0; index < names.length; index++) if (held[index] !== current[index]) return names[index];
-    return '';
 }
 
 class ColdSimulationCoordinator {
@@ -243,9 +228,8 @@ class ColdSimulationCoordinator {
                 actor: { id: e.actor.id, partyId: e.actor.partyId || null }, peer: { id: e.peer.id, partyId: e.peer.partyId || null } })) }),
             retreatRoute: (members, party, event, timestamp) => {
                 const leader = members.find(s => s.characterId === party?.leaderId) || members[0];
-                const index = this.contextIndex();
-                index.timestamp = timestamp;
-                const route = this.routeFor(leader, index.spots.get(String(event.spotId)), party, members, index);
+                const spots = SpotProfiles.ensure() || [];
+                const route = BotRoute.route(leader, SpotIndex.spotById(spots, event.spotId), party, members, { spots, timestamp });
                 return route ? { ...route, cause: 'competition_avoid', reason: party ? 'party_spot_replan' : 'competition_avoid' } : null;
             },
             formParty: (members, event, options) => this.population?.formCompetitionParty?.(members, event, options),
@@ -1093,260 +1077,6 @@ class ColdSimulationCoordinator {
         };
     }
 
-    routeFor(state, currentSpot, party, partyMembers, index) {
-        if (!state || state.phase !== 'cold' || state.stats?.travel) return null;
-        if (!party && invoke('GameServer/Bot/Population/ClanPartyDuty').waiting(state)) return null;
-        const partyRoute = !!party;
-        const eligibleActivity = state.activity === 'hunting'
-            || (partyRoute && state.activity === 'grouped');
-        if (!eligibleActivity) return null;
-        if (!partyRoute && invoke('GameServer/Bot/Economy/BotCrystallization').ready(state)) return null;
-        if (partyRoute && partyMembers.some((member) => ['resting', 'traveling', 'dead'].includes(member.activity))) return null;
-
-        let physical = null;
-        try { physical = SpotService.findCurrentSpot(state.loc); } catch (_) { physical = null; }
-        // Virtual raid profiles share the ordinary world grid with their
-        // surrounding field. Once the party has arrived, its persisted raid
-        // spot is the semantic destination; preferring the grid id here would
-        // schedule another 25-second trip to the same coordinates forever.
-        const declaredSpotId = party?.spotId || state.spotId || null;
-        const declaredSpot = declaredSpotId
-            ? index.spots?.get?.(String(declaredSpotId)) || SpotProfiles.findById(declaredSpotId)
-            : null;
-        const currentId = declaredSpot?.raidBoss === true
-            ? declaredSpot.id
-            : physical?.id || currentSpot?.id || declaredSpotId;
-        const timestamp = Number(index.timestamp || Date.now());
-        const routedMembers = partyRoute ? partyMembers : [state];
-        const partyRisk = invoke('GameServer/Bot/Population/PartySpotRiskPolicy');
-        const excludedSpotIds = partyRoute ? partyRisk.excludedSpotIds(party, timestamp)
-            : SpotRiskPolicy.excludedSpotIdsForStates(routedMembers, timestamp);
-        const spotBackoff = partyRoute ? partyRisk.backoff(party, currentId, timestamp)
-            : SpotRiskPolicy.backoffForStates(routedMembers, currentId, timestamp);
-
-        const role = partyRoute ? PartyComposition.roleForState(state) : null;
-        let fallbackSpot = null;
-        if (!partyRoute && PartyWaitFallback.waiting(state, state.stats?.equipmentPlan, state.stats?.partyRequest)) {
-            try {
-                fallbackSpot = PartyWaitFallback.spotFor(
-                    state,
-                    state.stats?.equipmentPlan,
-                    // Preserve catalog identity for the planner's source-index cache.
-                    index.profiles || [...index.spots.values()],
-                    { excludedSpotIds, timestamp }
-                )?.spot || null;
-            } catch (_) { fallbackSpot = null; }
-        }
-        const routeState = partyRoute
-            ? {
-                ...state,
-                spotId: party.spotId || state.spotId,
-                party: { ...(state.party || {}), partyId: party.partyId, role },
-                stats: { ...(state.stats || {}), routeMode: 'party' }
-            }
-            : fallbackSpot
-                ? { ...state, spotId: null }
-                : state;
-        const options = {
-            capacityStates: routedMembers,
-            excludedSpotIds,
-            timestamp,
-            ...(partyRoute ? { mode: 'party', role } : {})
-        };
-        // Match the combat resolver: an indexed coordinate sector only
-        // describes the current ground when it agrees with the persisted
-        // spot. Legacy dungeon sectors can keep their qualified id/name after
-        // the rebuilt spawn index exposes the same grid as an ordinary field.
-        const currentGround = currentSpot
-            && (!state.spotId || String(state.spotId) === String(currentSpot.id))
-            ? currentSpot
-            : (state.spotId || state.currentRegion) ? {
-                id: state.spotId || null,
-                name: state.currentRegion || null,
-                area: state.area || state.stats?.area || null
-            } : currentSpot;
-        // Solo checks and a non-party search all judge this bot, as the only
-        // capacity state, at this timestamp. Its combat profiles depend on the
-        // bot, not the spot: build them once for the decision.
-        let soloProfiles = null;
-        const soloOptions = () => {
-            soloProfiles = soloProfiles || invoke('GameServer/Bot/AI/BotTargetMatchup')
-                .stateProfiles(state, { ...options, mode: 'solo' });
-            return { ...options, mode: 'solo', matchupProfiles: soloProfiles };
-        };
-        const unsafeSoloGround = !partyRoute && currentGround
-            && !LevelingRoutes.isSpotAllowedForState(currentGround, state, soloOptions());
-        const leaf = partyRoute ? null : index.wishLeaf !== undefined ? index.wishLeaf
-            : this.economyDecisions.activity(state);
-        // Place 'route' (Hold.js), a solo context only: would the spot chosen
-        // last time stand? Shadow: counted, the search below still runs.
-        const hold = !partyRoute && index.routeHold === true && Hold.asked('route')
-            ? this.routeHold(state, currentId, leaf, excludedSpotIds, index, soloOptions, timestamp) : null;
-        const wished = leaf?.activity === 'hunting' && leaf.spotId
-            ? index.spots.get(String(leaf.spotId)) : null;
-        const wishDestination = wished && wished.raidBoss !== true
-            && !excludedSpotIds.has(String(wished.id))
-            && LevelingRoutes.isSpotAllowedForState(wished, state, soloOptions())
-            && (SpotService.isSuitable(wished, Number(state.level || 1), options)
-                || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state)
-                    && Number(wished.avgLevel || wished.minLevel || 1) >= Number(state.level || 1) - 15) ? wished : null;
-        const sharedSpot = party?.stats?.objective?.spotId;
-        let selected = partyRoute && sharedSpot && !excludedSpotIds.has(String(sharedSpot))
-            ? index.spots.get(String(sharedSpot)) || null : wishDestination || fallbackSpot;
-        let materialRoute = null;
-        const materialHunt = partyRoute && require('./CraftMaterialParty').isObjective(party.stats?.objective);
-        if (!selected && materialHunt) {
-            materialRoute = require('./CraftMaterialPartyRoute').select(party, partyMembers,
-                index.profiles || [...index.spots.values()], options);
-            selected = materialRoute?.spot || null;
-        }
-        try {
-            // A party-mode search of a lone member builds no profiles at all.
-            if (!selected) selected = SpotProfiles.findForState(routeState, !partyRoute
-                && LevelingRoutes.modeForState(routeState, options) !== 'party'
-                ? { ...options, matchupProfiles: soloOptions().matchupProfiles }
-                : options);
-        } catch (_) { selected = null; }
-        if (unsafeSoloGround && selected) {
-            const repeatsCurrentGround = String(selected.id || '') === String(currentId || '');
-            const destinationSafeForSolo = LevelingRoutes.isSpotAllowedForState(
-                selected,
-                state,
-                soloOptions()
-            );
-            if (repeatsCurrentGround || !destinationSafeForSolo) selected = null;
-        }
-        if (!selected && unsafeSoloGround) {
-            // No suitable field: a detached party member must not poll a
-            // blocked dungeon forever. Only for this rare safety evacuation,
-            // choose the least-bad allowed field near its level; the room
-            // there is checked at arrival, which lets it exceed a full spot
-            // by one (ARCH-08-a).
-            const emergencyOptions = soloOptions();
-            const nearLevel = (index.profiles || [...index.spots.values()])
-                .filter((profile) => profile.raidBoss !== true)
-                .filter((profile) => String(profile.id) !== String(currentId || ''))
-                .filter((profile) => !excludedSpotIds.has(String(profile.id)))
-                .filter((profile) => (
-                    Number(profile.minLevel || 1) <= Number(state.level || 1) + 4
-                    && Number(profile.maxLevel || profile.minLevel || 1) >= Number(state.level || 1) - 4
-                ));
-            const emergencyCandidates = nearLevel.filter((profile) => (
-                LevelingRoutes.isSpotAllowedForState(profile, state, emergencyOptions)
-            ));
-            const suitable = emergencyCandidates.filter((profile) => (
-                SpotService.isSuitable(profile, Number(state.level || 1), options)
-            ));
-            selected = emergencyCandidates.length ? LevelingRoutes.bestSpot(
-                suitable.length ? suitable : emergencyCandidates,
-                state,
-                emergencyOptions
-            )?.spot || null : null;
-        }
-        if (hold) this.recordHeldRoute(state, hold, selected);
-        if (!selected) return null;
-
-        const repairingPartyPosition = partyRoute && String(selected.id) === String(party.spotId || '')
-            && partyMembers.every(member => member.phase === 'cold' && member.vitals?.hp > 0
-                && !member.stats?.pvpEncounter && !member.stats?.travel)
-            && (!invoke('GameServer/Bot/Population/PartyHuntingAssembly').nearby(partyMembers)
-                || partyMembers.some(member => !SpotService.containsLocation(selected, member.loc)));
-        const materialReplan = materialRoute || materialHunt && String(selected.id) !== String(sharedSpot);
-        if (String(selected.id) === String(currentId || '') && !repairingPartyPosition && !materialReplan
-            && (!partyRoute || String(party.spotId || '') === String(selected.id))) return null;
-
-        const members = partyRoute ? partyMembers : [state];
-        const destinations = partyRoute ? SpotService.arrivalPointsForParty(members, selected) : {};
-        if (!destinations) return null;
-        for (const member of partyRoute ? [] : members) {
-            let destination = null;
-            try { destination = SpotService.arrivalPointForState(member, selected); } catch (_) { destination = null; }
-            if (!destination) return null;
-            destinations[String(member.characterId)] = destination;
-        }
-        const activeEquipmentPlan = state.stats?.equipmentPlan?.status === 'active';
-        return {
-            needed: true,
-            mode: partyRoute ? 'party' : 'solo',
-            currentSpotId: currentId,
-            spotId: selected.id,
-            regionName: selected.name || state.currentRegion || 'Hunting Ground',
-            // The routed bot's trip time; a party's members all take it.
-            travelMs: ColdTrip.spotTripMs(state, destinations[String(state.characterId)] || selected.center),
-            reason: partyRoute
-                ? 'party_spot_replan'
-                : unsafeSoloGround ? 'unsafe_ground_evacuation'
-                : spotBackoff ? 'death_pressure_replan'
-                    : activeEquipmentPlan ? 'equipment_source_replan' : 'level_replan',
-            ...(spotBackoff ? { cause: 'death_pressure', spotBackoff }
-                : repairingPartyPosition ? { cause: 'position_mismatch' } : {}),
-            to: destinations[String(state.characterId)] || null,
-            destinations,
-            ...(materialRoute ? { materialSources: materialRoute.sources }
-                : materialHunt && String(selected.id) !== String(sharedSpot) ? { materialEvacuation: true } : {})
-        };
-    }
-
-    // The route hold (Hold.js place 'route', shadow). The held decision is the
-    // spot a solo context chose (null: none), kept while its event inputs stay
-    // quiet: the kit parts (ColdCombatProfile.kitEvents, named by KIT_EVENTS;
-    // buffs and night are not route inputs), party and clan, the ground the bot
-    // stands on, the wish leaf's spot and the wish focus, the equipment plan
-    // and party request fields the search reads (its leveling recovery read
-    // through the planner, which ends by time), and the risk exclusions with
-    // the recovery level penalty. Occupancy and safety are checked on the held
-    // spot, never keyed. One record per bot in this.routeHolds: the spot id,
-    // the 7 kit hashes, four short strings and two hashes.
-    routeHold(state, ground, leaf, excludedSpotIds, index, soloOptions, timestamp) {
-        const stats = state.stats || {};
-        const plan = stats.equipmentPlan, request = stats.partyRequest;
-        const events = {
-            spotId: null,
-            profile: ColdCombatProfile.kitEvents(state),
-            relations: `${Number(state.party?.partyId || state.partyId || 0)}|${Number(state.clanId ?? stats.clanId ?? 0)}`,
-            occupation: String(ground ?? ''),
-            leaf: leaf?.activity === 'hunting' ? String(leaf.spotId ?? '') : '',
-            focus: String(stats.wishFocus?.[0] ?? ''),
-            plan: plan || request ? fnv1a32(`${plan?.status}|${plan?.strategy}|${plan?.next?.spotId}|${plan?.next?.npcId}|`
-                + `${plan?.next?.sourceKind}|${plan?.partyNeed}|${plan?.requiresParty}|`
-                + `${plan && GearAcquisitionPlanner.levelingRecoveryFor(state, plan, timestamp) ? 1 : 0}|`
-                + `${request?.status}|${request?.priority}`) : 0,
-            risk: fnv1a32(`${[...excludedSpotIds].sort().join(',')}|${SpotRiskPolicy.recoveryFor(state)?.levelPenalty || 0}`)
-        };
-        const held = (this.routeHolds ||= new Map()).get(Number(state.characterId));
-        let reason = !held ? 'unproved' : movedKitPart(held.profile, events.profile)
-            || (held.relations !== events.relations ? 'relations'
-                : held.occupation !== events.occupation ? 'occupation'
-                    : held.leaf !== events.leaf ? 'activity_leaf'
-                        : held.focus !== events.focus ? 'focus'
-                            : held.plan !== events.plan ? 'equipment_plan'
-                                : held.risk !== events.risk ? 'risk' : '');
-        // Feasibility of the held spot: still in the catalog, not excluded,
-        // still safe for its kit (the profiles the search builds anyway); its
-        // room is checked at arrival. A held "no spot" has nothing to check.
-        if (!reason && held.spotId !== null) {
-            const spot = index.spots.get(held.spotId);
-            reason = !spot ? 'spots'
-                : excludedSpotIds.has(held.spotId) ? 'risk'
-                    : !LevelingRoutes.isSpotAllowedForState(spot, state, soloOptions()) ? 'unsafe' : '';
-        }
-        const why = reason ? [reason] : [];
-        Hold.check('route', why);
-        return { why, held, events, startedAt: performance.now() };
-    }
-
-    // The search's choice becomes the bot's held record; a sampled owner with
-    // a held record also writes the same/new row against it.
-    recordHeldRoute(state, hold, selected) {
-        const spotId = selected?.id == null ? null : String(selected.id);
-        if (hold.held) {
-            Hold.compare('route', state, hold.why, () => hold.held.spotId === spotId ? '' : 'spot',
-                performance.now() - hold.startedAt);
-        }
-        hold.events.spotId = spotId;
-        this.routeHolds.set(Number(state.characterId), hold.events);
-    }
-
     async ensureCraftRecipes(state) {
         if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) {
             await invoke('GameServer/Bot/Economy/CraftWorkshopService').knownFor(state.characterId);
@@ -1367,9 +1097,9 @@ class ColdSimulationCoordinator {
         let pressure = {};
         try { pressure = Director.pressureForState(state) || {}; } catch (_) { pressure = {}; }
         const party = index.parties.get(Number(state.characterId)) || null;
-        const fullPartyMembers = party
+        const members = party
             ? (party.memberIds || []).map((characterId) => LifeState.cachedState(characterId)).filter(Boolean) : [];
-        const partyMembers = fullPartyMembers.map((member) => {
+        const partyMembers = members.map((member) => {
                 const memberId = Number(member.characterId || 0);
                 const compact = index.compactPartyMembers === true
                     || index.compactPartyMemberIds?.has(memberId);
@@ -1399,8 +1129,7 @@ class ColdSimulationCoordinator {
             ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
                 ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
             partyMembers,
-            requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId)),
-            route: this.routeFor(state, spot, party, fullPartyMembers, { ...index, memory: interactionMemory, wishLeaf: leaf, routeHold: true })
+            requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId))
         };
         this.projectionRetention.prepare(state, context, index.partyGeneration);
         return context;

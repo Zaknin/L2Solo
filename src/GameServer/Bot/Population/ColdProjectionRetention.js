@@ -28,7 +28,7 @@ function contextStamp(context) {
     return [context.spot, context.interactionMemory, context.clanHallServices,
         pressure.expMultiplier, pressure.deathChanceMultiplier, pressure.directorReason,
         context.buyOrderEscrow, context.targetNpcId, context.isPartyLeader, context.party,
-        context.partyMembers, context.route];
+        context.partyMembers];
 }
 
 // Replay only a producer's existing intent. The provider reads current local
@@ -90,7 +90,6 @@ class ColdProjectionRetention {
         if (record.sequence !== (this.dirty.get(state) || 0)) return unavailable('projection_dirty');
         const context = record.context;
         if (!same(record.contextStamp, contextStamp(context))) return unavailable('projection_context_changed');
-        if (context.route) return unavailable('dynamic_route_context');
         if (context.spot?.raidBoss) return unavailable('dynamic_raid_context');
         const current = this.dependencies(state, context);
         if (record.partyGeneration !== current.partyGeneration) return unavailable('party_generation_changed');

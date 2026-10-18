@@ -1136,9 +1136,6 @@ function combatView(state) {
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
 }
-// The names of the kit parts, one per kitEvents hash (DecisionSections.kit,
-// the route record's moved part).
-const KIT_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture'];
 // One small hash per kit part (combatView's), no clock, in a new array: the
 // kit fact (DecisionSections.factsOf) and the kit profile store's hash.
 function kitHash(parts) {
@@ -1158,7 +1155,7 @@ function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, KIT_EVENTS, kitEvents, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
+    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

@@ -1,6 +1,6 @@
 // A bot whose gear needs a party asks for one and hunts a safe spot while it
-// waits. One rule for the cold worker (planLifecycle), the coordinator
-// (routeFor) and the command resolve (PopulationService.resolveColdState).
+// waits. One rule for the cold worker (planLifecycle), the route search
+// (BotRoute.choose) and the command resolve (PopulationService.resolveColdState).
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');

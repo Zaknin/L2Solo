@@ -729,7 +729,7 @@ class ColdSimulationKernel {
             || String(membership) !== String(entry.context.party?.partyId || ''))) {
             entry = { ...entry, context: { ...entry.context, isPartyLeader: false,
                 party: null, partyMembers: [], requirementRefresh: false, targetNpcId: null,
-                raidOwner: null, route: entry.context.route?.mode === 'party' ? null : entry.context.route } };
+                raidOwner: null } };
         }
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
