@@ -1,7 +1,10 @@
 const Validation = require('./ColdCompetitionValidation');
 const Episode = require('./ColdCompetitionEpisode');
+const Risk = require('./SpotRiskPolicy');
+const PartyRisk = require('./PartySpotRiskPolicy');
 // Voluntary decisions affect the actor's whole hunting unit, without blame.
-const AVOID_MS = 10 * 60000;
+// The avoided spot stays excluded for ten of the holder's own steps.
+const AVOID_STEPS = 10;
 
 async function apply({ event, life, owner, memory, parties, participantAllowed, contestContextAllowed,
     retreatRoute, onState, now, waitMs }) {
@@ -27,9 +30,11 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
     if (states.length > 18 || new Set(states.map(s => s.characterId)).size !== states.length) return { ok: false, reason: 'overlapping_sides' };
     const revisions = new Map(states.map(s => [s.characterId, memory.snapshot(s.characterId).revision]));
     const avoiding = event.action === 'avoid';
-    const avoid = avoiding ? { spotId: event.spotId, until: at + AVOID_MS } : null;
+    // One avoid per holder, on its own counter: each member's far steps, the
+    // party's rounds for the party copy.
+    const avoidFor = counter => ({ spotId: event.spotId, untilStep: counter + AVOID_STEPS });
     const actorMembers = sides[0].members.map(s => avoiding ? { ...s, stats: { ...s.stats,
-        coldCompetition: { ...s.stats?.coldCompetition, avoid } } } : s);
+        coldCompetition: { ...s.stats?.coldCompetition, avoid: avoidFor(Risk.stepCount(s)) } } } : s);
     const route = avoiding ? retreatRoute(actorMembers, sides[0].party, event, at) : null;
     if (avoiding && (!route?.needed || !route.spotId || route.spotId === event.spotId)) return { ok: false, reason: 'no_retreat_route' };
     const { beginHuntingTrip } = require('./HuntingTravel');
@@ -44,7 +49,7 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
             nextResolveAt: i === 0 ? travel?.arrivalAt || Math.max(at, Number(side.party.nextResolveAt || 0)) + waitMs : side.party.nextResolveAt,
             stats: { ...side.party.stats, ...(travel ? { travel } : {}), coldCompetition: Episode.begin(side.party.stats?.coldCompetition, {
                 outcome: event.action, key: event.key, at, action: event.action, peerId: sides[1 - i].principal.characterId,
-                ...(i === 0 ? avoiding ? { avoid } : { wait: { start: at, until: at + waitMs } } : {})
+                ...(i === 0 ? avoiding ? { avoid: avoidFor(PartyRisk.rounds(side.party)) } : { wait: { start: at, until: at + waitMs } } : {})
             }) } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, side.party.updatedAt + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
@@ -75,7 +80,7 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
         preparedParties.filter(Boolean).forEach(p => parties.acceptCommit(p));
         return { ok: true, affectedIds: sides[0].members.map(s => s.characterId), memoryEvents: 0,
             matchup: sides.map(s => s.party ? 'party' : 'solo').join('_vs_'),
-            ...(avoiding ? { destinationSpotId: route.spotId, arrivalAt: travelling[0].timing.nextResolveAt, avoidUntil: avoid.until }
+            ...(avoiding ? { destinationSpotId: route.spotId, arrivalAt: travelling[0].timing.nextResolveAt, avoidSteps: AVOID_STEPS }
                 : { waitUntil: at + waitMs }) };
     } finally {
         const owned = grants.filter(g => life.cachedState(g.characterId)?.simulation?.leaseId === g.leaseId);
@@ -83,4 +88,4 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
         states.forEach(s => onState(s.characterId));
     }
 }
-module.exports = { apply, AVOID_MS };
+module.exports = { apply, AVOID_STEPS };

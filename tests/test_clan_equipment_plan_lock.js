@@ -130,7 +130,7 @@ async function main() {
         'an overlevel member must be removed even after raid preparation starts because Raid Curse disables combat');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview(raidParty, [{
             level: 99,
-            stats: { clanHuntBackoffs: [{ spotId: 'raid:10029', until: Date.now() + 60000 }] }
+            stats: { clanHuntBackoffs: [{ spotId: 'raid:10029', untilStep: 60 }] }
         }], Date.now()), false, 'ordinary hunt backoff must not dismantle a raid already in progress');
         const abandonedLegacyRaid = {
             ...raidParty,

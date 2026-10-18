@@ -1,6 +1,7 @@
 'use strict';
 
 const CharacterLocationIndex = require('../../World/CharacterLocationIndex');
+const Risk = require('./SpotRiskPolicy');
 const providers = new WeakMap();
 
 // Who stands on each spot and who is heading there, kept up to date at every
@@ -35,14 +36,16 @@ function farmIntentCandidate(state = {}) {
     return null;
 }
 
-function capacityBackedOff(state, spotId, timestamp) {
+// A "was full" mark lives the holder's own steps: it changes only with a new
+// state, which every write hands to update(), so no pass refreshes it.
+function capacityBackedOff(state, spotId) {
     return (state.stats?.capacityBackoffs || []).some(entry => String(entry.spotId) === String(spotId)
-        && Number(entry.until) > timestamp);
+        && Risk.markActive(entry, state));
 }
 
-function farmIntentSpotId(state = {}, timestamp = Date.now()) {
+function farmIntentSpotId(state = {}) {
     const spotId = farmIntentCandidate(state);
-    return spotId && !capacityBackedOff(state, spotId, timestamp) ? spotId : null;
+    return spotId && !capacityBackedOff(state, spotId) ? spotId : null;
 }
 
 function addMember(membersBySpot, spotId, key) {
@@ -68,13 +71,10 @@ class SpotOccupancyIndex {
         this.places = new Map();
         this.physical = new Map();
         this.reserved = new Map();
-        // Only keys are retained here; expiry reads their original current
-        // record, independently of its spatial eligibility.
-        this.backedOff = new Set();
         this.dirty = new Set();
     }
 
-    update(state, timestamp = Date.now(), options = {}) {
+    update(state, options = {}) {
         const key = stateKey(state); // Keep null's inherited error before writes.
         const { index, ownsSources } = providers.get(this);
         if (ownsSources) {
@@ -88,29 +88,27 @@ class SpotOccupancyIndex {
             // Do not read phase/location that the planning policy never used.
             const record = { id: key, source: state, phase: 'hot' };
             index.setSource(key, 'state', record, { indexed: false });
-            this.updateRecord(record, timestamp);
+            this.updateRecord(record);
             return;
         }
         const id = Object.prototype.hasOwnProperty.call(options, 'sourceId')
             ? options.sourceId : Number(state?.characterId || 0);
         const record = index.getSource(id, 'state');
         if (!record || !Object.is(record.source, state)) return false;
-        return this.updateRecord(record, timestamp);
+        return this.updateRecord(record);
     }
 
-    updateRecord(record, timestamp = Date.now()) {
+    updateRecord(record) {
         const { index } = providers.get(this);
         if (!record || index.getSource(record.id, 'state') !== record) return false;
         const state = record.source;
         const key = stateKey(state);
         const spotId = occupiedSpotId(state);
         const candidate = farmIntentCandidate(state);
-        const backedOff = !!candidate && capacityBackedOff(state, candidate, timestamp);
-        const intentSpotId = backedOff ? null : candidate;
+        const intentSpotId = candidate && !capacityBackedOff(state, candidate) ? candidate : null;
         this.removePlace(key);
         this.places.set(key, { record, spotId, intentSpotId,
             get state() { return record.source; } });
-        if (backedOff) this.backedOff.add(key);
         addMember(this.physical, spotId, key);
         addMember(this.reserved, spotId, key);
         addMember(this.reserved, intentSpotId, key);
@@ -128,7 +126,6 @@ class SpotOccupancyIndex {
         if (place.spotId) this.dirty.add(place.spotId);
         if (place.intentSpotId) this.dirty.add(place.intentSpotId);
         this.places.delete(key);
-        this.backedOff.delete(key);
         return place;
     }
 
@@ -159,26 +156,13 @@ class SpotOccupancyIndex {
         }
     }
 
-    // Expired intents refresh through record.id, which may be an opaque
-    // original Cache key rather than the state's characterId.
-    refreshBackoffs(timestamp) {
-        const { index } = providers.get(this);
-        for (const key of [...this.backedOff]) {
-            const record = this.places.get(key)?.record;
-            if (record && index.getSource(record.id, 'state') === record
-                && farmIntentSpotId(record.source, timestamp)) this.updateRecord(record, timestamp);
-        }
-    }
-
-    size() { return { owners: this.places.size, physical: this.physical.size, reserved: this.reserved.size,
-        backedOff: this.backedOff.size }; }
+    size() { return { owners: this.places.size, physical: this.physical.size, reserved: this.reserved.size }; }
 
     clear() {
         for (const spotId of [...this.physical.keys(), ...this.reserved.keys()]) this.dirty.add(spotId);
         this.places.clear();
         this.physical.clear();
         this.reserved.clear();
-        this.backedOff.clear();
         const { index, ownsSources } = providers.get(this);
         if (ownsSources) index.clearSourceView('state');
     }

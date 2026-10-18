@@ -16,6 +16,8 @@ const Funding = require('./PurchaseFunding');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
 const Network = require('./WishNetwork');
+const PurchaseEvidence = require('./WishPurchaseEvidence');
+const OccupationSources = invoke('GameServer/Bot/Population/ColdOccupationSources');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
     createQuantityInputs, quantityInputsHold, eachQuantityRow } = Network;
 const { isMainThread } = require('node:worker_threads');
@@ -345,10 +347,9 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
     const timestamp = Number(options.timestamp ?? deps.timestamp ?? Date.now()), baseline = options.baseline;
     if (!Sections.observationBaselineValid(baseline) || !Number.isFinite(proof.at)) return refuse('baseline');
-    // Diagnostics split of one refusal: the held plan's baseline moved under
-    // its proof, or the request's clock runs before the proof's.
+    // The baseline belongs to this proof (identity of `at`, not an order of
+    // two times: a request's own clock is no decision input).
     if (proof.at !== baseline.at) return refuse('baseline_at');
-    if (timestamp < proof.at) return refuse('baseline_clock');
     const generation = RecomputeGeneration.current();
     if (!generation || proof.generation !== generation) return refuse('generation', ['build', 'sources']);
     if (activityIdentity(options.leaf) !== proof.activity) return refuse('activity', ['sources']);
@@ -435,14 +436,20 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         });
     if (!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
         return refuse('liquidation', ['sources', 'money']);
-    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp)) return refuse('check_failed', ['occupation', 'sources']);
+    const input = { heldUnits, current: null, prepared: { liquidation: liquidation.candidates }, timestamp };
     if (options.rebuildBasis) {
+        // The basis keeps the held foundation (its hunt and best spot), so a
+        // spot the bot now avoids refuses it, as before the table. The other
+        // rows judge the old activity, which this rebuild re-weighs anyway: a
+        // purchase's funds check would refuse every basis a money drop asks for.
+        const spot = leaf?.activity === 'hunting' ? spotExcluded(state, leaf, deps, input) : '';
+        if (spot) return refuse(spot.reason, spot.sections);
         // Reusing slow valuation facts is not permission to execute the old
         // activity with the new wallet. Admission and the network run again.
         return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
     }
-    const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
-    if (leafWhy) return refuse(leafWhy.reason, leafWhy.sections);
+    const failed = leafCheck(state, leaf, deps, input);
+    if (failed) return refuse(failed.reason, failed.sections);
     return { valid: true, reason: '', touchedSections: 0 };
 }
 function eventProofHolds(state, proof, deps = {}, options = {}) {
@@ -645,59 +652,68 @@ function choiceBagValueHolds(state, bands, baseline, hourAdena, value = choiceBa
         && Math.abs(value - baseline.bagValue)
             <= positive(hourAdena) * positive(baseline.incomeError);
 }
-// A retained leaf is calculation data. Recheck its native source, physical
-// resources and funding now; execution still uses the existing command/CAS.
-function acceptedActivityHolds(state, leaf, deps = {}, current = null, prepared = null) {
-    if (leaf.activity === 'hunting') return true;
-    deps = resolved(state, deps, false);
+// The cheap check of a held decision: one row per kind of leaf answers "does
+// it still stand?" at the decision point (heldBuildVerdict). A row returns ''
+// or its own frozen failure: the name (check:<name>) and the sections the
+// build that follows re-weighs. input = { heldUnits, current, prepared,
+// timestamp }: heldUnits = the own item's bag+incoming at the decision (a held
+// build's entry; a card carries it on its leaf); current = a lazy basics
+// reader; prepared = { liquidation } candidates already read by the verdict.
+// Execution still prepares its batch and checks via the command/CAS.
+const failure = (name, ...sections) => Object.freeze({ reason: `check:${name}`, sections: Object.freeze(sections) });
+const EXCLUDED = failure('excluded', 'occupation', 'sources'), MATERIAL_DONE = failure('material_done', 'sources');
+const OFFER = failure('offer', 'sources', 'money'), SALE = failure('sale', 'sources', 'supply');
+const CRAFT = failure('craft', 'sources', 'supply'), TARGET = failure('target', 'relations');
+const IMPROVEMENT = failure('improvement', 'sources'), UNSUPPORTED = failure('unsupported', 'sources');
+const withHeldUnits = (leaf, heldUnits) => ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits)
+    ? { ...leaf, heldAtDecision: heldUnits } : leaf;
+// The hunting spot against the bot's marks (died here, was full, avoided a
+// quarrel) and its death pressure: the one exclusion read of a decision.
+function spotExcluded(state, leaf, deps, input) {
+    return SpotRiskPolicy.excludedSpotIdsForStates([state], input.timestamp).has(String(leaf.spotId)) ? EXCLUDED : '';
+}
+// A trade leaf's town route: known and its fees payable now.
+function tradeRoute(state, leaf, deps) {
     const trip = deps.tripCost || Trip.preparedReader(deps.routeRows || [], { hourAdena: positive(state.stats?.money?.[0]) });
     const route = trip.details?.(leaf.town);
-    if (!route?.known || !Number.isFinite(route.fees) || route.fees > positive(state.adena)) return false;
-    if (leaf.activity === 'shopping' && leaf.kind === 'buy' && leaf.itemId > 0 && leaf.amount > 0
-        && leaf.unitPrice > 0 && ['npc', 'configured_store', 'afk'].includes(leaf.sourceType)) {
-        const remaining = invoke('GameServer/Bot/Population/ColdEconomyDecision').remainingToOrder(leaf, state);
-        if (!(remaining > 0)) return false;
-        const offer = require('./WishPurchaseEvidence').reader(state, { board: deps.board, trip }, deps)(leaf.itemId);
-        if (!offer || offer.sourceType !== leaf.sourceType || offer.town !== leaf.town
-            || offer.unitPrice !== leaf.unitPrice || offer.availableUnits < remaining) return false;
-        return Funding.spendable(state, deps.buyOrderEscrow, Funding.nativeTerms(leaf, leaf.itemId)) >= remaining * offer.unitPrice + route.fees;
-    }
-    if (leaf.activity === 'selling' && leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
-        && invoke('GameServer/Bot/Population/ColdOccupationSources').hasNpcSellerInTown(leaf.town)) {
-        return (prepared?.liquidation || Providers.liquidationCandidates(state, current ? current() : basics(state, deps)))
-            .some(row => leaf.items.includes(Number(row.selfId)));
-    }
-    return false;
+    return route?.known && Number.isFinite(route.fees) && route.fees <= positive(state.adena) ? { trip, route } : null;
 }
-// The held leaf's own check, one copy for the event verdict, the legacy
-// soft-market hold and the legacy card: '' while it holds, else the
-// verdict's refusal (frozen: reason and touched section names). heldUnits:
-// the own item's bag+incoming at the decision (a held build's entry; a card
-// carries it on its leaf); current/prepared as acceptedActivityHolds.
-const leafRefused = (reason, ...sections) => Object.freeze({ reason, sections: Object.freeze(sections) });
-const LEAF_TRADE = leafRefused('check_failed', 'sources', 'money'), LEAF_SOURCES = leafRefused('check_failed', 'sources');
-const LEAF_RELATIONS = leafRefused('check_failed', 'relations'), LEAF_UNSUPPORTED = leafRefused('unsupported_leaf', 'sources');
-function heldLeafRefusal(state, leaf, deps, heldUnits, current = null, prepared = null) {
-    // A completed native graph may choose no economic action. Execution
-    // keeps its ordinary hunt/rest/travel path after every shared check.
-    if (!leaf) return '';
-    const checked = () => ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits)
-        ? { ...leaf, heldAtDecision: heldUnits } : leaf;
-    const kind = leaf.activity;
-    if (kind === 'shopping' || kind === 'selling')
-        return acceptedActivityHolds(state, checked(), deps, current, prepared) ? '' : LEAF_TRADE;
-    if (kind === 'hunting')
-        return ColdEconomyDecision.materialHunt(leaf) && ColdEconomyDecision.remainingToOrder(checked(), state) <= 0 ? LEAF_SOURCES : '';
-    if (kind === 'pvp' || kind === 'helping')
-        return Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
-            && leaf.rootKey === `${kind === 'pvp' ? 'scores' : 'care'}:${leaf.targetId}` ? '' : LEAF_RELATIONS;
+const LEAF_CHECKS = Object.freeze({
+    hunting: (state, leaf, deps, input) => spotExcluded(state, leaf, deps, input)
+        || (ColdEconomyDecision.materialHunt(leaf)
+            && ColdEconomyDecision.remainingToOrder(withHeldUnits(leaf, input.heldUnits), state) <= 0 ? MATERIAL_DONE : ''),
+    shopping: (state, leaf, deps, input) => {
+        deps = resolved(state, deps, false);
+        const trade = tradeRoute(state, leaf, deps);
+        if (!trade || !(leaf.kind === 'buy' && leaf.itemId > 0 && leaf.amount > 0 && leaf.unitPrice > 0
+            && ['npc', 'configured_store', 'afk'].includes(leaf.sourceType))) return OFFER;
+        const held = withHeldUnits(leaf, input.heldUnits);
+        const remaining = ColdEconomyDecision.remainingToOrder(held, state);
+        if (!(remaining > 0)) return OFFER;
+        const offer = PurchaseEvidence.reader(state, { board: deps.board, trip: trade.trip }, deps)(leaf.itemId);
+        if (!offer || offer.sourceType !== leaf.sourceType || offer.town !== leaf.town
+            || offer.unitPrice !== leaf.unitPrice || offer.availableUnits < remaining) return OFFER;
+        return Funding.spendable(state, deps.buyOrderEscrow, Funding.nativeTerms(held, leaf.itemId))
+            >= remaining * offer.unitPrice + trade.route.fees ? '' : OFFER;
+    },
+    selling: (state, leaf, deps, input) => {
+        deps = resolved(state, deps, false);
+        if (!tradeRoute(state, leaf, deps) || !(leaf.kind === 'liquidate' && leaf.funding === true && leaf.items?.length
+            && OccupationSources.hasNpcSellerInTown(leaf.town))) return SALE;
+        return (input.prepared?.liquidation || Providers.liquidationCandidates(state, input.current ? input.current() : basics(state, deps)))
+            .some(row => leaf.items.includes(Number(row.selfId))) ? '' : SALE;
+    },
     // This retains the chosen intention. The native executor still
     // prepares its actual batch and checks MP, materials and payment.
-    if (kind === 'crafting')
-        return Number.isSafeInteger(leaf.recipeId) && leaf.recipeId > 0 && Recipes.resolveByRecipeId(leaf.recipeId) ? '' : LEAF_SOURCES;
-    if (kind === 'improving') {
+    crafting: (state, leaf) => Number.isSafeInteger(leaf.recipeId) && leaf.recipeId > 0
+        && Recipes.resolveByRecipeId(leaf.recipeId) ? '' : CRAFT,
+    pvp: (state, leaf) => Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
+        && leaf.rootKey === `scores:${leaf.targetId}` ? '' : TARGET,
+    helping: (state, leaf) => Number.isSafeInteger(leaf.targetId) && leaf.targetId > 0
+        && leaf.rootKey === `care:${leaf.targetId}` ? '' : TARGET,
+    improving: (state, leaf) => {
         const improvement = leaf.improvement;
-        if (!improvement || typeof improvement !== 'object' || Array.isArray(improvement)) return LEAF_SOURCES;
+        if (!improvement || typeof improvement !== 'object' || Array.isArray(improvement)) return IMPROVEMENT;
         // An enchant or a special ability names its object: it is still in the
         // bag under its item at the enchant level the decision read. Other
         // objects in the bag are no input; an exchange or a crystallization
@@ -705,9 +721,17 @@ function heldLeafRefusal(state, leaf, deps, heldUnits, current = null, prepared 
         if (improvement.objectId == null) return '';
         const row = state.inventory?.[improvement.itemId];
         const object = row?.instances?.find(item => Number(item.id) === Number(improvement.objectId));
-        return object && positive(object.enchant ?? row.enchant) === positive(improvement.from) ? '' : LEAF_SOURCES;
-    }
-    return kind === 'resting' || kind === 'traveling' ? '' : LEAF_UNSUPPORTED;
+        return object && positive(object.enchant ?? row.enchant) === positive(improvement.from) ? '' : IMPROVEMENT;
+    },
+    resting: () => '',
+    traveling: () => ''
+});
+// A completed native graph may choose no economic action (no leaf):
+// execution keeps its ordinary hunt/rest/travel path after every shared check.
+function leafCheck(state, leaf, deps, input) {
+    if (!leaf) return '';
+    const row = Object.hasOwn(LEAF_CHECKS, leaf.activity) ? LEAF_CHECKS[leaf.activity] : null;
+    return row ? row(state, leaf, deps, input) : UNSUPPORTED;
 }
 // Board reads of the review go through here while it is built, so each
 // item it looked at is reported once (deps.onSourceRead: the occupation
@@ -752,7 +776,7 @@ function defaultProducerSource(state, board) {
     return { recipes: index.rowsFor(level), scope, revision: index.revision(scope) };
 }
 // The deps a full resolve made, with the state it was made for: a check
-// inside the same build (heldBuildVerdict, acceptedActivityHolds) is given
+// inside the same build (heldBuildVerdict, its LEAF_CHECKS rows) is given
 // the build's own deps and does not resolve them again (a second producer
 // source read and onSourceScope call). An entry dies with its deps object.
 const resolvedFor = new WeakMap();
@@ -1426,7 +1450,7 @@ function forState(state = {}, deps = {}) {
         ...(gateDiff ? { outcome: gateDiff === 'same' ? 'same_plan' : 'new_plan' } : {}),
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
-        ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
+        ...(['focus', 'leaf'].includes(gateDiff) || String(gate).startsWith('check:') ? shadowQuantityEvidence(state, held) : null) });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
     // Source memo belongs only to the bounded cache owner. A planning view
@@ -1824,6 +1848,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, sectionKeys, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, sectionKeys, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

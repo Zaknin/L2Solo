@@ -3,15 +3,24 @@ const Risk = require('./SpotRiskPolicy');
 function rosterKey(party) {
     return [...new Set((party?.memberIds || []).map(Number))].sort((a, b) => a - b).join(',');
 }
+// The party's spot memory as a holder state: its rounds are its step counter
+// (stats.stepCount), the clock of its marks. The risk window and the marks
+// reset with a roster change; the rounds stay with the party id, because the
+// party's competition avoid (stats.coldCompetition) is not reset with them.
 function state(party) {
     const memory = party?.stats?.partySpotRisk;
-    const current = memory?.partyId === party?.partyId && memory?.rosterKey === rosterKey(party) ? memory : {};
+    const same = memory?.partyId === party?.partyId;
+    const current = same && memory?.rosterKey === rosterKey(party) ? memory : {};
     return { spotId: party?.spotId, stats: { spotRisk: current.spotRisk, spotBackoffs: current.spotBackoffs,
+        stepCount: same ? Math.max(0, Number(memory.rounds) || 0) : 0,
         coldCompetition: party?.stats?.coldCompetition } };
 }
 function memory(party, stats) {
     return { partyId: party.partyId, rosterKey: rosterKey(party),
-        spotRisk: stats.spotRisk || null, spotBackoffs: stats.spotBackoffs || [] };
+        spotRisk: stats.spotRisk || null, spotBackoffs: stats.spotBackoffs || [], rounds: stats.stepCount || 0 };
+}
+function rounds(party) {
+    return state(party).stats.stepCount;
 }
 function excludedSpotIds(party, timestamp) {
     return Risk.excludedSpotIdsForStates([state(party)], timestamp);
@@ -28,15 +37,17 @@ function record(party, result, timestamp) {
     if (result?.memberResults) result = { ...result, memberResults: result.memberResults.map(entry => ({
         ...entry, result: require('./ClanEquipmentPartyPolicy').recordOutcome(entry.state, entry.result, party?.stats?.objective, timestamp)
     })) };
-    const fights = Number(result?.debug?.fights || 0);
-    const deaths = Math.max(0, Number(result?.partyPatch?.stats?.deaths || 0) - Number(party?.stats?.deaths || 0));
-    if (!party || !fights && !deaths) return result;
-    const previous = state(party).stats;
-    const spotRisk = Risk.recordResolve(previous.spotRisk || {}, {
+    if (!party || !result) return result;
+    const fights = Number(result.debug?.fights || 0);
+    const deaths = Math.max(0, Number(result.partyPatch?.stats?.deaths || 0) - Number(party.stats?.deaths || 0));
+    // Every party resolve is one party step: the rounds move before the
+    // early return of a resolve without fights or deaths.
+    const previous = state(party).stats, stepCount = previous.stepCount + 1;
+    const spotRisk = !fights && !deaths ? previous.spotRisk : Risk.recordResolve(previous.spotRisk || {}, {
         spotId: result.debug?.spotId || party.spotId, timestamp,
         fights, wins: Number(result.debug?.wins || 0), deaths
     });
     return { ...result, partyPatch: { ...result.partyPatch, stats: { ...result.partyPatch?.stats,
-        partySpotRisk: memory(party, { ...previous, spotRisk }) } } };
+        partySpotRisk: memory(party, { ...previous, spotRisk, stepCount }) } } };
 }
-module.exports = { rosterKey, excludedSpotIds, backoff, withBackoff, record };
+module.exports = { rosterKey, rounds, excludedSpotIds, backoff, withBackoff, record };

@@ -245,7 +245,7 @@ async function sourceCases(clan) {
     assert(team && Demand.economicSourceCurrent(team.source));
     const old = reward.spoils; reward.spoils = [];
     assert(!Demand.economicSourceCurrent(team.source), 'changed useful yield invalidates exact canonical source'); reward.spoils = old;
-    const blocked = { ...spoiler, stats: { ...spoiler.stats, clanHuntBackoffs: [{ spotId: spot.id, until: Date.now() + 60000 }] } };
+    const blocked = { ...spoiler, stats: { ...spoiler.stats, clanHuntBackoffs: [{ spotId: spot.id, untilStep: 60 }] } };
     assert(!Demand.economicCapable(blocked, requirement), 'native source safety applies to prospective helper');
     Events.watchRecruitment(clan.id, { classIds: [55], minLevel: 1, maxLevel: 100, requirements: [requirement] }); await Events.drain();
     const Policy = require('../src/GameServer/Bot/Population/ClanEquipmentPartyPolicy');

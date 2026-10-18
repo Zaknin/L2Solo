@@ -295,7 +295,7 @@ try {
         stats: {
             ...deathPressured.stats,
             spotRisk: { spotId: safer.id, deathsAtEntry: 2, fightsAtEntry: 6 },
-            spotBackoffs: [{ spotId: dangerous.id, reason: 'death_pressure', startedAt: 1000, until: 5000 }]
+            spotBackoffs: [{ spotId: dangerous.id, reason: 'death_pressure', startedAt: 1000, untilStep: 60 }]
         }
     };
     assert.strictEqual(
@@ -303,8 +303,9 @@ try {
         safer.id,
         'a persisted backoff must stop the equipment plan from immediately pulling the bot back'
     );
+    const expiredBackoff = { ...persistedBackoff, stats: { ...persistedBackoff.stats, stepCount: 60 } };
     assert.strictEqual(
-        SpotProfiles.findForState(persistedBackoff, { occupancy: {}, timestamp: 5001 }).id,
+        SpotProfiles.findForState(expiredBackoff, { occupancy: {}, timestamp: 5001 }).id,
         dangerous.id,
         'the original equipment source may be reconsidered after its cooldown expires'
     );

@@ -71,7 +71,7 @@ for (let death = 0; death < 5; death++) {
 assert.deepStrictEqual(penalties, [2, 4, 6, 6, 6]);
 assert.strictEqual(Routes.targetLevelForState(dying), 23);
 
-// Spot pressure: 2 deaths at a 20% death rate; a backoff doubles from 1 h up to 6 h; at most 8 spots.
+// Spot pressure: 2 deaths at a 20% death rate; a backoff doubles from 60 own steps up to 360; at most 8 spots.
 const pressure = (windowFights, windowDeaths) => Risk.deathPressure({ ...state, stats: { spotRisk: {
     spotId: 'danger', version: Risk.RISK_WINDOW_VERSION, windowFights, windowWins: windowFights - windowDeaths,
     windowDeaths, unrecoveredDeaths: 0, failedHunts: 0 } } });
@@ -81,14 +81,15 @@ assert.strictEqual(pressure(1, 1), null, 'one death is never pressure');
 
 let backedOff = state;
 let startedAt = at;
-const hours = [];
+const steps = [];
 for (let attempt = 0; attempt < 5; attempt++) {
     backedOff = Risk.withBackoff(backedOff, { spotId: 'danger', reason: 'death_pressure', startedAt }, startedAt);
     const entry = backedOff.stats.spotBackoffs.find((backoff) => backoff.spotId === 'danger');
-    hours.push((entry.until - startedAt) / 3600000);
-    startedAt = entry.until + 1;
+    steps.push(entry.untilStep - Risk.stepCount(backedOff));
+    backedOff = { ...backedOff, stats: { ...backedOff.stats, stepCount: entry.untilStep } };
+    startedAt += 1;
 }
-assert.deepStrictEqual(hours, [1, 2, 4, 6, 6]);
+assert.deepStrictEqual(steps, [60, 120, 240, 360, 360]);
 let crowded = state;
 for (let index = 0; index < 10; index++) {
     crowded = Risk.withBackoff(crowded, { spotId: `spot_${index}`, reason: 'death_pressure', startedAt: at }, at);

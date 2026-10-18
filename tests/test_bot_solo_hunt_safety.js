@@ -251,7 +251,7 @@ async function run() {
     assert(next.exp < state.exp, 'the regression must incur the real C4 death penalty');
     assert.strictEqual(next.stats.huntEfficiency[0].exp, next.exp - state.exp,
         'the persisted efficiency sample includes actual XP loss, not just the ten XP reward');
-    assert(next.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && entry.until > at),
+    assert(next.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && Risk.markActive(entry, next)),
         'the failed spot is remembered before revival changes physical routing origin');
     assert(next.stats.huntingRecovery.levelPenalty > 0);
     let losing = { ...state, stats: { ...state.stats } };

@@ -87,10 +87,12 @@ for (let attempt = 0; attempt < 2; attempt++) {
 veteran = JSON.parse(JSON.stringify(veteran));
 assert(!Safety.allowed(veteran, objective, at + 2), 'two deaths must survive party and roster replacement and serialization');
 assert(!veteran.stats.spotRisk && !veteran.stats.spotBackoffs, 'clan defeats must not prohibit a different solo hunt');
-const retryAt = veteran.stats.clanHuntBackoffs[0].until + 1;
+// The ban lives the member's own steps (stats.stepCount).
+const retryAt = at + 10;
+veteran = { ...veteran, stats: { ...veteran.stats, stepCount: veteran.stats.clanHuntBackoffs[0].untilStep } };
 assert(Safety.allowed(veteran, objective, retryAt));
 const successfulRetry = Safety.recordOutcome(veteran, { patch: {}, debug: { fights: 1, wins: 1 } }, objective, retryAt);
-assert(!successfulRetry.patch.stats.clanHuntBackoffs.some(b => b.until > retryAt),
+assert(!successfulRetry.patch.stats.clanHuntBackoffs.some(b => b.untilStep > veteran.stats.stepCount),
     'an expired ban must permit a real retry rather than revive old death pressure forever');
 
 const debtMembers = [1, 2].map(characterId => ({ characterId, level: 55, phase: 'cold',

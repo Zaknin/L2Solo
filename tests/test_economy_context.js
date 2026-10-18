@@ -211,7 +211,7 @@ async function run() {
         const spotId = held.network.activity?.spotId, published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
         assert(held.network.activity?.activity === 'hunting' && spotId, 'fixture: a hunting decision at a spot');
         assert.equal(Economy.forState(published, { timestamp: T }).plan, held.plan, 'fixture: the published decision holds');
-        const excluded = { ...published, stats: { ...published.stats, capacityBackoffs: [{ spotId, until: T + 60000 }] } };
+        const excluded = { ...published, stats: { ...published.stats, capacityBackoffs: [{ spotId, untilStep: 1 }] } };
         assert.notEqual(Economy.forState(excluded, { timestamp: T }).plan, held.plan, 'a new exclusion refuses a same-key hunting decision');
     }
     // The held decision is refused by its facts, not by the bot's own past
@@ -282,19 +282,37 @@ async function run() {
         assert(Economy.restoreEventProof(bytes, accepted), 'fixture: the generation is back');
         Economy.forget(native.characterId);
     }
-    // An enchant or special-ability decision names its object: it holds while
-    // that object is in the bag at the enchant level read; one without an
-    // object (an exchange) holds by its bag rows.
+    // The cheap check by kind of leaf: an enchant or special-ability decision
+    // names its object: it holds while that object is in the bag at the
+    // enchant level read; one without an object (an exchange) holds by its
+    // bag rows. A failed row names itself and lights its own sections.
     {
+        const check = (state, leaf) => Economy.leafCheck(state, leaf, {}, { heldUnits: undefined, timestamp: 0 });
         const leaf = improvement => ({ activity: 'improving', improvement });
         const bag = enchant => ({ ...base, inventory: { 1310: { selfId: 1310, amount: 1, instances: [{ id: 77, enchant }] } } });
         const enchant = { kind: 'enchant', itemId: 1310, objectId: 77, from: 2, to: 3 };
-        assert.equal(Economy.heldLeafRefusal(bag(2), leaf(enchant), {}), '', 'the named object at its level holds');
-        assert.notEqual(Economy.heldLeafRefusal({ ...base, inventory: {} }, leaf(enchant), {}), '', 'a gone object refuses');
-        assert.notEqual(Economy.heldLeafRefusal(bag(3), leaf(enchant), {}), '', 'a moved enchant level refuses');
-        assert.equal(Economy.heldLeafRefusal(bag(3), leaf({ kind: 'exchange', itemId: 1310 }), {}), '',
+        assert.equal(check(bag(2), leaf(enchant)), '', 'the named object at its level holds');
+        assert.equal(check({ ...base, inventory: {} }, leaf(enchant)).reason, 'check:improvement', 'a gone object refuses');
+        assert.equal(check(bag(3), leaf(enchant)).reason, 'check:improvement', 'a moved enchant level refuses');
+        assert.equal(check(bag(3), leaf({ kind: 'exchange', itemId: 1310 })), '',
             'an improvement without an object holds');
-        assert.notEqual(Economy.heldLeafRefusal(bag(2), leaf(null), {}), '', 'an improving leaf without its improvement refuses');
+        assert.equal(check(bag(2), leaf(null)).reason, 'check:improvement', 'an improving leaf without its improvement refuses');
+        // A hunting leaf on a spot the bot marked ("was full") refuses while
+        // the mark lives the bot's own steps, then holds again.
+        const hunt = { activity: 'hunting', spotId: 'crowded' };
+        const marked = stepCount => ({ ...base, stats: { ...base.stats, stepCount,
+            capacityBackoffs: [{ spotId: 'crowded', untilStep: 12 }] } });
+        const excluded = check(marked(11), hunt);
+        assert.equal(excluded.reason, 'check:excluded', 'a marked spot refuses its hunt');
+        assert.deepEqual([...excluded.sections].sort(), ['occupation', 'sources'], 'an excluded spot re-weighs occupation and sources');
+        assert.equal(check(marked(12), hunt), '', 'the mark is forgotten after its steps');
+        const craft = check(base, { activity: 'crafting', recipeId: 999999 });
+        assert.equal(craft.reason, 'check:craft', 'an unknown recipe refuses the craft');
+        assert(craft.sections.includes('supply'), 'a failed craft re-weighs supply');
+        assert.equal(check(base, { activity: 'pvp', targetId: 5, rootKey: 'care:5' }).reason, 'check:target',
+            'a pvp leaf whose root is not its target refuses');
+        assert.equal(check(base, { activity: 'dancing' }).reason, 'check:unsupported', 'an unknown kind refuses');
+        assert.equal(check(base, { activity: 'resting' }), '', 'resting has no check');
     }
     console.log('PASS threat mask kept / restart prefix format and generation / improving object');
     // MVP-6 Bounds: a gear candidate's reads wait in its scope; only a kept

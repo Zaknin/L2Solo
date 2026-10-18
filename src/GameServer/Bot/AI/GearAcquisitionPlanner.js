@@ -1562,6 +1562,9 @@ function finalizePlan(state = {}, previousPlan = null, rawPlan = {}, context = {
     };
 }
 
+// The equipment plan's own leveling-recovery window (not a spot mark): one
+// hour, the value it shared with the former spot death mark.
+const LEVELING_RECOVERY_MS = 60 * 60 * 1000;
 function levelingRecoveryFor(state = {}, plan = state.stats?.equipmentPlan, timestamp = Date.now()) {
     const stored = plan?.levelingRecovery;
     if (stored) {
@@ -1586,7 +1589,7 @@ function levelingRecoveryFor(state = {}, plan = state.stats?.equipmentPlan, time
     return {
         reason: deleveled ? 'level_regression' : pressure.reason || 'death_pressure',
         startedAt: timestamp,
-        until: timestamp + SpotRiskPolicy.BACKOFF_MS,
+        until: timestamp + LEVELING_RECOVERY_MS,
         resumeLevel: deleveled ? Math.max(level, baselineLevel) : level,
         resumeExp: Math.max(Number(state.exp || 0), Number(plan.progressionBaseline?.exp || 0),
             Number(death?.expBeforeDeath || 0)),

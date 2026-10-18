@@ -135,54 +135,40 @@ async function run() {
         [4, 0, 0],
         'a legacy lifetime baseline must migrate into a fresh bounded combat window'
     );
-    const firstBackoff = SpotRiskPolicy.withBackoff(state, {
-        spotId: 'old_spot',
-        reason: 'death_pressure',
-        startedAt: 1000,
-        until: 1000 + SpotRiskPolicy.BACKOFF_MS
+    // Spot marks live the holder's own steps (stats.stepCount), not a clock.
+    const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
+    const firstBackoff = SpotRiskPolicy.withBackoff(atStep(state, 0), {
+        spotId: 'old_spot', reason: 'death_pressure', startedAt: 1000, steps: SpotRiskPolicy.BACKOFF_STEPS
     }, 1000);
-    const repeatedBackoff = SpotRiskPolicy.withBackoff(firstBackoff, {
-        spotId: 'old_spot',
-        reason: 'death_pressure',
-        startedAt: firstBackoff.stats.spotBackoffs[0].until + 1
-    }, firstBackoff.stats.spotBackoffs[0].until + 1);
+    const firstEnd = firstBackoff.stats.spotBackoffs[0].untilStep;
+    assert(SpotRiskPolicy.excludedSpotIdsForStates([atStep(firstBackoff, firstEnd - 1)]).has('old_spot'),
+        'a death mark excludes its spot during its steps');
+    assert(!SpotRiskPolicy.excludedSpotIdsForStates([atStep(firstBackoff, firstEnd)]).has('old_spot'),
+        'a death mark is forgotten after its steps');
+    const repeatedBackoff = SpotRiskPolicy.withBackoff(atStep(firstBackoff, firstEnd), {
+        spotId: 'old_spot', reason: 'death_pressure', startedAt: 5000
+    }, 5000);
     assert.strictEqual(repeatedBackoff.stats.spotBackoffs[0].attempts, 2,
         'returning to the same lethal spot must escalate its persistent backoff');
-    assert(repeatedBackoff.stats.spotBackoffs[0].until
-        >= firstBackoff.stats.spotBackoffs[0].until + 1 + SpotRiskPolicy.BACKOFF_MS * 2,
-    'a repeated death loop must stay excluded longer than the first occurrence');
-    const legacyUntil = 2000 + SpotRiskPolicy.BACKOFF_MS;
-    const legacyRepeatedBackoff = SpotRiskPolicy.withBackoff({
-        ...state,
-        stats: {
-            ...state.stats,
-            spotBackoffs: [{
-                spotId: 'legacy_spot',
-                reason: 'death_pressure',
-                startedAt: 2000,
-                until: legacyUntil
-            }]
-        }
-    }, {
-        spotId: 'legacy_spot',
-        reason: 'death_pressure',
-        startedAt: legacyUntil + 1
-    }, legacyUntil + 1);
+    assert(repeatedBackoff.stats.spotBackoffs[0].untilStep - firstEnd > firstEnd,
+        'a repeated death loop must stay excluded longer than the first occurrence');
+    const legacyRepeatedBackoff = SpotRiskPolicy.withBackoff(atStep({ ...state, stats: { ...state.stats,
+        spotBackoffs: [{ spotId: 'legacy_spot', reason: 'death_pressure', startedAt: 2000, untilStep: 7 }] } }, 7), {
+        spotId: 'legacy_spot', reason: 'death_pressure', startedAt: 9000
+    }, 9000);
     assert.strictEqual(legacyRepeatedBackoff.stats.spotBackoffs[0].attempts, 2,
         'a persisted pre-attempts backoff must count as the first failed visit');
-    assert(legacyRepeatedBackoff.stats.spotBackoffs[0].until
-        >= legacyUntil + 1 + SpotRiskPolicy.BACKOFF_MS * 2,
-    'returning after a legacy backoff must use the second-attempt duration');
-    const overCapTimestamp = legacyRepeatedBackoff.stats.spotBackoffs[0].until + 1;
-    const cappedBackoff = SpotRiskPolicy.withBackoff(legacyRepeatedBackoff, {
-        spotId: 'over_cap_spot',
-        reason: 'death_pressure',
-        startedAt: overCapTimestamp,
-        until: overCapTimestamp + SpotRiskPolicy.MAX_BACKOFF_MS * 2
-    }, overCapTimestamp);
-    assert.strictEqual(cappedBackoff.stats.spotBackoffs[0].until,
-        overCapTimestamp + SpotRiskPolicy.MAX_BACKOFF_MS,
-        'a persisted deadline must not extend a spot backoff beyond the maximum duration');
+    assert.strictEqual(legacyRepeatedBackoff.stats.spotBackoffs[0].untilStep - 7, SpotRiskPolicy.BACKOFF_STEPS * 2,
+        'returning after a legacy backoff must use the second-attempt duration');
+    const cappedBackoff = SpotRiskPolicy.withBackoff(atStep(state, 40), {
+        spotId: 'over_cap_spot', reason: 'death_pressure', startedAt: 12000, attempts: 9,
+        untilStep: 40 + SpotRiskPolicy.MAX_BACKOFF_STEPS * 2
+    }, 12000);
+    assert(cappedBackoff.stats.spotBackoffs[0].untilStep - 40 <= SpotRiskPolicy.MAX_BACKOFF_STEPS,
+        'a copied mark must not extend a spot backoff beyond the maximum duration');
+    assert(!SpotRiskPolicy.excludedSpotIdsForStates([{ stats: { stepCount: 3,
+        spotBackoffs: [{ spotId: 'clock_spot', startedAt: 1, until: Number.MAX_SAFE_INTEGER }] } }]).has('clock_spot'),
+        'a saved mark of the former clock reads as forgotten');
     console.log('Bot spot risk baseline checks passed');
 }
 

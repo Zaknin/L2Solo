@@ -314,7 +314,7 @@ async function main() {
         Spots.findBestSpot = (status, options) => { selection = { status, options }; return { spot: returnSpot }; };
         Spots.arrivalPointForState = () => ({ ...returnSpot.center });
         const safeDeparture = Departure.plan({ ...state, stats: { ...state.stats,
-            spotBackoffs: [{ spotId: 'dangerous', until: at + 100000 }] } }, Runtime.owned(1), at);
+            spotBackoffs: [{ spotId: 'dangerous', untilStep: 60 }] } }, Runtime.owned(1), at);
         assert(safeDeparture);
         assert.equal(selection.options.spotRetryAfter.dangerous, Infinity, 'do not return to a dangerous spot');
         assert.equal(selection.options.mode, 'solo');

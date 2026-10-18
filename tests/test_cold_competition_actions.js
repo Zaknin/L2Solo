@@ -26,7 +26,7 @@ async function run() {
         ? { id: 'test', avgLevel: 20, npcEntries: [{ selfId: 10, level: 20, count: 10 }] } : null;
     const stats = ordinaryHunt ? {} : { equipmentPlan: { status: 'active', strategy: 'direct_drop', next: { npcId: 10, spotId: 'test' } } };
     const oldEpisode = { key: 'old-fight', at: now - 700000, outcome: 'pvp_fighting', role: 'support', endedAt: now - 600000,
-        conflictUntil: now + 60000, avoid: { spotId: 'elsewhere', until: now + 600000 } };
+        conflictUntil: now + 60000, avoid: { spotId: 'elsewhere', untilStep: 10 } };
     for (const id of Array.from({ length: 18 }, (_, index) => index + 1)) {
         await Database.execute(['INSERT INTO accounts(username,password) VALUES (?,?)', [`bot_actions_${id}`, 'test']]);
         await Database.execute([`INSERT INTO characters(id,username,name,classId,race,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)

@@ -191,7 +191,7 @@ class LifeStateCache extends Map {
                 loc: () => stateLocation(state) }, { indexed });
         }
         this.insertOrder(id, state, sequence);
-        this.occupancy.update(state, Date.now(), { sourceId: id });
+        this.occupancy.update(state, { sourceId: id });
         ShopPlaces.syncState(id, state);
         const run = state.phase === 'cold' && state.activity === 'traveling' ? state.stats?.travel?.run : null;
         if (run) this.walkers.set(id, run);

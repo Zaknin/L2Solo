@@ -10,7 +10,7 @@ const personal = { characterId: 1, level: 20, phase: 'cold', activity: 'hunting'
     vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
     stats: { deaths: 5, fightsResolved: 10, classId: 0, classProgressionLevel: 20, classProgressionClassId: 0,
         spotRisk: { version: 2, spotId: 'danger', windowFights: 3, windowWins: 0, windowDeaths: 2 },
-        spotBackoffs: [{ spotId: 'danger', startedAt: at - 1000, until: at + 3600000, attempts: 1 }] } };
+        spotBackoffs: [{ spotId: 'danger', startedAt: at - 1000, untilStep: 60, attempts: 1 }] } };
 const party = { partyId: 'group1', memberIds: [1, 2, 3], spotId: 'danger', stats: { fightsResolved: 100, deaths: 25 } };
 const merge = (p, r) => ({ ...p, ...r.partyPatch, stats: { ...p.stats, ...r.partyPatch.stats } });
 async function run() {

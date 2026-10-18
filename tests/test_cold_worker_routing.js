@@ -222,7 +222,7 @@ try {
     const retreatAt = Date.now();
     const retreatState = { characterId: 2, phase: 'cold', activity: 'hunting', level: 16,
         spotId: currentSpot.id, loc: { locX: 1, locY: 2, locZ: 3 },
-        stats: { coldCompetition: { avoid: { spotId: currentSpot.id, until: retreatAt + 600000 } } } };
+        stats: { coldCompetition: { avoid: { spotId: currentSpot.id, untilStep: 10 } } } };
     const savedIndex = coordinator.contextIndex;
     coordinator.contextIndex = () => ({ spots: new Map([[currentSpot.id, currentSpot], [targetSpot.id, targetSpot]]), occupancy: {} });
     SpotProfiles.findForState = (state, options) => {
@@ -306,20 +306,23 @@ try {
         'a rejected route retries after one ordinary hold, not at once and not in an unbounded wait');
     assert(Risk.ROUTE_CAPACITY_RETRY_MS >= 10000,
         'a refused bot must not stay due at once in the cold queue');
+    // "Was full" marks live the bot's own steps (stats.stepCount), one refusal per step.
+    const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
+    const refusedAt = Risk.stepCount(rejectedRoute.state);
     let chained = rejectedRoute.state;
     for (let index = 1; index < Risk.MAX_BACKOFFS; index += 1) {
-        chained = Risk.withCapacityBackoff(chained, `chain_${index}`, 2000 + index * Risk.ROUTE_CAPACITY_RETRY_MS);
+        chained = Risk.withCapacityBackoff(atStep(chained, refusedAt + index), `chain_${index}`, 2000 + index * Risk.ROUTE_CAPACITY_RETRY_MS);
     }
-    const chainEnd = 2000 + (Risk.MAX_BACKOFFS - 1) * Risk.ROUTE_CAPACITY_RETRY_MS;
-    assert.strictEqual(Risk.excludedSpotIdsForStates([chained], chainEnd).size, Risk.MAX_BACKOFFS,
+    const chainEnd = refusedAt + Risk.MAX_BACKOFFS - 1;
+    assert.strictEqual(Risk.excludedSpotIdsForStates([atStep(chained, chainEnd + 1)]).size, Risk.MAX_BACKOFFS,
         'every spot refused along a retry chain stays excluded, so the bot can reach a free spot');
-    assert.strictEqual(Risk.excludedSpotIdsForStates([chained], chainEnd + Risk.CAPACITY_BACKOFF_MS).size, 0,
+    assert.strictEqual(Risk.excludedSpotIdsForStates([atStep(chained, chainEnd + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).size, 0,
         'the whole chain expires one backoff after the last refusal');
     assert.strictEqual(rejectedRoute.state.stats.lastReason, 'route_capacity_full');
-    assert(Risk.excludedSpotIdsForStates([rejectedRoute.state], 2000 + Risk.ROUTE_CAPACITY_RETRY_MS).has(targetSpot.id),
+    assert(Risk.excludedSpotIdsForStates([atStep(rejectedRoute.state, refusedAt + 1)]).has(targetSpot.id),
         'a rejected capacity claim must not select the same destination on its retry');
-    assert(!Risk.excludedSpotIdsForStates([rejectedRoute.state], 2000 + Risk.CAPACITY_BACKOFF_MS).has(targetSpot.id),
-        'temporary congestion must expire after one minute, without death-backoff escalation');
+    assert(!Risk.excludedSpotIdsForStates([atStep(rejectedRoute.state, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).has(targetSpot.id),
+        'temporary congestion must expire after one step, without death-backoff escalation');
     assert.strictEqual(rejectedRoute.state.stats.spotBackoffs, undefined);
     for (const intent of [
         { equipmentPlan: { status: 'active', strategy: 'craft', next: { spotId: targetSpot.id } } },
@@ -328,9 +331,9 @@ try {
     ]) {
         const waiting = { activity: 'hunting', stats: { ...intent,
             capacityBackoffs: rejectedRoute.state.stats.capacityBackoffs } };
-        assert.strictEqual(SpotProfiles.farmIntentSpotId(waiting, 3000), null,
+        assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1)), null,
             'rejected intents must not retain a phantom capacity reservation');
-        assert.strictEqual(SpotProfiles.farmIntentSpotId(waiting, 62000), targetSpot.id);
+        assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)), targetSpot.id);
     }
 
     const originalCache = SpotProfiles.cache;
@@ -615,7 +618,10 @@ try {
     assert.strictEqual(pressuredPartyRoute.cause, 'death_pressure');
     assert.strictEqual(pressuredPartyRoute.spotBackoff.spotId, currentSpot.id,
         'group deaths must move the whole party without splitting it');
-    assert.strictEqual(pressuredPartyRoute.spotBackoff.until, 5000 + 60 * 60 * 1000);
+    assert.strictEqual(partyRisk.rounds(pressuredParty), partyRisk.rounds(party) + 1, 'a party resolve is one party round');
+    const movedParty = partyRisk.withBackoff(pressuredParty, pressuredPartyRoute.spotBackoff, 5000);
+    assert.strictEqual(movedParty.stats.partySpotRisk.spotBackoffs[0].untilStep - partyRisk.rounds(movedParty),
+        Risk.BACKOFF_STEPS, 'a first group death mark lives the party\'s own rounds');
 
     const requestPlan = {
         status: 'active',

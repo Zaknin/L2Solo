@@ -368,8 +368,6 @@ function spotsNearLevel(profiles, targetLevel) {
 // copies the entry first), and that must not reach the next snapshot.
 const indexedViews = new WeakMap();
 function indexedOccupancy(index, profiles, excludedKeys = new Set()) {
-    // occupancySnapshot judges capacity backoffs at wall-clock time.
-    index.refreshBackoffs(Date.now());
     let view = indexedViews.get(index);
     if (!view) indexedViews.set(index, view = { entries: new Map(), excludedKeys: new Set() });
     const markPlace = (key) => {

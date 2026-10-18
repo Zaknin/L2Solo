@@ -27,7 +27,7 @@ const members = [1, 2, 3].map(characterId => ({ characterId, name: `Material${ch
     stats: { classId: characterId === 3 ? 16 : characterId === 2 ? 54 : 8,
         role: characterId === 3 ? 'healer' : characterId === 2 ? 'spoiler' : 'dps',
         equipmentPlan: { status: 'active', target: { selfId: characterId === 1 ? 148 : 146 } },
-        spotBackoffs: [{ spotId: 'personal-only', until: at + 3600000 }] } }));
+        spotBackoffs: [{ spotId: 'personal-only', untilStep: 60 }] } }));
 const objective = { materialParty: true, status: 'open', priority: 'required', strategy: 'craft', reason: 'craft_material',
     itemId: 4108, targetId: 148, spotId: 'danger', npcId: 620, attempts: 2, objectiveKey: 'craft-material:danger' };
 const needs = [1, 2].map(characterId => ({ characterId, itemId: characterId === 1 ? 4108 : 4104,

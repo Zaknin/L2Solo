@@ -1341,7 +1341,8 @@ function startKernel(config = {}) {
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
-            if (refreshed && !nullReuse && SpotRiskPolicy.activitySpotAllowed(state, refreshed.economy.network.activity, timestamp)) {
+            // The card passed the verdict's cheap check (its spot not excluded).
+            if (refreshed && !nullReuse) {
                 if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'lifecycle');
                 const routedState = beginHuntingTrip(state, context?.route, timestamp) || state;
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
