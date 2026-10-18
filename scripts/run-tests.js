@@ -568,6 +568,7 @@ const tests = [
     'tests/test_b_grade_craft_progression.js',
     'tests/test_b_grade_acquisition_policy.js',
     'tests/test_cold_commit_queue.js',
+    'tests/test_cold_worker_isolation.js',
     'tests/test_cold_worker_coordinator.js',
     'tests/test_cold_orphan_party_reconcile.js',
     'tests/test_cold_feeds_every_state.js',
