@@ -21,7 +21,7 @@ Support, updates, and communication. Join the Discord to stay up to date with de
 ⚔️ [Game client](https://drive.google.com/file/d/1u0nW3m9c6Hql8sR9POQAcvglxIno23lv/view?usp=sharing)
 Clean C4 client protocol 656
 
-🧩 [L2Solo client mod](https://drive.google.com/file/d/1kDHcZubwtFvI4h8C93YDpE9Ctasll56Z/view?usp=sharing)
+🧩 [L2Solo client mod](https://drive.google.com/file/d/1u7zzKEUqDHQCBojFr3MeyYzDfWt4vkeY/view?usp=sharing)
 Optional but recommended for a better experience
 
 
@@ -31,10 +31,11 @@ Optional but recommended for a better experience
 
 🔥 Hot bots - bots that the player can see, or within maximum client view range. Any cold bot can become hot if the player is nearby. Highest detail level, uses much more compute for realistic movement, actions, etc.
 
-🌳 Static bots - mostly static traders in towns and crafting stations in Giran. Needed only for a specific function, no brain, no communication or goals.
+🌳 Static bots - static traders in towns and crafting stations in Giran. Needed only for a specific function, no brain, no communication or goals.
 
 
 ## Latest updates
+- **2026-10-03** Bot and performance fixes, player-led raids, better observer, quests and more
 - **2026-09-29** Market, recipes, bot shoulshots craft, paid buffs, fixes and improvements
 - **2026-09-26** Bot raid boss farm, player bot party join, SA, fixes and updates
 - **2026-09-22** Bot progression, clan party, craft, trading fixes; realistic bot and clan names
@@ -158,7 +159,7 @@ See full update log on our [Discord](https://discord.gg/dXsQ8SJA7k) server.
 - Complete Lineage 2 C4 experience
 
 <p align="center">
-<img src="https://github.com/user-attachments/assets/fe2765b5-193b-411b-a208-f466e10ed2e2" />
+<img src="https://github.com/user-attachments/assets/99695c45-80e8-4300-afa6-cada58ccd3bd" />
 </p>
 
 ## 🎮 Wanna play now?
@@ -171,6 +172,8 @@ You will need:
 ## Quick Start
 
 ```bash
+git clone https://github.com/pmbstyle/L2Solo.git
+cd L2Solo
 npm install
 npm start
 ```
@@ -223,7 +226,7 @@ providerOrder = OpenAI
 providerSort = price
 allowFallbacks = false
 requireParameters = true
-debug = true
+debug = false
 ```
 
 OpenRouter can also read the key/model from environment variables:
@@ -297,6 +300,6 @@ This project is a heavily modified solo-MMO fork of the original [NodeL2 Server 
 
 L2Solo is licensed under the Apache 2.0 license.
 
-Crafting with ❤️ by a player for players 🤘
+Crafting with ❤️ by players for players 🤘
 
 <img width="600"  alt="L2solo hit the star" src="https://github.com/user-attachments/assets/5e22564f-fe8e-4956-af21-1158f1849a31" />
