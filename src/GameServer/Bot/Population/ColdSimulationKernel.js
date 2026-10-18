@@ -9,6 +9,8 @@ const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
+const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
+const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
@@ -1752,7 +1754,7 @@ class ColdSimulationKernel {
             const rescuing = run.members.some(s => s.vitals?.hp <= 0);
             const equipmentBridgeReview = !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
-            if (!meetingPending && !rescuing && !require('./CraftMaterialPartyRoute').evacuating(run.party)
+            if (!meetingPending && !rescuing && !CraftMaterialPartyRoute.evacuating(run.party)
                 && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
                 || ClanEquipment.needsReview(run.party, run.members)
                 || equipmentBridgeReview)) {
@@ -1817,7 +1819,7 @@ class ColdSimulationKernel {
                         travel: null
                     }
                 };
-                const materialArrival = require('./CraftMaterialPartyRoute').arrived(run.party, arrivedMembers, startedAt);
+                const materialArrival = CraftMaterialPartyRoute.arrived(run.party, arrivedMembers, startedAt);
                 if (materialArrival) {
                     arrivedMembers.splice(0, arrivedMembers.length, ...materialArrival.members);
                     arrivedParty = materialArrival.party;
@@ -1868,8 +1870,8 @@ class ColdSimulationKernel {
                     spotId: route.spotId,
                     nextResolveAt: arrivalAt,
                     stats: {
-                        ...(require('./CraftMaterialPartyRoute').retarget(
-                            require('./PartySpotRiskPolicy').withBackoff(run.party, route.spotBackoff, startedAt),
+                        ...(CraftMaterialPartyRoute.retarget(
+                            PartySpotRiskPolicy.withBackoff(run.party, route.spotBackoff, startedAt),
                             route.materialSources).stats || {}),
                         pveEncounter: null,
                         travel: {
