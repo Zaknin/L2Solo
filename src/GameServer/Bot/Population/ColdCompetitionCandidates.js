@@ -1,5 +1,5 @@
 const Config = require('./PopulationConfig');
-const { seeded, INTERVAL_MS } = require('./ColdCompetitionMonitor');
+const { INTERVAL_MS } = require('./ColdCompetitionMonitor');
 const PartyTarget = require('./PartyHuntingTarget');
 const { StableOwnerMap } = require('./StableOwnerSet');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
@@ -283,7 +283,7 @@ class ColdCompetitionCandidates {
         }
         const selected = actors.map(({ key }) => this.packets(key)).filter(Boolean);
         const revengeEvents = this.monitor.revenge.sampleActors(selected, id => this.packets(id), this.memory, at,
-            this.monitor.personaFor, seeded(`revenge:${at}`), offer);
+            this.monitor.personaFor, null, offer);
         this.monitor.lastAt = at;
         this.monitor.report.recent = [...this.monitor.report.recent, ...revengeEvents].slice(-12);
         if (this.monitor.revenge.report.overflow) for (const { key } of actors) this.queueActor(key);

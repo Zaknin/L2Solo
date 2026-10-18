@@ -19,12 +19,12 @@ class ColdRevengeMonitor {
         this.onCooldown = onCooldown;
         this.cursor = 0; this.cooldowns = new Map(); this.report = { evaluated: 0, intents: 0 };
     }
-    sample(entries, memory, at, personaFor, rng) {
+    sample(entries, memory, at, personaFor) {
         for (const [id, until] of this.cooldowns) if (until <= at) this.cooldowns.delete(id);
         const byId = new Map(entries.map(e => [e.state.characterId, e]));
         const active = entries.filter(e => available(e.state, at));
         const selected = active.slice(this.cursor % (active.length || 1)).concat(active.slice(0, this.cursor % (active.length || 1)));
-        const events = this.sampleActors(selected.slice(0, MAX_ACTORS), id => byId.get(id), memory, at, personaFor, rng);
+        const events = this.sampleActors(selected.slice(0, MAX_ACTORS), id => byId.get(id), memory, at, personaFor);
         this.report.active = active.length;
         this.cursor += Math.min(MAX_ACTORS, active.length);
         return events;

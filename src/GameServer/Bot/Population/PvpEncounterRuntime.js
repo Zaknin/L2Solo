@@ -1,4 +1,5 @@
 const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
+const { seeded } = require('../AI/TendencyRoll');
 // Only active encounters are indexed. No per-tick scan of the population.
 const encounters = new Map();
 const pending = new Set();
@@ -85,7 +86,7 @@ function tick(actions) {
                     actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true, willing: e.willing };
                 const result = await require('./ColdPartyConflict').apply({ ...actions, event, resume: e,
                     incrementalPvp: true, onEncounter: register, waitMs: 15000, cooldownMs: 600000,
-                    rng: require('./ColdCompetitionMonitor').seeded(`${e.key}:${e.sequence}`) });
+                    rng: seeded(`${e.key}:${e.sequence}`) });
                 if (result.ok) {
                     actions.recordPvpStep(result);
                     if (!result.encounter) encounters.delete(e.key);

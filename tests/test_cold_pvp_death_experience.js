@@ -12,7 +12,7 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Pvp = require('../src/GameServer/Bot/Population/ColdPvpResolver');
-const { seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 
 // A bot killed in a cold PvP fight pays the C4 death penalty through the same
 // function as an ordinary cold death, once, with a durable restore record.

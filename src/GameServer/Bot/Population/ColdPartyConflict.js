@@ -3,7 +3,7 @@ const Episode = require('./ColdCompetitionEpisode');
 const EncounterBudget = require('./PvpEncounterBudget');
 // Main-process execution of one bounded encounter (at most two C4 parties).
 // Membership alone never makes a bot an aggressor or creates a memory edge.
-const { seeded } = require('./ColdCompetitionMonitor');
+const { seeded } = require('../AI/TendencyRoll');
 const partyIdOf = state => state?.party?.partyId || state?.partyId || null;
 
 const { reaction, select } = require('../../Social/ConflictParticipationPolicy');

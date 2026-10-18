@@ -1,7 +1,8 @@
 const assert = require('assert');
 const Policy = require('../src/GameServer/Social/ResourceCompetitionPolicy');
 const ColdPolicy = require('../src/GameServer/Bot/Population/ColdCompetitionPolicy');
-const { ColdCompetitionMonitor, INTERVAL_MS, seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { ColdCompetitionMonitor, INTERVAL_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 const Memory = require('../src/GameServer/Social/InteractionMemory');
 const P = require('../src/GameServer/Social/InteractionMemoryPolicy');
 

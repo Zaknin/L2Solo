@@ -42,6 +42,21 @@ for (let i = 0; i <= 60; i++) {
     }
 }
 assert(preservedLargeBatch, 'large current batches must survive the twelve-row observer history');
+// Each decision rolls from its own parts: a ground's encounters are the same
+// whether or not other grounds were drawn before it in the scan, and two
+// decisions never share a roll.
+const firstScan = input => { const m = make(); m.sample(input, memory, at); m.sample(input, memory, at + INTERVAL_MS); return m.snapshot().events; };
+const together = firstScan(crowdedEntries);
+assert(together.length > 8, 'the crowded scan decides many encounters');
+for (let ground = 0; ground < 8; ground++) {
+    const spotId = `crowded-${ground}`, shared = together.filter(e => e.spotId === spotId);
+    const alone = firstScan(crowdedEntries.filter(e => e.state.spotId === spotId));
+    assert(shared.length > 0);
+    assert.deepStrictEqual(shared, alone.slice(0, shared.length), 'other grounds drawn first do not change this ground\'s draws');
+}
+const scanRolls = together.flatMap(e => e.decisionRolls);
+assert(together.every(e => e.decisionRolls.length === 4 && e.decisionRolls.every(r => r >= 0 && r < 1)));
+assert.strictEqual(new Set(scanRolls).size, scanRolls.length, 'different decisions roll independently');
 const abundant = make(100);
 abundant.sample(entries, memory, at); abundant.sample(entries, memory, at + INTERVAL_MS);
 assert.strictEqual(abundant.snapshot().pressuredGroups, 0);
