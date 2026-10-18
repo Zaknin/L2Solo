@@ -67,41 +67,51 @@ const storeOwner = { characterId: 0, clanId: 0, stats: null };
 // crossing may cost one rebuild: death reads the live hp (a saved state its
 // saved vitals), the weight level the actor's max load (a saved state its
 // profile's), the clan warehouse the clan's row (a saved state may carry its
-// clan level).
+// clan level), the party only its id and role (a saved state's party object
+// may carry more fields, one relations event at the crossing).
+// The stock presences are read again on a bag revision: an amount change of
+// a bound bag item moves the revision (Item.setAmount).
 function actorView(session, actor, stats) {
     const backpack = actor.backpack, stored = session.coldLifeState || {};
     const fresh = !session.factView;
     const view = session.factView ||= { combat: [0, 0, 0, '', '', '', ''], craftLevel: null, craftStationId: null,
-        workshop: null, soulCrystalQuest: false, closesTowns: false, recipes: null, party: null, clanId: 0,
+        kitHashes: null, workshop: null, soulCrystalQuest: false, closesTowns: false, recipes: null, party: null, clanId: 0,
         relationTargets: null, activity: null, spotId: null, stats: { travel: null, relations: null }, dead: 0, riskDeaths: 0,
         supply: [[736, false], [0, false], [0, false]], stores: [null, null, null, false], bagFull: 0, weight: 0 };
     const combat = view.combat, characterId = Number(actor.fetchId?.());
     const classId = number(actor.fetchClassId?.(), number(stored.classId));
     const level = actor.fetchLevel?.();
     const kitMoved = fresh || combat[1] !== classId || combat[2] !== level;
+    let combatMoved = kitMoved;
     combat[1] = classId; combat[2] = level;
     const published = stored.stats?.coldCombat;
     if (fresh || published !== session.decisionCaptureRef) {
         session.decisionCaptureRef = published;
         combat[6] = CombatProfile.capturePart(published || {});
+        combatMoved = true;
     }
-    combat[0] = number(published?.classId, classId);
+    const savedClass = number(published?.classId, classId);
+    if (combat[0] !== savedClass) { combat[0] = savedClass; combatMoved = true; }
     const bagMoved = fresh || session.decisionBagRevision !== backpack?.inventoryRevision;
     if (bagMoved) {
         session.decisionBagRevision = backpack?.inventoryRevision;
         combat[3] = CombatProfile.wornPart(Economy.itemRows(backpack?.fetchItems?.() || []));
+        combatMoved = true;
     }
     const hennas = session.hennas || stored.stats?.hennas || [];
     const kept = session.decisionHennas ||= [];
     if (fresh || hennas.length !== kept.length || hennas.some((henna, at) => henna !== kept[at])) {
         kept.length = 0; kept.push(...hennas);
         combat[4] = hennas.join(',');
+        combatMoved = true;
     }
     const skills = actor.skillset?.fetchSkills?.();
     if (fresh || skills !== session.decisionSkillsRef || skills?.length !== session.decisionSkillsLength) {
         session.decisionSkillsRef = skills; session.decisionSkillsLength = skills?.length;
         combat[5] = CombatProfile.liveSkillsPart(skills);
+        combatMoved = true;
     }
+    if (combatMoved) view.kitHashes = CombatProfile.kitHash(combat);
     view.craftLevel = backpack?.fetchDwarvenCraftLevel?.(actor) ?? stored.craftLevel ?? stats.dwarvenCraftLevel;
     view.craftStationId = stats.craftStationId ?? null;
     view.workshop = stats.workshop;
@@ -143,8 +153,8 @@ function actorView(session, actor, stats) {
     if (kitMoved || bagMoved) {
         const ids = Sections.stockIds(ShotStock.planForActor(actor), Potions.purchasePotionFor(actor));
         for (let at = 0; at < ids.length; at++) view.supply[at][0] = ids[at];
+        for (const row of view.supply) row[1] = Number(backpack?.fetchItemFromSelfId?.(row[0])?.fetchAmount?.()) > 0;
     }
-    for (const row of view.supply) row[1] = Number(backpack?.fetchItemFromSelfId?.(row[0])?.fetchAmount?.()) > 0;
     storeOwner.characterId = characterId; storeOwner.clanId = view.clanId; storeOwner.stats = stats;
     Sections.storesOf(storeOwner, view.stores);
     storeOwner.stats = null;
