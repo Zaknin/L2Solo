@@ -14,7 +14,7 @@ function moneyWeight(state) {
     return Number.isFinite(price) && price > Math.max(0, Number(state.adena) || 0) ? 1 : 0;
 }
 
-function create(state, { timestamp = Date.now(), mode, occupancy, persona, deathHours, moneyWeight: weight = moneyWeight(state), price } = {}) {
+function create(state, { timestamp = Date.now(), mode, persona, deathHours, moneyWeight: weight = moneyWeight(state), price } = {}) {
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
@@ -53,13 +53,12 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
             kills: observed.kills * rate, deaths: theoretical?.deaths || 0, costs: Number(observed.costs || 0) * rate
         } : theoretical;
         if (!base) return null;
-        const entry = occupancy?.[spot.id] || occupancy?.get?.(spot.id);
-        const crowd = Math.max(1, positive(entry?.reservedCount ?? entry?.count) / Math.max(1, positive(spot.density)));
         const bias = 1 + incomeError * (2 * Tendency.roll('spot-income', state.characterId, spot.id) - 1);
         const scale = observed ? 1 : calibration;
-        const row = { ...base, useShots: shots, exp: base.exp * scale * bias / crowd,
-            adena: base.adena * scale * bias / crowd, loot: base.loot * scale * bias / crowd,
-            kills: base.kills * scale / crowd };
+        // No crowd divisor: the bot's own observed row already carries the share it got (ARCH-08-b).
+        const row = { ...base, useShots: shots, exp: base.exp * scale * bias,
+            adena: base.adena * scale * bias, loot: base.loot * scale * bias,
+            kills: base.kills * scale };
         // Own deaths calibrate danger independently, then receive the same
         // learned personal evaluation floor as income.
         const sample = state.stats?.spotRisk?.spotId === spot.id ? state.stats.spotRisk : null;
@@ -67,8 +66,8 @@ function create(state, { timestamp = Date.now(), mode, occupancy, persona, death
         const riskBias = 1 + incomeError * (2 * Tendency.roll('spot-danger', state.characterId, spot.id) - 1);
         row.deaths *= riskBias;
         row.riskHours = row.deaths * deathHours * riskWeight;
-        row.costs = observed ? Number(observed.costs || 0) * rate / crowd
-            : (Number(base.shots || 0) * costs.shots + Number(base.potions || 0) * costs.potions) * calibration / crowd;
+        row.costs = observed ? Number(observed.costs || 0) * rate
+            : (Number(base.shots || 0) * costs.shots + Number(base.potions || 0) * costs.potions) * calibration;
         row.income = row.adena + row.loot - row.costs;
         row.valueHours = row.exp / Math.max(1, hunt.expPerHour) * (1 - weight)
             + row.income / hourAdena * weight - row.riskHours;

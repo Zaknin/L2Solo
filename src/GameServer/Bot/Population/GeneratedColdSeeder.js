@@ -144,8 +144,7 @@ function targetSpot(level, index, base = {}) {
     const allSpots = SpotProfiles.ensure();
     const profiles = allSpots
         .filter((spot) => spot.minLevel <= level + 3 && spot.maxLevel >= level - 3);
-    const occupancy = SpotProfiles.currentOccupancy(allSpots);
-    const guided = LevelingRoutes.rankedSpots(profiles, state, { mode: 'solo', occupancy });
+    const guided = LevelingRoutes.rankedSpots(profiles, state, { mode: 'solo' });
     if (guided.length > 0) {
         const bestScore = guided[0].score;
         const shortlist = guided

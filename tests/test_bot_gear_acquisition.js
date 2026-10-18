@@ -402,7 +402,6 @@ const capacityMarketFallback = GearAcquisitionPlanner.replacementPlanFor(
     partyBlockedPlan,
     [],
     {
-        occupancy: {},
         findMarketOffer: (item) => Number(item.selfId) === Number(failedTarget.selfId)
             ? { selfId: item.selfId, price: 999999, town: 'Gludio', sourceType: 'npc' }
             : null
@@ -424,7 +423,6 @@ const excludedSourceReplacement = GearAcquisitionPlanner.replacementPlanFor(
     excludedSourcePlan,
     [stoneGolemSpot],
     {
-        occupancy: {},
         excludedTargetIds: [1869],
         findMarketOffer: () => null
     }
@@ -1120,40 +1118,6 @@ assert.strictEqual(GearAcquisitionPlanner.sameObjective(
     { target: { selfId: 101 }, next: { spotId: 'a' } }
 ), true, 'bots gathering at the same source must be party-compatible');
 
-const crowdedGearSource = { id: '15_-1', spotId: '15_-1', spotLevel: 27, capacity: 2, expectedYield: 10 };
-const availableGearSource = { id: '16_-1', spotId: '16_-1', spotLevel: 27, capacity: 10, expectedYield: 1 };
-const sourceOccupancy = {
-    '15_-1': { count: 50, capacity: 2 },
-    '16_-1': { count: 0, capacity: 10 }
-};
-assert.strictEqual(
-    GearAcquisitionPlanner.bestSourceForState(
-        [crowdedGearSource, availableGearSource],
-        { ...gearedLevel30, characterId: 7001 },
-        { occupancy: sourceOccupancy }
-    ).spotId,
-    availableGearSource.spotId,
-    'an equipment objective must prefer an available drop source over a higher-yield crowded source'
-);
-assert.strictEqual(
-    GearAcquisitionPlanner.bestSourceForState(
-        [crowdedGearSource],
-        { ...gearedLevel30, characterId: 7002 },
-        { occupancy: sourceOccupancy }
-    ),
-    null,
-    'an equipment objective must not keep selecting a drop source after its capacity is exhausted'
-);
-assert.strictEqual(
-    GearAcquisitionPlanner.bestSourceForState(
-        [availableGearSource],
-        { ...gearedLevel30, characterId: 7005 },
-        { occupancy: { '16_-1': { reservedCount: 9, count: 1, capacity: 10 } }, capacityUnits: 2 }
-    ),
-    null,
-    'a party-sized equipment decision must require enough free slots for the entire party'
-);
-
 const originalItemsForAvailabilityFallback = DataCache.items;
 const originalNpcsForAvailabilityFallback = DataCache.npcs;
 const originalSpawnsForAvailabilityFallback = DataCache.npcSpawns;
@@ -1210,7 +1174,6 @@ try {
         }
     }, {
         spots: [fallbackSpot],
-        occupancy: { [fallbackSpot.id]: { reservedCount: 0, capacity: 10 } },
         excludedTargetIds: originalItemsForAvailabilityFallback.map((item) => Number(item.selfId))
     });
     assert.strictEqual(fallbackTarget?.item?.selfId, fallbackJewels[3].selfId,
@@ -1232,7 +1195,6 @@ try {
     };
     const unavailableOptions = {
         spots: [fallbackSpot],
-        occupancy: { [fallbackSpot.id]: { reservedCount: 0, capacity: 10 } },
         excludedTargetIds: originalItemsForAvailabilityFallback.map((item) => Number(item.selfId))
     };
     assert.strictEqual(
@@ -1268,6 +1230,8 @@ assert.strictEqual(
     'underscore-only datapack placeholders must never become equipment goals'
 );
 
+const crowdedGearSource = { id: '15_-1', spotId: '15_-1', spotLevel: 27, capacity: 2, expectedYield: 10 };
+const availableGearSource = { id: '16_-1', spotId: '16_-1', spotLevel: 27, capacity: 10, expectedYield: 1 };
 const clanOwnedRoute = {
     status: 'active',
     strategy: 'direct_drop',
@@ -1303,49 +1267,6 @@ assert.strictEqual(
     ),
     null,
     'a death backoff must never fall through to the only excluded equipment source'
-);
-
-const timakDropSource = {
-    id: '15_-1',
-    avgLevel: 46,
-    minLevel: 40,
-    maxLevel: 52,
-    density: 14,
-    capacity: 2,
-    center: {},
-    npcEntries: [{ selfId: 588, name: 'Timak Orc Overlord', count: 14 }]
-};
-const alternateTimakSource = {
-    ...timakDropSource,
-    id: '16_-1',
-    capacity: 10
-};
-SpotProfiles.cache = [timakDropSource, alternateTimakSource];
-const crowdedPlanStates = [
-    { characterId: 7001, level: 50, spotId: timakDropSource.id, activity: 'hunting' },
-    { characterId: 7002, level: 50, spotId: timakDropSource.id, activity: 'hunting' },
-    { characterId: 7003, level: 50, spotId: timakDropSource.id, activity: 'hunting' }
-];
-const crowdedPlanOccupancy = SpotProfiles.occupancySnapshot(SpotProfiles.cache, crowdedPlanStates);
-const routedGearState = {
-    ...gearedLevel30,
-    characterId: 7003,
-    level: 50,
-    spotId: timakDropSource.id,
-    stats: {
-        ...(gearedLevel30.stats || {}),
-        equipmentPlan: {
-            status: 'active',
-            strategy: 'direct_drop',
-            target: { selfId: 72, name: 'Stormbringer' },
-            next: { itemId: 72, npcId: 588, spotId: timakDropSource.id }
-        }
-    }
-};
-assert.strictEqual(
-    SpotProfiles.findForState(routedGearState, { occupancy: crowdedPlanOccupancy }).id,
-    alternateTimakSource.id,
-    'an active Stormbringer plan must move to an available equivalent source instead of overriding spot capacity'
 );
 
 SpotProfiles.cache = [

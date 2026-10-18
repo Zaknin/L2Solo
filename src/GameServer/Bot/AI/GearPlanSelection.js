@@ -41,10 +41,10 @@ function withBridgeInputPreparation(state, previous, next) {
     return { ...next, inputPreparation };
 }
 
-function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
+function selectAcquisitionPlan(state, previousPlan, { spots = [], timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
     if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
     const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
-        spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
+        spots, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
     });
     const preparedAcquisition = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, economy);
     const preparedB = preparedAcquisition?.strategy === 'craft'
@@ -104,7 +104,7 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const availabilitySource = !replanContext.failure && previousPlan?.status === 'active'
         && ['direct_drop', 'craft'].includes(previousPlan.strategy)
         ? GearAcquisitionPlanner.bestSourceForPlan(state, previousPlan, spots, {
-            occupancy, excludedSpotIds, allowRaidSources: clanRaidPlan
+            excludedSpotIds, allowRaidSources: clanRaidPlan
         })
         : null;
     const availabilityRouteChanged = availabilitySource && (
@@ -113,7 +113,6 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     );
     const availabilityPlan = weaponBridgePlan || (previousPlan?.status === 'blocked' && !clanGoalLocked
         ? GearAcquisitionPlanner.replacementPlanFor(state, previousPlan, spots, {
-            occupancy,
             ...replanContext,
             ...planOptions
         })
@@ -123,7 +122,6 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
             && ['direct_drop', 'craft'].includes(previousPlan.strategy)
             && !clanGoalLocked
                 ? GearAcquisitionPlanner.replacementPlanFor(state, previousPlan, spots, {
-                    occupancy,
                     ...replanContext,
                     ...planOptions
                 })
@@ -140,12 +138,11 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const upgradedPlan = availabilityPlan || (
         reusablePartyRequest || clanGoalLocked
             ? previousPlan
-            : GearAcquisitionPlanner.planFor(state, { spots, occupancy, ...replanContext, ...planOptions })
+            : GearAcquisitionPlanner.planFor(state, { spots, ...replanContext, ...planOptions })
     );
     const previousRefresh = previousPlan?.recipeId && !reusablePartyRequest && !clanGoalLocked
         ? GearAcquisitionPlanner.planFor(state, {
             spots,
-            occupancy,
             recipeId: previousPlan.recipeId,
             ...replanContext,
             ...planOptions
@@ -165,7 +162,7 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const finalizedPlan = preservePreviousPlan
         ? previousPlan
         : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
-    const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
+    const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots);
     const retainedInputs = previousPlan?.crystalPreparation && ['complete', 'blocked'].includes(costedPlan.status)
         && !GearAcquisitionPlanner.equipmentTargetFulfilled(state, previousPlan)
         && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previousPlan)

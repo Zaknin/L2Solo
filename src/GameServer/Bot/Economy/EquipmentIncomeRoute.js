@@ -10,7 +10,7 @@ function economicHunt(state) {
         && /^(power:|resale:)/.test(String(state.stats?.wishFocus?.[0] || ''));
 }
 
-function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), price, required = false, mode,
+function select(state, { spots = [], timestamp = Date.now(), price, required = false, mode,
     maxChecks = 32 } = {}) {
     if (!spots.length || state.party?.partyId || ['party', 'duo'].includes(mode)
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return null;
@@ -25,12 +25,11 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
     const Index = invoke('GameServer/Bot/AI/SpotIndex');
     const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
     const costs = Hunt.consumablePrices(state, price);
     const tableRole = spoiler ? 'spoiler' : role === 'melee' || role === 'crafter' ? 'dps' : role === 'nuker' ? 'mage' : role;
-    const evaluate = (SpotEconomics ||= require('./SpotEconomics')).create(state, { timestamp, occupancy, price, moneyWeight: 1 });
+    const evaluate = (SpotEconomics ||= require('./SpotEconomics')).create(state, { timestamp, price, moneyWeight: 1 });
     const excluded = Risk.excludedSpotIdsForStates([state], timestamp);
-    const options = { timestamp, mode: 'solo', occupancy, matchupProfiles: Match.stateProfiles(state, { timestamp }) };
+    const options = { timestamp, mode: 'solo', matchupProfiles: Match.stateProfiles(state, { timestamp }) };
     const survives = Match.soloSpotUpperBound(options.matchupProfiles);
     const origin = Index.spotById(spots, state.spotId)?.center || state.loc;
     const ids = new Set([state.spotId, ...Hunt.sampledRows(state, timestamp).map(row => row.spotId)]);
@@ -47,8 +46,7 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
             const allowed = !spot.raidBoss
                 && Number(spot.avgLevel || spot.minLevel || 1) - state.level >= minGap
                 && !excluded.has(String(spot.id)) && survives(spot)
-                && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot))
-                && Profiles.hasCapacityForStates(spot, [state], occupancy);
+                && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot));
             spotFactors.set(spot, allowed ? undefined : null);
             return allowed;
         })

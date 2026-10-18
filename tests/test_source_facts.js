@@ -52,7 +52,7 @@ try {
     assert.equal(byKind(facts(noSpoil)).spoil.reason, 'spoil_skill');
     assert.equal(byKind(facts(noSpoil)).drop.status, 'ready');
 
-    // Hunt rules: level band, occupancy, solo safety; raids are not a solo farm.
+    // Hunt rules: level band, solo safety; raids are not a solo farm.
     assert.equal(byKind(facts({ ...warsmith, level: 50 })).drop.reason, 'level_band');
     const deepBlue = { ...warsmith, level: 49,
         stats: { ...warsmith.stats, wishFocus: ['power:161:7', 1, 0] } };
@@ -63,7 +63,6 @@ try {
     assert(earning.spoil.perHour < own.spoil.perHour, 'the wider band retains the native deep-blue spoil penalty');
     assert.equal(byKind(facts({ ...warsmith, level: 56 }, { economicLower: true })).drop.reason, 'level_band',
         'equipment income does not widen the band beyond fifteen levels');
-    assert.equal(byKind(facts(warsmith, { occupancy: { 'facts-test': { count: 9, capacity: 9 } } })).drop.reason, 'occupied');
     assert.equal(byKind(facts({ ...warsmith, inventory: {} })).drop.reason, 'party_needed');
     const raid = drain(Planner.sourceFacts(warsmith, 99101, 1, { spotValue, timestamp: 1,
         spots: [{ ...spots[0], id: 'facts-raid', raidBoss: true, raidBossTemplateId: 99001 }] })).value;
@@ -117,7 +116,7 @@ try {
     for (const [state, options] of [[warsmith, {}], [noSpoil, {}], [{ ...warsmith, level: 50 }, {}], [away, {}],
         [{ ...warsmith, inventory: {} }, {}], [warsmith, { spotValue: () => null }], [noSpoil, { spots: [spots[0], { ...spots[0], id: 'facts-test-2' }] }],
         [warsmith, { spots: [{ ...spots[0], id: 'facts-raid', raidBoss: true, raidBossTemplateId: 99001 }] }],
-        [warsmith, { occupancy: { 'facts-test': { count: 9, capacity: 9 } } }], [warsmith, { spotValue: () => ({ kills: 100, valueHours: NaN }) }]]) {
+        [warsmith, { spotValue: () => ({ kills: 100, valueHours: NaN }) }]]) {
         const all = facts(state, options), counts = new Map(), ready = facts(state, { ...options, counts });
         assert.deepEqual(facts(state, { ...options, readyOnly: true }), all.filter(row => row.status === 'ready'));
         const tally = new Map();
@@ -139,7 +138,7 @@ try {
     // learned Spoil overrides a level/hunt refusal, but never a raid refusal.
     const mixedNpcs = [
         { selfId: 99010, clanName: 'Siege Guard', template: { name: 'Mixed Guard A', level: 42, kind: 'Monster' } },
-        { selfId: 99011, template: { name: 'Mixed Occupied', level: 42, kind: 'Monster' } },
+        { selfId: 99011, template: { name: 'Mixed Early', level: 42, kind: 'Monster' } },
         { selfId: 99012, template: { name: 'Mixed Low', level: 30, kind: 'Monster' } },
         { selfId: 99013, template: { name: 'Mixed Raid', level: 42, kind: 'Monster', raidBoss: true } },
         { selfId: 99014, template: { name: 'Mixed Ready', level: 42, kind: 'Monster' } },
@@ -155,7 +154,6 @@ try {
         npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] }));
     const checkMixed = (state, extra = {}) => {
         const options = { spots: mixedSpots, spotValue, timestamp: 1,
-            occupancy: { 'mixed-99011': { count: 9, capacity: 9 } },
             trip: { details: () => ({ known: true, hours: .25, fees: 0 }) }, ...extra };
         const all = drain(Planner.sourceFacts(state, 99101, 50, options)).value;
         const expected = new Map();
@@ -184,8 +182,8 @@ try {
     }
     Data.npcRewards = mixedRewards;
     const beforeReplacement = checkMixed(warsmith);
-    assert.deepEqual([...beforeReplacement.counts.keys()], ['cannot_hunt', 'occupied', 'level_band', 'raid', 'ready']);
-    assert.deepEqual([...checkMixed(noSpoil).counts.keys()], ['cannot_hunt', 'spoil_skill', 'occupied', 'level_band', 'raid', 'ready']);
+    assert.deepEqual([...beforeReplacement.counts.keys()], ['cannot_hunt', 'ready', 'level_band', 'raid']);
+    assert.deepEqual([...checkMixed(noSpoil).counts.keys()], ['cannot_hunt', 'spoil_skill', 'ready', 'level_band', 'raid']);
     // Replacing NPC/reward/spot tables invalidates prepared ordinals as well
     // as the old expected yields; later personal availability remains live.
     Data.npcs = Data.npcs.map(npc => npc.selfId === 99012 ? { ...npc, template: { ...npc.template, level: 42 } } : npc);
@@ -195,7 +193,7 @@ try {
     const changed = checkMixed(warsmith);
     assert(changed.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield
         > beforeReplacement.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield);
-    checkMixed(warsmith, { spots: structuredClone(mixedSpots), occupancy: {} });
+    checkMixed(warsmith, { spots: structuredClone(mixedSpots) });
 
     // The party verdict of a record is the old rule: soloSafeForSource on the
     // target object the planner built per record (npcLevel from the record,
@@ -241,7 +239,7 @@ try {
     }
     verdict(warsmith, String(tight), Math.floor(effective), true, 'npc level string');
     verdict(warsmith, String(Math.floor(effective)), tight, false, 'npc level string, spot tight');
-    // (d) party_needed first seen after ready and occupied keeps that key
+    // (d) party_needed first seen after ready keeps that key
     // place, and its tally sums records on either side of other reasons.
     const orderNpcs = [[99030, Math.floor(effective)], [99031, tight], [99032, Math.floor(effective)], [99033, tight]]
         .map(([selfId, level]) => ({ selfId, template: { name: `Order ${selfId}`, level, kind: 'Monster' } }));
@@ -253,10 +251,9 @@ try {
         npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] });
     const orderSpots = [orderSpot(orderNpcs[0], 'ready'), orderSpot(orderNpcs[0], 'full'), orderSpot(orderNpcs[1], 'a'),
         orderSpot(orderNpcs[2], 'ready'), orderSpot(orderNpcs[3], 'b')];
-    const ordered = checkMixed(warsmith, { spots: orderSpots, occupancy: { 'order-99030-full': { count: 9, capacity: 9 } } });
+    const ordered = checkMixed(warsmith, { spots: orderSpots });
     const keys = [...ordered.counts.keys()];
-    assert(keys.indexOf('ready') >= 0 && keys.indexOf('occupied') >= 0 && keys.indexOf('party_needed') > keys.indexOf('ready')
-        && keys.indexOf('party_needed') > keys.indexOf('occupied'), `party_needed after ready and occupied: ${keys}`);
+    assert(keys.indexOf('ready') >= 0 && keys.indexOf('party_needed') > keys.indexOf('ready'), `party_needed after ready: ${keys}`);
     assert.equal(ordered.counts.get('party_needed'), ordered.all.filter(row => row.reason === 'party_needed').length);
     assert(ordered.counts.get('party_needed') >= 4, 'party_needed records on both sides of a later ready spot');
 

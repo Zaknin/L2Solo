@@ -54,75 +54,6 @@ try {
         density: 10, capacity: 10, center: { locX: 2000, locY: 2000, locZ: 0 }
     };
     SpotProfiles.cache = [crowded, alternate];
-    const partyOne = { characterId: 1, level: 8, spotId: crowded.id, party: { partyId: 'party-a' } };
-    const partyTwo = { characterId: 2, level: 8, spotId: crowded.id, party: { partyId: 'party-a' } };
-    const surplusSolo = { characterId: 3, level: 8, spotId: crowded.id, party: {} };
-    const surplusPartyOne = { characterId: 10, level: 8, spotId: crowded.id, party: { partyId: 'party-b' } };
-    const surplusPartyTwo = { characterId: 11, level: 8, spotId: crowded.id, party: { partyId: 'party-b' } };
-    const occupancy = SpotProfiles.occupancySnapshot(SpotProfiles.cache, [
-        partyOne,
-        partyTwo,
-        surplusSolo,
-        surplusPartyOne,
-        surplusPartyTwo
-    ]);
-    assert.strictEqual(SpotProfiles.shouldLeaveOverCapacity(partyOne, crowded, occupancy), false,
-        'the first whole party that fits within capacity must remain together');
-    assert.strictEqual(SpotProfiles.shouldLeaveOverCapacity(partyTwo, crowded, occupancy), false,
-        'retained background parties must never be split');
-    assert.strictEqual(SpotProfiles.shouldLeaveOverCapacity(surplusPartyOne, crowded, occupancy), true,
-        'a whole surplus party must be eligible for relocation');
-    assert.strictEqual(SpotProfiles.shouldLeaveOverCapacity(surplusPartyTwo, crowded, occupancy), true,
-        'all members of a surplus party must receive the same relocation decision');
-    assert.strictEqual(SpotProfiles.shouldLeaveOverCapacity(surplusSolo, crowded, occupancy), true,
-        'surplus solo hunters must be selected for deterministic redistribution');
-    assert.strictEqual(
-        SpotProfiles.findForState(surplusSolo, { occupancy }).id,
-        alternate.id,
-        'a surplus solo hunter must route to an available suitable field'
-    );
-    assert.strictEqual(
-        SpotProfiles.findForState(surplusPartyOne, { occupancy }).id,
-        alternate.id,
-        'a surplus party leader must select another spot so the party can travel together'
-    );
-
-    const remoteMember = { ...partyTwo, spotId: alternate.id };
-    const assembling = [partyOne, remoteMember];
-    const assemblyOccupancy = SpotProfiles.occupancySnapshot(SpotProfiles.cache, [
-        partyOne, remoteMember, surplusSolo
-    ]);
-    GearAcquisitionPlanner.bestSourceForPlan = () => null;
-    for (const equipmentPlan of [null, { status: 'active', strategy: 'direct_drop' }]) {
-        const leader = { ...partyOne, stats: { equipmentPlan } };
-        assert.strictEqual(
-            SpotProfiles.findForState(leader, { occupancy: assemblyOccupancy, capacityStates: assembling }).id,
-            alternate.id,
-            'a retained leader must choose room for the whole party, including when its gear source is unavailable'
-        );
-        SpotProfiles.cache = [crowded];
-        assert.strictEqual(
-            SpotProfiles.findForState(leader, { occupancy: assemblyOccupancy, capacityStates: assembling }),
-            null,
-            'without an alternative, an unassembled party must not repeatedly select a full leader spot'
-        );
-        SpotProfiles.cache = [crowded, alternate];
-    }
-    GearAcquisitionPlanner.bestSourceForPlan = originalBestSourceForPlan;
-    assert.strictEqual(assemblyOccupancy[crowded.id].reservedCount, 2,
-        'spot selection must not reserve capacity before a route is admitted');
-    const roomForParty = SpotProfiles.occupancySnapshot(SpotProfiles.cache, assembling);
-    assert.strictEqual(
-        SpotProfiles.findForState(partyOne, { occupancy: roomForParty, capacityStates: assembling }).id,
-        crowded.id,
-        'a leader may stay when its absent teammate fits in the remaining slot'
-    );
-    assert.strictEqual(
-        SpotProfiles.findForState(partyOne, { occupancy, capacityStates: [partyOne, partyTwo] }).id,
-        crowded.id,
-        'an already reserved retained party must stay even while surplus hunters make the spot overfull'
-    );
-
     const occupancyByPresence = SpotProfiles.occupancySnapshot(SpotProfiles.cache, [
         { characterId: 4, activity: 'merchant', spotId: crowded.id },
         { characterId: 5, activity: 'shopping', spotId: crowded.id },
@@ -147,15 +78,6 @@ try {
         'spot occupancy must include hunters and inbound travelers, not actors currently trading, crafting, or traveling to town');
     assert.strictEqual(occupancyByPresence[crowded.id].reservedCount, 3,
         'capacity admission must include durable farm intents without pretending that they are physically present');
-    assert.strictEqual(
-        GearAcquisitionPlanner.bestSourceForState(
-            [{ spotId: crowded.id, capacity: crowded.capacity, expectedYield: 1 }],
-            { characterId: 13 },
-            { occupancy: occupancyByPresence }
-        ),
-        null,
-        'a future equipment destination must consume capacity before another bot chooses it'
-    );
 
     const reservation = {};
     assert.strictEqual(SpotProfiles.capacityFingerprint(reservation, 1), '',
@@ -172,23 +94,6 @@ try {
     const oversizedGroup = [{ characterId: 33 }, { characterId: 34 }, { characterId: 35 }];
     assert.strictEqual(SpotProfiles.hasCapacityForStates(crowded, oversizedGroup, {}), false,
         'an empty spot must still reject a group larger than its total capacity');
-    assert.strictEqual(
-        GearAcquisitionPlanner.bestSourceForState(
-            [{ spotId: crowded.id, capacity: crowded.capacity, expectedYield: 1 }],
-            oversizedGroup[0],
-            { occupancy: {}, capacityUnits: oversizedGroup.length }
-        ),
-        null,
-        'equipment source planning must reject an oversized group even before the spot has an occupancy entry'
-    );
-    assert.strictEqual(
-        SpotProfiles.findForState(
-            { characterId: 33, level: 8 },
-            { occupancy: {}, capacityStates: oversizedGroup }
-        ).id,
-        alternate.id,
-        'party routing must skip an undersized destination and select a fitting alternative'
-    );
 
     const clanIntentStates = [40, 41, 42].map((characterId) => ({
         characterId,
@@ -226,24 +131,6 @@ try {
         [...competingClanOccupancy[alternate.id].retainedReservationKeys],
         ['clan-equipment:1', 'clan-equipment:2'],
         'only two deterministic clan equipment operations may reserve one sector'
-    );
-    assert.strictEqual(
-        SpotProfiles.shouldLeaveOverCapacity(competingClanStates[2], alternate, competingClanOccupancy),
-        true,
-        'a surplus clan operation must relocate even while numeric bot capacity remains'
-    );
-    assert.strictEqual(
-        GearAcquisitionPlanner.bestSourceForState(
-            [{ spotId: alternate.id, capacity: alternate.capacity, expectedYield: 1 }],
-            competingClanStates[2],
-            {
-                occupancy: competingClanOccupancy,
-                reservationKey: 'clan-equipment:3',
-                maxReservationGroups: SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT
-            }
-        ),
-        null,
-        'a non-retained clan operation must choose another source instead of joining the pile'
     );
     assert.strictEqual(
         SpotProfiles.reserveCapacity(
@@ -285,7 +172,7 @@ try {
         }
     };
     assert.strictEqual(
-        SpotProfiles.findForState(deathPressured, { occupancy: {}, timestamp: 1000 }).id,
+        SpotProfiles.findForState(deathPressured, { timestamp: 1000 }).id,
         safer.id,
         'death pressure must override an active equipment source and choose another available source'
     );
@@ -299,13 +186,13 @@ try {
         }
     };
     assert.strictEqual(
-        SpotProfiles.findForState(persistedBackoff, { occupancy: {}, timestamp: 2000 }).id,
+        SpotProfiles.findForState(persistedBackoff, { timestamp: 2000 }).id,
         safer.id,
         'a persisted backoff must stop the equipment plan from immediately pulling the bot back'
     );
     const expiredBackoff = { ...persistedBackoff, stats: { ...persistedBackoff.stats, stepCount: 60 } };
     assert.strictEqual(
-        SpotProfiles.findForState(expiredBackoff, { occupancy: {}, timestamp: 5001 }).id,
+        SpotProfiles.findForState(expiredBackoff, { timestamp: 5001 }).id,
         dangerous.id,
         'the original equipment source may be reconsidered after its cooldown expires'
     );
@@ -318,7 +205,7 @@ try {
     SpotProfiles.cache = [raid, safer];
     GearAcquisitionPlanner.bestSourceForPlan = originalBestSourceForPlan;
     assert.strictEqual(
-        SpotProfiles.findForState({ characterId: 70, level: 8, spotId: raid.id }, { occupancy: {} }).id,
+        SpotProfiles.findForState({ characterId: 70, level: 8, spotId: raid.id }).id,
         safer.id,
         'an ordinary bot already placed on raid ground must evacuate to a normal hunting spot'
     );

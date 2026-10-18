@@ -376,10 +376,9 @@ const SpotService = {
                     ...candidate,
                     spot: decoratedSpot,
                     score: candidate.score + routeMatch.routeScore + routeMatch.variation
-                        - routeMatch.crowdPenalty - routeMatch.localityPenalty - routeMatch.targetMatchup.penalty,
+                        - routeMatch.localityPenalty - routeMatch.targetMatchup.penalty,
                     route: decoratedSpot.route || null,
                     routeScore: routeMatch.routeScore,
-                    crowdPenalty: routeMatch.crowdPenalty,
                     localityPenalty: routeMatch.localityPenalty,
                     huntingGroundPenalty: routeMatch.huntingGroundPenalty,
                     variation: routeMatch.variation

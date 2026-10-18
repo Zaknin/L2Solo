@@ -20,8 +20,8 @@ function waiting(state, plan, partyRequest) {
 // Where it hunts meanwhile: the plan's own safe fallback, with the NPC to farm
 // there, when the bot may hunt it; otherwise ordinary level ground chosen
 // without the plan (a fitting current spot is kept). Null when neither exists.
-function spotFor(state, plan, profiles, { occupancy, excludedSpotIds, timestamp } = {}) {
-    const planned = GearAcquisitionPlanner.safeFallbackForPlan(state, plan, profiles, { occupancy, excludedSpotIds });
+function spotFor(state, plan, profiles, { excludedSpotIds, timestamp } = {}) {
+    const planned = GearAcquisitionPlanner.safeFallbackForPlan(state, plan, profiles, { excludedSpotIds });
     const plannedSpot = planned ? SpotIndex.spotById(profiles, planned.spotId) : null;
     if (plannedSpot && LevelingRoutes.isSpotAllowedForState(plannedSpot, state)) {
         return { spot: plannedSpot, npcId: Number(planned.npcId || 0) };
@@ -31,7 +31,7 @@ function spotFor(state, plan, profiles, { occupancy, excludedSpotIds, timestamp 
         spotId: null,
         stats: Object.fromEntries(Object.entries(state.stats || {})
             .filter(([key]) => key !== 'equipmentPlan'))
-    }, { profiles, occupancy, excludedSpotIds, timestamp });
+    }, { profiles, excludedSpotIds, timestamp });
     return spot ? { spot, npcId: 0 } : null;
 }
 

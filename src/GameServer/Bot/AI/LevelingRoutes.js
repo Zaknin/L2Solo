@@ -272,15 +272,6 @@ function capacityForSpot(spot = {}) {
     return Math.max(9, Math.min(36, densityCapacity));
 }
 
-function crowdPenaltyForSpot(spot, occupancy) {
-    const count = occupancyForSpot(occupancy, spot.id);
-    const capacity = capacityForSpot(spot);
-    if (!count || !capacity) return 0;
-    const ratio = count / capacity;
-    if (ratio <= 1) return ratio * ratio * 60;
-    return 60 + Math.pow(ratio - 1, 2) * 120;
-}
-
 // Read-only result: shared by every search of the spot.
 function starterRegionsFor(spot = {}) {
     if (!spot || typeof spot !== 'object') return deriveStarterRegions(spot);
@@ -389,20 +380,18 @@ function scoreSpot(spot, state = {}, options = {}) {
         .sort((a, b) => b.score - a.score);
 
     const routeMatch = matchingRoutes[0] || null;
-    const occupancy = occupancyForSpot(options.occupancy, spot.id);
     const capacity = capacityForSpot(spot);
-    const crowdPenalty = crowdPenaltyForSpot(spot, options.occupancy);
     const localityPenalty = localityPenaltyForSpot(spot, state, context, tags);
     const huntingGround = BotHuntingGroundPolicy.evaluate(spot, state, { ...options, ...context, tags });
     const huntingGroundPenalty = huntingGround.allowed ? 0 : 10000;
     const variation = stableVariation(spot, state);
     const economics = (options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-        { timestamp: options.timestamp, mode: context.mode, occupancy: options.occupancy }))(spot);
+        { timestamp: options.timestamp, mode: context.mode }))(spot);
     const efficiencyAdjustment = economics ? economics.valueHours * 100 : 0;
     const targetMatchup = TargetMatchup.spotMatchup(spot, TargetMatchup.stateProfiles(state, { ...options, mode: context.mode }),
         safetyOptions(state, { ...options, mode: context.mode }));
     const score = baseScore(spot, context) + (routeMatch ? routeMatch.score : 0)
-        + variation + efficiencyAdjustment - crowdPenalty - localityPenalty - huntingGroundPenalty
+        + variation + efficiencyAdjustment - localityPenalty - huntingGroundPenalty
         - targetMatchup.penalty - (targetMatchup.eligible ? 0 : 10000);
 
     return {
@@ -415,8 +404,6 @@ function scoreSpot(spot, state = {}, options = {}) {
         level: context.level,
         levelGap: Math.abs(Number(spot.avgLevel || spot.minLevel || 1) - context.level),
         capacity,
-        occupancy,
-        crowdPenalty,
         localityPenalty,
         huntingGroundPenalty,
         huntingGround,
@@ -450,7 +437,7 @@ function decorateSpot(spot, match) {
 function rankedSpots(spots, state = {}, options = {}) {
     options = { ...options, matchupProfiles: TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) }),
         spotEconomics: options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-            { timestamp: options.timestamp, mode: modeForState(state, options), occupancy: options.occupancy }) };
+            { timestamp: options.timestamp, mode: modeForState(state, options) }) };
     return (spots || [])
         .map((spot) => {
             const match = scoreSpot(spot, state, options);
@@ -462,8 +449,6 @@ function rankedSpots(spots, state = {}, options = {}) {
                 tags: match.tags,
                 levelGap: match.levelGap,
                 capacity: match.capacity,
-                occupancy: match.occupancy,
-                crowdPenalty: match.crowdPenalty,
                 localityPenalty: match.localityPenalty,
                 huntingGroundPenalty: match.huntingGroundPenalty,
                 efficiencyAdjustment: match.efficiencyAdjustment,
@@ -521,7 +506,6 @@ module.exports = {
     tagsForSpot,
     capacityForSpot,
     occupancyForSpot,
-    crowdPenaltyForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
     spotAllowedReaderFor,

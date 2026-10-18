@@ -245,10 +245,6 @@ assert.strictEqual(
     0,
     'the local human starter cohort may still use Elven Ruins at the intended level'
 );
-const crowded = LevelingRoutes.scoreSpot(elvenRuins, { characterId: 1, level: 13 }, { occupancy: { '7_41': 273 } });
-const available = LevelingRoutes.scoreSpot(elvenRuins, { characterId: 1, level: 13 }, { occupancy: { '7_41': 20 } });
-assert.ok(crowded.crowdPenalty > available.crowdPenalty + 1000,
-    'a 273-bot dungeon pile must lose decisively to an available hunting spot');
 
 const mithrilMines = {
     id: '29_-30',
@@ -306,9 +302,9 @@ try {
         classId: 19,
         starterRegion: 'elf',
         loc: { locX: 0, locY: 0, locZ: 0 }
-    }, { minDensity: 1, minDistance: 1, maxDistance: 10000, occupancy: { local_starter: 1, remote_starter: 0 } });
+    }, { minDensity: 1, minDistance: 1, maxDistance: 10000 });
     assert.strictEqual(routed.spot.id, 'local_starter',
-        'SpotService ranking must retain LevelingRoutes locality and occupancy adjustments');
+        'SpotService ranking must retain the LevelingRoutes locality adjustment');
     assert.strictEqual(routed.localityPenalty, 0);
 
     const nestedRoleRoute = SpotService.findBestSpot({
