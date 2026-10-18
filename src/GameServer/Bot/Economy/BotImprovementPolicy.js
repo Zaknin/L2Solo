@@ -21,8 +21,8 @@ function adapter(item) {
         fetchCristals: () => Number(source?.etc?.cristals || 0),
         isWeapon: () => kind.startsWith('Weapon.'), isArmor: () => kind.startsWith('Armor.') };
 }
-// The same ordered native targets feed admission and its diagnostic input
-// mark. Market interest, benefit, costs and tendency belong to opportunities.
+// The native improvement targets in the bag, in order. Market interest,
+// benefit, costs and tendency belong to opportunities.
 function targets(state) {
     const result = [];
     for (const item of instances(state)) {
@@ -31,9 +31,6 @@ function targets(state) {
         if (category && Rules.CRYSTAL_IDS[Rules.gradeOf(a)]) result.push({ item, a, category });
     }
     return result;
-}
-function targetInputs(state) {
-    return targets(state).map(({ item }) => [item.selfId, item.id, item.enchant, item.equipped, item.slot, item.amount]);
 }
 function isCaster(state) {
     return ['mage','healer','buffer','nuker','summoner'].includes(invoke('GameServer/Bot/AI/GearAcquisitionPlanner').roleFor(state));
@@ -228,4 +225,4 @@ function crystalPath(state, id, ctx, spots = []) {
     }
     return best;
 }
-module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, targetInputs, adapter, enchantCost, stuckCost };
+module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, adapter, enchantCost, stuckCost };

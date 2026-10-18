@@ -2,8 +2,6 @@
 const assert = require('node:assert/strict');
 require('../src/Global'); invoke('GameServer/DataCache').init();
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-// The event input key at one fixed time (deps.timestamp when given).
-const KEY_AT = Date.now(), eventKey = (state, deps = {}) => Economy.eventInputKey(state, deps, deps.timestamp ?? KEY_AT);
 const Table = invoke('GameServer/Bot/AI/SpotValueTable');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const saved = { value: Table.value, best: Table.best, hunt: Hunt.huntIncome };
@@ -90,11 +88,6 @@ try {
     assert.equal(target({ ...solo, stats: { ...solo.stats, visitEvery: [22, 8] } }), 8,
         'an absent table cannot cap learned eight hours without an earlier known return');
     rowPresent = true; stacks = 10;
-    const changedDescription = { ...protectedLoot, stats: { ...protectedLoot.stats,
-        equipmentPlan: { ...protectedLoot.stats.equipmentPlan, reason: 'different', expectedEffort: 123,
-            targetProgress: 1, at: Date.now() } } };
-    assert.equal(eventKey(protectedLoot), eventKey(changedDescription),
-        'plan metadata cannot invalidate the reservation-dependent economic context');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     // The sale list reads the plan's stock targets once (L72); without a
     // published row that read prepares the economics itself, once. A forecast
@@ -104,8 +97,6 @@ try {
     try { Disposition.saleCandidates(solo, { unlimited: true }); assert.equal(keptCalls, 1,
         'ordinary sale prepares the economics once; forecast presence never recursively calls it'); }
     finally { Economy.keptTargets = beforeKept; }
-    assert.notEqual(eventKey(solo), eventKey({ ...solo, partyId: 2 }));
-    assert.notEqual(eventKey(solo), eventKey(protectedLoot));
     // Fractional table rates are forecasts, but funded purchase tranches must
     // reach the same physical stock without fractional or duplicate units.
     potions = 2.25; stacks = 0;

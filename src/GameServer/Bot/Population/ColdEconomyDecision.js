@@ -683,7 +683,7 @@ function current(state, entry) {
 function readyCardHold(state, decision) {
     const Sections = DecisionSections ||= require('../Economy/DecisionSections'); // lazy: cycle as the advisory readers above
     const advice = decision.advisory, why = [];
-    if (!decision.key.startsWith(`${eventKey(state)}|`)) why.push('event_key');
+    if (!decision.key.startsWith(`${eventKey(state)}|`)) why.push('card_key');
     else if (state.stats?.wishDirty) why.push('wish_dirty');
     else if (!advice) why.push('unproved');
     else {

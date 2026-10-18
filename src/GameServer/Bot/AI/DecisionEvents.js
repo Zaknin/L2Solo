@@ -56,6 +56,17 @@ function marksFor(session, actor) {
         session.decisionSkillsRef = skills; session.decisionSkillsLength = skills?.length;
         session.decisionSkillsMark = Sections.hash((skills || []).map(skill => [skill.fetchSelfId?.(), skill.fetchLevel?.()]));
     }
+    // Who the friend and the enemy are (the cold relations fact's reading,
+    // DecisionSections.relationTargetIds), read again only on a new memory
+    // revision: the revision gates the read, it is no part of the mark.
+    // lazy: worker the main memory owner; this module also handles cold projections.
+    const memory = invoke('GameServer/Social/InteractionMemoryRuntime'), characterId = Number(actor.fetchId?.());
+    const memoryRevision = memory.revision(characterId);
+    if (memoryRevision === undefined || session.decisionMemoryRevision !== memoryRevision || !session.decisionRelationTargets) {
+        session.decisionRelationTargets = Sections.relationTargetIds({ stats },
+            memoryRevision === undefined ? null : memory.snapshot(characterId));
+        session.decisionMemoryRevision = memoryRevision;
+    }
     const timestamp = Date.now();
     const level = Number(actor.fetchLevel?.() || 0), exp = actor.fetchExp?.();
     const baseline = stats.wishSections;
@@ -75,7 +86,7 @@ function marksFor(session, actor) {
     return { level, weight: bag.weight, bag: bag.full,
         kit, fight, horizon, money: Sections.fundingMark(physical, escrow),
         meaningfulMoney: Sections.moneyEvent(physical, baseline, timestamp, escrow),
-        relations: Sections.hash([stats.memoryRevision, stats.relations, session.hotBackgroundPartyId, stats.clanId]) };
+        relations: Sections.hash([session.hotBackgroundPartyId, stats.clanId, ...session.decisionRelationTargets]) };
 }
 function observe(session, actor) {
     const marks = marksFor(session, actor), prior = session.decisionMarks;

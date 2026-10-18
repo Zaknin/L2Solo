@@ -30,6 +30,10 @@ function reviewDecision(state, existing, options, timestamp) {
     });
     const marketCandidate = candidates.find(isMarketGoal);
     const activeMarketGoal = isMarketGoal(existing?.current);
+    // The inputHash is the economy build's input name: its decided facts and
+    // market reads, not the bot's own plan (trip, town rhythm), a constant or
+    // the caller. So this "unchanged" shortcut now keeps a goal whose economy
+    // facts did not move where a moved own-plan value made it re-evaluate before.
     if (existing?.current?.nextReviewAt > timestamp && existing.current.status === 'active'
         && !marketCandidate && !activeMarketGoal
         && Number.isSafeInteger(existing.inputHash) && candidates[0]?.inputHash === existing.inputHash) return { result: existing, unchanged: true, goal: null, candidates, economy };

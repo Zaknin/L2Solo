@@ -6,6 +6,10 @@
 const { fnv1a32 } = require('../Fnv1a');
 const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
+const Karma = require('../../Karma');
+const Warehouse = require('./PersonalWarehouseIndex');
+const ClanSupply = require('../../Clan/ClanSupplyPolicy');
+const Providers = require('./WishProviders');
 // Read through the module object at call time (tests replace kitEvents).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -67,6 +71,7 @@ function sectionMask(names) {
 // build), the fight's own section, no economy input.
 const FACT_SECTIONS = Object.freeze({
     build: Object.freeze(['build', 'benefits', 'sources']),
+    recipes: Object.freeze(['build', 'benefits', 'sources']),
     fight: Object.freeze(['combat']),
     dead: Object.freeze(['combat']),
     relations: Object.freeze(['relations']),
@@ -74,6 +79,7 @@ const FACT_SECTIONS = Object.freeze({
     occupation: Object.freeze(['occupation']),
     riskDeaths: Object.freeze(['combat', 'occupation']),
     supply: Object.freeze(['supply']),
+    stores: Object.freeze(['supply', 'sources']),
     horizon: Object.freeze(['benefits'])
 });
 // The names of the sections raised in wishDirty bits, in table order.
@@ -83,13 +89,16 @@ function sectionNames(bits) {
     return names;
 }
 // The build fact: class, level, worn gear, hennas, skills, the hot capture
-// (ColdCombatProfile.kitEvents, the kit parts) and the craft. Effects and
-// night are no economy input, so a buff or the day/night flip moves no fact.
+// (ColdCombatProfile.kitEvents, the kit parts), the craft (level, station,
+// workshop), the soul crystal quest and the karma flip that closes the towns.
+// Effects and night are no economy input, so a buff or the day/night flip
+// moves no fact. The recipe book is its own fact (semanticFacts.recipes).
 // Its parts do not read the clock.
 function kit(state) {
     const stats = state.stats || {};
     return hash([CombatProfile.kitEvents(state),
-        state.craftLevel ?? stats.dwarvenCraftLevel, stats.recipes || state.recipes, stats.workshop]);
+        state.craftLevel ?? stats.dwarvenCraftLevel, stats.craftStationId ?? null, stats.workshop,
+        !!stats.soulCrystalQuest, Karma.closesTowns(stats.karma)]);
 }
 function fundingMark(state, escrow = 0) {
     const packet = state.stats?.money;
@@ -97,7 +106,8 @@ function fundingMark(state, escrow = 0) {
     const wallet = PurchaseFunding.budget(state, escrow) - positive(packet[2]);
     const funded = [];
     for (let at = 5; at < packet.length; at += 3) funded.push(wallet >= positive(packet[at]));
-    return hash([wallet >= 0, ...funded, PurchaseFunding.moneyReached(state, escrow)]);
+    // Items or adena on their way from the board are a board-side money fact.
+    return hash([wallet >= 0, ...funded, PurchaseFunding.moneyReached(state, escrow), state.incomingPending === true]);
 }
 function reachesUpper(wallet, bounds) {
     const high = bounds?.[1];
@@ -250,6 +260,8 @@ function bounds(wallet) {
 }
 // facts: the build's semanticFacts(state) when its caller already has them.
 // bond: the build's relation bond (WishProviders.relationBond), null without one.
+// threat: the gear-threat mask the build weighed (context.gearThreatMask),
+// compared hard by the held verdict.
 function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null, bond = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
@@ -261,22 +273,35 @@ function snapshot(state, context, cashBounds, moneyError = -1, mode, money = nul
     return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
-        ...(facts || semanticFacts(state)), horizon: context.horizonHours,
+        ...(facts || semanticFacts(state)), threat: context.gearThreatMask, horizon: context.horizonHours,
         expHour: positive(context.hunt?.expPerHour), frustration: frustrationOf(state), ...(bond ? { bond } : {}),
         incomeError: incomeError(state, persona), sample: packSample(sample(state, context.timestamp, mode)),
         ...(share === 1 ? {} : { share }) };
 }
-function semanticFacts(state) {
+// Who the friend and the enemy are (WishProviders.relationTargets over the
+// bot's memory), not how much: their trust and hostility are the soft bond.
+function relationTargetIds(state, memory = null) {
+    const { friend, enemy } = Providers.relationTargets(state, { memory });
+    return [friend?.targetId ?? null, enemy?.targetId ?? null];
+}
+// memory: the bot's interaction memory (the caller's deps.memory), null when
+// the caller read none. recipes: the known recipe ids the build reads
+// (WishProviders.recipeIds), null when the caller holds no recipe book.
+function semanticFacts(state, memory = null, recipes = null) {
     const stats = state.stats || {};
     const partyId = Number(state.party?.partyId || state.partyId || 0);
     const stockIds = [736, invoke('GameServer/Inventory/ShotStock').planForState(state).selfId,
         invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state).selfId];
-    return { build: kit(state),
-        relations: hash([partyId ? state.party : null, Number(state.clanId ?? stats.clanId ?? 0), stats.relations]),
+    return { build: kit(state), recipes: recipes ? hash(recipes) : null,
+        relations: hash([partyId ? state.party : null, Number(state.clanId ?? stats.clanId ?? 0), ...relationTargetIds(state, memory)]),
         occupation: hash([state.spotId, state.activity === 'resting' ? 'hunting' : state.activity]),
         dead: Number(state.activity === 'dead' || Number(state.vitals?.hp) <= 0),
         riskDeaths: positive(stats.spotRisk?.windowDeaths),
-        supply: hash(stockIds.map(id => [id, positive(state.inventory?.[id]?.amount) > 0])) };
+        supply: hash(stockIds.map(id => [id, positive(state.inventory?.[id]?.amount) > 0])),
+        // The tables main keeps about the bot: the clan's material demand, the
+        // personal warehouse, the clan supply and whether the clan has a warehouse.
+        stores: hash([stats.clanMaterialDemand ?? null, Warehouse.contentIdentity(state),
+            ClanSupply.contentIdentity(state), ClanSupply.hasWarehouse(state)]) };
 }
 function horizonChanged(state, baseline, expPerHour, persona) {
     if (!baseline) return true;
@@ -311,7 +336,9 @@ function events(before, after, timestamp = Date.now(), escrow = 0) {
     const previous = represented || before.stats?.wishSections || {};
     let original;
     const previousFact = key => previous[key] ?? (original ||= semanticFacts(before))[key];
-    const current = semanticFacts(after);
+    // No memory and no recipe book here: the relations and the recipes the
+    // decision kept stand until the next verdict, which reads both.
+    const current = { ...semanticFacts(after), relations: previousFact('relations'), recipes: previousFact('recipes') };
     // The round's callers (a hunting round, a rest) hold no leaf to tell an
     // ordered trip from a flight: a trip begun inside a round is an event.
     return factEvents(previousFact, current, moneyEvent(after, represented || before.stats?.wishSections, timestamp, escrow)
@@ -349,6 +376,7 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     const raise = fact => { facts?.push(fact); for (const name of FACT_SECTIONS[fact]) sections.add(name); };
     if (!previousFact('dead') && current.dead) raise('dead');
     if (previousFact('build') !== current.build) raise('build');
+    if (previousFact('recipes') !== current.recipes) raise('recipes');
     if (previousFact('relations') !== current.relations) raise('relations');
     if (funding) { facts?.push('funding'); sections.add('funding'); }
     // Resting reads as hunting at its spot: a rest where the bot hunted is
@@ -357,7 +385,8 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
     if (current.riskDeaths > previousFact('riskDeaths')) raise('riskDeaths');
     // Physical exhaustion is never hidden by economic uncertainty.
     if (previousFact('supply') !== current.supply) raise('supply');
+    if (previousFact('stores') !== current.stores) raise('stores');
     return [...sections];
 }
 module.exports = { SECTIONS, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, fundingMark, meaningfulMoney, observationChanged, horizonChanged, incomeError,
-    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
+    SOFT_DELAY, softDue, softDeadline, carrySectionClocks, carrySectionBaseline, baselineIdentity, clockBytes, moneyEvent, observationEvent, horizonEvent, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

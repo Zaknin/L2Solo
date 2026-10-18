@@ -118,7 +118,7 @@ function relationTargets(state, deps = {}) {
 }
 // Those targets' magnitudes, the friend's trust and the enemy's hostility,
 // rounded (the observation baseline holds a few bytes); null without either.
-// Which person they are is the event key's (relationTargets); how much is soft.
+// Which person they are is the relations fact's (DecisionSections.relationTargetIds); how much is soft.
 function relationBond(state, deps = {}) {
     const { friend, enemy } = relationTargets(state, deps);
     if (!friend && !enemy) return null;

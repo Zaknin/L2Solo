@@ -15,8 +15,6 @@ const Skills = invoke('GameServer/Npc/NpcSkills');
 const Threat = invoke('GameServer/Bot/Economy/GearThreat');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-// The event input key at one fixed time (deps.timestamp when given).
-const KEY_AT = Date.now(), eventKey = (state, deps = {}) => Economy.eventInputKey(state, deps, deps.timestamp ?? KEY_AT);
 let failures = 0;
 function check(name, fn) {
     try { fn(); console.log(`ok - ${name}`); }
@@ -74,7 +72,7 @@ check('preparation reuses unchanged sources and notices in-place hostile changes
     bot.stats.relations[0].hostility = 0;
     bot.stats.targetCombat.lastDefeatedNpcIds = [264]; bot.spotId = 'magic';
     assert.equal(Threat.prepare(bot, deps, first).mask, 3);
-    assert.notEqual(eventKey(state(), deps), eventKey(state([264], 'magic'), deps));
+    assert.notEqual(Threat.maskFor(state(), deps), Threat.maskFor(state([264], 'magic'), deps));
 });
 check('physical and magic threats give distinct necklace gains', () => {
     const necklace = Data.items.find(item => Number(item.selfId) === 118);

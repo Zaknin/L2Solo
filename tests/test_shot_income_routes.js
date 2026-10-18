@@ -50,11 +50,6 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
                     selfId: Recipes.resolveByRecipeId(id).productId, count: 100000, price: 10000, enchant: 0 }] }));
             const investing = { ...state, level: 52, stats: { ...state.stats,
                 shotRecipeDemand: { itemId: recipe.recipeItemId, at: Date.now(), amount: 1, maxSpend: 1000 } } };
-            const Context = invoke('GameServer/Bot/Economy/EconomyContext'), at = investing.stats.shotRecipeDemand.at;
-            const keyOf = (owner, timestamp) => Context.eventInputKey(owner, { timestamp, gearThreatMask: 0, knownRecipes: [] }, timestamp);
-            const expired = { ...investing, stats: { ...investing.stats, shotRecipeDemand: null } };
-            assert.notEqual(keyOf(investing, at), keyOf(expired, at), 'selected recipe invalidates the native wish context');
-            assert.notEqual(keyOf(investing, at + 1800001), keyOf(investing, at), 'the investment expiry is an input event');
             const wishes = await probe(investing, { nativeRoutes: true, context: { recipeBook: Codec.pack([]) },
                 boardRows: [...records, ...competitors].map(row => [row.id, rowOf(row)]) });
             assert(wishes.queue.some(row => row.key === `resale:${recipe.productId}`), 'recipe investment has a native earning root');

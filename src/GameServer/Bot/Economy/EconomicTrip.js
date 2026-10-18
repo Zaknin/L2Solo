@@ -151,7 +151,8 @@ function frame(state) {
     const travel = state?.stats?.travel;
     return { activity: String(state?.activity || ''), currentRegion: state?.currentRegion == null ? null : String(state.currentRegion),
         loc: point(state?.loc), inventory: { 736: { amount: Math.max(0, Number(state?.inventory?.[736]?.amount || 0)) } },
-        // Karma: only its town-closing flip is a route input (Karma.closesTowns).
+        // Karma: only its town-closing flip is a route input (Karma.closesTowns);
+        // for the economy decision the same flip is part of the kit fact (DecisionSections.kit).
         stats: { karma: Number(Karma.closesTowns(state?.stats?.karma)),
             marketReturn: state?.stats?.marketReturn?.loc ? { loc: point(state.stats.marketReturn.loc) } : null,
             travel: travel ? { townName: travel.townName == null ? null : String(travel.townName),

@@ -818,7 +818,9 @@ class WishNetwork {
         const trace = detail ? { owner: Number(characterId), caller, trigger,
             inputHash: fnv1a32(inputKey), decisionSeq, activityLeaf } : null;
         if (diagnostic) Diagnostics.count('network', 'miss', !remembered ? 'uncached_actor' : !retain ? 'held_plan_only' : cached ? 'input_dependency_changed' : 'not_retained');
-        // ARCH-NOTE: group and clan decisions retain their existing event-key seed.
+        // Group and clan decisions roll on their input name: a group's
+        // is its members' facts keys, so a party's choice is rolled again only
+        // when a member's facts, market reads, decision sequence, leaf or focus move.
         const roll = kind => individual ? Tendency.roll(characterId, decisionSeq, kind)
             : Tendency.roll(actorKey, inputKey, kind);
         const solver = createSolver({ nodes, hourAdena, riskWeight, stockFor, wallet, survivalReserve, diagnostic, detail, trace, captureReadyCraft });
