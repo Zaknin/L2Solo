@@ -7,8 +7,6 @@ const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const PartyGoalCalculation = require('./PartyGoalCalculation');
-// Recruits a party keeps as declined until its next member, objective or kit event.
-const DECLINED_RECRUITS_MAX = 16;
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
@@ -1923,9 +1921,7 @@ class ColdSimulationKernel {
             // recruit check runs here on this thread's copies of the recruits;
             // the answer rides the leader's proposal (main commits a join). A
             // recruit mid-step keeps the join pending for the next leader step;
-            // recruits declined or gone are kept on the row (declinedRecruits)
-            // so the formation pass does not pick them again until a party
-            // event (below) clears the list.
+            // after a decline the next formation pass picks again.
             let recruitCheck = null;
             const pendingRecruits = run.party.stats?.pendingRecruits;
             if (pendingRecruits && !meetingPending && resolvedParty.status !== 'dissolved') {
@@ -1941,8 +1937,6 @@ class ColdSimulationKernel {
                     recruitCheck = checked ? { outcome: 'accepted', memberIds: run.party.memberIds, recruitIds: ids,
                         sources: PartyGoalCalculation.sources(recruits), joint: checked }
                         : { outcome: free ? 'declined' : 'gone' };
-                    if (!checked) resolvedParty.stats.declinedRecruits = [...new Set([
-                        ...(run.party.stats?.declinedRecruits || []), ...ids])].slice(-DECLINED_RECRUITS_MAX);
                 }
             }
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
@@ -1978,9 +1972,7 @@ class ColdSimulationKernel {
             // step raised its build section (its kit moved, below), and
             // closes when every member is planned or the party ends.
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            let partyEvent = false;
             const openRequirements = reason => {
-                partyEvent = true;
                 if (requirementProgress || meetingPending || materialHunt) return;
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
@@ -2068,12 +2060,6 @@ class ColdSimulationKernel {
                     }
                 }
                 if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
-            }
-            // A member, objective or kit event makes the declined recruits worth
-            // a new check: the list leaves the row with this step's write.
-            if (partyEvent && resolvedParty.stats.declinedRecruits && !recruitCheck) {
-                delete resolvedParty.stats.declinedRecruits;
-                if (atomicParty) memoryGroup.partyChanges[0].statsJson = JSON.stringify(resolvedParty.stats);
             }
             if (!current()) return;
             published = handled = true;

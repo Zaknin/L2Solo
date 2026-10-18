@@ -2631,10 +2631,8 @@ const PopulationService = {
                 }
                 const partyObjective = party.stats?.objective || null;
                 const Material = require('./CraftMaterialParty');
-                // Recruits its leader's step declined wait for a party event.
-                const declined = new Set((party.stats?.declinedRecruits || []).map(Number));
                 const nearby = matched.get(party).filter((state) => (
-                    !claimed.has(Number(state.characterId)) && !declined.has(Number(state.characterId))
+                    !claimed.has(Number(state.characterId))
                     && (Material.isObjective(partyObjective) || !Material.requestOf(state))
                     && ClanEquipmentPartyPolicy.allowed(state, partyObjective)
                 ));
