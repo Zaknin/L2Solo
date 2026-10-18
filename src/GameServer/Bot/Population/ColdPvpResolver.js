@@ -29,7 +29,7 @@ function allowed(sides) {
 // coarse: each condition on the ceil quarters others see it on.
 function ownSide(states, timestamp, coarse = false) {
     const condition = state => {
-        const p = Profile.profileFor(state, timestamp);
+        const p = Profile.fightProfile(state, timestamp);
         const exact = Visible.condition(clamp(Number(state.vitals?.hp) || 0, 0, p.maxHp) / p.maxHp, p.maxCp > 0 ? p.cp / p.maxCp : 0,
             clamp(Number(state.vitals?.mp) || 0, 0, p.maxMp) / p.maxMp, Roles.shouldRestForMana(state), p.maxCp > 0);
         return coarse ? Visible.seen(exact, true) : exact;
@@ -59,7 +59,7 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
     const fighters = sides.flatMap((side, index) => side.members
         .filter(state => state.characterId === side.principal.characterId || roles.get(state.characterId) === 'support')
         .map(state => {
-            const profile = Profile.profileFor(state, timestamp);
+            const profile = Profile.fightProfile(state, timestamp);
             return { state, side: index, profile, id: state.characterId,
                 vitals: { hp: clamp(state.vitals.hp, 0, profile.maxHp), maxHp: profile.maxHp,
                     mp: clamp(state.vitals.mp, 0, profile.maxMp), maxMp: profile.maxMp },

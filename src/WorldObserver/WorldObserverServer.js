@@ -1550,7 +1550,7 @@ function effectiveColdCombat(state) {
             : Object.fromEntries((state.stats?.equipment || []).map((item) => [
                 String(item.selfId), { ...item, equipped: true }
             ]));
-    const profile = ColdCombatProfile.profileFor({ ...state, inventory });
+    const profile = ColdCombatProfile.profileFor({ ...state, inventory }, Date.now(), { store: false });
     return {
         pAtk: Number(profile.pAtk || 0),
         mAtk: Number(profile.mAtk || 0),

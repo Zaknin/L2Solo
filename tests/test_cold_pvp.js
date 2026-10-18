@@ -151,7 +151,7 @@ async function main() {
         aggressionConfig.pvpAggression = savedAggression;
     }
     assert(duel.actions <= Pvp.MAX_ACTIONS && duel.durationMs <= Pvp.MAX_DURATION_MS);
-    assert(duel.fighters.some(f => f.cp < Profile.profileFor(f.id === left.characterId ? left : right, at).cp));
+    assert(duel.fighters.some(f => f.cp < Profile.fightProfile(f.id === left.characterId ? left : right, at).cp));
     assert(duel.fighters.find(f => f.id === right.characterId).mp < right.vitals.mp, 'magic spends real MP');
     const protectedSides = sides.map(side => ({ ...side, members: side.members.map(s => ({ ...s, stats: { ...s.stats, clanId: 9 } })) }));
     assert.strictEqual(run(protectedSides).reason, 'pvp_protected_context');

@@ -10,6 +10,7 @@ const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
 const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
+const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 
 const anonymousStateIds = new WeakMap();
 let nextAnonymousStateId = 1;
@@ -333,7 +334,9 @@ const SpotService = {
             role: options.role || status.role,
             equipment: options.equipment
         };
-        routeOptions.matchupProfiles = invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(routeState, routeOptions);
+        // The stand-in state carries the bot's id without its bag: a what-if
+        // for the kit profile store.
+        routeOptions.matchupProfiles = BotTargetMatchup.stateProfiles(routeState, { ...routeOptions, store: false });
 
         const candidates = this.ensureIndexed()
             .filter((spot) => !(Number(options.spotRetryAfter?.[spot.id]) > Date.now()))

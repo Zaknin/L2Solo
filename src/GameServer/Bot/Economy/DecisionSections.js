@@ -6,7 +6,7 @@
 const { fnv1a32 } = require('../Fnv1a');
 const { createHash } = require('node:crypto');
 const PurchaseFunding = require('./PurchaseFunding');
-// Read through the module object at call time (tests replace buildInputKey, kitEvents).
+// Read through the module object at call time (tests replace kitEvents).
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 // Resolved at the first call (cycles); a require per call is a path lookup (L73).
@@ -83,9 +83,9 @@ function sectionNames(bits) {
     return names;
 }
 // The build fact: class, level, worn gear, hennas, skills, the hot capture
-// (ColdCombatProfile.kitEvents: holdEvents without its fight part, effects
-// and night) and the craft. Effects and night are no economy input, so a
-// buff or the day/night flip moves no fact. Its parts do not read the clock.
+// (ColdCombatProfile.kitEvents, the kit parts) and the craft. Effects and
+// night are no economy input, so a buff or the day/night flip moves no fact.
+// Its parts do not read the clock.
 function kit(state) {
     const stats = state.stats || {};
     return hash([CombatProfile.kitEvents(state),
@@ -253,14 +253,12 @@ function bounds(wallet) {
 function snapshot(state, context, cashBounds, moneyError = -1, mode, money = null, facts = null, bond = null) {
     const persona = context.persona;
     const actual = { ...state, stats: { ...state.stats, money: context.statsPacket.money } };
-    const profileKey = CombatProfile.buildInputKey(state, context.timestamp);
-    const night = profileKey.endsWith('|n') ? 1 : profileKey.endsWith('|d') ? 0 : -1;
     const budgetTracked = Array.isArray(money?.budgetBounds), escrow = budgetTracked ? money.buyOrderEscrow : 0;
     // budgetBounds tags the budget-aware schema. Its wallet/error use total
     // purchase funds; cashBounds still records physical fees. Old wallets are cash.
     const wallet = budgetTracked ? PurchaseFunding.budget(state, escrow) : positive(state.adena);
     const share = Hunt.onSpotShare(state);
-    return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError, night,
+    return { at: Number(context.timestamp), wallet, cashBounds, funding: fundingMark(actual, escrow), moneyError,
         ...(budgetTracked ? { budgetBounds: money.budgetBounds } : {}),
         choices: Number(context.choiceInputs || 0), bagValue: positive(context.choiceBagValue),
         ...(facts || semanticFacts(state)), horizon: context.horizonHours,

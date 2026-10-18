@@ -168,6 +168,14 @@ function compactPartyMemberContext(state = {}) {
     };
 }
 
+// The name of the first kit part (ColdCombatProfile.KIT_EVENTS) whose hash
+// differs between the held and the current kitEvents, or ''.
+function movedKitPart(held, current) {
+    const names = ColdCombatProfile.KIT_EVENTS;
+    for (let index = 0; index < names.length; index++) if (held[index] !== current[index]) return names[index];
+    return '';
+}
+
 class ColdSimulationCoordinator {
     constructor(options = {}) {
         this.WorkerClass = options.WorkerClass || Worker;
@@ -1351,20 +1359,20 @@ class ColdSimulationCoordinator {
 
     // The route hold (Hold.js place 'route', shadow). The held decision is the
     // spot a solo context chose (null: none), kept while its event inputs stay
-    // quiet: the combat profile events (ColdCombatProfile.holdEvents, named as
-    // the combat_profile place names them), party and clan, the ground the bot
+    // quiet: the kit parts (ColdCombatProfile.kitEvents, named by KIT_EVENTS;
+    // buffs and night are not route inputs), party and clan, the ground the bot
     // stands on, the wish leaf's spot and the wish focus, the equipment plan
     // and party request fields the search reads (its leveling recovery read
     // through the planner, which ends by time), and the risk exclusions with
     // the recovery level penalty. Occupancy and safety are checked on the held
     // spot, never keyed. One record per bot in this.routeHolds: the spot id,
-    // the 9 profile hashes, four short strings and two hashes.
+    // the 7 kit hashes, four short strings and two hashes.
     routeHold(state, ground, leaf, excludedSpotIds, index, soloOptions, timestamp) {
         const stats = state.stats || {};
         const plan = stats.equipmentPlan, request = stats.partyRequest;
         const events = {
             spotId: null,
-            profile: ColdCombatProfile.holdEvents(state, timestamp),
+            profile: ColdCombatProfile.kitEvents(state),
             relations: `${Number(state.party?.partyId || state.partyId || 0)}|${Number(state.clanId ?? stats.clanId ?? 0)}`,
             occupation: String(ground ?? ''),
             leaf: leaf?.activity === 'hunting' ? String(leaf.spotId ?? '') : '',
@@ -1376,7 +1384,7 @@ class ColdSimulationCoordinator {
             risk: fnv1a32(`${[...excludedSpotIds].sort().join(',')}|${SpotRiskPolicy.recoveryFor(state)?.levelPenalty || 0}`)
         };
         const held = (this.routeHolds ||= new Map()).get(Number(state.characterId));
-        let reason = !held ? 'unproved' : ColdCombatProfile.holdEvent(held.profile, events.profile)
+        let reason = !held ? 'unproved' : movedKitPart(held.profile, events.profile)
             || (held.relations !== events.relations ? 'relations'
                 : held.occupation !== events.occupation ? 'occupation'
                     : held.leaf !== events.leaf ? 'activity_leaf'

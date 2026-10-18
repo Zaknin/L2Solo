@@ -292,6 +292,9 @@ function soloSpotUpperBound(profiles) {
     };
 }
 
+// options.buffed: the fight profile (buffs and night at options.timestamp)
+// instead of the bot's kit profile; options.store: handed to the profile
+// (false: a what-if state under the bot's id).
 function stateProfiles(state, options = {}) {
     if (options.matchupProfiles) return options.matchupProfiles;
     const states = (options.capacityStates?.length ? options.capacityStates : [state])
@@ -301,7 +304,8 @@ function stateProfiles(state, options = {}) {
     const Cold = coldCombatProfile();
     const profiles = states.flatMap(member => typeof member.fetchHp === 'function'
         ? actorProfiles([member])
-        : coldProfiles({ ...Cold.withBuildSite('matchup', () => Cold.profileFor(member, options.timestamp)),
+        : coldProfiles({ ...Cold.withBuildSite('matchup', () => (options.buffed === true ? Cold.fightProfile : Cold.profileFor)(
+            member, options.timestamp, { store: options.store })),
             // Partial route projections must not turn an invented default
             // class/build into evidence that the real character is too weak.
             survivalKnown: !!member.stats?.coldCombat

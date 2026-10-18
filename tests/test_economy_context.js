@@ -289,15 +289,15 @@ async function run() {
             'an admitted candidate\'s source becoming known rebuilds');
     } finally { ScopedProviders.build = build; }
     console.log('PASS candidate read scopes');
-    // The build's memos (inventory row keys, the profile scope's build key,
-    // the bag tokens) end with it: a row changed after the build reads fresh.
+    // The build's memos (inventory row keys, the kit fact, the bag tokens)
+    // end with it: a row changed after the build reads fresh.
     // A nested build of another bot leaves the outer build's keys exact.
     {
         const T = Date.now(), deps = { timestamp: T }, Sections = invoke('GameServer/Bot/Economy/DecisionSections');
         const fixture = equippedFixture(1310, 1, 30, 20000);
         const worn = Object.keys(fixture.inventory).find(id => fixture.inventory[id].equipped);
         const state = { ...fixture, inventory: { ...fixture.inventory, [worn]: { ...fixture.inventory[worn] } } };
-        const keyBefore = eventKey(state, deps), buildBefore = Profile.buildInputKey(state, T);
+        const keyBefore = eventKey(state, deps);
         const kitBefore = Sections.kit(state);
         const bagRead = ctx => { const local = ctx.nodeInputs.begin(); ctx.nodeInputs.bag(worn); ctx.nodeInputs.end();
             return local.bag.get(Number(worn)); };
@@ -307,20 +307,19 @@ async function run() {
                 if (subject === state && outer === null) {
                     outer = ctx; bagDuring = bagRead(ctx);
                     Economy.forState(equippedFixture(1311, 1, 32, 30000), deps);
-                    nested = [eventKey(state, deps), Profile.buildInputKey(state, T), Sections.kit(state), bagRead(ctx)];
+                    nested = [eventKey(state, deps), Sections.kit(state), bagRead(ctx)];
                 }
                 return build(subject, ctx, buildDeps);
             };
             Economy.forState(state, deps);
         } finally { ScopedProviders.build = build; }
         assert(outer, 'the build reached its providers');
-        assert.deepEqual(nested, [keyBefore, buildBefore, kitBefore, bagDuring],
+        assert.deepEqual(nested, [keyBefore, kitBefore, bagDuring],
             'a nested build of another bot leaves the outer build\'s keys');
         state.inventory[worn].enchant = 3;
         const fresh = structuredClone(state);
         assert.notEqual(eventKey(state, deps), keyBefore);
         assert.equal(eventKey(state, deps), eventKey(fresh, deps), 'the row key reads the changed row');
-        assert.notEqual(Profile.buildInputKey(state, T), buildBefore);
         assert.equal(Sections.kit(state), Sections.kit(fresh), 'the kit reads the changed row');
         assert.notEqual(Sections.kit(state), kitBefore);
         assert.equal(bagRead(outer), JSON.stringify([state.inventory[worn], 0]), 'a late bag read reads the changed row');

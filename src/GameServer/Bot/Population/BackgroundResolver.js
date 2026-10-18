@@ -20,15 +20,15 @@ const PartyBuffLoadout = invoke('GameServer/Bot/AI/PartyBuffLoadout');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const Karma = invoke('GameServer/Karma');
 const SurvivalFloor = require('./SurvivalFloor');
-const Hold = require('../Economy/Hold');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
+// The fighter numbers with the bot's buffs and night at timestamp.
 function botCombatStats(state, timestamp = Date.now()) {
-    return ColdCombatProfile.profileFor(state, timestamp);
+    return ColdCombatProfile.fightProfile(state, timestamp);
 }
 
 // combat_profile: the profile builds and their ms in one fight or one solo
@@ -43,32 +43,6 @@ function countedBuilds(unit, kind, resolve, options) {
     Diagnostics.count('combat_profile', `${unit}_build`, kind, ColdCombatProfile.buildCount() - builds);
     Diagnostics.duration(`combat_profile:${unit}`, ColdCombatProfile.buildMs() - ms);
     return result;
-}
-
-// The combat profile hold (Hold.js place 'combat_profile', shadow): a solo
-// fight whose profile events (ColdCombatProfile.holdEvents) stayed quiet
-// since the bot's last fight would reuse that fight's profile. The held
-// record is the bot's own stats.coldCombat.profileHold { events, values }
-// (values, the compared numbers, only for a sampled owner); a death drops
-// it. Null outside the place, else { why, events, values, startedAt }.
-function profileHold(state, timestamp) {
-    if (!Hold.asked('combat_profile')) return null;
-    const held = state.stats?.coldCombat?.profileHold, events = ColdCombatProfile.holdEvents(state, timestamp);
-    const event = Array.isArray(held?.events) ? ColdCombatProfile.holdEvent(held.events, events) : 'unproved';
-    const why = event ? [event] : [];
-    Hold.check('combat_profile', why);
-    return { why, events, values: held?.values, startedAt: performance.now() };
-}
-// The record the fight's build leaves; a sampled owner with held values
-// also writes the same/new row against them.
-function heldProfile(state, hold, profile) {
-    const values = hold.values;
-    if (Array.isArray(values)) {
-        Hold.compare('combat_profile', state, hold.why, () => ColdCombatProfile.heldMove(values, profile),
-            performance.now() - hold.startedAt, () => ColdCombatProfile.heldDrift(values, profile));
-    }
-    return Diagnostics.enabled(Number(state.characterId))
-        ? { events: hold.events, values: ColdCombatProfile.heldValues(profile) } : { events: hold.events };
 }
 
 function combatRoleForState(state) {
@@ -1165,9 +1139,7 @@ function coldBotTurn(fighter, { allies, mob, mobHp, at, time, rng, party = false
 
 function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp = Date.now(), fightLimitMs = 12000, maxActions = 48 }) {
     const fightState = mutableCombatState(state);
-    const hold = profileHold(fightState, timestamp);
     const bot = botCombatStats(fightState, timestamp);
-    const profileHeld = hold && heldProfile(fightState, hold, bot);
     const encounterKey = PveEncounter.key([state], spot, targetNpcId);
     const pending = PveEncounter.read(state.stats?.pveEncounter, encounterKey, timestamp);
     const matchupProfiles = pending ? null : TargetMatchup.coldProfiles(bot, fightState, timestamp);
@@ -1335,7 +1307,6 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             effects: soloFighter.profile.effects,
             inventory: fightState.inventory,
             summon: soloFighter.summon || null,
-            profileHold: profileHeld,
             debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
                 musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
                 potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
@@ -1383,7 +1354,6 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         inventory: soloFighter.state.inventory,
         soulCrystals: soloFighter.soulCrystals || [],
         summon: soloFighter.summon || null,
-        profileHold: profileHeld,
         debug: { actions, durationMs: time, skillUses: soloFighter.skillUses, shotActions: soloFighter.shotActions, heals: soloFighter.heals,
             musicUses: soloFighter.musicUses, summonUses: soloFighter.summonUses, summonActions: soloFighter.summonActions,
             potionsUsed: soloFighter.potionsUsed, drunkPotions: soloFighter.drunkPotions || null,
@@ -1989,8 +1959,7 @@ const BackgroundResolver = {
                     cooldowns: result.cooldowns || {},
                     charges: result.charges || 0,
                     chargeExpiresAt: result.chargeExpiresAt || null,
-                    summon: result.died ? null : (result.summon || null),
-                    ...(result.profileHold ? { profileHold: result.died ? null : result.profileHold } : {})
+                    summon: result.died ? null : (result.summon || null)
                 }
             };
             materialize.exp += result.exp;
@@ -2134,13 +2103,9 @@ BackgroundResolver.resolveSolo = (options = {}) => {
             nextResolveAt: timestamp + 1000, debug: { reason: competitionReason, fights: 0, wins: 0 } }
         // Only raw equipment preparation is shared within this synchronous
         // round. Each fight still reads its current profile, effects and vitals.
-        // The step's own reads of the state at its timestamp (survival floor,
-        // standing regen, rest) share one profile (withProfileScope): nothing
-        // in the step writes the state's profile inputs, fights work on copies.
-        : ColdCombatProfile.withEquipmentPreparation(() => ColdCombatProfile.withProfileScope(competition.state,
-            () => countedBuilds('step', 'solo', resolveSolo, {
-                ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
-            })));
+        : ColdCombatProfile.withEquipmentPreparation(() => countedBuilds('step', 'solo', resolveSolo, {
+            ...options, state: competition.state, elapsedMs: competition.elapsedMs, timestamp
+        }));
     if (options.state?.stats?.pveEncounter && !Object.hasOwn(result.debug || {}, 'pendingFight')) {
         result.patch = { ...result.patch, stats: { ...(result.patch?.stats || options.state.stats), pveEncounter: null } };
     }

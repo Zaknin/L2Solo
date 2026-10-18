@@ -551,6 +551,8 @@ function normalize(row) {
     const stats = parseJson(row.statsJson, {});
     delete stats.marketTrades;
     delete stats.priceBeliefs;
+    // The retired combat profile hold record (no reader).
+    if (stats.coldCombat) delete stats.coldCombat.profileHold;
     const inventory = normalizeInventoryStackability(parseJson(row.inventorySummary, {}));
 
     return ClanMembershipPolicy.reconcileState({

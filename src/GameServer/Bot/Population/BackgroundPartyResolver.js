@@ -52,7 +52,7 @@ function distributeRewards({ members, spot, wins, defeatedNpcIds = [], overhitCo
     const expMultiplier = Number(pressure?.expMultiplier || 1);
     const rates = ProgressionRates.profile();
     const levels = members.map((state) => Number(state.level || 1));
-    const profiles = members.map((state) => ColdCombatProfile.profileFor(state, timestamp));
+    const profiles = members.map((state) => ColdCombatProfile.fightProfile(state, timestamp));
     const spoilerIndex = members.findIndex((state) => BotRoles.isSpoiler(state));
     const kills = Array.from({ length: wins }, (_, index) => ({
         npcSelfId: defeatedNpcIds[index],

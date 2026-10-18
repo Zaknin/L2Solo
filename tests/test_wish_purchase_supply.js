@@ -29,7 +29,7 @@ const adapters = {
         equipmentCandidate: () => true, equipmentItemBetter: (item, current) => !current },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), skillsFor: () => [], buildGainsFor: () => ({}),
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
-        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
+        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? recipeVariants : [],
         resolveByRecipeId: id => recipeVariants.find(row => row.recipeId === Number(id)) || null },

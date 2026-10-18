@@ -232,7 +232,7 @@ function gearGainReader(state, timestamp, build, caster = require('./BotImprovem
         const inventory = { ...withoutSlot, [item.selfId]: { selfId: Number(item.selfId),
             amount: paired ? Math.max(Number(previous?.amount || 0) + 1, equippedSlots.length) : 1,
             equipped: true, equippedCount: equippedSlots.length, equippedSlots, slot, enchant: 0 } };
-        const after = Profile.powerFor({ ...base, inventory }, timestamp, Profile.buildOptions(build, timestamp));
+        const after = Profile.powerFor({ ...base, inventory }, timestamp, { store: false });
         const attack = caster ? 'mAtk' : 'pAtk';
         const attackGain = Math.max(0, Number(after[attack]) / Math.max(1, Number(before[attack])) - 1);
         const defenceGain = Math.max(0, 1 - Number(before.pDef) / Math.max(1, Number(after.pDef)));
@@ -267,13 +267,12 @@ function attackRate(profile) {
     });
     return rotationRate(autoRate, casts);
 }
-function skillGain(state, book, before = null, beforeRate = null, timestamp = Date.now(), build = null) {
+function skillGain(state, book, before = null, beforeRate = null, timestamp = Date.now()) {
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const original = state.stats?.coldCombat || {};
     const skills = Profile.skillSnapshotsFromRecords([...original.skills || [], { selfId: book.skillId, level: book.level }]);
-    const options = build ? Profile.buildOptions(build, timestamp) : {};
-    const after = Profile.profileFor({ ...state, stats: { ...state.stats, coldCombat: { ...original, skills } } }, timestamp, options);
-    before = before || Profile.profileFor(state, timestamp, options);
+    const after = Profile.profileFor({ ...state, stats: { ...state.stats, coldCombat: { ...original, skills } } }, timestamp, { store: false });
+    before = before || Profile.profileFor(state, timestamp);
     beforeRate = beforeRate ?? attackRate(before);
     return { attack: Math.max(0, attackRate(after) / Math.max(0.001, beforeRate) - 1),
         defence: Math.max(0, 1 - before.pDef / after.pDef, 1 - before.mDef / after.mDef) };
@@ -393,7 +392,7 @@ function buildProjection(state, ctx, deps) {
     // Task 2 readers: one combat profile, spoil eligibility, craft labour and
     // trip map per build, shared by every farm and craft fact; they die at return.
     let combat = null, spoiler;
-    const profile = () => combat ??= Profile.profileFor(state, timestamp, Profile.buildOptions(ownBuild, timestamp));
+    const profile = () => combat ??= Profile.profileFor(state, timestamp);
     const Occupation = invoke('GameServer/Bot/Population/ColdOccupationSources');
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);

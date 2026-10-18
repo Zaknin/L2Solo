@@ -190,7 +190,7 @@ function statSources(profile, timestamp, options = {}) {
     };
     const situation = {
         hp: 1, maxHp: 1, moving: false, walking: false, seated: false,
-        get night() { options.onNightRead?.(); return options.night ?? GameTime.isNight(timestamp); }
+        get night() { return options.night ?? GameTime.isNight(timestamp); }
     };
     const sources = activeEffects(profile.effects, timestamp).map(effectStats);
     for (const skill of profile.skills || []) {
@@ -547,62 +547,82 @@ function skillsFor(state = {}, classId = number(state.stats?.coldCombat?.classId
         : state.characterId || saved ? [] : skillsFromTree(classId, level);
 }
 
-// One economy build (EconomyContext.forState) is synchronous and reads the
-// bot's own profile at one timestamp several times: the income route's
-// target matchup, the gear source facts and skill gains (with their own
-// build's night flag) and a repeated bag safety (L75). Nothing in the build
-// writes the profile's inputs (inventory rows, coldCombat, level, class,
-// hennas); the planners work on copies. The scope holds that one profile
-// until the build returns. Options only feed the night of statSources, so a
-// night flag equal to the timestamp's own night is the same profile; another
-// state, timestamp, night or option (a night probe) builds as before.
-// Equipment preparation only shares item rows and never changes a profile's
-// values. Each caller gets its own top-level copy, as from a fresh build.
-// The scope also holds the state's build input key at one exact timestamp
-// (buildInputKey), read by the build's section keys, capability and wish
-// section snapshot; a string, shared as is. The same holds the state's power
-// key (powerKey) per timestamp and slot form: buildGainsFor and buildInputKey
-// read the same inputs the profile does, so the key is built once per scope.
-let profileScope = null;
-function withProfileScope(state, work) {
-    const outer = profileScope;
-    profileScope = { state, timestamp: NaN, profile: null, keyAt: NaN, key: null, powerAt: NaN, power: null, canonAt: NaN, canon: null };
-    try { return work(); }
-    finally { profileScope = outer; }
+// The kit profile store, one per thread (the module loads once in each, no
+// message between threads). A bot's fighter numbers follow its kit
+// (kitEvents: class, level, worn gear, hennas, skills, the hot capture),
+// never its buffs or the clock: profileFor returns the stored profile while
+// the state's kit hash is the stored one and builds it once (no buffs, day)
+// when it moved. characterId -> { own, preparation }, each slot null or
+// { kit, kitPart, profile }: own is the bot, preparation its future state of
+// gear preparation (buildGainsFor with preparation). The stored profile is
+// shared, read-only: a reader spreads it into its own object to change it.
+// Buffs and night apply only in fightProfile. At most ownerLimit() bots; the
+// oldest inserted is dropped, a rebuilt one re-inserted. A state without a
+// positive characterId, or a what-if with options.store false (another kit
+// under the bot's real id), builds without reading or writing the store.
+const kitProfiles = new Map();
+function ownerLimit() {
+    return Math.ceil(1.25 * Math.max(256, Number(PopulationConfig.maxPlayingPopulation) || 0));
 }
-function sharedOptions(options, timestamp) {
-    for (const key in options) if (key !== 'night' || options.night !== GameTime.isNight(timestamp)) return false;
-    return true;
+function kitEntry(state, timestamp, options) {
+    const owner = Number(state.characterId);
+    if (!(owner > 0) || options.store === false) return buildKit(state, timestamp, 0);
+    const kit = buildHash(kitEvents(state).join('|')), slot = options.preparation === true ? 'preparation' : 'own';
+    let entry = kitProfiles.get(owner);
+    if (entry?.[slot]?.kit === kit) return entry[slot];
+    const built = buildKit(state, timestamp, kit);
+    if (entry) kitProfiles.delete(owner);
+    else entry = { own: null, preparation: null };
+    entry[slot] = built;
+    kitProfiles.set(owner, entry);
+    if (kitProfiles.size > ownerLimit()) kitProfiles.delete(kitProfiles.keys().next().value);
+    return built;
 }
 
+// The bot's unbuffed day profile, kept per kit. options: store (false: a
+// what-if state), preparation (true: the preparation slot); the timestamp
+// does not change the result.
 function profileFor(state = {}, timestamp = Date.now(), options = {}) {
-    const scope = profileScope !== null && profileScope.state === state && sharedOptions(options, timestamp) ? profileScope : null;
-    if (scope !== null && scope.profile !== null && scope.timestamp === timestamp) return { ...scope.profile };
-    const profile = Diagnostics.active() ? countedBuild(state, timestamp, options) : buildProfile(state, timestamp, options);
-    if (scope === null) return profile;
-    scope.timestamp = timestamp;
-    scope.profile = profile;
-    return { ...profile };
+    return kitEntry(state, timestamp, options).profile;
 }
 
-// Profile builds for the live read (combat_profile:build:all and its ms);
+// The profile a fight reads: the numbers pass over the stored kit part plus
+// the bot's current buffs (the saved effects that are not equipment ones,
+// active at timestamp) and the night of timestamp; cp from the clock. A new
+// object per call: the fight may write into it.
+function fightProfile(state = {}, timestamp = Date.now(), options = {}) {
+    const kitPart = kitEntry(state, timestamp, options).kitPart;
+    const effects = [...(state.stats?.coldCombat?.effects || []).filter(effect => !capturedEquipmentEffect(effect, state)),
+        ...kitPart.effects];
+    const profile = profileNumbers(kitPart, effects, timestamp, {});
+    profile.cp = currentCp(state, profile, timestamp);
+    return profile;
+}
+
+// The saved CP plus its regeneration since saved.cpAt at the profile's rate.
+function currentCp(state = {}, profile = {}, timestamp = Date.now()) {
+    const saved = state.stats?.coldCombat;
+    return Number.isFinite(saved?.cp) ? Math.min(profile.maxCp, Math.max(0, saved.cp)
+        + Math.floor(Math.max(0, timestamp - number(saved.cpAt, timestamp)) / 3000) * profile.cpRegen) : profile.maxCp;
+}
+
+// Kit profile builds for the live read (combat_profile:build:all and its ms);
 // a fight reads the totals around itself (buildCount, buildMs). Counted only
 // while diagnostics are on. combat_profile:build:<site> names who asked: an
-// explicit site set around the call (withBuildSite: gain, matchup; the
-// innermost wins), else own (the state of the open profile scope: the
-// economy build's or the solo step's own bot), else other.
+// explicit site set around the call (withBuildSite: gain, matchup, fight; the
+// innermost wins), else other.
 let builds = 0, buildTime = 0, buildSite = null;
-function countedBuild(state, timestamp, options) {
+function buildKit(state, timestamp, kit) {
+    if (!Diagnostics.active()) return kitSlot(state, timestamp, kit);
     const startedAt = performance.now();
-    const profile = buildProfile(state, timestamp, options);
+    const slot = kitSlot(state, timestamp, kit);
     const ms = performance.now() - startedAt;
     builds += 1;
     buildTime += ms;
     Diagnostics.count('combat_profile', 'build', 'all');
-    Diagnostics.count('combat_profile', 'build', buildSite
-        || (profileScope !== null && profileScope.state === state ? 'own' : 'other'));
+    Diagnostics.count('combat_profile', 'build', buildSite || 'other');
     Diagnostics.duration('combat_profile:build', ms);
-    return profile;
+    return slot;
 }
 function withBuildSite(site, work) {
     if (!Diagnostics.active()) return work();
@@ -614,7 +634,15 @@ function withBuildSite(site, work) {
 function buildCount() { return builds; }
 function buildMs() { return buildTime; }
 
-function buildProfile(state, timestamp, options) {
+function kitSlot(state, timestamp, kit) {
+    const kitPart = gatherKit(state, timestamp);
+    return { kit, kitPart, profile: profileNumbers(kitPart, kitPart.effects, timestamp, { night: false }) };
+}
+
+// The gather part of a profile: class template, worn gear, the kit effects
+// (armour sets and item effects of the worn gear), skills, the base stats
+// with the henna delta. No buff, no clock.
+function gatherKit(state, timestamp) {
     const saved = state.stats?.coldCombat;
     const classId = number(saved?.classId, number(state.stats?.classId, number(state.classId)));
     const template = classTemplate(classId);
@@ -623,7 +651,7 @@ function buildProfile(state, timestamp, options) {
         || [10, 13, 14, 25, 26, 28, 38, 39, 40, 41, 49].includes(classId);
     const equipped = equippedTemplates(state);
     const legacyEquipment = equipmentFromTemplates(equipped, spellcaster, template.stats || {});
-    const profile = {
+    const kitPart = {
         version: 1,
         capturedAt: number(saved?.capturedAt, timestamp),
         classId,
@@ -635,22 +663,32 @@ function buildProfile(state, timestamp, options) {
             ? { ...(saved?.equipment || {}), ...legacyEquipment }
             : { ...legacyEquipment, ...(saved?.equipment || {}) },
         // Set bonuses follow the current worn parts, including hypothetical swaps.
-        // Only legacy states without inventory still depend on captured bonuses.
-        effects: [...(saved?.effects || []).filter(effect => !capturedEquipmentEffect(effect, state)),
-            ...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))),
+        // The captured set effects of a state without inventory are saved
+        // effects, read with the buffs (fightProfile), as the kit hash has no
+        // saved effects.
+        effects: [...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))),
             ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)],
-        skills: skillsFor(state, classId, level)
+        skills: skillsFor(state, classId, level),
+        level, race: number(template.template?.race), spellcaster
     };
     const henna = invoke('GameServer/Henna/HennaRules').totals(state.stats?.hennas || []);
     // Captured hot base stats already include the same paid symbols. Only
     // the delta from that capture is added when the cold inventory changes.
     for (const stat of ['STR', 'DEX', 'CON', 'INT', 'WIT', 'MEN']) {
         const captured = number(saved?.henna?.[stat]);
-        profile.base[stat.toLowerCase()] = number(profile.base[stat.toLowerCase()], 1) + henna[stat] - captured;
+        kitPart.base[stat.toLowerCase()] = number(kitPart.base[stat.toLowerCase()], 1) + henna[stat] - captured;
     }
+    return kitPart;
+}
+
+// The numbers pass: the formulas over a kit part, a list of effects and the
+// night of sourceOptions (statSources; unset: the night of timestamp).
+function profileNumbers(kitPart, effects, timestamp, sourceOptions) {
+    const { classId, level, spellcaster } = kitPart;
+    const profile = { version: kitPart.version, capturedAt: kitPart.capturedAt, classId, base: kitPart.base,
+        equipment: kitPart.equipment, effects, skills: kitPart.skills };
     // Resolve effects and passive requirements once for this calculation.
-    // A later profile rebuild gets fresh sources after gear, skill or buff changes.
-    const sources = statSources(profile, timestamp, options);
+    const sources = statSources(profile, timestamp, sourceOptions);
     const equipment = profile.equipment;
     const str = effectiveBase(profile, 'STR', timestamp, sources);
     const dex = effectiveBase(profile, 'DEX', timestamp, sources);
@@ -666,8 +704,6 @@ function buildProfile(state, timestamp, options) {
         * multiplier(profile, 'maxCpMul', timestamp, sources) + add(profile, 'maxCpAdd', timestamp, sources));
     const cpRegen = Math.max(0, number(DataCache.revitalize?.hp?.[level]) * Formulas.calcLevelMod(level)
         * Formulas.calcBaseMod.CON(con) * multiplier(profile, 'regCp', timestamp, sources));
-    const cp = Number.isFinite(saved?.cp) ? Math.min(maxCp, Math.max(0, saved.cp)
-        + Math.floor(Math.max(0, timestamp - number(saved.cpAt, timestamp)) / 3000) * cpRegen) : maxCp;
     const pAtk = Math.round(Formulas.calcPAtk(level, str, number(equipment.pAtk, number(profile.base.pAtk)))
         * multiplier(profile, 'pAtkMul', timestamp, sources)) + add(profile, 'pAtkAdd', timestamp, sources);
     const mAtk = Math.round(Formulas.calcMAtk(level, int, number(equipment.mAtk, number(profile.base.mAtk)))
@@ -691,10 +727,10 @@ function buildProfile(state, timestamp, options) {
         weapon: !!equipment.weaponKind
     });
     return {
-        ...profile, level, race: number(template.template?.race),
+        ...profile, level, race: kitPart.race,
         maxLoad: Math.max(0, Formulas.calcMaxLoad(con) * multiplier(profile, 'maxLoadMul', timestamp, sources)
             + add(profile, 'maxLoad', timestamp, sources)),
-        maxCp, cp, maxHp: Math.max(1, maxHp), maxMp: Math.max(1, maxMp), pAtk: Math.max(1, pAtk), mAtk: Math.max(1, mAtk),
+        maxCp, cpRegen, maxHp: Math.max(1, maxHp), maxMp: Math.max(1, maxMp), pAtk: Math.max(1, pAtk), mAtk: Math.max(1, mAtk),
         pDef: Math.max(1, pDef), mDef: Math.max(1, mDef), accur: Math.max(1, accur), evasion: Math.max(0, evasion),
         critical: Math.max(0, critical), mCritRate, atkSpd: Math.max(1, atkSpd), castSpd: Math.max(1, castSpd),
         weaponMask: (WEAPON_MASK_BY_KIND[equipment.weaponKind] || 0) | (number(equipment.shieldPDef) > 0 ? 1048576 : 0)
@@ -941,9 +977,6 @@ function countClanSwitches(compute) {
 }
 const POWER_FIELDS = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
 const CANDIDATE_LIMIT = 65536, ENTRY_LIMIT = 256, NONZERO_LIMIT = 128;
-function ownerLimit() {
-    return Math.ceil(1.25 * Math.max(256, Number(PopulationConfig.maxPlayingPopulation) || 0));
-}
 function releaseBuild(key) {
     const entry = buildGains.get(key);
     if (!entry) return;
@@ -956,25 +989,12 @@ function releaseBuild(key) {
         if (marker && --marker.owners <= 0) buildGains.delete(entry.baseKey);
     }
 }
-function powerKey(state = {}, timestamp = Date.now(), canonicalSlots = false) {
-    const scope = profileScope !== null && profileScope.state === state ? profileScope : null;
-    if (scope === null) return computePowerKey(state, timestamp, canonicalSlots);
-    if (canonicalSlots) {
-        if (scope.canonAt !== timestamp) { scope.canon = computePowerKey(state, timestamp, true); scope.canonAt = timestamp; }
-        return scope.canon;
-    }
-    if (scope.powerAt !== timestamp) { scope.power = computePowerKey(state, timestamp, false); scope.powerAt = timestamp; }
-    return scope.power;
-}
-function computePowerKey(state, timestamp, canonicalSlots) {
-    return powerParts(state, timestamp, canonicalSlots).join('|');
-}
-// The build inputs of a profile, one part per input event: the kit parts
-// (kitParts) and the active effects (effectsPart).
-function powerParts(state, timestamp, canonicalSlots) {
-    const parts = kitParts(state, canonicalSlots);
+// The gain store's key: the kit parts (kitParts) and the active effects
+// (effectsPart).
+function powerKey(state, timestamp) {
+    const parts = kitParts(state, false);
     parts.push(effectsPart(state, timestamp));
-    return parts;
+    return parts.join('|');
 }
 // The slow build inputs, no clock: class (saved, current), level, worn gear,
 // hennas, skills, the hot capture.
@@ -1001,57 +1021,16 @@ function effectsPart(state, timestamp) {
 function buildHash(text) {
     return fnv1a32(text) * 2 ** 21 + (fnv1a32(text, 0x9e3779b9) & 0x1fffff);
 }
-function buildInputKey(state = {}, timestamp = Date.now()) {
-    const scope = profileScope !== null && profileScope.state === state ? profileScope : null;
-    if (scope !== null && scope.keyAt === timestamp) return scope.key;
-    // Lifecycle may publish the implicit worn slot explicitly. That is the
-    // same build, although the internal raw cache key can be reconstructed.
-    const text = powerKey(state, timestamp, true), entry = buildGainsFor(state, timestamp);
-    const key = entry.night === 1 ? `${text}|${GameTime.isNight(timestamp) ? 'n' : 'd'}` : text;
-    if (scope !== null) { scope.keyAt = timestamp; scope.key = key; }
-    return key;
-}
-// The combat profile hold (Hold.js place 'combat_profile'): the events of a
-// profile are its build inputs (powerParts, the parts DecisionSections' build
-// fact reads through buildInputKey) and the day/night flip, held as one small
-// hash each under HOLD_EVENTS: the kit events (kitEvents, no clock) then the
-// fight events (effects, night). Not buildInputKey itself: its buildGainsFor
-// would register a fight state as the owner's economy build. HELD_FIELDS are
-// the computed numbers a held copy is compared on; cp regenerates with time
-// (not an event) and is the last held value, read as drift.
+// The names of the kit parts, one per kitEvents hash (DecisionSections.kit,
+// the route record's moved part).
 const KIT_EVENTS = ['class', 'class', 'level', 'gear', 'henna', 'skills', 'capture'];
-const HOLD_EVENTS = [...KIT_EVENTS, 'effects', 'night'];
-const HELD_FIELDS = ['classId', 'level', 'maxHp', 'maxMp', 'maxCp', 'pAtk', 'mAtk', 'pDef', 'mDef', 'accur', 'evasion',
-    'critical', 'mCritRate', 'atkSpd', 'castSpd', 'weaponMask', 'maxLoad'];
-// The kit part of holdEvents: one hash per KIT_EVENTS name (DecisionSections.kit).
+// One small hash per kit part, no clock: the kit fact and the kit profile
+// store's hash.
 function kitEvents(state = {}) {
     const parts = kitParts(state, true);
     for (let index = 0; index < parts.length; index++) parts[index] = fnv1a32(String(parts[index]));
     return parts;
 }
-function holdEvents(state = {}, timestamp = Date.now()) {
-    const parts = kitEvents(state);
-    parts.push(fnv1a32(effectsPart(state, timestamp)), GameTime.isNight(timestamp) ? 1 : 0);
-    return parts;
-}
-// The name of the first event between held and current holdEvents, or ''.
-function holdEvent(held, current) {
-    for (let index = 0; index < HOLD_EVENTS.length; index++) if (held[index] !== current[index]) return HOLD_EVENTS[index];
-    return '';
-}
-function heldValues(profile) {
-    const values = HELD_FIELDS.map(field => profile[field]);
-    values.push(profile.cp);
-    return values;
-}
-// The first computed field of profile that differs from held values, or ''.
-function heldMove(values, profile) {
-    for (let index = 0; index < HELD_FIELDS.length; index++) {
-        if (values[index] !== profile[HELD_FIELDS[index]]) return HELD_FIELDS[index];
-    }
-    return '';
-}
-function heldDrift(values, profile) { return values[HELD_FIELDS.length] === profile.cp ? '' : 'cp'; }
 function powerFor(state = {}, timestamp = Date.now(), options = {}) {
     const profile = profileFor(state, timestamp, options);
     return Object.fromEntries(POWER_FIELDS.map(field => [field, profile[field]]));
@@ -1060,9 +1039,6 @@ function powerFor(state = {}, timestamp = Date.now(), options = {}) {
 // never retain that object or a per-candidate string/array.
 function powerNumbers(entry) {
     return Object.fromEntries(POWER_FIELDS.map((field, index) => [field, entry.power[index]]));
-}
-function buildOptions(entry, timestamp) {
-    return { night: entry.night === 0 ? false : GameTime.isNight(timestamp) };
 }
 function resizeGains(entry, idCapacity, gainCapacity) {
     const buffer = new ArrayBuffer(idCapacity * 3 + gainCapacity * 16);
@@ -1080,26 +1056,15 @@ function newEntry(power, night, baseKey, state) {
         kit: Diagnostics.active() ? buildHash(kitParts(state, false).join('|')) : 0 }, 32, 32);
 }
 function buildGainsFor(state = {}, timestamp = Date.now(), { preparation = false } = {}) {
-    const text = powerKey(state, timestamp), baseKey = buildHash(text);
+    const key = buildHash(powerKey(state, timestamp)), baseKey = key;
     const owner = Number(state.characterId) || 0;
-    let key = baseKey, entry = buildGains.get(baseKey);
+    let entry = buildGains.get(baseKey);
+    // The kit profile has no night, so every entry is a day entry (night 0).
+    // releaseBuild and countSwitch still handle night entries, but none are
+    // made any more. ARCH-01-b deletes this store.
     if (!entry) {
-        let readsNight = false;
-        const power = powerFor(state, timestamp, { onNightRead: () => { readsNight = true; } });
-        if (readsNight) {
-            entry = { night: 2, owners: 0 };
-            if (owner) buildGains.set(baseKey, entry);
-            key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
-            entry = newEntry(power, 1, baseKey, state);
-        } else entry = newEntry(power, 0, baseKey, state);
+        entry = newEntry(powerFor(state, timestamp, { preparation }), 0, baseKey, state);
         if (owner) buildGains.set(key, entry);
-    } else if (entry.night === 2) {
-        key = buildHash(text + (GameTime.isNight(timestamp) ? '|n' : '|d'));
-        entry = buildGains.get(key);
-        if (!entry) {
-            entry = newEntry(powerFor(state, timestamp), 1, baseKey, state);
-            if (owner) buildGains.set(key, entry);
-        }
     }
     if (!owner) return entry;
     // The preparation build carries the bot's id but has its own slot: in
@@ -1178,7 +1143,7 @@ function kitGainShadow(entry, state, timestamp, compute, effect) {
     const kit = { ...state, stats: { ...state.stats, coldCombat: { ...saved,
         effects: (saved.effects || []).filter(item => capturedEquipmentEffect(item, state)) } } };
     let before = kitPowers.get(entry);
-    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp, buildOptions(entry, timestamp))));
+    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp)));
     const kitEffect = withBuildSite('shadow', () => compute(kit, before));
     Diagnostics.count('combat_profile', 'gain_kit', sameGain(effect, kitEffect) ? 'same' : 'diff');
 }
@@ -1234,7 +1199,7 @@ function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightSources, kitEvents, holdEvents, holdEvent, heldValues, heldMove, heldDrift, withProfileScope, skillsFor, powerFor, buildGainsFor, buildInputKey, gainFor, forgetBuild, powerNumbers, buildOptions, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    fightProfile, currentCp, fightSources, KIT_EVENTS, kitEvents, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

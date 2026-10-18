@@ -104,8 +104,8 @@ function stuckCost(state, item, ctx, build = null) {
     let remainder = null;
     const bare = () => remainder ||= changedInventory(state, item, { equipped: false });
     const share = (candidate, after) => Profile.gainFor(build, candidate, (base = state, before = Profile.powerNumbers(build)) => ({
-        attack: Math.min(1, rate(Profile.powerFor({ ...base, inventory: after().inventory }, timestamp,
-            Profile.buildOptions(build, timestamp))) / Math.max(1, rate(before))), defence: 0 }), state, timestamp).attack;
+        attack: Math.min(1, rate(Profile.powerFor({ ...base, inventory: after().inventory }, timestamp, { store: false }))
+            / Math.max(1, rate(before))), defence: 0 }), state, timestamp).attack;
     let kept = share(key, bare);
     for (const spare of instances(state)) {
         if (spare.id === item.id || !adapter(spare).isWeapon()) continue;
@@ -132,7 +132,7 @@ function opportunities(state, ctx) {
     const build = Profile.buildGainsFor(state, timestamp), magic = isCaster(state);
     const value = (key, after) => {
         const effect = Profile.gainFor(build, `${magic ? 'm' : 'p'}:${key}`, (base = state, before = Profile.powerNumbers(build)) =>
-            gainBetween(before, Profile.powerFor({ ...base, inventory: after().inventory }, timestamp, Profile.buildOptions(build, timestamp)), magic),
+            gainBetween(before, Profile.powerFor({ ...base, inventory: after().inventory }, timestamp, { store: false }), magic),
             state, timestamp);
         return (effect.attack + effect.defence * ctx.deathHours) * horizon * weight;
     };

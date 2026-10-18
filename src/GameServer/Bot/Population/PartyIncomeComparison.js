@@ -102,9 +102,9 @@ function soloRoute(state, spots, timestamp, peers = []) {
         const effects = Offer.effectsFor(buff.selected, timestamp);
         const duration = Math.min(...effects.map(effect => effect.durationMs)) / HOUR_MS;
         const boosted = withEffects(standalone, effects);
-        const profiles = Match.stateProfiles(boosted, { timestamp });
+        const profiles = Match.stateProfiles(boosted, { timestamp, buffed: true });
         if (!Match.spotMatchup(choice.spot, profiles, { soloSafety: true }).eligible) continue;
-        const baseDamage = Match.damageRate(Match.stateProfiles(standalone, { timestamp }));
+        const baseDamage = Match.damageRate(Match.stateProfiles(standalone, { timestamp, buffed: true }));
         const gain = baseDamage > 0 ? Match.damageRate(profiles) / baseDamage : 1;
         const income = (row.income * Math.min(gain, 300 / Math.max(1, row.kills)) - price / duration) * Hunt.onSpotShare(state);
         if (income > best.income) best = { ...best, income, buffPrice: price, source: 'paid_buff' };
@@ -175,15 +175,15 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
         const row = Table.value(spot.id, tableRole(member), member.level, true,
             { spoilSkillLevel: Rewards.spoilSkillLevel(member) });
         if (!row || buffed[index] === member) return row;
-        const damage = Match.damageRate(Match.stateProfiles(member, { timestamp }));
-        const gain = damage > 0 ? Match.damageRate(Match.stateProfiles(buffed[index], { timestamp })) / damage : 1;
+        const damage = Match.damageRate(Match.stateProfiles(member, { timestamp, buffed: true }));
+        const gain = damage > 0 ? Match.damageRate(Match.stateProfiles(buffed[index], { timestamp, buffed: true })) / damage : 1;
         // Native buff stats change damage throughput, never drop rates or the
         // member's ownership share. Recovery gains wait for real samples.
         return { ...row, kills: row.kills * Math.max(1, gain) };
     });
     const gross = Table.value(spot.id, 'dps', level, true) || Table.value(spot.id, 'mage', level, true);
     const safe = Match.spotMatchup(spot, Match.stateProfiles(buffed[0],
-        { timestamp, capacityStates: buffed, mode: 'party' }), { soloSafety: true }).eligible;
+        { timestamp, capacityStates: buffed, mode: 'party', buffed: true }), { soloSafety: true }).eligible;
     const totalKills = values.reduce((sum, row) => sum + positive(row?.kills), 0);
     // The cold resolver opens at most one encounter per 12 seconds, shared
     // by all members. A large group cannot multiply that supply of monsters.

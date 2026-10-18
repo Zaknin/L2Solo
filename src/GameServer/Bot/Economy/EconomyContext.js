@@ -15,8 +15,6 @@ const Valuation = require('./EconomicValuation');
 const Providers = require('./WishProviders');
 const Sections = require('./DecisionSections');
 const Funding = require('./PurchaseFunding');
-// Read through the module object at call time (tests replace withProfileScope).
-const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const SpotRiskPolicy = require('../Population/SpotRiskPolicy');
 const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
 const Network = require('./WishNetwork');
@@ -1088,7 +1086,7 @@ function kitReader(data, price, scrollUseHours) {
 // again. Key: the same state object, timestamp, spots and occupancy objects,
 // mode, maxChecks and required gear flag. Select also reads module state
 // (SpotRiskPolicy exclusions, SpotValueTable tables, SpotProfiles capacity,
-// LevelingRoutes, ColdCombatProfile scope), so the reuse is exact only because
+// LevelingRoutes, the ColdCombatProfile kit store), so the reuse is exact only because
 // nothing yields or writes between the basics and the build of one step: a
 // record must never cross an await or a write to occupancy or reservations.
 // The record keeps each price(id) select made, in order, with
@@ -1245,12 +1243,7 @@ function basics(state = {}, deps = {}) {
     return base;
 }
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
-// The build reads the bot's own combat profile several times at one
-// timestamp; one build of it serves them (ColdCombatProfile.withProfileScope).
 function forState(state = {}, deps = {}) {
-    return CombatProfile.withProfileScope(state, () => buildForState(state, deps));
-}
-function buildForState(state, deps) {
     const diagnostic = Diagnostics.active();
     const inputSequence = Number(state.stats?.decisionSeq || 0);
     const inputActivityLeaf = Number(state.stats?.activityLeaf || 0);

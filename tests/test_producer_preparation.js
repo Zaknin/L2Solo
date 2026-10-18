@@ -28,7 +28,7 @@ const adapters = {
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn() },
     'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), buildGainsFor: () => ({}),
         gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
-        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
+        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? [recipe] : [], resolveByRecipeId: id => id === 301 ? recipe : null },
     'GameServer/Items/C4DualSwordCombinations': { resolveByProductId: () => null, resolveByRecipeId: () => null },
