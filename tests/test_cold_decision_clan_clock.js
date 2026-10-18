@@ -24,7 +24,7 @@ state.stats.coldCombat.effects = [{ id: 1040, key: 'shield', stats: { pDefMul: 1
 const economy = Economy.forState(state, { timestamp });
 assert.equal(economy.itemUsefulness(targetId), 0, 'a real non-top-k clan target takes the native fallback');
 const item = Data.items.find(row => Number(row.selfId) === targetId);
-assert(Profile.powerFor(state, timestamp).pDef > Profile.powerFor(state, timestamp + 60001).pDef,
+assert(Profile.fightProfile(state, timestamp).pDef > Profile.fightProfile(state, timestamp + 60001).pDef,
     'the native shield effect is active at the simulation clock and expired at the later clock');
 function verify(snapshot) {
     const expected = Providers.gearGain(snapshot, item, timestamp);

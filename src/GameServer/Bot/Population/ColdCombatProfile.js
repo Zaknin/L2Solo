@@ -532,9 +532,20 @@ function hasInventory(state) {
     return !!state.inventory && typeof state.inventory === 'object';
 }
 
-function capturedEquipmentEffect(effect, state) {
-    return effect.category === 'equipment_item_skill'
-        || (effect.category === C4ArmorSets.CATEGORY && hasInventory(state));
+// Equipment effects are kit, not buffs: item effects and armour sets (from
+// the worn parts with an inventory, else the saved captured ones, gatherKit).
+function capturedEquipmentEffect(effect) {
+    return effect.category === 'equipment_item_skill' || effect.category === C4ArmorSets.CATEGORY;
+}
+// The bot's buffs: its saved effects that are not equipment ones, active or
+// not (the reader filters by its clock).
+function buffEffects(state) {
+    return (state.stats?.coldCombat?.effects || []).filter(effect => !capturedEquipmentEffect(effect));
+}
+// A state without inventory: its saved captured set effects (kit, no clock).
+function savedSetEffects(state) {
+    return hasInventory(state) ? []
+        : (state.stats?.coldCombat?.effects || []).filter(effect => effect.category === C4ArmorSets.CATEGORY);
 }
 
 // The skills a cold profile carries, readable without building the profile.
@@ -569,7 +580,9 @@ function kitEntry(state, timestamp, options) {
     if (!(owner > 0) || options.store === false) return buildKit(state, timestamp, 0);
     const kit = buildHash(kitEvents(state).join('|')), slot = options.preparation === true ? 'preparation' : 'own';
     let entry = kitProfiles.get(owner);
-    if (entry?.[slot]?.kit === kit) return entry[slot];
+    const hit = entry?.[slot]?.kit === kit;
+    Diagnostics.count('combat_profile', 'kit', hit ? 'hit' : 'miss');
+    if (hit) return entry[slot];
     const built = buildKit(state, timestamp, kit);
     if (entry) kitProfiles.delete(owner);
     else entry = { own: null, preparation: null };
@@ -592,11 +605,23 @@ function profileFor(state = {}, timestamp = Date.now(), options = {}) {
 // object per call: the fight may write into it.
 function fightProfile(state = {}, timestamp = Date.now(), options = {}) {
     const kitPart = kitEntry(state, timestamp, options).kitPart;
-    const effects = [...(state.stats?.coldCombat?.effects || []).filter(effect => !capturedEquipmentEffect(effect, state)),
-        ...kitPart.effects];
+    const effects = [...buffEffects(state), ...kitPart.effects];
     const profile = profileNumbers(kitPart, effects, timestamp, {});
     profile.cp = currentCp(state, profile, timestamp);
     return profile;
+}
+
+// The saved kit of a bot that fights before any capture: the kit fields
+// capture writes, from its kit profile (copies: the stored one is shared),
+// and its cp at timestamp. The fight writes effects, cooldowns, charges and
+// the summon over it.
+function seedSnapshot(state = {}, timestamp = Date.now()) {
+    const profile = profileFor(state, timestamp);
+    return {
+        ...structuredClone({ version: profile.version, capturedAt: profile.capturedAt, classId: profile.classId,
+            base: profile.base, equipment: profile.equipment, skills: profile.skills }),
+        cp: currentCp(state, profile, timestamp), cpAt: timestamp
+    };
 }
 
 // The saved CP plus its regeneration since saved.cpAt at the profile's rate.
@@ -608,9 +633,9 @@ function currentCp(state = {}, profile = {}, timestamp = Date.now()) {
 
 // Kit profile builds for the live read (combat_profile:build:all and its ms);
 // a fight reads the totals around itself (buildCount, buildMs). Counted only
-// while diagnostics are on. combat_profile:build:<site> names who asked: an
-// explicit site set around the call (withBuildSite: gain, matchup, fight; the
-// innermost wins), else other.
+// while diagnostics are on. combat_profile:build:<site> names who asked: the
+// site set around the call (withBuildSite: matchup, fight, shadow; gainFor
+// sets gain; the innermost wins), else other.
 let builds = 0, buildTime = 0, buildSite = null;
 function buildKit(state, timestamp, kit) {
     if (!Diagnostics.active()) return kitSlot(state, timestamp, kit);
@@ -662,11 +687,9 @@ function gatherKit(state, timestamp) {
         equipment: equipped.length
             ? { ...(saved?.equipment || {}), ...legacyEquipment }
             : { ...legacyEquipment, ...(saved?.equipment || {}) },
-        // Set bonuses follow the current worn parts, including hypothetical swaps.
-        // The captured set effects of a state without inventory are saved
-        // effects, read with the buffs (fightProfile), as the kit hash has no
-        // saved effects.
-        effects: [...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))),
+        // Set bonuses follow the current worn parts, including hypothetical swaps;
+        // a state without inventory keeps its captured ones.
+        effects: [...C4ArmorSets.effectsForEquippedIds(new Set(equipped.map(item => Number(item.selfId)))), ...savedSetEffects(state),
             ...equipped.map(item => equipmentPreparation ? copyEquipmentEffect(item.equipmentEffect) : item.equipmentEffect).filter(Boolean)],
         skills: skillsFor(state, classId, level),
         level, race: number(template.template?.race), spellcaster
@@ -1010,12 +1033,11 @@ function kitParts(state, canonicalSlots) {
     // carry its alias at the root. Both forms have the same native build.
     return [number(saved.classId, currentClassId), currentClassId, state.level, worn, (state.stats?.hennas || []).join(','),
         Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '',
-        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null])];
+        JSON.stringify([saved.base || null, saved.henna || null, saved.equipment || null, ...savedSetEffects(state)])];
 }
 // The fight condition of a build at timestamp: its active effects.
 function effectsPart(state, timestamp) {
-    const saved = state.stats?.coldCombat || {};
-    return activeEffects((saved.effects || []).filter((effect) => !capturedEquipmentEffect(effect, state)), timestamp)
+    return activeEffects(buffEffects(state), timestamp)
         .map((effect) => `${effect.id}/${effect.key}/${JSON.stringify(effectStats(effect))}`).sort().join(',');
 }
 function buildHash(text) {
@@ -1101,6 +1123,7 @@ function forgetFrom(owners, owner) {
     releaseBuild(key);
 }
 function forgetBuild(characterId) {
+    kitProfiles.delete(Number(characterId));
     forgetFrom(ownerPreparations, Number(characterId));
     forgetFrom(ownerBuilds, Number(characterId));
 }
@@ -1139,11 +1162,12 @@ function kitGainShadow(entry, state, timestamp, compute, effect) {
         Diagnostics.count('combat_profile', 'gain_kit', 'no_effects');
         return;
     }
-    const saved = state.stats?.coldCombat || {};
+    const saved = state.stats?.coldCombat || {}, buffs = buffEffects(state);
     const kit = { ...state, stats: { ...state.stats, coldCombat: { ...saved,
-        effects: (saved.effects || []).filter(item => capturedEquipmentEffect(item, state)) } } };
+        effects: (saved.effects || []).filter(item => !buffs.includes(item)) } } };
     let before = kitPowers.get(entry);
-    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp)));
+    // The kit state carries the bot's id: a what-if, not the bot's slot.
+    if (!before) kitPowers.set(entry, before = withBuildSite('shadow', () => powerFor(kit, timestamp, { store: false })));
     const kitEffect = withBuildSite('shadow', () => compute(kit, before));
     Diagnostics.count('combat_profile', 'gain_kit', sameGain(effect, kitEffect) ? 'same' : 'diff');
 }
@@ -1195,11 +1219,11 @@ function gainFor(entry, key, compute, state = null, timestamp = 0) {
     entry.gains[slot * 2 + 1] = effect.defence;
     return { attack: entry.gains[slot * 2], defence: entry.gains[slot * 2 + 1] };
 }
-function size() { return { buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
+function size() { return { kitProfiles: kitProfiles.size, buildGains: buildGains.size, ownerBuilds: ownerBuilds.size, ownerPreparations: ownerPreparations.size, candidateIndex: candidateIndex.size }; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, fightSources, KIT_EVENTS, kitEvents, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, withEquipmentPreparation, size, cacheStats, countClanSwitches,
+    fightProfile, currentCp, seedSnapshot, fightSources, KIT_EVENTS, kitEvents, skillsFor, powerFor, buildGainsFor, gainFor, forgetBuild, powerNumbers, withEquipmentPreparation, size, cacheStats, countClanSwitches,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

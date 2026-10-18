@@ -29,9 +29,10 @@ let lastMoneyPacketMissing = 0;
 function isBotSession(session) {
     return session && session.accountId && String(session.accountId).startsWith('bot_');
 }
-// ColdCombatProfile.cacheStats() of one thread (L110); the fields are explained beside its stats.
+// ColdCombatProfile.cacheStats() of one thread (L110); the fields are explained beside its stats,
+// the last part (k) is the kit profile store's bots.
 function gainStoreLine(g = {}) {
-    return `${g.buildGains || 0}/${g.ownerBuilds || 0}/${g.ownerPreparations || 0}/${g.candidateIndex || 0}:${g.gainHits || 0}/${g.gainMisses || 0}/${g.limitMisses || 0}:${g.switches || 0}/${g.preparationSwitches || 0}/${g.clanSwitches || 0}/${g.filledDrops || 0}/${g.evictions || 0}`;
+    return `${g.buildGains || 0}/${g.ownerBuilds || 0}/${g.ownerPreparations || 0}/${g.candidateIndex || 0}:${g.gainHits || 0}/${g.gainMisses || 0}/${g.limitMisses || 0}:${g.switches || 0}/${g.preparationSwitches || 0}/${g.clanSwitches || 0}/${g.filledDrops || 0}/${g.evictions || 0}:k${g.kitProfiles || 0}`;
 }
 
 const PopulationStatus = {

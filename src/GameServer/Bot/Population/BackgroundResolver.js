@@ -1951,10 +1951,10 @@ const BackgroundResolver = {
             patch.stats = {
                 ...(patch.stats || state.stats || {}),
                 // patch.stats starts as the state's stats, so its coldCombat
-                // carries every field of the state's (or of the profile the
+                // carries every field of the state's (or of the seed the
                 // first fight seeded it with): only a bot without one builds.
                 coldCombat: {
-                    ...(patch.stats?.coldCombat || ColdCombatProfile.profileFor(fightState, timestamp)),
+                    ...(patch.stats?.coldCombat || ColdCombatProfile.seedSnapshot(fightState, timestamp)),
                     effects: result.effects || patch.stats?.coldCombat?.effects || [],
                     cooldowns: result.cooldowns || {},
                     charges: result.charges || 0,
