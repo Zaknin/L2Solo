@@ -11,10 +11,6 @@ const BACKOFF_STEPS = 60;
 const MAX_BACKOFF_STEPS = 360;
 const MAX_BACKOFFS = 8;
 const CAPACITY_BACKOFF_STEPS = 1;
-// A bot refused by a full spot keeps its current activity for one ordinary
-// hold before it plans again. A 1 s retry kept such bots due at once and let
-// them walk the full spots one per second in the cold queue.
-const ROUTE_CAPACITY_RETRY_MS = 30000;
 const MAX_FAILED_HUNTS = 3;
 const FAILED_HUNT_RECOVERY_WINS = 3;
 
@@ -274,7 +270,6 @@ module.exports = {
     BACKOFF_STEPS,
     MAX_BACKOFF_STEPS,
     MAX_BACKOFFS,
-    ROUTE_CAPACITY_RETRY_MS,
     CAPACITY_BACKOFF_STEPS,
     MAX_FAILED_HUNTS,
     FAILED_HUNT_RECOVERY_WINS,

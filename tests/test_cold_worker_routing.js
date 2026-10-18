@@ -13,8 +13,7 @@ const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpc
 const {
     ColdSimulationCoordinator,
     compactPartyMemberContext,
-    npcPlanningCatalogRows,
-    admitSoloRouteTravelState
+    npcPlanningCatalogRows
 } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 
 DataCache.init();
@@ -255,84 +254,44 @@ try {
     assert.strictEqual(batchRouteFor(22), null,
         'later decisions in the same cold snapshot must not overbook the reserved destination');
 
-    const baseRouteState = {
+    // A spot found full at arrival leaves the bot a "was full" mark
+    // (SpotRiskPolicy.withCapacityBackoff); the marks live the bot's own
+    // steps (stats.stepCount), one mark per arrival.
+    const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+    const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
+    const markedState = Risk.withCapacityBackoff({
         characterId: 23,
         phase: 'cold',
         activity: 'hunting',
-        spotId: currentSpot.id,
+        spotId: targetSpot.id,
         loc: { locX: 1, locY: 2, locZ: 3 },
-        timing: { activityStartedAt: 500 },
         stats: { equipmentPlan: { status: 'active', strategy: 'direct_drop' } }
-    };
-    const proposedRouteState = {
-        ...baseRouteState,
-        activity: 'traveling',
-        timing: { activityStartedAt: 1000, nextResolveAt: 26000 },
-        stats: {
-            ...baseRouteState.stats,
-            travel: {
-                spotId: targetSpot.id,
-                reason: 'equipment_source_replan',
-                arrivalAt: 26000
-            }
-        }
-    };
-    const fullDestination = {
-        [targetSpot.id]: {
-            count: 2,
-            reservedCount: 2,
-            capacity: 2,
-            retained: new Set(['20', '21']),
-            reservedKeys: new Set(['20', '21']),
-            reservationKeys: new Set(),
-            retainedReservationKeys: new Set()
-        }
-    };
-    const rejectedRoute = admitSoloRouteTravelState(
-        proposedRouteState,
-        baseRouteState,
-        [targetSpot],
-        fullDestination,
-        2000
-    );
-    assert.strictEqual(rejectedRoute.admitted, false,
-        'a route must be checked again against capacity immediately before commit');
-    assert.strictEqual(rejectedRoute.state.activity, 'hunting');
-    assert.strictEqual(rejectedRoute.state.stats.travel, undefined);
-    assert.strictEqual(rejectedRoute.state.stats.equipmentPlan, baseRouteState.stats.equipmentPlan,
-        'rejecting stale travel must preserve the newly selected equipment alternative');
-    const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
-    assert.strictEqual(rejectedRoute.state.timing.nextResolveAt, 2000 + Risk.ROUTE_CAPACITY_RETRY_MS,
-        'a rejected route retries after one ordinary hold, not at once and not in an unbounded wait');
-    assert(Risk.ROUTE_CAPACITY_RETRY_MS >= 10000,
-        'a refused bot must not stay due at once in the cold queue');
-    // "Was full" marks live the bot's own steps (stats.stepCount), one refusal per step.
-    const atStep = (value, stepCount) => ({ ...value, stats: { ...value.stats, stepCount } });
-    const refusedAt = Risk.stepCount(rejectedRoute.state);
-    let chained = rejectedRoute.state;
+    }, targetSpot.id);
+    const refusedAt = Risk.stepCount(markedState);
+    let chained = markedState;
     for (let index = 1; index < Risk.MAX_BACKOFFS; index += 1) {
-        chained = Risk.withCapacityBackoff(atStep(chained, refusedAt + index), `chain_${index}`, 2000 + index * Risk.ROUTE_CAPACITY_RETRY_MS);
+        chained = Risk.withCapacityBackoff(atStep(chained, refusedAt + index), `chain_${index}`);
     }
     const chainEnd = refusedAt + Risk.MAX_BACKOFFS - 1;
     assert.strictEqual(Risk.excludedSpotIdsForStates([atStep(chained, chainEnd + 1)]).size, Risk.MAX_BACKOFFS,
-        'every spot refused along a retry chain stays excluded, so the bot can reach a free spot');
+        'every spot found full along a chain stays excluded, so the bot can reach a free spot');
     assert.strictEqual(Risk.excludedSpotIdsForStates([atStep(chained, chainEnd + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).size, 0,
-        'the whole chain expires one backoff after the last refusal');
-    assert.strictEqual(rejectedRoute.state.stats.lastReason, 'route_capacity_full');
-    assert(Risk.excludedSpotIdsForStates([atStep(rejectedRoute.state, refusedAt + 1)]).has(targetSpot.id),
-        'a rejected capacity claim must not select the same destination on its retry');
-    assert(!Risk.excludedSpotIdsForStates([atStep(rejectedRoute.state, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).has(targetSpot.id),
+        'the whole chain expires one backoff after the last full spot');
+    assert.strictEqual(markedState.stats.lastReason, 'route_capacity_full');
+    assert(Risk.excludedSpotIdsForStates([atStep(markedState, refusedAt + 1)]).has(targetSpot.id),
+        'a spot found full is not selected again at the next step');
+    assert(!Risk.excludedSpotIdsForStates([atStep(markedState, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)]).has(targetSpot.id),
         'temporary congestion must expire after one step, without death-backoff escalation');
-    assert.strictEqual(rejectedRoute.state.stats.spotBackoffs, undefined);
+    assert.strictEqual(markedState.stats.spotBackoffs, undefined);
     for (const intent of [
         { equipmentPlan: { status: 'active', strategy: 'craft', next: { spotId: targetSpot.id } } },
         { partyRequest: { status: 'open', spotId: targetSpot.id } },
         { clanPartyObjective: { status: 'deferred', spotId: targetSpot.id } }
     ]) {
         const waiting = { activity: 'hunting', stats: { ...intent,
-            capacityBackoffs: rejectedRoute.state.stats.capacityBackoffs } };
+            capacityBackoffs: markedState.stats.capacityBackoffs } };
         assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1)), null,
-            'rejected intents must not retain a phantom capacity reservation');
+            'an intent on a spot found full must not hold a phantom place there');
         assert.strictEqual(SpotProfiles.farmIntentSpotId(atStep(waiting, refusedAt + 1 + Risk.CAPACITY_BACKOFF_STEPS)), targetSpot.id);
     }
 
@@ -344,62 +303,14 @@ try {
         SpotProfiles.cache = [targetSpot, free];
         SpotProfiles.findForState = originalFindForState;
         SpotService.findCurrentSpot = () => null;
-        const rerouted = SpotProfiles.findForState({ ...rejectedRoute.state, level: 16 },
+        const rerouted = SpotProfiles.findForState({ ...markedState, level: 16 },
             { timestamp: 3000, occupancy: {} });
-        assert.strictEqual(rerouted?.id, free.id, 'the next route must use a free alternative even with an older occupancy snapshot');
+        assert.strictEqual(rerouted?.id, free.id, 'the next search after a full arrival takes a free alternative even with an older occupancy snapshot');
     } finally {
         SpotProfiles.cache = originalCache;
         SpotProfiles.findForState = savedFind;
         SpotService.findCurrentSpot = savedPhysical;
     }
-
-    const safetyRouteState = {
-        ...proposedRouteState,
-        stats: {
-            ...proposedRouteState.stats,
-            travel: {
-                ...proposedRouteState.stats.travel,
-                reason: 'unsafe_ground_evacuation'
-            }
-        }
-    };
-    const admittedSafetyRoute = admitSoloRouteTravelState(
-        safetyRouteState,
-        baseRouteState,
-        [targetSpot],
-        fullDestination,
-        2000
-    );
-    assert.strictEqual(admittedSafetyRoute.admitted, true,
-        'evacuating party-only content must not be rejected by a full safe destination');
-    assert.strictEqual(admittedSafetyRoute.capacityBypassed, true,
-        'the exceptional capacity bypass must remain visible to diagnostics');
-    assert.strictEqual(fullDestination[targetSpot.id].reservedCount, 3,
-        'the safety overflow must be reserved so the same snapshot cannot overbook it again');
-    const rejectedSecondSafetyRoute = admitSoloRouteTravelState(
-        {
-            ...safetyRouteState,
-            characterId: 25
-        },
-        { ...baseRouteState, characterId: 25 },
-        [targetSpot],
-        fullDestination,
-        2000
-    );
-    assert.strictEqual(rejectedSecondSafetyRoute.admitted, false,
-        'a safety destination may exceed its soft capacity by only one bot');
-
-    const admittedOccupancy = {};
-    const admittedRoute = admitSoloRouteTravelState(
-        proposedRouteState,
-        baseRouteState,
-        [targetSpot],
-        admittedOccupancy,
-        2000
-    );
-    assert.strictEqual(admittedRoute.admitted, true);
-    assert.strictEqual(admittedOccupancy[targetSpot.id].reservedCount, 1,
-        'the pre-commit admission must reserve its destination for later proposals in the batch');
 
     const dangerousSpot = {
         id: 'dangerous-party-room',

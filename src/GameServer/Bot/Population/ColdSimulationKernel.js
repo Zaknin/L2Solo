@@ -554,6 +554,9 @@ class ColdSimulationKernel {
         this.equipmentBridgeReason = typeof options.equipmentBridgeReason === 'function'
             ? options.equipmentBridgeReason : null;
         this.projectResolve = typeof options.projectResolve === 'function' ? options.projectResolve : null;
+        // The room check at a party's arrival (the worker's partyArrival):
+        // { party, members } with the "was full" mark, or null.
+        this.partyArrival = typeof options.partyArrival === 'function' ? options.partyArrival : null;
         this.now = options.now || Date.now;
         this.emit = options.emit || (() => {});
         this.maxBatch = Math.max(1, Math.min(64, Number(options.maxBatch) || 64));
@@ -1808,6 +1811,13 @@ class ColdSimulationKernel {
                 if (materialArrival) {
                     arrivedMembers.splice(0, arrivedMembers.length, ...materialArrival.members);
                     arrivedParty = materialArrival.party;
+                }
+                // The party is checked once, as a whole, here; its members'
+                // own arrivals are not.
+                const crowded = this.partyArrival?.({ party: arrivedParty, members: arrivedMembers, spotId: partyTravel.spotId });
+                if (crowded) {
+                    arrivedMembers.splice(0, arrivedMembers.length, ...crowded.members);
+                    arrivedParty = crowded.party;
                 }
                 const proposals = partyTransitionProposals(
                     run,

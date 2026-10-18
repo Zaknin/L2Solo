@@ -12,12 +12,15 @@ function state(party) {
     const same = memory?.partyId === party?.partyId;
     const current = same && memory?.rosterKey === rosterKey(party) ? memory : {};
     return { spotId: party?.spotId, stats: { spotRisk: current.spotRisk, spotBackoffs: current.spotBackoffs,
+        capacityBackoffs: current.capacityBackoffs,
         stepCount: same ? Math.max(0, Number(memory.rounds) || 0) : 0,
         coldCompetition: party?.stats?.coldCompetition } };
 }
 function memory(party, stats) {
     return { partyId: party.partyId, rosterKey: rosterKey(party),
-        spotRisk: stats.spotRisk || null, spotBackoffs: stats.spotBackoffs || [], rounds: stats.stepCount || 0 };
+        spotRisk: stats.spotRisk || null, spotBackoffs: stats.spotBackoffs || [],
+        ...(stats.capacityBackoffs?.length ? { capacityBackoffs: stats.capacityBackoffs } : {}),
+        rounds: stats.stepCount || 0 };
 }
 function rounds(party) {
     return state(party).stats.stepCount;
@@ -31,6 +34,14 @@ function backoff(party, spotId, timestamp) {
 function withBackoff(party, value, timestamp) {
     if (!value) return party;
     const next = Risk.withBackoff(state(party), value, timestamp);
+    return { ...party, stats: { ...party.stats, partySpotRisk: memory(party, next.stats) } };
+}
+// The party found its spot full at arrival: the same "was full" mark as a
+// solo bot's, in the party's memory and counted in its rounds. The arrival is
+// not a round (no party resolve moves the counter there), so the mark holds
+// through the party's next round and lapses one round later.
+function withCapacityBackoff(party, spotId) {
+    const next = Risk.withCapacityBackoff(state(party), spotId);
     return { ...party, stats: { ...party.stats, partySpotRisk: memory(party, next.stats) } };
 }
 function record(party, result, timestamp) {
@@ -50,4 +61,4 @@ function record(party, result, timestamp) {
     return { ...result, partyPatch: { ...result.partyPatch, stats: { ...result.partyPatch?.stats,
         partySpotRisk: memory(party, { ...previous, spotRisk, stepCount }) } } };
 }
-module.exports = { rosterKey, rounds, excludedSpotIds, backoff, withBackoff, record };
+module.exports = { rosterKey, rounds, excludedSpotIds, backoff, withBackoff, withCapacityBackoff, record };
