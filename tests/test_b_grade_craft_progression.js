@@ -95,7 +95,7 @@ function verify(recipeId, missing = false, slot = 14, classId = 3, targetId = nu
         assert.deepEqual(plan.unseal, { sourceId: recipe.productId, productId: targetId });
         assert.notEqual(leaf.kind, 'mammon_unseal', 'Mammon must wait for the base craft or missing input');
         const command = invoke('GameServer/Bot/Population/ColdEconomyDecision').capture(context, state);
-        assert(command.data.byteLength + 48 + Buffer.byteLength(command.key) <= 800,
+        assert(command.data.byteLength + 48 + Buffer.byteLength(JSON.stringify(command.echo)) <= 800,
             'the conversion chain fits the bounded cold-worker decision');
     }
     assert.equal(plan.target.slot, slot, 'the selected paperdoll slot reaches the equipment receipt');
@@ -335,7 +335,7 @@ results.push(verify(430, false, 9, 9, 5710));
     assert.equal(selected.recipeId, 457);
     assert(selected.crystalPreparation.exchange);
     const command = invoke('GameServer/Bot/Population/ColdEconomyDecision').capture(context, state);
-    assert(command.data.byteLength + 48 + Buffer.byteLength(command.key) <= 800,
+    assert(command.data.byteLength + 48 + Buffer.byteLength(JSON.stringify(command.echo)) <= 800,
         'the crystal chain fits the bounded worker decision');
     assert.equal(command.activity.itemId, leaf.itemId);
     const native = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').planFor(state, {

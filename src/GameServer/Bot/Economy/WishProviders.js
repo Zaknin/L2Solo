@@ -298,8 +298,9 @@ function buildProjection(state, ctx, deps) {
     // per target, no owner store.
     // Sources are plain descriptors, independent of the wallet-dependent
     // arena admission below. Only the previous final cut (<=40 nodes) is
-    // kept by EconomyContext's existing bounded owner. A missing/evicted
-    // descriptor is calculated normally; this never limits alternatives.
+    // kept, in EconomyContext's held build entry while no source section is
+    // raised. A missing/evicted descriptor is calculated normally; this never
+    // limits alternatives.
     const keptSources = (deps.sourceSections?.nodes || []).filter(row => (!quantityInputs
         || !(row.inputs.bag || []).some(([id]) => id === -1)) && ctx.nodeInputs?.holds(row.inputs));
     const descriptors = new Map(keptSources.map(row => [row.node.key, row.node]));

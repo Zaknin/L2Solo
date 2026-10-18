@@ -7,11 +7,9 @@ const Diagnostics = require('./EconomyDiagnostics');
 
 // place -> 'off' | 'shadow' (the verdict runs for the counter, the place still
 // recomputes) | 'on' (a quiet verdict skips the recompute).
-const MODE = Object.freeze({ transit: 'shadow', economy: 'on',
-    ready_card: 'shadow', commit_skills: 'shadow',
-    party_requirements: 'shadow', route: 'shadow' });
+const MODE = Object.freeze({ party_requirements: 'shadow', route: 'shadow' });
 
-// The test override, as deps.eventReuse: deps.hold = { <place>: true }.
+// The test override: deps.hold = { <place>: true }.
 function on(place, deps = null) { return MODE[place] === 'on' || deps?.hold?.[place] === true; }
 // Whether a place runs its verdict: in shadow only while the counters count.
 function asked(place, deps = null) { return on(place, deps) || MODE[place] === 'shadow' && Diagnostics.active(); }

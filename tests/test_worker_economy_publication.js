@@ -62,7 +62,7 @@ async function runWorker(state, predicate) {
     const decision = Decisions.compact(hot.payload.economyDecision);
     assert.equal(decision.clan, null);
     assert.equal(decision.workshop.known, true);
-    assert.equal(decision.key, Decisions.stateKey(state));
+    assert.deepEqual(decision.echo, Decisions.stateEcho(state));
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,
         selfId: 952, amount: 1, equipped: false, slot: 0, enchant: 0 }));

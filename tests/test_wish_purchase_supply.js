@@ -252,7 +252,7 @@ const freeVisit = new network.WishNetwork().build({ actorKey: 'free', inputKey: 
 assert.equal(freeVisit.plans.get('free').effort, 3, 'zero cash is not multiplied by an unknown hour price');
 
 const ColdDecision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
-const decoded = ColdDecision.compact({ key: 'city', updatedAt: 1, riskWeight: 1,
+const decoded = ColdDecision.compact({ echo: [1, 0, null], updatedAt: 1, riskWeight: 1,
     activity: { activity: 'shopping', itemId: 202, amount: 6, price: 106, unitPrice: 1,
         rootKey: 'gear', town: 'Giran', sourceType: 'npc' } }).activity;
 assert.equal(decoded.town, 'Giran'); assert.equal(decoded.sourceType, 'npc');
@@ -276,7 +276,7 @@ assert.equal(goal.plan.marketTown, 'Giran', 'execution keeps the selected reacha
 assert.equal(goal.plan.sourceType, 'npc', 'execution keeps the chosen source class');
 assert.equal(goal.target.adena, 1, 'travel fee cannot inflate the executable unit quote');
 assert.equal(goal.plan.estimatedCost, 106, 'the complete monetary estimate retains its future trip');
-const wideDecision = ColdDecision.compact({ key: '65|57|hunting|0|', updatedAt: 1, riskWeight: 1,
+const wideDecision = ColdDecision.compact({ echo: [65, 57, null], updatedAt: 1, riskWeight: 1,
     usefulness: Array.from({ length: 80 }, (_, i) => i + 1),
     watch: Array.from({ length: 3 }, (_, i) => [200 + i, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 3]),
     materials: Array.from({ length: 8 }, (_, i) => [300 + i, Number.MAX_SAFE_INTEGER]),

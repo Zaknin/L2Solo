@@ -4,25 +4,15 @@
 const Config = require('../Population/PopulationConfig');
 const { isMainThread } = require('node:worker_threads');
 const LIMITS = Object.freeze({ recordBytes: 1024, batch: 16, batchBytes: 16384,
-    mainRecords: 256, workerRecords: 64, keys: 1024, owners: 16, perSecond: 64, mismatchPerSecond: 16,
+    mainRecords: 256, workerRecords: 64, keys: 1024, owners: 16, perSecond: 64,
     layers: 32, durationSamples: 32 });
 const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 'remaining', 'recordId', 'lineId',
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
     'errandAt', 'receiptUnits', 'receiptSpent', 'decisionSeq', 'activityLeaf', 'inputActivityLeaf', 'inputHash', 'target', 'owned', 'missing', 'requested', 'planned',
     'wallet', 'available', 'budget', 'reserve', 'priorityReserve', 'escrow', 'unitPrice', 'valueHours',
-    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'baselineAt', 'reconsidered',
-    'queueIndex', 'heldFunded', 'freshFunded', 'queueEntered', 'queueLeft', 'heldRootDrift', 'freshRootDrift', 'soft'];
+    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'reconsidered', 'soft'];
 const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
-    'moved', 'gate', 'gateDiff', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social', 'choiceEvent', 'heldRoot', 'freshRoot', 'queueMoved'];
-
-// A completed native comparison is useful even outside the owner detail
-// sample. Its rows (any of the bots) have their own per-second budget, so a
-// flood never takes the sampled owners' rate; queue and bytes stay shared.
-function isPlanMismatch(input) {
-    return Number.isSafeInteger(input?.owner) && input.owner > 0
-        && input.phase === 'wish_context' && input.gate === 'would_hold'
-        && ['focus', 'leaf', 'queue', 'funded'].includes(input.gateDiff);
-}
+    'moved', 'gate', 'mask', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social'];
 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {
@@ -36,7 +26,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     const dirtyKeys = new Set(), dirtyLayers = new Set();
     let sentSeq = 0, needFull = true, deltaDropped = false;
     let selectionListener = null;
-    let seq = 0, second = -1, rate = 0, mismatchRate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
+    let seq = 0, second = -1, rate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
     let drops = null;
     const active = () => config.developerDiagnostics === true;
     const detail = () => active() && config.economyDiagnostics === true;
@@ -137,20 +127,15 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     }
     function enqueue(input, imported = false) {
         if (!detail()) return false;
-        // A mismatch never enrolls its owner for alternatives or later detail.
-        const mismatch = isPlanMismatch(input);
-        if (!mismatch) {
-            if (imported) {
-                refreshSelection();
-                if (!(explicit || selected).has(Number(input?.owner))) return false;
-            } else if (!enabled(input?.owner)) return false;
-        }
+        if (imported) {
+            refreshSelection();
+            if (!(explicit || selected).has(Number(input?.owner))) return false;
+        } else if (!enabled(input?.owner)) return false;
         offered++;
         const timestamp = now(), bucket = Math.floor(timestamp / 1000);
-        if (second !== bucket) { second = bucket; rate = 0; mismatchRate = 0; }
+        if (second !== bucket) { second = bucket; rate = 0; }
         const summary = input.phase === 'wish_context' && typeof input.gate === 'string';
-        if (mismatch ? mismatchRate >= LIMITS.mismatchPerSecond
-            : rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
+        if (rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
         // Forward the event's original time and thread, never a late main snapshot.
         const record = { v: 1, at: Number.isFinite(input.at) ? input.at : timestamp,
             thread: imported && ['main', 'worker'].includes(input.thread) ? input.thread : thread, owner: Number(input.owner) };
@@ -163,7 +148,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         if ((rows?.length || 0) >= (summary ? capacity : capacity - summaryReserve)
             || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
         // Every transition is eligible; minute-based owner/phase dedup broke correlation.
-        if (mismatch) mismatchRate++; else rate++;
+        rate++;
         rows ||= []; rows.push(row); bytes += size; pump(); return true;
     }
     function push(input) { return enqueue(input); }
@@ -235,4 +220,4 @@ function sizeBucket(bytes) {
     return bytes < 2048 ? 'lt2k' : bytes < 4096 ? '2_4k' : bytes <= 8192 ? '4_8k' : bytes <= 16384 ? '8_16k'
         : bytes <= 32768 ? '16_32k' : 'over32k';
 }
-module.exports = { ...create(), create, LIMITS, sizeBucket, isPlanMismatch };
+module.exports = { ...create(), create, LIMITS, sizeBucket };

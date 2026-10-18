@@ -29,7 +29,6 @@ const Bytes = require('./CompactBytes');
 const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
 const Diagnostics = require('./EconomyDiagnostics');
 const PriceBelief = require('./PriceBelief');
-const Hold = require('./Hold');
 const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
@@ -40,7 +39,6 @@ const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
 // The bound of an event proof's packed and wire forms.
 const PROOF_RAW_BYTES = 65536;
-const SOURCE_MEMO_LIMIT = 8;
 // The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
 // 64-slot cache shrunk by them dropped a plan within ~2.5 s under a long cold queue, so every
 // same-key rebuild found nothing held (L133). A worker entry is the plan only (perf C1); the main
@@ -58,7 +56,6 @@ function registerProvider(key, provider) {
 // actorKey -> { key, readIds, plan, stateRef, gearThreat } of bots: bounded
 // (WishNetwork.remember). The plan is data (planOf); a reader gets view().
 const cache = new Map();
-const sourceHolders = new Set(); // actor keys whose held entry keeps sourceSections, oldest first
 // Groups apart, so a party composition that weighs many candidate groups
 // never evicts the bots' own reviews: `group:<partyId>` -> { key, ids,
 // context }, removed when the party ends (forgetGroup) and bounded besides;
@@ -120,22 +117,6 @@ function routeState(state, session) {
     routeAnchors.set(session, anchor);
     return { ...state, loc: anchor.loc };
 }
-// The native loot projection omits a stack's default metadata; DB
-// publication restores it. Its actual flags and ownership stay inputs,
-// while absent false/zero fields describe the same stack.
-function canonicalRow(row) {
-    const stackable = row.stackable ?? ItemIndex.find(DataCache.items, Number(row.selfId))?.etc?.stackable;
-    return { ...row, equipped: !!row.equipped, equippedCount: Number(row.equippedCount || 0), slot: Number(row.slot || 0),
-        enchant: row.enchant === null ? null : Number(row.enchant || 0), stackable };
-}
-const rowKey = row => [row.selfId, row.amount, row.equippedCount || row.equipped,
-    row.slot, row.enchant, row.stackable, row.starterMobLootAmount, row.kind, row.rank,
-    row.reservedAmount, row.protectedAmount, row.protected, row.acceptedCustomer, row.assignedClan, row.available,
-    (row.instances || []).map(item=>[item.id,item.enchant,item.slot,item.equipped,item.amount].join('/')).join(';')].join(':');
-// The economy place of the hold scheme (Hold.js): while it is on, a held
-// build whose event verdict (heldBuildVerdict) is quiet is kept, not rebuilt.
-// deps.eventReuse is the test override.
-function eventReuseEnabled(deps = {}) { return Hold.on('economy', deps) || deps.eventReuse === true; }
 const proofDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function activityIdentity(leaf) {
     if (!leaf) return null;
@@ -144,83 +125,6 @@ function activityIdentity(leaf) {
     // different selected activity. Every native command field stays bound.
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
-}
-// A party as a key input: none is null whatever its representation (an
-// empty party record, a null id); a member is its party with the id and role.
-function partyInput(state) {
-    const stats = state.stats || {}, partyId = Number(state.party?.partyId || state.partyId || 0);
-    return partyId ? { ...state.party, partyId, role: state.party?.role || stats.role || Roles.inferRole(stats.classId || 0) } : null;
-}
-// The fields of the section keys (sectionKeys: the source memo and the
-// choice inputs), in order.
-function inputKeyParts(state, deps = {}) {
-    const stats = state.stats || {};
-    const items = Object.values(state.inventory || {}).map(rowKey).sort().join(',');
-    // A native bag change, own sample or relation revision is an input event.
-    // No timing poll, no world-wide counter: the board and the market are
-    // heard at the soft point, through the decision's watch list only.
-    return [state.level, stats.classId, state.craftLevel ?? stats.dwarvenCraftLevel, items, positive(state.adena), stats.decisionSeq, stats.activityLeaf, stats.visitEvery?.[0], stats.visitEvery?.[1],
-        deps.workshop?.recipeId, deps.workshop?.productId, deps.workshop?.incomePerHour, deps.workshop?.cycleHours,
-        Providers.recipeIds(state, deps).join(','), deps.producerRevision ?? '',
-        Number(stats.shotRecipeDemand?.at) + 30 * 60 * 1000 > Number(deps.timestamp || Date.now())
-            ? Number(stats.shotRecipeDemand.itemId) : 0,
-        Number(state.vitals?.mp), positive(deps.buyOrderEscrow),
-        Math.floor(positive(stats.frustration) * 10), stats.karma, Number(state.clanId ?? stats.clanId ?? 0), Number(state.party?.partyId || state.partyId || 0),
-        stats.generatedCold, stats.race, stats.marketSellRetryAfter,
-        Number(stats.marketSellRetryAfter || 0) > Number(deps.timestamp || Date.now()),
-        invoke('GameServer/Bot/Economy/ItemDisposition').reservationInputKey(state), JSON.stringify(stats.clanMaterialDemand || null),
-        invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').version(state),
-        state.spotId, deps.gearThreatMask ?? GearThreat.maskFor(state, deps), stats.huntEfficiency?.[0]?.at, deps.memory?.revision || 0,
-        deps.inputKey || '', deps.mode || '', state.incomingPending === true, JSON.stringify(state.acceptedIncoming || null), Trip.key(state), deps.routeRows ? 'route_ready' : deps.tripCost ? 'route_given' : 'route_pending', stats.pk, stats.soulCrystalQuest, (stats.hennas || []).join(','),
-        Math.floor(positive(stats.exp ?? state.exp) / Math.max(1, positive(state.level) ** 2 * 100)),
-        deps.knowledgeEnabled ?? Knowledge.knowledgeEnabled(),
-        stats.production?.crafts || 0, positive(state.sp),
-        (stats.coldCombat?.skills || state.skills || []).map(row => `${row.selfId}:${row.level}`).join(',')];
-}
-// Every section keeps only its used inputs. Current combat resources and
-// financial facts do not invalidate a sword's benefit or its source graph.
-// A caller reads one part: the source memo only its source sections, the
-// choice inputs only the structure, so the other key is not built (L73).
-function sectionKeys(state, deps = {}, bands = [], part = 'structural') {
-    const stats = state.stats || {}, inventory = { ...state.inventory }, party = partyInput(state);
-    const role = party?.role || stats.role || Roles.inferRole(stats.classId || 0);
-    delete inventory[57];
-    for (const [id, low, high, original] of bands) {
-        const row = inventory[id], amount = Number(row?.amount);
-        if (!row || !(amount >= low) || high !== null && !(amount <= high)) continue;
-        inventory[id] = { ...canonicalRow(row), amount: original,
-            ...(row.instances ? { instances: row.instances.map(item => ({ ...item,
-                amount: Number(item.amount) >= low && (high === null || Number(item.amount) <= high) ? original : item.amount })) } : {}) };
-    }
-    const plan = stats.equipmentPlan;
-    // The planner publishes this known empty result after the wish review.
-    // It names no target, reservation or next action. Unknown plan fields
-    // keep the exact dependency instead of being treated as an empty plan.
-    const calculationPlan = Sections.isEmptyWishPlan(plan) ? null : plan;
-    const stable = { ...state, adena: 0, sp: 0, inventory,
-        party, partyId: party?.partyId || 0,
-        clanId: Number(state.clanId ?? stats.clanId ?? 0),
-        vitals: { ...state.vitals, mp: 0 },
-        stats: { ...stats, role, clanId: Number(stats.clanId ?? state.clanId ?? 0),
-            karma: stats.karma ?? 0, decisionSeq: 0, activityLeaf: 0, exp: 0, huntEfficiency: [] } };
-    const build = Sections.kit(state);
-    if (part === 'structural') return { build, structural: `${inputKeyParts(stable, deps).join('|')}|${build}|${JSON.stringify([
-        calculationPlan, stats.craftStationId, stats.persona, Number(stats.spotRisk?.windowDeaths || 0),
-        state.marketTrades, stats.marketTrades, stats.relations,
-        stats.production, role, state.accountName])}` };
-    const sourceStable = { ...stable, inventory: Object.fromEntries(Object.entries(inventory)
-        .filter(([, row]) => row.equipped || row.equippedCount)) };
-    const sourceParts = inputKeyParts(sourceStable, { ...deps, memory: null });
-    const sourceTail = [calculationPlan, stats.craftStationId, stats.persona, state.marketTrades, stats.marketTrades,
-        role, state.accountName,
-        // Source descriptors include route admission. Reuse only while the
-        // native active exclusions are equal at this already scheduled review.
-        [...SpotRiskPolicy.excludedSpotIdsForStates([state], deps.timestamp)].sort(),
-        stats.huntEfficiency, stats.huntClock, stats.spotRisk,
-        stats.money ? [stats.money[0], Number(stats.money[3]) > 0] : stats.wishFocus?.[2],
-        stats.exp ?? state.exp,
-        Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0 ? state.vitals?.mp : 0];
-    return { build, sources: `${sourceParts.join('|')}|${build}|${Sections.hash(sourceTail)}` };
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised. One trip is the plan itself: leaving for the
@@ -263,22 +167,22 @@ function bandsHold(state, bands = [], leaf = null) {
     return true;
 }
 // The event part of the one verdict "the held plan is still valid" (L70),
-// read by the verdict (heldBuildVerdict), the card (ColdEconomyDecision
-// .canReuse) and the worker's transit hold. Only hard checks: a raised
-// event (wishDirty), a crafter's MP and hard money (below the lower bound or
-// a moved funding mark). Soft money, income and the market are the soft
-// point's (DecisionSections.softEvents, the end of the step), never here.
+// read by the verdict (heldBuildVerdict), which checks a raised event
+// (wishDirty) itself before. Only hard checks: a crafter's MP and hard money
+// (below the lower bound or a moved funding mark). Soft money, income and
+// the market are the soft point's (DecisionSections.softEvents, the end of
+// the step), never here.
 // held: { baseline, mp, nativeCraftContinuation } of the last actual decision.
-// A failing check names itself in `why` (an array or null) and fails.
+// Every failing check names itself in `why` (an array or null), in order.
 const miss = (why, reason) => { why?.push(reason); return false; };
-// why: an array that receives the failing event's name (L114 diagnostics).
-function heldEventsQuiet(state, held, deps = {}, why = null, skipMoney = false) {
+const ALL_SECTIONS = Sections.sectionMask(Sections.SECTIONS);
+function heldEventsQuiet(state, held, deps = {}, why = null) {
     const stats = state.stats || {};
-    if (stats.wishDirty) return miss(why, 'wish_dirty');
+    let quiet = true;
     if (!held.nativeCraftContinuation && Number(state.craftLevel ?? stats.dwarvenCraftLevel) > 0
-        && Number(state.vitals?.mp) !== Number(held.mp)) return miss(why, 'crafter_mp');
-    if (!skipMoney && Sections.moneyChanged(state, held.baseline, deps.buyOrderEscrow, false)) return miss(why, 'money');
-    return true;
+        && Number(state.vitals?.mp) !== Number(held.mp)) quiet = miss(why, 'crafter_mp');
+    if (Sections.moneyChanged(state, held.baseline, deps.buyOrderEscrow, false)) quiet = miss(why, 'money');
+    return quiet;
 }
 // A quantity proof row (WishNetwork createQuantityInputs layout) of the
 // leaf's own progress: a stock row of its own root on its item, or a
@@ -327,9 +231,23 @@ function captureEventProof(state, deps = {}, options = {}) {
             && deps.sourceReady === true });
 }
 
+// options.collect (the decision point, forState): a refusal that names
+// sections ORs them into touchedSections and the checks go on; one that
+// names none stops with every section. Otherwise (every other caller) the
+// first refusal answers. The first refusal stays the reason either way.
+// A sections refusal returns `out` only to stop: `if (... && refuse()) return out`.
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
-    const refuse = (reason, names) => ({ valid: false, reason,
-        touchedSections: names ? Sections.sectionMask(names) : 0 });
+    const collect = options.collect === true;
+    const out = { valid: false, reason: '', touchedSections: 0 };
+    const refuse = (reason, names) => {
+        out.reason ||= reason;
+        if (!names) {
+            if (collect) out.touchedSections = ALL_SECTIONS;
+            return out;
+        }
+        out.touchedSections |= typeof names === 'number' ? names : Sections.sectionMask(names);
+        return collect ? null : out;
+    };
     if (!proof || proof.version !== 2 || proof.owner !== Number(state.characterId)
         || !Array.isArray(proof.decision) || proof.decision.length !== 3
         || !proof.decision.slice(0, 2).every(value => Number.isSafeInteger(value) && value >= 0)
@@ -350,33 +268,36 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (proof.at !== baseline.at) return refuse('baseline_at');
     if (timestamp < proof.at) return refuse('baseline_clock');
     const generation = RecomputeGeneration.current();
-    if (!generation || proof.generation !== generation) return refuse('generation', ['build', 'sources']);
-    if (activityIdentity(options.leaf) !== proof.activity) return refuse('activity', ['sources']);
+    if ((!generation || proof.generation !== generation) && refuse('generation', ['build', 'sources'])) return out;
+    if (activityIdentity(options.leaf) !== proof.activity && refuse('activity', ['sources'])) return out;
     // A raised event (reconcile bumps the sequence with it) is named by its
-    // sections before the echo, as the card names it (refused_plan:wish_dirty.<sections>).
+    // sections before the echo.
     const dirty = Number(state.stats?.wishDirty) || 0;
-    if (dirty) return { valid: false, reason: 'wish_dirty', touchedSections: dirty,
-        ...(Diagnostics.active() ? { facts: Sections.sectionNames(dirty).join('+') } : {}) };
+    if (dirty && refuse('wish_dirty', dirty)) return out;
     const echo = Sections.decisionRefusal(state, ...proof.decision);
-    if (echo) return refuse(echo, ['sources']);
+    // Collecting past raised bits: every raise (DecisionEvents markSections,
+    // raiseSections) bumps decisionSeq with its bits, an impossible step also
+    // clears activityLeaf, so a moved sequence or leaf is that raise, already
+    // named by its bits; read as sources it would rebuild the source walk on
+    // every event. A moved focus (no raise moves it) still lights sources.
+    const raisedEcho = collect && dirty && echo !== 'wish_focus';
+    if (echo && !raisedEcho && refuse(echo, ['sources'])) return out;
     deps = resolved(state, deps);
     if (!Warehouse.contentIdentity(state) || !ClanSupply.contentIdentity(state)) return refuse('unready');
     const current = fieldActivity(state, options.activity, options.leaf);
-    // Diagnostics: the facts behind a sections refusal (refused_plan:sections.<fact>).
-    const raised = Diagnostics.active() ? [] : null;
     // An occupation move the held leaf ordered (its trip, its arrival) is its own output.
-    const changed = Sections.factEvents(name => baseline[name], options.facts || requestFacts(current, deps), false, raised,
+    const changed = Sections.factEvents(name => baseline[name], options.facts || requestFacts(current, deps), false, null,
         Sections.occupationPlanned(state, options.leaf));
-    if (changed.length) return { ...refuse('sections', changed), ...(raised ? { facts: raised.join('+') } : {}) };
+    if (changed.length && refuse('sections', changed)) return out;
     // The gear-threat mask the decision weighed: only its flip between
     // "physical only" and "both" changes a decision. A baseline kept before
     // the mask was recorded has none to compare.
-    if (baseline.threat !== undefined && baseline.threat !== (deps.gearThreatMask ?? GearThreat.maskFor(current, deps)))
-        return refuse('observation', ['occupation', 'benefits', 'sources']);
+    if (baseline.threat !== undefined && baseline.threat !== (deps.gearThreatMask ?? GearThreat.maskFor(current, deps))
+        && refuse('observation', ['occupation', 'benefits', 'sources'])) return out;
     const why = [];
-    if (!heldEventsQuiet(state, { baseline, mp: options.mp, nativeCraftContinuation: deps.nativeCraftContinuation === true },
-        deps, why, options.rebuildBasis === true)) return refuse(why[0], why[0] === 'money' ? ['money'] : ['sources']);
-    if (!bandsHold(state, proof.bands, options.leaf)) return refuse('bands', ['supply', 'sources']);
+    if (!heldEventsQuiet(state, { baseline, mp: options.mp, nativeCraftContinuation: deps.nativeCraftContinuation === true }, deps, why))
+        for (const name of why) if (refuse(name, name === 'money' ? ['money'] : ['sources'])) return out;
+    if (!bandsHold(state, proof.bands, options.leaf) && refuse('bands', ['supply', 'sources'])) return out;
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
     // A held build passes its entry's fields; a card carries them on its leaf.
@@ -401,7 +322,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
-    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) return refuse('quantity', ['sources', 'money']);
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits && refuse('quantity', ['sources', 'money'])) return out;
     // The proof is held packed and read as a stream: no rows array.
     const ownRow = own === null ? null : row => ownQuantityRow(row, leaf.rootKey, own);
     const stock = stockReader(state, key => roots.get(key));
@@ -411,8 +332,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         return isReserved(id) && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
     };
     const moved = [];
-    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved))
-        return moved.length ? refuse('quantity', ['sources', 'money']) : refuse('unproved');
+    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved)
+        && (moved.length ? refuse('quantity', ['sources', 'money']) : refuse('unproved'))) return out;
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -433,17 +354,12 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             return band && band[2] !== null && /^Other\.(Material|Arrow)/.test(String(item?.template?.kind || ''))
                 && count - original[1] === positive(state.inventory?.[id]?.amount) - band[3];
         });
-    if (!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
-        return refuse('liquidation', ['sources', 'money']);
-    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp)) return refuse('check_failed', ['occupation', 'sources']);
-    if (options.rebuildBasis) {
-        // Reusing slow valuation facts is not permission to execute the old
-        // activity with the new wallet. Admission and the network run again.
-        return { valid: false, reason: 'rebuild_basis', touchedSections: Sections.sectionBit('money'), basisValid: true };
-    }
+    if ((!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
+        && refuse('liquidation', ['sources', 'money'])) return out;
+    if (!SpotRiskPolicy.activitySpotAllowed(state, options.leaf, timestamp) && refuse('check_failed', ['occupation', 'sources'])) return out;
     const leafWhy = heldLeafRefusal(state, leaf, deps, heldUnits, null, { liquidation: liquidation.candidates });
-    if (leafWhy) return refuse(leafWhy.reason, leafWhy.sections);
-    return { valid: true, reason: '', touchedSections: 0 };
+    if (leafWhy && refuse(leafWhy.reason, leafWhy.sections)) return out;
+    return out.reason ? out : { valid: true, reason: '', touchedSections: 0 };
 }
 function eventProofHolds(state, proof, deps = {}, options = {}) {
     const verdict = heldBuildVerdict(state, proof, deps, options);
@@ -527,69 +443,6 @@ function receiveEventProof(proof) {
     const value = proof?.quantities, cap = Network.QUANTITY_INPUT_BYTES;
     const quantities = value instanceof Uint8Array ? value.byteLength <= cap ? value : null : Bytes.fromBase64(value, cap);
     return quantities ? { ...proof, quantities } : null;
-}
-// Sampled proof uses existing numeric fields: item/requested = held hunting
-// item/amount, before = the held build's bag+incoming at the decision,
-// owned/actual = current bag/incoming, remaining = raw progress gap. This is
-// not allocatable craft stock.
-function shadowQuantityEvidence(state, held) {
-    const leaf = held?.plan.network?.activity;
-    if (!ColdEconomyDecision.materialHunt(leaf)) return null;
-    return { item: leaf.itemId, requested: leaf.amount, before: held.heldUnits,
-        owned: positive(state.inventory?.[leaf.itemId]?.amount), actual: positive(state.acceptedIncoming?.[leaf.itemId]),
-        remaining: Number.isFinite(held.heldUnits)
-            ? ColdEconomyDecision.remainingToOrder({ ...leaf, heldAtDecision: held.heldUnits }, state) : undefined };
-}
-const FOCUS_KINDS = new Set(['power', 'stock', 'resale', 'level', 'care', 'scores', 'status', 'book', 'enchant', 'sa', 'henna']);
-function focusKind(key) {
-    if (key == null || key === '') return 'none';
-    if (typeof key !== 'string') return 'other';
-    const end = key.indexOf(':');
-    const kind = end < 0 ? key : key.slice(0, end);
-    return FOCUS_KINDS.has(kind) ? kind : 'other';
-}
-// Compare funded flags only after both plans see the request's current wallet.
-function gatePlanDiff(state, held, fresh, deps, evidence = null) {
-    const before = held.plan.network;
-    if (before.focus?.[0] !== fresh.network.focus?.[0]) return 'focus';
-    if ((before.activity?.key ?? before.activity?.kind ?? null) !== (fresh.network.activity?.key ?? fresh.network.activity?.kind ?? null)) return 'leaf';
-    const left = before.queue || [], right = fresh.network.queue || [];
-    const reprice = (queue, plan) => moneyQueue(queue, Funding.budget(state, deps.buyOrderEscrow),
-        plan.survivalReserve, plan.hourAdena > 0 ? 1 / plan.hourAdena : 0);
-    for (let at = 0; at < Math.max(left.length, right.length); at++) {
-        if (at >= left.length || at >= right.length || left[at].key !== right[at].key) {
-            if (!evidence) return 'queue';
-            // Which order readers the held queue would mislead (view() reprices
-            // it; TradeIntent reads the top items): none = an order-only miss.
-            // A wish born or gone (entered/left) with quiet events is a missing event.
-            const heldMoney = reprice(left, held.plan), freshMoney = reprice(right, fresh);
-            const heldRows = new Map(left.map(row => [row.key, row])), freshRows = new Map(right.map(row => [row.key, row]));
-            const funded = money => money.queue.filter(row => row.funded).map(row => row.key).sort().join();
-            const watch = list => (list || []).map(row => `${row.itemId}x${row.amount}`).join();
-            const drift = key => heldRows.get(key)?.ratio > 0 && freshRows.get(key)?.ratio > 0
-                ? Math.round((freshRows.get(key).ratio / heldRows.get(key).ratio - 1) * 1000) / 1000 : undefined;
-            let entered = 0;
-            for (const key of freshRows.keys()) if (!heldRows.has(key)) entered++;
-            const moved = [watch(held.plan.watchList) !== watch(fresh.watchList) && 'watch',
-                heldMoney.gap?.key !== freshMoney.gap?.key && 'gap', funded(heldMoney) !== funded(freshMoney) && 'funded'].filter(Boolean);
-            Object.assign(evidence, { queueIndex: at, heldRoot: left[at]?.key, freshRoot: right[at]?.key,
-                queueEntered: entered, queueLeft: heldRows.size - freshRows.size + entered, queueMoved: moved.join() || 'order',
-                heldRootDrift: drift(left[at]?.key), freshRootDrift: drift(right[at]?.key) });
-            return 'queue';
-        }
-    }
-    const current = new Map(reprice(left, held.plan).queue.map(row => [row.key, row.funded])), repriced = reprice(right, fresh).queue;
-    for (let at = 0; at < repriced.length; at++) {
-        const row = repriced[at], heldFunded = current.get(row.key);
-        if (heldFunded !== row.funded) {
-            // Flags and index belong to the already-repriced current-wallet
-            // queue. Stored flags are never a queue-mismatch witness.
-            if (evidence) Object.assign(evidence, { queueIndex: at, heldRoot: row.key, freshRoot: row.key,
-                heldFunded: Number(heldFunded), freshFunded: Number(row.funded) });
-            return 'funded';
-        }
-    }
-    return 'same';
 }
 function quantityBands(state, context, projection) {
     const bands = [], stock = new Map();
@@ -1067,7 +920,6 @@ function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kin
 function forState(state = {}, deps = {}) {
     const diagnostic = Diagnostics.active();
     const inputSequence = Number(state.stats?.decisionSeq || 0);
-    const inputActivityLeaf = Number(state.stats?.activityLeaf || 0);
     if (diagnostic) Diagnostics.count('context', 'request');
     if (diagnostic && isMainThread && state.phase === 'cold') {
         const caller = deps.caller || 'other';
@@ -1088,30 +940,24 @@ function forState(state = {}, deps = {}) {
     if (!deps.routeRows && held?.plan.routeKey === Trip.key(state)) deps.routeRows = held.plan.routeRows;
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
-    // The economy place of the hold scheme (Hold.js): the one verdict on the
-    // held build (heldBuildVerdict). Off, every request builds; diagnostics
-    // still ask the verdict for the gate counters.
-    const activeEvents = eventReuseEnabled(deps);
-    // The facts the verdict compares, read once: the held leaf's own trip is
+    // The one verdict on the held build (heldBuildVerdict), collecting: the
+    // sections of all its refusals, no held build or an unproved one = every
+    // section. The facts it compares, read once: the held leaf's own trip is
     // read as the field activity it ordered (fieldActivity).
     const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
     const facts = requestFacts(current, deps);
     const key = inputName(facts, deps.gearThreatMask);
-    const eventVerdict = activeEvents || diagnostic ? heldBuildVerdict(state, held?.plan.eventProof, deps, {
+    const eventVerdict = heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
-        mp: held?.mp, timestamp, facts }) : { valid: false, reason: 'unproved', touchedSections: 0 };
-    // A caller that needs the member's graph nodes (a worker group solve)
-    // builds unless the held entry kept them (the main thread keeps them);
-    // such a request is no hold answer and is not counted.
-    const holdWhy = !activeEvents ? null : !eventVerdict.valid ? [eventVerdict.reason || 'unproved']
-        : deps.withNodes && !held.projection ? null : [];
-    if (holdWhy && diagnostic) Hold.check('economy', holdWhy, deps);
-    if (holdWhy?.length === 0) {
+        mp: held?.mp, timestamp, facts, collect: true });
+    // A valid held build is served. A caller that needs the member's graph
+    // nodes (a worker group solve) builds unless the held entry kept them
+    // (the main thread keeps them).
+    if (eventVerdict.valid && !(deps.withNodes && !held.projection)) {
         if (deps.onSourceRead) for (const id of held.readIds) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
-            if (deps.advisoryRefusal) Diagnostics.count('advisory', 'refusal_hit', deps.advisoryRefusal);
             // The timeline sees the served request too (tools/timeline).
             if (Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
                 caller: deps.caller || 'economy_context', trigger: deps.trigger || 'request', phase: 'wish_context',
@@ -1127,35 +973,24 @@ function forState(state = {}, deps = {}) {
         const late = id => deps.onSourceRead?.(Number(id));
         return view(state, held.plan, deps, { board: sourceBoard, read: late, projection: held.projection });
     }
-    // A lost graph cache still has the bot's accepted execution card. Compare
-    // its verdict with the one fresh card the normal publication captures;
-    // this transient reference never joins a retained plan or another map.
-    const candidate = diagnostic && !held ? deps.eventCandidate : null;
-    const eventShadow = candidate ? { accepted: candidate,
-        verdict: heldBuildVerdict(state, candidate.eventProof, deps, {
-            baseline: candidate.baseline, activity: candidate.activity, leaf: candidate.card?.activity,
-            mp: candidate.mp, timestamp }) } : null;
-    const basis = activeEvents && eventVerdict.reason === 'money' && heldBuildVerdict(state, held.plan.eventProof, deps, {
-        baseline: held.plan.statsPacket.wishSections, activity: held.activity, leaf: held.plan.network?.activity,
-        heldUnits: held.heldUnits, craftReservations: held.craftReservations, mp: held.mp, timestamp, facts,
-        rebuildBasis: true }).basisValid ? held.plan : null;
-    const sections = sectionKeys(state, { ...deps, timestamp }, [], 'sources');
+    // The mask: the sections that moved since the held build (the raised
+    // bits, the prepared card's verdict, this verdict's refusals). A computed
+    // piece (Sections.COMPUTED) is rebuilt when one of its sections is in it,
+    // else reused from the held build.
+    const mask = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
+        | eventVerdict.touchedSections;
+    // The foundation is reused with the prices and the horizon it was priced with.
+    const keptBase = held && !(mask & Sections.COMPUTED.foundation) ? held.plan : null;
+    const keptSources = held?.sourceSections && !(mask & Sections.COMPUTED.sources) ? held : null;
     const started = diagnostic ? performance.now() : 0;
-    // The build's cause, one of a few names (its duration layer): the held
-    // build's refusal is named by its verdict (hold:economy:<reason>). An
-    // input-key mismatch is named as a dependency change; it does not claim
+    // The build's cause, one of a few names (its duration layer). An
+    // input-name mismatch is named as a dependency change; it does not claim
     // which historical event caused it.
     const diagnosticReason = !diagnostic ? null : !held ? deps.rememberContext === false ? 'unkept_caller' : 'not_retained'
         : held.key !== key ? 'input_dependency_changed'
-        : !eventVerdict.valid ? 'held_refused'
-        : deps.withNodes && !held.projection ? 'nodes_needed' : 'hold_off';
+        : !eventVerdict.valid ? 'held_refused' : 'nodes_needed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
-    let elapsed = 0, gate = null, gateDiff = null, gateEvidence = null;
-    if (diagnostic) {
-        gate = held?.plan.eventProof ? eventVerdict.valid ? 'would_hold' : eventVerdict.reason
-            : held ? 'unproved' : 'no_held';
-        Diagnostics.count('context', 'gate', gate);
-    }
+    let elapsed = 0;
     // The items the review read, each reported once (deps.onSourceRead, the
     // occupation planner's dependencies) and kept with the held entry
     // (held.readIds) so that a hit reports them again. No token: the market
@@ -1209,29 +1044,30 @@ function forState(state = {}, deps = {}) {
     // A price is remembered, so every price read counts, also a late one
     // through context.price: its item joins the review's inputs.
     const { price, prices, beliefs, beliefFor, knowledgeEnabled } = pricing(state, persona, board, timestamp, deps, read,
-        basis ? new Map(basis.prices) : new Map());
+        keptBase ? new Map(keptBase.prices) : new Map());
     // The income route record of this build (its own search or the basics'
     // one): its solo matchup profiles serve the providers' source route reader.
     let incomeRecord = null;
-    const base = basis ? foundationFromPlan(state, basis, deps, price)
+    const base = keptBase ? foundationFromPlan(state, keptBase, deps, price)
         : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
-    // These facts still belong to the accepted basis: its items stay read.
-    if (basis) for (const id of held.readIds) read(id);
+    // These facts still belong to the reused foundation: its items stay read.
+    if (keptBase) for (const id of held.readIds) read(id);
     const quantityInputs = createQuantityInputs();
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         quantityInputs,
-        nominationBasis: basis?.nominationBasis ?? Providers.nominationBasis(state),
-        ...(basis ? { horizonHours: basis.horizonHours } : {}),
-        touchedSections: Number(state.stats?.wishDirty || 0) | Number(deps.eventVerdict?.touchedSections || 0)
-            | Number(eventVerdict.touchedSections || 0),
+        // The gear nomination's basis (the equipment plan's target, the power
+        // focus) is a source walk input no section names: a focus moves only
+        // with a build or the echo, so it is reused with the walk.
+        nominationBasis: keptSources?.plan.nominationBasis || Providers.nominationBasis(state),
+        ...(keptBase ? { horizonHours: keptBase.horizonHours } : {}),
         riskWeight: base.riskWeight, bestSpotId: base.bestSpotId, deathHours: base.deathHours, lostGearHours: base.lostGearHours,
         karmaHours: base.karmaHours, expectedDeathHours: base.expectedDeathHours, stock: base.stock,
         survivalReserve: base.survivalReserve, kitCost: base.kitCost, hourAdena: base.hourAdena,
         walletBoundary: cash.watch,
         budgetBoundary: budget.watch,
         // The per-node source memo: its inputs are the bag only (prices and
-        // spots are none; a new decision voids the memo through the sources
-        // key). The item ids a node read are kept without a token, only so
+        // spots are none; a raised section of the walk voids the memo, the
+        // mask). The item ids a node read are kept without a token, only so
         // that a reused node reports them again (deps.onSourceRead).
         nodeInputs: { begin: () => { const local = { items: new Set(), bag: new Map() }; nodeScopes.push(local); return local; },
             end: () => nodeScopes.pop(),
@@ -1285,11 +1121,10 @@ function forState(state = {}, deps = {}) {
     context.stockFor = (id, rootKey) => quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
     context.completionKey = Crystallization.completionKey(state, quantityInputs);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
-    const sourceSections = held?.sections?.sources === sections.sources
-        ? held.sourceSections : null;
+    const sourceSections = keptSources ? held.sourceSections : null;
     if (diagnostic) {
         Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
-            : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'key');
+            : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'sections');
         Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
     }
     const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra],
@@ -1300,22 +1135,16 @@ function forState(state = {}, deps = {}) {
         cycleHours: workshop.cycleHours, repeatable: true });
     const networkKey = key;
     const choiceBands = quantityBands(state, context, projection);
-    // Above a native stock target, exact quantities are execution facts.
-    // Unused free loot is compared with the last decision's own value/error,
-    // while required materials retain their exact quantities in the key.
-    const choiceShape = sectionKeys(state, deps, choiceBands.map(([id, low, high]) => [id, low, high, high === null ? low : 1]));
+    // Unused free loot is compared with the last decision's own value/error:
+    // with no section moved the accepted bag value stays.
     const bagValue = choiceBagValue(state, choiceBands, context.buyback);
     const acceptedSections = state.stats?.wishSections;
-    context.choiceInputs = Sections.hash([choiceShape.structural]);
-    const unchangedChoice = Number(acceptedSections?.choices) === context.choiceInputs
-        && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue);
-    context.choiceBagValue = unchangedChoice ? acceptedSections.bagValue : bagValue;
+    context.choiceBagValue = mask === 0 && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
+        ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
-    // raised section (a soft one was raised by the soft point at the end of a
-    // step). A rebuild where only noise moved keeps them. A crafter's MP
-    // fences its plan (sources), not its goal: no event.
-    const dirty = (Number(state.stats?.wishDirty) || 0) | (activeEvents ? context.touchedSections : 0);
-    const reconsider = dirty !== 0;
+    // section in the mask (a soft one was raised by the soft point at the end
+    // of a step). A rebuild with an empty mask keeps them.
+    const reconsider = mask !== 0;
     const network = engine.build({ actorKey, inputKey: networkKey, ...projection,
         remembered: deps.rememberContext !== false,
         stockFor: context.stockFor,
@@ -1324,7 +1153,7 @@ function forState(state = {}, deps = {}) {
         wallet: context.wallet, survivalReserve: base.survivalReserve,
         reconsider,
         // Diagnostics only: the events that re-weigh (network:reconsider), 'quiet' for none.
-        reconsiderReasons: !diagnostic ? null : dirty ? Sections.sectionNames(dirty) : ['quiet'],
+        reconsiderReasons: !diagnostic ? null : mask ? Sections.sectionNames(mask) : ['quiet'],
         playedHours: positive(state.stats?.playedHours), persona,
         previous: { focus: state.stats?.wishFocus, dormant: state.stats?.dormantWishes },
         hourAdena: context.hourAdena, riskWeight: context.riskWeight,
@@ -1350,7 +1179,7 @@ function forState(state = {}, deps = {}) {
     for (const wish of network.queue) { cumulative += cashCharge(wish); budget.watch(cumulative); }
     const watchedWish = network.gap || network.queue.find(wish => wish.key === network.focus?.[0]);
     const watchedItem = Number(watchedWish?.object?.itemId);
-    const belief = beliefs.get(watchedItem) || (basis && watchedItem > 0 ? beliefFor(watchedItem) : null);
+    const belief = beliefs.get(watchedItem) || (keptBase && watchedItem > 0 ? beliefFor(watchedItem) : null);
     const moneyError = belief ? knowledgeEnabled
         ? positive(watchedWish.price) * Math.expm1(PriceBelief.sigma(belief)) : 0 : -1;
     // The bot's error on an item's price, as moneyError reads it (0 without
@@ -1366,11 +1195,9 @@ function forState(state = {}, deps = {}) {
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
         { buyOrderEscrow: deps.buyOrderEscrow, budgetBounds: budget.result }, current === state ? facts : requestFacts(state, deps),
         Providers.relationBond(state, deps), watchRows);
-    // The trigger is not the calculation basis. Only the proven money path
-    // kept the original valuation inputs; a fresh fallback adopted all of
-    // them and must publish matching baselines, including downstream money.
-    if (activeEvents) Sections.carrySectionBaseline(acceptedSections, context.statsPacket.wishSections,
-        basis ? Sections.sectionBit('money') : Sections.sectionMask(Sections.SECTIONS));
+    // The baseline fields of a section not in the mask stay those of the
+    // accepted decision (carrySectionBaseline); every moved one is fresh.
+    Sections.carrySectionBaseline(acceptedSections, context.statsPacket.wishSections, mask);
     building = false; endTokens();
 
     if (diagnostic) {
@@ -1383,54 +1210,24 @@ function forState(state = {}, deps = {}) {
         elapsed = performance.now() - started;
         Diagnostics.duration('context', elapsed);
         Diagnostics.duration(`context:${diagnosticReason}`, elapsed);
-        if (gate === 'would_hold') {
-            gateEvidence = {};
-            gateDiff = gatePlanDiff(state, held, context, deps, gateEvidence);
-            Diagnostics.count('context', 'gate_plan', gateDiff);
-            if (gateDiff === 'focus') {
-                // Each marginal shares the focus denominator; these are not paired transitions.
-                Diagnostics.count('context', 'gate_focus_held', focusKind(held.plan.network.focus?.[0]));
-                Diagnostics.count('context', 'gate_focus_fresh', focusKind(network.focus?.[0]));
-            }
-            Diagnostics.count('context', 'gate_ms', 'would_hold', Math.round(elapsed));
-        } else if (held && Diagnostics.enabled(state.characterId)) {
-            // Sampled owners: did the build the verdict refused change the plan?
-            // same per refusal reason is the waste the reason's rule costs.
-            gateDiff = gatePlanDiff(state, held, context, deps);
-            // A sections refusal names the moved facts, a wish_dirty refusal
-            // its raised sections: per fact, does the move give another plan
-            // (focus or leaf: a real decision change; queue, funded: its order)?
-            const refusal = (gate === 'sections' || gate === 'wish_dirty') && eventVerdict.facts ? `${gate}.${eventVerdict.facts}` : gate;
-            Diagnostics.count('context', 'refused_plan', `${refusal}:${gateDiff}`);
-        }
     }
-    // The build's record carries its cause (tools/timeline): the miss reason and the time it took.
-    const mismatch = gateDiff !== null && Diagnostics.isPlanMismatch({ owner: state.characterId, phase: 'wish_context', gate, gateDiff });
-    if (mismatch) Diagnostics.push({ owner: state.characterId, phase: 'wish_context', gate, gateDiff,
-        baselineAt: held.plan.statsPacket.wishSections.at, sequence: inputSequence, inputActivityLeaf,
-        decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
-        // A fresh focus/leaf equal to the held one is left out: a queue or
-        // funded witness has both equal, and its evidence needs the bytes.
-        heldFocus: held.plan.network.focus?.[0], freshFocus: network.focus?.[0] === held.plan.network.focus?.[0] ? undefined : network.focus?.[0],
-        heldLeaf: held.plan.network.activity?.key, freshLeaf: network.activity?.key === held.plan.network.activity?.key ? undefined : network.activity?.key,
-        reconsidered: Number(reconsider), choiceEvent: dirty ? Sections.sectionNames(dirty).join(',') : 'quiet',
-        ...gateEvidence });
-    else if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
+    // The build's record carries its cause (tools/timeline): the miss reason,
+    // the verdict's first refusal (gate), the mask and the time it took.
+    if (diagnostic && Diagnostics.enabled(state.characterId)) Diagnostics.push({ owner: state.characterId,
         caller: deps.caller || 'economy_context', trigger: deps.trigger || diagnosticReason,
         phase: 'wish_context', reason: diagnosticReason, inputHash: fnv1a32(networkKey),
         durationMs: Math.round(elapsed * 100) / 100,
         sequence: inputSequence, decisionSeq: network.decisionSeq, activityLeaf: network.activityLeaf,
-        inputActivityLeaf: gate === 'would_hold' ? inputActivityLeaf : undefined,
         revision: state.simulation?.revision, wallet: positive(state.adena), escrow: positive(deps.buyOrderEscrow),
-        available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0], gate, gateDiff,
-        ...(gateDiff ? { outcome: gateDiff === 'same' ? 'same_plan' : 'new_plan' } : {}),
+        available: network.available, reserve: base.survivalReserve, wishKey: network.focus?.[0],
+        gate: eventVerdict.reason || 'valid', mask: Sections.sectionNames(mask).join('+') || 'none',
         heldFocus: held?.plan.network.focus?.[0], freshFocus: network.focus?.[0],
-        heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key,
-        ...(['focus', 'leaf'].includes(gateDiff) || gate === 'check_failed' ? shadowQuantityEvidence(state, held) : null) });
+        heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    // Source memo belongs only to the bounded cache owner. A planning view
-    // or a group closure must never retain a second copy outside that cap.
+    // Source memo belongs only to the held build entry (bounded by
+    // RETAIN_LIMIT, each memo by WishProviders' cap). A planning view or a
+    // group closure must never retain a second copy.
     const retainedSourceMemo = projection.sourceSections;
     projection.sourceSections = null;
     if (deps.rememberContext !== false) {
@@ -1438,8 +1235,7 @@ function forState(state = {}, deps = {}) {
         // The main thread keeps the graph nodes as before (its group solve
         // reads them on a hit); the worker keeps the plan only (perf C1).
         // Its own activity: the later reuse verdict reads the held build
-        // with it. The source sections are read only to reuse the source memo, so
-        // they are kept with it and dropped with it (L104).
+        // with it.
         plan.eventProof = captureEventProof(state, deps, { plan });
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
@@ -1449,21 +1245,12 @@ function forState(state = {}, deps = {}) {
             heldUnits: own === null ? undefined : ColdEconomyDecision.heldFor(state, own),
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             readIds: Int32Array.from(readIds), plan, stateRef: new WeakRef(state), gearThreat,
-            sections: retainedSourceMemo ? sections : null,
             activity: state.activity,
             sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
-        if (retainedSourceMemo) {
-            sourceHolders.delete(actorKey); sourceHolders.add(actorKey);
-            while (sourceHolders.size > SOURCE_MEMO_LIMIT) {
-                const oldest = sourceHolders.keys().next().value; sourceHolders.delete(oldest);
-                const entry = cache.get(oldest); if (entry) entry.sourceSections = entry.sections = null;
-            }
-        }
     }
     readIds = null;
-    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection,
-        eventShadow });
+    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers
@@ -1621,7 +1408,6 @@ function view(state, plan, deps, built = {}) {
     // (a refused trip, the gear plan choice), not this view object.
     Object.defineProperty(context, 'plan', { value: plan });
     Object.defineProperty(context, 'eventProof', { value: () => plan.eventProof || null });
-    if (built.eventShadow) Object.defineProperty(context, 'eventShadow', { value: built.eventShadow });
     Object.defineProperty(context, 'gearPlanMemo', { get: () => plan.gearPlanMemo, set: memo => { plan.gearPlanMemo = memo; } });
     if (plan.pending) {
         context.itemUsefulness = () => 0; context.worth = price; context.purchaseBudget = () => 0;
@@ -1662,7 +1448,7 @@ function survivalReserve(state = {}) {
 }
 function forActor(actor, session, deps = {}) {
     const state = stateForActor(actor, session);
-    if (!isMainThread || !eventReuseEnabled(deps)) return forState(state, deps);
+    if (!isMainThread) return forState(state, deps);
     // lazy: cycle the coordinator publishes hot handoffs through this owner.
     const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const accepted = coordinator.economyDecisions?.advisoryFor(state);
@@ -1800,9 +1586,8 @@ function forgetContext(id, reason = 'explicit_invalidation', expectedState = nul
     const key = `character:${id}`;
     if (expectedState && cache.get(key)?.stateRef.deref() !== expectedState) return;
     // Publication replaces the facts object, not the economic decision. The
-    // next reader validates semantic section keys and all watched sources.
+    // next reader's verdict validates the held build against the state.
     if (reason !== 'state_publication') {
-        sourceHolders.delete(key);
         if (cache.delete(key) && Diagnostics.active()) { Diagnostics.count('context', 'eviction', reason); }
         engine.forget(key, reason);
     }
@@ -1820,10 +1605,10 @@ function forget(id) {
 function reset() {
     if (Diagnostics.active() && cache.size) Diagnostics.count('context', 'eviction', 'reset', cache.size);
     if (Diagnostics.active() && groups.size) Diagnostics.count('context_group', 'eviction', 'reset', groups.size);
-    cache.clear(); sourceHolders.clear(); groups.clear(); engine.clear(); routeAnchors = new WeakMap();
+    cache.clear(); groups.clear(); engine.clear(); routeAnchors = new WeakMap();
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, eventReuseEnabled, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, sectionKeys, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, heldEventsQuiet, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, acceptedActivityHolds, heldLeafRefusal, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

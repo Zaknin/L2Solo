@@ -55,8 +55,8 @@ module.exports.stepProbe = async (id) => {
             seq: [Number(plan.statsPacket.decisionSeq || 0), Number(projection.state.stats.decisionSeq || 0)],
             baseline: [plan.statsPacket.wishSections?.at, projection.state.stats.wishSections?.at],
             edges: projection.economyEdges,
-            card: { updatedAt: projection.economyDecision?.updatedAt, key: projection.economyDecision?.key,
-                projectedAt: Number(projection.state.updatedAt || 0), projectedKey: ColdEconomyDecision.stateKey(projection.state) } };
+            card: { updatedAt: projection.economyDecision?.updatedAt, echo: projection.economyDecision?.echo,
+                projectedAt: Number(projection.state.updatedAt || 0), projectedEcho: ColdEconomyDecision.stateEcho(projection.state) } };
     } finally { Economy.forState = original; }
 };
 // Quiet steps (no loot) leave the step decision held: the next decision
@@ -159,7 +159,7 @@ parentPort.on('message', message => {
         assert(step.seq[1] > step.seq[0], 'the event check after the round moves the decision sequence');
         assert.equal(step.baseline[1], step.baseline[0], 'the projected state keeps the baseline of the step decision');
         assert.equal(step.card.updatedAt, step.card.projectedAt, 'main gets the step card stamped to the projected state');
-        assert.equal(step.card.key, step.card.projectedKey);
+        assert.deepEqual(step.card.echo, step.card.projectedEcho, 'main gets the step card with the projected decision echo');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'goal'), goalProbe: id });
         const goalResponse = await wait(message => message.probeId === 'goal'); if (goalResponse.error) throw Error(goalResponse.error);
         const goal = goalResponse.value;

@@ -38,7 +38,7 @@ async function capture(state, options = {}, label = '') {
     assert.deepEqual(captured.forbiddenLoaded, []);
     const native = Decision.compact(captured.decision);
     assert.equal(native.updatedAt, Number(state.updatedAt || 0));
-    assert.equal(native.key, Decision.stateKey(state));
+    assert.deepEqual(native.echo, Decision.stateEcho({ ...state, stats: { ...state.stats, ...captured.statsPacket } }));
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     Coordinator.economyDecisions.accept(state.characterId, captured.decision);
     const read = Coordinator.economyDecisions.decided(accepted);

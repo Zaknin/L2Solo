@@ -43,10 +43,10 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         const refreshes = [];
         coordinator.requestEconomyRefresh = id => { refreshes.push(id); return true; };
         let serial = 0;
-        // The worker's card for the state it saw: authority, updatedAt and key.
+        // The worker's card for the state it saw: authority, updatedAt and echo.
         const card = state => Protocol.envelope('ready', epoch, { phase: 'economy_plan_ready', characterId: owner,
             authority: Commit.authority(state), economyPlan: { take: [Afk.SELL ?? 1, ORE, 2, 77, 78, 4, 237] },
-            economyDecision: { updatedAt: Number(state.updatedAt || 0), key: Decision.stateKey(state) } }, `b5-card-${++serial}`);
+            economyDecision: { updatedAt: Number(state.updatedAt || 0), echo: Decision.stateEcho(state) } }, `b5-card-${++serial}`);
         const kept = () => {
             assert.deepEqual(Goals.snapshot(owner).current, goal, 'the goal is kept');
             assert.equal(Life.cachedState(owner).stats?.marketRetryAfter, undefined, 'no retry penalty');

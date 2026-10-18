@@ -4,8 +4,10 @@
 // The economy owner validates the saved proof.
 const { deflateRawSync, inflateRawSync } = require('node:zlib');
 const MAX_BYTES = 1024, MAX_PLAIN_BYTES = 16384;
-// 4: the restart prefix inside is format 4; an older card is refused before inflate.
-const VERSION = 4;
+// 5: the metadata row without the card key (the card carries its echo, the
+// row's decisionSeq, activityLeaf and focus); the restart prefix inside is
+// format 4. An older card is refused before inflate: one rebuild per bot.
+const VERSION = 5;
 
 function cardData(value, maxBytes) {
     if (typeof value !== 'string' || value.length > Math.ceil(maxBytes / 3) * 4
@@ -19,7 +21,7 @@ function encode(accepted, baselineIdentity) {
     if (!(accepted?.eventProof instanceof Uint8Array) || !(accepted.card?.data instanceof ArrayBuffer)
         || typeof baselineIdentity !== 'string' || !/^[a-f0-9]{64}$/.test(baselineIdentity)) return null;
     try {
-        const metadata = Buffer.from(JSON.stringify([accepted.card.key, accepted.decisionSeq, accepted.activityLeaf,
+        const metadata = Buffer.from(JSON.stringify([accepted.decisionSeq, accepted.activityLeaf,
             accepted.focus, accepted.activity, accepted.mp, accepted.characterId]));
         const card = Buffer.from(accepted.card.data), proof = Buffer.from(accepted.eventProof);
         const size = 36 + metadata.length + card.length + proof.length;
@@ -49,18 +51,18 @@ function decode(value, timestamp, maxCardBytes, characterId, baseline, baselineI
         const raw = plain.subarray(36, cardAt), text = raw.toString('utf8');
         if (!Buffer.from(text, 'utf8').equals(raw)) return null;
         const row = JSON.parse(text);
-        if (!Array.isArray(row) || row.length !== 7 || typeof row[0] !== 'string' || row[0].length > 256
-            || !Number.isSafeInteger(row[1]) || row[1] < 0
-            || !Number.isSafeInteger(row[2]) || row[2] < 0 || row[2] > 0xffffffff
-            || row[3] !== null && (typeof row[3] !== 'string' || row[3].length > 128)
-            || typeof row[4] !== 'string' || !Number.isFinite(row[5])
-            || !Number.isSafeInteger(row[6]) || row[6] <= 0 || row[6] !== characterId) return null;
+        if (!Array.isArray(row) || row.length !== 6
+            || !Number.isSafeInteger(row[0]) || row[0] < 0
+            || !Number.isSafeInteger(row[1]) || row[1] < 0 || row[1] > 0xffffffff
+            || row[2] !== null && (typeof row[2] !== 'string' || row[2].length > 128)
+            || typeof row[3] !== 'string' || !Number.isFinite(row[4])
+            || !Number.isSafeInteger(row[5]) || row[5] <= 0 || row[5] !== characterId) return null;
         const at = baseline?.at;
         if (!Number.isFinite(at) || !Number.isFinite(timestamp) || timestamp < at) return null;
         const data = Uint8Array.from(plain.subarray(cardAt, cardAt + cardSize)).buffer;
-        return { key: row[0], data, decisionSeq: row[1], activityLeaf: row[2], focus: row[3], baseline,
-            activity: row[4], mp: row[5], eventProof: Uint8Array.from(plain.subarray(cardAt + cardSize)),
-            characterId: row[6], saved: value };
+        return { data, decisionSeq: row[0], activityLeaf: row[1], focus: row[2], baseline,
+            activity: row[3], mp: row[4], eventProof: Uint8Array.from(plain.subarray(cardAt + cardSize)),
+            characterId: row[5], saved: value };
     } catch (_) { return null; }
 }
 
