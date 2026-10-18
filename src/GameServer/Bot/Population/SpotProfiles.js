@@ -175,7 +175,6 @@ const SpotProfiles = {
         ]);
         const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
         const mode = LevelingRoutes.modeForState(state, options);
-        // The crowd is no input of the search: a full spot is met at arrival (ARCH-08-a).
         const routeOptions = { ...options, excludedSpotIds,
             spotEconomics: options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
                 { timestamp, mode }),
@@ -212,11 +211,23 @@ const SpotProfiles = {
         // One list object for the income route and the list walk below: its
         // spoiler and costs are read once, and only when one of them asks.
         const list = EquipmentIncomeRoute.spotList(state);
+        // options.hasRoom(spotId): the worker's own exact index, a filter on
+        // every spot this search returns other than the current one
+        // (ROUTE-ROOM, ROUTE-ROOM-2): the income route's spot, the planned
+        // source, the list walk and the near-level fallback; a refused
+        // candidate counts as absent. A bot's own spot is never full to it;
+        // the room is checked again at arrival. Main passes none: no filter.
+        const full = (spot) => {
+            if (!options.hasRoom || (currentSpot && spot.id === currentSpot.id)
+                || options.hasRoom(spot.id)) return false;
+            Diagnostics.count('spot_list', 'skip', 'full');
+            return true;
+        };
         if (!protectedStarterCohort && !collectingGear) {
             const incomeRoute = EquipmentIncomeRoute.select(state, {
                 spots: profiles, timestamp, mode, list,
                 required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
-            if (incomeRoute) return incomeRoute.spot;
+            if (incomeRoute && !full(incomeRoute.spot)) return incomeRoute.spot;
         }
 
         if (keepCurrentSpot) {
@@ -235,7 +246,7 @@ const SpotProfiles = {
                         && GearAcquisitionPlanner.isClanOwnedPlan(acquisitionPlan) }
             );
             const planned = SpotIndex.spotById(profiles, plannedSource ? plannedSource.spotId : acquisitionPlan.next?.spotId);
-            if (planned && !excludedSpotIds.has(String(planned.id))
+            if (planned && !excludedSpotIds.has(String(planned.id)) && !full(planned)
                 && LevelingRoutes.isSpotAllowedForState(planned, state, routeOptions)) {
                 // A drop source may be valid for the item but still be a
                 // starter-level camp for the bot. Never let an active gear
@@ -265,15 +276,6 @@ const SpotProfiles = {
         // reads its leader's list (its party role when it has one, the
         // simplest reading); a list for the party's main role would be read
         // once per party search.
-        // options.hasRoom(spotId): the worker's own exact index, a filter
-        // here (ROUTE-ROOM): a spot other than the current one with no room
-        // for the bot is skipped, as in the near-level fallback below; the
-        // room is checked again at arrival. Main passes none: no filter.
-        const full = (spot) => {
-            if (!options.hasRoom || options.hasRoom(spot.id)) return false;
-            Diagnostics.count('spot_list', 'skip', 'full');
-            return true;
-        };
         let pick = null, firstAllowed = null, currentListed = false;
         for (const shots of [true, false]) {
             for (const id of list.ids(shots, targetLevel)) {
@@ -283,7 +285,7 @@ const SpotProfiles = {
                 if (!spot || spot.raidBoss === true || excludedSpotIds.has(String(spot.id)) || foreign(spot)) continue;
                 const isCurrent = currentSpot && spot.id === currentSpot.id;
                 if (isCurrent && mustRelocate) continue;
-                if (!isCurrent && full(spot)) continue;
+                if (full(spot)) continue;
                 const fits = SpotService.isSuitable(spot, targetLevel, options);
                 if (!fits && firstAllowed && !isCurrent) continue;
                 // The keep rule below holds only a current spot this reader
@@ -317,7 +319,7 @@ const SpotProfiles = {
         // income route's wider minGap (-15).
         const candidates = spotsNearLevel(profiles, targetLevel)
             .filter((profile) => !excludedSpotIds.has(String(profile.id))
-                && (profile.id === currentSpot?.id || !full(profile)))
+                && !full(profile))
             .filter((profile) => homeAllowed(profile));
         const relocationCandidates = mustRelocate
             ? candidates.filter((profile) => profile.id !== currentSpot.id)

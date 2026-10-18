@@ -1,7 +1,7 @@
 'use strict';
 // ARCH-08-b: a spot search reads the game table's spot list for the bot's
 // role and level and takes the first spot it may hunt whose level fits; the
-// crowd is no input. The real table; a catalogue of its own spots built from
+// crowd enters only as the worker's room filter (ROUTE-ROOM). The real table; a catalogue of its own spots built from
 // its authored reward rows (no World in a test); one level 29 mage.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -71,6 +71,30 @@ assert.equal(Spots.findForState(state, { ...options, hasRoom: id => String(id) !
     'a full spot of the list is skipped: the next one of the list');
 assert.equal(Spots.findForState(state, { ...options, hasRoom: () => true })?.id, chosen.id,
     'a filter that finds room everywhere changes nothing');
+// ROUTE-ROOM-2: the filter holds for the gear plan's source and the income
+// route too: a full one counts as absent, the list walk decides; the bot's
+// own spot is never full to it.
+{
+    const source = listed.find(spot => spot.id !== first.id && spot.id !== next?.id);
+    const planning = (spotId = null) => ({ ...state, spotId, stats: { ...state.stats,
+        equipmentPlan: { status: 'active', strategy: 'direct_drop', next: { spotId: source.id } } } });
+    const noRoomAt = id => other => String(other) !== String(id);
+    assert.equal(Spots.findForState(planning(), options)?.id, source.id, 'fixture: the plan\'s source is the pick');
+    assert.equal(Spots.findForState(planning(), { ...options, hasRoom: noRoomAt(source.id) })?.id, first.id,
+        'a full planned source is skipped: the first spot of the list');
+    assert.equal(Spots.findForState(planning(source.id), { ...options, hasRoom: () => false })?.id, source.id,
+        'a planned source the bot stands on is taken even when it counts as full');
+
+    // The income route's own pick needs a kit that survives its spots; the
+    // naked fixture survives none, so its answer is given here.
+    const select = IncomeRoute.select;
+    try {
+        IncomeRoute.select = () => ({ spot: source });
+        assert.equal(Spots.findForState(state, options)?.id, source.id, 'fixture: the income route\'s spot is the pick');
+        assert.equal(Spots.findForState(state, { ...options, hasRoom: noRoomAt(source.id) })?.id, first.id,
+            'a full income route spot is skipped: the first spot of the list');
+    } finally { IncomeRoute.select = select; }
+}
 
 Spots.cache = originalCache;
 

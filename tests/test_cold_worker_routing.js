@@ -188,6 +188,16 @@ try {
     assert.strictEqual(tripTo(), undefined, 'a failed search starts no trip');
     SpotProfiles.findForState = () => targetSpot;
     assert.strictEqual(tripTo(), targetSpot.id, 'a failed search is not kept: the next trip start searches');
+    // ROUTE-ROOM-2: the worker's room filter refuses a leaf trip to a full
+    // spot other than the bot's own (the search decides); the bot's own spot
+    // is never full to it (here it stands elsewhere, displaced from it).
+    const roomTrip = (hunter, hasRoom) => BotRoute.trip({ route: null }, hunter,
+        { activity: 'hunting', spotId: otherSpot.id },
+        { spots: keptSpots, currentSpot, timestamp: leafAt, hasRoom })?.spotId;
+    assert.strictEqual(roomTrip(keptHunter, id => id !== otherSpot.id), targetSpot.id,
+        'a leaf trip to a full spot is not taken: the search decides');
+    assert.strictEqual(roomTrip({ ...keptHunter, spotId: otherSpot.id }, () => false), otherSpot.id,
+        'the leaf trip to the bot\'s own spot is taken even when it counts as full');
     SpotProfiles.findForState = routeTargetForState;
 
     const raidSpot = {
