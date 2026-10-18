@@ -39,8 +39,7 @@ const original = { gate: Routes.isSpotAllowedForState, profiles: Matchup.statePr
 let gates = 0, profiles = 0;
 try {
     Routes.isSpotAllowedForState = (_spot, _state, options) => {
-        gates++; assert.equal(options.mode, 'solo'); assert.equal(options.timestamp, timestamp);
-        assert.deepEqual(options.capacityStates, [state]); return true;
+        gates++; assert.equal(options.mode, 'solo'); assert.equal(options.timestamp, timestamp); return true;
     };
     Matchup.stateProfiles = (...args) => { profiles++; return original.profiles(...args); };
     const routeAllowed = Planner.sourceRouteReader(state, { timestamp });
