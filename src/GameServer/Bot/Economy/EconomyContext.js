@@ -818,22 +818,9 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
     const reads = keep ? [] : null;
     const route = IncomeRoute.select(state, { ...deps, timestamp, required,
         price: keep ? id => { const value = price(id); reads.push(id, value); return value; } : price });
-    if (Diagnostics.active()) countIncomeRoute(state, deps, timestamp, route);
     keep?.({ state, timestamp, spots: deps.spots, mode: deps.mode,
         maxChecks: deps.maxChecks, required, reads, route });
     return route;
-}
-// Shadow (no behaviour): would the held build's income route serve this
-// search? The held plan's hunt names the route it was built on (foundation:
-// source 'route'); the same spot and charge policy is 'same'. A held plan of
-// this request's timestamp is the step's own first build: step_<same|new>.
-const routeName = (spotId, useShots) => `${spotId}:${useShots !== false}`;
-function countIncomeRoute(state, deps, timestamp, route) {
-    const plan = cache.get(deps.actorKey || `character:${Number(state.characterId || 0)}`)?.plan;
-    if (!plan) { Diagnostics.count('context', 'income_route', 'no_held'); return; }
-    const before = plan.hunt?.source === 'route' ? routeName(plan.hunt.spotId, plan.hunt.useShots) : 'none';
-    const now = route ? routeName(route.spot.id, route.row.useShots) : 'none';
-    Diagnostics.count('context', 'income_route', `${plan.timestamp === timestamp ? 'step_' : ''}${before === now ? 'same' : 'new'}`);
 }
 function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
@@ -1286,7 +1273,12 @@ function forState(state = {}, deps = {}) {
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
     }
     readIds = null;
-    return view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
+    const built = view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
+    // The sections this build saw moved (worker-local, never posted): the
+    // worker drops the kept route when they hit COMPUTED.route. A served held
+    // build and a card view carry none: they hold only with nothing moved.
+    built.mask = mask;
+    return built;
 }
 // Plan as data (perf C1). A built context's closures hold the wish network,
 // the projection and the whole build scope (~60 KB per bot); what its readers

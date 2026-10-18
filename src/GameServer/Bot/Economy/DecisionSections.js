@@ -76,10 +76,15 @@ function sectionMask(names) {
 // sources: the source walk (worn gear and level; party, clan, role;
 // exclusions, risk, hunt rows; the plan, persona, craft station, trades;
 // the hour adena and the money mark). weighing: focus, step and money queue.
+// route: the bot's hunting spot search (BotRoute.choose), kept in the worker's
+// record: kit and level (build), party and clan (relations), the ground and
+// the exclusion and "was full" marks (occupation, sources). The matchup it
+// filters with reads the kit, so build covers it; buffs and night are read-time.
 const COMPUTED = Object.freeze({
     foundation: sectionMask(['build', 'combat', 'supply', 'occupation', 'relations']),
     sources: sectionMask(['build', 'relations', 'occupation', 'sources', 'money']),
-    weighing: sectionMask(SECTIONS)
+    weighing: sectionMask(SECTIONS),
+    route: sectionMask(['build', 'relations', 'occupation', 'sources'])
 });
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,
