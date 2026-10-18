@@ -699,9 +699,6 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
-        if (entry.context?.requirementRefresh === false) {
-            this.partyRequirementProgress.delete(String(entry.context?.party?.partyId || current?.context?.party?.partyId || ''));
-        }
         let memoryChanged = false;
         if (entry.context?.interactionMemory) {
             if (entry.context.interactionMemory.ownerId !== characterId) throw new Error('interaction memory: wrong snapshot owner');
@@ -1932,11 +1929,18 @@ class ColdSimulationKernel {
                     revision: Number(run.spot.raidAuthorityRevision || 0) + 1, snapshot };
             }
             let requirementMs = 0, lastRequirementPlanMs = 0;
+            // The open re-plan of the party's needs (members already planned).
+            // It opens on main's due mark (a member joined or left, the
+            // objective moved: run.requirementRefresh) or on a member whose
+            // step raised its build section (its kit moved, below), and
+            // closes when every member is planned or the party ends.
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
-            if (!meetingPending && run.requirementRefresh && !requirementProgress && !materialHunt) {
+            const openRequirements = () => {
+                if (requirementProgress || meetingPending || materialHunt) return;
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
-            }
+            };
+            if (run.requirementRefresh) openRequirements();
             const memberPlans = [];
             for (const { state, result } of resolution.memberResults || []) {
                 const id = Number(state.characterId);
@@ -1953,8 +1957,8 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.objective
                     );
                 }
-                if (!meetingPending && run.requirementRefresh && this.planPartyRequirement && projectedState
-                    && !materialHunt
+                if (projection?.raised?.includes('build')) openRequirements();
+                if (requirementProgress && !meetingPending && !materialHunt && this.planPartyRequirement && projectedState
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
                     && requirementMs + lastRequirementPlanMs < 20) {
                     const planningStarted = performance.now();
@@ -2007,7 +2011,7 @@ class ColdSimulationKernel {
                 };
                 proposals.push(proposal);
             }
-            if (!meetingPending && run.requirementRefresh && !materialHunt) {
+            if (requirementProgress && !meetingPending && !materialHunt) {
                 const leader = proposals.find(proposal => proposal.partyResolution);
                 if (leader) {
                     leader.partyResolution.memberPlans = memberPlans;
@@ -2017,13 +2021,6 @@ class ColdSimulationKernel {
                     }
                 }
                 if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
-                // Preserve the first-refresh key shape used for byte admission.
-                for (const key of ['partyRequirementRefreshes', 'partyRequirementRefreshMs', 'partyRequirementRefreshMaxMs']) {
-                    if (!Object.hasOwn(this.stats, key)) this.stats[key] = 0;
-                }
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshes = Number(this.stats.partyRequirementRefreshes || 0) + 1);
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMs = requirementMs);
-                DiagnosticConfig.developerDiagnostics && (this.stats.partyRequirementRefreshMaxMs = Math.max(Number(this.stats.partyRequirementRefreshMaxMs || 0), requirementMs));
             }
             if (!current()) return;
             published = handled = true;

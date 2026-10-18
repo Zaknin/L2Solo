@@ -627,7 +627,29 @@ function claimAck(kernel, payload) {
     assert.deepStrictEqual(refreshProposal.partyResolution.memberPlans.map(row => row.characterId), [120], 'only changed requirement keys cross the worker boundary');
     assert.strictEqual(refreshProposal.partyResolution.requirementRefreshedAt, now);
     assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
-    assert(refreshKernel.snapshot().partyRequirementRefreshMaxMs < 20);
+
+    // A member whose own step raised its build section opens the re-plan with
+    // no due mark from main; members already passed wait for the next step.
+    for (const raised of [[], ['build']]) {
+        const kitMessages = [], kitPlanned = [];
+        const kitKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state, raised: state.characterId === 121 ? raised : [] }),
+            planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
+            emit: (type, payload) => kitMessages.push({ type, payload }) });
+        kitKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
+            partyMembers: refreshMembers, spot: { id: 'refresh-spot' } } });
+        kitKernel.upsert({ state: refreshMembers[1], context: {} }); kitKernel.tick();
+        const kitClaim = kitMessages.find(message => message.type === 'claim_request');
+        claimAck(kitKernel, { grants: kitClaim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `kit-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        await kitKernel.resolveChain;
+        assert.deepStrictEqual(kitPlanned, raised.length ? [121] : [], 'a raised build opens the re-plan at that member');
+        assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), raised.length > 0,
+            'the re-plan stays open for the member passed before the raise');
+    }
 
     for (const complete of [false, true]) {
         const materialMessages = [], objective = { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-spot' };

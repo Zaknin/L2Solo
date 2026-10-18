@@ -48,8 +48,6 @@ const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulati
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
-const Hold = invoke('GameServer/Bot/Economy/Hold');
-const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const WAREHOUSE_CLEANUP_KEY = Symbol('warehouse-cleanup');
 const STATE_RETENTION_KEY = Symbol('state-retention');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
@@ -268,17 +266,6 @@ function occupiedPartySlots() {
 }
 
 const { acquisitionRequirementKey, acquisitionFallbackEvent } = require('./PartyRequirementRefresh');
-
-// The event inputs of a party's requirement refresh (hold place
-// party_requirements): its objective and each member's kit (class, level,
-// worn gear, hennas, skills, craft; DecisionSections.kit, no effects or
-// night: no clock part). Money, market and occupancy drift and stay out; the
-// shadow compare shows whether a refresh with these quiet still changes a plan.
-function partyRequirementInputs(party, members, timestamp) {
-    const facts = members.map(member => [Number(member.characterId), DecisionSections.kit(member, timestamp)])
-        .sort((a, b) => a[0] - b[0]);
-    return DecisionSections.hash([partyObjectiveGroupingKey(party.stats?.objective) ?? null, facts]);
-}
 
 function partyObjectivesShareRoute(left, right) {
     const leftClanGoal = String(left?.clanGoalKey || '');
@@ -1031,15 +1018,14 @@ const PopulationService = {
     schedulerTimer: null,
     backgroundJobRegistry: null,
     partyAssemblyEvents: null,
+    // Party ids whose re-plan of member needs runs at the leader's next step:
+    // marked on a membership or objective change (startPartyAssemblyEvents),
+    // cleared by the apply of the finished re-plan.
     partyRequirementRefreshDue: new Set(),
-    // partyId -> { why, moved }: the hold verdict of a due refresh, until the
-    // refresh completes (shadow; read by its compare).
-    partyRequirementVerdicts: new Map(),
     phasePolicyTimer: null,
     seedTimer: null,
     classProgressionMigrationTimer: null,
     nextColdCombatProfileMigrationAt: 0,
-    nextPartyRequestCleanupAt: 0,
     nextWarehouseCleanupAt: 0,
     warehouseCleanupCursor: 0,
     warehouseCleanupPassUnits: 0,
@@ -1060,7 +1046,6 @@ const PopulationService = {
     partyFormationPending: false,
     nextProtectedPartyFormationAt: 0,
     protectedPartyFormationFailures: 0,
-    partyRequestCleanupRunning: false,
     phasePolicyRunning: false,
     clanActionRunning: false,
     clanFounderRunning: false,
@@ -1239,7 +1224,6 @@ const PopulationService = {
             this.classProgressionMigrationTimer = null;
         }
         this.nextColdCombatProfileMigrationAt = 0;
-        this.partyRequestCleanupRunning = false;
         if (this.personaBackfillTimer) {
             clearInterval(this.personaBackfillTimer);
             this.personaBackfillTimer = null;
@@ -1529,11 +1513,12 @@ const PopulationService = {
             onError: error => utils.infoWarn('BotPopulation', 'party event failed: %s', error?.message || error)
         });
         this.partyAssemblyEvents = service;
-        service.unsubscribeRequirements = BackgroundPartyState.subscribeChanges(party => {
-            if (party.status !== 'active') {
-                this.partyRequirementRefreshDue.delete(String(party.partyId));
-                this.partyRequirementVerdicts.delete(String(party.partyId));
-            }
+        // Subscribed once the saved parties are loaded: a row read at start-up is
+        // no member event, so a restart opens no re-plan of its own.
+        Promise.resolve(BackgroundPartyState.init()).then(() => {
+            if (this.partyAssemblyEvents !== service) return;
+            service.unsubscribeRequirements = BackgroundPartyState.subscribeChanges(
+                (party, previous) => this.markPartyRequirementsDue(party, previous));
         });
         service.start();
         service.unsubscribeHelp = Help.subscribePending(() => service.wakeHelp());
@@ -1554,7 +1539,25 @@ const PopulationService = {
         this.partyAssemblyEvents = null;
         service?.unsubscribeHelp?.(); service?.unsubscribePresence?.(); service?.unsubscribeRequirements?.(); service?.stop();
         this.partyRequirementRefreshDue.clear();
-        this.partyRequirementVerdicts.clear();
+    },
+
+    // Trigger 1 of the party re-plan (the second is a member's kit, at the
+    // party's step in the background thread): a published party row whose
+    // members, objective or pending join moved against the previous row. The
+    // apply's own writes mark here too; it clears the mark after its last
+    // write (applyWorkerPartyRequirements), so they open nothing.
+    markPartyRequirementsDue(party, previous) {
+        const id = String(party.partyId);
+        if (party.status !== 'active') {
+            this.partyRequirementRefreshDue.delete(id);
+            return;
+        }
+        if (BackgroundPartyLifecycle.raidStarted(party)) return;
+        const pending = party.stats?.pendingRecruits;
+        if (!previous
+            || (party.memberIds || []).join(',') !== (previous.memberIds || []).join(',')
+            || partyObjectiveGroupingKey(party.stats?.objective) !== partyObjectiveGroupingKey(previous.stats?.objective)
+            || pending && pending.at !== previous.stats?.pendingRecruits?.at) this.partyRequirementRefreshDue.add(id);
     },
 
     partyAssemblyInput(state, timestamp = Date.now()) {
@@ -1582,7 +1585,7 @@ const PopulationService = {
     async refreshPartyAssemblyRequest(id, timestamp = Date.now()) {
         const state = LifeState.cachedState(id);
         if (!state) return null;
-        if (!this.started || this.partyFormationRunning || this.resolving || this.partyRequestCleanupRunning
+        if (!this.started || this.partyFormationRunning || this.resolving
             || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.simulation?.leaseId) return { deferred: true };
         const expired = expirePartyRequestForState(state, timestamp);
         if (expired !== state) return LifeState.upsertState(expired, 'party_request_expired');
@@ -1604,7 +1607,7 @@ const PopulationService = {
             await this.helpClanParty(timestamp);
             return { deferred: Help.hasPending(), retryAt: Help.nextDeadline() };
         }
-        if (this.partyFormationRunning || this.resolving || this.partyRequestCleanupRunning) return { deferred: true };
+        if (this.partyFormationRunning || this.resolving) return { deferred: true };
         const eligible = candidates.filter(state => LifeState.cachedState(state.characterId) === state
             && state.simulation?.ownerId === 'legacy_main' && !state.simulation?.leaseId
             && !invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)
@@ -2018,28 +2021,6 @@ const PopulationService = {
         ), Promise.resolve([]));
     },
 
-    cleanupStalePartyRequests(timestamp = Date.now(), batchSize = Config.partyRequestCleanupBatchSize) {
-        const cleanupInterval = Math.max(5000, Number(Config.partyRequestCleanupIntervalMs) || 30000);
-        if (timestamp < this.nextPartyRequestCleanupAt) return Promise.resolve(0);
-        return LifeState.expireStalePartyRequests(Math.max(1, Number(batchSize) || Config.partyRequestCleanupBatchSize))
-            .catch((error) => {
-                utils.infoWarn('BotPopulation', 'party request cleanup failed: %s', error?.message || error);
-                return 0;
-            })
-            .finally(() => {
-                this.nextPartyRequestCleanupAt = Date.now() + cleanupInterval;
-            });
-    },
-
-    runPartyRequestCleanup(batchSize = Config.partyRequestCleanupBatchSize) {
-        if (this.partyRequestCleanupRunning) return Promise.resolve(0);
-        this.partyRequestCleanupRunning = true;
-        return this.cleanupStalePartyRequests(Date.now(), batchSize)
-            .finally(() => {
-                this.partyRequestCleanupRunning = false;
-            });
-    },
-
     protectedPartyFormationDelay(failed = false) {
         const base = Math.max(1000, Number(Config.protectedPartyFormationIntervalMs) || 30000);
         if (failed) this.protectedPartyFormationFailures = Math.min(8, Number(this.protectedPartyFormationFailures || 0) + 1);
@@ -2051,7 +2032,7 @@ const PopulationService = {
     async helpClanParty(timestamp = Date.now()) {
         const Help = invoke('GameServer/Bot/Population/ClanPartyHelp');
         if (!Help.hasPending() || Config.enabled === false || Config.backgroundPartyEnabled === false
-            || this.partyFormationRunning || this.resolving || this.partyRequestCleanupRunning) return null;
+            || this.partyFormationRunning || this.resolving) return null;
         const cold = ColdSimulationCoordinator.snapshot();
         if (Number(Metrics.currentEventLoopLag()) >= Number(Config.protectedPartyFormationLagAbortMs || 40)
             || Number(Database.pending() || 0) > 0 || Database.checkpointSnapshot()?.inFlight
@@ -2183,34 +2164,21 @@ const PopulationService = {
             Config.developerDiagnostics && Metrics.recordPartyFormationDeferral();
             return Promise.resolve([]);
         }
-        if (this.partyRequestCleanupRunning) {
-            this.partyFormationPending = true;
-            return Promise.resolve([]);
-        }
         if (this.resolving) {
             // Busy work preserves this group's retry deadline.
             this.partyFormationPending = true;
-            return activity.protected
-                ? Promise.resolve([])
-                : candidates ? Promise.resolve([]) : this.runPartyRequestCleanup(Config.partyRequestCleanupBatchSize).then(() => []);
+            return Promise.resolve([]);
         }
 
         const formationBudgetMs = this.partyFormationBudgetMs(activity);
         if (formationBudgetMs <= 0) {
             this.partyFormationPending = true;
             Config.developerDiagnostics && Metrics.recordPartyFormationDeferral();
-            return activity.protected
-                ? Promise.resolve([])
-                : candidates ? Promise.resolve([]) : this.runPartyRequestCleanup(Config.partyRequestCleanupBatchSize).then(() => []);
+            return Promise.resolve([]);
         }
 
         this.partyFormationRunning = true;
         this.partyFormationPending = false;
-        // Event discovery already has original candidates. Their TTLs are
-        // individually armed; legacy tooling retains its cleanup entrypoint.
-        const cleanup = activity.protected || candidates
-            ? Promise.resolve(0)
-            : this.runPartyRequestCleanup(Config.partyRequestCleanupBatchSize);
         const startedAt = Date.now();
         const deadlineAt = startedAt + formationBudgetMs;
         let budgetStopRecorded = false;
@@ -2231,15 +2199,14 @@ const PopulationService = {
         const objectiveOf = partyObjectiveMemo();
         const openRequired = state => objectiveOf(state)?.status === 'open' && objectiveOf(state)?.priority === 'required';
         const formationWork = () => {
-            return timedStage('cleanup', () => cleanup)
             // Production inspects one indexed group page. Tooling can explicitly
             // request the legacy projection; only selected rows hydrate.
-            .then(() => timedStage('candidate_projection', () => (candidates ? Promise.resolve(candidates) : LifeState.coldPartyCandidateProjections())
+            return timedStage('candidate_projection', () => (candidates ? Promise.resolve(candidates) : LifeState.coldPartyCandidateProjections())
                 .then((states) => ({
                     states,
                     partyRequestBacklog: states.some((state) => objectiveOf(state)?.status === 'open'),
                     requiredPartyRequestCount: states.filter(openRequired).length
-                }))))
+                })))
             .then(({ states, partyRequestBacklog, requiredPartyRequestCount }) => {
                 const materialRequested = states.some(state => require('./CraftMaterialParty').isObjective(partyObjectiveForState(state)));
                 const willingStates = states.filter((state) => (
@@ -2248,21 +2215,14 @@ const PopulationService = {
                     || materialRequested && !!PartyComposition.supportRole(state, partyObjectiveForState(state))
                     || PersonaPartyPolicy.backgroundIntent(state).accept
                 ));
-                const requiredStates = willingStates.filter(openRequired);
-                const reclaim = activity.protected
-                    ? Promise.resolve([])
-                    : this.reviewBackgroundPartyDemand(requiredStates, {
-                        deadlineAt,
-                        markBudgetStop: () => budgetReached()
-                    });
                 const recruit = activity.protected
                     ? Promise.resolve(new Set())
-                    : reclaim.then(() => this.recruitBackgroundMembers(willingStates, {
+                    : this.recruitBackgroundMembers(willingStates, {
                         deadlineAt,
                         markBudgetStop: () => budgetReached(),
                         objectiveOf
-                    }));
-                return reclaim.then(() => recruit).then((recruitedIds) => ({
+                    });
+                return recruit.then((recruitedIds) => ({
                     states: willingStates.filter((state) => !recruitedIds.has(Number(state.characterId))),
                     partyRequestBacklog,
                     requiredPartyRequestCount
@@ -2458,44 +2418,6 @@ const PopulationService = {
     partyObjectiveForState,
     expirePartyRequestForState,
 
-    refreshBackgroundPartyRequirements(parties = [], options = {}) {
-        const timestamp = Date.now();
-        const deadlineAt = Number(options.deadlineAt || Infinity);
-        const budgetReached = () => {
-            if (Date.now() < deadlineAt) return false;
-            options.markBudgetStop?.();
-            return true;
-        };
-        const refreshMs = Math.max(1000, Number(Config.partyRequirementRefreshMs) || 5 * 60 * 1000);
-        const batchSize = Math.max(1, Number(Config.partyRequirementRefreshBatchSize) || 8);
-        const refreshable = (parties || [])
-            .filter((party) => party.status === 'active' && !BackgroundPartyLifecycle.raidStarted(party))
-            .filter((party) => timestamp - Number(party.stats?.lastRequirementRefreshAt || 0) >= refreshMs)
-            .sort((a, b) => Number(a.stats?.lastRequirementRefreshAt || 0) - Number(b.stats?.lastRequirementRefreshAt || 0))
-            .slice(0, batchSize);
-        if (!refreshable.length) return Promise.resolve([]);
-
-        for (const party of refreshable) {
-            if (budgetReached()) break;
-            this.partyRequirementRefreshDue.add(String(party.partyId));
-        }
-        const due = refreshable.filter(party => this.partyRequirementRefreshDue.has(String(party.partyId)));
-        if (!Hold.asked('party_requirements')) return Promise.resolve(due.map(party => party.partyId));
-        // Shadow verdict: would this timed refresh have been skipped because
-        // no member input event happened since the last one? The refresh
-        // still runs; the 'on' skip is not wired here.
-        return Promise.resolve(LifeState.cachedStatesForParties(due)).then(membersByParty => {
-            for (const party of due) {
-                const held = party.stats?.requirementInputs, why = [];
-                if (!held) why.push('unproved');
-                else if (held !== partyRequirementInputs(party, membersByParty.get(String(party.partyId)) || [], timestamp)) why.push('event_key');
-                Hold.check('party_requirements', why);
-                this.partyRequirementVerdicts.set(String(party.partyId), { why, moved: false });
-            }
-            return due.map(party => party.partyId);
-        });
-    },
-
     async applyWorkerPartyRequirements(party, resolution) {
         // Material completion is checked against the physical bag by the
         // native resolver. A generic gear refresh must not evict its core.
@@ -2505,7 +2427,6 @@ const PopulationService = {
         }
         if (party.status !== 'active') {
             this.partyRequirementRefreshDue.delete(String(party.partyId));
-            this.partyRequirementVerdicts.delete(String(party.partyId));
             return [];
         }
         let changed = false;
@@ -2516,11 +2437,8 @@ const PopulationService = {
             changed = !!await LifeState.upsertState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
                 'party_requirement_refresh') || changed;
         }
-        const verdict = this.partyRequirementVerdicts.get(String(party.partyId));
-        if (verdict && changed) verdict.moved = true;
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
         if (!resolution.requirementRefreshedAt) return [];
-        const timestamp = Number(resolution.requirementRefreshedAt);
         const members = (await LifeState.cachedStatesForParties([party])).get(String(party.partyId)) || [];
         const refreshedMembers = members;
         const releasable = party.stats?.objective?.priority === 'required'
@@ -2554,32 +2472,17 @@ const PopulationService = {
                 objective: objective || null,
                 acquisitionGoal: objectiveMember?.stats?.equipmentPlan?.status === 'active'
                     ? objectiveMember.stats.equipmentPlan
-                    : null,
-                lastRequirementRefreshAt: timestamp
+                    : null
             }
         };
-        // The held record of the hold place: the inputs this refresh answered
-        // (none while the place is not asked: a stale one would hold wrongly).
-        if (Hold.asked('party_requirements')) nextParty.stats.requirementInputs = partyRequirementInputs(nextParty, retainedMembers, timestamp);
-        else delete nextParty.stats.requirementInputs;
-        if (verdict) {
-            this.partyRequirementVerdicts.delete(String(party.partyId));
-            Hold.compare('party_requirements', { characterId: Number(party.leaderId) }, verdict.why,
-                () => verdict.moved || departures.length ? 'plan' : '', 0);
-        }
         if (Number(nextLeaderId) !== Number(party.leaderId)) {
             await syncPartyLeader(retainedMembers, nextParty, nextLeaderId);
         }
         await BackgroundPartyState.createOrUpdate(nextParty);
+        // After the last write: it also erases the marks of this apply's own
+        // writes (leaveParty, createOrUpdate publish inside their awaits).
         this.partyRequirementRefreshDue.delete(String(party.partyId));
         return changed || departures.length ? [party.partyId] : [];
-    },
-
-    // Review the current goals, but never disband an otherwise valid party
-    // merely because another candidate is waiting for scheduler capacity.
-    reviewBackgroundPartyDemand(partyWaitStates = [], options = {}) {
-        if (!partyWaitStates.length) return Promise.resolve([]);
-        return this.refreshBackgroundPartyRequirements(BackgroundPartyState.active(), options).then(() => []);
     },
 
     recruitBackgroundMembers(candidates = [], options = {}) {

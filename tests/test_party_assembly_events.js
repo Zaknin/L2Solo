@@ -171,11 +171,19 @@ async function main() {
         assert.equal(memberQueries, 0, 'five-party recruitment reads no member DB rows');
         assert.equal(publications, 0, 'member reads publish nothing');
         assert.equal(Life.cachedState(freshId).level, 11, 'a stale DB row cannot overwrite the newer cache');
-        Population.partyRequirementRefreshDue.clear();
-        await Population.reviewBackgroundPartyDemand([]);
-        assert.equal(Population.partyRequirementRefreshDue.size, 0, 'no required waiters marks no refresh');
-        await Population.reviewBackgroundPartyDemand([{ characterId: 999 }]);
-        assert.equal(Population.partyRequirementRefreshDue.size, Config.partyRequirementRefreshBatchSize);
+        // A party is due for its member plans only when its roster, its
+        // objective or its pending recruits change, never on its own plan write.
+        const due = Population.partyRequirementRefreshDue, base = cacheParties[0], id = base.partyId;
+        due.clear();
+        Population.markPartyRequirementsDue({ ...base, stats: { acquisitionGoal: { status: 'active' } } }, base);
+        assert.equal(due.size, 0, 'the apply\'s own goal write marks nothing');
+        Population.markPartyRequirementsDue({ ...base, memberIds: [...base.memberIds, 999] }, base);
+        assert(due.has(id), 'a new member marks the party due');
+        due.clear();
+        Population.markPartyRequirementsDue({ ...base, stats: { objective: { objectiveKey: 'spot:B' } } }, base);
+        assert(due.has(id), 'a new objective marks the party due');
+        Population.markPartyRequirementsDue({ ...base, status: 'dissolved' }, base);
+        assert.equal(due.size, 0, 'a dissolved party drops its mark');
     } finally { DB.execute = originalExecute; Parties.active = originalActive; unpublish(); Population.partyRequirementRefreshDue?.clear(); }
     console.log('PASS five-party cache reads, no publications, cache authority and addressed refresh marks');
 

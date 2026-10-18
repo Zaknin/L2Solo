@@ -1118,13 +1118,14 @@ function startKernel(config = {}) {
             // without one (a party member, karma) asks after
             // the round below: that is its one decision point.
             const stepEconomy = lifecyclePlan?.economy || null;
-            let economy = stepEconomy, seenEcho = null, refreshed = null, observedDeps = null, economyEdges = null;
+            let economy = stepEconomy, seenEcho = null, refreshed = null, observedDeps = null, economyEdges = null, raised = 0;
             const escrowOf = () => kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow || 0;
             const base = {
                 persist: false,
                 timestamp,
                 projectClassProgression: true,
                 moneyEscrowFor: escrowOf,
+                onRaised: bits => { raised = bits; },
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and
                 // the bot's memory rows, read only when its bond is compared.
@@ -1197,6 +1198,9 @@ function startKernel(config = {}) {
             const market = reviewMarket(projected, timestamp, economy);
             return {
                 state: projected,
+                // The sections this step's event check raised (worker-local:
+                // the party step reads 'build', a member's kit event).
+                raised: DecisionSections.sectionNames(raised),
                 economyEdges,
                 ...(economyPlan ? { economyPlan } : {}),
                 ...(market ? { market } : {}),

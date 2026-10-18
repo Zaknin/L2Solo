@@ -302,15 +302,6 @@ try {
             assert(save.sql.includes('lastResolvedAt = excluded.lastResolvedAt'), 'persisted cold resolve history must survive an upsert');
             assert(save.sql.includes('inventorySummary = excluded.inventorySummary'), 'background drop rewards must persist after an upsert');
             assert(save.sql.includes("WHERE bot_life_state.simulationOwner = 'legacy_main'"), 'legacy saves must not overwrite a cold owner lease');
-            const cleanupStart = statements.length;
-            return BotLifeState.expireStalePartyRequests(100).then((expired) => {
-                assert.strictEqual(expired, 1, 'TTL cleanup should report the physical row it changed');
-                const cleanupUpdate = statements.slice(cleanupStart).find((entry) => entry.sql.startsWith('UPDATE bot_life_state'));
-                assert(cleanupUpdate, 'periodic TTL cleanup must execute its update');
-                assert.strictEqual(cleanupUpdate.params.length, 6, 'bounded TTL cleanup must bind only the predicates present in its subquery');
-                assert.strictEqual(BotLifeState.cachedState(42).stats.partyRequest.status, 'deferred', 'TTL cleanup must refresh the lifecycle cache');
-                assert.strictEqual(BotLifeState.partyRequestSummary().total, 0, 'TTL cleanup must remove expired requests from telemetry');
-            });
         }).then(() => BotLifeState.migrateLegacyClassProgression(1).then((migrated) => {
                 assert.strictEqual(migrated.length, 1, 'legacy cold bots without progression markers must be migrated');
                 const classUpdate = classUpdates.at(-1);

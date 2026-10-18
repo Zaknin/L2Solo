@@ -215,7 +215,7 @@ function rowFromParty(party) {
     const current = cache.get(String(party.partyId))?.stats;
     if (Number(current?.clanGoalInvalidationVersion || 0) > Number(party.stats?.clanGoalInvalidationVersion || 0)) {
         party = { ...party, stats: { ...party.stats, objective: current.objective,
-            acquisitionGoal: current.acquisitionGoal, lastRequirementRefreshAt: current.lastRequirementRefreshAt,
+            acquisitionGoal: current.acquisitionGoal,
             clanGoalInvalidationVersion: current.clanGoalInvalidationVersion } };
     }
     const timestamp = now();
