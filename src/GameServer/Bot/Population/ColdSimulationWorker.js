@@ -781,12 +781,12 @@ function advisoryRefusal(deps, site, reason) {
     if (name === 'party' || name === 'no_card') return deps;
     return { ...deps, advisoryRefusal: name };
 }
-// The card of the step's decision after its round: a craft step the round's
-// action plan prepared joins it, as the post-round build's card carried it
-// (main's crafters read decided().shot). Any other action keeps the card.
+// The card of the step's decision after its round carries the shot of the
+// round's action plan, as the post-round build's card did (main's crafters
+// read decided().shot): a prepared craft step joins it, an action plan that
+// prepared none strips a stale one. No action plan keeps the card.
 function stepCard(card, actionPlan) {
-    const shot = actionPlan?.shot;
-    return shot ? ColdEconomyDecision.cardWithShot(card, shot) || card : card;
+    return actionPlan ? ColdEconomyDecision.cardWithShot(card, actionPlan.shot || null) || card : card;
 }
 // Two plan-like stats values hold the same data (undefined reads as null).
 function samePlanJson(a, b) {

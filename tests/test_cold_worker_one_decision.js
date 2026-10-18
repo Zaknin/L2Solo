@@ -58,6 +58,37 @@ module.exports.stepProbe = async (id) => {
             card: { updatedAt: projection.economyDecision?.updatedAt, key: projection.economyDecision?.key,
                 projectedAt: Number(projection.state.updatedAt || 0), projectedKey: ColdEconomyDecision.stateKey(projection.state) } };
     } finally { Economy.forState = original; }
+};
+// Quiet steps (no loot) leave the step decision held: the next decision
+// point reuses it while the goal revision holds and rebuilds once it moves.
+// The first quiet round records the hunt cycle (an income event), so the
+// second step is the warm one.
+module.exports.goalProbe = async (id) => {
+    const context = kernel.states.get(id).context, timestamp = Date.now();
+    context.goalRevision = 1;
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext'), original = Economy.forState;
+    const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+    let builds = 0;
+    Economy.forState = (...args) => { builds++; return original(...args); };
+    const step = async at => {
+        const before = builds, state = kernel.states.get(id).state;
+        const plan = await kernel.planLifecycle({ state, context, timestamp: at });
+        const projection = await kernel.projectResolve(plan.plannedState || state, { patch: {}, debug: {}, events: [],
+            materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: at + 60000 }, at, plan);
+        kernel.states.set(id, { state: projection.state, context });
+        return builds - before;
+    };
+    try {
+        await step(timestamp); await step(timestamp + 1000);
+        const same = await step(timestamp + 2000);
+        const ask = () => ColdEconomyDecision.refusal(kernel.states.get(id).state, context.wishAdvisory,
+            { goalRevision: context.goalRevision, timestamp: timestamp + 3000 });
+        const held = ask();
+        context.goalRevision += 1;
+        const refusal = ask();
+        const moved = await step(timestamp + 3000);
+        return { same, held, refusal, moved };
+    } finally { Economy.forState = original; }
 };`;
 const wrapper = String.raw`
 const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
@@ -66,8 +97,8 @@ const loaded = new Module(workerData.workerPath, module);
 loaded.filename = workerData.workerPath; loaded.paths = Module._nodeModulePaths(path.dirname(workerData.workerPath));
 loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.observer, workerData.workerPath);
 parentPort.on('message', message => {
-    if (!message.stepProbe) return;
-    loaded.exports.stepProbe(message.stepProbe).then(value => parentPort.postMessage({ probeId: message.msgId, value }))
+    if (!message.stepProbe && !message.goalProbe) return;
+    (message.stepProbe ? loaded.exports.stepProbe(message.stepProbe) : loaded.exports.goalProbe(message.goalProbe)).then(value => parentPort.postMessage({ probeId: message.msgId, value }))
         .catch(error => parentPort.postMessage({ probeId: message.msgId, error: error.stack }));
 });`;
 
@@ -109,10 +140,11 @@ parentPort.on('message', message => {
             rows: catalog.slice(at, at + Protocol.MAX_BATCH), done: at + Protocol.MAX_BATCH >= catalog.length });
         const spots = invoke('GameServer/Bot/Population/SpotProfiles').ensure();
         for (let at = 0; at < spots.length; at += Protocol.MAX_BATCH) send('catalog_page', { catalog: 'spots', rows: spots.slice(at, at + Protocol.MAX_BATCH) });
-        send('init', { config: { loopIntervalMs: 1000 } }, 'init');
+        send('init', { config: { loopIntervalMs: 1000 }, recomputeGeneration: { code: 'a'.repeat(40), config: 'b'.repeat(64) } }, 'init');
         await wait(message => message.type === 'ready' && message.payload.phase === 'running'); send('pause', {}, 'pause');
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
-            { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
+            { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true },
+            { name: 'personal_warehouse', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
         send('snapshot_page', { rows: [{ state, context: { buyOrderEscrow: 0 } }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), stepProbe: id });
@@ -128,6 +160,14 @@ parentPort.on('message', message => {
         assert.equal(step.baseline[1], step.baseline[0], 'the projected state keeps the baseline of the step decision');
         assert.equal(step.card.updatedAt, step.card.projectedAt, 'main gets the step card stamped to the projected state');
         assert.equal(step.card.key, step.card.projectedKey);
+        worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'goal'), goalProbe: id });
+        const goalResponse = await wait(message => message.probeId === 'goal'); if (goalResponse.error) throw Error(goalResponse.error);
+        const goal = goalResponse.value;
+        console.log(JSON.stringify(goal));
+        assert.equal(goal.same, 0, 'a quiet step reuses the held decision while the goal revision holds');
+        assert.equal(goal.held, '', 'the held decision holds on the warm state at the same goal revision');
+        assert.equal(goal.refusal, 'goal', 'a moved goal revision refuses the held decision');
+        assert.equal(goal.moved, 1, 'the next decision point after a goal change builds once');
         console.log('One economy decision per far solo step passed');
     } finally { await worker?.terminate(); await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });
