@@ -90,6 +90,9 @@ function isCGradeHelmet(item) {
 // usable C slot. Already worn higher-grade pieces also satisfy that milestone.
 function acquisitionRankFor(state = {}, assessment = null) {
     const rank = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').gradeForLevel(state.level);
+    // The assessment can only lower the ceiling to its own rank, which is the
+    // level's grade up to C: at or under C the level's grade is the answer.
+    if (!assessment && RANKS.indexOf(rank) <= 2) return rank;
     const current = assessment || assess(state);
     return current.required && RANKS.indexOf(rank) > (current.rank || 2) ? RANKS[current.rank || 2] : rank;
 }
