@@ -22,7 +22,8 @@ function waiting(state, plan, partyRequest) {
 // without the plan (a fitting current spot is kept). hasRoom (the worker's
 // room filter, ROUTE-ROOM-3): a planned spot other than the bot's own with no
 // room for it is no fallback, and the level search takes the filter too; main
-// passes none. Null when neither exists.
+// passes none (its level search reads main's world index, ROUTE-ROOM-4).
+// Null when neither exists.
 function spotFor(state, plan, profiles, { excludedSpotIds, timestamp, hasRoom = null } = {}) {
     const planned = GearAcquisitionPlanner.safeFallbackForPlan(state, plan, profiles, { excludedSpotIds });
     const plannedSpot = planned ? SpotIndex.spotById(profiles, planned.spotId) : null;

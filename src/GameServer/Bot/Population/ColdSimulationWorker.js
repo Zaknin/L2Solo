@@ -97,7 +97,7 @@ const LifeStateProjector = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyRequirementRefresh = invoke('GameServer/Bot/Population/PartyRequirementRefresh');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
-const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const DecisionEvents = require('../AI/DecisionEvents');
 const { stateKey } = require('./SpotOccupancyIndex');
 const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
@@ -936,34 +936,19 @@ function pruneLookSeen(ownerId) {
 // a spot the catalog does not know has room.
 const ROOM_SECTIONS = Object.freeze(['occupation', 'sources']);
 function roomAtArrival(spotId, arriving, overflow = 0) {
-    const room = spotRoom(spotId);
+    const room = SpotProfiles.spotRoom(planningSpots, spotId);
     if (room === Infinity) return true;
     const standing = kernel.occupancy.physicalCount(spotId, { excludeKeys: arriving, standingOnly: true });
     return standing + arriving.size <= room + overflow;
 }
 
-// How many bots a spot holds (LevelingRoutes.roomForSpot); a raid boss spot
-// or a spot the catalog does not know: no limit. The arrival check above and
-// the route search's filter below read this one rule.
-function spotRoom(spotId) {
-    const spot = SpotIndex.spotById(planningSpots, spotId);
-    return !spot || spot.raidBoss === true ? Infinity : LevelingRoutes.roomForSpot(spot);
-}
-
-// The room filter of a solo bot's route (ROUTE-ROOM): a spot has room for
-// this bot when every bot indexed there, those on their way included, other
-// than this bot, plus this bot fit; re-checked at arrival.
-function roomFilterFor(state) {
-    const self = new Set([stateKey(state)]);
-    return (spotId) => kernel.occupancy.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spotId);
-}
-
 // The step's solo trip and the kept route's drop (BotRoute.trip / drop): the
 // route lives in the bot's kernel record. The search skips a spot with no
-// room for the bot.
+// room for the bot (SpotProfiles.roomFilterFor over this worker's index).
 function routeTrip(state, context, leaf, timestamp) {
     return BotRoute.trip(kernel.states.get(Number(state.characterId)), state, leaf,
-        { spots: planningSpots, currentSpot: context?.spot || null, timestamp, hasRoom: roomFilterFor(state) });
+        { spots: planningSpots, currentSpot: context?.spot || null, timestamp,
+            hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, state) });
 }
 function dropRoute(characterId, why) {
     BotRoute.drop(kernel.states.get(Number(characterId)), why);
@@ -985,6 +970,8 @@ function soloArrival(state, result) {
     economyDiagnostics.count('roomAtArrival', 'solo', 'checked');
     if (room) return null;
     economyDiagnostics.count('roomAtArrival', 'solo', 'full');
+    // Which trips still end on a full spot: the read names their reasons.
+    economyDiagnostics.count('roomAtArrival', 'full', travel.reason || 'none');
     // The arrival patch carries the whole stats copy (resolveTravel); the mark
     // reads the same counter and marks from the state the step started on.
     const { capacityBackoffs, lastReason } = SpotRiskPolicy.withCapacityBackoff(state, travel.spotId).stats;
@@ -1490,7 +1477,8 @@ function startKernel(config = {}) {
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots,
-                    { excludedSpotIds, timestamp, hasRoom: roomFilterFor(state) })
+                    { excludedSpotIds, timestamp,
+                        hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, state) })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
             const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };

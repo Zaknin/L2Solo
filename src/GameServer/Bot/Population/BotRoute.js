@@ -74,7 +74,8 @@ function groundOf(state, currentSpot) {
 // unsafe-ground verdict. One frame serves one trip start (leafChoice or
 // choose, then record): the caller builds it once and passes it to each.
 // hasRoom: the worker's room filter for the spot search (ROUTE-ROOM), only
-// on the solo trip; a party search and main pass none.
+// on the solo trip; a party search and main pass none (a solo search on main
+// reads main's world index in SpotProfiles.findForState, ROUTE-ROOM-4).
 function frameFor(state, party, partyMembers = [], timestamp, hasRoom = null) {
     const partyRoute = !!party;
     const routedMembers = partyRoute ? partyMembers : [state];
