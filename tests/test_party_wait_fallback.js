@@ -177,8 +177,9 @@ async function commandChecks() {
     GlobalChat.maybeAnnounce = () => null;
     // The worker's plan is used as it is: a 'farm' plan has no drop source
     // for main to re-check. The plan arrives with the party request the
-    // worker built for it (main builds none).
-    const command = (state, plan, context = {}, route = null) => {
+    // worker built for it (main builds none), and the request's route names
+    // the trip it started or the ground it fought on.
+    const command = (state, plan, route) => {
         applied.length = 0;
         upserted.length = 0;
         reviewed.length = 0;
@@ -187,13 +188,12 @@ async function commandChecks() {
                 partyRequest: invoke('GameServer/Bot/Population/PartyRequestPlanner')
                     .partyRequestForPlan(state, plan, Date.now(), { economy: { worth: () => 0 } }) },
             precomputedResult: workerFight(),
-            context,
             route
         });
     };
     const farmPartyPlan = { ...partyPlan, strategy: 'farm' };
     const farmSoloPlan = { ...soloPlan, strategy: 'farm' };
-    const worked = { spot: currentSpot };
+    const worked = { needed: false, spotId: currentSpot.id };
 
     // A waiter with a worker fight is relabelled to the plan's safe fallback.
     GearPlanner.safeFallbackForPlan = () => ({ spotId: plannedFallback.id, npcId: 321 });
@@ -228,12 +228,11 @@ async function commandChecks() {
     assert(reviewed.length && reviewed.every((id) => id === currentSpot.id),
         'the goal review sees the ground the worker fought on');
     // A trip the worker's step started (its request's route) names its destination.
-    result = await command(routeState(17, {}), farmSoloPlan, { spot: currentSpot },
-        { needed: true, spotId: levelSpot.id });
+    result = await command(routeState(17, {}), farmSoloPlan, { needed: true, spotId: levelSpot.id });
     assert.strictEqual(applied.length, 1);
     assert(reviewed.length && reviewed.every((id) => id === levelSpot.id), 'the goal review sees the trip\'s destination');
-    // Without any spot in the worker's context the rest stays.
-    result = await command(routeState(16, {}), farmSoloPlan, {});
+    // Without any spot in the worker's route the rest stays.
+    result = await command(routeState(16, {}), farmSoloPlan, { needed: false, spotId: null });
     assert.strictEqual(result.reason, 'missing_spot_recovery', 'no spot anywhere: the bot rests and retries');
     assert.strictEqual(upserted[0].value.activity, 'resting');
     SpotProfiles.findForState = findForStateStub;

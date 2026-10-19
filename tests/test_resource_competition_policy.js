@@ -40,11 +40,10 @@ const at = 1800000000000;
 const memory = new Memory();
 const spot = { id: 'null-persona', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 8 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`,
-    phase: 'cold', activity: 'hunting', level: 40, spotId: spot.id, vitals: { hp: 100 }, stats: {} },
-    context: { spot } }));
+    phase: 'cold', activity: 'hunting', level: 40, spotId: spot.id, vitals: { hp: 100 }, stats: {} } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
 function forecast(persona) {
-    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: () => persona });
+    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: () => persona, spotOf: () => spot });
     for (let i = 0; i <= 60; i++) monitor.sample(entries, memory, at + i * INTERVAL_MS);
     return monitor.snapshot();
 }

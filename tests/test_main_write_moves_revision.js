@@ -41,8 +41,6 @@ function coordinatorProbe() {
     coordinator.workerEpoch = 'main-write-revision';
     coordinator.postCollections = (type, payload) => { sent.push({ type, results: payload.results }); return 1; };
     coordinator.ensureCraftRecipes = async () => null;
-    coordinator.contextIndex = () => ({});
-    coordinator.contextFor = () => ({});
     return { coordinator, sent };
 }
 

@@ -174,17 +174,18 @@ let coordinator = null;
     const CraftShop = invoke('GameServer/Bot/Economy/CraftShopService');
     const Workshop = require('../src/GameServer/Bot/Economy/CraftWorkshopService');
     const Codec = require('../src/GameServer/Bot/Economy/RecipeBookCodec');
-    const recipe = Object.values(invoke('GameServer/Items/C4RecipeItems').loadRecipeItems()).find(row => row.type === 'dwarven');
-    const originalService = CraftShop.isServiceCrafter, originalBook = Workshop.bookFor;
+    const originalService = CraftShop.isServiceCrafter;
     const originalPost = coordinator.post;
-    let book = Codec.pack([]), sentKnowledge;
+    let sentKnowledge;
     CraftShop.isServiceCrafter = () => true;
-    Workshop.bookFor = () => book;
+    // Main's recipe cache holds each member's book (none learned yet).
+    await Promise.all(goalMembers.map(member => Workshop.knownFor(member.characterId)));
     coordinator.post = function(type, payload, ...args) {
         const sent = originalPost.call(this, type, payload, ...args);
         if (type === 'party_goal_request') {
             sentKnowledge = payload.recipeKnowledge;
-            book = Codec.pack([recipe.recipeId]);
+            // A learning while the reply is awaited drops main's cached book.
+            Workshop.recipesChanged(goalMembers[0].characterId);
         }
         return sent;
     };
@@ -194,7 +195,7 @@ let coordinator = null;
         assert.equal(changedKnowledge.reason, 'party_goal_source_changed', 'knowledge learned while awaiting reply rejects stale goals');
         assert.equal(coordinator.partyGoalRequests, 0);
     } finally {
-        CraftShop.isServiceCrafter = originalService; Workshop.bookFor = originalBook; coordinator.post = originalPost;
+        CraftShop.isServiceCrafter = originalService; coordinator.post = originalPost;
     }
     const largeMembers = await LifeState.statesForParty('worker-party');
     assert(require('../src/GameServer/Bot/Population/ColdSimulationProtocol').byteLength({ members: largeMembers }) > 256 * 1024,

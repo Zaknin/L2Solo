@@ -39,8 +39,7 @@ const worker = new Memory();
 worker.accept(JSON.parse(JSON.stringify(memory.snapshot(1))));
 assert.deepStrictEqual(Policy.evaluate(worker.assess({ id: 1 }, { id: 2 }, {}, at), persona), Policy.evaluate(social, persona));
 const entries = [1, 2].map(id => ({ state: { characterId: id, name: `Bot${id}`, phase: 'cold', activity: 'hunting',
-    spotId: 'spot', loc: { locX: id * 10, locY: 0, locZ: 0 }, vitals: { hp: 100 }, stats: {}, simulation: { revision: 3 } },
-    context: { spot: { id: 'spot', npcEntries: [{ selfId: 1 }, { selfId: 2 }] } } }));
+    spotId: 'spot', loc: { locX: id * 10, locY: 0, locZ: 0 }, vitals: { hp: 100 }, stats: {}, simulation: { revision: 3 } } }));
 const before = JSON.stringify(entries);
 // The test override of the roll (() => 0) forces the outcome through the sampleActors seam.
 const forced = (m, input, personaFor = () => persona, when = at) => m.sampleActors(input,
