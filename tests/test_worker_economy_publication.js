@@ -43,7 +43,7 @@ async function runWorker(state, predicate, followUp = null) {
         await until(message => message.type === 'ready' && message.msgId === 'init');
         send('snapshot_page', { rows: [{ state }], initial: true, done: true });
         const result = await until(predicate);
-        if (followUp) await followUp({ result, until, seen: test => received.some(test),
+        if (followUp) await followUp({ result, until, received, seen: test => received.some(test),
             post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }),
             table: tables => send('table_page', { tables }) });
         assert(!received.some(message => message.type === 'fault'));
@@ -93,18 +93,38 @@ async function runWorker(state, predicate, followUp = null) {
 
     // The worker owns the near mind: a post carries the body's older mind keys, which are
     // discarded; a raise is taken once and a later post naming it adds nothing.
-    const decidedAt = (until, seq) => until(message => message.type === 'ready'
-        && message.payload.phase === 'economy_decided' && message.payload.near?.nearSeq === seq);
+    const decidedAt = (until, seq, characterId = 765413) => until(message => message.type === 'ready'
+        && message.payload.phase === 'economy_decided' && message.payload.characterId === characterId
+        && message.payload.near?.nearSeq === seq);
     await runWorker({ ...state, characterId: 765413 }, message => message.type === 'ready'
-        && message.payload.phase === 'economy_decided', async ({ result: first, until, post }) => {
+        && message.payload.phase === 'economy_decided', async ({ result: first, until, received, post }) => {
         const own = first.payload.near.statsPacket.decisionSeq;
-        const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1, raise: { seq: 1, bits: 1, impossible: false } };
+        const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1,
+            raise: { seq: 1, bits: 1, impossible: true, impossibleSeq: 1 } };
+        post({ ...state, characterId: 765414, updatedAt: now + 1 });
         post(raised);
-        const one = (await decidedAt(until, 4)).payload.near.statsPacket;
+        const answer = (await decidedAt(until, 4)).payload.near, one = answer.statsPacket;
         assert.equal(one.decisionSeq, own + 1, 'a raise main posted is taken once, on the worker\'s mind');
+        assert(answer.shots && Number.isFinite(answer.shots.ownedUsePerHour), 'the decision carries its build\'s auto-shot verdict');
+        // A writer's copy of the cached row (no post number) is older than the
+        // record's post: the record stands and no decision answers it.
+        const cached = { ...state };
+        delete cached.nearSeq;
+        post({ ...cached, characterId: 765413, updatedAt: now + 3 });
+        // A second near bot's post queued after it: the planner takes builds in
+        // order, so a build on the copy would be answered before this one.
+        post({ ...state, characterId: 765414, nearSeq: 4, updatedAt: now + 3 });
+        await decidedAt(until, 4, 765414);
+        assert(!received.some(message => message.payload?.phase === 'economy_decided' && message.payload.characterId === 765413
+            && message.payload.near?.nearSeq === 0), 'a hot row without a newer post number is not decided on');
         post({ ...raised, nearSeq: 5, updatedAt: now + 2 });
         const two = (await decidedAt(until, 5)).payload.near.statsPacket;
         assert.equal(two.decisionSeq, one.decisionSeq, 'a later post naming the same raise neither raises again nor rolls the mind back');
+        // The pending bag is cumulative: a later raise still carries the
+        // impossible mark of raise 1 (its step drop: test_near_decision_order).
+        post({ ...raised, nearSeq: 6, updatedAt: now + 4, raise: { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 } });
+        const three = (await decidedAt(until, 6)).payload.near.statsPacket;
+        assert.equal(three.decisionSeq, two.decisionSeq + 1, 'the new raise is taken');
     });
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,

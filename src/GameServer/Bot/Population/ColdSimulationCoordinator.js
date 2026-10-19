@@ -31,7 +31,7 @@ const World = invoke('GameServer/World/World');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
-const { ColdEconomyDecisions, echoHolds, compact } = require('./ColdEconomyDecision');
+const { ColdEconomyDecisions, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
@@ -99,8 +99,10 @@ class ColdSimulationCoordinator {
         this.workerDiagnosticsSeq = 0;
         this.diagnosticsResyncAt = 0;
         this.partyReviews = { committed: 0, departed: 0, dissolved: 0, reasons: {}, recent: [] };
-        // Always on (PopulationStatus.nearText): the near decisions the bodies took or refused.
-        this.nearDecisions = { accepted: 0, refused: 0 };
+        // Always on (PopulationStatus.nearText): the near decisions the bodies
+        // took, refused as older than the held one, or dropped (the bot cooled
+        // or has no body before its decision arrived).
+        this.nearDecisions = { accepted: 0, refused: 0, dropped: 0 };
         this.workerMaxInFlight = null;
         this.restartCount = 0;
         this.restartTimer = null;
@@ -743,13 +745,15 @@ class ColdSimulationCoordinator {
                 // arriving after it is refused. It never authorizes native spending.
                 const id = Number(payload.characterId), state = LifeState.cachedState(id);
                 const session = World.registeredActorById(id)?.session;
-                const decision = payload.economyDecision ? compact(payload.economyDecision) : null;
-                if (state?.phase !== 'hot' || !decision || !payload.near || !session?.actor) break;
+                if (state?.phase !== 'hot' || !payload.economyDecision || !payload.near || !session?.actor) {
+                    this.nearDecisions.dropped++; break;
+                }
                 if (Number(payload.near.nearSeq || 0) < Number(session.heldNearSeq || 0)) { this.nearDecisions.refused++; break; }
                 this.nearDecisions.accepted++;
+                // The held card is the one compact (accept) the body's view reads.
+                const decision = this.economyDecisions.accept(id, payload.economyDecision);
                 DecisionEvents.receive(session, decision, payload.near);
-                this.economyDecisions.accept(id, decision);
-                if (decision.feasibility) HotBoardReview.preparedOwner(id);
+                if (decision?.feasibility) HotBoardReview.preparedOwner(id);
             } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
                 this.economyDecisions.staleWorkshop(Number(payload.characterId),
                     { updatedAt: Number(payload.updatedAt), echo: payload.echo });

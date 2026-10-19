@@ -104,6 +104,7 @@ const mocks = {
     'GameServer/Bot/AI/PartyAwareness': { npcThreateningActor: () => null },
     'GameServer/Geodata/GeodataEngine': { getHeight: (x, y, z) => z, hasLineOfSight: () => true },
     'GameServer/Bot/AI/BotEventJournal': { record: async () => {} },
+    'GameServer/Bot/Population/BotLifeState': { notifyNearFacts() {} },
     'GameServer/Bot/AI/BotTownTravel': { hasCombatThreat: () => false },
     'GameServer/Bot/AI/TownGatekeeperCatalog': { targetForTown: () => ({ town: 'TestTown', npcSelfId: 1 }) },
     'GameServer/Bot/AI/TownNpcApproach': { reset() {}, planOpen: () => ({ ready: true }) },

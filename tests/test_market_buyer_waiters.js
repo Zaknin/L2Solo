@@ -71,7 +71,8 @@ async function main() {
         kernel.cancelCommand(102, busy);
         kernel.upsert(state(102, 1102));
         assert.equal(kernel.scheduleTokens.get(102).dueAt, now, 'accepted state rearms the pending event');
-        kernel.upsert(state(103, 1103, { phase: 'hot' }));
+        // The bot turns near: its hot row comes at the revision the handoff moved.
+        kernel.upsert(state(103, 1103, { phase: 'hot', simulation: { revision: 2 } }));
         assert.deepEqual(publish(record(6, 100, 10, [{ lineId: 5, selfId: 1103, count: 5, price: 100 }])), []);
         console.log('market buyer waiters: PASS (bounded new-stock delivery, native command, affordability, busy and retirement)');
     } finally {

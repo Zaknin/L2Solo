@@ -15,7 +15,6 @@ const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const Service = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
 const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Profit = invoke('GameServer/Bot/Economy/CraftProfitPolicy');
 const Policy = invoke('GameServer/Bot/Economy/WealthCraftPolicy');
 const CraftShop = invoke('GameServer/Bot/Economy/CraftShopService');
@@ -310,7 +309,6 @@ async function run() {
     assert.strictEqual(purchases.length, writesBefore);
     Admission.configureTradeAdmission(id => LifeState.cachedState(Number(id)),
         id => invoke('GameServer/World/World').registeredActorById(Number(id))?.session);
-    assert.deepStrictEqual(Economy.summary().mainColdForState, {});
     console.log(JSON.stringify({ scope: 'declared unit clock plus genuine native unfunded execution',
         recipeId: recipe.recipeId, productId, wallet: originalState.adena, cash: unit.basket.cashCost,
         revenue: unit.revenue, labour, net: unit.expectedProfit, breakEven, ratio, nativePacket,

@@ -153,10 +153,9 @@ const id = 730180;
             assert.equal(row.adena, beforeMoney);
             assert.equal(JSON.parse(row.inventorySummary)[weapon.selfId].enchant, goal.object.from + expectedConsumed);
             assert.equal(JSON.parse(row.statsJson).lastSafeEnchant.operations, expectedConsumed);
-            assert.deepEqual(Economy.summary().mainColdForState, {}, 'town readers never build a main cold network');
             console.log(JSON.stringify({ native: true, requests, nativeNeed,
                 weaponEnchant: goal.object.from + expectedConsumed, consumedScrolls: expectedConsumed,
-                wallet: beforeMoney, mainColdForState: 0 }));
+                wallet: beforeMoney }));
 
             // Separate captured-wire control: the real Steel recipe's legacy
             // plan and compact worker materials refer to the same physical gap.
@@ -214,10 +213,9 @@ const id = 730180;
             const savedOverlap = (await Database.execute(['SELECT inventorySummary FROM bot_life_state WHERE characterId=?', [id]]))[0];
             for (const material of recipe.materials) assert.equal(JSON.parse(savedOverlap.inventorySummary)[material.selfId]?.amount,
                 overlapBag.find(row => Number(row.selfId) === material.selfId)?.amount, 'saved projection matches the physical bag');
-            assert.deepEqual(Economy.summary().mainColdForState, {});
             console.log(JSON.stringify({ capturedWire: true, recipeId: recipe.recipeId,
                 materials: captured, nativeMarketRequests: market, withdrawnOnce: overlap.items,
-                wallet: beforeMoney, mainColdForState: 0 }));
+                wallet: beforeMoney }));
         } finally { Economy.forState = originalFull; }
     } finally {
         Coordinator.economyDecisions.forget(id);

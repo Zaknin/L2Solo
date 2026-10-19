@@ -58,5 +58,46 @@ const spot = () => Events.held(session)?.network.activity?.spotId;
     assert.equal(Events.rejectSession(session, accepted(8)), false, 'a decision taken before the raise does not answer it');
     await coordinator.onMessage(decided('answered', 5, 9, session.raiseSeq));
     assert.equal(Events.rejectSession(session, accepted(9)), true, 'after the answer a new rejection raises again');
+    // A later raise joins the pending bag; the answer to the impossible raise
+    // alone lifts its mark (a new rejection raises again) and keeps the bag.
+    const impossibleSeq = session.raiseSeq;
+    Events.raiseDecision(session, 'town');
+    await coordinator.onMessage(decided('partial', 6, 10, impossibleSeq));
+    assert.equal(session.nearRaise?.seq, impossibleSeq + 1, 'the later raise still waits');
+    assert.equal(session.nearRaise.impossible, false, 'the answered impossible mark is lifted');
+    assert.equal(Events.rejectSession(session, accepted(10)), true, 'a new rejection raises again');
+
+    // The worker takes a posted bag once per raise; the impossible mark of an
+    // applied raise does not drop the step a later raise of the bag finds.
+    const mind = { decisionSeq: 3, activityLeaf: 77 };
+    assert.equal(Events.takePostedRaise(mind, { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 }, 1), 2);
+    assert.deepEqual([mind.decisionSeq, mind.activityLeaf], [4, 77], 'raise 2 is taken, raise 1\'s mark is not');
+    assert.equal(Events.takePostedRaise(mind, { seq: 2, bits: 1, impossible: true, impossibleSeq: 2 }, 2), 2);
+    assert.equal(mind.decisionSeq, 4, 'an applied raise is not taken again');
+    assert.equal(Events.takePostedRaise(mind, { seq: 3, bits: 1, impossible: true, impossibleSeq: 3 }, 2), 3);
+    assert.deepEqual([mind.decisionSeq, mind.activityLeaf], [5, 0], 'an unapplied impossible raise drops the step');
+
+    // A decision for a bot that cooled before it came is dropped, and counted.
+    const dropped = coordinator.nearDecisions.dropped;
+    World.registeredActorById = () => null;
+    await coordinator.onMessage(decided('cooled', 7, 11));
+    assert.equal(coordinator.nearDecisions.dropped, dropped + 1);
+    assert.equal(spot(), 'partial');
+
+    // The body cools with a raise unanswered: its cold row takes it.
+    const pending = { ...session.nearRaise }, seq = session.coldLifeState.stats.decisionSeq;
+    Object.assign(actor, { fetchHp: () => 100, fetchMaxHp: () => 100, fetchMp: () => 50, fetchMaxMp: () => 50,
+        fetchName: () => 'NearOrder', fetchExp: () => 0, fetchSp: () => 0 });
+    // The row is read here, not saved (this test has no database).
+    Life.upsertState = async row => row;
+    // The party and PvP cooldowns build their cold rows here too.
+    const party = Life.partySessionSnapshot(session, { ...session.coldLifeState, party: { partyId: 'p', role: 'dps', leaderId: id } },
+        'cold', 'party_cooldown');
+    assert.equal(party.stats.decisionSeq, seq + 1, 'a party cooling\'s cold row takes the raise');
+    await Life.writeColdRow(session, 'cooldown');
+    assert.equal(session.coldLifeState.phase, 'cold');
+    assert.equal(session.coldLifeState.stats.decisionSeq, seq + 1, 'the cold row is raised once');
+    assert.equal(session.coldLifeState.stats.wishDirty & pending.bits, pending.bits);
+    assert.equal(session.coldLifeState.stats.activityLeaf, 0, 'its unanswered impossible mark drops the step');
     console.log('PASS near decision order: newest post wins, its mind reaches the body, a raise waits for its answer');
 })().catch(error => { console.error(error); process.exitCode = 1; });

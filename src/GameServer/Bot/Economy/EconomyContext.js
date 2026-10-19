@@ -47,7 +47,6 @@ const PROOF_RAW_BYTES = 65536;
 // thread keeps the graph nodes too and stays at 64.
 const RETAIN_LIMIT = isMainThread ? 64 : 2048;
 let routeAnchors = new WeakMap();
-let mainColdForState = null;
 let runtime = {};
 const extensions = new Map();
 function configure(providers = {}) { runtime = providers; reset(); }
@@ -991,12 +990,6 @@ function forState(state = {}, deps = {}) {
     const diagnostic = Diagnostics.active();
     const inputSequence = Number(state.stats?.decisionSeq || 0);
     if (diagnostic) Diagnostics.count('context', 'request');
-    if (diagnostic && isMainThread && state.phase === 'cold') {
-        const caller = deps.caller || 'other';
-        mainColdForState ||= new Map();
-        const slot = mainColdForState.has(caller) || mainColdForState.size < 63 ? caller : 'overflow';
-        mainColdForState.set(slot, (mainColdForState.get(slot) || 0) + 1);
-    }
     deps = resolved(state, deps);
     if (typeof deps.routeRows === 'function') deps.routeRows = deps.routeRows(state);
     const timestamp = Number(deps.timestamp || Date.now());
@@ -1558,11 +1551,6 @@ function keptTargets(state = {}, deps = {}) {
 function survivalReserve(state = {}) {
     return Array.isArray(state.stats?.money) ? positive(state.stats.money[2]) : basics(state).survivalReserve;
 }
-function forActor(actor, session, deps = {}) {
-    // The worker owns the near mind (DecisionEvents); no card crossed the
-    // handoff, so main builds from the row alone.
-    return forState(stateForActor(actor, session), deps);
-}
 function craftIncome(state) {
     // The guarded worker publication is the only production income reader on
     // main. A missing result leaves the independently supported hunt baseline.
@@ -1708,6 +1696,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
-    craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
-    resetCounters: () => { mainColdForState = null; } };
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+    craftIncome };

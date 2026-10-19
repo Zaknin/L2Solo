@@ -436,8 +436,10 @@ function restockPlan(value, options = {}) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const state = actor ? Economy.stateForActor(value) : value;
     currentAmount += beginnerAmount(state, plan);
-    const coldMain = require('node:worker_threads').isMainThread && state?.phase === 'cold';
-    const context = options.context || (coldMain ? Economy.basics(state) : Economy.forState(state));
+    // Main reads the basics: a near bot's money packet is already in its
+    // state (its held decision), a far bot's in its row.
+    const onMain = require('node:worker_threads').isMainThread;
+    const context = options.context || (onMain ? Economy.basics(state) : Economy.forState(state));
     const stock = context.stock('shots');
     const targetAmount = Math.max(0, Number(options.targetAmount ?? stock.target) || 0);
     const reserve = context.survivalReserve;
@@ -445,7 +447,7 @@ function restockPlan(value, options = {}) {
         .botPurchasePrice(plan.selfId));
     const npcPrice = Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice : 0;
     const wish = options.targetAmount === undefined ? context.network?.queue?.find(row => Number(row.object?.itemId) === Number(plan.selfId)) : null;
-    const fundedState = !coldMain && options.targetAmount === undefined && context.statsPacket
+    const fundedState = !onMain && options.targetAmount === undefined && context.statsPacket
         ? { ...state, stats: { ...state.stats, money: context.statsPacket.money } } : state;
     // The wish's rank at the price each source asks (E187): the board lines
     // at the cheapest line's price, the NPC remainder at the NPC's.
@@ -584,10 +586,11 @@ function restockAfterWeaponChange(actor, slots = [], logTag = 'BotGear') {
         .catch((error) => utils.infoWarn(logTag, 'failed to refresh shots for %s: %s', actor.fetchName?.(), error.message));
 }
 
+// Whether the decision the body holds wants a shot restock the money queue
+// funds (DecisionEvents.nearFields, taken in the background thread).
 function needsActorRestock(actor) {
-    const context = invoke('GameServer/Bot/Economy/EconomyContext').forActor(actor);
-    const stock = context.stock('shots');
-    return stock.needed && context.purchaseBudget(stock.itemId) > 0;
+    // lazy: cycle DecisionEvents requires this module at its top.
+    return invoke('GameServer/Bot/AI/DecisionEvents').held(actor.session)?.shotRestock === true;
 }
 
 // Where a hot bot goes for its shots in `town`: the best seller there, a

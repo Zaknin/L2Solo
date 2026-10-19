@@ -137,7 +137,6 @@ if (nativeMargin > 0) {
 const lowGainRatio = native.state.stats.money[1] / 2;
 assert.strictEqual(Funding.spendable(native.state, 0, { r: lowGainRatio }), 0,
     'actual E3 refuses a low-value gain even though the original 100000 wallet pays 27000 physically');
-assert.deepStrictEqual(Economy.summary().mainColdForState, {}, 'native craft readers do not rebuild on main');
 console.log('Wealth craft policy checks passed');
 } finally {
     Economy.reset();

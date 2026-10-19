@@ -523,22 +523,25 @@ const occupationPlanner = new ColdOccupationPlanner({
             Object.assign(owner.state.stats ||= {}, workshop.statsPacket);
             owner.nearRoute = { key: input.routeKey, rows: workshop.routeRows };
             send('ready', { phase: 'economy_decided', characterId: id, economyDecision: workshop.decision,
-                near: { statsPacket: workshop.statsPacket, nearSeq: Number(input.state.nearSeq || 0), raiseSeq: Number(input.raiseSeq || 0) } });
+                near: { statsPacket: workshop.statsPacket, shotRestock: workshop.shotRestock, personalCraft: workshop.personalCraft,
+                    nearSeq: Number(input.state.nearSeq || 0), raiseSeq: Number(input.raiseSeq || 0),
+                    ...(workshop.shots ? { shots: workshop.shots } : {}) } });
             // Sent once: the slot keeps the workshop.
-            workshop.decision = null; workshop.statsPacket = null; workshop.routeRows = null;
+            workshop.decision = null; workshop.statsPacket = null; workshop.personalCraft = null; workshop.routeRows = null; workshop.shots = null;
         }
     }
 });
 // The planner's work for one request. A near bot's decision (mode near) is the
-// occupation's workshop with the card, the money packet and the route rows of
-// the same build (publish sends them once).
+// occupation's workshop with the card, the fields beside it
+// (DecisionEvents.nearFields) and the route rows of the same build (publish
+// sends them once).
 function occupationWork(input, iterator) {
     return { iterator: input.mode === 'near' ? nearDecision(input, iterator) : iterator, done: false, value: null, stage: 0, units: 0 };
 }
 function* nearDecision(input, iterator) {
     const workshop = yield* iterator;
     return { workshop, decision: ColdEconomyDecision.capture({ ...input.economy, workshop }, input.state),
-        statsPacket: input.economy.statsPacket, routeRows: input.routeRows };
+        ...DecisionEvents.nearFields(input.economy, input.state), routeRows: input.routeRows };
 }
 // options: { economy, stock, routeRows, routeKey } a step already holds, and
 // a party goal query's own (main's) buyOrderEscrow and recipeKnowledge.
@@ -671,14 +674,13 @@ const softInputFor = (characterId, timestamp) => ({ board: boardReady(), buyOrde
 // it, on the posted row before it is stored: the raise main named (once per
 // raise), the hard facts (DecisionSections.events) and the soft point, in the
 // far step's one bump. The decision is then taken on this row (mode near).
-function nearEvents(id, previousEntry, entry) {
-    const previous = previousEntry.state, row = entry.state, stats = row.stats ||= {};
+// applied: the last raise the record applied.
+function nearEvents(id, previous, entry, applied) {
+    const row = entry.state, stats = row.stats ||= {};
     // The worker owns the near mind: a post's mind keys are discarded and the
     // record's stand, so a late post cannot roll back a raise.
     for (const key of SavedStats.MIND_KEYS) stats[key] = previous.stats?.[key];
-    const raise = row.raise, applied = Number(previousEntry.raiseSeq || 0);
-    if (raise && Number(raise.seq) > applied) DecisionEvents.applyRaise(stats, Number(raise.bits) || 0, raise.impossible === true);
-    entry.raiseSeq = Math.max(applied, Number(raise?.seq || 0));
+    entry.raiseSeq = DecisionEvents.takePostedRaise(stats, row.raise, applied);
     const hard = DecisionSections.events(previous, row, escrowFor(id));
     const soft = DecisionSections.softEvents(row, stats.wishSections, softInputFor(id, Date.now()));
     DecisionEvents.raiseSections(previous, row, hard, soft);
@@ -1637,7 +1639,13 @@ function startKernel(config = {}) {
     const nativeClear = kernel.states.clear.bind(kernel.states);
     kernel.states.set = (id, entry) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
-        if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previousEntry, entry);
+        // A new life starts from no record (activations fence the bot first),
+        // so the raises applied are this life's.
+        if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previous, entry, Number(previousEntry.raiseSeq || 0));
+        // The near bookkeeping ends with the body: a far record keeps no
+        // route rows of a near decision, and the next activation's raises
+        // count from its session's first.
+        else if (entry.state.phase !== 'hot' && (entry.nearRoute || entry.raiseSeq)) { entry.nearRoute = null; entry.raiseSeq = 0; }
         const result = nativeSet(id, entry);
         if (previous !== entry.state) {
             const route = routeRequests.get(Number(id));

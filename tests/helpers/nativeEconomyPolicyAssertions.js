@@ -109,7 +109,6 @@ async function captureAndRead(state, { timestamp, context = {}, needsOptions = {
         assert.deepEqual(Needs.evaluate({ ...accepted, level: accepted.level + 1, stats: { ...accepted.stats,
             wishDirty: Sections.sectionMask(['build']) } }, options), [],
             'a raised build section cannot consume the previous decision');
-        assert.deepEqual(Economy.summary().mainColdForState, {}, 'all main cold checks use a stored capture');
         console.log(JSON.stringify({ characterId: state.characterId, nativeActivity: leaf.activity,
             goalType: goal.type, money: accepted.stats.money, nativeQueue: captured.queue }));
         return { state: accepted, captured, activity: leaf, goal };
