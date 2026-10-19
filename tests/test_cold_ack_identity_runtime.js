@@ -157,6 +157,35 @@ function take(type) {
         assert.equal(coordinator.ackState.with, ackState.with + Object.keys(fails).length);
         console.log('Each failed numbers condition still carries the state: PASS');
 
+        // A main write to a far row while its worker step is out: the step's
+        // commit at its base revision is refused and the main write stays.
+        const raceId = await create(), raceBase = stepRevision(raceId), raceAt = Date.now();
+        const raceStep = { ...Life.cachedState(raceId), activity: 'hunting', updatedAt: raceAt,
+            timing: { ...Life.cachedState(raceId).timing, lastResolvedAt: raceAt, nextResolveAt: raceAt + 60000 } };
+        const raceProposal = { proposalId: `${raceId}:${raceAt}`, revision: raceBase, nextState: raceStep,
+            result: { events: [] }, enqueuedAt: raceAt };
+        const mainWrite = await Life.upsertState(Life.cachedState(raceId), 'main_write_during_step');
+        assert(mainWrite.simulation.revision > raceBase, 'a main write moves the far row');
+        assert.equal(mainWrite.simulation.revision, (await row(raceId)).simulationRevision, 'the cache takes the moved revision');
+        const [raceCommit] = await Owner.commitBatch([{ revision: raceBase, nextState: raceStep, proposal: raceProposal,
+            options: { allowLifecycle: true } }]);
+        assert.equal(raceCommit.ok, false); assert.equal(raceCommit.reason, 'stale_revision');
+        const raceRow = await row(raceId);
+        assert.equal(JSON.parse(raceRow.statsJson).lastReason, 'main_write_during_step', 'the main write survives');
+        assert.equal(raceRow.activity, 'resting');
+        console.log('A main write to a far row refuses the step begun before it: PASS');
+
+        // A proposal without a whole revision is refused before the queue.
+        sent.length = 0;
+        coordinator.handleProposalBatch({ payload: { proposals: [{ proposalId: `${raceId}:${raceAt + 1}`,
+            characterId: raceId, revision: 'x', priority: 'P1', enqueuedAt: raceAt, nextState: raceStep }] } });
+        await until(() => sent.some(message => message.type === 'commit_ack'), 'invalid revision ack');
+        const [invalidAck] = take('commit_ack');
+        assert.equal(invalidAck.ok, false); assert.equal(invalidAck.reason, 'invalid_revision');
+        assert.equal(invalidAck.proposalId, `${raceId}:${raceAt + 1}`);
+        assert.deepEqual(await row(raceId), raceRow, 'a refused proposal writes nothing');
+        console.log('A proposal without a revision is acked invalid_revision: PASS');
+
         // Hold the real queue flush of the old Worker's step before its native
         // prepare, then replace the actual Worker before the commit and its
         // result reach main's handler. Only Promise delivery is gated.
