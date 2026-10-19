@@ -68,6 +68,15 @@ function attackersOf(actor, target, near = null) {
     return [target, ...others];
 }
 
+// The decision the body received with its death price, else null: before
+// the first near decision arrives (DecisionEvents.held gives a view without
+// a card) the author's retreat rule decides. `decided` is read first: the
+// cardless view's death price is never consulted.
+function decidedEconomy(session) {
+    const economy = DecisionEvents.held(session);
+    return economy?.decided && economy.deathHours >= 0 ? economy : null;
+}
+
 // The hot moment for a bot fighting target: the held economy gives the death
 // price, the price of money and the trait weight; the live fight gives the
 // survival ratio at the HP and MP left against every mob hitting the bot.
@@ -75,8 +84,8 @@ function attackersOf(actor, target, near = null) {
 // is kept on the session, so the fixed-ratio potion step yields to it.
 function forActor(session, actor, target, options = {}) {
     session.dangerMoment = undefined;
-    const economy = DecisionEvents.held(session);
-    if (!economy || !(economy.deathHours >= 0) || !target) return null;
+    const economy = decidedEconomy(session);
+    if (!economy || !target) return null;
     const hp = Number(actor.fetchHp?.() || 0), maxHp = Number(actor.fetchMaxHp?.() || 0);
     const mp = Number(actor.fetchMp?.() || 0), maxMp = Number(actor.fetchMaxMp?.() || 0);
     const profiles = (options.profiles || TargetMatchup.actorProfiles([actor])).map(profile => profile.soloDamageReceiver === false ? profile
@@ -115,8 +124,7 @@ function forActor(session, actor, target, options = {}) {
 // caller checks it before its own scan for the attackers.
 function applies(session, actor) {
     const hp = Number(actor.fetchHp?.() || 0), maxHp = Number(actor.fetchMaxHp?.() || 0);
-    const economy = hp < maxHp ? DecisionEvents.held(session) : null;
-    if (economy && economy.deathHours >= 0) return true;
+    if (hp < maxHp && decidedEconomy(session)) return true;
     session.dangerMoment = undefined;
     return false;
 }
@@ -130,7 +138,7 @@ function counted(action) {
 
 // The moment a fight in progress takes, hunting (E70) or resting and attacked
 // (E71): 'drank', 'flee', 'fight', or null when
-// the bot has no held economy or the matchup is unknown (the author's retreat
+// the bot has no received decision or the matchup is unknown (the author's retreat
 // rule then). A potion it could not drink leaves the moment to the other
 // options. A bot at full HP has nothing to drink and takes the author's rule
 // until the first hit, so a fight at full HP scans nothing. options: profiles
