@@ -6,16 +6,13 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Books = invoke('GameServer/Skills/SkillBookCatalog');
 const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 async function main() {
     const ids = [719410,719411,719412];
     const levelUpIds = [719413,719414];
     const world = await createWorld([...ids.map(id => ({ id, classId: 12, level: 40 })),
         ...levelUpIds.map(id => ({ id, classId: 46, level: 61 }))], 'cold-free-skill-authority');
     const save = Database.saveBotLifeState, learn = Database.learnBotSkill;
-    const restores = [];
-    const stub = (object, key, value) => {
-        const previous = object[key]; restores.push(() => { object[key] = previous; }); object[key] = value;
-    };
     let repairs = 0, spent = 0, consumed = 0;
     try {
         await Database.createAccount('bot_free_skill_authority', 'fixture');
@@ -82,14 +79,20 @@ async function main() {
         assert(Life.cachedState(ids[1]).stats.coldCombat.skills.length > 0);
         assert.equal(Life.cachedState(ids[1]).sp, 0);
 
-        stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});
-        stub(invoke('GameServer/Bot/Population/BotLifeEvents'), 'recordMany', async () => {});
-        stub(invoke('GameServer/Bot/Population/BotGlobalChat'), 'maybeAnnounce', () => {});
-        stub(invoke('GameServer/Clan/ClanReviewEvents'), 'committedMember', () => {});
-        stub(invoke('GameServer/Bot/Economy/BotAfkMarketService'), 'reviewPurchaseLimits', async state => ({ state }));
         const coordinator = new ColdSimulationCoordinator();
         coordinator.economyDecisions.accept = () => {};
         coordinator.reviewCommittedEconomy = () => { throw Error('skill_grant_must_not_require_economy_plan'); };
+        const answers = [];
+        coordinator.worker = { postMessage: message => message.type === 'command_ack' && answers.push(...message.payload.results) };
+        coordinator.workerEpoch = 'free-skill:test';
+        // The training review the commit ack names, as the worker sends it.
+        const review = async id => {
+            coordinator.handleCommandRequest({ msgId: `skill:${answers.length}`, payload: { requests: [{ characterId: id,
+                kind: 'review', commandId: `review:${id}:${answers.length}`,
+                commandCheckpoint: Protocol.commandCheckpoint(Life.cachedState(id)), training: true }] } });
+            await coordinator.commandTail;
+            return answers.at(-1);
+        };
         for (const [index,id] of levelUpIds.entries()) {
             await Database.execute(['UPDATE characters SET username=?,sp=0 WHERE id=?', ['bot_free_skill_authority',id]]);
             await Database.setSkill({ selfId:239, name:'Expertise C', level:3, passive:true },id);
@@ -99,12 +102,12 @@ async function main() {
                 level:61, sp:0, phase:'cold', activity:index ? 'hunting' : 'grouped', stats,
                 inventory:{}, vitals:{hp:187,maxHp:187,mp:74,maxMp:74} },'committed_level_up');
             assert(Books.needsTraining(state),'a committed level gain still needs its native grants');
-            const entry = { nextState:state, proposal:{ result:{events:[]} } };
+            assert(Life.trainingNeeded(state),'the commit ack names its training review');
             coordinator.stopping = true;
-            await coordinator.afterCommit(entry);
+            await review(id);
             assert.equal((await Database.fetchSkill(id,239))[0].level,3,'retired worker cannot grant ranks');
             coordinator.stopping = false;
-            await coordinator.afterCommit(entry);
+            assert.equal((await review(id)).ok,true);
             assert.equal((await Database.fetchSkill(id,239))[0].level,4,
                 `${state.activity} level-up grants skills even without an economy plan`);
             const trainedState = Life.cachedState(id);
@@ -114,7 +117,6 @@ async function main() {
         }
         console.log('Cold free-skill authority: legacy repair, zero SP, no book demand, native grants and startup catch-up passed');
     } finally {
-        for (const restore of restores.reverse()) restore();
         Database.saveBotLifeState=save; Database.learnBotSkill=learn;
         await world.close();
     }

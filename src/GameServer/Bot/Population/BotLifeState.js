@@ -1053,6 +1053,11 @@ function classProgressionNeeded(state, classId, level) {
         || invoke('GameServer/Skills/SkillBookCatalog').needsTraining(state);
 }
 
+// The far bots main trains after a commit: cold, its own, alive.
+function mainTrainsFar(state) {
+    return !!state && state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main' && state.activity !== 'dead';
+}
+
 function refreshColdCombatProfile(state) {
     return Database.fetchSkills(state.characterId).then((skills) => ({
         ...state,
@@ -2921,8 +2926,14 @@ const BotLifeState = {
         });
     },
 
+    // A far bot main owns has class training to do (level, class or a skill book
+    // in its bag): the commit ack names a `training` review from it.
+    trainingNeeded(state) {
+        return mainTrainsFar(state) && classProgressionNeeded(state, state.stats?.classId, state.level);
+    },
+
     reviewTrainingAfterCommit(state, options = {}) {
-        if (!state || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.activity === 'dead') return Promise.resolve(state);
+        if (!mainTrainsFar(state)) return Promise.resolve(state);
         return this.serializeClanLevelUp(state.characterId, async () => {
             if (cache.get(state.characterId) !== state) return cache.get(state.characterId) || state;
             if (!classProgressionNeeded(state, state.stats?.classId, state.level)) return state;

@@ -401,6 +401,9 @@ function sameSafetyCheckpoint(left, right) {
 }
 
 const COMMAND_CHECKPOINT_FIELDS = CHECKPOINT_FIELDS.filter(key => key !== 'simulationLeaseUntil');
+// The steps a `review` command runs after a far bot's commit: main names them
+// on the commit ack, the worker sends the command with their inputs.
+const REVIEW_STEPS = Object.freeze(['plan', 'buff', 'training']);
 
 function commandCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -455,8 +458,11 @@ function commandIdentity(value) {
     if (!checkpoint || checkpoint.characterId !== value.characterId || checkpoint.phase !== 'cold'
         || (value.state !== undefined && (!value.state || typeof value.state !== 'object'
             || Array.isArray(value.state) || value.state.characterId !== value.characterId))) return null;
-    if (value.kind !== undefined && (value.kind !== 'lifecycle'
-        || !value.state || !sameCommandCheckpoint(value.state, checkpoint))) return null;
+    // A lifecycle request carries the state it was computed on; a review (the
+    // far bot's own actions after its commit) carries none, main reads its cache.
+    if (value.kind !== undefined && !(value.kind === 'lifecycle'
+        ? value.state && sameCommandCheckpoint(value.state, checkpoint)
+        : value.kind === 'review' && value.state === undefined)) return null;
     return { characterId: value.characterId, commandId: value.commandId, checkpoint };
 }
 
@@ -519,6 +525,7 @@ module.exports = {
     commandCheckpoint,
     sameCommandCheckpoint,
     commandIdentity,
+    REVIEW_STEPS,
     meetingIdentity,
     byteLength,
     omitPlannedStates,

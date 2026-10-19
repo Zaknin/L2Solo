@@ -1497,6 +1497,41 @@ function claimAck(kernel, payload) {
     await marketKernel.shutdown();
     assert.strictEqual(marketKernel.lookSeen.size, 0);
 
+    {
+        // A commit ack naming a review: the bot waits for the review command
+        // (no step starts), which carries the plan the proposal had and no
+        // state; its answer gives the bot back to its schedule. An ack naming
+        // nothing sends no command.
+        const at = 50000;
+        const reviewKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const plan = { sell: [], withdraw: [7], buyAds: [], travel: null };
+        const committed = {};
+        for (const id of [60, 61]) {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `review-${id}`, leaseUntil: at + 30000 };
+            reviewKernel.upsert({ state: base });
+            reviewKernel.inFlight.set(id, { state: base, grant: token });
+            reviewKernel.dirty.set(id, { proposalId: `review:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
+        }
+        reviewKernel.flush(null, true);
+        commitAck(reviewKernel, { results: [
+            { ok: true, characterId: 60, revision: 5, state: committed[60], review: ['plan'] },
+            { ok: true, characterId: 61, revision: 5, state: committed[61] }] });
+        const request = sentCommands.get(reviewKernel).get(60);
+        assert.strictEqual(request?.kind, 'review');
+        assert.deepStrictEqual(request.economyPlan, plan, 'the review carries the committed proposal plan');
+        assert.strictEqual(request.state, undefined, 'main reads its own committed state');
+        assert.strictEqual(sentCommands.get(reviewKernel).has(61), false, 'an ack naming nothing sends no review');
+        reviewKernel.tick();
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), false, 'no step starts while the review runs');
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(61), true);
+        commandAck(reviewKernel, { characterId: 60, state: committed[60] });
+        reviewKernel.tick();
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), true, 'the answered review gives the bot back to its schedule');
+    }
+
     // A party run with no member result (no spot): the whole roster commits
     // the party row, fenced on the revision the run read, with the resolver's
     // next due and a goal review; every member stays claimed until the ACK.

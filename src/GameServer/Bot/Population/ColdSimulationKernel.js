@@ -655,6 +655,9 @@ class ColdSimulationKernel {
         this.commanding = new Set();
         this.commandStartedAt = new Map();
         this.nextCommandRequest = 1;
+        // Reviews a commit ack named that found no command slot (always counted:
+        // the plan is re-planned at the bot's next step, its buff or training waits).
+        this.reviewsSkipped = 0;
         this.paused = false;
         this.stopping = false;
         this.resolveChain = Promise.resolve();
@@ -1415,7 +1418,7 @@ class ColdSimulationKernel {
 
     beginCommand(characterId, kind = 'lifecycle') {
         const id = Number(characterId), current = this.states.get(id);
-        if (!Number.isSafeInteger(id) || id <= 0 || kind !== 'lifecycle'
+        if (!Number.isSafeInteger(id) || id <= 0 || (kind !== 'lifecycle' && kind !== 'review')
             || this.stopping || !current || current.state.phase !== 'cold' || this.busy(id)
             || this.claiming.size + this.inFlight.size + this.commanding.size >= this.maxInFlight) return null;
         const checkpoint = Protocol.commandCheckpoint(current.state);
@@ -2408,6 +2411,9 @@ class ColdSimulationKernel {
             if (this.sameLease(active?.grant, proposal.token)) {
                 active.pendingCommitId = proposal.proposalId;
                 active.pendingRaidStepId = proposal.raidStepId;
+                // The inputs of the review the commit ack may name (onCommitAck).
+                active.economyPlan = proposal.economyPlan;
+                active.buffOffer = proposal.buffOffer;
             }
         }
         this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes);
@@ -2464,7 +2470,7 @@ class ColdSimulationKernel {
     }
 
     onCommitAck(payload = {}) {
-        const accepted = [], refused = [];
+        const accepted = [], refused = [], reviews = [];
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
             const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
@@ -2480,6 +2486,10 @@ class ColdSimulationKernel {
             this.inFlight.delete(id);
             if (result.ok && result.state) {
                 this.upsert({ state: result.state });
+                // The commit's slot is free and the kernel holds main's committed
+                // state: the review main named takes the bot before any step does.
+                const review = this.beginReview(id, result.review, active);
+                if (review) reviews.push(review);
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
                 if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
@@ -2500,7 +2510,33 @@ class ColdSimulationKernel {
         // After the whole ACK: a follower's state in it moves its leader to the
         // party row's due, which an unchanged row has in the past.
         refused.forEach(id => this.requeueAtDue(id));
+        if (reviews.length && this.emit('command_request', { requests: reviews.map(review => review.request) }) === false) {
+            for (const { request, attempt } of reviews) {
+                if (this.cancelCommand(request.characterId, attempt)) this.ensureScheduled(request.characterId);
+            }
+        }
         return accepted;
+    }
+
+    // A `review` command for the steps main named on the commit ack (Protocol
+    // REVIEW_STEPS), with the plan and offer this thread kept from the proposal.
+    // No state on the wire: main runs the steps on its own cache.
+    beginReview(characterId, named, active) {
+        if (!Array.isArray(named)) return null;
+        const steps = new Set(named.filter(step => Protocol.REVIEW_STEPS.includes(step)));
+        const economyPlan = steps.has('plan') ? active.economyPlan : undefined;
+        const buffOffer = steps.has('buff') ? active.buffOffer : undefined;
+        if (!economyPlan && !buffOffer && !steps.has('training')) return null;
+        const attempt = this.beginCommand(characterId, 'review');
+        if (!attempt) {
+            this.reviewsSkipped += 1;
+            return null;
+        }
+        attempt.sent = true;
+        return { attempt, request: { characterId, kind: 'review', commandId: attempt.commandId,
+            commandCheckpoint: attempt.checkpoint,
+            ...(economyPlan ? { economyPlan } : {}), ...(buffOffer ? { buffOffer } : {}),
+            ...(steps.has('training') ? { training: true } : {}) } };
     }
 
     onReleaseAck(payload = {}) {
@@ -2654,6 +2690,7 @@ class ColdSimulationKernel {
             dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
             commanding: this.commanding.size,
             commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
+            reviewsSkipped: this.reviewsSkipped,
             maxInFlight: this.maxInFlight,
             maxAtomicPartySize: this.maxAtomicPartySize,
             paused: this.paused,
@@ -2699,6 +2736,7 @@ class ColdSimulationKernel {
             dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
             commanding: this.commanding.size,
             commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
+            reviewsSkipped: this.reviewsSkipped,
             maxInFlight: this.maxInFlight,
             maxAtomicPartySize: this.maxAtomicPartySize,
             paused: this.paused,
