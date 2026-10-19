@@ -78,10 +78,29 @@ try {
     // Party-only ground: refused to the bot alone, admitted once it joins a
     // party (a relations move, which no longer drops the kept verdict).
     const partyGround = { ...low, id: '8_43', tags: ['party_required'], tagsAuthoritative: true };
-    const kept = Planner.sourceGround([partyGround]);
-    const onParty = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround([partyGround], kept) })(partyGround);
+    const partySpots = [partyGround], kept = Planner.sourceGround(partySpots);
+    const onParty = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(partySpots, kept) })(partyGround);
     assert.equal(onParty(economic), false, 'party-only ground is refused to the bot alone');
     assert.equal(onParty({ ...economic, party: { partyId: 77 } }), true, 'the same ground is admitted in a party');
     assert.equal(onParty(economic), false, 'and refused again after the party');
+}
+// The kept verdict also follows the bot's solo profiles, which move no
+// section: a summon beside it (its live cold summon) and its death (a dead
+// bot has no profiles, so no spot is refused for its kit).
+{
+    const spots = [spot], kept = Planner.sourceGround(spots);
+    const allowed = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(spots, kept) })(spot);
+    const summon = { active: true, npcId: 12077, skillId: 1111, hp: 5000, maxHp: 5000, pAtk: 3000, pDef: 2000,
+        accur: 200, critical: 10, atkSpd: 400, expiresAt: timestamp + 600000 };
+    const summoned = { ...state, stats: { ...state.stats, coldCombat: { ...state.stats.coldCombat, summon } } };
+    const dead = { ...state, vitals: { ...state.vitals, hp: 0 } };
+    assert.equal(allowed(state), false, 'the kit alone is refused on the spot');
+    assert.equal(allowed(state), false, 'and still refused while nothing changes');
+    assert.equal(allowed(summoned), true, 'a summon beside the bot admits the spot within the held build');
+    assert.equal(allowed(summoned), true, 'and keeps it admitted while it lives');
+    assert.equal(allowed({ ...summoned, stats: { ...summoned.stats, coldCombat: { ...summoned.stats.coldCombat,
+        summon: { ...summon, expiresAt: timestamp - 1 } } } }), false, 'an expired summon leaves the kit alone again');
+    assert.equal(allowed(dead), true, 'a dead bot has no profiles, so its kit refuses nothing');
+    assert.equal(allowed(state), false, 'alive again, the kit refuses it');
 }
 console.log('test_source_route_admission: ok');

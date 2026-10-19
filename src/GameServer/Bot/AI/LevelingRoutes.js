@@ -499,6 +499,8 @@ function spotAllowedReaderFor(state = {}, options = {}) {
     };
 }
 
+// The matchup's safety options for the state: solo safety outside a party
+// or duo, and the recovery's lower target level while it has a penalty.
 function safetyOptions(state, options = {}) {
     const soloSafety = !['party', 'duo'].includes(modeForState(state, options));
     const recovery = soloSafety && spotRiskPolicy().recoveryFor(state);
@@ -515,6 +517,7 @@ module.exports = {
     roomForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
+    safetyOptions,
     spotAllowedReaderFor,
     scoreSpot,
     routeMatchFor,
