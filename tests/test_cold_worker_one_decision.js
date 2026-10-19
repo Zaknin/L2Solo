@@ -65,7 +65,9 @@ module.exports.stepProbe = async (id) => {
 // second step is the warm one.
 module.exports.goalProbe = async (id) => {
     const context = kernel.states.get(id).context, timestamp = Date.now();
-    context.goalRevision = 1;
+    // The goal revision is the worker's 'goals' table row, as main publishes it.
+    const goal = revision => ({ characterId: id, nextReviewAt: 0, revision });
+    tables.apply([{ name: 'goals', from: null, to: 0, full: true, rows: [[id, goal(1)]], removed: [], last: true }]);
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext'), original = Economy.forState;
     const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
     let builds = 0;
@@ -82,9 +84,9 @@ module.exports.goalProbe = async (id) => {
         await step(timestamp); await step(timestamp + 1000);
         const same = await step(timestamp + 2000);
         const ask = () => ColdEconomyDecision.refusal(kernel.states.get(id).state, context.wishAdvisory,
-            { goalRevision: context.goalRevision, timestamp: timestamp + 3000 });
+            { goalRevision: goalRevision(id), timestamp: timestamp + 3000 });
         const held = ask();
-        context.goalRevision += 1;
+        tables.apply([{ name: 'goals', from: 0, to: 1, full: false, rows: [[id, goal(2)]], removed: [], last: true }]);
         const refusal = ask();
         const moved = await step(timestamp + 3000);
         return { same, held, refusal, moved };
@@ -161,7 +163,7 @@ parentPort.on('message', message => {
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
             { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true },
             { name: 'personal_warehouse', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
-        send('snapshot_page', { rows: [{ state, context: { buyOrderEscrow: 0 } }], ack: true }, 'state');
+        send('snapshot_page', { rows: [{ state, context: {} }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), stepProbe: id });
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);

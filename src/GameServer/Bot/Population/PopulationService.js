@@ -1557,6 +1557,7 @@ const PopulationService = {
             onError: error => utils.infoWarn('BotPopulation', 'party event failed: %s', error?.message || error)
         });
         this.partyAssemblyEvents = service;
+        BackgroundPartyState.useRequirementDue(id => this.partyRequirementRefreshDue.has(id));
         // Subscribed once the saved parties are loaded: a row read at start-up is
         // no member event, so a restart opens no re-plan of its own. A due mark
         // held before the restart is lost: a static party re-plans at its next
@@ -1584,7 +1585,15 @@ const PopulationService = {
         const service = this.partyAssemblyEvents;
         this.partyAssemblyEvents = null;
         service?.unsubscribeHelp?.(); service?.unsubscribePresence?.(); service?.unsubscribeRequirements?.(); service?.stop();
+        const due = [...this.partyRequirementRefreshDue];
         this.partyRequirementRefreshDue.clear();
+        for (const id of due) BackgroundPartyState.publish(id);
+    },
+
+    // The apply of a finished re-plan clears the mark; the party row carries
+    // it to the worker (BackgroundPartyState 'parties'), so it is re-published.
+    clearPartyRequirementDue(partyId) {
+        if (this.partyRequirementRefreshDue.delete(String(partyId))) BackgroundPartyState.publish(partyId);
     },
 
     // Trigger 1 of the party re-plan (the second is a member's kit, at the
@@ -2466,11 +2475,11 @@ const PopulationService = {
         // Material completion is checked against the physical bag by the
         // native resolver. A generic gear refresh must not evict its core.
         if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
-            this.partyRequirementRefreshDue.delete(String(party.partyId));
+            this.clearPartyRequirementDue(party.partyId);
             return [];
         }
         if (party.status !== 'active') {
-            this.partyRequirementRefreshDue.delete(String(party.partyId));
+            this.clearPartyRequirementDue(party.partyId);
             return [];
         }
         let changed = false;
@@ -2525,7 +2534,7 @@ const PopulationService = {
         await BackgroundPartyState.createOrUpdate(nextParty);
         // After the last write: it also erases the marks of this apply's own
         // writes (leaveParty, createOrUpdate publish inside their awaits).
-        this.partyRequirementRefreshDue.delete(String(party.partyId));
+        this.clearPartyRequirementDue(party.partyId);
         return changed || departures.length ? [party.partyId] : [];
     },
 

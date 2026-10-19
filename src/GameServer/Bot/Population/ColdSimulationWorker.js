@@ -120,7 +120,8 @@ const { beginHuntingTrip } = require('./HuntingTravel');
 const BotRoute = require('./BotRoute');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableMirror = require('./TableMirror');
-const { BoardIndex, recordOf } = require('../../AfkTrade/BoardIndex');
+const { BoardIndex, recordOf, escrowOf } = require('../../AfkTrade/BoardIndex');
+const ColdPvpResolver = invoke('GameServer/Bot/Population/ColdPvpResolver');
 const { MarketBuyerWaiters } = require('../Economy/MarketBuyerWaiters');
 const SpotIndex = require('../AI/SpotIndex');
 const SpotValueTable = require('../AI/SpotValueTable');
@@ -531,7 +532,9 @@ function occupationFor(state, timestamp, context = {}, mode = 'occupation') {
         routeRequests.set(id, input);
         return occupationPlanner.request(-id, input);
     }
-    return occupationPlanner.request(id, { state, sourceState, timestamp, assetsKey: assetsKey(state), buyOrderEscrow: context.buyOrderEscrow || 0,
+    return occupationPlanner.request(id, { state, sourceState, timestamp, assetsKey: assetsKey(state),
+        // The party goal query passes its own (main's) escrow; else the board's sum.
+        buyOrderEscrow: context.buyOrderEscrow ?? escrowFor(state.characterId),
         knownShotRecipes: context.knownShotRecipes || [], recipeBook: context.recipeBook, stock: context.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
@@ -582,7 +585,7 @@ function occupationOwnerChanged(id, refresh = false) {
     if (refresh) refreshedStates.add(entry.state);
     occupationPlanner.request(id, { state: entry.state, sourceState: entry.state, assetsKey: assetsKey(entry.state),
         timestamp: Date.now(), mode: refresh ? 'refresh' : 'occupation', pending: entry.context.economyPending || 0,
-        buyOrderEscrow: entry.context.buyOrderEscrow || 0,
+        buyOrderEscrow: escrowFor(id),
         knownShotRecipes: entry.context.knownShotRecipes || [],
         recipeBook: entry.context.recipeBook,
         routeKey: EconomicTrip.key(entry.state),
@@ -604,12 +607,33 @@ boardIndex.setOwnerChangeObserver((previous, next, board) => {
         invoke('GameServer/Bot/Economy/BoardLook').consumeOwnProjection(kernel?.lookSeen.get(id), previous, next, board, id);
     }
 });
+// A bot's buy-order escrow: the sum of its board records' escrow (row[9]),
+// kept as the board rows apply (BotAfkMarketService.buyOrderEscrow on main).
+const escrowByRecord = new Map(), escrowByOwner = new Map();
+function setRecordEscrow(key, ownerId, amount) {
+    const previous = escrowByRecord.get(key);
+    if (previous) {
+        const left = (escrowByOwner.get(previous[0]) || 0) - previous[1];
+        if (left > 0) escrowByOwner.set(previous[0], left); else escrowByOwner.delete(previous[0]);
+        escrowByRecord.delete(key);
+    }
+    if (ownerId > 0 && amount > 0) {
+        escrowByRecord.set(key, [ownerId, amount]);
+        escrowByOwner.set(ownerId, (escrowByOwner.get(ownerId) || 0) + amount);
+    }
+}
+const escrowFor = characterId => escrowByOwner.get(Number(characterId)) || 0;
+// A bot's goal revision (GoalState.revision on main, 0 = no goal) from the
+// 'goals' table; undefined while the table loads (the decision skips the compare).
+const goalRevision = characterId => tables.ready('goals')
+    ? (tables.rows('goals').get(Number(characterId))?.revision ?? 0) : undefined;
 tables.watch('board', {
-    reset: () => { publicWorkshopIndex.clear(); publicWorkshopKeys.clear(); workshopRevisions.clear(); workshopDigests.clear(); workshopScopeDigests.clear(); boardReplacing = true; boardFollower.reset(); OccupationSources.recipeIndex(boardIndex).reset(); kernel?.lookSeen.clear(); },
+    reset: () => { escrowByRecord.clear(); escrowByOwner.clear(); publicWorkshopIndex.clear(); publicWorkshopKeys.clear(); workshopRevisions.clear(); workshopDigests.clear(); workshopScopeDigests.clear(); boardReplacing = true; boardFollower.reset(); OccupationSources.recipeIndex(boardIndex).reset(); kernel?.lookSeen.clear(); },
     put: (key, row) => {
         if (String(key).startsWith('w:')) { changeWorkshop(key, row.length === 9 ? row.slice(1) : row); return; }
         const previous = boardIndex.records.get(Number(key)) || [];
         boardFollower.put(key, row);
+        setRecordEscrow(Number(key), Number(recordOf(row).ownerId), escrowOf(row));
         changedItems(previous, boardIndex.records.get(Number(key)));
         pruneLookSeen(recordOf(row).ownerId);
         if (previous[0]?.ownerId !== recordOf(row).ownerId) pruneLookSeen(previous[0]?.ownerId);
@@ -620,9 +644,40 @@ tables.watch('board', {
         const previous = boardIndex.records.get(Number(key)) || [];
         const ownerId = previous[0]?.ownerId;
         boardFollower.remove(key);
+        setRecordEscrow(Number(key), 0, 0);
         changedItems(previous, []);
         if (ownerId) pruneLookSeen(ownerId);
     }
+});
+// Parties, memory and pressure are main's tables the kernel keeps
+// (ColdSimulationKernel.partyPut, InteractionMemory.accept, pressureFor).
+// A party's competition side is read through its leader: a row that changes
+// leaders moves both the old and the new leader's candidate.
+tables.watch('parties', {
+    reset: () => { for (const leaderId of kernel?.partyReset() || []) competitionCandidates?.partyChanged(leaderId); },
+    put: (key, row) => {
+        const previous = kernel?.partyPut(key, row);
+        competitionCandidates?.partyChanged(row.leaderId);
+        if (previous && Number(previous.leaderId) !== Number(row.leaderId)) competitionCandidates?.partyChanged(previous.leaderId);
+    },
+    remove: key => {
+        const previous = kernel?.partyRemove(key);
+        if (previous) competitionCandidates?.partyChanged(previous.leaderId);
+    }
+});
+// The memory rows are kept packed by the kernel's InteractionMemory, not a
+// second plain copy in the mirror (retain: false); older revisions are refused.
+// Main publishes no removed row: the set is bounded by the owners main
+// accepted, and a full copy (reset) re-sends them, kept views refuse equals.
+tables.watch('memory', {
+    reset() {},
+    put: (key, row) => { if (kernel?.interactionMemory.accept(row)) kernel.decisionEvents?.memoryChanged(Number(key)); },
+    remove() {}
+}, { retain: false });
+tables.watch('pressure', {
+    reset: () => { if (kernel) kernel.pressureRow = null; },
+    put: (_key, row) => { if (kernel) kernel.pressureRow = row; },
+    remove: () => { if (kernel) kernel.pressureRow = null; }
 });
 // The market counters come from the main thread's 'market' table.
 MarketCounters.useTable(() => tables.rows('market'));
@@ -1193,9 +1248,10 @@ function startKernel(config = {}) {
             partyMinSize: Config.partyMinSize
         },
         partyMinSize: Config.partyMinSize,
+        buyOrderEscrow: escrowFor,
         equipmentBridgeReason: (state) => GearAcquisitionPlanner.equipmentBridgeReason(state, {
             ...planningNpcCatalog.plannerOptions,
-            buyOrderEscrow: kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow
+            buyOrderEscrow: escrowFor(state.characterId)
         }),
         partyArrival,
         partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
@@ -1212,17 +1268,17 @@ function startKernel(config = {}) {
             // the round below: that is its one decision point.
             const stepEconomy = lifecyclePlan?.economy || null;
             let economy = stepEconomy, seenEcho = null, refreshed = null, observedDeps = null, economyEdges = null;
-            const escrowOf = () => kernel.states.get(Number(state.characterId))?.context?.buyOrderEscrow || 0;
+            const ownEscrow = () => escrowFor(state.characterId);
             const base = {
                 persist: false,
                 timestamp,
                 projectClassProgression: true,
                 ...(crowded ? { checkSections: ROOM_SECTIONS } : {}),
-                moneyEscrowFor: escrowOf,
+                moneyEscrowFor: ownEscrow,
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and
                 // the bot's memory rows, read only when its bond is compared.
-                softInputFor: (projected, at) => ({ board: boardReady(), buyOrderEscrow: escrowOf(), timestamp: at,
+                softInputFor: (projected, at) => ({ board: boardReady(), buyOrderEscrow: ownEscrow(), timestamp: at,
                     memory: () => kernel.interactionMemory.relationRows(Number(projected.characterId)) })
             };
             const resolved = await LifeStateProjector.prepareResolve(state, result, stepEconomy
@@ -1235,7 +1291,7 @@ function startKernel(config = {}) {
                         const workshop = await occupationFor(projected, timestamp,
                             { ...context, routeRows, routeKey: EconomicTrip.key(projected) });
                         return { spots: planningSpots, workshop, routeRows,
-                            board: boardReady(), buyOrderEscrow: context.buyOrderEscrow, goalRevision: context.goalRevision };
+                            board: boardReady(), buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId) };
                     },
                     economyFor: async (projected, deps) => {
                         observedDeps = deps;
@@ -1249,8 +1305,8 @@ function startKernel(config = {}) {
                         // gate read (edges skips resting, travelling and party
                         // bots, which read none).
                         let stock = refreshed?.economy || prepared.basics || null;
-                        economyEdges = ColdEconomyPlan.edges(state, projected, owner?.context || {},
-                            { stockFor: (_state, kind) => (stock ||= prepared.basics = EconomyContext.basics(projected, deps)).stock(kind) });
+                        economyEdges = ColdEconomyPlan.edges(state, projected,
+                            { buyOrderEscrow: ownEscrow(), stockFor: (_state, kind) => (stock ||= prepared.basics = EconomyContext.basics(projected, deps)).stock(kind) });
                         if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, owner?.context || {}, refreshed);
                         if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
                         return EconomyContext.forState(projected, withIncomeRoute(withEventVerdict(deps, prepared), prepared.basics));
@@ -1266,8 +1322,8 @@ function startKernel(config = {}) {
             const projected = resolved;
             if (stepEconomy) {
                 seenEcho = ColdEconomyDecision.stateEcho(projected);
-                economyEdges = ColdEconomyPlan.edges(state, projected, owner?.context || {},
-                    { stockFor: (_state, kind) => stepEconomy.stock(kind) });
+                economyEdges = ColdEconomyPlan.edges(state, projected,
+                    { buyOrderEscrow: ownEscrow(), stockFor: (_state, kind) => stepEconomy.stock(kind) });
             }
             const beforeLevel = Number(state.stats?.classProgressionLevel || 0);
             const beforeClassId = Number(state.stats?.classProgressionClassId ?? state.stats?.classId ?? 0);
@@ -1316,10 +1372,10 @@ function startKernel(config = {}) {
         // projection after it (class training, equipped upgrades) left its kit
         // (the build's baseline build fact); else one build on the same board
         // the step's build reads.
-        planPartyRequirement: ({ state, context, timestamp, economy }) => PartyRequirementRefresh.plan(state, {
+        planPartyRequirement: ({ state, timestamp, economy }) => PartyRequirementRefresh.plan(state, {
             spots: planningSpots, timestamp,
             preparedEconomy: economy?.statsPacket?.wishSections?.build === DecisionSections.kit(state) ? economy : null,
-            planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow, board: boardReady() }
+            planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: escrowFor(state.characterId), board: boardReady() }
         }),
         reviewRecruits: ({ party, members, timestamp }) => PartyGoalCalculation.recruitCheck(party, members,
             { spots: planningSpots, timestamp }),
@@ -1339,7 +1395,7 @@ function startKernel(config = {}) {
                 { ...context, routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
             const deps = { spots, timestamp, board: boardReady(),
-                buyOrderEscrow: context?.buyOrderEscrow, goalRevision: context?.goalRevision, workshop, routeRows };
+                buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId), workshop, routeRows };
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
@@ -1417,7 +1473,7 @@ function startKernel(config = {}) {
             } : GearPlanSelection
                 .selectAcquisitionPlan(preparationState, previousPlan, {
                     spots, timestamp, preparedEconomy, preparedReplanContext: nativeReplan,
-                    planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: context?.buyOrderEscrow }
+                    planningOptions: { ...planningNpcCatalog.plannerOptions, buyOrderEscrow: escrowFor(state.characterId) }
                 });
             const { replanContext, reusablePartyRequest, excludedSpotIds, economy } = selectedAcquisition;
             const acquisitionPlan = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, preparedEconomy)
@@ -1530,7 +1586,7 @@ function startKernel(config = {}) {
         const side = meeting.actorA === id ? 0 : 1;
         const state = meeting.incoming ? { ...entry.state, acceptedIncoming: meeting.incoming[side], incomingPending: false } : entry.state;
         return occupationPlanner.request(id, { state, sourceState: entry.state, timestamp: Date.now(), assetsKey: assetsKey(state),
-            mode: 'meeting', meeting, recipeBook: entry.context.recipeBook, buyOrderEscrow: entry.context.buyOrderEscrow || 0,
+            mode: 'meeting', meeting, recipeBook: entry.context.recipeBook, buyOrderEscrow: escrowFor(id),
             routeKey: EconomicTrip.key(entry.state), sourceReady: tables.ready('board') && tables.ready('market') }).then(result => {
                 if (!result?.token) throw Error(result?.reason || 'trade_meeting_preparation_pending');
                 return result;
@@ -1569,7 +1625,7 @@ function startKernel(config = {}) {
             return (held?.input.mode === 'occupation' ? occupationPlanner.valueFor(id, entry?.state) : null)
                 || entry?.context?.workshop || ColdEconomyDecision.unknownWorkshop();
         },
-        buyOrderEscrow: id => kernel.states.get(Number(id))?.context?.buyOrderEscrow || 0,
+        buyOrderEscrow: escrowFor,
         spots: () => planningSpots,
         memory: (characterId) => kernel.interactionMemory.snapshot(characterId),
         memoryIdentity: characterId => kernel.interactionMemory.contentIdentity(characterId),
@@ -1591,12 +1647,13 @@ function startKernel(config = {}) {
             personaFor: state => BotPersona.of(state),
             knowledgeFor: (source, persona, key) => persona ? { source, persona, key } : null,
             isTargetAllowed: id => allowed.has(id),
-            ownSide: invoke('GameServer/Bot/Population/ColdPvpResolver').ownSide
+            ownSide: ColdPvpResolver.ownSide,
+            leaderParty: id => kernel.leaderParty(id)
         });
         competitionCandidates = new ColdCompetitionCandidates({
             records: id => kernel.states.locationIndex.getSource(id, 'state'),
             packets: id => kernel.states.get(id), memory: kernel.interactionMemory,
-            monitor: competition, deadlines: kernel,
+            monitor: competition, deadlines: kernel, leaderParty: id => kernel.leaderParty(id),
             frameSizing: frame => {
                 // ARCH-NOTE: these retained fields determine the existing byte admission.
                 // Keep identical conservative capacity on/off; Candidates.snapshot hides

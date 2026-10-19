@@ -1,5 +1,6 @@
 const InteractionMemory = require('./InteractionMemory');
 const Repository = invoke('GameServer/Social/InteractionMemoryRepository');
+const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 
 // The main-process instance. Cold workers create repository-free instances.
 const memory = new InteractionMemory(Repository);
@@ -13,17 +14,17 @@ memory.enrichEvent = event => {
         World.registeredActorById(event.targetId)?.actor);
 };
 memory.clanSocial = invoke('GameServer/Clan/ClanSocialRuntime').view;
+// The 'memory' table (ColdTableChannel, key: owner id): every accepted
+// snapshot (load, ensureMany, a committed episode, a bot's reflected commit,
+// a clan discipline) is published once; the worker accepts it into its own
+// instance (ColdSimulationWorker 'memory' watch).
+TableChannel.register('memory', {
+    key: row => row.ownerId,
+    allRows: () => Array.from(memory.snapshots.keys(), id => memory.snapshot(id))
+});
+// The row is a deep copy: built only when a worker is attached to take it.
+memory.onAccept = ownerId => TableChannel.changed('memory', () => memory.snapshot(ownerId));
 memory.events = new (require('./InteractionEventQueue'))(memory, {
-    onCommit(ownerId) {
-        const state = invoke('GameServer/Bot/Population/BotLifeState').cachedState(ownerId);
-        if (state) {
-            const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-            // Ordinary dirty rows are ignored during full bootstrap. Preserve
-            // memory commits racing an already serialized page until it ends.
-            coordinator.markDirty(state, { critical: coordinator.snapshotInFlightInitial === true,
-                reason: 'interaction_memory' });
-        }
-    },
     onError(error) { utils.infoWarn('InteractionMemory', 'episode write failed: %s', error.message); }
 });
 module.exports = memory;

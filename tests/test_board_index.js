@@ -68,7 +68,7 @@ const store = { shopId: 12, kind: 'sell_ad', storeType: SELL, ownerId: 5, town: 
     items: [{ afkTradeLineId: 40, selfId: 1864, enchant: 0, count: 3, price: 9, name: 'Stem' },
         { afkTradeLineId: 41, selfId: 1865, enchant: 0, count: 0, price: 9 }] };
 const row = rowOf(store);
-assert.deepStrictEqual(row, [12, 'sell_ad', SELL, 5, 'Oren', 1, [[40, 1864, 0, 3, 9, null, 0]], 4, 0]);
+assert.deepStrictEqual(row, [12, 'sell_ad', SELL, 5, 'Oren', 1, [[40, 1864, 0, 3, 9, null, 0]], 4, 0, 0], 'a sell record holds no escrow');
 assert.deepStrictEqual(recordOf(row), { id: 12, kind: 'sell_ad', storeType: SELL, ownerId: 5, town: 'Oren', botOwned: true,
     revision: 4, custodyPolicy: 0, lines: [{ lineId: 40, selfId: 1864, enchant: 0, count: 3, price: 9, fills: 0 }] });
 assert.strictEqual(recordOf(row.slice(0, 7)).revision, null, 'old worker rows stay readable without a revision fence');

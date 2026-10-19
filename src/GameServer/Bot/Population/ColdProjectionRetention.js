@@ -1,11 +1,5 @@
 'use strict';
 
-const { createHash } = require('node:crypto');
-
-function partyStamp(party) {
-    return party ? createHash('sha256').update(JSON.stringify(party)).digest('hex') : null;
-}
-
 function stateStamp(state) {
     const simulation = state.simulation || {};
     const timing = state.timing || {};
@@ -23,12 +17,10 @@ function same(left, right) {
     return left.length === right.length && left.every((value, index) => Object.is(value, right[index]));
 }
 
+// Party, memory, pressure, goal and escrow are worker tables, not context:
+// a replayed entry carries none of them, so none is checked here.
 function contextStamp(context) {
-    const pressure = context.pressure || {};
-    return [context.spot, context.interactionMemory, context.clanHallServices,
-        pressure.expMultiplier, pressure.deathChanceMultiplier, pressure.directorReason,
-        context.buyOrderEscrow, context.targetNpcId, context.isPartyLeader, context.party,
-        context.partyMembers];
+    return [context.spot, context.clanHallServices, context.targetNpcId];
 }
 
 // Replay only a producer's existing intent. The provider reads current local
@@ -54,17 +46,12 @@ class ColdProjectionRetention {
         if (state && typeof state === 'object') this.dirty.set(state, (this.dirty.get(state) || 0) + 1);
     }
 
-    prepare(state, context, partyGeneration) {
+    prepare(state, context) {
         if (this.stateFor(state?.characterId) !== state || !context) return;
-        const members = context.party ? (context.party.memberIds || []).map(id => this.stateFor(id)) : [];
-        if (members.some(member => !member)) return;
-        const stamp = this.dependencies(state, context);
         this.prepared.set(context, {
-            state, context, epoch: this.epoch(), stamp, partyGeneration,
+            state, context, epoch: this.epoch(), stamp: this.dependencies(state, context),
             contextStamp: contextStamp(context),
-            own: stateStamp(state), sequence: this.dirty.get(state) || 0,
-            partyStamp: partyStamp(context.party),
-            members: members.map(member => ({ state: member, stamp: stateStamp(member), sequence: this.dirty.get(member) || 0 }))
+            own: stateStamp(state), sequence: this.dirty.get(state) || 0
         });
     }
 
@@ -92,22 +79,11 @@ class ColdProjectionRetention {
         if (!same(record.contextStamp, contextStamp(context))) return unavailable('projection_context_changed');
         if (context.spot?.raidBoss) return unavailable('dynamic_raid_context');
         const current = this.dependencies(state, context);
-        if (record.partyGeneration !== current.partyGeneration) return unavailable('party_generation_changed');
         if (current.clanId || context.clanHallServices) return unavailable('dynamic_clan_hall_context');
         if (record.stamp.catalog !== current.catalog || record.stamp.physicalCatalog !== current.physicalCatalog) {
             return unavailable('spot_catalog_changed');
         }
-        if (!same(record.stamp.pressure, current.pressure)) return unavailable('pressure_changed');
-        if (record.stamp.memory !== current.memory || record.stamp.memoryRevision !== current.memoryRevision) return unavailable('memory_changed');
-        if (context.buyOrderEscrow !== current.escrow) return unavailable('escrow_changed');
         if (context.targetNpcId !== current.targetNpcId) return unavailable('target_changed');
-        if (context.party && (context.party !== current.party || record.partyStamp !== partyStamp(current.party))) {
-            return unavailable('party_context_changed');
-        }
-        for (const member of record.members) {
-            if (this.stateFor(member.state.characterId) !== member.state || !same(member.stamp, stateStamp(member.state))
-                || member.sequence !== (this.dirty.get(member.state) || 0)) return unavailable('party_member_changed');
-        }
         return { ok: true, entry: record.entry };
     }
 }

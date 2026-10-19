@@ -11,6 +11,8 @@ const Database = invoke('Database');
 const Policy = require(gameRoot + '/src/GameServer/Social/InteractionMemoryPolicy');
 const Memory = require(gameRoot + '/src/GameServer/Social/InteractionMemory');
 const Repository = invoke('GameServer/Social/InteractionMemoryRepository');
+const TableChannel = require(gameRoot + '/src/GameServer/Bot/Population/ColdTableChannel').shared;
+const TableMirror = require(gameRoot + '/src/GameServer/Bot/Population/TableMirror');
 const dir = fixture.directory, file = fixture.world;
 const event = (key, sourceId = 1, targetId = 2, at = Date.now()) => ({ key, sourceId, targetId, type: 'attacked', at });
 
@@ -107,7 +109,15 @@ async function run() {
         const { ColdSimulationCoordinator } = require(gameRoot + '/src/GameServer/Bot/Population/ColdSimulationCoordinator');
         const kernel = new ColdSimulationKernel({ resolveSolo: () => ({}) });
         const coordinator = new ColdSimulationCoordinator();
-        coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
+        coordinator.contextIndex = () => ({ spots: new Map() });
+        // The worker's 'memory' table over the real channel: a full copy at
+        // attach, then every snapshot main accepts, accepted as the worker does.
+        const mirror = new TableMirror();
+        mirror.watch('memory', { reset() {}, put: (_key, row) => kernel.interactionMemory.accept(row), remove() {} },
+            { retain: false });
+        const channelTarget = {};
+        TableChannel.attach(channelTarget, 'memory-test', payload => { mirror.apply(payload.tables); return true; });
+        assert.strictEqual(mirror.rows('memory').size, 0, 'the worker keeps the accepted snapshots, not a second row copy');
         const coldState = { characterId: 1, phase: 'cold', activity: 'hunting', stats: {},
             simulation: { revision: 5 }, timing: { nextResolveAt: Date.now() + 60000 } };
         const oldPage = coordinator.snapshotEntry(coldState);
@@ -116,6 +126,8 @@ async function run() {
             runtime.assess({ id: 1 }, { id: 2 }, {}, timestamp));
         assert(!kernel.states.get(1).context.interactionMemory, 'worker stores one indexed view, not an extra context copy');
         await runtime.recordBatch([event('ack:memory')]);
+        TableChannel.flush();
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a committed episode reaches the worker as a memory row');
         const token = { characterId: 1, ownerId: 'cold_simulation_owner', revision: 5,
             leaseId: 'memory-ack', leaseUntil: Date.now() + 30000 };
         const proposal = { characterId: 1, proposalId: 'memory-ack:5', token,
@@ -128,13 +140,12 @@ async function run() {
         };
         await coordinator.handleCommitResults([{ ok: true, characterId: 1, nextState: coldState, proposal }]);
         kernel.upsert(oldPage);
-        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'late catalog pages cannot overwrite ACK memory');
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a late state page cannot overwrite table memory');
         kernel.upsert({ state: { ...coldState, phase: 'hot', simulation: { revision: 6 } } });
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'phase changes do not erase memory');
         kernel.remove(1);
-        assert.strictEqual(kernel.interactionMemory.inspect(1).ready, false);
-        kernel.upsert(coordinator.snapshotEntry(coldState));
-        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a returning cold bot is rehydrated');
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a state leaving the worker keeps its table memory');
+        TableChannel.detach(channelTarget);
         const saved = await Repository.load(1);
         await Database.close();
         Database.init();

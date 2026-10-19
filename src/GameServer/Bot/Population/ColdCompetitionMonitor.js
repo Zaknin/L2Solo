@@ -8,11 +8,16 @@ const PAIR_COOLDOWN_MS = 2 * 60000;
 const BOT_COOLDOWN_MS = 2 * 60000;
 const unitKeyOf = (partyId, id) => partyId || `solo:${id}`;
 const TendencyRoll = require('../AI/TendencyRoll');
+const { ColdRevengeMonitor } = require('./ColdRevengeMonitor');
 class ColdCompetitionMonitor {
     // ownSide(states, timestamp): how a side knows itself (U26). The worker passes the
     // exact one (ColdPvpResolver.ownSide); standalone tests see themselves as others do.
-    constructor({ capacityForSpot, personaFor, isTargetAllowed = () => true, ownSide = Visible.stateSide, onCooldown = () => {}, knowledgeFor = () => null }) {
+    // leaderParty(characterId): the party row a bot leads, or null (the
+    // worker's parties table, ColdSimulationKernel.leaderParty).
+    constructor({ capacityForSpot, personaFor, isTargetAllowed = () => true, ownSide = Visible.stateSide, onCooldown = () => {},
+        knowledgeFor = () => null, leaderParty = () => null }) {
         this.ownSide = ownSide;
+        this.leaderParty = leaderParty;
         this.knowledgeFor = knowledgeFor;
         this.onCooldown = onCooldown;
         this.capacityForSpot = capacityForSpot;
@@ -22,7 +27,7 @@ class ColdCompetitionMonitor {
         this.cursor = 0;
         this.pairs = new Map();
         this.bots = new Map();
-        this.revenge = new (require('./ColdRevengeMonitor').ColdRevengeMonitor)({ onCooldown });
+        this.revenge = new ColdRevengeMonitor({ onCooldown, leaderParty });
         this.report = { mode: 'observe', scans: 0, evaluated: 0, outcomes: {}, pvpIntents: 0, recent: [],
             skipped: { cooldown: 0, conflictCooldown: 0, encounterRate: 0, memory: 0, incompleteParty: 0 } };
     }
@@ -35,13 +40,10 @@ class ColdCompetitionMonitor {
         for (const [key, until] of this.bots) if (until <= timestamp) this.bots.delete(key);
         const parties = new Map();
         const states = new Map(entries.filter(e => e.state).map(e => [Number(e.state.characterId), e.state]));
-        // Incremental snapshots may leave different party versions on teammates.
-        // Entry ordering must never allow an older roster to replace a newer one.
-        for (const { context } of entries) if (context?.party) {
-            const party = context.party, previous = parties.get(party.partyId);
-            if (!previous || Number(party.updatedAt || 0) > Number(previous.updatedAt || 0)) {
-                parties.set(party.partyId, party);
-            }
+        // One row per party (the parties table), read through its leader.
+        for (const { state } of entries) {
+            const party = state ? this.leaderParty(Number(state.characterId)) : null;
+            if (party) parties.set(party.partyId, party);
         }
         this.evaluate(entries, memory, timestamp, { elapsed, parties, states, cursor: this.cursor });
         if (elapsed > 0) {

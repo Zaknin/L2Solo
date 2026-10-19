@@ -39,9 +39,10 @@ class ColdTableChannel {
             version: 0, pending: new Map(), changedUnseen: false });
     }
 
-    // change: a row, or { key, removed: true } for a removed row. With no
-    // worker attached nobody needs the row: a worker that attaches gets the
-    // table in full, so only the next version is marked.
+    // change: a row, or { key, removed: true } for a removed row, or (an
+    // ordinary table) a function returning the row when the row costs a copy.
+    // With no worker attached nobody needs the row: a worker that attaches
+    // gets the table in full, so only the next version is marked.
     changed(name, change) {
         const table = this.tables.get(String(name));
         if (!table || !change) return false;
@@ -50,6 +51,7 @@ class ColdTableChannel {
             table.changedUnseen = true;
             return true;
         }
+        if (typeof change === 'function' && !(change = change())) return false;
         if (change.removed === true) table.pending.set(change.key, REMOVED);
         else table.pending.set(table.key(change), change);
         if (table.eventDriven && !this.eventFlushQueued) {

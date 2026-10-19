@@ -4,6 +4,7 @@ const Database = invoke('Database');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyRisk = require('./PartySpotRiskPolicy');
+const TableChannel = require('./ColdTableChannel').shared;
 
 const TABLE = 'bot_background_parties';
 const cache = new Map();
@@ -100,6 +101,29 @@ function activeOf(ids, reader) {
     return parties;
 }
 
+// The 'parties' table (ColdTableChannel, key: party id): an active party's
+// snapshot plus the raid owner of its full roster and the re-plan due mark
+// (PopulationService.partyRequirementRefreshDue), both read when the row is
+// published. A party that is no longer active leaves the table. The worker
+// reads its party and leadership from it (ColdSimulationKernel.partyRow).
+let requirementDue = () => false;
+function tableRow(party) {
+    const roster = party.stats?.objective?.fullRoster;
+    return { ...party, raidOwner: roster && Database.isReady() ? Database.clanRaidOwner(roster) : null,
+        requirementRefresh: requirementDue(String(party.partyId)) === true };
+}
+
+function publish(partyId) {
+    const party = cache.get(String(partyId));
+    TableChannel.changed('parties', party?.status === 'active' ? tableRow(party)
+        : { key: String(partyId), removed: true });
+}
+
+TableChannel.register('parties', {
+    key: row => row.partyId,
+    allRows: () => Array.from(byStatus.get('active'), id => tableRow(cache.get(id)))
+});
+
 function acceptedParty(snapshot) {
     const current = cache.get(snapshot.partyId);
     // ARCH-NOTE: Snapshots have no revision. One FNV stamp per accept replaces
@@ -117,6 +141,8 @@ function acceptedParty(snapshot) {
         try { listener(snapshot, current || null); }
         catch (error) { utils.infoWarn('BotParty', 'publication listener failed: %s', error?.message || error); }
     }
+    // After the listeners: the row reads the due mark they set.
+    publish(snapshot.partyId);
     if (!byStatus.has(snapshot.status)) {
         cache.delete(snapshot.partyId);
         acceptedStamps.delete(snapshot.partyId);
@@ -310,6 +336,8 @@ const BackgroundPartyState = {
             const keys = Array.from(cache.keys());
             const changedOrder = keys.length !== next.length || next.some((party, index) => party.partyId !== keys[index]);
             if (changedOrder) {
+                const kept = new Set(next.map(party => String(party.partyId)));
+                for (const id of byStatus.get('active')) if (!kept.has(id)) TableChannel.changed('parties', { key: id, removed: true });
                 cache.clear();
                 acceptedStamps.clear();
                 for (const ids of byStatus.values()) ids.clear();
@@ -406,9 +434,13 @@ const BackgroundPartyState = {
         return acceptedParty(snapshot);
     },
 
-    generation() {
-        return cacheGeneration;
+    // The re-plan due mark's owner (PopulationService) hands its reader; a
+    // change of the mark outside a party write re-publishes the row (publish).
+    useRequirementDue(reader) {
+        requirementDue = typeof reader === 'function' ? reader : () => false;
     },
+
+    publish,
 
     find(partyId) {
         return cache.get(String(partyId || '')) || null;

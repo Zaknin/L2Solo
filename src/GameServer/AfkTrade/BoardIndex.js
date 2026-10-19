@@ -69,10 +69,12 @@ function mergedPosition(left, right, n) {
 }
 
 // A record as the table carries it: [id, kind, storeType, ownerId, town,
-// botOwned, lines[[lineId, selfId, enchant, count, price, pricing, fills]], revision], lines with stock
-// only. `record` has the main thread's fields (AfkTradeService projectionStore
-// or a database record).
-function rowOf(record) {
+// botOwned, lines[[lineId, selfId, enchant, count, price, pricing, fills]], revision,
+// custodyPolicy, escrowAdena], lines with stock only. `record` has the main
+// thread's fields (AfkTradeService projectionStore or a database record);
+// `escrowAdena` is the database record's (a projected store has none). A
+// record without stock lines holds no escrow (escrow = sum of count x price).
+function rowOf(record, escrowAdena = record.escrowAdena) {
     const lines = [];
     for (const line of record.lines || record.items || []) {
         const count = Number(line.count);
@@ -82,7 +84,14 @@ function rowOf(record) {
     }
     return [Number(record.shopId ?? record.id), String(record.kind || 'shop'), Number(record.storeType),
         Number(record.ownerId), record.town || null, record.botOwned === true ? 1 : 0, lines,
-        Number(record.revision ?? record.afkTradeRevision) || null, Number(record.custodyPolicy || 0)];
+        Number(record.revision ?? record.afkTradeRevision) || null, Number(record.custodyPolicy || 0),
+        Number(record.storeType) === BUY ? Math.max(0, Number(escrowAdena || 0)) : 0];
+}
+
+// The adena a table row's buy record holds (BotAfkMarketService.buyOrderEscrow
+// sums it per owner on the main thread; a worker sums its rows).
+function escrowOf(row) {
+    return Number(row?.[9] || 0);
 }
 
 function recordOf(row) {
@@ -546,4 +555,4 @@ class BoardIndex {
     }
 }
 
-module.exports = { BoardIndex, SELL, BUY, compareLines, offerFields, rowOf, recordOf };
+module.exports = { BoardIndex, SELL, BUY, compareLines, offerFields, rowOf, recordOf, escrowOf };

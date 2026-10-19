@@ -53,8 +53,8 @@ async function run() {
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: () => { throw Error('party must remain together'); }, resolveParty: input => Party.resolve(input),
         emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
     const roster = states(), expired = { ...party, stats: { ...party.stats, sessionExpiresAt: at - 1 } };
-    roster.forEach(s => kernel.upsert({ state: s, context: s.characterId === 2
-        ? { isPartyLeader: true, party: expired, partyMembers: roster, spot: { id: 'test' } } : {} }));
+    roster.forEach(s => kernel.upsert({ state: s, context: s.characterId === 2 ? { spot: { id: 'test' } } : {} }));
+    kernel.partyPut(expired.partyId, expired);
     kernel.tick();
     const claim = messages.find(m => m.type === 'claim_request'); assert(claim);
     kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,

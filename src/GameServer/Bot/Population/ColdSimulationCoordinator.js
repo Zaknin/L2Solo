@@ -16,9 +16,10 @@ const DataCache = invoke('GameServer/DataCache');
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
+const ClanSocial = invoke('GameServer/Clan/ClanSocialRuntime');
+const PartyHuntingTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
 const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
-const Director = invoke('GameServer/Bot/Population/PopulationDirector');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
@@ -36,7 +37,6 @@ const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const RecomputeGeneration = require('./RecomputeGeneration');
-const GoalService = invoke('GameServer/Bot/Goals/GoalService');
 
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
 const BotRoute = require('./BotRoute');
@@ -91,25 +91,10 @@ function npcPlanningCatalogRows() {
     });
 }
 
-function compactPartyMemberContext(state = {}) {
-    const partyId = state.party?.partyId || state.partyId || null;
-    return {
-        characterId: Number(state.characterId || 0),
-        phase: state.phase || 'cold',
-        activity: state.activity || 'hunting',
-        partyId,
-        ...(partyId ? {
-            party: {
-                partyId,
-                leaderId: Number(state.party?.leaderId || 0)
-            }
-        } : {}),
-        simulation: {
-            ownerId: state.simulation?.ownerId || 'legacy_main',
-            revision: Math.max(0, Number(state.simulation?.revision || 0))
-        },
-        compact: true
-    };
+// The active party this bot leads (the last one active() lists), or null:
+// the context's target npc reads it.
+function ledParty(state) {
+    return BackgroundPartyState.activeByLeaders([state.characterId], 'context').at(-1) || null;
 }
 
 class ColdSimulationCoordinator {
@@ -122,22 +107,11 @@ class ColdSimulationCoordinator {
         this.safetyTransport = null;
         this.projectionRetention = new ColdProjectionRetention({
             stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
-            dependencies: (state, context) => {
-                const memory = invoke('GameServer/Social/InteractionMemoryRuntime').snapshots.get(Number(state.characterId));
-                const pressure = Director.pressureForState(state);
-                const party = context.party ? BackgroundPartyState.find(context.party.partyId) : null;
-                const leaf = !party ? this.economyDecisions.activity(state) : null;
-                return {
-                    catalog: SpotProfiles.cache, physicalCatalog: SpotService.spots,
-                    partyGeneration: BackgroundPartyState.generation(), party,
-                    pressure: [pressure.expMultiplier, pressure.deathChanceMultiplier, pressure.directorReason],
-                    memory, memoryRevision: memory?.revision,
-                    clanId: invoke('GameServer/Clan/ClanSocialRuntime').view.memberships.get(Number(state.characterId)) || 0,
-                    escrow: invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId),
-                    targetNpcId: party ? invoke('GameServer/Bot/Population/PartyHuntingTarget').npcId(party, state)
-                        : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null
-                };
-            }
+            dependencies: state => ({
+                catalog: SpotProfiles.cache, physicalCatalog: SpotService.spots,
+                clanId: ClanSocial.view.memberships.get(Number(state.characterId)) || 0,
+                targetNpcId: this.targetNpcId(state, ledParty(state))
+            })
         });
         this.population = null;
         this.started = false;
@@ -373,7 +347,7 @@ class ColdSimulationCoordinator {
             // dissolved parties. Only then is it safe to trim the rows.
             await BackgroundPartyState.purgeHistory();
             await invoke('GameServer/Bot/Population/ColdRaidAuthority').init();
-            await invoke('GameServer/Clan/ClanSocialRuntime').refresh(true);
+            await ClanSocial.refresh(true);
             invoke('GameServer/Bot/Population/ColdOccupationSources').initialise();
             this.queue.start();
             this.startWorker();
@@ -499,6 +473,16 @@ class ColdSimulationCoordinator {
         for (const entry of entries || []) {
             if (!entry?.state?.inventoryInstanceColumns) this.projectionRetention.remember(entry);
         }
+        if (entries?.length) {
+            // Table changes reach the worker before the states that read them
+            // (parties, memory, goals, pressure, the board's escrow).
+            this.tableChannel.flush();
+            // The facts each commit answer still carries, by name.
+            if (DiagnosticConfig.developerDiagnostics && type === 'commit_ack') for (const entry of entries) {
+                EconomyDiagnostics.count('context_fact', 'commit', 'acks');
+                for (const key in entry?.context || {}) EconomyDiagnostics.count('context_fact', 'commit', key);
+            }
+        }
         const packed = StateWire.packPayload(type, payload);
         if (packed !== payload) { payload = packed; bytes = null; }
         const message = Protocol.envelope(type, this.workerEpoch, payload, msgId);
@@ -557,7 +541,7 @@ class ColdSimulationCoordinator {
                 throw Error('trade_meeting_source_retired');
             const state = LifeState.cachedState(id);
             if (!state) throw Error('trade_meeting_missing_state');
-            this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) }] });
+            this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex()) }] });
             const codec = invoke('GameServer/AfkTrade/TradeMeetingCodec');
             const msgId = `meeting:${id}:${token}`;
             const envelope = frame => Protocol.envelope('command_request', epoch,
@@ -666,7 +650,7 @@ class ColdSimulationCoordinator {
             }
             return true;
         }
-        this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) }] });
+        this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex()) }] });
         return !!this.post('snapshot_page', { rows: [], economyOwnerId: id, reconcile: true });
     }
 
@@ -1059,22 +1043,20 @@ class ColdSimulationCoordinator {
         });
     }
 
-    contextIndex(options = {}) {
+    contextIndex() {
         let profiles = [];
         try { profiles = SpotProfiles.ensure() || []; } catch (_) { profiles = []; }
         // Every context of one spot catalog reads the same id table.
         const spots = SpotIndex.tableFor(profiles);
-        const parties = new Map((BackgroundPartyState.active?.() || []).map((party) => [Number(party.leaderId || 0), party]));
-        return {
-            spots,
-            profiles,
-            parties,
-            partyGeneration: BackgroundPartyState.generation(),
-            compactPartyMembers: options.compactPartyMembers === true,
-            compactPartyMemberIds: options.compactPartyMemberIds instanceof Set
-                ? options.compactPartyMemberIds
-                : null
-        };
+        return { spots, profiles };
+    }
+
+    // The hunted npc of the bot's step: its party's target when it leads
+    // one, else its solo hunting leaf's.
+    targetNpcId(state, party) {
+        if (party) return PartyHuntingTarget.npcId(party, state);
+        const leaf = this.economyDecisions.activity(state);
+        return leaf?.activity === 'hunting' ? (leaf.npcId || null) : null;
     }
 
     async ensureCraftRecipes(state) {
@@ -1094,19 +1076,10 @@ class ColdSimulationCoordinator {
             || (physical && index.spots.get(String(physical.id)))
             || declared
             || null;
-        let pressure = {};
-        try { pressure = Director.pressureForState(state) || {}; } catch (_) { pressure = {}; }
-        const party = index.parties.get(Number(state.characterId)) || null;
-        const members = party
-            ? (party.memberIds || []).map((characterId) => LifeState.cachedState(characterId)).filter(Boolean) : [];
-        const partyMembers = members.map((member) => {
-                const memberId = Number(member.characterId || 0);
-                const compact = index.compactPartyMembers === true
-                    || index.compactPartyMemberIds?.has(memberId);
-                return compact ? compactPartyMemberContext(member) : member;
-            });
-        const interactionMemory = invoke('GameServer/Social/InteractionMemoryRuntime').snapshot(Number(state.characterId));
-        const leaf = !party ? this.economyDecisions.activity(state) : null;
+        // Party, leadership, memory, pressure, goal revision and escrow are
+        // worker tables (BackgroundPartyState, InteractionMemoryRuntime,
+        // PopulationDirector, GoalState, the board's escrow), not context.
+        const party = ledParty(state);
         const workshop = this.economyDecisions.workshopFor(state);
         const context = {
             playerWaiting: invoke('GameServer/AfkTrade/TradeMeetingService').isPlayerWaiting?.(state.characterId) === true,
@@ -1115,23 +1088,10 @@ class ColdSimulationCoordinator {
             ...recipeKnowledgeFor(state),
             ...(state.stats?.workshop?.entries?.length ? { workshop } : {}),
             spot: invoke('GameServer/RaidBoss/RaidEncounterScope').decorateSpot(spot),
-            interactionMemory,
             clanHallServices: invoke('GameServer/ClanHall/ColdVisit').needed(state),
-            pressure,
-            goalRevision: GoalService.revision(state.characterId),
-            // The worker cannot see AFK shops: hand it the Adena the bot's own
-            // buy order holds, which still counts as purchase budget.
-            buyOrderEscrow: invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId),
-            targetNpcId: party ? invoke('GameServer/Bot/Population/PartyHuntingTarget').npcId(party, state)
-                : leaf?.activity === 'hunting' ? (leaf.npcId || null) : null,
-            isPartyLeader: !!party,
-            party,
-            ...(party?.stats?.objective?.fullRoster && Number(state.characterId) === Number(party.leaderId)
-                ? { raidOwner: Database.clanRaidOwner(party.stats.objective.fullRoster) } : {}),
-            partyMembers,
-            requirementRefresh: !!party && this.population?.partyRequirementRefreshDue?.has(String(party.partyId))
+            targetNpcId: this.targetNpcId(state, party)
         };
-        this.projectionRetention.prepare(state, context, index.partyGeneration);
+        this.projectionRetention.prepare(state, context);
         return context;
     }
 
@@ -1294,14 +1254,13 @@ class ColdSimulationCoordinator {
     }
 
     async sendFullSnapshot() {
-        invoke('GameServer/Clan/ClanSocialRuntime').send(this);
+        ClanSocial.send(this);
         await this.reconcileOrphanedBackgroundParties();
         // Re-read after reconciliation: releasing an invalid party updates
         // cached member ownership and membership. Sending the pre-repair
         // array would immediately seed the worker with the stale party again.
         const states = LifeState.everyState();
-        const compactPartyMemberIds = new Set(states.map((state) => Number(state.characterId || 0)).filter(Boolean));
-        const index = this.contextIndex({ compactPartyMemberIds });
+        const index = this.contextIndex();
         const pageSize = this.snapshotQueue.pageSize;
         const baseBytes = Protocol.byteLength(Protocol.envelope('snapshot_page', this.workerEpoch, {
             rows: [], done: false, initial: true
@@ -1459,7 +1418,7 @@ class ColdSimulationCoordinator {
             while (this.worker && this.ready) {
                 const entries = this.snapshotQueue.takeCritical(this.snapshotQueue.pageSize);
                 if (!entries.length) break;
-                const index = this.contextIndex({ compactPartyMembers: true });
+                const index = this.contextIndex();
                 const result = await this.sendIncrementalEntries(entries, index, this.snapshotQueue.pageSize, 'P0');
                 if (!result.ok) {
                     entries.forEach((entry) => this.snapshotQueue.restoreCritical(entry));
@@ -1495,9 +1454,9 @@ class ColdSimulationCoordinator {
         // Preserve bootstrap intent across a concurrent critical publication.
         // An incremental continuation has no final initial-ready marker.
         if (initial) this.snapshotBootstrapPending = true;
-        await invoke('GameServer/Clan/ClanSocialRuntime').refresh();
-        await invoke('GameServer/Clan/ClanSocialRuntime').enforceOne(this);
-        invoke('GameServer/Clan/ClanSocialRuntime').send(this);
+        await ClanSocial.refresh();
+        await ClanSocial.enforceOne(this);
+        ClanSocial.send(this);
         if (this.snapshotInFlight || this.criticalSnapshotInFlight) {
             this.snapshotRefreshPending = true;
             return false;
@@ -1546,7 +1505,7 @@ class ColdSimulationCoordinator {
         return this.startSnapshotJob('dirty', async () => {
             const startedAt = Date.now();
             try {
-                const index = this.contextIndex({ compactPartyMembers: true });
+                const index = this.contextIndex();
                 const result = await this.sendIncrementalEntries(plan.entries, index, plan.pageSize, null,
                     startedAt + (lease?.budgetMs || Math.max(1, Number(Config.schedulerSliceMs) || 12)));
                 if (result.ok) plan.entries.slice(0, result.rowsSent).forEach(entry => this.snapshotQueue.complete(entry, true));
@@ -1678,7 +1637,7 @@ class ColdSimulationCoordinator {
             leaseMs: Math.max(2000, Number(Config.coldOwnerLeaseMs) || 30000)
         });
         this.noteLeaseGrants(claimed.grants || []);
-        const index = this.contextIndex({ compactPartyMembers: true });
+        const index = this.contextIndex();
         const rebaseIds = [...new Set((claimed.rejected || [])
             .filter((result) => OWNERSHIP_REBASE_REASONS.has(String(result.reason || '')))
             .map((result) => Number(result.characterId))
@@ -2110,7 +2069,7 @@ class ColdSimulationCoordinator {
             this.tableChannel.flush();
             return;
         }
-        const index = this.contextIndex({ compactPartyMembers: true });
+        const index = this.contextIndex();
         for (const result of results) {
             const state = LifeState.cachedState(result.characterId) || result.nextState;
             if (state) await this.step('economyPlan', result.characterId, () => this.ensureCraftRecipes(state));
@@ -2156,7 +2115,7 @@ class ColdSimulationCoordinator {
         }
         const released = await ColdSimulationOwner.releaseBatch(tokens, { releaseInvalidated: true }).catch(() => []);
         if (this.worker !== worker || this.workerEpoch !== epoch) return;
-        const index = this.contextIndex({ compactPartyMembers: true });
+        const index = this.contextIndex();
         const results = released.flatMap((result) => {
             const inputToken = original.get(Number(result.characterId));
             if (!inputToken) return [];
@@ -2197,7 +2156,7 @@ class ColdSimulationCoordinator {
                     }
                     if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) {
                         results.push({ ...identity, ok: false, reason: 'stale_command', retryAfterMs: 1000,
-                            state, context: this.contextFor(state, this.contextIndex({ compactPartyMembers: true })) });
+                            state, context: this.contextFor(state, this.contextIndex()) });
                         continue;
                     }
                     let result;
@@ -2215,7 +2174,7 @@ class ColdSimulationCoordinator {
                         ...(result?.ok === false ? { retryAfterMs: Math.max(1000,
                             Number(result.retryAfterMs) || (result.reason === 'missing_spot' ? 30000 : 5000)) } : {}),
                         ...(nextState ? { state: nextState } : {}),
-                        context: nextState ? this.contextFor(nextState, this.contextIndex({ compactPartyMembers: true })) : {}
+                        context: nextState ? this.contextFor(nextState, this.contextIndex()) : {}
                     });
                 } catch (error) {
                     if (!sourceCurrent()) return;
@@ -2702,5 +2661,4 @@ class ColdSimulationCoordinator {
 
 module.exports = new ColdSimulationCoordinator();
 module.exports.ColdSimulationCoordinator = ColdSimulationCoordinator;
-module.exports.compactPartyMemberContext = compactPartyMemberContext;
 module.exports.npcPlanningCatalogRows = npcPlanningCatalogRows;

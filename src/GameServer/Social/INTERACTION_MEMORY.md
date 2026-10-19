@@ -176,12 +176,14 @@ Create `new InteractionMemory()` without a repository in a worker. Feed
 `accept(mainMemory.snapshot(id))`; call the same `assess` API. Older or equal
 snapshot revisions cannot replace an already accepted view. Views are read-only:
 they cannot be passed to the durable reducer, and workers cannot write SQL.
-The coordinator hydrates full/incremental snapshot pages and explicit cold
-handoffs. It includes the owner's compact memory in `context.interactionMemory`,
-including commit ACKs. The kernel indexes that memory separately and removes the
-transport copy from retained context. Social revisions are accepted independently
-of lifecycle revisions, and stale pages cannot overwrite newer ACK memory.
-Removing a worker entry releases its view; returning entries hydrate again.
+Main publishes every accepted snapshot (`onAccept`) as a row of the `memory`
+table (ColdTableChannel, key: owner id); the cold worker accepts each row into
+its own instance and keeps no second row copy (TableMirror `retain: false`).
+State pages and commit ACKs carry no memory. Social revisions are accepted
+independently of lifecycle revisions, and older rows cannot replace a newer view.
+A worker entry leaving keeps its view. Main publishes no removed row, so the
+worker's set is bounded by the owners main accepted; a full copy of the table
+re-sends them and the kept views refuse the equal revisions.
 Resolver callbacks receive `assessRelationship`, the same evaluator used on main.
 
 `workerMemory.propose(events)` only validates/copies events. Put the result in

@@ -260,12 +260,13 @@ function applyOrdinaryPieces(pieces = []) {
                 table.waiting = true;
                 continue;
             }
+            const retain = !this.unretained.has(name);
             for (const [key, row] of piece.rows || []) {
-                table.rows.set(key, row);
+                if (retain) table.rows.set(key, row);
                 listener?.put(key, row);
             }
             for (const key of piece.removed || []) {
-                table.rows.delete(key);
+                if (retain) table.rows.delete(key);
                 listener?.remove(key);
             }
             table.version = piece.to;
@@ -289,12 +290,17 @@ class TableMirror {
     constructor(options) {
         this.tables = new Map();
         this.listeners = new Map();
+        this.unretained = new Set();
         initializeNativeActorMirror(this, options);
     }
 
     // listener: { reset(), put(key, row), remove(key) }, called as pieces apply.
-    watch(name, listener) {
+    // retain: false = the listener owns the rows (e.g. packs them); the mirror
+    // keeps only the version bookkeeping, and rows(name) stays empty.
+    watch(name, listener, { retain = true } = {}) {
         this.listeners.set(String(name), listener);
+        if (retain === false) this.unretained.add(String(name));
+        else this.unretained.delete(String(name));
     }
 
     // pieces: [{ name, from, to, full, last, rows: [[key, row]], removed: [key] }].
@@ -306,39 +312,7 @@ class TableMirror {
             // A native actor cut cannot fall through to a second ordinary Map.
             throw new TypeError('missing_native_actor_store');
         }
-        const resync = [];
-        for (const piece of pieces) {
-            const name = String(piece.name);
-            const listener = this.listeners.get(name);
-            let table = this.tables.get(name);
-            if (piece.full) {
-                table = { version: piece.to, rows: new Map(), waiting: false, loading: piece.last === 0 };
-                this.tables.set(name, table);
-                listener?.reset();
-            } else if (!table || table.waiting || table.version !== piece.from
-                || (table.loading && piece.from !== piece.to)) {
-                // A change on a table not held, or on a full copy that never
-                // finished, is a gap too.
-                if (!table) {
-                    table = { version: null, rows: new Map(), waiting: false, loading: false };
-                    this.tables.set(name, table);
-                }
-                if (!table.waiting) resync.push(name);
-                table.waiting = true;
-                continue;
-            }
-            for (const [key, row] of piece.rows || []) {
-                table.rows.set(key, row);
-                listener?.put(key, row);
-            }
-            for (const key of piece.removed || []) {
-                table.rows.delete(key);
-                listener?.remove(key);
-            }
-            table.version = piece.to;
-            if (piece.last === 1) table.loading = false;
-        }
-        return resync;
+        return applyOrdinaryPieces.call(this, pieces);
     }
 
     // Attach once, before the first actor piece. Factory ownership is private;

@@ -1,5 +1,6 @@
 const Database = invoke('Database');
 const { fnv1a32 } = require('../Fnv1a');
+const TableChannel = require('../Population/ColdTableChannel').shared;
 
 const TABLE = 'bot_goal_state';
 const cache = new Map();
@@ -84,7 +85,30 @@ function save(snapshot) {
     ]);
 }
 
+// The 'goals' table (ColdTableChannel, key: bot id): { characterId,
+// nextReviewAt, revision } of each cached goal, published by its one writer
+// (store). The worker's economy decision reads the revision from it.
+function tableRow(snapshot) {
+    return { characterId: snapshot.characterId, nextReviewAt: Number(snapshot.current?.nextReviewAt || 0),
+        revision: GoalState.revision(snapshot.characterId) };
+}
+
+function store(snapshot) {
+    cache.set(snapshot.characterId, snapshot);
+    TableChannel.changed('goals', tableRow(snapshot));
+    GoalState.watch?.put(snapshot.characterId, Number(snapshot.current?.nextReviewAt || 0));
+}
+
+TableChannel.register('goals', {
+    key: row => row.characterId,
+    allRows: () => Array.from(cache.values(), tableRow)
+});
+
 const GoalState = {
+    // { put(characterId, nextReviewAt), reset() }: told of every goal write
+    // beside its 'goals' row (GoalService's due list of reviews).
+    watch: null,
+
     init() {
         if (initialized) return Promise.resolve(true);
         if (initPromise) return initPromise;
@@ -122,7 +146,7 @@ const GoalState = {
 
     prime(characterId, goalJson, updatedAt = now()) {
         const snapshot = normalize({ characterId, goalJson, updatedAt });
-        if (snapshot) cache.set(snapshot.characterId, snapshot);
+        if (snapshot) store(snapshot);
         return snapshot;
     },
 
@@ -139,7 +163,7 @@ const GoalState = {
                 [id]
             ]).then((rows) => {
                 const snapshot = normalize(rows?.[0]);
-                if (snapshot) cache.set(id, snapshot);
+                if (snapshot) store(snapshot);
                 return snapshot;
             });
         }).catch((err) => {
@@ -157,7 +181,7 @@ const GoalState = {
         return this.init().then((ready) => {
             if (!ready) return null;
             return save(snapshot).then(() => {
-                cache.set(id, snapshot);
+                store(snapshot);
                 return snapshot;
             });
         }).catch((err) => {
@@ -181,7 +205,7 @@ const GoalState = {
                 goalJson: safeJson(snapshot.current),
                 updatedAt: snapshot.updatedAt
             }))).then(() => {
-                snapshots.forEach((snapshot) => cache.set(snapshot.characterId, snapshot));
+                snapshots.forEach(store);
                 return snapshots;
             });
         }).catch((err) => {
@@ -217,13 +241,15 @@ const GoalState = {
             [safeJson(current), timestamp, id, existing.updatedAt, safeJson(existing.current)]
         ], 'bot-goals:purchase-progress').then(result => {
             if (Number(result?.affectedRows) !== 1) return null;
-            if (cache.get(id) === existing) cache.set(id, snapshot);
+            if (cache.get(id) === existing) store(snapshot);
             return snapshot;
         });
     },
 
     reset() {
+        for (const id of cache.keys()) TableChannel.changed('goals', { key: id, removed: true });
         cache.clear();
+        this.watch?.reset();
         initialized = false;
         initPromise = null;
     }
