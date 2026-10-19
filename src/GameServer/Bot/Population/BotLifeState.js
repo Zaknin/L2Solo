@@ -954,6 +954,39 @@ function save(row, options = {}) {
     });
 }
 
+// A party's write to a far member (its requirement plan, its departure), built
+// on the copy main read before: only the given fields are written (`stats`:
+// top-level stats keys, `columns`: row columns), held on that copy's revision,
+// and the write moves it. A write that moved the row in between (the member's
+// own review: its training, buff or plan) wins and nothing is written: false,
+// and the caller marks the party's re-plan due again.
+function writeHeldOnRevision(member, { stats = {}, columns = {} }, reason) {
+    const id = Number(member.characterId);
+    const statsEntries = Object.entries(stats), columnEntries = Object.entries(columns);
+    const assignments = [
+        ...(statsEntries.length ? [`statsJson = json_set(COALESCE(statsJson, '{}'), ${statsEntries.map(() => '?, json(?)').join(', ')})`] : []),
+        ...columnEntries.map(([name]) => `${name} = ?`),
+        'simulationRevision = simulationRevision + 1', 'updatedAt = ?'
+    ];
+    const params = [
+        ...statsEntries.flatMap(([key, value]) => [`$.${key}`, JSON.stringify(value ?? null)]),
+        ...columnEntries.map(([, value]) => value),
+        now(), id, Number(member.simulation?.revision || 0)
+    ];
+    return module.exports.serializeClanLevelUp(id, () => Database.execute([`UPDATE ${TABLE} SET ${assignments.join(', ')}
+        WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
+        RETURNING *`, params, { read: true }]))
+        .then(([row] = []) => {
+            if (!row) return false;
+            const snapshot = module.exports.acceptNewerLifecycleRow(row);
+            if (snapshot) notifyColdSnapshot(snapshot, reason, { critical: true });
+            return snapshot;
+        }).catch((error) => {
+            utils.infoWarn('BotLife', 'failed held write %s for %s: %s', reason, id, error.message);
+            return null;
+        });
+}
+
 // The world was paused while the server was down (L136): every persisted due
 // time moves by the downtime, so a restart does not make all bots due at once,
 // and so does lastResolvedAt: the step's length is now - lastResolvedAt
@@ -3215,6 +3248,7 @@ const BotLifeState = {
 
     leaveParty(state, reason = 'party_break', options = {}) {
         if (!state?.characterId) return Promise.resolve(null);
+        const read = state;
         if (invoke('GameServer/Bot/Population/RaidSoloBoundary').stale(state)) state = invoke('GameServer/Bot/Population/RaidSoloBoundary').clear(state);
         const timestamp = now();
         const cached = cache.get(Number(state.characterId));
@@ -3240,6 +3274,20 @@ const BotLifeState = {
                 : state.timing,
             updatedAt: timestamp
         };
+        // A party's release of a far member (applyWorkerPartyRequirements):
+        // only what the departure changes is written, held on the revision of
+        // the copy passed; false when a member write beat it. Its travel is
+        // kept or dropped, never a new paid trip, so no trip payment follows.
+        if (options.heldOnRevision === true) {
+            return writeHeldOnRevision(read, {
+                stats: Object.fromEntries(Object.entries(nextState.stats).filter(([key, value]) => value !== read.stats?.[key])),
+                columns: {
+                    partyId: null,
+                    ...(nextState.spotId !== read.spotId ? { spotId: nextState.spotId || null } : {}),
+                    ...(needsSoloResume ? { activity: nextActivity, activityStartedAt: timestamp, nextResolveAt: timestamp + 30000 } : {})
+                }
+            }, `party_left_${reason}`);
+        }
         const row = rowFromState(nextState);
         if (options.ownerHandoff === true) {
             return invoke('GameServer/Bot/Population/ColdSimulationOwner').handoffToMain(state, {
@@ -3530,13 +3578,10 @@ const BotLifeState = {
     },
 
     // One member's plan from its party's requirement refresh
-    // (PopulationService.applyWorkerPartyRequirements), built on the copy main
-    // read before: only the plan is written, held on that copy's revision, and
-    // the write moves it. A write that moved the row in between (the member's
-    // own review: its training, buff or plan) wins and nothing is written:
-    // false, and the caller marks the party's re-plan due again. A clan-locked
-    // plan or a foreign clan's goal is not replaced, as the full save would
-    // not replace it (null: nothing to write).
+    // (PopulationService.applyWorkerPartyRequirements), held on the revision
+    // of the copy read (writeHeldOnRevision: false when a member write beat
+    // it). A clan-locked plan or a foreign clan's goal is not replaced, as the
+    // full save would not replace it (null: nothing to write).
     writePartyRequirementPlan(member, plan = null) {
         const id = Number(member?.characterId), reason = 'party_requirement_refresh';
         if (!id) return Promise.resolve(null);
@@ -3545,20 +3590,7 @@ const BotLifeState = {
         if (next.stats.equipmentPlan !== plan || ClanMembershipPolicy.reconcileState(next).stats.equipmentPlan !== plan) {
             return Promise.resolve(null);
         }
-        return this.serializeClanLevelUp(id, () => Database.execute([`UPDATE ${TABLE}
-            SET statsJson = json_set(COALESCE(statsJson, '{}'), '$.equipmentPlan', json(?), '$.lastReason', ?),
-                simulationRevision = simulationRevision + 1, updatedAt = ?
-            WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
-            RETURNING *`, [JSON.stringify(plan), reason, now(), id, Number(member.simulation?.revision || 0)], { read: true }]))
-            .then(([row] = []) => {
-                if (!row) return false;
-                const snapshot = this.acceptNewerLifecycleRow(row);
-                if (snapshot) notifyColdSnapshot(snapshot, reason, { critical: true });
-                return snapshot;
-            }).catch((error) => {
-                utils.infoWarn('BotLife', 'failed party requirement plan for %s: %s', id, error.message);
-                return null;
-            });
+        return writeHeldOnRevision(member, { stats: { equipmentPlan: plan, lastReason: reason } }, reason);
     },
 
     acceptClanLevelSpState(row) {
