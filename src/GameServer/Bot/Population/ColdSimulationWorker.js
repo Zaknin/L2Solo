@@ -1427,7 +1427,12 @@ function startKernel(config = {}) {
                 { stock: economy.stock('shots'), economy }, 'action') : null;
             const economyPlan = preparedAction?.economyPlan || (stepEconomy ? lifecyclePlan.economyPlan : refreshed?.economyPlan) || null;
             const record = kernel.states.get(Number(projected.characterId));
-            if (economyPlan?.d && record) { record.economyPending = economyPlan.d; record.economyPlanHash = economyPlanHash(economyPlan); }
+            // Every sent plan stamps what is still deferred: a complete plan
+            // clears what an earlier one left, so no later state replans it.
+            if (economyPlan && record) {
+                record.economyPending = economyPlan.d || 0;
+                if (economyPlan.d) record.economyPlanHash = economyPlanHash(economyPlan);
+            }
             const market = reviewMarket(projected, timestamp, economy);
             // Main reads this instead of building the network again; the
             // record keeps what it published (the workshop it reads below).
