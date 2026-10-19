@@ -341,6 +341,54 @@ async function run() {
             Economy.forget(990027);
         }
     }
+    // A card refused right before the build of the same step on the same
+    // state hands its verdict to that build: the verdict is computed once and
+    // the build weighs the same mask as with its own; the card's answer stays
+    // the first refusal's. A state that moved between them recomputes.
+    {
+        const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const diagnosticsBefore = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        const T = Date.now(), native = { ...base, characterId: 990028 };
+        try {
+            const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
+            const delta = (before, key) => (counts()[key] || 0) - (before[key] || 0);
+            const held = Economy.forState(native, { timestamp: T });
+            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+            const accepted = Card.advisory(held, published, published.activity, { timestamp: T });
+            assert.equal(accepted?.eventProof, held.eventProof(), 'fixture: the card carries the held proof');
+            const moved = { ...published, stats: { ...published.stats,
+                coldCombat: { classId: 1, skillSource: 'database', skills: [{ selfId: 3, level: 1 }] } } };
+            // The worker's step deps carry its trip rows (main fills them in the build).
+            const deps = { timestamp: T, routeRows: [] };
+            const refused = (state, options) => {
+                const prepared = {};
+                assert.equal(Card.refreshAdvisory(state, accepted, deps, { prepared, ...options }), null,
+                    'fixture: a learned skill refuses the card');
+                return prepared.eventVerdict;
+            };
+            const build = (state, eventVerdict) => Economy.forState(state, { ...deps, rememberContext: false, eventVerdict });
+            const plain = refused(moved, {});
+            const own = build(moved, plain);
+            let before = counts();
+            const handed = refused(moved, { collect: true });
+            const served = build(moved, handed);
+            assert.equal(delta(before, 'context:held_verdict:computed'), 1, 'one verdict for the card and the build');
+            assert.equal(delta(before, 'context:held_verdict:reused'), 1, 'the build serves the card\'s verdict');
+            assert.equal(served.mask, own.mask, 'the build weighs the mask of its own verdict');
+            assert.deepEqual([handed.valid, handed.reason, handed.touchedSections, handed.movedSections],
+                [plain.valid, plain.reason, plain.touchedSections, plain.movedSections], 'the card answers its first refusal');
+            before = counts();
+            // The build reads a state that moved after the card's verdict.
+            build({ ...moved, adena: moved.adena + 1 }, refused(moved, { collect: true }));
+            assert.equal(delta(before, 'context:held_verdict:computed'), 2, 'a moved input recomputes');
+            assert.equal(delta(before, 'context:held_verdict:reused') || 0, 0, 'a moved input serves nothing');
+        } finally {
+            Config.developerDiagnostics = diagnosticsBefore;
+            Economy.forget(native.characterId);
+        }
+        console.log('PASS card verdict handed to the build of its step');
+    }
     // The cheap check by kind of leaf: an enchant or special-ability decision
     // names its object: it holds while that object is in the bag at the
     // enchant level read; one without an object (an exchange) holds by its

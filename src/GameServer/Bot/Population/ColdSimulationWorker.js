@@ -1345,7 +1345,7 @@ function startKernel(config = {}) {
                         const prepared = {};
                         refreshed = !projected.party?.partyId && !projected.partyId
                             ? ColdEconomyDecision.refreshAdvisory(projected, owner?.wishAdvisory, deps,
-                                { afterResult: true, prepared }) : null;
+                                { afterResult: true, prepared, collect: true }) : null;
                         // Both native stock gates read one prepared foundation;
                         // the same edges also drive the action after projection.
                         // L116: a reuse's own basics, else built at the first
@@ -1488,9 +1488,11 @@ function startKernel(config = {}) {
             // A proved ordinary solo round keeps its accepted native plan.
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
+            // A refused card's verdict serves the build below, which reads
+            // this state unless a wish-focus plan is deferred on a copy of it.
             const prepared = {};
             let refreshed = solo && nativeHolds && planHolds()
-                ? ColdEconomyDecision.refreshAdvisory(state, record?.wishAdvisory, deps, { prepared }) : null;
+                ? ColdEconomyDecision.refreshAdvisory(state, record?.wishAdvisory, deps, { prepared, collect: !wishFocus }) : null;
             if (refreshed) refreshed = await refreshCraftPacket(state, timestamp, refreshed);
             // Compact advice has no full money queue for clan acquisition.
             // A null intention takes its ordinary native selection there.
