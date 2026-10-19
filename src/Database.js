@@ -5931,7 +5931,7 @@ const Database = {
     },
 
     endPvpEncounter(key, ids, outcome = 'pvp_expired') {
-        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], complete: false });
+        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], parties: [] });
         return inTransaction(() => {
             const rows = [], parties = [], partyIds = new Set(), timestamp = now();
             for (const id of ids) {
@@ -5957,7 +5957,7 @@ const Database = {
                     [JSON.stringify(stats), Math.max(timestamp, Number(party.updatedAt) + 1), partyId]);
                 parties.push(one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]));
             }
-            return { rows, parties, complete: true };
+            return { rows, parties };
         }, 'bot-life:pvp-encounter-end');
     },
 
