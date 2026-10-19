@@ -611,9 +611,12 @@ function refusal(state, accepted, deps = {}, options = {}) {
     // the next decision point. No revision on the card (restored after a
     // restart) differs too: one rebuild.
     if (Number.isFinite(deps.goalRevision) && deps.goalRevision !== accepted.goalRevision) return 'goal';
+    // options.collect: a build of the same step on this state follows a
+    // refusal; the verdict collects and hands itself to it (forState).
     const why = [], verdict = {};
     const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
-        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()), why, verdict });
+        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()), why, verdict,
+        collect: options.collect === true && !!options.prepared });
     if (options.prepared) options.prepared.eventVerdict = verdict;
     return holds ? '' : `events:${why[0] || 'unproved'}`;
 }
@@ -622,7 +625,9 @@ function canReuse(state, accepted, deps = {}, options = {}) {
 }
 // options.why: an array that receives the refusal's name; options.prepared:
 // an object that receives the basics a reuse built (L120), so the caller does
-// not build them or their income route again for the same state and deps.
+// not build them or their income route again for the same state and deps,
+// and the card's verdict; options.collect: the caller builds on this state
+// and deps when the card is refused (its verdict serves the build's).
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     const refused = refusal(state, accepted, deps, options);
     if (refused) { options.why?.push(refused); return null; }
