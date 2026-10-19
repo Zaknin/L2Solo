@@ -1014,7 +1014,10 @@ function hydrateCache() {
             if (row.nativeLearnedSkills != null) {
                 state.stats.coldCombat = ColdCombatProfile.legacySnapshot(state, parseJson(row.nativeLearnedSkills, []), now());
             }
-            if (row.nativeLearnedSkills != null || hennaRepair) {
+            // Once per bot at load: an old seed's base counts hennas a cold draw may have changed since.
+            const seedRepair = ColdCombatProfile.oldSeedRepair(state.stats.coldCombat);
+            if (seedRepair) state.stats.coldCombat = seedRepair;
+            if (row.nativeLearnedSkills != null || hennaRepair || seedRepair) {
                 // Startup repair precedes cache publication and worker reads.
                 // Use the existing guarded save; do not learn/spend here.
                 if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
