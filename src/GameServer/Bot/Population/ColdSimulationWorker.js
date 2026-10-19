@@ -572,6 +572,13 @@ function occupationFor(state, timestamp, options = {}, mode = 'occupation') {
         knownShotRecipes: recipes.knownShotRecipes || [], recipeBook: recipes.recipeBook, stock: options.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
+// A build's workshop (the crafter's best recipe and its income per hour,
+// occupationFor mode occupation), counted by the caller that asks: only a
+// build reads it, a held card asks none.
+function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
+    economyDiagnostics.count('occupation', 'ask', caller);
+    return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
+}
 async function refreshCraftPacket(state, timestamp, refreshed) {
     if (!refreshed || !CraftEligibility.isServiceCrafter(state)) return refreshed;
     const mp = Number(state.vitals?.mp), preparedMp = refreshed.advisory.preparedMp ?? refreshed.advisory.mp;
@@ -1188,8 +1195,7 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             const options = { buyOrderEscrow: payload.escrows[at], recipeKnowledge: payload.recipeKnowledge?.[at] || {} };
             const routeRows = await occupationFor(member, timestamp, options, 'wish');
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
-            const workshop = await occupationFor(member, timestamp,
-                { ...options, routeRows, routeKey: EconomicTrip.key(member) });
+            const workshop = await askWorkshop(member, timestamp, routeRows, 'party_goal', options);
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
             return invoke('GameServer/Bot/Economy/EconomyContext').forState(member, {
                 timestamp, spots: planningSpots, board: boardReady(),
@@ -1366,13 +1372,9 @@ function startKernel(config = {}) {
                 // Merged before the event check, whose dirty bits follow it.
                 ? { ...base, statsPacket: lifecyclePlan.statsPacket, statsPacketBeforeResolve: true }
                 : { ...base,
-                    economyDepsFor: async projected => {
-                        const routeRows = await occupationFor(projected, timestamp, {}, 'wish');
-                        const workshop = await occupationFor(projected, timestamp,
-                            { routeRows, routeKey: EconomicTrip.key(projected) });
-                        return { spots: planningSpots, workshop, routeRows,
-                            board: boardReady(), buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId) };
-                    },
+                    // The workshop is asked by economyFor, only for a build.
+                    economyDepsFor: async projected => ({ spots: planningSpots, routeRows: await occupationFor(projected, timestamp, {}, 'wish'),
+                        board: boardReady(), buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId) }),
                     economyFor: async (projected, deps) => {
                         observedDeps = deps;
                         const prepared = {};
@@ -1389,6 +1391,8 @@ function startKernel(config = {}) {
                             { buyOrderEscrow: ownEscrow(), stockFor: (_state, kind) => (stock ||= prepared.basics = EconomyContext.basics(projected, deps)).stock(kind) });
                         if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, refreshed);
                         if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
+                        deps.workshop = await askWorkshop(projected, timestamp, deps.routeRows,
+                            projected.party?.partyId || projected.partyId ? 'party' : 'karma');
                         return EconomyContext.forState(projected, withIncomeRoute(withEventVerdict(deps, prepared), prepared.basics));
                     },
                     onEconomy: (built, seen) => {
@@ -1486,11 +1490,10 @@ function startKernel(config = {}) {
             // GearPlanSelection uses EconomyContext's same prepared occupation
             // reader. No synchronous recipe scan can run through it.
             const routeRows = await occupationFor(state, timestamp, {}, 'wish');
-            const workshop = await occupationFor(state, timestamp,
-                { routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+            // deps.workshop: asked below, only for a build.
             const deps = { spots, timestamp, board: boardReady(),
-                buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId), workshop, routeRows };
+                buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId), routeRows };
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
@@ -1536,6 +1539,8 @@ function startKernel(config = {}) {
             // A null intention takes its ordinary native selection there.
             if (refreshed?.economy.network.activity === null && GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) refreshed = null;
             const nullReuse = refreshed?.economy.network.activity === null;
+            // Both reuses (the card's leaf, a null intention) read the card's workshop.
+            if (!refreshed) deps.workshop = await askWorkshop(state, timestamp, routeRows, 'lifecycle');
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
@@ -1622,7 +1627,7 @@ function startKernel(config = {}) {
                 economy,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,
-                economyDecision: heldDecision || ColdEconomyDecision.capture({ ...economy, workshop }, routedState),
+                economyDecision: heldDecision || ColdEconomyDecision.capture({ ...economy, workshop: deps.workshop }, routedState),
                 previousPlan,
                 acquisitionPlan,
                 partyRequest,
