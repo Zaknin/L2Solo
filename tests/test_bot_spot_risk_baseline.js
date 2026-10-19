@@ -36,14 +36,6 @@ async function run() {
         [992, 'bot_risk_baseline_fixture', 'RiskBaselineProbe', 0, 0, 20, 100, 100, 50, 50,
             0, 0, 0, 0, 0, 0, 0, 0, 0]
     ], 'fixture:physical-risk-character');
-    Database.reconcileBotClanMembership = async () => ({ repairedMembers: 0, repairedParties: 0 });
-    Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
-    Database.execute = () => Promise.resolve([]);
-    Database.syncInventorySummary = () => Promise.resolve();
-    Database.updateCharacterLocation = () => Promise.resolve();
-    Database.updateCharacterExperience = () => Promise.resolve();
-    Database.updateCharacterVitals = () => Promise.resolve();
-
     const state = {
         characterId: 992,
         name: 'RiskBaselineProbe',
@@ -67,7 +59,19 @@ async function run() {
             spotRisk: { spotId: 'old_spot', deathsAtEntry: 1, fightsAtEntry: 2 }
         }
     };
-    const saved = await LifeState.applyResolve(state, {
+    // The bot's saved cold row: a step's class training checks the saved row
+    // it was planned from (revision and save time).
+    const seeded = await LifeState.upsertState(state);
+    assert.strictEqual(seeded?.phase, 'cold', 'fixture: the cold row is saved');
+    Database.reconcileBotClanMembership = async () => ({ repairedMembers: 0, repairedParties: 0 });
+    Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
+    Database.execute = () => Promise.resolve([]);
+    Database.syncInventorySummary = () => Promise.resolve();
+    Database.updateCharacterLocation = () => Promise.resolve();
+    Database.updateCharacterExperience = () => Promise.resolve();
+    Database.updateCharacterVitals = () => Promise.resolve();
+
+    const saved = await LifeState.applyResolve(seeded, {
         patch: {
             activity: 'hunting',
             spotId: 'new_spot',
