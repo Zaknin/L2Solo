@@ -41,6 +41,8 @@ async function run() {
         GoalState.prime(2, goal(now + 1000));
         GoalState.prime(3, goal(now + 1000));
         GoalState.prime(4, goal(now + 60000));
+        GoalState.prime(5, '{}');
+        states.set(5, { characterId: 5, phase: 'cold', activity: 'hunting', party: { partyId: null }, stats: {} });
         assert.strictEqual(GoalService.dueArmedAt(), now + 1000, 'one timer, armed at the earliest review time');
 
         assert.deepStrictEqual(await GoalService.reviewDue(now), [], 'nothing is reviewed before its time');
@@ -57,6 +59,7 @@ async function run() {
         assert.deepStrictEqual(reviewed, [], 'bot 4 is not cached as a state: nothing to review');
         await GoalService.reviewDue(now + 120000);
         assert.deepStrictEqual(reviewed, [1], 'the far solo bot is reviewed again at its next review time');
+        assert(!reviewed.includes(5), 'a bot without a goal has no review time');
 
         GoalState.reset();
         assert.strictEqual(GoalService.dueArmedAt(), Infinity, 'a reset leaves no timer');

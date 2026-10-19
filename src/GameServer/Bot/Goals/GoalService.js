@@ -211,6 +211,11 @@ GoalService.reviewSpot = reviewSpot;
 
 GoalState.watch = {
     put(characterId, nextReviewAt) {
+        // No goal, no review time: a bot without one is not given one here.
+        if (!nextReviewAt) {
+            due.delete(characterId);
+            return;
+        }
         due.set(characterId, nextReviewAt);
         arm(nextReviewAt);
     },
