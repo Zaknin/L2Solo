@@ -1719,7 +1719,9 @@ function startKernel(config = {}) {
         npcOffersFor: OccupationSources.npcOffersFor,
         buyOrderEscrow: escrowFor,
         spots: () => planningSpots,
-        memory: (characterId) => kernel.interactionMemory.snapshot(characterId),
+        // The bot's memory rows for its relations fact, bond and threat (read
+        // only), without the deep copy snapshot() makes; as main passes them.
+        memory: characterId => kernel.interactionMemory.relationRows(Number(characterId)),
         memoryIdentity: characterId => kernel.interactionMemory.contentIdentity(characterId),
         sourceReady: () => tables.ready('board') && tables.ready('market'),
         nativeCraftContinuation: true
