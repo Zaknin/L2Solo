@@ -429,7 +429,8 @@ function handedVerdict(handed, state, held, deps) {
         || leaf?.activity === 'crafting' && reservedRows(handed.reservations)
             !== reservedRows(held.craftReservations ?? leaf.craftReservations)
         || !readsAsCompact(leaf)) return null;
-    return handed.verdict.leaf !== undefined && handed.verdict.leaf === activityIdentity(leaf) ? handed.verdict : null;
+    // The held leaf's identity is its proof's (captureEventProof, the same plan).
+    return handed.verdict.leaf !== undefined && handed.verdict.leaf === handed.proof.activity ? handed.verdict : null;
 }
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
