@@ -35,4 +35,12 @@ for (const stat of Henna.STAT_KEYS) {
     const key = stat.toLowerCase();
     assert.equal(redrawn[key], fewer[key], `${stat}: a henna change after the seed applies its delta once`);
 }
-console.log('PASS a seeded cold combat kit counts hennas once, also after a henna change');
+// A seed saved before the fix: base with the hennas inside, no henna totals.
+const oldSeed = Profile.seedSnapshot(bot, timestamp);
+delete oldSeed.henna;
+const old = Profile.profileFor({ ...bot, stats: { ...bot.stats, coldCombat: oldSeed } }, timestamp).base;
+for (const stat of Henna.STAT_KEYS) {
+    const key = stat.toLowerCase();
+    assert.equal(old[key], fresh[key], `${stat}: an old seed counts the hennas once`);
+}
+console.log('PASS a seeded cold combat kit counts hennas once, also after a henna change and from an old seed');

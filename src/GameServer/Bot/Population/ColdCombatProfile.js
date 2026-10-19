@@ -692,9 +692,12 @@ function gatherKit(state, timestamp) {
     };
     const henna = hennaTotals(state.stats?.hennas);
     // Captured base stats (hot capture, seedSnapshot) already include the
-    // symbols in saved.henna. Only the delta from them is added.
+    // symbols in saved.henna. Only the delta from them is added. A base
+    // without henna is a seed from before 2e3af7fa0, which counted the
+    // current symbols (assumed unchanged since that seed).
+    const counted = saved?.base && !saved.henna ? henna : saved?.henna;
     for (const stat of BASE_STATS) {
-        const captured = number(saved?.henna?.[stat]);
+        const captured = number(counted?.[stat]);
         kitPart.base[stat.toLowerCase()] = number(kitPart.base[stat.toLowerCase()], 1) + henna[stat] - captured;
     }
     return kitPart;
