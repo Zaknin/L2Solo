@@ -512,6 +512,8 @@ class RetainedStateMap extends Map {
         const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(record.state, incomingAdvice, previousAdvice)
             ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(record.state, previousAdvice) ? previousAdvice : null;
         if (this.#skillDtos && record && (wishAdvisory || record.wishAdvisory)) {
+            // A near record's decision is its published packet (no proof), never a card:
+            // the far card is dropped here and none is built while the bot is near.
             record.wishAdvisory = record.state?.phase === 'cold' ? wishAdvisory : null;
         }
         if (this.#skillDtos) {

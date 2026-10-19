@@ -43,7 +43,9 @@ async function runWorker(state, predicate, followUp = null) {
         await until(message => message.type === 'ready' && message.msgId === 'init');
         send('snapshot_page', { rows: [{ state }], initial: true, done: true });
         const result = await until(predicate);
-        if (followUp) await followUp({ result, until, post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }) });
+        if (followUp) await followUp({ result, until, seen: test => received.some(test),
+            post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }),
+            table: tables => send('table_page', { tables }) });
         assert(!received.some(message => message.type === 'fault'));
         send('shutdown', {}, 'shutdown');
         await until(message => message.type === 'drained' && message.msgId === 'shutdown');
@@ -61,7 +63,25 @@ async function runWorker(state, predicate, followUp = null) {
         timing: { nextResolveAt: now + 60000, lastResolvedAt: now - 60000 }, updatedAt: now,
         simulation: { revision: 1 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
-    const hot = await runWorker(state, message => message.type === 'ready' && message.payload.phase === 'economy_decided');
+    // A workshop gone stale: a far row's echoes to main; a near row's does not
+    // (its copy is current by nearSeq). The far crafter reads 1882, the near build 1835.
+    const staleFor = id => message => message.type === 'ready'
+        && message.payload.phase === 'economy_workshop_stale' && message.payload.characterId === id;
+    const far = { ...state, characterId: 765414, name: 'PublicationFar', phase: 'cold', nearSeq: undefined,
+        timing: { nextResolveAt: now - 1, lastResolvedAt: now - 60000 },
+        stats: { classId: 0, clanId: 9, generatedCold: true, dwarvenCraftLevel: 1, workshop: { entries: [] }, money: [1000, .001, 0, 0] } };
+    const hot = await runWorker(state, message => message.type === 'ready' && message.payload.phase === 'economy_decided',
+        async ({ seen, post, table }) => {
+            post(far);
+            // A moved item marks a done slot only: pages repeat until the far one has finished.
+            for (let version = 0; !seen(staleFor(far.characterId)); version++) {
+                assert(version < 200, 'the far crafter echoes its stale workshop');
+                table([{ name: 'market', from: version, to: version + 1, full: false, last: 1, removed: [],
+                    rows: [1835, 1882].map(id => [`i:${id}`, [`i:${id}`, version + 1, 1]]) }]);
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            assert(!seen(staleFor(state.characterId)), 'a near row\'s stale workshop is not echoed to main');
+        });
     // A near bot's decision is the whole one a far bot gets (its clan plan
     // included), with the mind it moved and the row's post number beside it.
     const decision = Decisions.compact(hot.payload.economyDecision), near = hot.payload.near;

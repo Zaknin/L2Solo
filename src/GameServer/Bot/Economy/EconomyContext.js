@@ -1013,12 +1013,10 @@ function forState(state = {}, deps = {}) {
     // route instead (Die, GearPlanSelection, HealingPotionStock, ScrollStock,
     // ShotStock: no route request from main).
     if (!isMainThread && !deps.tripCost && !fullRoute(deps.routeRows)) {
-        const steps = Trip.prepare(state);
-        let step; do { step = steps.next(); } while (!step.done);
-        deps.routeRows = step.value;
+        deps.routeRows = Trip.prepared(state);
         // Read live: a high share against context builds says the 64-request
         // cap refuses too often.
-        if (Diagnostics.active()) Diagnostics.count('context', 'route', 'inline');
+        if (diagnostic) Diagnostics.count('context', 'route', 'inline');
     }
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
