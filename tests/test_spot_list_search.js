@@ -1,8 +1,10 @@
 'use strict';
 // ARCH-08-b: a spot search reads the game table's spot list for the bot's
 // role and level and takes the first spot it may hunt whose level fits; the
-// crowd enters only as the worker's room filter (ROUTE-ROOM). The real table; a catalogue of its own spots built from
-// its authored reward rows (no World in a test); one level 29 mage.
+// crowd enters only as the room filter (ROUTE-ROOM: the worker's own index;
+// ROUTE-ROOM-4: main's world index for a solo search on main). The real
+// table; a catalogue of its own spots built from its authored reward rows (no
+// World in a test); one level 29 mage.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,6 +17,10 @@ const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const Index = invoke('GameServer/Bot/AI/SpotIndex');
 const Spots = invoke('GameServer/Bot/Population/SpotProfiles');
 const IncomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
+const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 
 const at = 1800000000000;
 const mage = { classId: 12, level: 29, role: 'mage', maxHp: 592, maxMp: 932,
@@ -66,7 +72,7 @@ assert.equal(chosen.route?.id ?? null, route?.id ?? null, 'the chosen spot carri
 const next = listed.find(spot => spot.id !== first.id && SpotService.isSuitable(spot, level));
 assert.equal(Spots.findForState(state, { ...options, excludedSpotIds: new Set([String(first.id)]) })?.id, next?.id,
     'an avoided spot is skipped: the next one of the list');
-// ROUTE-ROOM: the worker passes its own room filter; main passes none.
+// ROUTE-ROOM: the worker passes its own room filter.
 assert.equal(Spots.findForState(state, { ...options, hasRoom: id => String(id) !== String(first.id) })?.id, next?.id,
     'a full spot of the list is skipped: the next one of the list');
 assert.equal(Spots.findForState(state, { ...options, hasRoom: () => true })?.id, chosen.id,
@@ -94,6 +100,50 @@ assert.equal(Spots.findForState(state, { ...options, hasRoom: () => true })?.id,
         assert.equal(Spots.findForState(state, { ...options, hasRoom: noRoomAt(source.id) })?.id, first.id,
             'a full income route spot is skipped: the first spot of the list');
     } finally { IncomeRoute.select = select; }
+}
+
+// ROUTE-ROOM-4: a market return (GoalExecutor.finishMarketVisit) to the spot
+// the bot left goes home while that spot has room; when main's world index
+// holds a full spot there, the return goes to another spot the search picks.
+{
+    const savedCatalogue = SpotService.spots;
+    SpotService.spots = profiles;
+    try {
+        const shopping = {
+            ...state, activity: 'shopping', currentRegion: 'Giran', adena: 100000,
+            inventory: { 57: { selfId: 57, amount: 100000 }, 736: { selfId: 736, amount: 3 } },
+            loc: { locX: 83400, locY: 147943, locZ: -3400 },
+            // No class in the stats: no matchup profile refuses a spot, so the
+            // search has other spots to offer (the naked mage survives none).
+            stats: { role: 'nuker', deaths: 0, townVisit: { town: 'Giran', completed: true },
+                marketReturn: { spotId: first.id, regionName: first.name, loc: { ...first.center } } }
+        };
+        const home = GoalExecutor.finishMarketVisit(shopping, at);
+        assert.equal(home?.stats.travel.reason, 'return_after_market', 'fixture: the visit ends in a return trip');
+        assert.equal(home.stats.travel.spotId, first.id, 'a saved spot with room: the bot returns home');
+
+        for (let i = 0; i < Routes.roomForSpot(first); i++) {
+            LifeState.acceptLifecycleRow({ characterId: 990950 + i, accountName: `bot_${990950 + i}`,
+                characterName: `Home${i}`, level: 29, phase: 'cold', activity: 'hunting', spotId: first.id,
+                statsJson: '{}', inventorySummary: '{}' });
+        }
+        const elsewhere = GoalExecutor.finishMarketVisit(shopping, at);
+        assert.equal(elsewhere?.stats.travel.reason, 'return_after_market', 'a full saved spot: still a return trip');
+        assert(Index.spotById(profiles, elsewhere.stats.travel.spotId) && elsewhere.stats.travel.spotId !== first.id,
+            'a full saved spot: the return goes to another spot of the catalogue');
+
+        // No other spot to offer: the bot still goes home, the room is read
+        // again at arrival.
+        Spots.cache = [first];
+        // The remembered region name differs from the spot's, so the trip shows
+        // which of the two the destination was read from.
+        const forgetful = { ...shopping, stats: { ...shopping.stats,
+            marketReturn: { ...shopping.stats.marketReturn, regionName: 'Remembered ground' } } };
+        const alone = GoalExecutor.finishMarketVisit(forgetful, at);
+        assert.equal(alone?.stats.travel.reason, 'return_after_market', 'a full saved spot alone: still a return trip');
+        assert.equal(alone.stats.travel.spotId, first.id, 'a full saved spot and no other spot fits: the bot goes home');
+        assert.equal(alone.stats.travel.regionName, first.name, 'the saved spot itself is the destination');
+    } finally { SpotService.spots = savedCatalogue; }
 }
 
 Spots.cache = originalCache;
@@ -155,9 +205,40 @@ Spots.cache = originalCache;
 
         const listed = [thin('a'), thin('b', 3), thin('c')];
         assert.equal(Spots.findForState(bot, search(listed, ['a']))?.id, 'a',
-            'without a filter (main) the listed spot is taken, full or not');
+            'a solo search on main with nobody on the listed spot takes it');
         assert.equal(Spots.findForState(bot, search(listed, ['a'], id => id === 'c'))?.id, 'c',
             'every listed spot full: the near-level fallback skips the full ones too');
+
+        // ROUTE-ROOM-4: a solo search on main reads main's world index (the
+        // rows main accepted); spot 'a' holds as many bots as its room.
+        for (let i = 0; i < Routes.roomForSpot(listed[0]); i++) {
+            LifeState.acceptLifecycleRow({ characterId: 990900 + i, accountName: `bot_${990900 + i}`,
+                characterName: `Crowd${i}`, level: 25, phase: 'cold', activity: 'hunting', spotId: 'a',
+                statsJson: '{}', inventorySummary: '{}' });
+        }
+        assert.notEqual(Spots.findForState(bot, search(listed, ['a']))?.id, 'a',
+            'a full listed spot is skipped by a solo search on main');
+        assert.equal(Spots.findForState({ ...bot, spotId: 'a' }, search(listed, ['a']))?.id, 'a',
+            'the bot\'s own spot is never full to it');
+        assert.equal(Spots.findForState(bot, search(listed, ['a'], () => true))?.id, 'a',
+            'a filter the caller passes is read instead of main\'s index');
+
+        // A party-wait search on main (PartyWaitFallback.spotFor, no filter
+        // passed) reads the same index: a full planned spot is no fallback,
+        // the level search picks another; one with room is the fallback.
+        const safeFallback = GearPlanner.safeFallbackForPlan;
+        try {
+            const waitingOn = (spotId) => {
+                GearPlanner.safeFallbackForPlan = () => ({ spotId, npcId: 321 });
+                search(listed, ['a']);
+                // No class in the stats: no matchup profile refuses a spot.
+                return PartyWaitFallback.spotFor({ ...bot, stats: { role: 'nuker', deaths: 0 } }, { status: 'active' }, listed,
+                    { excludedSpotIds: new Set(), timestamp: at })?.spot?.id;
+            };
+            assert.equal(waitingOn('c'), 'c', 'a planned fallback with room is taken');
+            const other = waitingOn('a');
+            assert(other && other !== 'a', 'a full planned fallback on main: the level search picks another spot');
+        } finally { GearPlanner.safeFallbackForPlan = safeFallback; }
     } finally {
         IncomeRoute.spotList = saved.spotList; Ground.evaluate = saved.evaluate; Spots.cache = saved.cache;
     }
