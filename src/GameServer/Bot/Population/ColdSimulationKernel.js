@@ -841,7 +841,10 @@ class ColdSimulationKernel {
         if (card !== undefined) delete entry.wishAdvisory;
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
-        if (current && incomingRevision < currentRevision) {
+        // A hot row at the cold row's revision is a stale near post that crossed
+        // the cooldown: cold -> hot moves the revision (the handoff), hot -> cold does not.
+        if (current && (incomingRevision < currentRevision || incomingRevision === currentRevision
+            && state.phase === 'hot' && current.state.phase === 'cold')) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
             // ownership state when an older page arrives out of order.

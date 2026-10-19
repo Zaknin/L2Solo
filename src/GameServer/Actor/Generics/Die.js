@@ -76,6 +76,7 @@ function die(session, actor, context = {}) {
             });
             victimSession.coldLifeState = { ...prior, stats: { ...prior.stats, ...progress } };
         }
+        Life.notifyNearFacts(victimSession, 'death');
         Promise.resolve(invoke('GameServer/Bot/AI/BotEventJournal').record({
             botId: actor.fetchId(),
             eventType: 'death',

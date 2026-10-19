@@ -430,6 +430,7 @@ const tests = [
     'tests/test_native_purchase_equip.js',
     'tests/test_cold_purchase_failure_hot_bot.js',
     'tests/test_life_state_hot_row_guard.js',
+    'tests/test_near_fact_post.js',
     'tests/test_cold_inventory_jewelry.js',
     'tests/test_cold_inventory_instance_sync.js',
     'tests/test_inventory_summary_stackability.js',

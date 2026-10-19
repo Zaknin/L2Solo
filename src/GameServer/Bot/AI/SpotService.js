@@ -401,6 +401,7 @@ const SpotService = {
 
     assignSpot(session, spot) {
         if (!spot) return null;
+        const moved = spot.id !== session.currentSpot?.id;
         session.currentSpot = {
             id: spot.id,
             name: spot.name,
@@ -415,6 +416,9 @@ const SpotService = {
             area: spot.area ? { ...spot.area } : null,
             route: spot.route || null
         };
+        // The arrival after the choice is the same spot: no second post.
+        // lazy: cycle BotLifeState invokes SpotService at its top.
+        if (moved) invoke('GameServer/Bot/Population/BotLifeState').notifyNearFacts(session, 'near_spot');
         return session.currentSpot;
     },
 
