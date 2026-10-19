@@ -134,7 +134,7 @@ async function nativeImpactCases(sessions, registry) {
         const assigned = members.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
         const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
         assert(formed.ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptRow(formed.partyRow); await phase('hot');
+        Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; session.actor.state.setCasts(false); session.actor.state.setHits(false); });
         boss.setHp(1000); boss.state.setDead(false); boss.setDestId(base); boss.raidInstanceId = marker.raidInstanceId;
         const opened = await Lifecycle.openMarkedRaid(party, sessions);
@@ -341,7 +341,7 @@ async function main() {
         const assigned = ungrouped.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
         const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
         assert(formed.ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptRow(formed.partyRow); members = await refreshed();
+        Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow); members = await refreshed();
         const checked = admission(members); assert(checked.ok, checked.reason); const proof = checked.proof;
         assert(Buffer.byteLength(JSON.stringify(proof)) <= 1024);
         for (const count of [7, 8]) assert(!admission(members.slice(0, count)).ok);
@@ -473,7 +473,7 @@ async function main() {
             stats: { ...member.stats, clanPartyObjective: objective, partyRequest: objective } }, hotPrepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
         const hotFormed = await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned });
         assert(hotFormed.ok);
-        Life.acceptPartyAssignments(hotAssigned); party = Parties.acceptRow(hotFormed.partyRow); await phase('hot');
+        Life.acceptPartyAssignments(hotAssigned, hotFormed.lifeRows); party = Parties.acceptRow(hotFormed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; delete session.raidOpenedBossId; });
         Runtime.start();
         const opened = await Lifecycle.openMarkedRaid(party, sessions);

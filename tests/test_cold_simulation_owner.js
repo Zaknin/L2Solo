@@ -118,14 +118,20 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(lifecycleStats.lifecycleProbe, 'after',
         'serialized lifecycle persistence must commit unrelated state from the later write');
 
-    const first = await Owner.claim(initialState, { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-a' });
+    // The generated look and name writes each moved the far row's revision
+    // once, and the cache carries the written number.
+    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, 2,
+        'each main write to a far row moves its revision once');
+    assert.strictEqual((await Owner.claim(initialState, { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-old' })).reason,
+        'stale_revision', 'a claim built before the main writes is refused');
+    const first = await Owner.claim(state(characterId, 2), { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-a' });
     assert.strictEqual(first.ok, true, 'simple cold state must be claimable');
-    assert.strictEqual(first.revision, 1, 'claim must advance the persisted revision');
+    assert.strictEqual(first.revision, 3, 'claim must advance the persisted revision');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.OWNER_ID, 'claim must update cached ownership');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, first.revision, 'claim must update the cached revision');
     const competing = await Owner.claim({
         ...state(characterId, 1),
-        simulation: { ownerId: Owner.OWNER_ID, revision: 1, leaseId: 'lease-a', leaseUntil: 6000 }
+        simulation: { ownerId: Owner.OWNER_ID, revision: first.revision, leaseId: 'lease-a', leaseUntil: 6000 }
     }, { timestamp: 1500, leaseMs: 5000, leaseId: 'lease-b' });
     assert.strictEqual(competing.reason, 'lease_active', 'an active lease must reject a competing claim');
 
@@ -163,9 +169,16 @@ function state(characterId, revision, activity = 'hunting') {
         timing: { activityStartedAt: 2000, nextResolveAt: 9000, lastResolvedAt: 2000, lastHotAt: null },
         updatedAt: 2000
     };
-    const committed = await Owner.commit(first, resting, { timestamp: 2000, leaseMs: 5000 });
+    // The look write under the lease moved the row: the proposal built before
+    // it is refused, the lease is released and the step redone on the row.
+    assert.strictEqual((await Owner.commit(first, resting, { timestamp: 2000, leaseMs: 5000 })).reason, 'stale_revision',
+        'a proposal built before a main write is refused');
+    assert.strictEqual((await Owner.releaseBatch([first], { releaseInvalidated: true, timestamp: 2000 }))[0].ok, true);
+    const redo = await Owner.claim(BotLifeState.cachedState(characterId), { timestamp: 2000, leaseMs: 5000, leaseId: 'lease-a2' });
+    assert.strictEqual(redo.ok, true, 'the refused step claims the row again');
+    const committed = await Owner.commit(redo, resting, { timestamp: 2000, leaseMs: 5000 });
     assert.strictEqual(committed.ok, true, 'owner proposal must commit through the main database gateway');
-    assert.strictEqual(committed.revision, 2, 'conditional commit must advance the revision');
+    assert.strictEqual(committed.revision, redo.revision + 1, 'conditional commit must advance the revision');
     assert.strictEqual(committed.row.activity, 'resting');
     assert.strictEqual(BotLifeState.cachedState(characterId).activity, 'resting', 'commit must reflect the accepted state in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, committed.revision, 'commit must reflect its revision in cache');
@@ -204,7 +217,7 @@ function state(characterId, revision, activity = 'hunting') {
     const released = await Owner.release(committed, { timestamp: 2400 });
     assert.strictEqual(released.ok, true);
     assert.strictEqual(released.ownerId, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(released.revision, 3);
+    assert.strictEqual(released.revision, committed.revision + 1);
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'release must return cached ownership to main');
 
     const secondState = {
@@ -265,6 +278,8 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(compacted.rowsRemoved, 1);
     assert.strictEqual(compacted.units, 1);
     assert.strictEqual(compacted.payout, 50);
+    assert.strictEqual(Number(compacted.state.simulationRevision), Number(recovered.simulationRevision) + 1,
+        'the compaction moves the far row revision once');
     assert.strictEqual(Number(compacted.state.adena), 150);
     assert.strictEqual(JSON.parse(compacted.state.inventorySummary)['57'].amount, 150);
     assert.strictEqual(JSON.parse(compacted.state.statsJson).lastWarehouseCompaction.source, 'test_cleanup');
@@ -286,7 +301,7 @@ function state(characterId, revision, activity = 'hunting') {
 
     const warehouseClaim = await Owner.claim({
         ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: recovered.simulationRevision, leaseId: null, leaseUntil: 0 }
+        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: Number(compacted.state.simulationRevision), leaseId: null, leaseUntil: 0 }
     }, { timestamp: 6000, leaseMs: 5000, leaseId: 'lease-warehouse' });
     assert.strictEqual(warehouseClaim.ok, true, 'passive stored items must not starve the owner-capable lifecycle partition');
     const leasedCleanup = await Database.liquidateWarehouseGear(characterId, [storedGear[0]], { source: 'must_not_run' });

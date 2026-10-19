@@ -262,6 +262,9 @@ class ColdSimulationCoordinator {
                 board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
                 economyPlan: 0, clanEvents: 0, partyGoals: 0, partyPlans: 0, buff: 0 }
         };
+        // Refused commits by reason and stale_command answers, counted always
+        // (cheap): the live read of how often a main write lands under a step.
+        this.refusals = { commitRefused: {}, staleCommand: 0 };
         this.economyPlanCount = 0;
         this.economyPlanTimes = [];
         this.queue = new ColdCommitQueue({
@@ -2017,6 +2020,9 @@ class ColdSimulationCoordinator {
 
     async handleCommitResults(results = []) {
         const worker = this.worker, epoch = this.workerEpoch;
+        for (const result of results) {
+            if (!result.ok) this.refusals.commitRefused[result.reason] = (this.refusals.commitRefused[result.reason] || 0) + 1;
+        }
         // A committed dissolve of a marked unopened party (the resolver's cancel)
         // wakes its clan once; the atomic group commits all members or none.
         const dissolved = new Set();
@@ -2037,6 +2043,12 @@ class ColdSimulationCoordinator {
         if (!results.length) {
             this.tableChannel.flush();
             return;
+        }
+        // A refused commit hands back the row it read. The cache takes it before
+        // the release below moves the owner, so the ack's state carries what
+        // main wrote under the step and the next proposal is built on it.
+        for (const result of results) {
+            if (!result.ok && result.row && OWNERSHIP_REBASE_REASONS.has(String(result.reason || ''))) LifeState.acceptNewerLifecycleRow(result.row);
         }
         const releaseTokens = results.filter((result) => !result.ok && result.proposal?.token).map((result) => result.proposal.token);
         if (releaseTokens.length) await ColdSimulationOwner.releaseBatch(releaseTokens, { releaseInvalidated: true }).catch(() => []);
@@ -2133,7 +2145,7 @@ class ColdSimulationCoordinator {
                 if (!sourceCurrent()) return;
                 DiagnosticConfig.developerDiagnostics && (this.counters.commands += 1);
                 try {
-                    const state = LifeState.cachedState(request.characterId);
+                    let state = LifeState.cachedState(request.characterId);
                     const id = identity.characterId;
                     Metrics.recordColdOwnerLegacyDeferred(`command_${String(state?.activity || 'unknown')}`);
                     if (this.fencedBots.has(id) || state?.phase !== 'cold') {
@@ -2142,6 +2154,8 @@ class ColdSimulationCoordinator {
                         continue;
                     }
                     if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) {
+                        this.refusals.staleCommand += 1;
+                        state = await this.reloadStaleCommand(id);
                         results.push({ ...identity, ok: false, reason: 'stale_command', retryAfterMs: 1000,
                             state, context: this.contextFor(state, this.contextIndex()) });
                         continue;
@@ -2153,6 +2167,7 @@ class ColdSimulationCoordinator {
                         if (this.commandInflight.get(id) === operation) this.commandInflight.delete(id);
                     }
                     if (!sourceCurrent()) return;
+                    if (result?.reason === 'stale_command') this.refusals.staleCommand += 1;
                     const nextState = LifeState.cachedState(request.characterId) || result?.state;
                     results.push({
                         ...identity,
@@ -2177,6 +2192,14 @@ class ColdSimulationCoordinator {
         }).catch((error) => { if (sourceCurrent()) this.recordError(error); });
     }
 
+    // A stale_command answers with the row read back, not the cached copy that
+    // refused it: a main write that moved the row past the cache would refuse
+    // the next command again. The cached copy when the row is not a far one
+    // owned by main (a handoff or lease is published by its owner).
+    async reloadStaleCommand(characterId) {
+        return await LifeState.reloadRow(characterId).catch(() => null) || LifeState.cachedState(characterId);
+    }
+
     async executeLifecycleCommand(request, identity, sourceCurrent) {
         // A previous native writer can hold the character beyond the worker
         // lifetime. Own this entire promise and admit the computation only
@@ -2185,12 +2208,13 @@ class ColdSimulationCoordinator {
         if (!sourceCurrent()) return { ok: false, reason: 'stale_worker_source' };
         const state = LifeState.cachedState(identity.characterId);
         const refusal = reason => ({ ok: false, reason, retryAfterMs: 1000, ...(state ? { state } : {}) });
+        const staleCommand = async () => ({ ...refusal('stale_command'), state: await this.reloadStaleCommand(identity.characterId) });
         if (this.stopping) return refusal('coordinator_stopping');
         if (!state) return refusal('missing_state');
         if (this.fencedBots.has(identity.characterId) || state.phase !== 'cold') return refusal('hot_handoff_fenced');
-        if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) return refusal('stale_command');
+        if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) return staleCommand();
         const owned = this.commandInflight.get(identity.characterId);
-        if (!(owned instanceof Promise)) return refusal('stale_command');
+        if (!(owned instanceof Promise)) return staleCommand();
         const checkpoint = Object.freeze({ ...Protocol.commandCheckpoint(identity.commandCheckpoint) });
         const workerAdmission = Object.freeze({
             characterId: identity.characterId, commandId: identity.commandId, commandCheckpoint: checkpoint,
@@ -2620,6 +2644,7 @@ class ColdSimulationCoordinator {
             epoch: this.workerEpoch,
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
+            refusals: { commitRefused: { ...this.refusals.commitRefused }, staleCommand: this.refusals.staleCommand },
             heldAcks: this.heldAcks.size,
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,

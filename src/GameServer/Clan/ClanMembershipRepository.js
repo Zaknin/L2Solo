@@ -1,6 +1,15 @@
 const Policy = require('./ClanMembershipPolicy');
 
 module.exports = ({ all, write, inTransaction, now }) => {
+    // The row's revision moves in SQL, so no writer between the read and this
+    // write can be handed the same number; the cache gets the written one.
+    function writeMemberUnsafe(row, activity, statsJson) {
+        const [written] = all(`UPDATE bot_life_state SET activity = ?, statsJson = ?,
+            simulationRevision = simulationRevision + 1, updatedAt = ?
+            WHERE characterId = ? RETURNING simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
+        return { ...row, activity, statsJson, ...written };
+    }
+
     function repairUnsafe(characterIds = null) {
         const ids = characterIds && [...new Set(characterIds.map(Number).filter(Boolean))];
         if (ids && !ids.length) return { members: [], parties: [] };
@@ -13,11 +22,7 @@ module.exports = ({ all, write, inTransaction, now }) => {
             const repaired = Policy.reconcileState(previous, Number(row.actualClanId || 0));
             if (repaired === previous) continue;
             repaired.stats.clanMembershipVersion = Math.max(now(), Number(previous.stats.clanMembershipVersion || 0) + 1);
-            const next = { ...row, activity: repaired.activity, statsJson: JSON.stringify(repaired.stats),
-                simulationRevision: Number(row.simulationRevision || 0) + 1, updatedAt: now() };
-            write(`UPDATE bot_life_state SET activity = ?, statsJson = ?, simulationRevision = ?, updatedAt = ?
-                WHERE characterId = ?`, [next.activity, next.statsJson, next.simulationRevision, next.updatedAt, row.characterId]);
-            members.push(next);
+            members.push(writeMemberUnsafe(row, repaired.activity, JSON.stringify(repaired.stats)));
         }
         const parties = [];
         for (const row of all(`SELECT parties.*, members.clanId AS actualClanId FROM bot_background_parties parties
@@ -66,11 +71,7 @@ module.exports = ({ all, write, inTransaction, now }) => {
                 repaired.stats.clanMembershipVersion = version;
                 repaired.stats.clanGoalInvalidationVersion = version;
                 repaired.stats.lastReason = 'clan_goal_expired';
-                const next = { ...row, activity: repaired.activity, statsJson: JSON.stringify(repaired.stats),
-                    simulationRevision: Number(row.simulationRevision || 0) + 1, updatedAt: now() };
-                write(`UPDATE bot_life_state SET activity = ?, statsJson = ?, simulationRevision = ?, updatedAt = ?
-                    WHERE characterId = ?`, [next.activity, next.statsJson, next.simulationRevision, next.updatedAt, row.characterId]);
-                members.push(next);
+                members.push(writeMemberUnsafe(row, repaired.activity, JSON.stringify(repaired.stats)));
             }
             for (const row of all(`SELECT p.* FROM bot_background_parties p JOIN characters c ON c.id = p.leaderId
                 WHERE c.clanId = ? AND p.status IN ('active', 'hot')

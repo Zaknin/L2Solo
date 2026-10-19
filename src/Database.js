@@ -2479,7 +2479,7 @@ function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
     };
     const stats = jsonObject(row.statsJson);
     if (event) stats.lastClanContribution = { ...event };
-    write(`UPDATE bot_life_state SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?
+    write(`UPDATE bot_life_state SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION}
         WHERE characterId = ?`, [
         Math.max(0, Number(amount) || 0),
         JSON.stringify(inventory),
@@ -2572,6 +2572,16 @@ const UPSERT_MACRO = `INSERT INTO macros (characterId, id, icon, name, descr, ac
 
 const LEGACY_SIMULATION_OWNER = 'legacy_main';
 const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
+// A main write to a far bot's row moves its revision in the same statement,
+// so a worker proposal built before it is refused (stale_revision) and rebases
+// on the row. A near bot's row keeps its number (its saves check otherwise).
+// One move per transaction: a statement whose transaction already moves the
+// same row (writeColdInventorySnapshotUnsafe, a trade meeting's fence, the
+// commit itself) does not add a second one. Writers that do not take it on
+// purpose: the BotLifeState startup recovery UPDATEs (they run before the
+// cache and any claim), its `save` upsert (a near bot's write), the hot branch
+// of completeEconomyStepUnsafe, and the karma/PK write inside the commit.
+const MOVE_FAR_REVISION = "simulationRevision = simulationRevision + CASE WHEN phase = 'cold' THEN 1 ELSE 0 END";
 const SIMPLE_COLD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const COLD_SIMULATION_PATCH_COLUMNS = new Set([
     'level', 'exp', 'sp', 'adena', 'homeRegion', 'currentRegion', 'spotId',
@@ -2998,12 +3008,13 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
     // returns its death sequence only when it wrote) rewrite this bot's life
     // state after the commit's UPDATE. A learned skill moves only its
     // skillsRevision (the trigger).
-    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
+    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId, { moveRevision: false }) : null;
     return { drops: dropped?.drops || [],
         rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
 }
 
-function dropPkDeathItemsUnsafe(characterId) {
+// moveRevision: false inside the commit, whose own UPDATE already moved the row.
+function dropPkDeathItemsUnsafe(characterId, { moveRevision }) {
     const current = one('SELECT hp,karma,pk FROM characters WHERE id=?', [characterId]);
     if (!current || Number(current.hp) > 0 || !require('./GameServer/PkDropPolicy').enabled(current)) return { drops: [] };
     const life = one('SELECT deathCount,statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
@@ -3018,9 +3029,9 @@ function dropPkDeathItemsUnsafe(characterId) {
     const drops = require('./GameServer/PkDropPolicy').rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
     for (const item of drops) write('DELETE FROM items WHERE id=? AND characterId=?', [item.id, characterId]);
     const summary = invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]));
-    write("UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?) WHERE characterId=?",
-        [JSON.stringify(summary), death, characterId]);
-    return { drops, inventory: summary, deathSequence: death };
+    const moved = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)${moveRevision ? `, ${MOVE_FAR_REVISION}` : ''}
+        WHERE characterId=? RETURNING simulationRevision`, [JSON.stringify(summary), death, characterId]);
+    return { drops, inventory: summary, deathSequence: death, revision: Number(moved.simulationRevision) };
 }
 
 // `parsedStats`, when given, is parsedObject(row.statsJson) computed earlier.
@@ -4345,7 +4356,9 @@ const Database = {
                 if (admission.nativeProof) NativeWriteCheckpoint.checkRow(admission.nativeProof, statement);
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
-                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'statsJson';
+                // The upsert never writes simulationRevision; it hands back the
+                // row's own, which a main write may have moved meanwhile.
+                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
                     // BotLifeState.save supplies its native 29-column ROW.
@@ -4367,7 +4380,7 @@ const Database = {
                 const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
-                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson };
+                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, simulationRevision: row?.simulationRevision };
             } catch (error) {
                 reportBotLifeSaveFailure(phase, error, statement);
                 throw error;
@@ -5630,7 +5643,7 @@ const Database = {
                 if (combat) stats.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
                 const result = write(`UPDATE bot_life_state
                     SET activity = ?, activityStartedAt = ?, nextResolveAt = ?,
-                        partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId)
+                        partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId), ${MOVE_FAR_REVISION}
                     WHERE characterId = ?
                     AND phase = ?
                     AND simulationOwner = ?
@@ -5986,7 +5999,8 @@ const Database = {
             const parts = Diagnostics.laps('commit_');
             parts && Diagnostics.count('commit_input', checked ? 'group_check' : 'read');
             const { row, conflict, patch, stats, statsParsed, skills, deathExperience, partition } = checked || commitInput(request, fields, parts);
-            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
+            // A refusal hands back the row it read: the worker rebases on it.
+            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict, ...(row ? { row } : {}) };
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
             const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
             // The commit moves the bag revision with its own write, so the
@@ -6011,10 +6025,12 @@ const Database = {
                 WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
                   AND simulationLeaseId = ? AND simulationLeaseUntil > ?`, params);
             if (result.affectedRows !== 1) {
+                const current = coldSimulationRow(characterId);
                 return {
                     ok: false,
                     characterId,
-                    reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp)
+                    reason: coldSimulationConflict(current, { expectedRevision, ownerId, leaseId }, timestamp),
+                    ...(current ? { row: current } : {})
                 };
             }
             parts?.lap('row_write');
@@ -6742,6 +6758,10 @@ const Database = {
             // A recovered pending intent has no physical commit. Its arguments
             // are not reconstructed; the new step is planned from actual state.
             const command = EconomyCommit.create(kind, sequence, authority);
+            // The pending intent does not move the revision: the command's
+            // authority holds the revision read before this write, and the
+            // step's economyOwnerUnsafe refuses a moved one (economy_owner_changed).
+            // The step's own write moves the row.
             write("UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),'$.economyCommit',json(?)) WHERE characterId=?",
                 [JSON.stringify(EconomyCommit.pending(command)), Number(characterId)]);
             return { command, row: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId=?', [Number(characterId)])),
@@ -6844,7 +6864,7 @@ const Database = {
                 const result = syncInventorySummaryUnsafe(characterId, inventory);
                 // A new ordinary cold death consumes its ordered bag once, in
                 // the same transaction that reconciles the physical inventory.
-                if (reason === 'resolve_death') return dropPkDeathItemsUnsafe(characterId);
+                if (reason === 'resolve_death') return dropPkDeathItemsUnsafe(characterId, { moveRevision: true });
                 return result;
             },
             reason ? `inventory:sync-summary:${reason}` : 'inventory:sync-summary'
@@ -7311,7 +7331,7 @@ const Database = {
             }
 
             const updated = write(`UPDATE bot_life_state
-                SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?
+                SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION}
                 WHERE characterId = ?
                   AND simulationOwner = ?
                   AND simulationRevision = ?
@@ -7436,7 +7456,7 @@ const Database = {
         return enqueue(() => {
             const row = one(`UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),
                 '$.lastWarehouseWithdrawal',json(?)${market ? ", '$.marketSellRetryAfter', NULL" : ''}),
-                nextResolveAt=CASE WHEN activity='hunting' THEN ? ELSE nextResolveAt END WHERE characterId=?
+                nextResolveAt=CASE WHEN activity='hunting' THEN ? ELSE nextResolveAt END, ${MOVE_FAR_REVISION} WHERE characterId=?
                 RETURNING characterId,nextResolveAt,simulationRevision,updatedAt`, [raw, record.at, Number(characterId)]);
             return row ? { ...row, withdrawal: record, market } : null;
         }, { operation: 'warehouse:withdrawal-record' });
@@ -7867,8 +7887,10 @@ const Database = {
             const learning = { learned, at: now() };
             const completedRow = step ? completeEconomyStepUnsafe(characterId, step, receipt,
                 learned.map(recipe => recipe.recipeItemId), null, learning) : syncEconomySnapshotUnsafe(characterId, coldState, learned.map(recipe => recipe.recipeItemId));
-            if (!step) write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?)) WHERE characterId = ?",
-                [JSON.stringify(learning), characterId]);
+            // The snapshot sync above moved a cold row already; only a write
+            // without it moves the revision here.
+            if (!step) write(`UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?))${completedRow ? '' : `, ${MOVE_FAR_REVISION}`}
+                WHERE characterId = ?`, [JSON.stringify(learning), characterId]);
             return { learned, committed: true, ...(step ? { economyCommit: jsonObject(completedRow.statsJson).economyCommit } : {}),
                 coldLifeRow: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId])) };
         }, 'recipe:cold-learn'));
@@ -9951,7 +9973,9 @@ const Database = {
             } else {
                 return { ok: true, characterId: Number(leader.characterId), unchanged: true };
             }
-            write('UPDATE bot_life_state SET statsJson = ?, updatedAt = ? WHERE characterId = ?', [
+            // The clan's demand stays in its leader's row (a clan table read by
+            // the market readers is a later change); the write moves the row.
+            write(`UPDATE bot_life_state SET statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION} WHERE characterId = ?`, [
                 JSON.stringify(stats), now(), Number(leader.characterId)
             ]);
             return { ok: true, characterId: Number(leader.characterId), itemId: selfId, status: String(status) };
@@ -11127,11 +11151,11 @@ const Database = {
         const characterId = Number(id);
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET name = ? WHERE id = ?', [name, characterId]);
-            const life = write(`UPDATE bot_life_state SET characterName = ?,
-                statsJson = json_set(COALESCE(statsJson, '{}'), '$.nameGeneratorVersion', ?)
-                WHERE characterId = ?`, [name, version, characterId]);
-            if (character.affectedRows !== 1 || life.affectedRows !== 1) throw new Error(`generated name target missing for ${characterId}`);
-            return { ok: true, characterId, name, version };
+            const life = one(`UPDATE bot_life_state SET characterName = ?,
+                statsJson = json_set(COALESCE(statsJson, '{}'), '$.nameGeneratorVersion', ?), ${MOVE_FAR_REVISION}
+                WHERE characterId = ? RETURNING simulationRevision`, [name, version, characterId]);
+            if (character.affectedRows !== 1 || !life) throw new Error(`generated name target missing for ${characterId}`);
+            return { ok: true, characterId, name, version, simulationRevision: Number(life.simulationRevision) };
         }, 'bot-life:generated-name'));
     },
     updateGeneratedBotAppearance(id, sex, appearanceVersion) {
@@ -11143,19 +11167,20 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET sex = ? WHERE id = ?', [normalizedSex, characterId]);
-            const state = write(`UPDATE bot_life_state
+            const state = one(`UPDATE bot_life_state
                 SET statsJson = json_set(
                     COALESCE(statsJson, '{}'),
                     '$.sex', ?,
                     '$.appearanceVersion', ?
-                )
-                WHERE characterId = ?`, [normalizedSex, version, characterId]);
-            if (character.affectedRows !== 1 || state.affectedRows !== 1) {
+                ), ${MOVE_FAR_REVISION}
+                WHERE characterId = ? RETURNING simulationRevision`, [normalizedSex, version, characterId]);
+            if (character.affectedRows !== 1 || !state) {
                 const error = new Error(`generated appearance target missing for ${characterId}`);
                 error.code = 'BOT_APPEARANCE_TARGET_MISSING';
                 throw error;
             }
-            return { ok: true, characterId, sex: normalizedSex, appearanceVersion: version };
+            return { ok: true, characterId, sex: normalizedSex, appearanceVersion: version,
+                simulationRevision: Number(state.simulationRevision) };
         }, 'bot-life:generated-appearance'));
     },
     updateColdCharacterExperience(id, level, exp, sp, options = {}) {
@@ -11285,6 +11310,9 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
     position: tradeMeetingPositionUnsafe,
     canStartTrade: (id, state) => require('./GameServer/Bot/Population/PartyAdmission').partyTradeAllowed(
         'trade', state, invoke('GameServer/World/World').registeredActorById(id)?.session),
+    // stopTrip and startTrip do not move the revision: TradeMeeting's terminal
+    // and leg run them in the transaction whose fence (`snapshot` below) moves
+    // both actors' rows.
     stopTrip: meeting => {
         for (const actor of [meeting.actorA, meeting.actorB]) {
             write("UPDATE bot_life_state SET activity='shopping',statsJson=json_remove(statsJson,'$.travel') WHERE characterId=? AND json_extract(statsJson,'$.travel.meetingId')=?", [actor, meeting.id]);

@@ -177,7 +177,7 @@ async function main() {
     });
     const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
     assert.equal(formed.ok, true);
-    Life.acceptPartyAssignments(assigned);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
     party = Parties.acceptRow(formed.partyRow);
     const members = ids.map(id => Life.cachedState(id));
     const inputs = copy(members);
