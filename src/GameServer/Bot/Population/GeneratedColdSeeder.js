@@ -218,7 +218,7 @@ function migratePopulationNames(states = []) {
         const isBot = /^bot_(pop|scale|craft)_/i.test(String(state.accountName || ''))
             || Boolean(state.stats?.generatedCold)
             || Number(state.stats?.generatedIndex) >= 10000;
-        const needsUpdate = Number(state.stats?.nameGeneratorVersion || 0) < NAME_GENERATOR_VERSION;
+        const needsUpdate = Number(state.nameGeneratorVersion || 0) < NAME_GENERATOR_VERSION;
         return isBot && needsUpdate;
     });
 
@@ -236,7 +236,7 @@ function migratePopulationNames(states = []) {
 function migratePopulationAppearances(states = []) {
     const candidates = states.filter((state) => (
         Boolean(state.stats?.generatedCold) || Number(state.stats?.generatedIndex) >= 10000
-    ) && Number(state.stats?.appearanceVersion || 0) < APPEARANCE_VERSION
+    ) && Number(state.appearanceVersion || 0) < APPEARANCE_VERSION
       && Number.isFinite(Number(state.stats?.generatedIndex)));
 
     return cooperativeEach(candidates, (state) => {
@@ -434,6 +434,8 @@ function stateFor(character, index, seedMeta = {}) {
         characterId: Number(character.id),
         accountName: character.username || usernameFor(index),
         name: character.name || nameFor(index, base),
+        nameGeneratorVersion: NAME_GENERATOR_VERSION,
+        appearanceVersion: APPEARANCE_VERSION,
         level,
         exp: ProgressionCap.clampTotalExperience(Number(character.exp || expForLevel(level))),
         sp: Number(character.sp || Math.round(level * level * 3)),
@@ -463,9 +465,6 @@ function stateFor(character, index, seedMeta = {}) {
             classProgressionClassId: classId,
             generatedCold: true,
             generatedIndex: index,
-            nameGeneratorVersion: NAME_GENERATOR_VERSION,
-            appearanceVersion: APPEARANCE_VERSION,
-            sex: Number(character.sex ?? base.sex),
             levelBand: levelProfile.band,
             populationWave: seedMeta.populationWave || null,
             starterRegion: seedMeta.starterRegion || null

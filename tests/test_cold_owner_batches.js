@@ -150,11 +150,6 @@ async function createProbe(index) {
     assert.strictEqual(claimed.grants.length, 3, 'one transaction must claim every eligible row');
     assert.strictEqual(claimed.rejected.length, 0);
 
-    await Promise.all([states[0], states[2]].map((state) => Database.execute([
-        'UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?',
-        [JSON.stringify({ ...state.stats, sex: 1, appearanceVersion: 2 }), state.characterId]
-    ])));
-
     const staleClaims = await Owner.claimBatch([{
         state: states[0],
         leaseId: 'stale-batch-lease'
@@ -257,11 +252,6 @@ async function createProbe(index) {
         assert.strictEqual(Number(row.sp), 100 + authoredProfiles[index].earnedSp);
         assert.strictEqual(Number(row.adena), 550 + index);
         assert.strictEqual(Number(row.lastResolvedAt), 3000);
-        const stats = JSON.parse(row.statsJson);
-        assert.strictEqual(stats.appearanceVersion, 2,
-            'batch commits must not erase a newer appearance migration version');
-        assert.strictEqual(stats.sex, 1,
-            'batch commits must preserve the sex paired with the newer appearance version');
         assert.strictEqual(row.simulationOwner, Owner.LEGACY_OWNER_ID);
         assert.strictEqual(row.simulationLeaseId, null);
         assert.strictEqual(Number(row.simulationLeaseUntil), 0);

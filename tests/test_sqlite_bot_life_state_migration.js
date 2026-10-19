@@ -432,6 +432,25 @@ if (process.argv[2] === '--bootstrap') {
         'v17 compaction must be one-time and idempotent');
     compactedAgain.close();
 
+    // v70: the generated name and look versions move from the stats into
+    // their own columns; the stats lose them and the unread copy of sex.
+    const versionsPath = path.join(outputDir, 'version-16-generated-versions.sqlite');
+    seed(versionsPath, Array.from({ length: 16 }, (_, index) => index + 1), { schema: currentSchema });
+    const versionsSeed = open(versionsPath);
+    versionsSeed.prepare('UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?').run(
+        JSON.stringify({ role: 'dps', nameGeneratorVersion: 3, appearanceVersion: 2, sex: 1 }), 71001);
+    versionsSeed.close();
+    bootstrap(versionsPath);
+    const versioned = open(versionsPath);
+    const versionRows = () => versioned.prepare(`SELECT characterId, nameGeneratorVersion, appearanceVersion, statsJson
+        FROM bot_life_state WHERE characterId IN (71001, 71002) ORDER BY characterId`).all()
+        .map((row) => [Number(row.characterId), Number(row.nameGeneratorVersion), Number(row.appearanceVersion), JSON.parse(row.statsJson)]);
+    assert.deepStrictEqual(versionRows(), [
+        [71001, 3, 2, { role: 'dps' }],
+        [71002, 0, 0, JSON.parse(realisticRows[1].statsJson)]
+    ], 'v70 copies the versions into their columns and removes them and sex from the stats');
+    versioned.close();
+
     const freshPath = path.join(outputDir, 'fresh.sqlite');
     bootstrap(freshPath);
     const fresh = open(freshPath);

@@ -31,11 +31,11 @@ function session(id, clanId, name) {
             VALUES (?,'bot_pop_names',?,7,4,0,40,500,250,0,0,0,0,100,100,0)`, [id, name]);
     }
     await query("INSERT INTO clans(id,name,leaderId) VALUES (7,'Legion',2)");
-    const stats = { generatedCold: true, generatedIndex: 100, nameGeneratorVersion: 2, clanId: 7, classId: 4,
+    const stats = { generatedCold: true, generatedIndex: 100, clanId: 7, classId: 4,
         marketStore: { storeType: 1, town: 'Giran', expiresAt: Date.now() + 600000,
             items: [{ selfId: 1864, count: 10, price: 50 }] } };
-    await query(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,activity,phase,statsJson,inventorySummary,updatedAt)
-        VALUES (1,'bot_pop_names','OldBotName',40,'merchant','cold',?,'{}',1)`, [JSON.stringify(stats)]);
+    await query(`INSERT INTO bot_life_state(characterId,accountName,characterName,nameGeneratorVersion,level,activity,phase,statsJson,inventorySummary,updatedAt)
+        VALUES (1,'bot_pop_names','OldBotName',2,40,'merchant','cold',?,'{}',1)`, [JSON.stringify(stats)]);
     const [row] = await query('SELECT * FROM bot_life_state WHERE characterId=1');
     Life.acceptLifecycleRow(row);
     await Clan.reload();
@@ -56,9 +56,10 @@ function session(id, clanId, name) {
     assert.strictEqual(Clan.liveMember({ id: 1, name: 'StaleClanCache' }).name, 'NewBotName');
     assert.strictEqual(boardName(), 'NewBotName');
     assert.strictEqual(await Seeder.migratePopulationNames([migrated]), 0, 'repeated migration must leave new names alone');
-    const [stored] = await query('SELECT characterName,statsJson FROM bot_life_state WHERE characterId=1');
+    const [stored] = await query('SELECT characterName,nameGeneratorVersion,statsJson FROM bot_life_state WHERE characterId=1');
     assert.strictEqual(stored.characterName, 'NewBotName');
-    assert.deepStrictEqual(JSON.parse(stored.statsJson), { ...stats, nameGeneratorVersion: 3 });
+    assert.strictEqual(Number(stored.nameGeneratorVersion), 3);
+    assert.deepStrictEqual(JSON.parse(stored.statsJson), stats, 'the rename leaves the stats as they were');
     assert.strictEqual((await query('SELECT name FROM characters WHERE id=1'))[0].name, 'NewBotName');
     await assert.rejects(Database.updateGeneratedBotName(3, 'MustRollBack', 3), /target missing/);
     assert.strictEqual((await query('SELECT name FROM characters WHERE id=3'))[0].name, 'MissingState');
@@ -73,7 +74,7 @@ function session(id, clanId, name) {
     assert.strictEqual(hot.actor.fetchName(), 'HotBotName');
     assert.strictEqual(hot.name, 'HotBotName');
     assert.strictEqual(hot.coldLifeState.name, 'HotBotName');
-    assert.strictEqual(hot.coldMarketState.stats.nameGeneratorVersion, 4);
+    assert.strictEqual(hot.coldMarketState.nameGeneratorVersion, 4);
     assert(hot.packets.some(p => p.toString() === 'self:HotBotName'));
     assert(hot.broadcasts.some(p => p.toString() === 'world:HotBotName'));
     assert.strictEqual(Clan.membersForDisplay(Clan.findById(7)).find(member => member.id === 1).name, 'HotBotName');

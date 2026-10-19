@@ -560,6 +560,9 @@ function normalize(row) {
         characterId: Number(row.characterId),
         accountName: row.accountName || '',
         name: row.characterName || '',
+        // The generated name and look versions: the seeder redoes a lower one.
+        nameGeneratorVersion: Number(row.nameGeneratorVersion || 0),
+        appearanceVersion: Number(row.appearanceVersion || 0),
         level: Number(row.level || 1),
         exp: Number(row.exp || 0),
         sp: Number(row.sp || 0),
@@ -711,6 +714,8 @@ function recordFromSession(session, phase, reason = '') {
         characterId,
         accountName: session.accountId || '',
         characterName: actor.fetchName(),
+        nameGeneratorVersion: Number(cache.get(characterId)?.nameGeneratorVersion || 0),
+        appearanceVersion: Number(cache.get(characterId)?.appearanceVersion || 0),
         level: actor.fetchLevel(),
         exp: actor.fetchExp() || 0,
         sp: actor.fetchSp() || 0,
@@ -752,6 +757,8 @@ function rowFromState(state) {
         characterId: persistedState.characterId,
         accountName: persistedState.accountName || '',
         characterName: persistedState.name || '',
+        nameGeneratorVersion: Number(persistedState.nameGeneratorVersion || 0),
+        appearanceVersion: Number(persistedState.appearanceVersion || 0),
         level: Number(persistedState.level || 1),
         exp: Number(persistedState.exp || 0),
         sp: Number(persistedState.sp || 0),
@@ -789,23 +796,6 @@ function rowFromState(state) {
         equipmentAdvance,
         updatedAt: now()
     };
-}
-
-function preserveVersionedAppearanceForSave(row) {
-    const currentStats = cache.get(Number(row?.characterId))?.stats;
-    if (!currentStats) return row;
-
-    const proposedStats = parseJson(row.statsJson, {});
-    const currentVersion = Math.max(0, Number(currentStats.appearanceVersion || 0));
-    const proposedVersion = Math.max(0, Number(proposedStats.appearanceVersion || 0));
-    if (currentVersion <= proposedVersion) return row;
-
-    const protectedStats = { ...proposedStats, appearanceVersion: currentVersion };
-    if (Object.prototype.hasOwnProperty.call(currentStats, 'sex')) {
-        protectedStats.sex = Number(currentStats.sex) & 1;
-    }
-    row.statsJson = safeJson(protectedStats);
-    return row;
 }
 
 // The session's own snapshots carry the phase of its row: after markHot what
@@ -856,14 +846,6 @@ function save(row, options = {}) {
         error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
         return Promise.reject(error);
     }
-    preserveVersionedAppearanceForSave(row);
-    const current = cache.get(Number(row.characterId));
-    const incomingStats = parseJson(row.statsJson, {});
-    if (Number(current?.stats?.nameGeneratorVersion || 0) > 0
-        && Number(current.stats.nameGeneratorVersion) >= Number(incomingStats.nameGeneratorVersion || 0)) {
-        row.characterName = current.name;
-        row.statsJson = safeJson({ ...incomingStats, nameGeneratorVersion: current.stats.nameGeneratorVersion });
-    }
     const beforeWrite = Object.getOwnPropertyDescriptor(options, 'beforeWrite');
     const databaseOptions = beforeWrite ? Object.defineProperty({}, 'beforeWrite', beforeWrite) : undefined;
     const statement = [
@@ -871,11 +853,14 @@ function save(row, options = {}) {
             characterId, accountName, characterName, level, exp, sp, adena, homeRegion, currentRegion,
             spotId, activity, phase, activityStartedAt, nextResolveAt,
             lastResolvedAt, lastHotAt, locX, locY, locZ, hp, maxHp, mp, maxMp,
-            targetLevelBand, deathCount, partyId, inventorySummary, statsJson, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            targetLevelBand, deathCount, partyId, inventorySummary, statsJson, updatedAt,
+            nameGeneratorVersion, appearanceVersion
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(characterId) DO UPDATE SET
             accountName = excluded.accountName,
             characterName = excluded.characterName,
+            nameGeneratorVersion = excluded.nameGeneratorVersion,
+            appearanceVersion = excluded.appearanceVersion,
             level = excluded.level,
             exp = excluded.exp,
             sp = excluded.sp,
@@ -948,7 +933,9 @@ function save(row, options = {}) {
             row.partyId,
             row.inventorySummary,
             row.statsJson,
-            row.updatedAt
+            row.updatedAt,
+            Number(row.nameGeneratorVersion || 0),
+            Number(row.appearanceVersion || 0)
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
@@ -3870,7 +3857,7 @@ const BotLifeState = {
             if (!current) return null;
             // The write moved a far row's revision; the cache carries the new one.
             const simulation = movedSimulation(current, written);
-            const snapshot = { ...current, name, simulation, stats: { ...current.stats, nameGeneratorVersion: version } };
+            const snapshot = { ...current, name, nameGeneratorVersion: version, simulation };
             cache.set(id, snapshot);
             const World = invoke('GameServer/World/World');
             for (const session of World.user?.sessions || []) {
@@ -3878,8 +3865,7 @@ const BotLifeState = {
                 session.actor.model.name = name;
                 session.name = name;
                 for (const key of ['coldLifeState', 'coldMarketState', 'coldCraftState']) {
-                    if (session[key]) session[key] = { ...session[key], name, simulation,
-                        stats: { ...session[key].stats, nameGeneratorVersion: version } };
+                    if (session[key]) session[key] = { ...session[key], name, nameGeneratorVersion: version, simulation };
                 }
                 RefreshPartyMemberships([session], invoke);
                 if (session.actor.fetchIsOnline?.()) {
@@ -3909,15 +3895,7 @@ const BotLifeState = {
                 if (!result?.ok) throw new Error(result?.reason || 'generated appearance migration failed');
                 const current = cache.get(id);
                 if (!current) return null;
-                const snapshot = {
-                    ...current,
-                    simulation: movedSimulation(current, result),
-                    stats: {
-                        ...(current.stats || {}),
-                        sex: normalizedSex,
-                        appearanceVersion: version
-                    }
-                };
+                const snapshot = { ...current, appearanceVersion: version, simulation: movedSimulation(current, result) };
                 cache.set(id, snapshot);
                 notifyColdSnapshot(snapshot, 'generated_appearance_migration');
                 return snapshot;
@@ -3966,11 +3944,6 @@ const BotLifeState = {
                 leaseUntil: Math.max(0, Number(result.leaseUntil || 0))
             }
         };
-        if (Number(current?.stats?.nameGeneratorVersion || 0) > 0
-            && Number(current.stats.nameGeneratorVersion) >= Number(next.stats?.nameGeneratorVersion || 0)) {
-            next.name = current.name;
-            next.stats = { ...next.stats, nameGeneratorVersion: current.stats.nameGeneratorVersion };
-        }
         cache.set(id, next);
         notifyMarketReviewState(next, current);
         invoke('GameServer/Clan/ClanService').syncColdMember(next);

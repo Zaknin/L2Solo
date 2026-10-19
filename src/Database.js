@@ -1765,6 +1765,24 @@ function applySchemaMigrations() {
             connection.exec('ALTER TABLE bot_background_parties ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
         }
     }]);
+    // The generated name and look versions leave the stats for their own
+    // columns: only their writers move them, and each write moves the row's
+    // revision, so an older proposal is refused instead of merged. The stats
+    // copy of sex had no reader (characters.sex owns it).
+    migrations.push([70, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        for (const column of ['nameGeneratorVersion', 'appearanceVersion']) {
+            if (!columns.has(column)) connection.exec(`ALTER TABLE bot_life_state ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+        }
+        connection.exec(`
+            UPDATE bot_life_state SET
+                nameGeneratorVersion = COALESCE(CAST(json_extract(statsJson, '$.nameGeneratorVersion') AS INTEGER), 0),
+                appearanceVersion = COALESCE(CAST(json_extract(statsJson, '$.appearanceVersion') AS INTEGER), 0),
+                statsJson = json_remove(statsJson, '$.nameGeneratorVersion', '$.appearanceVersion', '$.sex')
+            WHERE json_valid(statsJson) AND (json_type(statsJson, '$.nameGeneratorVersion') IS NOT NULL
+                OR json_type(statsJson, '$.appearanceVersion') IS NOT NULL OR json_type(statsJson, '$.sex') IS NOT NULL);
+        `);
+    }]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -2634,18 +2652,6 @@ function statsViews(raw) {
     return { loose, plain: Array.isArray(loose) ? {} : loose };
 }
 
-function mergeVersionedAppearance(current, proposed, proposedRaw) {
-    if (!current || !proposed) return proposedRaw;
-
-    const currentVersion = Math.max(0, Number(current.appearanceVersion || 0));
-    const proposedVersion = Math.max(0, Number(proposed.appearanceVersion || 0));
-    if (currentVersion <= proposedVersion) return proposedRaw;
-
-    const merged = { ...proposed, appearanceVersion: currentVersion };
-    if (Object.prototype.hasOwnProperty.call(current, 'sex')) merged.sex = current.sex;
-    return JSON.stringify(merged);
-}
-
 function preserveColdVersionedStats(row, patch = {}) {
     return preserveColdVersionedStatsParsed(row, patch).patch;
 }
@@ -2712,15 +2718,11 @@ const clanMembershipPolicy = () => ClanMembershipPolicyModule
 function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
     const next = { ...patch };
     if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, skills: undefined, deathExperience: undefined };
-    const proposedRaw = next.statsJson;
-    const currentViews = statsViews(row?.statsJson);
-    const proposedViews = statsViews(proposedRaw);
+    const proposedViews = statsViews(next.statsJson);
     const deathExperience = proposedViews.loose?.deathExperience;
     let stats = proposedViews.loose;
-    next.statsJson = mergeVersionedAppearance(currentViews.loose, proposedViews.loose, proposedRaw);
-    const current = currentViews.plain;
-    const incoming = next.statsJson === proposedRaw ? proposedViews.plain : jsonObject(next.statsJson);
-    if (next.statsJson !== proposedRaw) stats = incoming;
+    const current = statsViews(row?.statsJson).plain;
+    const incoming = proposedViews.plain;
     parts?.lap('stats_parse');
     // Each repair below edits `incoming`; it is serialized once after the last.
     let dirty = false;
@@ -2768,13 +2770,6 @@ function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
         delete incoming.marketTrades;
         delete incoming.priceBeliefs;
         dirty = true;
-    }
-    if (Number(current.nameGeneratorVersion || 0) > Number(incoming.nameGeneratorVersion || 0)) {
-        incoming.nameGeneratorVersion = current.nameGeneratorVersion;
-        dirty = true;
-    }
-    if (Number(current.nameGeneratorVersion || 0) > 0 && 'characterName' in next) {
-        next.characterName = row.characterName;
     }
     if (Number(current.clanMembershipVersion || 0) > Number(incoming.clanMembershipVersion || 0)) {
         for (const key of ['clanId', 'clanMembershipVersion', 'clanDiscipline', 'clanPartyObjective']) incoming[key] = current[key];
@@ -4364,10 +4359,10 @@ const Database = {
                 const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
-                    // BotLifeState.save supplies its native 29-column ROW.
+                    // BotLifeState.save supplies its native 31-column ROW.
                     // Read skills inside this queued job, after admission and
                     // immediately before SQL, so an earlier await cannot age it.
-                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 29 || params[0] !== characterId)
+                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 31 || params[0] !== characterId)
                         throw new TypeError('invalid_bot_life_skill_snapshot');
                     const stats = jsonObject(params[27]);
                     const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
@@ -11160,8 +11155,7 @@ const Database = {
         const characterId = Number(id);
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET name = ? WHERE id = ?', [name, characterId]);
-            const life = one(`UPDATE bot_life_state SET characterName = ?,
-                statsJson = json_set(COALESCE(statsJson, '{}'), '$.nameGeneratorVersion', ?), ${MOVE_FAR_REVISION}
+            const life = one(`UPDATE bot_life_state SET characterName = ?, nameGeneratorVersion = ?, ${MOVE_FAR_REVISION}
                 WHERE characterId = ? RETURNING simulationRevision`, [name, version, characterId]);
             if (character.affectedRows !== 1 || !life) throw new Error(`generated name target missing for ${characterId}`);
             return { ok: true, characterId, name, version, simulationRevision: Number(life.simulationRevision) };
@@ -11176,13 +11170,8 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET sex = ? WHERE id = ?', [normalizedSex, characterId]);
-            const state = one(`UPDATE bot_life_state
-                SET statsJson = json_set(
-                    COALESCE(statsJson, '{}'),
-                    '$.sex', ?,
-                    '$.appearanceVersion', ?
-                ), ${MOVE_FAR_REVISION}
-                WHERE characterId = ? RETURNING simulationRevision`, [normalizedSex, version, characterId]);
+            const state = one(`UPDATE bot_life_state SET appearanceVersion = ?, ${MOVE_FAR_REVISION}
+                WHERE characterId = ? RETURNING simulationRevision`, [version, characterId]);
             if (character.affectedRows !== 1 || !state) {
                 const error = new Error(`generated appearance target missing for ${characterId}`);
                 error.code = 'BOT_APPEARANCE_TARGET_MISSING';
