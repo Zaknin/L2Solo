@@ -405,7 +405,7 @@ const PopulationMetrics = {
         if (!Config.developerDiagnostics) return;
         const key = String(reason || 'unknown');
         this.counters.coldOwnerRejected += 1;
-        if (['stale_revision', 'cas_failed', 'owner_changed', 'lease_changed', 'lease_expired'].includes(key)) {
+        if (['stale_revision', 'cas_failed', 'owner_changed'].includes(key)) {
             this.counters.coldOwnerCasStale += 1;
             const gap = revisionGapBucket(result);
             const owner = String(result.actualOwner || 'unknown');
