@@ -120,6 +120,10 @@ async function run() {
         const prior = Party.find(`p${a}`)?.nextResolveAt || state(a).timing.nextResolveAt, peerDue = state(b).timing.nextResolveAt;
         const result = await actions.apply(event(a, b, 'yield'));
         assert(result.ok, JSON.stringify(result));
+        for (const partyId of [`p${a}`, `p${b}`].filter(id => Party.find(id))) {
+            const [saved] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', [partyId]]);
+            assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+        }
         for (const id of [...actorIds, ...peerIds]) {
             assert.strictEqual(state(id).stats.coldCompetition.outcome, 'yield');
             assert.strictEqual(state(id).stats.coldCompetition.endedAt, undefined);

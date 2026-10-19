@@ -852,7 +852,7 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
         expectedPartyRevision: options.expectedPartyRevision ?? null
     }).then((result) => {
         if (!result?.ok) return { party: null, assigned: [], failed: selected, eventCommitted: false, reason: result?.reason || 'commit_failed' };
-        const committedParty = result.partyRow ? BackgroundPartyState.acceptRow(result.partyRow) : BackgroundPartyState.acceptCommit(preparedParty);
+        const committedParty = BackgroundPartyState.acceptRow(result.partyRow);
         for (const row of result.lifeRows || []) {
             const entry = preparedMembers.find(member => Number(member.row.characterId) === Number(row.characterId));
             if (entry) entry.snapshot = LifeState.acceptNewerLifecycleRow(row) || entry.snapshot;

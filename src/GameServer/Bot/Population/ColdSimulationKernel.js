@@ -2424,7 +2424,7 @@ class ColdSimulationKernel {
                 this.upsert({ state: result.state, context: result.context || this.states.get(id)?.context || {} });
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
-                if (String(result.reason || '').includes('stale')) DiagnosticConfig.developerDiagnostics && (this.stats.stale += 1);
+                if (DiagnosticConfig.developerDiagnostics && `${result.reason || ''} ${result.detail || ''}`.includes('stale')) this.stats.stale += 1;
                 if (result.state) this.upsert({
                     state: {
                         ...result.state,

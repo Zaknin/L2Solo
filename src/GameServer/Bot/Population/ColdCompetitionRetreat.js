@@ -52,9 +52,6 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
                 ...(i === 0 ? avoiding ? { avoid: avoidFor(PartyRisk.rounds(side.party)) } : { wait: { start: at, until: at + waitMs } } : {})
             }) } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, side.party.updatedAt + 1);
-        prepared.snapshot.updatedAt = prepared.row.updatedAt;
-        // The commit's fenced party write moves the revision by exactly one.
-        prepared.snapshot.revision = side.party.revision + 1;
         return prepared;
     });
     const next = sides.flatMap((side, i) => side.members.map((s, j) => {
@@ -79,7 +76,8 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
             options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[i] }
         })), { timestamp: now(), journalReason: 'retreat' });
         if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
-        preparedParties.filter(Boolean).forEach(p => parties.acceptCommit(p));
+        // Each side caches its own committed row (Database commitBatch, partyRow).
+        preparedParties.filter(Boolean).forEach(p => parties.acceptRow(results.find(r => r.partyRow?.partyId === p.row.partyId).partyRow));
         return { ok: true, affectedIds: sides[0].members.map(s => s.characterId), memoryEvents: 0,
             matchup: sides.map(s => s.party ? 'party' : 'solo').join('_vs_'),
             ...(avoiding ? { destinationSpotId: route.spotId, arrivalAt: travelling[0].timing.nextResolveAt, avoidSteps: AVOID_STEPS }

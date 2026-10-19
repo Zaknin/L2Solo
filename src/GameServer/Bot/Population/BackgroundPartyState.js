@@ -126,8 +126,8 @@ TableChannel.register('parties', {
 
 function acceptedParty(snapshot) {
     const current = cache.get(snapshot.partyId);
-    // ARCH-NOTE: Snapshots have no revision. One FNV stamp per accept replaces
-    // two cryptographic hashes; the prior accepted stamp is already known.
+    // Each accepted row carries its database revision. One FNV stamp of the
+    // whole snapshot per accept: a re-accepted identical row changes nothing.
     const stamp = fnv1a32(JSON.stringify(snapshot));
     if (current && acceptedStamps.get(snapshot.partyId) === stamp) return current;
     cache.set(snapshot.partyId, snapshot);
@@ -260,49 +260,8 @@ function rowFromParty(party) {
         status: party.status || 'active',
         roleCoverageJson: safeJson(party.roleCoverage || {}),
         statsJson: safeJson(party.stats || {}),
-        updatedAt: timestamp,
-        // The revision the write starts from; the database moves it.
-        revision: Number(party.revision || 0)
+        updatedAt: timestamp
     };
-}
-
-function save(row) {
-    if (Database.isReady() && typeof Database.saveBackgroundParty === 'function') return Database.saveBackgroundParty(row);
-    return Database.execute([
-        `INSERT INTO ${TABLE} (
-            partyId, leaderId, memberIdsJson, spotId, startedAt, nextResolveAt,
-            cohesion, risk, status, roleCoverageJson, statsJson, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(partyId) DO UPDATE SET
-            leaderId = excluded.leaderId,
-            memberIdsJson = excluded.memberIdsJson,
-            spotId = excluded.spotId,
-            nextResolveAt = excluded.nextResolveAt,
-            cohesion = excluded.cohesion,
-            risk = excluded.risk,
-            status = excluded.status,
-            roleCoverageJson = excluded.roleCoverageJson,
-            statsJson = excluded.statsJson,
-            updatedAt = excluded.updatedAt,
-            revision = ${TABLE}.revision + 1
-        WHERE ${TABLE}.status <> 'hot'
-          AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanGoalInvalidationVersion'), 0)
-              <= COALESCE(json_extract(excluded.statsJson, '$.clanGoalInvalidationVersion'), 0)`,
-        [
-            row.partyId,
-            row.leaderId,
-            row.memberIdsJson,
-            row.spotId,
-            row.startedAt,
-            row.nextResolveAt,
-            row.cohesion,
-            row.risk,
-            row.status,
-            row.roleCoverageJson,
-            row.statsJson,
-            row.updatedAt
-        ]
-    ]);
 }
 
 const BackgroundPartyState = {
@@ -392,12 +351,12 @@ const BackgroundPartyState = {
 
         return ready.then((isReady) => {
             if (!isReady) return null;
-            return save(prepared.row).then((result) => {
+            return Database.saveBackgroundParty(prepared.row).then((result) => {
                 // Only the whole-party lifecycle can change a hot roster.
                 // A cold maintenance job may have prepared this save before activation.
                 if (!result.affectedRows) return null;
                 (result.lifeRows || []).forEach(row => BotLifeState.acceptNewerLifecycleRow(row));
-                return result.row ? this.acceptRow(result.row) : this.acceptCommit(prepared);
+                return this.acceptRow(result.row);
             });
         }).catch((err) => {
             utils.infoWarn('BotParty', 'failed to save background party %s: %s', prepared.snapshot.partyId, err.message);
@@ -425,12 +384,6 @@ const BackgroundPartyState = {
         if (status === 'active' && membership.memberIds.length < Config.partyMinSize) return null;
         const row = rowFromParty(normalizedParty);
         return { row, snapshot: normalize(row) };
-    },
-
-    acceptCommit(prepared) {
-        const snapshot = prepared?.snapshot;
-        if (!snapshot?.partyId) return null;
-        return acceptedParty(snapshot);
     },
 
     acceptRow(row) {

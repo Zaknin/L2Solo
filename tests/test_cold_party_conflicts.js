@@ -112,6 +112,10 @@ async function run() {
     await createParty(range(18, 9));
     const full = await apply(9, 18);
     assert(full.ok, JSON.stringify(full));
+    for (const partyId of ['party-9', 'party-18']) {
+        const [saved] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', [partyId]]);
+        assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+    }
     assert.strictEqual(full.matchup, 'party_vs_party');
     assert.strictEqual(full.participants.length, 18);
     assert.strictEqual(full.memoryEvents, 17, '9v9 attribution is linear, not 81 relationships');

@@ -4261,8 +4261,8 @@ const Database = {
         try {
             return performTransaction(() => {
                 const row = one('SELECT * FROM bot_background_parties WHERE partyId=?', [request.partyId]);
-                if (!row || row.status !== 'hot' || Number(row.revision) !== Number(request.expectedPartyRevision))
-                    return { ok: false, reason: 'party_changed' };
+                if (!row || row.status !== 'hot' || !Number.isSafeInteger(request.expectedPartyRevision)
+                    || Number(row.revision) !== request.expectedPartyRevision) return { ok: false, reason: 'party_changed' };
                 const party = { ...row, memberIds: JSON.parse(row.memberIdsJson), stats: jsonObject(row.statsJson) };
                 if (!Roster.admitted(party) || Roster.held(party) || !Roster.exact(request.members?.map(member => member.characterId), party.memberIds))
                     return { ok: false, reason: 'raid_roster_not_opened' };
@@ -5933,7 +5933,14 @@ const Database = {
                     const party = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                     const ids = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
                     const expected = change.memberIds || [];
-                    if (party?.status !== 'active' || Number(party.revision) !== Number(change.expectedPartyRevision)
+                    // A fresh revision-0 party cannot match a missing revision.
+                    if (party && (!Number.isSafeInteger(change.expectedPartyRevision)
+                        || Number(party.revision) !== change.expectedPartyRevision)) {
+                        failure = true;
+                        reason = 'party_revision_stale';
+                        break;
+                    }
+                    if (party?.status !== 'active'
                         || ids.length < 2 || ids.length > 9 || ids.length !== expected.length
                         || new Set(expected).size !== expected.length || ids.some(id => !expected.includes(id) || !presentIds.has(id)
                             || memberRows.get(id)?.partyId !== change.partyId)
@@ -5946,7 +5953,7 @@ const Database = {
                         break;
                     }
                 }
-                if (failure) reason = 'party_context_changed';
+                if (failure) reason ||= 'party_context_changed';
             }
             if (!failure && raidCommit) {
                 const change = group[0].atomicGroup.partyChanges[0];
@@ -6090,6 +6097,9 @@ const Database = {
                         result.row = row;
                         result.revision = Number(result.row.simulationRevision);
                         if (payment.touched.has(result.characterId)) result.partyPayment = true;
+                        // A two-party group: each member gets its own party's row
+                        // (the roster was matched to change.memberIds above).
+                        if (!change.memberIds.includes(result.characterId)) continue;
                         if (!partyRowRead) {
                             partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                             partyRowRead = true;
@@ -6327,7 +6337,8 @@ const Database = {
         const members = request.members || [];
         const ids = members.map(m => Number(m.characterId));
         if (ids.length < 2 || ids.length > 9 || new Set(ids).size !== ids.length
-            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)) {
+            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_transition' });
         }
         return inTransaction(() => {
@@ -6380,13 +6391,14 @@ const Database = {
         const ids = members.map((member) => Number(member.characterId));
         const playerId = Number(request.playerId || 0);
         if (!request.partyId || !Number.isSafeInteger(playerId) || playerId <= 0
-            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length) {
+            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_takeover' });
         }
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]);
             const declared = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
-            if (!party || party.status !== 'hot' || Number(party.revision) !== Number(request.expectedPartyRevision)
+            if (!party || party.status !== 'hot' || Number(party.revision) !== request.expectedPartyRevision
                 || declared.length !== ids.length || declared.some((id) => !ids.includes(id))) {
                 return { ok: false, reason: 'party_changed' };
             }

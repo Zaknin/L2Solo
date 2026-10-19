@@ -2091,6 +2091,8 @@ class ColdSimulationCoordinator {
                 inputToken,
                 proposalId,
                 reason: result.reason || (result.ok ? 'committed' : 'rejected'),
+                // A refused atomic group names its cause here (e.g. party_revision_stale).
+                ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
                 state,

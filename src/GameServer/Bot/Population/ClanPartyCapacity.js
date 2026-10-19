@@ -41,7 +41,7 @@ async function reclaim(objective, { parties, life, database, metrics }, now = Da
         // A worker claim or membership change wins over this stale decision.
         if (!result?.ok) continue;
         life.acceptPartyAssignments(prepared, result.lifeRows);
-        parties.acceptCommit(preparedParty);
+        parties.acceptRow(result.partyRow);
         metrics.recordPartyDissolution();
         return true;
     }

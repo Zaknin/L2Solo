@@ -95,7 +95,7 @@ async function main() {
     await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrentMarker',1) WHERE partyId=?", [party.partyId]]);
     const before = await image();
     const rejected = await Owner.commitAndReleaseBatch(stale.entries, { timestamp });
-    assert(rejected.every(row => !row.ok && row.detail === 'party_context_changed'), JSON.stringify(rejected));
+    assert(rejected.every(row => !row.ok && row.detail === 'party_revision_stale'), JSON.stringify(rejected));
     assert.deepEqual(await image(), before, 'stale party context cannot commit even one member destination');
     await Owner.releaseBatch(stale.grants, { timestamp });
     party = Parties.acceptRow(await partyRow(party.partyId));

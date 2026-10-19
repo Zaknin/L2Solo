@@ -8,7 +8,7 @@ const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', activit
 (async () => {
     let writes = 0, accepted = 0, commits = [];
     const deps = {
-        parties: { active: () => [ordinary], prepareCommit: party => ({ row: party }), acceptCommit: () => accepted++ },
+        parties: { active: () => [ordinary], prepareCommit: party => ({ row: party }), acceptRow: () => accepted++ },
         life: { statesForParty: async () => members,
             preparePartyReview: (before, after) => ({ before, snapshot: after }), acceptPartyAssignments: () => accepted++ },
         database: { commitBackgroundPartyMembership: async args => { writes++; commits.push(args); return { ok: true }; } },
