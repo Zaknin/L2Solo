@@ -196,7 +196,8 @@ function state(characterId, revision, activity = 'hunting') {
     ]);
     // A clan inventory write moves the row under a step: the step's commit is
     // refused and the row keeps the new inventory.
-    const raceRevision = Number(recovered.simulationRevision);
+    const [beforeRace] = await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]]);
+    const raceRevision = Number(beforeRace.simulationRevision);
     const inventoryAfterClanWrite = JSON.stringify({ '1869': { selfId: 1869, amount: 42 } });
     await Database.execute([`UPDATE bot_life_state SET simulationRevision = simulationRevision + 1,
         inventorySummary = ?, statsJson = ? WHERE characterId = ?`,
