@@ -3005,11 +3005,13 @@ const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevisio
 // what an AFTER trigger writes, and a statement that moved it leaves the
 // trigger nothing to do. The owner and lease columns are set to their constant
 // values. Null when the guard refused.
-// The mind column rides this UPDATE; when the guard refused, a phase-only
-// UPDATE writes it alone: the worker decided it, and phase cold alone says the
-// worker owns the row (a phase_hot refusal leaves it to main's save). A
-// stale_revision refusal hands back a row with the worker's newest mind, so
-// the rebase keeps the held build.
+// A refused commit writes nothing, the mind included: main moved the row, the
+// refusal hands that row back (coldSimulationRow), the worker rebases on it and
+// builds again (one build per refusal, stale_revision 0.3% of acks). Every mind
+// write is on the row's revision: this UPDATE on the step's base,
+// BotLifeState.save on the copy's. A refused write that kept the mind without
+// moving the revision let a main save built on that same revision overwrite it,
+// and dropped a raise main made meanwhile.
 function writeColdCommitUnsafe(fields, patch) {
     const { characterId, expectedRevision, timestamp } = fields;
     const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
@@ -3021,13 +3023,9 @@ function writeColdCommitUnsafe(fields, patch) {
     }
     assignments.push('simulationRevision = ?', 'simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0');
     params.push(expectedRevision + 1, LEGACY_SIMULATION_OWNER);
-    const written = one(`UPDATE bot_life_state SET ${assignments.join(', ')}
+    return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
         WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
         RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, expectedRevision]) || null;
-    if (!written && patch.mindJson !== undefined) {
-        write("UPDATE bot_life_state SET mindJson = ? WHERE characterId = ? AND phase = 'cold'", [patch.mindJson, characterId]);
-    }
-    return written;
 }
 
 function ensureSocialEntityUnsafe(entity, timestamp) {
