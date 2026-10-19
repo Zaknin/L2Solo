@@ -10,12 +10,10 @@ require('../src/Global');
 const Database = invoke('Database');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 
-const originalInit = BackgroundPartyState.init;
 const stored = async partyId => (await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]]))[0];
 
 (async () => {
     Database.init();
-    BackgroundPartyState.init = () => Promise.resolve(true);
 
     const saved = await BackgroundPartyState.createOrUpdate({
         partyId: 'bgp_stale_leader',
@@ -127,8 +125,7 @@ const stored = async partyId => (await Database.execute(['SELECT * FROM bot_back
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;
-}).finally(() => {
-    BackgroundPartyState.init = originalInit;
-    Database.close();
+}).finally(async () => {
+    await Database.close();
     fs.rmSync(directory, { recursive: true, force: true });
 });

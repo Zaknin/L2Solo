@@ -110,12 +110,19 @@ async function run() {
 
     await createParty(range(9, 9));
     await createParty(range(18, 9));
+    // The native row owns the agreement: the commit rebuilds it from the DB row,
+    // so the cache must show that row, not the proposal built from the old cache.
+    await Database.execute(['UPDATE bot_background_parties SET statsJson = json_patch(statsJson, ?) WHERE partyId = ?',
+        [JSON.stringify({ agreement: { terms: 'db-only' } }), 'party-9']]);
     const full = await apply(9, 18);
     assert(full.ok, JSON.stringify(full));
     for (const partyId of ['party-9', 'party-18']) {
-        const [saved] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', [partyId]]);
+        const [saved] = await Database.execute(['SELECT revision, statsJson FROM bot_background_parties WHERE partyId=?', [partyId]]);
         assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+        assert.deepStrictEqual(Party.find(partyId).stats.agreement, JSON.parse(saved.statsJson).agreement,
+            'the cached agreement is the committed one, not the proposed one');
     }
+    assert.strictEqual(Party.find('party-9').stats.agreement.terms, 'db-only');
     assert.strictEqual(full.matchup, 'party_vs_party');
     assert.strictEqual(full.participants.length, 18);
     assert.strictEqual(full.memoryEvents, 17, '9v9 attribution is linear, not 81 relationships');
