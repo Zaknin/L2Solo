@@ -42,6 +42,10 @@ function stateInventory(state, items = []) {
 function stateCastCosts(state, profile, timestamp) {
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Rules = invoke('GameServer/Skills/C4SkillRules');
+    // One stat source list per call: every skill's two multipliers read it.
+    let sources = null;
+    const multiplier = stat => Profile.statMultiplier(profile, stat, timestamp,
+        sources ||= Profile.fightSources(profile, timestamp).sources);
     return Profile.offensiveSkills(profile).filter(skill => {
         const semantic = Rules.resolveCached(skill);
         return Number(state.stats?.coldCombat?.cooldowns?.[skill.selfId] || 0) <= timestamp
@@ -50,8 +54,7 @@ function stateCastCosts(state, profile, timestamp) {
     }).map(skill => {
         const stat = skill.spell ? 'magicalMpConsumeMul' : 'physicalMpConsumeMul';
         const equipment = skill.spell ? 'magicalMpConsumeRateMul' : 'physicalMpConsumeRateMul';
-        return Math.max(0, Math.floor(Number(skill.mp || 0) * Profile.statMultiplier(profile, stat, timestamp)
-            * Profile.statMultiplier(profile, equipment, timestamp) + 1e-9));
+        return Math.max(0, Math.floor(Number(skill.mp || 0) * multiplier(stat) * multiplier(equipment) + 1e-9));
     });
 }
 
