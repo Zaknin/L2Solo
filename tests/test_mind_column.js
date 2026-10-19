@@ -73,11 +73,12 @@ async function bodyMoney(id) {
         assert.equal(refused.row.mindJson, before.mindJson, 'the refusal hands back the row with the mind it had');
         // A main save built on the row's revision writes its own mind; nothing
         // of the refused proposal is on the row or in main's cache.
-        await Life.upsertState(mainCopy1, 'mind_column_refused_main_save');
+        const MAIN_MONEY = [77000, 0, 15000, 0];
+        await Life.upsertState({ ...mainCopy1, stats: { ...mainCopy1.stats, money: MAIN_MONEY } }, 'mind_column_refused_main_save');
         const resaved = await row(far);
-        assert.deepEqual(JSON.parse(resaved.mindJson).money, OLD_MONEY, 'the row holds main\'s mind after its save');
+        assert.deepEqual(JSON.parse(resaved.mindJson).money, MAIN_MONEY, 'the row holds main\'s mind after its save');
         assert.equal(resaved.mindJson.includes(String(NEW_MONEY[0])), false, 'no mind value of the refused proposal is on the row');
-        assert.deepEqual(Life.cachedState(far).stats.money, OLD_MONEY, 'main\'s cache holds none of the refused mind');
+        assert.deepEqual(Life.cachedState(far).stats.money, MAIN_MONEY, 'main\'s cache holds main\'s mind, none of the refused one');
         assert.equal(Life.cachedState(far).stats.proposalProbe, undefined, 'main\'s cache holds none of the refused proposal');
 
         // (2) A near bot's save writes its money into the mind column, not the body.
