@@ -102,7 +102,7 @@ async function main() {
     }
     soloKernel.partyPut(staleParty.partyId, staleParty);
     assert.equal(soloKernel.leaderParty(departed.characterId), null, 'a solo state leads no stale party row');
-    assert.equal(lifecycleKind(departed, {}, soloKernel), 'resolver', 'the solo trip keeps its own writer');
+    assert.equal(lifecycleKind(departed, soloKernel), 'resolver', 'the solo trip keeps its own writer');
     assert.equal(soloKernel.scheduleTokens.get(departed.characterId).dueAt, leftAt,
         'the paid trip owns the deadline, no party claim');
     await soloKernel.shutdown();

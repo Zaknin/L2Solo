@@ -166,7 +166,7 @@ async function resolve(state, timestamp = Date.now(), options = {}) {
                     }
                 }
             };
-            if (!inside || !Services.recovery(actorFor(serviced, hall), hall)) {
+            if (!inside || !Services.recovery(actorFor(serviced, hall), hall, timestamp)) {
                 next = finish(serviced, timestamp, 'clan_hall_services_complete');
                 next.patch.vitals = serviced.vitals;
                 const departure = require('./Departure').plan(serviced, hall, timestamp);

@@ -87,8 +87,8 @@ function missing(actor, hall, timestamp = Date.now(), threshold = REFRESH_MS, ef
             return true;
         });
 }
-function recovery(actor, hall) {
-    if (!available(hall)) return false;
+function recovery(actor, hall, timestamp = Date.now()) {
+    if (!available(hall, timestamp)) return false;
     return (
         (hall.functions.hp > 0 && actor.fetchHp() < actor.fetchMaxHp() * 0.95) ||
         (hall.functions.mp > 0 &&
@@ -170,7 +170,7 @@ function needed(state, hall, managerPresent, timestamp = Date.now()) {
     const actor = actorFor(state, hall);
     return (
         missing(actor, hall, timestamp, REFRESH_MS, Object.values(actor.effects)).length > 0 ||
-        (local(actor, hall) && recovery(actor, hall))
+        (local(actor, hall) && recovery(actor, hall, timestamp))
     );
 }
 // The first time after `timestamp` at which needed() can answer otherwise for
