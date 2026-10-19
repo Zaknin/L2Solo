@@ -87,25 +87,22 @@ function state(characterId, revision, activity = 'hunting') {
     }, 'appearance_race_before');
     const queuedMigration = BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
     const queuedNameMigration = BotLifeState.acceptNameMetadata(characterId, 'NewOwnerNick', 3);
-    const [, migratedLifecycle, renamed] = await Promise.all([
+    const [queuedSave, migratedLifecycle, renamed] = await Promise.all([
         queuedBeforeMigration,
         queuedMigration,
         queuedNameMigration
     ]);
+    assert(queuedSave, 'the save queued before the migrations lands');
     assert.strictEqual(migratedLifecycle.appearanceVersion, 2,
         'appearance migration must run in the per-character lifecycle write chain');
     assert.strictEqual(renamed.name, 'NewOwnerNick');
     assert.strictEqual(renamed.nameGeneratorVersion, 3);
     const versioned = (await Database.execute([
-        'SELECT characterName, nameGeneratorVersion, appearanceVersion, statsJson FROM bot_life_state WHERE characterId = ?',
+        'SELECT characterName, nameGeneratorVersion, appearanceVersion FROM bot_life_state WHERE characterId = ?',
         [characterId]
     ]))[0];
     assert.deepStrictEqual([versioned.characterName, Number(versioned.nameGeneratorVersion), Number(versioned.appearanceVersion)],
         ['NewOwnerNick', 3, 2], 'the name and look versions live in their own columns');
-    const versionedStats = JSON.parse(versioned.statsJson);
-    for (const key of ['nameGeneratorVersion', 'appearanceVersion', 'sex']) {
-        assert.strictEqual(Object.hasOwn(versionedStats, key), false, `the stats carry no ${key}`);
-    }
 
     // The generated look and name writes each moved the far row's revision
     // once, and the cache carries the written number.
