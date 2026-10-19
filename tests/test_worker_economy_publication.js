@@ -98,11 +98,10 @@ async function runWorker(state, predicate, followUp = null) {
         const two = (await decidedAt(until, 5)).payload.near.statsPacket;
         assert.equal(two.decisionSeq, one.decisionSeq, 'a later post naming the same raise neither raises again nor rolls the mind back');
         // The pending bag is cumulative: a later raise still carries the
-        // impossible mark of raise 1, which the worker already applied.
+        // impossible mark of raise 1 (its step drop: test_near_decision_order).
         post({ ...raised, nearSeq: 6, updatedAt: now + 4, raise: { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 } });
         const three = (await decidedAt(until, 6)).payload.near.statsPacket;
         assert.equal(three.decisionSeq, two.decisionSeq + 1, 'the new raise is taken');
-        assert.equal(three.activityLeaf, two.activityLeaf, 'an impossible mark already applied does not drop the held step again');
         // A clan expulsion's row (a writer's copy, newer membership) joins the
         // record's body and is decided on as the record's post.
         const sent = received.length;
@@ -117,9 +116,15 @@ async function runWorker(state, predicate, followUp = null) {
         post({ ...cached, characterId: 765413, updatedAt: now + 6, simulation: { revision: 3 },
             stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
         await decidedAt(until, 0);
-        post({ ...cached, characterId: 765413, nearSeq: 1, updatedAt: now + 7, simulation: { revision: 3 },
-            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
-        await decidedAt(until, 1);
+        const life = { ...cached, characterId: 765413, simulation: { revision: 3 },
+            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } };
+        post({ ...life, nearSeq: 1, updatedAt: now + 7 });
+        const lifeFirst = (await decidedAt(until, 1)).payload.near.statsPacket;
+        // The new session's first raise (seq 1, below the old life's 2) is taken.
+        post({ ...life, nearSeq: 2, updatedAt: now + 8, raise: { seq: 1, bits: 1, impossible: false } });
+        const raisedAgain = await decidedAt(until, 2);
+        assert.equal(raisedAgain.payload.near.statsPacket.decisionSeq, lifeFirst.decisionSeq + 1, 'a new life\'s raises count from 1');
+        assert.equal(raisedAgain.payload.near.raiseSeq, 1);
     });
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,

@@ -76,6 +76,16 @@ function rejectedState(current, accepted = current) {
     applyRaise(next.stats, reasonBits.sources, true);
     return next;
 }
+// A near bot's posted raise bag on the background thread's mind (stats),
+// against the last raise it applied in this life (applied): taken once per
+// raise seq. The bag is cumulative, so its impossible mark drops the held
+// step only while the raise that set it (impossibleSeq) is not yet applied.
+// Returns the raise seq now applied.
+function takePostedRaise(stats, raise, applied) {
+    if (raise && Number(raise.seq) > applied) applyRaise(stats, Number(raise.bits) || 0,
+        raise.impossible === true && Number(raise.impossibleSeq || 0) > applied);
+    return Math.max(applied, Number(raise?.seq || 0));
+}
 // A near bot's pending raise when its body cools (BotLifeState.writeColdRow):
 // no decision will answer it, so it lands on the cold row's stats, the step
 // dropped only while its impossible raise is still unanswered.
@@ -150,4 +160,4 @@ function raiseSections(before, after, ...lists) {
     stats.wishDirty = (Number(stats.wishDirty) || 0) | bits;
     return bits;
 }
-module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, settleNearRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };
+module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, takePostedRaise, settleNearRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };

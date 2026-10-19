@@ -67,6 +67,16 @@ const spot = () => Events.held(session)?.network.activity?.spotId;
     assert.equal(session.nearRaise.impossible, false, 'the answered impossible mark is lifted');
     assert.equal(Events.rejectSession(session, accepted(10)), true, 'a new rejection raises again');
 
+    // The worker takes a posted bag once per raise; the impossible mark of an
+    // applied raise does not drop the step a later raise of the bag finds.
+    const mind = { decisionSeq: 3, activityLeaf: 77 };
+    assert.equal(Events.takePostedRaise(mind, { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 }, 1), 2);
+    assert.deepEqual([mind.decisionSeq, mind.activityLeaf], [4, 77], 'raise 2 is taken, raise 1\'s mark is not');
+    assert.equal(Events.takePostedRaise(mind, { seq: 2, bits: 1, impossible: true, impossibleSeq: 2 }, 2), 2);
+    assert.equal(mind.decisionSeq, 4, 'an applied raise is not taken again');
+    assert.equal(Events.takePostedRaise(mind, { seq: 3, bits: 1, impossible: true, impossibleSeq: 3 }, 2), 3);
+    assert.deepEqual([mind.decisionSeq, mind.activityLeaf], [5, 0], 'an unapplied impossible raise drops the step');
+
     // A decision for a bot that cooled before it came is dropped, and counted.
     const dropped = coordinator.nearDecisions.dropped;
     World.registeredActorById = () => null;

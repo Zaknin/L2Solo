@@ -696,17 +696,13 @@ const softInputFor = (characterId, timestamp) => ({ board: boardReady(), buyOrde
 // it, on the posted row before it is stored: the raise main named (once per
 // raise), the hard facts (DecisionSections.events) and the soft point, in the
 // far step's one bump. The decision is then taken on this row (mode near).
-function nearEvents(id, previousEntry, entry) {
-    const previous = previousEntry.state, row = entry.state, stats = row.stats ||= {};
+// applied: the last raise this life applied (0 for a new life).
+function nearEvents(id, previous, entry, applied) {
+    const row = entry.state, stats = row.stats ||= {};
     // The worker owns the near mind: a post's mind keys are discarded and the
     // record's stand, so a late post cannot roll back a raise.
     for (const key of SavedStats.MIND_KEYS) stats[key] = previous.stats?.[key];
-    // The pending bag is cumulative: its impossible mark drops the held step
-    // only while the raise that set it (impossibleSeq) is not yet applied.
-    const raise = row.raise, applied = Number(previousEntry.raiseSeq || 0);
-    if (raise && Number(raise.seq) > applied) DecisionEvents.applyRaise(stats, Number(raise.bits) || 0,
-        raise.impossible === true && Number(raise.impossibleSeq || 0) > applied);
-    entry.raiseSeq = Math.max(applied, Number(raise?.seq || 0));
+    entry.raiseSeq = DecisionEvents.takePostedRaise(stats, row.raise, applied);
     const hard = DecisionSections.events(previous, row, escrowFor(id));
     const soft = DecisionSections.softEvents(row, stats.wishSections, softInputFor(id, Date.now()));
     DecisionEvents.raiseSections(previous, row, hard, soft);
@@ -1665,7 +1661,11 @@ function startKernel(config = {}) {
     const nativeClear = kernel.states.clear.bind(kernel.states);
     kernel.states.set = (id, entry, card) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
-        if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previousEntry, entry);
+        // A hot row below the hot record's post number that reached the store
+        // is a new life (ColdSimulationKernel nearHeld holds every other one):
+        // its session's raises count from 1 again.
+        if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previous, entry,
+            previous.phase === 'hot' && Number(entry.state.nearSeq || 0) < Number(previous.nearSeq || 0) ? 0 : Number(previousEntry.raiseSeq || 0));
         // The near bookkeeping ends with the body: a far record keeps no
         // route rows of a near decision, and the next activation's raises
         // count from its session's first.
