@@ -2023,7 +2023,8 @@ class ColdSimulationCoordinator {
             || result.settled || result.pkDrops?.length || result.partyPayment
             || !row || typeof row.statsJson === 'string'
             || row.economyCommit != null || stats && Object.hasOwn(stats, 'economyCommit')) return null;
-        return { revision: cached.simulation.revision, updatedAt: cached.updatedAt, inventoryRevision: cached.bagRevision,
+        // The ack's revision is already the commit's (result.revision, the cache's too).
+        return { updatedAt: cached.updatedAt, inventoryRevision: cached.bagRevision,
             skillsRevision: cached.skillsRevision, hennaRevision: cached.hennaRevision };
     }
 
