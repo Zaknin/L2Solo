@@ -139,11 +139,9 @@ function* details(state, town, { origin = null } = {}, tailScope = null) {
     const fees = Number(plan.route.fee || 0);
     return Number.isFinite(hours) && Number.isFinite(fees) && fees >= 0 ? { known: true, hours, fees } : unknown();
 }
-function read(state, town, options) {
-    const iterator = details(state, town, options);
-    let step; do { step = iterator.next(); } while (!step.done);
-    return step.value;
-}
+// A preparation run to its end in one call (no slices).
+function drain(iterator) { let step; do { step = iterator.next(); } while (!step.done); return step.value; }
+function read(state, town, options) { return drain(details(state, town, options)); }
 const point = loc => loc ? { locX: Number(loc.locX || 0), locY: Number(loc.locY || 0), locZ: Number(loc.locZ || 0) } : null;
 // Only own route inputs cross the existing worker boundary. The caller holds
 // the decision's location anchor; no inventory or market graph is copied.
@@ -179,6 +177,8 @@ function* prepare(state) {
     if (preparedTables.size > MAX_PREPARED_TABLES) preparedTables.delete(preparedTables.keys().next().value);
     return rows;
 }
+// The same table in one call, for a caller that cannot slice (EconomyContext.forState).
+function prepared(state) { return drain(prepare(state)); }
 function preparedReader(rows, { hourAdena } = {}) {
     const row = town => {
         const index = townOrdinal.get(town), value = index === undefined ? null : rows?.[index];
@@ -224,4 +224,4 @@ function reader(state, { hourAdena, origin = null } = {}) {
     if (state && typeof state === 'object') readers.set(state, { key, cost });
     return cost;
 }
-module.exports = { details, read, reader, regionalTown, towns, frame, key, prepare, preparedReader };
+module.exports = { details, read, reader, regionalTown, towns, frame, key, prepare, prepared, preparedReader };

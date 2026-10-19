@@ -494,8 +494,7 @@ class RetainedStateMap extends Map {
         for (const [id, packet] of this.entries()) Reflect.apply(callback, thisArg, [packet, id, this]);
     }
 
-    // incomingCard: the card a snapshot row carried (undefined: none came).
-    set(id, entry, incomingCard = undefined) {
+    set(id, entry) {
         const current = this.get(id);
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }
@@ -514,18 +513,19 @@ class RetainedStateMap extends Map {
         }
         // Worker calculation advice belongs to this existing native owner, as
         // a field of its record (the record never leaves this thread). A new
-        // record is not a new decision: the card it carried over is checked
-        // against the new state. Only its bounded restart prefix lives in
-        // stats. Readers prove every dependency before reuse, and retirement
-        // releases the owner.
+        // state is not a new decision: the card the record holds is checked
+        // against it. A first row (a restart, a bot this thread held no copy of) restores
+        // the card from its bounded restart prefix in stats; no card crosses
+        // a handoff. Readers prove every dependency before reuse, and
+        // retirement releases the owner.
         const record = this.get(id);
-        const supplied = incomingCard !== undefined;
         const previousAdvice = current?.wishAdvisory;
-        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(incomingCard)
-            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(record.state, this.now()) : null;
+        const incomingAdvice = !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(record.state, this.now()) : null;
         const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(record.state, incomingAdvice, previousAdvice)
             ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(record.state, previousAdvice) ? previousAdvice : null;
-        if (this.#skillDtos && record && (supplied || wishAdvisory || record.wishAdvisory)) {
+        if (this.#skillDtos && record && (wishAdvisory || record.wishAdvisory)) {
+            // A near record's decision is its published packet (no proof), never a card:
+            // the far card is dropped here and none is built while the bot is near.
             record.wishAdvisory = record.state?.phase === 'cold' ? wishAdvisory : null;
         }
         if (this.#skillDtos) {
@@ -849,10 +849,6 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
-        // The card a hot-to-far handoff carried: off the row before the store,
-        // handed to the record's write (RetainedStateMap.set).
-        const card = entry !== state && Object.hasOwn(entry, 'wishAdvisory') ? entry.wishAdvisory : undefined;
-        if (card !== undefined) delete entry.wishAdvisory;
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
         // A hot row older than the near record (nearHeld) leaves it as it is.
@@ -891,7 +887,7 @@ class ColdSimulationKernel {
             // A full catalog refresh normally resends the same state. Keep the
             // existing heap version so ten-second refreshes do not accumulate
             // one invalid future node per bot until its next due time.
-            this.states.set(characterId, { ...current, state }, card);
+            this.states.set(characterId, { ...current, state });
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -911,7 +907,7 @@ class ColdSimulationKernel {
         // economy plan sent and its hash, the card it holds, the decision it
         // published and, for a near bot, the last raise applied and the route
         // rows of its last decision (ColdSimulationWorker nearEvents, publish).
-        this.states.set(characterId, { route: null, ...current, state, version }, card);
+        this.states.set(characterId, { route: null, ...current, state, version });
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -2367,11 +2363,8 @@ class ColdSimulationKernel {
     fence(characterId) {
         const id = Number(characterId);
         const proposal = this.dirty.get(id) || null;
-        const accepted = this.states.get(id)?.wishAdvisory;
-        const wishAdvisory = accepted ? ColdEconomyDecision.wireAdvisory(accepted) : null;
-        if (accepted && !wishAdvisory && EconomyDiagnostics.active()) EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         this.remove(id);
-        return { characterId: id, proposal, ...(wishAdvisory ? { wishAdvisory } : {}) };
+        return { characterId: id, proposal };
     }
 
     pause() {

@@ -65,10 +65,7 @@ function joint(party, members, { context = null, memberContexts, spots, timestam
         review = { lastIncomeReviewAt: timestamp, incomeReviews: members.map(member => ({ characterId: Number(member.characterId),
             ...Income.compare(member, members.filter(peer => peer !== member), { prepared, party, objective: previous }) })) };
     }
-    // Waiting for a travel quote keeps the objective, but must not suspend
-    // the cheap personal income review for an already active hunt.
-    return { ...(context?.routePending ? pending(party, members)
-        : { objective, memberGoals: goals, ...(context?.statsPacket || {}) }), ...review };
+    return { objective, memberGoals: goals, ...(context?.statsPacket || {}), ...review };
 }
 
 function participation(state, peers, { persona, roll = 0.5, bonus = 0 } = {}) {

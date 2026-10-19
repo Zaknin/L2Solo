@@ -31,7 +31,7 @@ const World = invoke('GameServer/World/World');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
-const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
+const { ColdEconomyDecisions, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
@@ -113,18 +113,9 @@ class ColdSimulationCoordinator {
         this.historyCleanupInFlight = null;
         this.seen = new Set();
         this.economyDecisions = new ColdEconomyDecisions();
-        this.economyRoutes = new (invoke('GameServer/Bot/Economy/EconomyRouteCache').EconomyRouteCache)({
-            send: payload => !this.stopping && this.ready && !!this.post('economy_route_request', payload),
-            evictable: id => {
-                const record = World.registeredActorById(id);
-                return !record || record.retired || record.session?.actor !== record.actor || record.session.aiActive !== true;
-            },
-            prepared: id => EconomyContext.forgetContext(id, 'state_publication')
-        });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
-            this.economyRoutes.forget(packet.characterId);
             EconomyContext.forget(packet.characterId);
         });
         this.seenOrder = [];
@@ -567,12 +558,6 @@ class ColdSimulationCoordinator {
         }
     }
 
-    routeRows(state) {
-        if (this.stopping || !this.ready) return null;
-        const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
-        return this.economyRoutes.read(state.characterId, Trip.key(state), Trip.frame(state));
-    }
-
     requestEconomyRefresh(characterId) {
         const id = Number(characterId), state = LifeState.cachedState(id);
         if (!state || this.stopping || !this.ready) return false;
@@ -701,9 +686,6 @@ class ColdSimulationCoordinator {
                 if (held?.meetingToken === result.commandId && result.ok === false)
                     this.finishMeetingPreparation(result.characterId, held, null, Error(result.reason || 'trade_meeting_preparation_refused'));
             }
-            break;
-        case 'economy_route_result':
-            if (!this.stopping) this.economyRoutes.accept(payload);
             break;
         case 'ready':
             if (payload.phase === 'loaded') {
@@ -1396,27 +1378,9 @@ class ColdSimulationCoordinator {
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([Number(state.characterId)]);
         await this.ensureCraftRecipes(state);
         this.fencedBots.delete(Number(state.characterId));
-        const entry = { state }, advice = this.economyDecisions.advisoryFor(state);
-        if (advice) {
-            // The handoff card rides on the row; the kernel takes it off.
-            const transfer = wireAdvisory(advice);
-            if (transfer) entry.wishAdvisory = transfer;
-            else EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
-        }
-        const payload = StateWire.packPayload('snapshot_page', {
-            rows: [entry],
-            done: false,
-            ack: true,
-            initial: false
-        });
-        const worker = this.worker, epoch = this.workerEpoch;
-        const frame = Protocol.envelope('snapshot_page', epoch, payload);
-        if (entry.wishAdvisory && Protocol.validateEnvelope(frame,
-            'main', { workerEpoch: this.workerEpoch }).reason === 'message_too_large') {
-            delete entry.wishAdvisory;
-            EconomyDiagnostics.count('card', 'drop', 'handoff_oversize');
-        }
-        const msgId = this.post('snapshot_page', payload, frame.msgId);
+        // The row alone: the worker's copy keeps the bot's decision and its
+        // first far row restores the card from the bot's saved copy.
+        const msgId = this.post('snapshot_page', { rows: [{ state }], done: false, ack: true, initial: false });
         if (!msgId) return { ok: false, reason: 'state_send_failed' };
         let timer = null;
         try {
@@ -1424,12 +1388,6 @@ class ColdSimulationCoordinator {
                 timer = setTimeout(() => reject(new Error('cold_worker_accept_timeout')), Math.max(50, Number(timeoutMs) || 500));
                 this.waiters.set(msgId, { resolve, reject });
             });
-            // A cold handoff retires the visible owner's unconsumed route.
-            this.economyRoutes.forget(Number(state.characterId));
-            const current = LifeState.cachedState(state.characterId);
-            if (entry.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
-                && current?.phase === 'cold')
-                this.economyDecisions.releaseAdvisory(state.characterId, advice);
             return { ok: true, reason: 'accepted', ...payload };
         } catch (error) {
             this.waiters.delete(msgId);
@@ -2055,13 +2013,11 @@ class ColdSimulationCoordinator {
 
     async fenceBot(characterId, timeoutMs = 500) {
         const id = Number(characterId);
-        this.economyDecisions.fence(id);
+        this.economyDecisions.forget(id);
         EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         this.fencedBots.add(id);
-        this.economyRoutes.forget(id);
         DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
-        const worker = this.worker, epoch = this.workerEpoch;
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
         if (!msgId) return { ok: false, reason: 'fence_send_failed' };
         let timer = null;
@@ -2077,13 +2033,6 @@ class ColdSimulationCoordinator {
             const command = this.commandInflight.get(id);
             if (command) await Promise.race([command.catch(() => null), wait(timeoutMs)]);
             await this.queue.flushCharacter(id);
-            if (fenced.wishAdvisory) {
-                const state = LifeState.cachedState(id);
-                if (this.worker !== worker || this.workerEpoch !== epoch || !state
-                    || !this.economyDecisions.retainAdvisory(state, fenced.wishAdvisory)) {
-                    EconomyDiagnostics.count('card', 'drop', 'handoff_stale');
-                }
-            }
             return { ok: true, reason: 'fenced', ...fenced };
         } catch (error) {
             DiagnosticConfig.developerDiagnostics && (this.counters.fenceTimeouts += 1);
@@ -2192,7 +2141,6 @@ class ColdSimulationCoordinator {
         this.cancelSafety();
         Metrics.clearColdSafetyEpoch(epoch);
         this.economyDecisions.clear();
-        this.economyRoutes.clear();
         DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
         this.tableChannel.detach(this);
         this.worker = null;
@@ -2236,7 +2184,6 @@ class ColdSimulationCoordinator {
         for (const held of this.commitAcknowledgements.values()) held.resolve(false);
         this.commitAcknowledgements.clear();
         this.economyDecisions.clear();
-        this.economyRoutes.clear();
         if (!this.started) return { stopped: true };
         this.stopping = true;
         if (this.pvpEncounterTimer) clearInterval(this.pvpEncounterTimer);

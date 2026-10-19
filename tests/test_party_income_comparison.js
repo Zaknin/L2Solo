@@ -93,13 +93,6 @@ try {
         assert.equal(review.incomeReviews?.length, 2,
             'ordinary party income review also runs for members of a clan with a warehouse');
     }
-    const heldObjective = { spotId: 'peer', objectiveKey: 'held' };
-    const pending = Goals.joint({ startedAt: at - Income.REVIEW_MS, spotId: 'peer',
-        stats: { objective: heldObjective } }, [state, peer], { timestamp: at,
-        context: { routePending: true } });
-    assert.equal(pending.objective, heldObjective, 'a pending travel quote retains the native objective');
-    assert.equal(pending.lastIncomeReviewAt, at, 'a pending travel quote does not block personal income review');
-    assert.equal(pending.incomeReviews.length, 2);
     assert.equal(builds, 0);
     const provider = { ...peer, level: 20, adena: 100000, spotId: 'lower',
         stats: { classId: 15, role: 'healer' } };

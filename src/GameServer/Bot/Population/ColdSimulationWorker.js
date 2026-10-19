@@ -184,8 +184,9 @@ const boardFollower = boardIndex.follower();
 // during the copy asks for it again (table_resync); that copy's reset keeps
 // the flag and its last piece ends the wait.
 let boardReplacing = false, marketReplacing = false;
+// A bot's own route preparation in flight (occupationFor mode wish), keyed by
+// its id; the planner runs it in slot -id.
 const routeRequests = new Map();
-let nativeRouteSequence = 0;
 const publicWorkshopIndex = new (require('../Economy/PublicWorkshopIndex').PublicWorkshopIndex)();
 const publicWorkshopKeys = new Map(), workshopRevisions = new Map(), workshopDigests = new Map(), workshopScopeDigests = new Map();
 const digestToken = value => value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
@@ -245,9 +246,8 @@ const occupationPlanner = new ColdOccupationPlanner({
         : `${boardIndex.itemRevision(id)}:${tables.rows('market').get(`i:${id}`)?.[1] || 0}:${MarketCounters.revisionOf(MarketCounters.counterOf(id))}:${workshopRevisions.get(id) || 0}`,
     sourceScope: id => MarketCounters.counterOf(id),
     sourceScopeToken: scope => OccupationSources.recipeIndex(boardIndex).revision(scope),
-    ownCurrent: (id, input) => !shuttingDown && (id < 0 ? routeRequests.get(-id) === input
-        && (!input.native || kernel?.states.get(-id)?.state === input.sourceState)
-        : kernel?.states.get(id)?.state === input.sourceState),
+    ownCurrent: (id, input) => !shuttingDown && (id >= 0 || routeRequests.get(-id) === input)
+        && kernel?.states.get(Math.abs(id))?.state === input.sourceState,
     sameInput: (left, right) => left.mode === 'wish' || right.mode === 'wish'
         ? left.mode === right.mode && left.sourceState === right.sourceState && left.routeKey === right.routeKey
         : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
@@ -290,7 +290,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 // replaces the bot's held plan: its next request still finds it (L133).
                 rememberContext: false, caller: 'meeting_prepare', trigger: request.token });
             yield 'candidate';
-            if (economy.intentPending || economy.routePending) throw Error('trade_meeting_preparation_pending');
+            if (economy.intentPending) throw Error('trade_meeting_preparation_pending');
             const intents = invoke('GameServer/Bot/Economy/TradeIntent').project(input.state, economy.network, economy.projection,
                 id => economy.worth(id) ?? economy.price(id), 40);
             if (!intents) throw Error('trade_meeting_preparation_pending');
@@ -498,8 +498,6 @@ const occupationPlanner = new ColdOccupationPlanner({
 
         if (input.mode === 'wish') {
             if (id < 0 && routeRequests.get(-id) === input) {
-                if (!shuttingDown && !input.native) send('economy_route_result', { characterId: -id, requestId: input.requestId,
-                    key: input.routeKey, rows: Array.isArray(workshop) ? workshop : [] });
                 routeRequests.delete(-id);
                 occupationPlanner.release(id);
             }
@@ -511,11 +509,11 @@ const occupationPlanner = new ColdOccupationPlanner({
         const owner = kernel?.states.get(id);
         if (shuttingDown || owner?.state !== input.sourceState) return;
         if (meta.stale) {
-            const echo = ColdEconomyDecision.stateEcho(input.state);
-            // The same mark main's staleWorkshop sets on its copy.
+            // The same mark main's staleWorkshop sets on its copy. A near row's
+            // slot recomputes on its next post; main's copy is current by nearSeq.
             if (owner?.published && ColdEconomyDecision.current(input.state, owner.published)) owner.published.workshopStale = true;
-            send('ready', { phase: 'economy_workshop_stale', characterId: id,
-                updatedAt: Number(input.state.updatedAt || 0), echo });
+            if (input.state.phase !== 'hot') send('ready', { phase: 'economy_workshop_stale', characterId: id,
+                updatedAt: Number(input.state.updatedAt || 0), echo: ColdEconomyDecision.stateEcho(input.state) });
         } else if (input.mode === 'near' && workshop?.decision) {
             // The near bot's decision on its post: the card, and beside it the
             // mind keys the body takes and the post and raise it answers.
@@ -559,12 +557,11 @@ function occupationFor(state, timestamp, options = {}, mode = 'occupation') {
         return Promise.resolve(routeRows);
     if (mode === 'wish') {
         const previous = routeRequests.get(id);
-        if (previous?.native && previous.sourceState === sourceState && previous.routeKey === routeKey)
+        if (previous?.sourceState === sourceState && previous.routeKey === routeKey)
             return occupationPlanner.request(-id, previous);
         if (!previous && routeRequests.size >= 64) return Promise.resolve([]);
         cancelRoute(id);
-        const input = { state: EconomicTrip.frame(state), sourceState, timestamp, mode: 'wish', native: true,
-            routeKey, requestId: ++nativeRouteSequence };
+        const input = { state: EconomicTrip.frame(state), sourceState, timestamp, mode: 'wish', routeKey };
         routeRequests.set(id, input);
         return occupationPlanner.request(-id, input);
     }
@@ -592,22 +589,6 @@ function cancelRoute(characterId) {
     const id = Number(characterId);
     routeRequests.delete(id);
     occupationPlanner.cancel(-id);
-}
-function requestRoute(payload) {
-    if (shuttingDown) return;
-    const id = payload.characterId, previous = routeRequests.get(id);
-    if (previous && !previous.native && previous.requestId === payload.requestId && previous.routeKey === payload.key) return;
-    if (payload.key !== EconomicTrip.key(payload.frame)) {
-        send('economy_route_result', { characterId: id, requestId: payload.requestId, key: payload.key, rows: [] }); return;
-    }
-    if (!previous && routeRequests.size >= 64) {
-        send('economy_route_result', { characterId: id, requestId: payload.requestId, key: payload.key, rows: [] }); return;
-    }
-    cancelRoute(id);
-    const input = { state: payload.frame, sourceState: null, timestamp: Date.now(), mode: 'wish',
-        routeKey: payload.key, requestId: payload.requestId };
-    routeRequests.set(id, input);
-    occupationPlanner.request(-id, input, { awaitResult: false });
 }
 const refreshedStates = new WeakSet();
 function assetsKey(state) {
@@ -1656,7 +1637,7 @@ function startKernel(config = {}) {
     // scratch is cancelled on a newer canonical owner; it is never LRU-evicted.
     const nativeSet = kernel.states.set.bind(kernel.states), nativeDelete = kernel.states.delete.bind(kernel.states);
     const nativeClear = kernel.states.clear.bind(kernel.states);
-    kernel.states.set = (id, entry, card) => {
+    kernel.states.set = (id, entry) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
         // A new life starts from no record (activations fence the bot first),
         // so the raises applied are this life's.
@@ -1665,10 +1646,10 @@ function startKernel(config = {}) {
         // route rows of a near decision, and the next activation's raises
         // count from its session's first.
         else if (entry.state.phase !== 'hot' && (entry.nearRoute || entry.raiseSeq)) { entry.nearRoute = null; entry.raiseSeq = 0; }
-        const result = nativeSet(id, entry, card);
+        const result = nativeSet(id, entry);
         if (previous !== entry.state) {
             const route = routeRequests.get(Number(id));
-            if (route?.native && route.sourceState !== entry.state) cancelRoute(id);
+            if (route && route.sourceState !== entry.state) cancelRoute(id);
             const held = occupationPlanner.slots.get(Number(id));
             const routeKey = EconomicTrip.key(entry.state);
             const incoming = held ? { ...held.input, state: entry.state, sourceState: entry.state, routeKey,
@@ -1891,9 +1872,6 @@ async function handle(message) {
         if (replaced) occupationPlanner.recheckSources();
         break;
     }
-    case 'economy_route_request':
-        requestRoute(payload);
-        break;
     case 'clan_social_page':
         if (!kernel) break;
         for (const snapshot of payload.rows || []) {
@@ -1959,13 +1937,8 @@ async function handle(message) {
     case 'fence': {
         occupationPlanner.cancel(payload.characterId);
         cancelRoute(payload.characterId);
-        const result = kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null };
-        if (result.wishAdvisory && Protocol.validateEnvelope(Protocol.envelope('fence_ack', epoch, result, message.msgId),
-            'worker', { workerEpoch: epoch }).reason === 'message_too_large') {
-            delete result.wishAdvisory;
-            economyDiagnostics.count('card', 'drop', 'handoff_oversize');
-        }
-        send('fence_ack', result, message.msgId);
+        send('fence_ack', kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null },
+            message.msgId);
         break;
     }
     case 'pause':

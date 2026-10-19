@@ -18,9 +18,7 @@ for (const patch of [{ quoted: false }, { executable: false }, { sourceType: 'np
     { activity: 'hunting' }, { unitPrice: 300 }, { amount: 3 }, { town: 'Giran' }, { amount: 0 }]) {
     assert.equal(Choice.purchase(state, { network: { activity: { ...leaf, ...patch } } }, board), null);
 }
-for (const patch of [{ routePending: true }, { intentPending: true }]) {
-    assert.equal(Choice.purchase(state, { ...economy, ...patch }, board), null);
-}
+assert.equal(Choice.purchase(state, { ...economy, intentPending: true }, board), null);
 assert.equal(Choice.purchase({ ...state, characterId: 99 }, economy, board), null);
 assert.equal(Choice.purchase({ ...state, inventory: { 1869: { amount: 2 } } },
     { network: { activity: { ...leaf, heldAtDecision: 0 } } }, board), null,

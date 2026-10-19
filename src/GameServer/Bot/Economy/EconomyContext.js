@@ -984,14 +984,14 @@ function basics(state = {}, deps = {}) {
     return base;
 }
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
+// A route table with a row for every town (EconomicTrip.prepare).
+const fullRoute = rows => Array.isArray(rows) && rows.length === Trip.towns.length;
 function forState(state = {}, deps = {}) {
     const diagnostic = Diagnostics.active();
     const inputSequence = Number(state.stats?.decisionSeq || 0);
     if (diagnostic) Diagnostics.count('context', 'request');
     deps = resolved(state, deps);
     if (typeof deps.routeRows === 'function') deps.routeRows = deps.routeRows(state);
-    if (!deps.tripCost && !deps.routeRows && isMainThread)
-        deps.routeRows = preparedRouteRows(state) || invoke('GameServer/Bot/Population/ColdSimulationCoordinator').routeRows?.(state);
     const timestamp = Number(deps.timestamp || Date.now());
     const actorKey = deps.actorKey || `character:${Number(state.characterId || 0)}`;
     const sourceBoard = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
@@ -999,6 +999,18 @@ function forState(state = {}, deps = {}) {
     // A valid completed card survives planner-slot reuse or card eviction;
     // the same route is repriced with the current hour value, never a wallet.
     if (!deps.routeRows && held?.plan.routeKey === Trip.key(state)) deps.routeRows = held.plan.routeRows;
+    // A build never waits for its route. In the background thread a caller
+    // whose own route preparation was refused (occupationFor mode wish at its
+    // 64-request cap: the party goal query, the post-round economy ask, the
+    // gear step) gets it here, in the same call. Main builds with an unknown
+    // route instead (Die, GearPlanSelection, HealingPotionStock, ScrollStock,
+    // ShotStock: no route request from main).
+    if (!isMainThread && !deps.tripCost && !fullRoute(deps.routeRows)) {
+        deps.routeRows = Trip.prepared(state);
+        // Read live: a high share against context builds says the 64-request
+        // cap refuses too often.
+        if (diagnostic) Diagnostics.count('context', 'route', 'inline');
+    }
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
     // The one verdict on the held build (heldBuildVerdict), collecting: the
@@ -1172,8 +1184,7 @@ function forState(state = {}, deps = {}) {
     const productive = workshop?.known !== false && workshop?.incomePerHour > 0 && Number.isFinite(workshop.incomePerHour)
         && workshop.cycleHours > 0 && Number.isFinite(workshop.cycleHours);
     if (productive) { watch(workshop.productId); context.hourAdena = Math.max(context.hourAdena, workshop.incomePerHour); }
-    context.routeKey = Trip.key(state); context.routeRows = Array.isArray(deps.routeRows) && deps.routeRows.length === Trip.towns.length ? deps.routeRows : null;
-    context.routePending = !deps.tripCost && !context.routeRows;
+    context.routeKey = Trip.key(state); context.routeRows = fullRoute(deps.routeRows) ? deps.routeRows : null;
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
     const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
@@ -1434,7 +1445,7 @@ function planOf(context, base, { key, tripHour, projection = null, knowledgeEnab
         riskWeight: context.riskWeight, bestSpotId: context.bestSpotId, deathHours: context.deathHours,
         lostGearHours: context.lostGearHours, karmaHours: context.karmaHours, expectedDeathHours: context.expectedDeathHours,
         survivalReserve: context.survivalReserve, kit: base.kit, hourAdena: context.hourAdena, workshop: context.workshop,
-        routeKey: context.routeKey, routeRows: context.routeRows, routePending: context.routePending, tripHour,
+        routeKey: context.routeKey, routeRows: context.routeRows, tripHour,
         network: compactNetwork(context.network), moneyPrice: context.moneyPrice, gapHorizonHours: context.gapHorizonHours,
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
@@ -1494,7 +1505,6 @@ function view(state, plan, deps, built = {}) {
         deathHours: plan.deathHours, lostGearHours: plan.lostGearHours, karmaHours: plan.karmaHours,
         expectedDeathHours: plan.expectedDeathHours, stock, survivalReserve: plan.survivalReserve, kitCost,
         hourAdena: plan.hourAdena, workshop: plan.workshop, routeKey: plan.routeKey, routeRows: plan.routeRows,
-        routePending: plan.routePending,
         trip: built.trip || deps.tripCost || Trip.preparedReader(plan.routeRows || [], { hourAdena: plan.tripHour }),
         spotValue: built.spotValue || lazySpotValue(state, plan, deps),
         network, moneyPrice: network.moneyPrice, gapHorizonHours: plan.gapHorizonHours, watchList: plan.watchList,
@@ -1635,7 +1645,7 @@ function forGroup(group, members, deps = {}) {
         moneyPaths: sources[0].moneyPaths, riskWeight: first.riskWeight });
     const groupHunt = { ...first.hunt, perHour: contexts.reduce((sum, member) => sum + member.hunt.perHour, 0),
         expPerHour: contexts.reduce((sum, member) => sum + member.hunt.expPerHour, 0) };
-    const context = { ...first, actorKey, inputKey: key, network, routePending: contexts.some(member => member.routePending), hunt: groupHunt, groupIncomePerHour: groupHunt.perHour,
+    const context = { ...first, actorKey, inputKey: key, network, hunt: groupHunt, groupIncomePerHour: groupHunt.perHour,
         moneyPrice: network.moneyPrice,
         hourAdena: network.hourAdena, statsPacket: { wishFocus: network.focus, dormantWishes: network.dormant } };
     context.itemUsefulness = id => contexts.reduce((sum, member) => sum + member.itemUsefulness(id), 0);
@@ -1686,5 +1696,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };

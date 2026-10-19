@@ -12,7 +12,7 @@ function encode(side, line, count) {
 }
 function purchase(state, economy, board) {
     const leaf = economy?.network?.activity;
-    if (economy?.intentPending || economy?.routePending || leaf?.activity !== 'shopping'
+    if (economy?.intentPending || leaf?.activity !== 'shopping'
         || leaf.kind !== 'buy' || leaf.sourceType !== 'afk' || leaf.quoted !== true
         || leaf.executable !== true || !positive(leaf.itemId) || !positive(leaf.amount)
         || !positive(leaf.unitPrice) || !leaf.town || !board?.heads) return null;

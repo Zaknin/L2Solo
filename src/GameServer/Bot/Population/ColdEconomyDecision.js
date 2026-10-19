@@ -544,30 +544,6 @@ function readAdvisoryCard(record) {
         return card;
     } catch (_) { return null; }
 }
-function wireAdvisory(accepted) {
-    if (!accepted?.card) return null;
-    // lazy: cycle EconomyContext owns its packed read-set conversion.
-    const Economy = accepted.eventProof ? invoke('GameServer/Bot/Economy/EconomyContext') : null;
-    const eventProof = Economy ? Economy.wireEventProof(accepted.eventProof) : null;
-    if (accepted.eventProof && !eventProof) return null;
-    return { ...accepted, eventProof, card: { echo: accepted.card.echo,
-        data: Buffer.from(accepted.card.data).toString('base64') } };
-}
-function receiveAdvisory(value) {
-    if (value?.card instanceof CompactDecision && value.card.data.byteLength <= MAX_BYTES
-        && Number.isFinite(value.baseline?.at)) return value;
-    const card = readAdvisoryCard(value?.card);
-    if (!card || !Number.isSafeInteger(value.characterId) || value.characterId <= 0
-        || !Number.isSafeInteger(value.decisionSeq) || value.decisionSeq < 0
-        || !Number.isSafeInteger(value.activityLeaf) || value.activityLeaf < 0 || value.activityLeaf > 0xffffffff
-        || value.focus !== null && typeof value.focus !== 'string' || !Number.isFinite(value.baseline?.at)
-        || !Number.isFinite(value.mp) || typeof value.activity !== 'string'
-        || card.activity === null && (value.activityLeaf !== 0 || value.eventProof?.activity !== null)) return null;
-    // lazy: cycle EconomyContext owns its proof's wire form.
-    const eventProof = value.eventProof ? invoke('GameServer/Bot/Economy/EconomyContext').receiveEventProof(value.eventProof) : value.eventProof;
-    if (value.eventProof && !eventProof) return null;
-    return { ...value, card, eventProof };
-}
 function advisoryMatches(state, accepted) {
     if (!accepted || accepted.characterId !== Number(state?.characterId)) return false;
     return !Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
@@ -694,7 +670,6 @@ class ColdEconomyDecisions {
     accept(characterId, decision, committed = null, state = null) {
         const id = Number(characterId);
         if (!id) return;
-        const advice = this.byId.get(id)?.advisory;
         // One compact: the stale flag's setter copies the buffer it changes.
         const incoming = decision ? compact(decision) : null;
         const bagChanged = !!committed?.settled || !!committed?.pkDrops?.length;
@@ -721,38 +696,10 @@ class ColdEconomyDecisions {
             // level) is not served: decided() misses and main reads the
             // basics view until the next decision point.
             card.stale = bagChanged || !!state?.stats?.wishDirty;
-            if (state && advisoryMatches(state, advice)) Object.defineProperty(card, 'advisory', {
-                value: advice, configurable: true, writable: true
-            });
             this.byId.set(id, card);
         }
         else if (this.byId.has(id)) this.byId.get(id).stale = true;
         return incoming;
-    }
-
-    // The hot owner can retain advice without granting compact-card execution.
-    // Only the shared event verdict can consume this separate native view.
-    retainAdvisory(state, value) {
-        const advice = receiveAdvisory(value);
-        const id = Number(state.characterId), current = this.byId.get(id);
-        if (!advisoryPublicationHolds(state, advice, current?.advisory)) return false;
-        const card = current || compact({ echo: advice.card.echo, data: advice.card.data, stale: true });
-        Object.defineProperty(card, 'advisory', { value: advice, configurable: true, writable: true });
-        if (!current) this.byId.set(id, card);
-        return true;
-    }
-    advisoryFor(state) {
-        const advice = this.byId.get(Number(state?.characterId))?.advisory;
-        return advisoryMatches(state, advice) ? advice : null;
-    }
-    releaseAdvisory(id, expected) {
-        const card = this.byId.get(Number(id));
-        if (card && card.advisory === expected) delete card.advisory;
-    }
-    fence(id) {
-        const card = this.byId.get(Number(id));
-        if (!card?.advisory) { this.forget(id); return; }
-        card.held = false; card.stale = true;
     }
 
     // The worker's decision made on exactly this state, or held for a command.
@@ -785,10 +732,8 @@ class ColdEconomyDecisions {
     activity(state) { return this.decided(state)?.activity || null; }
     hold(id, decision) {
         if (!decision) return;
-        const advice = this.byId.get(Number(id))?.advisory;
         const card = compact(decision);
         card.held = true;
-        if (advice) Object.defineProperty(card, 'advisory', { value: advice, configurable: true, writable: true });
         this.byId.set(Number(id), card);
     }
     release(id) { const decision = this.byId.get(Number(id)); if (decision) { decision.held = false; decision.stale = true; } }
@@ -820,5 +765,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, restoreAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };
