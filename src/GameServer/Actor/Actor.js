@@ -17,6 +17,9 @@ class Actor extends ActorModel {
         this.backpack.onInventoryChange = selfId => {
             const Events = require('../Clan/ClanReviewEvents'), clanId = this.fetchClanId();
             if (Events.tracks(clanId, selfId)) Events.changed(clanId, 'member_item');
+            // An item kind entered or left the bag; stack counts never post.
+            // lazy: cycle BotLifeState loads Actor at its top.
+            invoke('GameServer/Bot/Population/BotLifeState').notifyNearFacts(this.session, 'bag');
         };
         this.attack     = new Attack();
         this.automation = new Automation();

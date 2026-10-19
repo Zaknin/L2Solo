@@ -30,7 +30,6 @@ const ColdBuffService = invoke('GameServer/Bot/Economy/ColdBuffService');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
-const { occupiedSpotId } = require('./SpotOccupancyIndex');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
@@ -123,16 +122,6 @@ class ColdSimulationCoordinator {
             }
         });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
-            // A near bot's spot reaches the worker's "who stands here" index
-            // (kernel.occupancy, read by the room check at arrival) when it
-            // changes; a far bot's state goes there with every step. Here
-            // rather than in LifeStateCache.set: this is that write's own
-            // publication, and the coordinator lives on main only.
-            if (packet.kind === 'put' && packet.state && packet.state.phase !== 'cold'
-                && occupiedSpotId(packet.previousState || {}) !== occupiedSpotId(packet.state)) {
-                // Dropped while the worker is not ready: its full snapshot at ready reads every state then.
-                this.markDirty(packet.state, { reason: 'near_spot' });
-            }
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
             this.economyRoutes.forget(packet.characterId);

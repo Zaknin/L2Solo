@@ -110,6 +110,43 @@ function notifyColdSnapshot(state, reason = 'state_changed', options = {}) {
     handle.unref?.();
 }
 
+// A near bot's body moved a fact (reason: bag, equip, level, death, revive,
+// near_spot, activated): its row goes to its slot in the worker, whose one fact
+// function decides whether that is an event. A delivery, not a save: neither
+// the cache nor the database is written. The row is built on the next turn, so
+// it reads the body after the change; several changes in one turn stay one
+// queue entry per bot. The far poster's gate above stays for far bots.
+function notifyNearFacts(session, reason) {
+    if (!session?.accountId?.startsWith?.('bot_') || session.arenaEphemeral === true) return;
+    const handle = setImmediate(() => {
+        try {
+            const actor = session.actor;
+            if (!actor) return;
+            const current = cache.get(Number(actor.fetchId()));
+            if (current?.phase !== 'hot') return;
+            const row = mergeSessionIntoLifeState(session, session.coldLifeState || current, 'hot', reason,
+                { physicalLocation: true });
+            // The cached row owns the revision (the handoff moved it);
+            // session.coldLifeState may lag it.
+            row.simulation = current.simulation;
+            // The spot the bot was given, as a far traveler counts at its
+            // travel spot; loc stays physical.
+            row.spotId = session.currentSpot?.id ?? row.spotId;
+            row.updatedAt = now();
+            // Not saved: the number of this post and the raise it carries.
+            session.nearSeq = Number(session.nearSeq || 0) + 1;
+            row.nearSeq = session.nearSeq;
+            if (session.nearRaise) row.raise = { ...session.nearRaise };
+            // lazy: cycle the coordinator requires this module at its top.
+            invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty(row,
+                { reason, critical: isCriticalSnapshotReason(reason, row), near: true });
+        } catch (error) {
+            utils.infoWarn('BotLife', 'near fact %s post failed: %s', reason, error.message);
+        }
+    });
+    handle.unref?.();
+}
+
 function now() {
     return Date.now();
 }
@@ -1706,6 +1743,8 @@ function reconcilePersistedLoadouts() {
 }
 
 const BotLifeState = {
+    notifyNearFacts,
+
     // Boot only: { startedAt, downtimeMs } of this restart, measured once (L136).
     bootPause() {
         return measureBootPause();
@@ -1968,6 +2007,9 @@ const BotLifeState = {
             cache.set(characterId, snapshot);
             setSessionSnapshotsPhase(session, 'hot');
             notifyMarketReviewState(snapshot, current);
+            // The kernel's fence removed the far record: this post gives the
+            // near bot its slot back at once.
+            notifyNearFacts(session, 'activated');
             return snapshot;
         }).catch((err) => {
             utils.infoWarn('BotLife', 'failed to mark %s hot: %s', row.characterName, err.message);
