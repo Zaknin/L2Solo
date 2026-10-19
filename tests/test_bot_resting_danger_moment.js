@@ -48,9 +48,9 @@ function build({ potions = 0, mobHp = 10, mobPAtk = 1, economy = true } = {}) {
         accountId: 'bot_resting_moment', actor: bot, plan: 'resting', recoveryLocked: true,
         incomingThreatId: mob.fetchId(), incomingThreatAt: Date.now(), dataSendToOthers() {}
     };
-    // The decision the body holds (DecisionEvents.held); without one the
-    // price of death is unknown.
-    session.heldEconomy = economy ? { deathHours: 0.5, riskWeight: 1.5, moneyPrice: 1 / 10000, network: { activity: null } }
+    // The decision the body received (DecisionEvents.receive: decided);
+    // without one the price of death is unknown.
+    session.heldEconomy = economy ? { decided: true, deathHours: 0.5, riskWeight: 1.5, moneyPrice: 1 / 10000, network: { activity: null } }
         : { deathHours: NaN, network: { activity: null } };
     World.user = { sessions: [session] };
     World.npc = { spawns: [mob] };
