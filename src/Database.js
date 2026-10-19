@@ -1,5 +1,6 @@
 const ItemTemplateIndex = require('./GameServer/Item/ItemTemplateIndex');
 const BeginnerShots = require('./GameServer/Items/C4BeginnerShots');
+const InventoryLimits = require('./GameServer/Inventory/InventoryLimits');
 const fs = require('fs');
 const DiagnosticConfig = require('./GameServer/Bot/Population/PopulationConfig');
 const path = require('path');
@@ -7085,6 +7086,42 @@ const Database = {
     },
     deleteItems(characterId) {
         return withCharacterFlush(characterId, () => remove('items', 'characterId = ?', [characterId], 'item:delete-all'));
+    },
+    sellItemsToNpc(characterId, lines, validate) {
+        const seen = new Set();
+        const entries = Array.isArray(lines) ? lines.map(line => ({ ...line })) : [];
+        if (!Number.isSafeInteger(characterId) || characterId < 1 || !entries.length || entries.length > InventoryLimits.MAX_CAPACITY
+            || typeof validate !== 'function'
+            || entries.some(line => !Number.isSafeInteger(line.objectId) || line.objectId < 1
+                || seen.has(line.objectId) || !seen.add(line.objectId)
+                || !Number.isSafeInteger(line.amount) || line.amount < 1
+                || !Number.isSafeInteger(line.price) || line.price < 0)) {
+            return Promise.reject(Error('invalid_npc_sale'));
+        }
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            validate();
+            let payout = 0;
+            const sold = entries.map(line => {
+                const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [line.objectId, characterId]);
+                if (!row || Number(row.selfId) !== line.selfId || row.equipped
+                    || Number(row.selfId) === 57 || Number(row.amount) < line.amount
+                    || Number(row.amount) !== line.expectedAmount) throw Error('npc_sale_item_changed');
+                payout += line.price * line.amount;
+                if (!Number.isSafeInteger(payout) || payout < 0) throw Error('npc_sale_payout_overflow');
+                return { objectId: line.objectId, amount: Number(row.amount) - line.amount };
+            });
+            const balance = afkTradeAdenaRowsUnsafe(characterId).reduce((sum, row) => sum + Number(row.amount), 0);
+            if (!Number.isSafeInteger(balance + payout) || balance + payout > 0x7fffffff) throw Error('npc_sale_adena_overflow');
+            for (const item of sold) {
+                const changed = item.amount
+                    ? write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [item.amount, item.objectId, characterId])
+                    : write('DELETE FROM items WHERE id = ? AND characterId = ?', [item.objectId, characterId]);
+                if (changed.affectedRows !== 1) throw Error('npc_sale_item_changed');
+            }
+            const adenaId = afkTradeCreditAdenaUnsafe(characterId, payout);
+            const adena = adenaId ? one('SELECT id, amount FROM items WHERE id = ? AND characterId = ?', [adenaId, characterId]) : null;
+            return { sold, adena };
+        }, 'npc-shop:sell'));
     },
     fetchWarehouseItems(characterId) {
         return select('warehouse_items', ['*'], 'characterId = ? AND amount > 0', [characterId], 'warehouse:list');

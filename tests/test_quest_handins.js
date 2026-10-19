@@ -122,7 +122,9 @@ async function main() {
     sellRequest.writeInt32LE(bezoar.fetchId(), 9);
     sellRequest.writeInt32LE(1160, 13);
     sellRequest.writeInt32LE(13, 17);
+    const packetsBeforeSale = hunt.packets.length;
     await invoke('GameServer/Network/Request/Sell')(hunt, sellRequest);
+    assert(hunt.packets.slice(packetsBeforeSale).some(packet => packet[0] === 0x25), 'protected quest item sales receive ActionFailed');
     invoke('GameServer/World/Generics/NpcBypasses/SellJunk')(hunt);
     assert.equal(count(hunt, 1160), 13);
     assert.equal(count(hunt, 57), 0);
