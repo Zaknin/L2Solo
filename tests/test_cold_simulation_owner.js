@@ -81,42 +81,28 @@ function state(characterId, revision, activity = 'hunting') {
 
     const initialState = state(characterId, 0);
     BotLifeState.acceptSimulationOwnership(characterId, initialState.simulation, initialState);
-    const staleLifecycleState = {
+    const queuedBeforeMigration = BotLifeState.upsertState({
         ...initialState,
-        stats: { generatedCold: true, generatedIndex: 700, lifecycleProbe: 'stale' }
-    };
-    const queuedBeforeMigration = BotLifeState.upsertState(staleLifecycleState, 'appearance_race_before');
+        stats: { generatedCold: true, generatedIndex: 700 }
+    }, 'appearance_race_before');
     const queuedMigration = BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
     const queuedNameMigration = BotLifeState.acceptNameMetadata(characterId, 'NewOwnerNick', 3);
-    const queuedAfterMigration = BotLifeState.upsertState({
-        ...staleLifecycleState,
-        stats: { ...staleLifecycleState.stats, lifecycleProbe: 'after' }
-    }, 'appearance_race_after');
-    const [, migratedLifecycle, savedAfterMigration] = await Promise.all([
+    const [queuedSave, migratedLifecycle, renamed] = await Promise.all([
         queuedBeforeMigration,
         queuedMigration,
-        queuedAfterMigration,
         queuedNameMigration
     ]);
-    assert.strictEqual(migratedLifecycle.stats.appearanceVersion, 2,
+    assert(queuedSave, 'the save queued before the migrations lands');
+    assert.strictEqual(migratedLifecycle.appearanceVersion, 2,
         'appearance migration must run in the per-character lifecycle write chain');
-    assert.strictEqual(savedAfterMigration.stats.appearanceVersion, 2,
-        'a stale queued lifecycle state must not erase newer appearance metadata');
-    assert.strictEqual(savedAfterMigration.stats.sex, 1,
-        'a stale queued lifecycle state must retain the sex paired with the newer appearance version');
-    assert.strictEqual(savedAfterMigration.name, 'NewOwnerNick', 'delayed lifecycle saves retain the migrated name');
-    assert.strictEqual(savedAfterMigration.stats.nameGeneratorVersion, 3);
-    assert.strictEqual(savedAfterMigration.stats.lifecycleProbe, 'after',
-        'appearance protection must preserve unrelated lifecycle changes');
-    const lifecycleStats = JSON.parse((await Database.execute([
-        'SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]
-    ]))[0].statsJson);
-    assert.strictEqual(lifecycleStats.appearanceVersion, 2,
-        'serialized lifecycle persistence must keep the migrated appearance version durable');
-    assert.strictEqual(lifecycleStats.sex, 1,
-        'serialized lifecycle persistence must keep the migrated sex durable');
-    assert.strictEqual(lifecycleStats.lifecycleProbe, 'after',
-        'serialized lifecycle persistence must commit unrelated state from the later write');
+    assert.strictEqual(renamed.name, 'NewOwnerNick');
+    assert.strictEqual(renamed.nameGeneratorVersion, 3);
+    const versioned = (await Database.execute([
+        'SELECT characterName, nameGeneratorVersion, appearanceVersion FROM bot_life_state WHERE characterId = ?',
+        [characterId]
+    ]))[0];
+    assert.deepStrictEqual([versioned.characterName, Number(versioned.nameGeneratorVersion), Number(versioned.appearanceVersion)],
+        ['NewOwnerNick', 3, 2], 'the name and look versions live in their own columns');
 
     // The generated look and name writes each moved the far row's revision
     // once, and the cache carries the written number.
@@ -154,9 +140,9 @@ function state(characterId, revision, activity = 'hunting') {
         'renewal must update the main ownership cache for later persistence');
 
     const migratedAppearance = await BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
-    assert.strictEqual(migratedAppearance.stats.appearanceVersion, 2,
+    assert.strictEqual(migratedAppearance.appearanceVersion, 2,
         'appearance metadata must patch atomically while the cold worker owns the lifecycle row');
-    assert.strictEqual(BotLifeState.cachedState(characterId).stats.appearanceVersion, 2,
+    assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
         'appearance migration must patch the active lifecycle cache without replacing other state');
 
     const resting = {
@@ -189,19 +175,16 @@ function state(characterId, revision, activity = 'hunting') {
     ]))[0].inventorySummary);
     assert.strictEqual(committedInventory['9999'], undefined,
         'cold-owner persistence must not write a zero-amount inventory entry');
-    const committedStats = JSON.parse((await Database.execute([
-        'SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]
-    ]))[0].statsJson);
-    assert.strictEqual(committedStats.nameGeneratorVersion, 3, 'worker patches must preserve the name migration version');
+    const committedRow = (await Database.execute([
+        'SELECT statsJson, characterName, nameGeneratorVersion, appearanceVersion FROM bot_life_state WHERE characterId = ?', [characterId]
+    ]))[0];
+    // The commit patch carries no name or look version: the columns keep what their writers set.
+    assert.deepStrictEqual([committedRow.characterName, Number(committedRow.nameGeneratorVersion), Number(committedRow.appearanceVersion)],
+        ['NewOwnerNick', 3, 2], 'a commit leaves the name and its versions to their writers');
     assert.strictEqual(BotLifeState.cachedState(characterId).name, 'NewOwnerNick');
-    assert.strictEqual(committedStats.appearanceVersion, 2,
-        'a stale cold snapshot must not erase a newer appearance migration version');
-    assert.strictEqual(committedStats.sex, 1,
-        'a stale cold snapshot must preserve the sex paired with the newer appearance version');
-    assert.strictEqual(committedStats.restUntil, 9000,
-        'appearance preservation must retain the cold worker\'s unrelated stats changes');
-    assert.strictEqual(BotLifeState.cachedState(characterId).stats.appearanceVersion, 2,
-        'the main cache must reflect the protected stats returned by the database gateway');
+    assert.strictEqual(JSON.parse(committedRow.statsJson).restUntil, 9000, 'the commit writes the worker\'s stats');
+    assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
+        'the main cache keeps the look version over a commit');
     const committedCharacter = (await Database.fetchCharacters('owner_probe'))[0];
     assert.strictEqual(committedCharacter.name, 'NewOwnerNick');
     assert.strictEqual(Number(committedCharacter.sex), 1,

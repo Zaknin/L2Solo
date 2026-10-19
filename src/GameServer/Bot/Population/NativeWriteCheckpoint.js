@@ -4,7 +4,7 @@ const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('
 const columns = Object.freeze(['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
     'simulationLeaseId', 'activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt']);
 const timing = ['activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt'];
-// The bound lifecycle statement is the native 29-column BotLifeState.save ROW.
+// The bound lifecycle statement is the native 31-column BotLifeState.save ROW.
 // Ownership fields remain unchanged in its UPDATE and come from the private proof.
 const rowParameters = Object.freeze({ characterId: 0, activity: 10, phase: 11,
     activityStartedAt: 12, nextResolveAt: 13, lastResolvedAt: 14, lastHotAt: 15, updatedAt: 28 });
