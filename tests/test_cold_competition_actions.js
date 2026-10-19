@@ -101,7 +101,7 @@ async function run() {
         limitsFor: () => ({ maxSize: 5, minSize: 2, levelRange: 4 }), clanReserved: () => false, commit };
     const recruitEvent = (solo, member) => ({ ...event(solo, member, 'offer_party'),
         peer: { ...event(solo, member).peer, partyId: 'competition-party',
-            partyUpdatedAt: Party.find('competition-party').updatedAt, size: Party.find('competition-party').memberIds.length } });
+            partyRevision: Party.find('competition-party').revision, size: Party.find('competition-party').memberIds.length } });
     const join = recruitEvent(7, 3);
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 4]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [4]]))[0]);

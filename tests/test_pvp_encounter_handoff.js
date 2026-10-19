@@ -50,7 +50,7 @@ const base = { life: Life, owner: Owner, memory: Memory, parties: Parties, now: 
     pvpEnabled: () => true, incrementalPvp: true, onEncounter: Runtime.register, waitMs: 15000, cooldownMs: 600000, rng: () => 0.5 };
 function event(a, b, key = `handoff:${a}:${b}`) {
     const p = id => { const s = state(id), party = Parties.find(s.party?.partyId); return { id,
-        partyId: party?.partyId || null, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1,
+        partyId: party?.partyId || null, partyRevision: party?.revision, size: party?.memberIds.length || 1,
         revision: s.simulation.revision, memoryRevision: Memory.snapshot(id).revision }; };
     // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
     return { key, at: clock, pressure: 3, spotId: 'test', npcId: 10, actor: p(a), peer: p(b), action: 'contest', pvpIntent: true, willing: [true, true] };

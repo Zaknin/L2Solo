@@ -36,7 +36,7 @@ function event(a, b) {
     const participant = id => {
         const party = Party.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: party?.partyId, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1 };
+            partyId: party?.partyId, partyRevision: party?.revision, size: party?.memberIds.length || 1 };
     };
     return { key: `competition:${a}:${b}`, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest',
         actor: participant(a), peer: participant(b) };
@@ -176,7 +176,7 @@ async function run() {
         if (detail === 'member_competition_wait') assert.strictEqual(failure.rejectionContext.expired, true);
     }
     for (const [detail, patch] of [
-        ['party_revision_changed', { updatedAt: Party.find('party-34').updatedAt + 1 }],
+        ['party_revision_changed', { revision: Party.find('party-34').revision + 1 }],
         ['party_travelling', { stats: { objective: { npcId: 10 }, travel: {} } }],
         ['party_target_changed', { stats: { objective: { npcId: 11 } } }],
         ['party_competition_wait', { stats: { objective: { npcId: 10 }, coldCompetition: { wait: { until: at + 1 } } } }],
@@ -249,7 +249,7 @@ async function run() {
     await createParty([53, 54]);
     const staleForecast = forecast(53, 55), savedForecast = JSON.stringify(staleForecast);
     const beforeSave = Party.find('party-53');
-    await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1, revision=revision+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
+    await Database.execute(['UPDATE bot_background_parties SET revision=revision+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
     Party.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['party-53']]))[0]);
     await Database.execute(['UPDATE bot_life_state SET hp=99,simulationRevision=simulationRevision+1 WHERE characterId=53', []]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=53', []]))[0]);

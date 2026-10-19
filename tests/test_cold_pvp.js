@@ -35,7 +35,7 @@ function event(a, b, key = `cold-pvp:${a}:${b}`) {
     const participant = id => {
         const p = Parties.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: p?.partyId, partyUpdatedAt: p?.updatedAt, size: p?.memberIds.length || 1 };
+            partyId: p?.partyId, partyRevision: p?.revision, size: p?.memberIds.length || 1 };
     };
     // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
     return { key, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest', pvpIntent: true, willing: [true, true],

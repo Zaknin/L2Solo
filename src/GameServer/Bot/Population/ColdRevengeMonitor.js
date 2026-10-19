@@ -38,7 +38,7 @@ class ColdRevengeMonitor {
         const identity = s => ({ id: s.characterId, clanId: Number(s.stats?.clanId || 0), partyId: partyId(s) });
         const participant = e => ({ id: e.state.characterId, name: e.state.name, partyId: partyId(e.state),
             size: this.leaderParty(e.state.characterId)?.memberIds?.length || 1,
-            partyUpdatedAt: this.leaderParty(e.state.characterId)?.updatedAt,
+            partyRevision: this.leaderParty(e.state.characterId)?.revision,
             revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.revision(e.state.characterId) });
         const examined = Math.min(MAX_ACTORS, actors.length);
         Object.assign(this.report, { at, active: actors.length, sampledActors: examined, overflow: false });

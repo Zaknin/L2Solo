@@ -9,7 +9,7 @@ async function recruit({ participants, event, parties, life, memory, composition
     const forecast = [event.actor, event.peer].find(p => p.id === representative.characterId);
     const party = parties.find(partyId);
     if (!party || party.status !== 'active' || party.spotId !== event.spotId
-        || forecast?.partyId !== partyId || forecast.partyUpdatedAt !== party.updatedAt
+        || forecast?.partyId !== partyId || forecast.partyRevision !== party.revision
         || forecast.size !== party.memberIds.length) return { rejected: 'party_changed' };
     const objective = party.stats?.objective;
     if (objective?.clanGoalKey || objective?.clanOperation || participants.some(clanReserved)) return { rejected: 'clan_objective' };

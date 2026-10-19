@@ -42,7 +42,7 @@ function event(a, b, action = 'avoid') {
     const participant = id => {
         const party = Party.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: party?.partyId, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1 };
+            partyId: party?.partyId, partyRevision: party?.revision, size: party?.memberIds.length || 1 };
     };
     return { key: `retreat:${a}:${b}`, at, pressure: 3, spotId: 'test', npcId: 10, action, actor: participant(a), peer: participant(b) };
 }

@@ -20,7 +20,7 @@ function refresh(event, { life, parties, memory, personaFor }, timestamp) {
         if (members.some(s => !s)) return { reason: 'party_roster_unavailable' };
         sides.push({ state, members, participant: { ...old, partyId, size: members.length,
             level: members.reduce((sum, s) => sum + Number(s.level || 1), 0) / members.length,
-            partyUpdatedAt: party?.updatedAt, revision: Number(state.simulation?.revision || 0) } });
+            partyRevision: party?.revision, revision: Number(state.simulation?.revision || 0) } });
     }
     if (sides[0].members.some(a => sides[1].members.some(b => a.characterId === b.characterId))) {
         return { reason: 'overlapping_sides' };
