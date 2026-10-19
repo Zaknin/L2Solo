@@ -21,7 +21,7 @@ console.log('Actual Registry clock positive control: pass');
         const rows = [];
         for (let characterId = 1; characterId <= 140; characterId++) {
             const state = { characterId, phase: 'cold', activity: 'resting', updatedAt: 100, stats: {}, inventory: {},
-                simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 },
+                simulation: { revision: 1 },
                 timing: { activityStartedAt: 10, nextResolveAt: now + 10000000, lastResolvedAt: 50, lastHotAt: 0 } };
             states.set(characterId, state);
             rows.push(Protocol.safetyCheckpoint(state));

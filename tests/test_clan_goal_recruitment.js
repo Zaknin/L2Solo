@@ -26,7 +26,7 @@ const base = 830000;
 const heal = [{ selfId: 1015, level: 1 }], buff = [{ selfId: 1068, level: 1 }];
 function member(id, classId, skills = []) {
     const value = { characterId: id, classId, clanId: 0, level: 50, phase: 'cold', activity: 'hunting', spotId: 'ordinary:fixture',
-        partyId: null, simulationOwner: 'legacy_main', simulationRevision: 0, inventory: {}, accountName: 'bot_pop_recruitment',
+        partyId: null, simulationRevision: 0, inventory: {}, accountName: 'bot_pop_recruitment',
         stats: { generatedCold: true, classId, partyHistory: { peer: { runs: 4 } }, coldCombat: {
             version: Combat.PROFILE_VERSION, classId, skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } };
     const role = Gear.roleFor(value);
@@ -376,7 +376,7 @@ async function main() {
             console.log('Clan recruitment critic fixes: same-key cleanup, min9/generation/roster delivery, started preservation and scalar source checks passed');
             return;
         }
-        let prospects = await Life.statesByIds([healer.characterId, damage.characterId], { unassigned: true, ownerId: 'legacy_main' });
+        let prospects = await Life.statesByIds([healer.characterId, damage.characterId], { unassigned: true });
         await pureAndWorker(clan, prospects);
         await boundedContinuation(clan); clan = await Goals.clanProjectionById(clan.id);
         let captured = planning(clan, prospects);
@@ -439,7 +439,7 @@ async function main() {
         for (const m of current.members) assert(!m.stats.equipmentPlan && !m.stats.clanPartyObjective, 'waiting applies no plan, pay or party objective');
         assert.equal((await query("SELECT COUNT(*) AS n FROM clan_operation_members WHERE status='active'"))[0].n, 0);
         await query('UPDATE characters SET clanJoinExpiryTime=0 WHERE id=?', [healer.characterId]);
-        prospects = await Life.statesByIds([healer.characterId], { unassigned: true, ownerId: 'legacy_main' });
+        prospects = await Life.statesByIds([healer.characterId], { unassigned: true });
         const joining = await Equipment.resolveClan(current, current.state.productionGoal,
             { ownerSection: 'productionGoal', planning: planning(current, prospects) });
         assert.equal(joining.joined.accepted, healer.characterId);

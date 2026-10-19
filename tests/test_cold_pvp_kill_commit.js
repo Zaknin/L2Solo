@@ -32,7 +32,7 @@ async function createProbe(index) {
         vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
         timing: { activityStartedAt: 100, nextResolveAt: 1000, lastResolvedAt: 500, lastHotAt: null },
         party: { partyId: null }, stats: {}, inventory: {},
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: 0, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: 0 },
         updatedAt: 1000
     };
     await Database.execute([

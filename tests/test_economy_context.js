@@ -600,7 +600,7 @@ async function run() {
     const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
     const shopRecipe = Object.values(invoke('GameServer/Items/C4RecipeItems').loadRecipeItems())
         .find(row => row.type === 'dwarven' && Number(row.mpCost) > 0);
-    const shopOwner = { ...base, characterId: 1801, simulation: { ownerId: 'legacy_main', revision: 1 },
+    const shopOwner = { ...base, characterId: 1801, simulation: { revision: 1 },
         vitals: { ...base.vitals, mp: shopRecipe.mpCost * 5 },
         stats: { ...base.stats, workshop: { entries: [{ recipeId: shopRecipe.recipeId, price: 100 }] } } };
     const shopSaved = changes => Workshop.register({ ...shopOwner, ...changes,

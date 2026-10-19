@@ -355,10 +355,7 @@ async function run() {
         activationOrder.push(`handoff:${state.characterId}`);
         return {
             ok: true,
-            ownerId: ColdSimulationOwner.LEGACY_OWNER_ID,
-            revision: Number(state.simulation?.revision || 0),
-            leaseId: null,
-            leaseUntil: 0
+            revision: Number(state.simulation?.revision || 0)
         };
     };
     const groupedState = {

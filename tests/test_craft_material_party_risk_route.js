@@ -22,7 +22,7 @@ const members = [1, 2, 3].map(characterId => ({ characterId, name: `Material${ch
     inventory: characterId <= 2 ? { [characterId === 1 ? 4108 : 4104]: { amount: characterId } } : {}, adena: 100000,
     party: { partyId: 'material-risk', leaderId: 1, role: characterId === 3 ? 'healer' : characterId === 2 ? 'spoiler' : 'dps' },
     vitals: { hp: 2000, maxHp: 2000, mp: 1000, maxMp: 1000 },
-    simulation: { ownerId: 'legacy_main', revision: 1 },
+    simulation: { revision: 1 },
     timing: { lastResolvedAt: at - 10000, nextResolveAt: at },
     stats: { classId: characterId === 3 ? 16 : characterId === 2 ? 54 : 8,
         role: characterId === 3 ? 'healer' : characterId === 2 ? 'spoiler' : 'dps',

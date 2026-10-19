@@ -43,7 +43,7 @@ function hotActor(state) {
         vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
         timing: {}, party: {}, inventory: {},
         stats: { classId: 0, classProgressionLevel: 20, classProgressionClassId: 0, karma: 0, deaths: 0 },
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: 0 }, updatedAt: 1000
+        simulation: { revision: 0 }, updatedAt: 1000
     };
     let timestamp = 2000;
     async function resolve(patch, debug = {}) {

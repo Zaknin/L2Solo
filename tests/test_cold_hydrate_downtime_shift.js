@@ -38,8 +38,8 @@ async function bot(id, name, nextResolveAt, updatedAt) {
     await Native.character(Database, id, name, account, loc);
     await Database.execute([`INSERT INTO bot_life_state (characterId,accountName,characterName,level,
         phase,activity,currentRegion,locX,locY,locZ,hp,maxHp,mp,maxMp,inventorySummary,statsJson,
-        activityStartedAt,nextResolveAt,lastResolvedAt,updatedAt,simulationOwner,simulationRevision)
-        VALUES (?,?,?,18,'cold','hunting','Elven Ruins',?,?,?,100,100,100,100,'{}',?,?,?,?,?,'legacy_main',3)`,
+        activityStartedAt,nextResolveAt,lastResolvedAt,updatedAt,simulationRevision)
+        VALUES (?,?,?,18,'cold','hunting','Elven Ruins',?,?,?,100,100,100,100,'{}',?,?,?,?,?,3)`,
         [id, account, name, loc.locX, loc.locY, loc.locZ, stats,
             updatedAt - 1000, nextResolveAt, updatedAt - 1000, updatedAt]]);
 }

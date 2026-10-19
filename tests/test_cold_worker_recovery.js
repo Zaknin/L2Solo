@@ -35,8 +35,6 @@ function wait(ms) {
 }
 
 (async () => {
-    const originalRecover = Owner.recoverStartupLeases;
-    Owner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
     try {
         const coordinator = new ColdSimulationCoordinator({ WorkerClass: FakeWorker, workerPath: 'fake-worker.js' });
         coordinator.started = true;
@@ -112,7 +110,6 @@ function wait(ms) {
         coordinator.restartTimer = null;
         console.log('Cold worker epoch fencing, watchdog, and restart checks passed');
     } finally {
-        Owner.recoverStartupLeases = originalRecover;
     }
 })().catch((error) => {
     console.error(error);

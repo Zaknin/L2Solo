@@ -18,7 +18,6 @@ const originalFetchMarketCounts = Database.fetchBotMarketCounts;
 const DataCache = invoke('GameServer/DataCache');
 const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
-const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 
 DataCache.init();
@@ -42,13 +41,11 @@ const originalFetchSkill = Database.fetchSkill;
 const originalSetSkill = Database.setSkill;
 const originalUpdateSkillLevel = Database.updateSkillLevel;
 const originalUpdateCharacterClassId = Database.updateCharacterClassId;
-const originalRecoverStartupLeases = ColdSimulationOwner.recoverStartupLeases;
 const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 const statements = [];
 const classUpdates = [];
 
 try {
-    ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
     Database.reconcileBotClanMembership = () => Promise.resolve({ repairedMembers: 0, repairedParties: 0 });
     Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
     Database.fetchBotMarketCounts = async () => [];
@@ -301,7 +298,6 @@ try {
             assert(save.sql.includes('nextResolveAt = excluded.nextResolveAt'), 'persisted cold resolve timing must advance after every tick');
             assert(save.sql.includes('lastResolvedAt = excluded.lastResolvedAt'), 'persisted cold resolve history must survive an upsert');
             assert(save.sql.includes('inventorySummary = excluded.inventorySummary'), 'background drop rewards must persist after an upsert');
-            assert(save.sql.includes("WHERE bot_life_state.simulationOwner = 'legacy_main'"), 'legacy saves must not overwrite a cold owner lease');
         }).then(() => BotLifeState.migrateLegacyClassProgression(1).then((migrated) => {
                 assert.strictEqual(migrated.length, 1, 'legacy cold bots without progression markers must be migrated');
                 const classUpdate = classUpdates.at(-1);
@@ -358,7 +354,6 @@ try {
                         const populationRank = candidates.sql.indexOf('party_spots.candidateCount DESC');
                         assert(requiredRank >= 0 && requiredRank < preferredRank, 'required requests must rank ahead of preferred requests');
                         assert(preferredRank < generalRank && generalRank < populationRank, 'all open requests must rank ahead of crowded general candidate grounds');
-                        assert(candidates.sql.includes("simulationOwner = 'legacy_main'"), 'party spot counts must exclude cold-worker-owned rows');
                         assert(candidates.sql.includes('partyObjectiveSpot AS candidateSpot'), 'party formation must use the indexed objective projection');
                         assert(!candidates.sql.includes('json_extract'), 'party formation must not parse full JSON state while ranking candidates');
                         assert(candidates.sql.indexOf('LIMIT 5') < candidates.sql.indexOf('SELECT states.*'), 'party formation must rank lightweight ids before loading full state blobs');
@@ -371,20 +366,18 @@ try {
                 return BotLifeState.coldPartyCandidateCount(true).then(() => {
                     const count = statements.find((entry) => entry.sql.includes('COUNT(*) AS candidateCount'));
                     assert(count, 'party capacity planning must be able to measure the full wait backlog');
-                    assert(count.sql.includes("simulationOwner = 'legacy_main'"), 'party capacity counts must exclude cold-worker-owned rows');
                     return BotLifeState.coldPartyCandidatesForSpots(['cruma', 'dion'], 3, true);
                 }).then(() => {
                     const fairCandidates = statements.find((entry) => entry.sql.includes('ROW_NUMBER() OVER') && entry.sql.includes('PARTITION BY'));
                     assert(fairCandidates, 'party recruitment must load a bounded fair sample per active spot');
-                    assert(fairCandidates.sql.includes("simulationOwner = 'legacy_main'"), 'party recruitment must exclude cold-worker-owned rows');
                     assert(fairCandidates.sql.includes('PARTITION BY partyObjectiveSpot'), 'party recruitment must rank the indexed objective projection');
                     assert(!fairCandidates.sql.includes('json_extract'), 'party recruitment must not parse JSON while ranking candidates');
                     const clearPartyStart = statements.length;
                     return BotLifeState.clearParty('bgp_cleanup_probe', 'ownership_aware_cleanup').then(() => {
                         const clearPartyQuery = statements.slice(clearPartyStart)
-                            .find((entry) => entry.sql.includes('AND partyId = ?') && entry.sql.includes('simulationOwner = ?'));
-                        assert(clearPartyQuery, 'party cleanup must query only rows owned by the main lifecycle');
-                        assert.deepStrictEqual(clearPartyQuery.params, ['bgp_cleanup_probe', 'legacy_main']);
+                            .find((entry) => entry.sql.includes('AND partyId = ?'));
+                        assert(clearPartyQuery, 'party cleanup must query the far members of the party');
+                        assert.deepStrictEqual(clearPartyQuery.params, ['bgp_cleanup_probe']);
                     });
                 }).then(() => {
                     const member = {
@@ -567,7 +560,6 @@ try {
         Database.setSkill = originalSetSkill;
         Database.updateSkillLevel = originalUpdateSkillLevel;
         Database.updateCharacterClassId = originalUpdateCharacterClassId;
-        ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
         Database.reconcileBotClanMembership = originalReconcileClanMembership;
         Database.reconcileBotClanGoals = originalReconcileClanGoals;
         Database.fetchBotMarketCounts = originalFetchMarketCounts;
@@ -589,7 +581,6 @@ try {
     Database.setSkill = originalSetSkill;
     Database.updateSkillLevel = originalUpdateSkillLevel;
     Database.updateCharacterClassId = originalUpdateCharacterClassId;
-    ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
     Database.reconcileBotClanMembership = originalReconcileClanMembership;
     Database.reconcileBotClanGoals = originalReconcileClanGoals;
     Database.fetchBotMarketCounts = originalFetchMarketCounts;
