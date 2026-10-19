@@ -99,6 +99,7 @@ async function bodyMoney(id) {
         const saved = await row(cold);
         assert.equal(saved.activity, 'trading', 'the main save writes the body');
         assert.deepEqual(JSON.parse(saved.mindJson).money, NEW_MONEY, 'the main save keeps the far row\'s mind');
+        assert.deepEqual(Life.cachedState(cold).stats.money, NEW_MONEY, 'main\'s cache takes the far row\'s mind back');
 
         // (4) The clan goal member repair writes the body and leaves the mind.
         const member = await create('cold', { money: NEW_MONEY });

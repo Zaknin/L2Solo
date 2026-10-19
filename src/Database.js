@@ -4278,8 +4278,9 @@ const Database = {
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
                 // The upsert moves a far row's revision (MOVE_FAR_REVISION) and
-                // hands back the row's own, the number the caller's cache takes.
-                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
+                // hands back the row's own, the number the caller's cache takes;
+                // the mind comes back too: over a far row it is the worker's.
+                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson, mindJson` : 'simulationRevision, statsJson, mindJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
                     // BotLifeState.save supplies its native 32-column ROW.
@@ -4301,7 +4302,7 @@ const Database = {
                 const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
-                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, simulationRevision: row?.simulationRevision };
+                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, mindJson: row?.mindJson, simulationRevision: row?.simulationRevision };
             } catch (error) {
                 reportBotLifeSaveFailure(phase, error, statement);
                 throw error;

@@ -902,7 +902,8 @@ function save(row, options = {}) {
             -- (old phase cold) the worker is the mind's one writer: a main
             -- save there (npc liquidation, a purchase, leaving a party) keeps
             -- the row's mind; the hot->cold hand-off (old phase hot) still
-            -- carries main's.
+            -- carries main's. RETURNING hands the kept mind back, so the
+            -- cache and the snapshot the worker receives carry the row's.
             mindJson = CASE WHEN ${TABLE}.phase = 'cold' THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
             updatedAt = excluded.updatedAt,
             -- A main write to a far row moves its revision: a worker step
@@ -960,6 +961,7 @@ function save(row, options = {}) {
         }
         Metrics.recordDbFlush();
         row.statsJson = result.statsJson;
+        if (result.mindJson !== undefined) row.mindJson = result.mindJson;
         // The cache built from this row takes the row's revision (moved by
         // this write on a far row), not the older one the caller's state carried.
         if (result.simulationRevision !== undefined) row.simulationRevision = Number(result.simulationRevision);
