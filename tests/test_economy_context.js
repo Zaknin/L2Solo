@@ -423,8 +423,9 @@ async function run() {
     }
     // The crafter's workshop is kept with its held build: on the same route,
     // known, with a finite income and no workshop section moved (the
-    // foundation's or money); otherwise it is asked again. The step keeps it
-    // only when its build reuses the card's collected verdict. A build with a
+    // foundation's or money); otherwise it is asked again. The step judges
+    // its held build before the build (heldWorkshop): a valid verdict keeps
+    // the workshop, a refusal keeps it under its sections. A build with a
     // productive workshop watches its product's buyers and its materials'
     // sellers.
     {
@@ -457,12 +458,9 @@ async function run() {
             Economy.keptWorkshop(heldOf(workshop), Sections.sectionBit('build'), crafter);
             assert.equal(unknown(), before + 1, 'a crafter without a kept workshop is counted');
         } finally { Config.developerDiagnostics = diagnosticsBefore; }
-        // The step: a held build and full route rows, but no collected card verdict.
         const routeRows = Trip.prepared(state);
         const built = Economy.forState(state, { routeRows, workshop });
         assert.equal(built.plan.workshop, workshop, 'fixture: the build holds its workshop');
-        assert.equal(Economy.heldWorkshop(state, { routeRows }), null, 'no collected card verdict asks');
-        assert.equal(Economy.heldWorkshop(state, { routeRows: [] }), null, 'route rows the build replaces ask');
         const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(workshop.recipeId);
         const watched = built.statsPacket.wishSections.marketWatch || [];
         const watches = (id, storeType) => watched.some(row => row[0] === id && row[1] === storeType);
@@ -470,24 +468,30 @@ async function run() {
         assert(watched.length < Sections.MARKET_WATCH, 'fixture: a short queue, every row fits under the cap');
         assert(recipe.materials.every(row => watches(row.selfId, 1)), 'the materials\' sellers are watched');
         Economy.forget(state.characterId);
-        // The keep: a crafter's card refused only by its MP (sources), its
-        // collected verdict handed to the step's build on the same deps.
+        // The step on a crafter's held build: a valid verdict keeps the
+        // workshop (no ask) and the build that follows serves the held
+        // decision; a refusal by its MP alone (sources) keeps it, with or
+        // without the card refused before; a wallet below the decision's
+        // bounds (money) asks.
         const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
-        const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1 };
+        const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1, adena: 1000000 };
         const deps = { timestamp: T, routeRows: Trip.prepared(crafter) };
         const held = Economy.forState(crafter, { ...deps, workshop });
         const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
+        const step = { ...deps }, eventVerdict = {};
+        assert.equal(Economy.heldWorkshop(published, step, eventVerdict), held.plan.workshop, 'a valid held build keeps its workshop');
+        const served = Economy.forState(published, { ...step, workshop: held.plan.workshop, eventVerdict });
+        assert.deepEqual(served.statsPacket, held.statsPacket, 'the build that follows serves the held decision');
         const accepted = Card.advisory(held, published, published.activity, deps);
         const tired = { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } };
+        assert.equal(Economy.heldWorkshop(tired, { ...deps }, {}), held.plan.workshop, 'a refusal by the MP alone keeps it');
         const prepared = {};
         assert.equal(Card.refreshAdvisory(tired, accepted, deps, { prepared, collect: true }), null, 'fixture: the MP refuses the card');
-        const handed = { ...deps, eventVerdict: prepared.eventVerdict };
-        assert(prepared.eventVerdict.collected, 'fixture: the refusal is collected');
         assert(!(prepared.eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
             'fixture: the refusal names no workshop section');
-        assert.equal(Economy.heldWorkshop(tired, handed), held.plan.workshop, 'the held workshop is kept for the build');
-        assert.equal(Economy.heldWorkshop(tired, { ...handed, routeRows: Trip.prepared(crafter).slice() }), null,
-            'other route rows than the verdict judged ask');
+        assert.equal(Economy.heldWorkshop(tired, { ...deps }, prepared.eventVerdict), held.plan.workshop,
+            'a refusal by the MP alone keeps it after the card refused');
+        assert.equal(Economy.heldWorkshop({ ...published, adena: 0 }, { ...deps }, {}), null, 'a moved wallet asks');
         Economy.forget(crafter.characterId);
     }
     console.log('PASS workshop kept with the held build / asked when it moved');

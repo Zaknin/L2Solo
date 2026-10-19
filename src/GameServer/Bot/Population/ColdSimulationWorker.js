@@ -576,13 +576,13 @@ function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
     economyDiagnostics.count('occupation', 'ask', caller);
     return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
 }
-// The step's build workshop: the held build's while its build keeps it
-// (EconomyContext.heldWorkshop), else asked.
-function lifecycleWorkshop(state, timestamp, deps) {
-    const kept = EconomyContext.heldWorkshop(state, deps);
-    if (!kept) return askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
-    economyDiagnostics.count('workshop', 'kept', 'lifecycle');
-    return kept;
+// The step's build workshop: the held build's while its verdict, judged
+// here for the build that follows on the step's deps and its card's verdict
+// (EconomyContext.heldWorkshop, prepared.eventVerdict), keeps it, else
+// asked. A wish-focus build reads a copy of the state: it judges its own.
+function lifecycleWorkshop(state, timestamp, deps, prepared, wishFocus) {
+    const kept = wishFocus ? null : EconomyContext.heldWorkshop(state, deps, prepared.eventVerdict ||= {});
+    return kept || askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
 }
 async function refreshCraftPacket(state, timestamp, refreshed) {
     if (!refreshed || !CraftEligibility.isServiceCrafter(state)) return refreshed;
@@ -1531,7 +1531,7 @@ function startKernel(config = {}) {
             const nullReuse = refreshed?.economy.network.activity === null;
             // Both reuses (the card's leaf, a null intention) read the card's
             // workshop. A build keeps the held one while its sections hold.
-            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, withEventVerdict(deps, prepared));
+            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, deps, prepared, wishFocus);
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
