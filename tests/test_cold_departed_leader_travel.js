@@ -53,7 +53,7 @@ async function main() {
     kernel.flush(null, true);
     const proposal = messages.find(m => m.type === 'proposal_batch')?.payload.proposals[0];
     assert(proposal, 'the native arrival resolver must issue a durable proposal');
-    const [committed] = await Owner.commitAndReleaseBatch([{ token: proposal.token, nextState: proposal.nextState,
+    const [committed] = await Owner.commitBatch([{ revision: proposal.token.revision, nextState: proposal.nextState,
         proposal, options: proposal.options }], { timestamp: at });
     assert(committed.ok, JSON.stringify(committed));
     const saved = Life.cachedState(id);

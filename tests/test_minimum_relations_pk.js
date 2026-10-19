@@ -220,7 +220,7 @@ async function main() {
             assert.equal(claim.grants.length, 1);
             const current = Life.cachedState(2), next = { ...current, activity: 'dead', vitals: { ...current.vitals, hp: 0 },
                 stats: { ...current.stats, deaths: 1 }, updatedAt: at + 200 };
-            const [result] = await Owner.commitAndReleaseBatch([{ token: claim.grants[0], nextState: next,
+            const [result] = await Owner.commitBatch([{ revision: claim.grants[0].revision, nextState: next,
                 options: { allowLifecycle: true }, proposal: { baseState: current, durable: { pvpKills: [{ victimId: 1, victimLevel: 1, pvp: false }] } } }], { timestamp: at + 200 });
             assert(result.ok); assert.equal(result.pkDrops.length, 2);
             assert.equal(Life.cachedState(2).inventory['19'], undefined);

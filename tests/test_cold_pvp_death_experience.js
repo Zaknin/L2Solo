@@ -101,8 +101,8 @@ async function main() {
     // resurrection restores, the same row an ordinary cold death writes.
     const claimed = await Owner.claimBatch([killer, victim], { timestamp: at, allowParty: true, allowLifecycle: true });
     assert.strictEqual(claimed.grants.length, 2);
-    const commit = await Owner.commitAndReleaseBatch([killer, victim].map(state => ({
-        token: claimed.grants.find(g => g.characterId === state.characterId),
+    const commit = await Owner.commitBatch([killer, victim].map(state => ({
+        revision: claimed.grants.find(g => g.characterId === state.characterId).revision,
         nextState: result.updates.get(state.characterId), options: { allowParty: true, allowLifecycle: true },
         proposal: { baseState: state, durable: { pvpKills: result.fighters.find(f => f.id === state.characterId).kills } }
     })), { timestamp: at + 10, journalReason: 'pvp' });

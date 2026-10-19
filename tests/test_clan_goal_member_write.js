@@ -69,7 +69,7 @@ async function row(id) {
         assert.equal(cached.stats.clanPartyObjective, undefined, 'the cache holds the cleared objective');
 
         // The older proposal is refused and does not restore the old goal.
-        const [refused] = await Owner.commitAndReleaseBatch([{ token, nextState: proposed, proposal: { token } }]);
+        const [refused] = await Owner.commitBatch([{ revision: token.revision, nextState: proposed, proposal: { token } }]);
         assert.equal(refused.ok, false);
         assert.equal(refused.reason, 'stale_revision', 'the proposal built before the goal write is refused');
         assert.equal(JSON.parse((await row(far)).statsJson).equipmentPlan, undefined, 'the row keeps the cleared plan');

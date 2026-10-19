@@ -112,7 +112,7 @@ async function run() {
     const leasedState = LifeState.cachedState(leased);
     const hunted = structuredClone(leasedState.inventory);
     hunted['57'].amount += 30;
-    const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
+    const [commit] = await Owner.commitBatch([{ revision: claim.revision,
         nextState: { ...leasedState, adena: hunted['57'].amount, inventory: hunted,
             simulation: { ...leasedState.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
         proposal: { baseState: { inventory: leasedState.inventory } } }], { timestamp: Date.now() });

@@ -128,7 +128,7 @@ async function run() {
     assert.strictEqual(Lod.evaluate(Manager.sessions[1], [], Date.now()).tier, 'full',
         'a fighting member keeps the healer active even outside player visibility');
     Manager.sessions[0].actor.state.fetchHits = () => false;
-    const stale = await Owner.commitAndReleaseBatch(originalStates.map((state, index) => ({ token: claims.grants[index], nextState: state,
+    const stale = await Owner.commitBatch(originalStates.map((state, index) => ({ revision: claims.grants[index].revision, nextState: state,
         atomicGroup: { id: 'stale', memberIds: [1, 2, 3] } })), { allowParty: true, allowLifecycle: true });
     assert(stale.every(r => !r.ok), 'stale cold worker cannot overwrite the hot party');
     const group = Manager.sessions.slice();

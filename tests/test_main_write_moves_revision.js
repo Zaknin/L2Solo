@@ -77,7 +77,7 @@ function coordinatorProbe() {
         const proposed = { ...Life.cachedState(far), stats: { ...Life.cachedState(far).stats, proposalProbe: true } };
         await Database.updateGeneratedBotName(far, 'RenamedUnderStep', 4);
         const moved = Number((await row(far)).simulationRevision);
-        const [refused] = await Owner.commitAndReleaseBatch([{ token, nextState: proposed, proposal: { token } }]);
+        const [refused] = await Owner.commitBatch([{ revision: token.revision, nextState: proposed, proposal: { token } }]);
         assert.equal(refused.ok, false);
         assert.equal(refused.reason, 'stale_revision', 'the older proposal is refused');
         assert.equal(refused.row.characterName, 'RenamedUnderStep', 'the refusal hands back the row it read');
@@ -156,7 +156,7 @@ function coordinatorProbe() {
         assert(leafToken.ok);
         const leafless = { ...Life.cachedState(trader), stats: { ...Life.cachedState(trader).stats, proposalProbe: true } };
         delete leafless.stats.economyCommit;
-        const [kept] = await Owner.commitAndReleaseBatch([{ token: leafToken, nextState: leafless, proposal: { token: leafToken } }]);
+        const [kept] = await Owner.commitBatch([{ revision: leafToken.revision, nextState: leafless, proposal: { token: leafToken } }]);
         assert.equal(kept.ok, true, `the leafless proposal commits: ${kept.reason}`);
         const keptRow = JSON.parse((await row(trader)).statsJson);
         assert.equal(keptRow.proposalProbe, true, 'the proposal\'s stats are written');

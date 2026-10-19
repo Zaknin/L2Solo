@@ -56,8 +56,8 @@ async function commitKills(state, pvpKills, timestamp) {
         { timestamp, leaseMs: 10000 });
     assert.strictEqual(claimed.grants.length, 1);
     const current = LifeState.cachedState(state.characterId);
-    const [result] = await Owner.commitAndReleaseBatch([{
-        token: claimed.grants[0],
+    const [result] = await Owner.commitBatch([{
+        revision: claimed.grants[0].revision,
         nextState: { ...current, timing: { ...current.timing, lastResolvedAt: timestamp + 500 }, updatedAt: timestamp + 500 },
         proposal: { baseState: current, durable: { pvpKills } }
     }], { timestamp: timestamp + 500 });

@@ -56,11 +56,11 @@ async function proposals(party, route, at) {
     await kernel.resolvePartyGrant(party.partyId);
     const rows = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(rows, JSON.stringify(messages));
-    return { grants, entries: rows.map(proposal => ({ token: proposal.token, nextState: proposal.nextState,
+    return { grants, entries: rows.map(proposal => ({ revision: proposal.token.revision, nextState: proposal.nextState,
         options: proposal.options, atomicGroup: proposal.atomicGroup, proposal })) };
 }
 async function commit(prepared, at) {
-    const results = await Owner.commitAndReleaseBatch(prepared.entries, { timestamp: at });
+    const results = await Owner.commitBatch(prepared.entries, { timestamp: at });
     assert(results.every(row => row.ok), JSON.stringify(results));
     assert(results[0].partyRow, 'material transitions persist their party row in the native transaction');
     return Parties.acceptRow(results[0].partyRow);
@@ -94,7 +94,7 @@ async function main() {
     const stale = await proposals(party, route, timestamp);
     await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrentMarker',1) WHERE partyId=?", [party.partyId]]);
     const before = await image();
-    const rejected = await Owner.commitAndReleaseBatch(stale.entries, { timestamp });
+    const rejected = await Owner.commitBatch(stale.entries, { timestamp });
     assert(rejected.every(row => !row.ok && row.detail === 'party_revision_stale'), JSON.stringify(rejected));
     assert.deepEqual(await image(), before, 'stale party context cannot commit even one member destination');
     await Owner.releaseBatch(stale.grants, { timestamp });
@@ -117,7 +117,7 @@ async function main() {
     const arrival = await proposals(party, null, timestamp);
     await DB.execute(["CREATE TRIGGER reject_material_arrival BEFORE UPDATE ON bot_background_parties WHEN NEW.status='dissolved' BEGIN SELECT RAISE(ABORT,'material arrival rollback'); END", []]);
     const beforeFailure = await image();
-    await assert.rejects(Owner.commitAndReleaseBatch(arrival.entries, { timestamp }), /material arrival rollback/);
+    await assert.rejects(Owner.commitBatch(arrival.entries, { timestamp }), /material arrival rollback/);
     assert.deepEqual(await image(), beforeFailure, 'SQL failure rolls back member release, party dissolution and helper refund together');
     await DB.execute(['DROP TRIGGER reject_material_arrival', []]);
     party = await commit(arrival, timestamp);

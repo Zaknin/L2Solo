@@ -54,11 +54,11 @@ function hotActor(state) {
             patch, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             nextResolveAt: timestamp + 1000, debug
         }, { persist: false, timestamp, projectClassProgression: true });
-        const [committed] = await Owner.commitAndReleaseBatch([{ token, nextState }], { timestamp });
+        const [committed] = await Owner.commitBatch([{ revision: token.revision, nextState }], { timestamp });
         assert(committed.ok);
         state = Life.cachedState(id);
         // A stale lease cannot overwrite either EXP or the death entitlement.
-        const [replayed] = await Owner.commitAndReleaseBatch([{ token, nextState }], { timestamp });
+        const [replayed] = await Owner.commitBatch([{ revision: token.revision, nextState }], { timestamp });
         assert.strictEqual(replayed.ok, false);
         return Database.fetchCharacterDeathExperience(id);
     }

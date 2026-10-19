@@ -103,7 +103,7 @@ async function fillUnderLease({ label, storeType, lines, ownerItems, counterpart
     next['1864'] = { selfId: 1864, name: 'Stem', amount: 2 };
     const nextState = { ...leased, adena: next['57'].amount, inventory: next,
         simulation: { ...leased.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } };
-    const [commit] = await Owner.commitAndReleaseBatch([{ token: claim, nextState,
+    const [commit] = await Owner.commitBatch([{ revision: claim.revision, nextState,
         proposal: { baseState: { inventory: leased.inventory } } }], { timestamp: Date.now() });
     assert(commit.ok, `${label}: the worker commit after the deal succeeds`);
     assert.strictEqual(commit.settled, true, `${label}: the commit merges the deal`);
@@ -149,7 +149,7 @@ async function writeUnderLease({ label, storeType, lines, ownerItems, counterpar
     next['1864'] = { selfId: 1864, name: 'Stem', amount: 2 };
     const nextState = { ...leased, adena: next['57'].amount, inventory: next,
         simulation: { ...leased.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } };
-    const [commit] = await Owner.commitAndReleaseBatch([{ token: claim, nextState,
+    const [commit] = await Owner.commitBatch([{ revision: claim.revision, nextState,
         proposal: { baseState: { inventory: leased.inventory } } }], { timestamp: Date.now() });
     assert.strictEqual(commit.ok, false, `${label}: the worker commit after the shop write fails its CAS`);
     assert.strictEqual(commit.reason, 'stale_revision');
@@ -175,7 +175,7 @@ async function writeUnderLease({ label, storeType, lines, ownerItems, counterpar
     assert(again.ok, `${label}: the worker leases the fresh row`);
     const hunted = structuredClone(retry.inventory);
     hunted['57'].amount += 30;
-    const [second] = await Owner.commitAndReleaseBatch([{ token: again,
+    const [second] = await Owner.commitBatch([{ revision: again.revision,
         nextState: { ...retry, adena: hunted['57'].amount, inventory: hunted,
             simulation: { ...retry.simulation, ownerId: Owner.OWNER_ID, revision: again.revision } },
         proposal: { baseState: { inventory: retry.inventory } } }], { timestamp: Date.now() });

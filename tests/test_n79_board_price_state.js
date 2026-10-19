@@ -239,7 +239,7 @@ async function run() {
             lineId: shop.lines[0].id, amount: 3 });
         const next = structuredClone(leased);
         next.stats.workerAfterDeal = true;
-        const [commit] = await Owner.commitAndReleaseBatch([{ token, nextState: next,
+        const [commit] = await Owner.commitBatch([{ revision: token.revision, nextState: next,
             proposal: { baseState: { inventory: leased.inventory } } }], { timestamp: Date.now() });
         assert(commit.ok, 'a record fill must keep the owner worker lease valid');
         assert(commit.settled);

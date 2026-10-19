@@ -53,7 +53,7 @@ async function run() {
         if (process.argv.includes('--reproduce')) {
             const claim = await Owner.claim(first.state, { allowLifecycle: true, leaseMs: 30000 });
             assert(claim.ok);
-            const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
+            const [commit] = await Owner.commitBatch([{ revision: claim.revision,
                 nextState: { ...first.state, inventory: { ...first.state.inventory,
                     [STEM]: { ...first.state.inventory[STEM], amount: 21 } },
                     simulation: { ...first.state.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
@@ -75,7 +75,7 @@ async function run() {
         assert(fresh); assert.equal(Number(fresh.inventory[STEM]?.amount || 0), 0);
         const claim = await Owner.claim(fresh, { allowLifecycle: true, leaseMs: 30000 });
         assert(claim.ok);
-        const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
+        const [commit] = await Owner.commitBatch([{ revision: claim.revision,
             nextState: { ...fresh, inventory: { ...fresh.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 1 } },
                 simulation: { ...fresh.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
             proposal: { baseState: { inventory: fresh.inventory } }

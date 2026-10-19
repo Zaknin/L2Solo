@@ -174,13 +174,13 @@ async function run() {
             const token = await Owner.claim(LifeState.cachedState(id), { timestamp: Date.now(), leaseMs: 30000 });
             assert(token.ok);
             const state = LifeState.cachedState(id);
-            owners.push({ id, token, state, request: { token, nextState: structuredClone(state),
+            owners.push({ id, token, state, request: { revision: token.revision, nextState: structuredClone(state),
                 proposal: { baseState: { inventory: state.inventory } } } });
         }
         await Database.execute([`CREATE TEMP TRIGGER audit_batch_failure
             BEFORE UPDATE OF inventorySummary ON main.bot_life_state WHEN NEW.characterId = ${owners[1].id}
             BEGIN SELECT RAISE(ABORT, 'injected later batch failure'); END`]);
-        try { await assert.rejects(Owner.commitAndReleaseBatch(owners.map(owner => owner.request),
+        try { await assert.rejects(Owner.commitBatch(owners.map(owner => owner.request),
             { timestamp: Date.now() }), /injected later batch failure/); }
         finally { await Database.execute(['DROP TRIGGER temp.audit_batch_failure']); }
         for (const { id, token } of owners) {
@@ -190,9 +190,9 @@ async function run() {
             assert.strictEqual(row.simulationRevision, token.revision);
             assert.strictEqual(row.simulationLeaseId, token.leaseId);
         }
-        const results = await Owner.commitAndReleaseBatch(owners.map(owner => owner.request), { timestamp: Date.now() });
+        const results = await Owner.commitBatch(owners.map(owner => owner.request), { timestamp: Date.now() });
         assert(results.every(result => result.ok && result.settled));
-        const repeated = await Owner.commitAndReleaseBatch(owners.map(owner => owner.request), { timestamp: Date.now() });
+        const repeated = await Owner.commitBatch(owners.map(owner => owner.request), { timestamp: Date.now() });
         assert(repeated.every(result => !result.ok));
         for (const { id } of owners) {
             assert.strictEqual(await bag(id, 57), 300);

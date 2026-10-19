@@ -140,7 +140,7 @@ async function prepareBatch(deadlineOverride) {
         const nextState = await Life.prepareResolve(state, result,
             { persist: false, projectClassProgression: true, timestamp: at });
         if (deadlineOverride !== undefined) nextState.timing.nextResolveAt = deadlineOverride;
-        return { token: grants.find(grant => grant.characterId === state.characterId), nextState, atomicGroup,
+        return { revision: grants.find(grant => grant.characterId === state.characterId).revision, nextState, atomicGroup,
             options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state, result } };
     }));
     return { entries, stageId, resolution, before: image() };
@@ -217,7 +217,7 @@ async function main() {
     });
     await check('malformed outgoing party deadline still refuses with whole-image conservation', async () => {
         batch = await prepareBatch(at + expectedDuration);
-        const results = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const results = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         observations.push({ stage: 'malformed_group_refusal', results: copy(results),
             before: batch.before, after: image() });
         assert.equal(results.length, 7);
@@ -227,7 +227,7 @@ async function main() {
     });
     await check('genuine BackgroundParty→Life→SQL batch and final ACK conserve physical state', async () => {
         batch = await prepareBatch();
-        const results = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const results = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         observations.push({ stage: 'actual_commit', results: copy(results), before: batch.before, after: image() });
         assert.equal(results.length, 7);
         assert(results.every(result => result.ok), JSON.stringify(results));
@@ -263,7 +263,7 @@ async function main() {
         const completed = await Raid.stage({ key: 'raid:10372', id: 'after-final', memberIds: ids }, () => null);
         assert.equal(completed.result, null);
         Raid.abort('after-final');
-        const replay = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const replay = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         assert(replay.every(result => !result.ok));
         assert.deepEqual(image(), after, 'replay pays no MP twice and grants no reward');
         grants = [];

@@ -188,7 +188,7 @@ async function createProbe(index) {
         57: { selfId: 57, name: 'Adena', amount: 999999, stackable: true }
     };
     const entries = claimed.grants.map((grant, index) => ({
-        token: grant,
+        revision: grant.revision,
         nextState: nextStates[index],
         proposal: {
             baseState: states[index],
@@ -208,7 +208,7 @@ async function createProbe(index) {
     const rawResults = [];
     Database.commitAndReleaseColdSimulationLeases = async (...args) => {
         const out = await commitLeases.apply(Database, args); rawResults.push(...out); return out; };
-    const results = await Owner.commitAndReleaseBatch(entries, { timestamp: 3000 });
+    const results = await Owner.commitBatch(entries, { timestamp: 3000 });
     Database.commitAndReleaseColdSimulationLeases = commitLeases;
     const committedRows = rawResults.filter((result) => result.ok);
     assert(committedRows.length >= 1, 'the batch must commit at least one row');
@@ -288,7 +288,7 @@ async function createProbe(index) {
     const karmaRows = () => Database.execute(['SELECT karma FROM characters ORDER BY id', []]);
     assert.deepStrictEqual((await karmaRows()).map(row => Number(row.karma)), [41, 45, 0], 'karma must stop at zero');
     const beforeReplay = await Promise.all(states.map(state => wholeImage(state.characterId)));
-    const replay = await Owner.commitAndReleaseBatch(entries, { timestamp: 3100 });
+    const replay = await Owner.commitBatch(entries, { timestamp: 3100 });
     assert(replay.every((result) => !result.ok), 'an ACK-loss replay must never apply progress twice');
     assert.deepStrictEqual(await Promise.all(states.map(state => wholeImage(state.characterId))), beforeReplay,
         'ACK-loss replay preserves whole physical/cache images, including actual paid skills');
@@ -327,8 +327,8 @@ async function createProbe(index) {
     })), { timestamp: 4000, leaseMs: 10000 });
     assert.strictEqual(partyClaim.grants.length, 2, 'trusted party lifecycle must claim plan and warehouse members together');
     const partyExpectedExp = partyMembers.map((member, index) => member.exp + 100 + index);
-    const partyCommit = await Owner.commitAndReleaseBatch(partyClaim.grants.map((token, index) => ({
-        token,
+    const partyCommit = await Owner.commitBatch(partyClaim.grants.map((token, index) => ({
+        revision: token.revision,
         nextState: { ...partyMembers[index], exp: partyExpectedExp[index], updatedAt: 4100 },
         options: { allowParty: true, allowLifecycle: true }
     })), { timestamp: 4100 });
@@ -346,8 +346,8 @@ async function createProbe(index) {
         leaseId: `party-release-${index}`,
         options: { allowParty: true, allowLifecycle: true }
     })), { timestamp: 4200, leaseMs: 10000 });
-    const releaseCommit = await Owner.commitAndReleaseBatch(releaseClaim.grants.map((token, index) => ({
-        token,
+    const releaseCommit = await Owner.commitBatch(releaseClaim.grants.map((token, index) => ({
+        revision: token.revision,
         nextState: {
             ...releaseBase[index],
             party: { ...(releaseBase[index].party || {}), partyId: null, leaderId: null },
@@ -374,8 +374,8 @@ async function createProbe(index) {
     const invalidation = await Owner.handoffToMain(LifeState.cachedState(invalidatedMember.characterId));
     assert.strictEqual(invalidation.ok, true, `atomic party invalidation must succeed: ${JSON.stringify(invalidation)}`);
     const atomicGroup = { id: 'atomic-party-route', memberIds: atomicBase.map((member) => member.characterId) };
-    const atomicCommit = await Owner.commitAndReleaseBatch(atomicClaim.grants.map((token, index) => ({
-        token,
+    const atomicCommit = await Owner.commitBatch(atomicClaim.grants.map((token, index) => ({
+        revision: token.revision,
         nextState: { ...atomicBase[index], exp: atomicBase[index].exp + 100 + index, updatedAt: 5100 },
         options: { allowParty: true, allowLifecycle: true },
         atomicGroup
