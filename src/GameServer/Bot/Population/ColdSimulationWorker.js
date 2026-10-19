@@ -667,10 +667,12 @@ tables.watch('parties', {
 });
 // The memory rows are kept packed by the kernel's InteractionMemory, not a
 // second plain copy in the mirror (retain: false); older revisions are refused.
+// Main publishes no removed row: the set is bounded by the owners main
+// accepted, and a full copy (reset) re-sends them, kept views refuse equals.
 tables.watch('memory', {
-    reset: () => {},
+    reset() {},
     put: (key, row) => { if (kernel?.interactionMemory.accept(row)) kernel.decisionEvents?.memoryChanged(Number(key)); },
-    remove: key => kernel?.interactionMemory.forget(Number(key))
+    remove() {}
 }, { retain: false });
 tables.watch('pressure', {
     reset: () => { if (kernel) kernel.pressureRow = null; },
