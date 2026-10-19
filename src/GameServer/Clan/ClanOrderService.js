@@ -201,7 +201,6 @@ async function deliveryContext(order, clan) {
     const nextRecipient = deliveryMember(next);
     const remaining = Math.max(0, number(order.amount) - deliveredAmount);
     const busy = !!next && (String(next.phase || '') !== 'cold'
-        || String(next.simulation?.ownerId || 'legacy_main') !== 'legacy_main'
         || !!String(next.party?.partyId || ''));
     return {
         kind: 'best_upgrade',

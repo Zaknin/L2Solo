@@ -67,15 +67,12 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
         // The party run's route (the worker's BotRoute.route).
         partyRoute: () => route,
         emit: (type, payload) => messages.push({ type, payload }) });
-    const requestId = 'material-risk-claim';
-    const grants = new Map(roster.map(state => [state.characterId, { characterId: state.characterId,
-        ownerId: 'cold_simulation_owner', leaseId: `route-${state.characterId}`, revision: 2, leaseUntil: timestamp + 30000 }]));
     for (const state of roster) {
         kernel.upsert({ state });
-        kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
+        kernel.inFlight.set(state.characterId, { state, startedAt: timestamp, partyId: party.partyId });
     }
-    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), requestId, grants });
-    await kernel.resolvePartyGrant(currentParty.partyId);
+    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), startedAt: timestamp });
+    await kernel.resolvePartyStep(currentParty.partyId);
     const proposals = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(proposals, JSON.stringify(messages));
     assert(proposals.every(row => row.atomicGroup?.memberIds.length === roster.length), 'every transition uses the complete atomic roster');

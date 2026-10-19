@@ -10,7 +10,6 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Warehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const Enchant = invoke('GameServer/Bot/Economy/ColdSafeEnchantService');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 
 const originals = { saleDecision: Market.saleDecision, warehouseRequests: Enchant.warehouseRequests,
     enchantSafe: Enchant.enchantSafe, execute: Database.execute, applyNpcLiquidation: Life.applyNpcLiquidation,
@@ -139,22 +138,6 @@ async function run() {
         await world.reopen(ids[0]);
         assert.equal((await totals(ids[0], 1864)).total, 30, 'withdrawal and money survive reopen');
 
-        const handoff = await seed(ids[4]);
-        await stock(ids[4], 1864, 20);
-        choices = [{ action: 'list', selfId: 1864, count: 20 }];
-        Database.transferWarehouseToInventory = async (id, item, options) => {
-            const claim = await Owner.claim(Life.cachedState(id), { allowLifecycle: true });
-            assert.equal(claim.ok, true, 'ownership changes after the last service check');
-            return originals.transferWarehouseToInventory(id, item, options);
-        };
-        const rejected = await Warehouse.releaseCold(handoff, { inTown: true });
-        Database.transferWarehouseToInventory = originals.transferWarehouseToInventory;
-        assert.equal(rejected.released, false, 'a claimed owner cannot withdraw after the service check');
-        const claimedTotals = await totals(ids[4], 1864);
-        assert.equal(claimedTotals.physical, 0);
-        assert.equal(claimedTotals.stored, 20);
-        assert.equal(rejected.state.simulation.ownerId, Owner.OWNER_ID);
-
         const oldPlan = await seed(ids[5]);
         await stock(ids[5], 1870, 10);
         await stock(ids[5], 1870, 15);
@@ -196,14 +179,14 @@ async function run() {
         Database.transferWarehouseToInventory = async (id, item, options) => {
             const result = await originals.transferWarehouseToInventory(id, item, options);
             const committed = Life.acceptLifecycleRow(result.coldLifeRow);
-            assert.equal((await Owner.claim(committed, { allowLifecycle: true })).ok, true,
-                'a newer owner is cached before the old transaction result is delivered');
+            assert(await Life.upsertState({ ...committed, stats: { ...committed.stats, note: 'newer row' } }, 'newer_row_after_first_transfer'),
+                'a newer row is cached before the old transaction result is delivered');
             return result;
         };
         const partial = await Warehouse.releaseCold(afterCommit, { inTown: true });
         Database.transferWarehouseToInventory = originals.transferWarehouseToInventory;
         assert.equal(partial.aborted, true);
-        assert.equal(partial.state.simulation.ownerId, Owner.OWNER_ID, 'a returned legacy row cannot replace the newer owner');
+        assert.equal(partial.state.stats.note, 'newer row', 'a returned older row cannot replace the newer one');
         assert.equal(partial.items.reduce((amount, item) => amount + item.amount, 0), 10, 'only the first committed row is reported');
         const partialTotals = await totals(ids[7], 1864);
         assert.equal(partialTotals.physical, 10);
@@ -216,12 +199,13 @@ async function run() {
         for (const enchant of [0, 1, 2]) await stock(ids[8], 94, 1, enchant);
         choices = [{ action: 'list', selfId: 94, count: 3 }];
         Database.transferWarehouseToInventory = async (id, item, options) => {
-            assert.equal((await Owner.claim(Life.cachedState(id), { allowLifecycle: true })).ok, true);
+            // A main write moves the far row after the last service check.
+            await Database.updateGeneratedBotName(id, `TownMoved${id}`, 3);
             return originals.transferWarehouseToInventory(id, item, options);
         };
         const nativeHandoff = await Warehouse.releaseCold(townHandoff, { inTown: true });
         Database.transferWarehouseToInventory = originals.transferWarehouseToInventory;
-        assert.equal(nativeHandoff.released, false, 'town withdrawal observes the new ownership fence');
+        assert.equal(nativeHandoff.released, false, 'town withdrawal observes the moved revision');
         assert.equal(nativeHandoff.reason, 'economy_state_changed');
         assert.equal(nativeHandoff.items.length, 0);
         assert.equal((await totals(ids[8], 94)).stored, 3);

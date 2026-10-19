@@ -59,7 +59,7 @@ function planningFingerprint(clan) {
         rateProfile: GearAcquisitionPlanner.rateProfileSignature(),
         members: (clan.members || []).map((member) => ({
             id: memberId(member), level: member.level, classId: member.classId,
-            phase: member.phase, owner: member.simulationOwner, partyId: member.partyId,
+            phase: member.phase, partyId: member.partyId,
             equipment: Object.values(member.inventory || {}).filter((item) => item?.equipped === true)
                 .map(({ selfId, slot, equippedSlots, equippedCount, enchant }) => ({ selfId, slot, equippedSlots, equippedCount, enchant }))
         }))
@@ -432,13 +432,11 @@ function goalPurchaseFailed(code, result = {}) {
 // member buys in the seller's town, at once when it stands there, else on a
 // clan errand it goes on and buys on arrival (a real NPC sells only to a bot in
 // its town). A purchase that neither happens nor leaves returns the clan's part.
-// Only a free cold member the main thread owns (not in a party, hunting or
-// resting) and not already on its errand for this item; others wait for the
-// next review.
+// Only a free cold member (not in a party, hunting or resting) and not
+// already on its errand for this item; others wait for the next review.
 async function buyGoalCopy(memberId, plan, clan, amount = 1) {
     let state = await LifeState.findByCharacterId(memberId);
     if (!state || state.phase !== 'cold' || state.partyId || state.party?.partyId
-        || String(state.simulation?.ownerId || 'legacy_main') !== 'legacy_main'
         || !['hunting', 'resting'].includes(state.activity)) return { ok: false, code: 'member_busy' };
     const selfId = number(plan.target?.selfId);
     if (ClanCredit.hasClanErrand(state, clan.id, selfId)) {
@@ -643,7 +641,7 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
             WHERE characterId IN (${retainedIds.map(() => '?').join(',')}) AND joinAvailability=1 AND clanId=0
             AND NOT EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=p.characterId AND r.status='active')
             AND NOT EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=p.characterId AND t.meetingId IS NOT NULL)`, retainedIds]);
-        prospects = await LifeState.statesByIds(eligible.map(row => row.characterId), { ownerId: 'legacy_main', unassigned: true });
+        prospects = await LifeState.statesByIds(eligible.map(row => row.characterId), { unassigned: true });
     }
     let remaining = 64 - retainedIds.length;
     const prepare = pool => options.jobKey ? PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline, context: options.workerContext,
@@ -788,7 +786,6 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     const spoilCapable = (clan.members || []).some((member) => (
         member?.phase === 'cold'
         && (!member?.partyId || previousAssigned.has(memberId(member)))
-        && String(member?.simulationOwner || 'legacy_main') === 'legacy_main'
         && (ClanPolicy.rosterRole(member) === 'spoiler' || RosterDemand.ownedSpoilCapability(clan, member))
     ));
     const members = planningMemberOrder(

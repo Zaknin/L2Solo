@@ -52,12 +52,9 @@ async function createProbe(index) {
 }
 
 async function commitKills(state, pvpKills, timestamp) {
-    const claimed = await Owner.claimBatch([{ state, leaseId: `pvp-lease-${state.characterId}-${timestamp}` }],
-        { timestamp, leaseMs: 10000 });
-    assert.strictEqual(claimed.grants.length, 1);
     const current = LifeState.cachedState(state.characterId);
     const [result] = await Owner.commitBatch([{
-        revision: claimed.grants[0].revision,
+        revision: current.simulation.revision,
         nextState: { ...current, timing: { ...current.timing, lastResolvedAt: timestamp + 500 }, updatedAt: timestamp + 500 },
         proposal: { baseState: current, durable: { pvpKills } }
     }], { timestamp: timestamp + 500 });

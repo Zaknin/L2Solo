@@ -45,15 +45,10 @@ function emptyCounters() {
         activationFloorGeoChecks: 0,
         activationFloorCacheHits: 0,
         activationFloorBudgetDeferred: 0,
-        coldOwnerSelected: 0,
-        coldOwnerClaimed: 0,
         coldOwnerResolved: 0,
         coldOwnerCommitted: 0,
-        coldOwnerReleased: 0,
         coldOwnerCasStale: 0,
         coldOwnerRejected: 0,
-        coldOwnerLeaseRecoveries: 0,
-        coldOwnerLeaseExpiries: 0,
         coldOwnerErrors: 0,
         coldOwnerLegacyDeferred: 0,
         coldOwnerDbBusy: 0,
@@ -146,7 +141,6 @@ const PopulationMetrics = {
         activationFloorDurationsMs: [],
         activationFloorReasons: new DiagnosticMetricMap(),
         skippedResolveReasons: new DiagnosticMetricMap(),
-        coldOwnerClaimDurationsMs: [],
         coldOwnerCommitDurationsMs: [],
         coldOwnerLegacyReasons: new DiagnosticMetricMap(),
         coldOwnerRejectReasons: new DiagnosticMetricMap(),
@@ -369,19 +363,6 @@ const PopulationMetrics = {
         this.counters.backgroundDeferrals += 1;
     },
 
-    recordColdOwnerSelected() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerSelected += 1;
-    },
-
-    recordColdOwnerClaim(result = {}, durationMs = 0) {
-        if (!Config.developerDiagnostics) return;
-        this.interval.coldOwnerClaimDurationsMs.push(Math.max(0, Number(durationMs) || 0));
-        if (this.interval.coldOwnerClaimDurationsMs.length > Config.resolveSampleLimit) this.interval.coldOwnerClaimDurationsMs.shift();
-        if (result.ok) this.counters.coldOwnerClaimed += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
-    },
-
     recordColdOwnerResolved() {
         if (!Config.developerDiagnostics) return;
         this.counters.coldOwnerResolved += 1;
@@ -392,12 +373,6 @@ const PopulationMetrics = {
         this.interval.coldOwnerCommitDurationsMs.push(Math.max(0, Number(durationMs) || 0));
         if (this.interval.coldOwnerCommitDurationsMs.length > Config.resolveSampleLimit) this.interval.coldOwnerCommitDurationsMs.shift();
         if (result.ok) this.counters.coldOwnerCommitted += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
-    },
-
-    recordColdOwnerRelease(result = {}) {
-        if (!Config.developerDiagnostics) return;
-        if (result.ok) this.counters.coldOwnerReleased += 1;
         else this.recordColdOwnerRejected(result.reason, result);
     },
 
@@ -419,13 +394,6 @@ const PopulationMetrics = {
             );
         }
         this.interval.coldOwnerRejectReasons.set(key, Number(this.interval.coldOwnerRejectReasons.get(key) || 0) + 1);
-    },
-
-    recordColdOwnerRecovery(count = 0, startup = false) {
-        if (!Config.developerDiagnostics) return;
-        const recovered = Math.max(0, Number(count) || 0);
-        this.counters.coldOwnerLeaseRecoveries += recovered;
-        if (!startup) this.counters.coldOwnerLeaseExpiries += recovered;
     },
 
     recordColdOwnerError(error = null) {
@@ -647,7 +615,6 @@ const PopulationMetrics = {
         const actorPathStats = stats(this.interval.actorPathDurationsMs);
         const companionPathStats = stats(this.interval.companionPathDurationsMs);
         const activationFloorStats = stats(this.interval.activationFloorDurationsMs);
-        const coldOwnerClaimStats = stats(this.interval.coldOwnerClaimDurationsMs);
         const coldOwnerCommitStats = stats(this.interval.coldOwnerCommitDurationsMs);
         const partyFormationStages = Object.fromEntries(Array.from(this.interval.partyFormationStageDurationsMs.entries())
             .map(([stage, values]) => [stage, stats(values)]));
@@ -668,7 +635,6 @@ const PopulationMetrics = {
         this.interval.actorPathDurationsMs = [];
         this.interval.companionPathDurationsMs = [];
         this.interval.activationFloorDurationsMs = [];
-        this.interval.coldOwnerClaimDurationsMs = [];
         this.interval.coldOwnerCommitDurationsMs = [];
         this.interval.activationFloorReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerLegacyReasons = new DiagnosticMetricMap();
@@ -700,7 +666,6 @@ const PopulationMetrics = {
                 reasons: activationFloorReasons
             },
             coldOwner: {
-                claim: coldOwnerClaimStats,
                 commit: coldOwnerCommitStats,
                 legacyReasons: coldOwnerLegacyReasons,
                 rejectReasons: coldOwnerRejectReasons,

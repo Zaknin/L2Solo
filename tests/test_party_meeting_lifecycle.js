@@ -68,18 +68,15 @@ async function main() {
         planPartyRequirement: () => { throw Error('held meeting cannot start another economic plan'); },
         partyRoute: () => ({ needed: true, travelMs: 60000, spotId: 'wrong-spot', to: { locX: 9000, locY: 0, locZ: 0 } }),
         emit: (type, payload) => messages.push({ type, payload }) });
-    const requestId = 'meeting-claim';
-    const grants = new Map(members.map(state => [state.characterId, { characterId: state.characterId,
-        ownerId: 'cold_simulation_owner', leaseId: `group-${state.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
     for (const state of members) {
         kernel.upsert({ state });
-        kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
+        kernel.inFlight.set(state.characterId, { state, startedAt: at, partyId: party.partyId });
     }
     kernel.partyPut(party.partyId, { ...party, nextResolveAt: at + 10000 });
     assert.equal(kernel.dueAt(members[0]), at, 'a later group timer does not postpone the due paid arrival');
-    kernel.partyRuns.set(party.partyId, { party, members, grants, requestId, requirementRefresh: true,
+    kernel.partyRuns.set(party.partyId, { party, members, startedAt: at, requirementRefresh: true,
         spot: null });
-    await kernel.resolvePartyGrant(party.partyId);
+    await kernel.resolvePartyStep(party.partyId);
     const batch = messages.find(message => message.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
     assert.equal(batch.payload.proposals.length, 2);
@@ -95,7 +92,7 @@ async function main() {
     const selected = [];
     let selectorAt = at;
     const selector = new ColdSimulationKernel({ now: () => selectorAt,
-        resolveSolo: () => { throw Error('no personal claim for a group meeting'); },
+        resolveSolo: () => { throw Error('no personal step for a group meeting'); },
         resolveParty: input => Resolver.resolve(input),
         projectResolve: (state, resolution) => ({ ...state, ...resolution.patch }),
         emit: (type, payload, msgId) => selected.push({ type, payload, msgId }) });
@@ -104,15 +101,12 @@ async function main() {
     for (const state of future) selector.upsert({ state });
     selector.partyPut(party.partyId, party);
     selector.tick();
-    assert(!selected.some(message => message.type === 'claim_request'),
-        'expired session review cannot shorten a future physical meeting leg');
+    assert.equal(selector.inFlight.size, 0, 'expired session review cannot shorten a future physical meeting leg');
     selectorAt += 10000;
     selector.tick();
-    const claim = selected.find(message => message.type === 'claim_request');
-    assert(claim && claim.payload.candidates.length === 2);
-    assert(claim.payload.candidates.every(candidate => candidate.purpose.kind === 'party'));
-    selector.onClaimAck({ grants: claim.payload.candidates.map(candidate => ({ ...grants.get(candidate.characterId),
-        ok: true, purpose: candidate.purpose })) }, claim.msgId);
+    const step = selector.partyRuns.get(String(party.partyId));
+    assert(step && selector.inFlight.size === 2);
+    assert.equal(step.purpose.kind, 'party');
     await selector.resolveChain;
     const selectedBatch = selected.find(message => message.type === 'proposal_batch');
     assert(selectedBatch, JSON.stringify(selected));
@@ -121,16 +115,13 @@ async function main() {
     // Main's parties table row arrives before the commit's ack (one flush).
     selector.partyPut(continuedParty.partyId, continuedParty);
     selector.onCommitAck({ results: selectedBatch.payload.proposals.map(proposal => ({
-        ok: true, characterId: proposal.characterId, inputToken: proposal.token, proposalId: proposal.proposalId,
+        ok: true, characterId: proposal.characterId, proposalId: proposal.proposalId,
         state: { ...proposal.nextState, timing: { ...proposal.nextState.timing, nextResolveAt: proposal.result.nextResolveAt } },
         context: {}
     })) });
     selector.tick();
-    const afterArrivalClaim = selected.filter(message => message.type === 'claim_request').at(-1);
-    assert.notEqual(afterArrivalClaim, claim, 'the native next-pass transition is admitted once');
-    selector.onClaimAck({ grants: afterArrivalClaim.payload.candidates.map(candidate => ({
-        ...grants.get(candidate.characterId), revision: 2, ok: true, purpose: candidate.purpose
-    })) }, afterArrivalClaim.msgId);
+    const afterArrivalStep = selector.partyRuns.get(String(party.partyId));
+    assert(afterArrivalStep && afterArrivalStep !== step, 'the native next-pass transition is admitted once');
     await selector.resolveChain;
     const idleBatch = selected.filter(message => message.type === 'proposal_batch').at(-1);
     const idleParty = idleBatch.payload.proposals.find(proposal => proposal.partyResolution).partyResolution.party;
@@ -138,13 +129,12 @@ async function main() {
     assert(idleBatch.payload.proposals.every(proposal => proposal.result.materialize.exp === 0));
     selector.partyPut(idleParty.partyId, idleParty);
     selector.onCommitAck({ results: idleBatch.payload.proposals.map(proposal => ({ ok: true,
-        characterId: proposal.characterId, inputToken: proposal.token, proposalId: proposal.proposalId,
+        characterId: proposal.characterId, proposalId: proposal.proposalId,
         state: { ...proposal.nextState, timing: { ...proposal.nextState.timing, nextResolveAt: proposal.result.nextResolveAt } },
         context: {}
     })) });
-    const claimCount = selected.filter(message => message.type === 'claim_request').length;
     for (let i = 0; i < 100; i++) selector.tick();
-    assert.equal(selected.filter(message => message.type === 'claim_request').length, claimCount,
+    assert.equal(selector.inFlight.size, 0,
         'expired session review cannot restart the same held group work before its transition');
 
     const victoryParty = { ...party, stats: { ...party.stats, objective: { sourceKind: 'raid', raidBossTemplateId: 10484 },
@@ -167,15 +157,14 @@ async function main() {
             emit: (type, payload) => raidMessages.push({ type, payload }) });
         for (const state of raidMembers) {
             terminalKernel.upsert({ state });
-            terminalKernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId),
-                partyId: party.partyId, claimRequestId: requestId });
+            terminalKernel.inFlight.set(state.characterId, { state, startedAt: at, partyId: party.partyId });
         }
         terminalKernel.partyPut(victoryParty.partyId, victoryParty);
         assert.equal(terminalKernel.dueAt(raidMembers[0]), at,
             'terminal raid settlement is not delayed by a future personal leg');
-        terminalKernel.partyRuns.set(party.partyId, { party: victoryParty, members: raidMembers, grants,
-            requestId, spot: null });
-        await terminalKernel.resolvePartyGrant(party.partyId);
+        terminalKernel.partyRuns.set(party.partyId, { party: victoryParty, members: raidMembers, startedAt: at,
+            spot: null });
+        await terminalKernel.resolvePartyStep(party.partyId);
         const raidBatch = raidMessages.find(message => message.type === 'proposal_batch');
         assert(raidBatch, JSON.stringify(raidMessages));
         const detached = raidBatch.payload.proposals.find(entry => entry.characterId === 2);

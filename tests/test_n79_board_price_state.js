@@ -228,20 +228,22 @@ async function run() {
         assert.strictEqual((await getCounts(owner))[key], 2, 'partial fills count deals, not sold units');
     });
 
-    await check('leased cold owner retains learning when stale worker commits settlement', async () => {
+    await check('a far owner keeps its deal learning when its next step commits the settlement', async () => {
         const owner = await makeBot([stem(10), adena(100)]);
         const buyer = await makeBot([adena(2000)], { player: true });
         const shop = await sell(owner);
-        const leased = LifeState.cachedState(owner);
-        const token = await Owner.claim(leased, { timestamp: Date.now(), leaseMs: 30000 });
-        assert(token.ok);
+        const stepped = LifeState.cachedState(owner);
         await buy(buyer, { shopId: shop.id, ownerId: owner,
             lineId: shop.lines[0].id, amount: 3 });
-        const next = structuredClone(leased);
+        const next = structuredClone(stepped);
         next.stats.workerAfterDeal = true;
-        const [commit] = await Owner.commitBatch([{ revision: token.revision, nextState: next,
-            proposal: { baseState: { inventory: leased.inventory } } }], { timestamp: Date.now() });
-        assert(commit.ok, 'a record fill must keep the owner worker lease valid');
+        const step = revision => Owner.commitBatch([{ revision, nextState: next,
+            proposal: { baseState: { inventory: stepped.inventory } } }], { timestamp: Date.now() });
+        const [refused] = await step(stepped.simulation.revision);
+        assert.strictEqual(refused.reason, 'stale_revision', 'the fill moved the far owner\'s revision under the step');
+        const [{ simulationRevision }] = await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [owner]]);
+        const [commit] = await step(simulationRevision);
+        assert(commit.ok, 'the step from the filled row commits');
         assert(commit.settled);
         assert.strictEqual(await balance(owner), 400);
         const stats = await getStats(owner);

@@ -131,6 +131,7 @@ const ColdCombatProfile = require('./ColdCombatProfile');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const CraftEligibility = require('../Economy/CraftEligibility');
 const RecipeBookCodec = require('../Economy/RecipeBookCodec');
+const EconomyCommit = require('../Economy/EconomyCommit');
 const VisitNeed = require('../../ClanHall/VisitNeed');
 const HallPolicy = require('../../ClanHall/Policy');
 const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
@@ -158,7 +159,6 @@ let competition = null;
 let competitionCandidates = null;
 let competitionReady = false;
 let safetyStateReady = false;
-let leaseProbe = null;
 let safetyStateRepairs = 0;
 let safetyOrphanRepairs = 0;
 let previousElu = null;
@@ -252,8 +252,6 @@ const occupationPlanner = new ColdOccupationPlanner({
         : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
         && sameDecisionInput(left.state, right.state)
         && left.state.simulation?.revision === right.state.simulation?.revision
-        && left.state.simulation?.ownerId === right.state.simulation?.ownerId
-        && left.state.simulation?.leaseId === right.state.simulation?.leaseId
         && left.state.inventory === right.state.inventory
         && left.state.stats?.workshop?.entries === right.state.stats?.workshop?.entries
         && left.knownShotRecipes === right.knownShotRecipes && left.recipeBook === right.recipeBook && left.stock === right.stock
@@ -279,9 +277,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         if (input.mode === 'meeting') {
             const request = input.meeting, ownId = Number(input.state.characterId);
             const side = request.actorA === ownId ? 0 : 1, own = request.parties[side];
-            const authority = invoke('GameServer/Bot/Economy/EconomyCommit').authority(input.state);
-            if (!['phase', 'ownerId', 'leaseId', 'hotAt', 'revision'].every(key => own[key] === authority[key]))
-                throw Error('trade_meeting_authority_changed');
+            if (!EconomyCommit.sameAuthority(own, EconomyCommit.authority(input.state))) throw Error('trade_meeting_authority_changed');
             const routeRows = yield* EconomicTrip.prepare(input.state);
             const Context = invoke('GameServer/Bot/Economy/EconomyContext');
             // Fresh physical incoming is delivered in the native owner snapshot.
@@ -489,7 +485,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 entry.economyPending = workshop.economyPlan.d || 0;
                 if (workshop.economyDecision) entry.published = workshop.economyDecision;
                 send('ready', { phase: 'economy_plan_ready', characterId: id,
-                    authority: invoke('GameServer/Bot/Economy/EconomyCommit').authority(input.state), economyPlan: workshop.economyPlan,
+                    authority: EconomyCommit.authority(input.state), economyPlan: workshop.economyPlan,
                     economyDecision: workshop.economyDecision });
             }
             input.economy = null; return;
@@ -815,23 +811,6 @@ function safetyTotals() {
         coverageRepairs: 0, orphanRepairs: safetyOrphanRepairs };
 }
 
-function sendLeasePage() {
-    const probe = leaseProbe;
-    if (!probe || shuttingDown || !kernel || kernel.stopping || Date.now() >= probe.replyBy) {
-        leaseProbe = null; return;
-    }
-    const page = probe.pages.next();
-    const tokens = page.done ? [] : page.value;
-    const msgId = Protocol.envelope('lease_renewal_candidates', epoch).msgId;
-    // One page remains outstanding. The next page is built only after main
-    // acknowledges this one, so native pressure cannot grow a queued inventory.
-    probe.waiting = msgId;
-    probe.done = page.done;
-    probe.tokens = new Map(tokens.map(token => [token.characterId, token]));
-    send('lease_renewal_candidates', { requestId: probe.requestId,
-        pageIndex: probe.pageIndex++, done: page.done, tokens }, msgId);
-}
-
 function safetyPresence(checkpoint) {
     const id = checkpoint.characterId, entry = kernel?.states.get(id);
     const result = { characterId: id, checkpoint, observedCheckpoint: Protocol.safetyCheckpoint(entry?.state),
@@ -849,7 +828,6 @@ function safetyPresence(checkpoint) {
     // Native ownership can be ahead of the cached row during ACK processing.
     if (kernel.busy(id)) return gate('deferred', 'worker_busy');
     const normalCovered = kernel.hasNormalCoverage(id);
-    if (!normalCovered && kernel.hasAcceptedPartyGrant(id)) return gate('deferred', 'partial_party_accepted');
     if (entry && !Protocol.sameSafetyCheckpoint(checkpoint, entry.state)) return gate('deferred', 'checkpoint_changed');
     result.normal = normalCovered ? { status: 'covered', reason: 'normal_schedule' }
         : kernel.paused ? { status: 'deferred', reason: 'worker_paused' }
@@ -1263,7 +1241,6 @@ function armLoop(from = Date.now()) {
 function runLoop() {
     const startedAt = Date.now();
     try {
-        if (leaseProbe && (shuttingDown || startedAt >= leaseProbe.replyBy)) leaseProbe = null;
         kernel.tick();
     } finally {
         if (loopTimer && !shuttingDown) armLoop(startedAt);
@@ -1641,9 +1618,7 @@ function startKernel(config = {}) {
                 && held.input.routeKey === routeKey
                 && held.input.state.updatedAt === entry.state.updatedAt
                 && sameDecisionInput(held.input.state, entry.state)
-                && Number(entry.state.simulation?.revision || 0) > Number(held.input.state.simulation?.revision || 0)
-                && held.input.state.simulation?.ownerId === entry.state.simulation?.ownerId
-                && held.input.state.simulation?.leaseId === entry.state.simulation?.leaseId;
+                && Number(entry.state.simulation?.revision || 0) > Number(held.input.state.simulation?.revision || 0);
             if (held?.done && (acceptedPublication || held.input.state === entry.state || occupationPlanner.sameInput(held.input, incoming))) {
                 held.input = incoming;
             } else {
@@ -1720,7 +1695,6 @@ function startKernel(config = {}) {
     loopIntervalMs = Math.max(5, Number(config.loopIntervalMs) || 20);
     if (LOOP_ALARM) armLoop();
     else loopTimer = setInterval(() => {
-        if (leaseProbe && (shuttingDown || Date.now() >= leaseProbe.replyBy)) leaseProbe = null;
         kernel.tick();
     }, loopIntervalMs);
     if (Config.coldCompetitionObserveEnabled) {
@@ -1751,7 +1725,7 @@ function startKernel(config = {}) {
                     ...kernelReport, safety: safetyTotals(),
                     // Forecast cooldowns can make a decision alarm the new
                     // head. Include both optional shapes before those effects.
-                    queueHead: { ...kernelReport.queueHead, kind: 'normal', alarmKind: 'claim_ack',
+                    queueHead: { ...kernelReport.queueHead, kind: 'normal', alarmKind: 'decision',
                         dueAt: large, overdue: false, current: false },
                     competition: { ...report, events: [],
                         recent: [], frame: { ...frame, events: [] }, at: frame.at, outcomes,
@@ -1905,31 +1879,8 @@ async function handle(message) {
     case 'worker_repair_request':
         send('worker_repair_ack', { results: payload.rows.map(safetyRepair), safety: safetyTotals() }, message.msgId);
         break;
-    case 'claim_ack':
-        kernel?.onClaimAck(payload, message.msgId);
-        break;
-    case 'lease_renewal_probe':
-        if (!kernel || shuttingDown || kernel.stopping || !safetyStateReady || Date.now() >= payload.replyBy) break;
-        if (leaseProbe && Date.now() < leaseProbe.replyBy) break;
-        leaseProbe = { requestId: message.msgId, replyBy: payload.replyBy, pageIndex: 0,
-            pages: kernel.leaseRenewalPages({ replyBy: payload.replyBy }) };
-        sendLeasePage();
-        break;
-    case 'lease_renewal':
-        if (leaseProbe?.waiting !== message.msgId || Date.now() >= leaseProbe.replyBy || shuttingDown) break;
-        if (payload.renewals.some(result => {
-            const token = leaseProbe.tokens.get(result.characterId);
-            return !token || token.ownerId !== result.ownerId || token.revision !== result.revision || token.leaseId !== result.leaseId;
-        })) break;
-        kernel?.onLeaseRenewal(payload);
-        if (leaseProbe.done) leaseProbe = null;
-        else sendLeasePage();
-        break;
     case 'commit_ack':
         kernel?.onCommitAck(payload);
-        break;
-    case 'release_ack':
-        kernel?.onReleaseAck(payload);
         break;
     case 'command_request':
         for (const request of payload.requests || []) if (!kernel?.receiveMeetingPage(request))
@@ -1953,7 +1904,7 @@ async function handle(message) {
     case 'fence': {
         occupationPlanner.cancel(payload.characterId);
         cancelRoute(payload.characterId);
-        const result = kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null, token: null };
+        const result = kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null };
         if (result.wishAdvisory && Protocol.validateEnvelope(Protocol.envelope('fence_ack', epoch, result, message.msgId),
             'worker', { workerEpoch: epoch }).reason === 'message_too_large') {
             delete result.wishAdvisory;
@@ -1979,7 +1930,6 @@ async function handle(message) {
         competitionCandidates?.releaseForecasts(payload.events || []);
         break;
     case 'shutdown':
-        leaseProbe = null;
         buyerWaiters.clear();
         if (shuttingDown) break;
         shuttingDown = true;

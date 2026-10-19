@@ -5,7 +5,7 @@
 // planning or authority checks. The persisted inventory is never compacted.
 const WIRE_FIELD = 'inventoryInstanceColumns';
 const MIN_INSTANCES = 512;
-const STATE_BATCHES = new Set(['snapshot_page', 'claim_ack', 'commit_ack', 'release_ack', 'command_ack']);
+const STATE_BATCHES = new Set(['snapshot_page', 'commit_ack', 'command_ack']);
 
 function packState(state) {
     if (!state?.inventory || state[WIRE_FIELD]) return state;
@@ -69,7 +69,7 @@ function mapPayload(type, payload, transform) {
     }
     if (!STATE_BATCHES.has(type)) return payload;
     let result = payload;
-    for (const field of ['rows', 'grants', 'rejected', 'results']) {
+    for (const field of ['rows', 'results']) {
         if (!Array.isArray(payload[field])) continue;
         const entries = payload[field].map(entry => {
             const state = transform(entry?.state);

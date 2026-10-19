@@ -14,17 +14,14 @@ let party;
 function resolve(members = states()) { return Party.resolve({ party, members, spot: { id: 'test' }, timestamp: at,
     episodeId: `revive:${at}`, assessRelationship: Memory.assess.bind(Memory) }); }
 async function commit(resolution, reject = false) {
-    const { grants } = await Owner.claimBatch(states(), { timestamp: at, allowParty: true, allowLifecycle: true });
     const entries = await Promise.all(resolution.memberResults.map(async ({ state, result }) => {
         const projection = await Life.prepareResolve(state, result, { timestamp: at, persist: false, projectClassProgression: true });
-        return { revision: grants.find(g => g.characterId === state.characterId).revision, nextState: projection,
+        return { revision: state.simulation.revision, nextState: projection,
             options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: `revive:${at}`, memberIds: [1, 2] },
             proposal: { baseState: state, result } };
     }));
     if (reject) entries[0].revision -= 1;
-    const results = await Owner.commitBatch(entries, { timestamp: at });
-    await Owner.releaseBatch(grants, { timestamp: at });
-    return results;
+    return Owner.commitBatch(entries, { timestamp: at });
 }
 async function run() {
     invoke('GameServer/DataCache').init(); DB.init();
@@ -57,10 +54,7 @@ async function run() {
     roster.forEach(s => kernel.upsert({ state: s }));
     kernel.partyPut(expired.partyId, expired);
     kernel.tick();
-    const claim = messages.find(m => m.type === 'claim_request'); assert(claim);
-    kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1, leaseId: `revival-${c.characterId}`,
-        leaseUntil: at + 30000, purpose: c.purpose })) }, claim.msgId);
+    assert.strictEqual(kernel.inFlight.size, 2, 'the party steps at once');
     await kernel.resolveChain;
     const batch = messages.find(m => m.type === 'proposal_batch'); assert(batch, JSON.stringify(messages));
     assert(batch.payload.proposals.every(p => p.atomicGroup?.memberIds.length === 2), 'the real worker groups revival and MP writes even without gratitude');

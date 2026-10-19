@@ -588,9 +588,6 @@ async function main() {
             'role-first selection must retain one tank, healer, and buffer when the roster is capped');
         assert.strictEqual(ClanGoalPolicy.hasReadyRoles(expandedRoster), true,
             'a larger role-balanced clan roster must be ready');
-        assert.strictEqual(ClanGoalPolicy.hasReadyRoles(expandedRoster.map((member) => (
-            member.characterId === 8005 ? { ...member, simulationOwner: 'cold_simulation_owner' } : member
-        ))), false, 'a worker-owned support must not be reserved by the main-owned clan operation');
         console.log('Clan action queue checks passed');
     } finally {
         await Database.close();

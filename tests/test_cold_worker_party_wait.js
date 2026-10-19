@@ -99,20 +99,10 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
         }));
         send('snapshot_page', { done: true, rows });
         const proposals = new Map();
-        const granted = new Set();
         const deadline = Date.now() + 20000;
         while (Object.keys(scenarios).some((id) => !proposals.has(Number(id)))) {
             if (workerError) throw workerError;
             if (Date.now() >= deadline) throw Error(`proposals: ${JSON.stringify(received.map((m) => m.type))}`);
-            for (const message of received.filter((m) => m.type === 'claim_request')) {
-                const fresh = message.payload.candidates.filter((c) => !granted.has(c.characterId));
-                fresh.forEach((c) => granted.add(c.characterId));
-                if (fresh.length) {
-                    send('claim_ack', { grants: fresh.map((c) => ({ ok: true, characterId: c.characterId,
-                        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-                        leaseId: `party-wait-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, message.msgId);
-                }
-            }
             for (const message of received.filter((m) => m.type === 'proposal_batch')) {
                 for (const proposal of message.payload.proposals) proposals.set(Number(proposal.characterId), proposal);
             }

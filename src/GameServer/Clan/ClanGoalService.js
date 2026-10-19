@@ -129,7 +129,7 @@ async function clanProjection(clanId = null) {
                COALESCE(life.locX, members.locX) AS locX, COALESCE(life.locY, members.locY) AS locY,
                COALESCE(life.locZ, members.locZ) AS locZ,
                life.partyId,
-               life.simulationOwner, life.simulationRevision, life.inventorySummary, life.statsJson, life.mindJson, personas.traitsJson, personas.primaryDrive, personas.archetype
+               life.simulationRevision, life.inventorySummary, life.statsJson, life.mindJson, personas.traitsJson, personas.primaryDrive, personas.archetype
         FROM clan_simulation_clans simulated
         JOIN clans ON clans.id = simulated.clanId
         JOIN characters members ON members.clanId = simulated.clanId
@@ -169,7 +169,6 @@ async function clanProjection(clanId = null) {
             currentRegion: String(row.currentRegion || ''),
             spotId: row.spotId || null,
             partyId: row.partyId || null,
-            simulationOwner: String(row.simulationOwner || 'legacy_main'),
             adena: number(row.adena),
             simulationRevision: number(row.simulationRevision),
             inventory: memberJson(number(row.characterId), 'inventory', row.inventorySummary, now),

@@ -108,43 +108,23 @@ function state(characterId, revision, activity = 'hunting') {
     // once, and the cache carries the written number.
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, 2,
         'each main write to a far row moves its revision once');
-    assert.strictEqual((await Owner.claim(initialState, { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-old' })).reason,
-        'stale_revision', 'a claim built before the main writes is refused');
-    const first = await Owner.claim(state(characterId, 2), { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-a' });
-    assert.strictEqual(first.ok, true, 'simple cold state must be claimable');
-    assert.strictEqual(first.revision, 3, 'claim must advance the persisted revision');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.OWNER_ID, 'claim must update cached ownership');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, first.revision, 'claim must update the cached revision');
-    const competing = await Owner.claim({
-        ...state(characterId, 1),
-        simulation: { ownerId: Owner.OWNER_ID, revision: first.revision, leaseId: 'lease-a', leaseUntil: 6000 }
-    }, { timestamp: 1500, leaseMs: 5000, leaseId: 'lease-b' });
-    assert.strictEqual(competing.reason, 'lease_active', 'an active lease must reject a competing claim');
-
     const [invalidPatch] = await Database.commitAndReleaseColdSimulationLeases([{
         characterId,
-        expectedRevision: first.revision,
+        expectedRevision: 2,
         timestamp: 1800,
         patch: { arbitraryColumn: 1 }
     }]);
     assert.strictEqual(invalidPatch.reason, 'invalid_patch', 'gateway must reject fields outside the explicit bridge protocol');
 
-    const renewed = await Owner.renewActiveLeases([first], { now: () => 2000, leaseMs: 5000, canRenew: () => true });
-    assert.strictEqual(renewed.length, 1, 'active cold ownership must be renewable before its lease expires');
-    assert.strictEqual(renewed[0].ok, true);
-    assert.strictEqual(renewed[0].leaseUntil, 7000, 'renewal must extend the lease from the renewal timestamp');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.leaseUntil, 7000,
-        'renewal must update the main ownership cache for later persistence');
-
     const migratedAppearance = await BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
     assert.strictEqual(migratedAppearance.appearanceVersion, 2,
-        'appearance metadata must patch atomically while the cold worker owns the lifecycle row');
+        'appearance metadata must patch atomically');
     assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
         'appearance migration must patch the active lifecycle cache without replacing other state');
 
-    // The worker proposes on the state it claimed: its name and look ride along.
+    // The worker proposes on the state it stepped from: its name and look ride along.
     const resting = {
-        ...state(characterId, first.revision, 'resting'),
+        ...state(characterId, 0, 'resting'),
         name: BotLifeState.cachedState(characterId).name,
         appearanceVersion: BotLifeState.cachedState(characterId).appearanceVersion,
         stats: { restUntil: 9000 },
@@ -157,16 +137,14 @@ function state(characterId, revision, activity = 'hunting') {
     };
     const commitOn = (revision, nextState, timestamp) => Owner.commitBatch([{ revision, nextState }], { timestamp })
         .then(([result]) => result);
-    // The look write under the lease moved the row: the proposal built before
-    // it is refused, the lease is released and the step redone on the row.
-    assert.strictEqual((await commitOn(first.revision, resting, 2000)).reason, 'stale_revision',
+    // The look write during the step moved the row: the proposal built before
+    // it is refused and the step is redone on the row.
+    assert.strictEqual((await commitOn(0, resting, 2000)).reason, 'stale_revision',
         'a proposal built before a main write is refused');
-    assert.strictEqual((await Owner.releaseBatch([first], { releaseInvalidated: true, timestamp: 2000 }))[0].ok, true);
-    const redo = await Owner.claim(BotLifeState.cachedState(characterId), { timestamp: 2000, leaseMs: 5000, leaseId: 'lease-a2' });
-    assert.strictEqual(redo.ok, true, 'the refused step claims the row again');
-    const committed = await commitOn(redo.revision, resting, 2000);
+    const step = BotLifeState.cachedState(characterId).simulation.revision;
+    const committed = await commitOn(step, resting, 2000);
     assert.strictEqual(committed.ok, true, 'owner proposal must commit through the main database gateway');
-    assert.strictEqual(committed.revision, redo.revision + 1, 'conditional commit must advance the revision');
+    assert.strictEqual(committed.revision, step + 1, 'conditional commit must advance the revision');
     assert.strictEqual(Number(committed.row.simulationRevision), committed.revision, 'the commit hands back the revision it wrote');
     assert.strictEqual(BotLifeState.cachedState(characterId).activity, 'resting', 'commit must reflect the accepted state in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, committed.revision, 'commit must reflect its revision in cache');
@@ -195,41 +173,27 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID,
         'a commit returns the bot to main');
 
-    const staleCommit = await commitOn(first.revision, { ...resting, activity: 'hunting' }, 2100);
-    assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old claim must never overwrite a newer revision');
+    const staleCommit = await commitOn(step, { ...resting, activity: 'hunting' }, 2100);
+    assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old step must never overwrite a newer revision');
     const partitionFailure = await commitOn(committed.revision, { ...resting, activity: 'crafting', stats: { craftShop: {} } }, 2200);
     assert.strictEqual(partitionFailure.reason, 'partition_rejected', 'owner cannot cross into a legacy-main activity');
-    const staleRelease = await Owner.release(first, { timestamp: 2300 });
-    assert.strictEqual(staleRelease.reason, 'stale_revision', 'release is CAS-protected too');
 
-    const secondState = {
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: committed.revision, leaseId: null, leaseUntil: 0 }
-    };
-    const second = await Owner.claim(secondState, { timestamp: 3000, leaseMs: 5000, leaseId: 'lease-c' });
-    assert.strictEqual(second.ok, true);
-    const handoff = await Owner.handoffToMain({
-        ...secondState,
-        simulation: { ownerId: Owner.OWNER_ID, revision: second.revision, leaseId: second.leaseId, leaseUntil: second.leaseUntil }
-    });
-    assert.strictEqual(handoff.reason, 'hot_handoff', 'hot activation must revoke the cold claim before spawning');
-    const postHandoffCommit = await commitOn(second.revision, resting, 3200);
+    const handoff = await Owner.handoffToMain(BotLifeState.cachedState(characterId), { timestamp: 3000 });
+    assert.strictEqual(handoff.reason, 'hot_handoff');
+    assert.strictEqual(handoff.revision, committed.revision + 1, 'a hot activation moves the revision before spawning');
+    const postHandoffCommit = await commitOn(committed.revision, resting, 3200);
     assert.strictEqual(postHandoffCommit.reason, 'stale_revision', 'handoff must fence a late cold commit');
 
-    const thirdState = {
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: handoff.revision, leaseId: null, leaseUntil: 0 }
-    };
-    const third = await Owner.claim(thirdState, { timestamp: 4000, leaseMs: 1000, leaseId: 'lease-d' });
-    assert.strictEqual(third.ok, true);
-    assert.strictEqual((await Owner.recoverExpiredLeases(4500)).affectedRows, 0, 'live lease must survive recovery');
-    assert.strictEqual((await Owner.recoverExpiredLeases(5001)).affectedRows, 1, 'expired owner must recover to legacy_main');
+    // A loan an older server left in the row returns to main at startup.
+    await Database.execute([`UPDATE bot_life_state SET simulationOwner = ?, simulationLeaseId = 'lease-old',
+        simulationLeaseUntil = 99999999999999 WHERE characterId = ?`, [Owner.OWNER_ID, characterId]]);
+    assert.strictEqual((await Owner.recoverStartupLeases()).affectedRows, 1, 'a startup loan must recover to legacy_main');
     const recovered = (await Database.execute([
         'SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?',
         [characterId]
     ]))[0];
     assert.strictEqual(recovered.simulationOwner, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(recovered.simulationRevision, third.revision + 1);
+    assert.strictEqual(recovered.simulationRevision, handoff.revision + 1);
     assert.strictEqual(recovered.simulationLeaseId, null);
     assert.strictEqual(recovered.simulationLeaseUntil, 0);
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'recovery must return cached ownership to main');
@@ -281,57 +245,19 @@ function state(characterId, revision, activity = 'hunting') {
     assert((await Database.fetchWarehouseItems(characterId)).some((item) => Number(item.id) === storedGear[0].id),
         'failed cleanup must not remove the selected warehouse object');
 
-    const warehouseClaim = await Owner.claim({
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: Number(compacted.state.simulationRevision), leaseId: null, leaseUntil: 0 }
-    }, { timestamp: 6000, leaseMs: 5000, leaseId: 'lease-warehouse' });
-    assert.strictEqual(warehouseClaim.ok, true, 'passive stored items must not starve the owner-capable lifecycle partition');
-    const leasedCleanup = await Database.liquidateWarehouseGear(characterId, [storedGear[0]], { source: 'must_not_run' });
-    assert.strictEqual(leasedCleanup.reason, 'owner_changed', 'warehouse cleanup must defer while the cold worker owns the lifecycle row');
-    const warehouseReleased = await Owner.release(warehouseClaim, { timestamp: 6100 });
-    assert.strictEqual(warehouseReleased.ok, true);
-
-    await Database.execute([
-        'UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?',
-        [JSON.stringify({ warehouseWorkflow: { kind: 'release' } }), characterId]
-    ]);
-    const activeWarehouseClaim = await Database.claimColdSimulationLease({
-        characterId,
-        expectedRevision: warehouseReleased.revision,
-        ownerId: Owner.OWNER_ID,
-        leaseId: 'lease-active-warehouse',
-        timestamp: 6200,
-        leaseUntil: 11200
-    });
-    assert.strictEqual(activeWarehouseClaim.reason, 'warehouse_state', 'an active warehouse workflow must remain legacy-main');
-
-    await Database.execute(['UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?',
-        [JSON.stringify({ craftReturn: { loc: { locX: 1, locY: 2 } } }), characterId]]);
-    const inventoryRace = await Owner.claim({ ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: warehouseReleased.revision }
-    }, { timestamp: 6300, leaseMs: 5000, leaseId: 'inventory-race' });
-    assert(inventoryRace.ok);
+    // A clan inventory write moves the row under a step: the step's commit is
+    // refused and the row keeps the new inventory.
+    const raceRevision = Number(compacted.state.simulationRevision);
     const inventoryAfterClanWrite = JSON.stringify({ '1869': { selfId: 1869, amount: 42 } });
     await Database.execute([`UPDATE bot_life_state SET simulationRevision = simulationRevision + 1,
         inventorySummary = ?, statsJson = ? WHERE characterId = ?`,
-    [inventoryAfterClanWrite, JSON.stringify({ clanInventoryRevision: inventoryRace.revision + 1 }), characterId]]);
-    const rejectedCommit = await commitOn(inventoryRace.revision, resting, 6400);
+    [inventoryAfterClanWrite, JSON.stringify({ clanInventoryRevision: raceRevision + 1 }), characterId]]);
+    const rejectedCommit = await commitOn(raceRevision, resting, 6400);
     assert.strictEqual(rejectedCommit.reason, 'stale_revision');
-    assert.strictEqual((await Owner.releaseBatch([inventoryRace], { timestamp: 6400 }))[0].reason, 'stale_revision',
-        'ordinary release retains revision fencing');
-    const releasedRace = (await Owner.releaseBatch([inventoryRace], { timestamp: 6400, releaseInvalidated: true }))[0];
-    assert(releasedRace.ok, 'a rejected operation must release its own unchanged lease after a clan inventory write');
     const [afterRace] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]]);
-    assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'release must preserve new inventory');
-    assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, inventoryRace.revision + 1);
-    assert.strictEqual(afterRace.simulationLeaseId, null);
+    assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'a refused commit preserves the new inventory');
+    assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, raceRevision + 1);
     assert.strictEqual(afterRace.simulationOwner, Owner.LEGACY_OWNER_ID);
-    const freshClaim = await Owner.claim({ ...resting, simulation: { revision: releasedRace.revision } },
-        { timestamp: 6500, leaseMs: 5000, leaseId: 'after-inventory-race' });
-    assert(freshClaim.ok, 'the bot can resume simulation after releasing the abandoned lease');
-    assert(!(await Owner.releaseBatch([inventoryRace], { timestamp: 6600, releaseInvalidated: true }))[0].ok,
-        'a late rejection must not release a newer lease');
-    assert((await Owner.release(freshClaim, { timestamp: 6600 })).ok);
 
     // Developer diagnostics: an item read counts under its call-site tag.
     await Database.fetchItems(characterId, 'owner_probe');
@@ -339,7 +265,7 @@ function state(characterId, revision, activity = 'hunting') {
 
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');
-    console.log('Cold simulation owner claim, CAS, handoff, and recovery checks passed');
+    console.log('Cold simulation owner revision fence, handoff, and recovery checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

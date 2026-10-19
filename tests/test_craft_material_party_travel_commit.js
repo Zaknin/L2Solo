@@ -37,10 +37,7 @@ async function image() {
 }
 async function proposals(party, route, at) {
     const members = party.memberIds.map(id => Life.cachedState(id));
-    const { grants } = await Owner.claimBatch(members, { timestamp: at, allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, members.length);
-    const held = new Map(grants.map(grant => [grant.characterId, grant]));
-    const messages = [], requestId = `material-trip-${at}`;
+    const messages = [];
     const kernel = new Kernel.ColdSimulationKernel({ now: () => at,
         resolveSolo: () => { throw Error('no solo combat in a trip'); },
         resolveParty: () => { throw Error('no party combat in a trip'); },
@@ -49,14 +46,13 @@ async function proposals(party, route, at) {
     for (const member of members) {
         const current = Life.cachedState(member.characterId);
         kernel.upsert({ state: current });
-        kernel.inFlight.set(member.characterId, { state: current, grant: held.get(member.characterId),
-            partyId: party.partyId, claimRequestId: requestId });
+        kernel.inFlight.set(member.characterId, { state: current, startedAt: at, partyId: party.partyId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members, requestId, grants: held });
-    await kernel.resolvePartyGrant(party.partyId);
+    kernel.partyRuns.set(party.partyId, { party, members, startedAt: at });
+    await kernel.resolvePartyStep(party.partyId);
     const rows = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(rows, JSON.stringify(messages));
-    return { grants, entries: rows.map(proposal => ({ revision: proposal.token.revision, nextState: proposal.nextState,
+    return { entries: rows.map(proposal => ({ revision: proposal.revision, nextState: proposal.nextState,
         options: proposal.options, atomicGroup: proposal.atomicGroup, proposal })) };
 }
 async function commit(prepared, at) {
@@ -90,14 +86,13 @@ async function main() {
     const route = trip(states, 'new-source', { materialSources: sources });
 
     // A party-only change must reject the entire native transition, even when
-    // every character lease is still current. No postcommit repair is enough.
+    // every member revision is still current. No postcommit repair is enough.
     const stale = await proposals(party, route, timestamp);
     await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrentMarker',1) WHERE partyId=?", [party.partyId]]);
     const before = await image();
     const rejected = await Owner.commitBatch(stale.entries, { timestamp });
     assert(rejected.every(row => !row.ok && row.detail === 'party_revision_stale'), JSON.stringify(rejected));
     assert.deepEqual(await image(), before, 'stale party context cannot commit even one member destination');
-    await Owner.releaseBatch(stale.grants, { timestamp });
     party = Parties.acceptRow(await partyRow(party.partyId));
 
     party = await commit(await proposals(party, route, ++timestamp), timestamp);

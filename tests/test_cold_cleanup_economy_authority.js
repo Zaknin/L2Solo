@@ -55,8 +55,7 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         assert.equal(prepared.stats.travel.paid.fee, 11000, 'the real Giran-to-Oren route charges its fare');
         assert.equal(prepared.adena, 9000, 'cleanup replaces the planner wallet after its bid was sized');
         const committed = await Life.upsertState(prepared, 'cleanup_trip_commit_fixture');
-        const result = { ok: true, characterId: id, nextState: committed, proposal: { ...proposal, proposalId: 'cleanup:1',
-            token: { characterId: id, ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'cleanup:lease', leaseUntil: Date.now() + 60000 } } };
+        const result = { ok: true, characterId: id, nextState: committed, proposal: { ...proposal, proposalId: `${id}:1`, revision: 1 } };
         await coordinator.afterCommit(result);
         await coordinator.handleCommitResults([result]);
         assert.equal(acks[0]?.ok, true);

@@ -14,7 +14,6 @@ function safeMembers(party, members) {
     return members.length > 0 && members.length === party.memberIds.length
         && members.every(member => party.memberIds.includes(member.characterId)
             && member.phase === 'cold' && member.party?.partyId === party.partyId
-            && String(member.simulation?.ownerId || 'legacy_main') === 'legacy_main'
             && ['hunting', 'grouped', 'resting', 'party_wait'].includes(member.activity)
             && !member.stats?.clanPartyObjective && !member.stats?.equipmentPlan?.clanGoal
             && !member.stats?.pvpEncounter && !member.stats?.partyMarketReturn

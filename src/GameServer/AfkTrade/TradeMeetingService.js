@@ -2,6 +2,7 @@
 const { randomUUID } = require('node:crypto');
 const { MAX_COMMITMENTS } = require('./TradeMeeting');
 const { partyTradeAllowed } = require('../Bot/Population/PartyAdmission');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
 const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 const staged = new Map();
 const preparedActors = new Map(); // actor -> staged token; one preparation per actor.
@@ -287,12 +288,10 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
     // Freshly reading a participant must not turn a stale decision into consent.
     const sourceState = options.coldState || life().cachedState(characterId);
     const callerAuthority = options.economyCommand?.authority || (sourceState
-        ? require('../Bot/Economy/EconomyCommit').authority(sourceState) : null);
+        ? EconomyCommit.authority(sourceState) : null);
     if (callerAuthority) {
         const own = sides[actors.indexOf(characterId)];
-        if (own.phase !== callerAuthority.phase || own.revision !== callerAuthority.revision
-            || own.ownerId !== callerAuthority.ownerId || own.leaseId !== callerAuthority.leaseId
-            || own.hotAt !== callerAuthority.hotAt) throw Error('trade_meeting_authority_changed');
+        if (!EconomyCommit.sameAuthority(own, callerAuthority)) throw Error('trade_meeting_authority_changed');
     }
     const buyerSide = actors.indexOf(buyer), sellerSide = 1 - buyerSide;
     const sources = []; let remainder = amount;
@@ -515,7 +514,7 @@ async function init() {
         // accepted meeting survives ordinary economic revisions and ad edits.
         for (const [key, entry] of staged) if (entry.actors.includes(id)) {
             const side = entry.actors.indexOf(id), state = life().cachedState(id);
-            if (!state || require('../Bot/Economy/EconomyCommit').authority(state).revision !== entry.revisions[side]) discard(key);
+            if (!state || EconomyCommit.authority(state).revision !== entry.revisions[side]) discard(key);
         }
         wake(id);
     });

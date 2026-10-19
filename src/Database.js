@@ -23,7 +23,6 @@ const InteractionMemoryPolicy = require('./GameServer/Social/InteractionMemoryPo
 const ClanNameCatalog = require('./GameServer/Clan/ClanNameCatalog');
 const BoardRules = require('./GameServer/AfkTrade/BoardRules');
 const BotErrands = require('./GameServer/Bot/Population/BotErrands');
-const ColdProtocol = require('./GameServer/Bot/Population/ColdSimulationProtocol');
 const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCheckpoint');
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
@@ -2269,8 +2268,7 @@ function economyOwnerUnsafe(characterId, authority, fresh = false) {
     const row = one('SELECT life.*, c.username FROM bot_life_state life JOIN characters c ON c.id=life.characterId WHERE life.characterId=?',
         [Number(characterId)]);
     if (!row || !BoardRules.isBotAccount(row.username) || !authority
-        || row.phase !== authority.phase || row.simulationOwner !== authority.ownerId
-        || (row.simulationLeaseId || null) !== (authority.leaseId || null)
+        || row.phase !== authority.phase
         || Number(row.lastHotAt || 0) !== Number(authority.hotAt || 0)
         || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId
         || (fresh && Number(row.simulationRevision) !== authority.revision)) throw Error('economy_owner_changed');
@@ -2414,14 +2412,14 @@ function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (available - reserve < used) throw Error('economy_material_protected');
 }
 
-// An AFK fill changes the items of a bot whose row the cold worker may lease;
+// An AFK fill changes the items of a far bot the cold worker may be stepping;
 // the worker would later commit its older summary over them. Fence it as clan
 // writes do: the same transaction writes the new amounts into the summary and
 // advances simulationRevision, so the worker's commit fails its CAS and the
 // bot is resolved again from this row. Returns the row when it was fenced.
-function fenceLeasedColdInventoryUnsafe(characterId, changedIds) {
-    const row = one('SELECT simulationOwner, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
-    if (!row || row.simulationOwner !== COLD_SIMULATION_OWNER) return null;
+function fenceColdInventoryUnsafe(characterId, changedIds) {
+    const row = one('SELECT phase, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
+    if (!row || row.phase !== 'cold') return null;
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds);
 }
 
@@ -2630,8 +2628,8 @@ const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
 // commit); elsewhere a writer that may run next to another mover (the party
 // payment inside commitBackgroundPartyMembership) can move twice. Writers that do not take it on
 // purpose: the BotLifeState startup recovery UPDATEs (they run before the
-// cache and any claim), its `save` upsert (a near bot's write), the hot branch
-// of completeEconomyStepUnsafe, and the karma/PK write inside the commit.
+// cache and the worker), the hot branch of completeEconomyStepUnsafe, and the
+// karma/PK write inside the commit. BotLifeState `save` takes it in its upsert.
 const MOVE_FAR_REVISION = "simulationRevision = simulationRevision + CASE WHEN phase = 'cold' THEN 1 ELSE 0 END";
 const SIMPLE_COLD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const COLD_SIMULATION_PATCH_COLUMNS = new Set([
@@ -2974,25 +2972,6 @@ function acceptedTradeIncomingUnsafe(characterId, row) {
     if (pendingSettlementOwners.has(characterId)) for (const line of all(`SELECT selfId,SUM(amount) amount
         FROM board_settlements WHERE ownerId=? GROUP BY selfId`, [characterId])) add(line.selfId, line.amount);
     return incoming;
-}
-
-// A claim needs the lease columns and the workflow flags coldSimulationPartition
-// reads, not the whole row with its 9 KB stats. json_extract keeps JavaScript
-// truthiness for them: false, 0, '' and missing values come back as 0, '' or
-// NULL, objects and arrays as their JSON text. Empty stats parse to {} as in
-// parsedObject; malformed stats have no flags and fail as invalid_stats.
-const COLD_CLAIM_FLAGS = BotErrands.COLD_CLAIM;
-const COLD_CLAIM_SQL = `SELECT characterId, phase, activity, partyId,
-        simulationOwner, simulationRevision, simulationLeaseUntil,
-        (statsJson IS NULL OR statsJson = '' OR json_valid(statsJson)) AS statsValid,
-        ${COLD_CLAIM_FLAGS.map((flag) => `CASE WHEN json_valid(statsJson) THEN json_extract(statsJson, '$.${flag}') END AS "${flag}"`).join(',\n        ')}
-    FROM bot_life_state WHERE characterId = ?`;
-
-function coldClaimRow(characterId) {
-    const row = one(COLD_CLAIM_SQL, [Number(characterId)]);
-    if (!row) return { row: null, stats: undefined };
-    const stats = row.statsValid ? Object.fromEntries(COLD_CLAIM_FLAGS.map((flag) => [flag, row[flag]])) : null;
-    return { row, stats };
 }
 
 // Why a guarded far-row write found no row: the revision is the fence.
@@ -3602,12 +3581,12 @@ function closeBoardRecordUnsafe(shop, { ownMove = true, at = now() } = {}) {
 }
 
 // An AFK shop write (a fill, close, reprice or publish) moves adena and the
-// items selfIds into or out of each party's backpack. Fences each party whose
-// lifecycle row the cold worker leases; by characterId.
+// items selfIds into or out of each party's backpack. Fences each far party
+// (phase cold); by characterId.
 function fenceAfkTradePartiesUnsafe(characterIds, selfIds) {
     const rows = {};
     for (const characterId of characterIds) {
-        const row = fenceLeasedColdInventoryUnsafe(characterId, selfIds);
+        const row = fenceColdInventoryUnsafe(characterId, selfIds);
         if (row) rows[Number(characterId)] = row;
     }
     return rows;
@@ -4199,6 +4178,9 @@ function publishClanMembership(result) {
 
 
 const Database = {
+    // BotLifeState.save builds its upsert with it.
+    MOVE_FAR_REVISION,
+
     openClanRaidPartyAtImpact(request) {
         // The offensive callback cannot await our queue: its registered roster
         // could change meanwhile. Abort this native action when another write
@@ -4295,8 +4277,8 @@ const Database = {
                 if (admission.nativeProof) NativeWriteCheckpoint.checkRow(admission.nativeProof, statement);
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
-                // The upsert never writes simulationRevision; it hands back the
-                // row's own, which a main write may have moved meanwhile.
+                // The upsert moves a far row's revision (MOVE_FAR_REVISION) and
+                // hands back the row's own, the number the caller's cache takes.
                 const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
@@ -4773,11 +4755,9 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             if (expectedAuthority) {
-                const row = one('SELECT phase,simulationOwner,simulationRevision,simulationLeaseId,lastHotAt FROM bot_life_state WHERE characterId=?',
-                    [characterId]);
-                if (!row || row.phase !== expectedAuthority.phase || row.simulationOwner !== expectedAuthority.ownerId
+                const row = one('SELECT phase,simulationRevision,lastHotAt FROM bot_life_state WHERE characterId=?', [characterId]);
+                if (!row || row.phase !== expectedAuthority.phase
                     || Number(row.simulationRevision) !== expectedAuthority.revision
-                    || (row.simulationLeaseId || null) !== expectedAuthority.leaseId
                     || Number(row.lastHotAt || 0) !== expectedAuthority.hotAt) throw Error('economy_plan_need_changed');
             }
             const timestamp = now();
@@ -4885,15 +4865,14 @@ const Database = {
         }, 'board:leave'));
     },
 
-    // A main-thread save of what waits for a bot on the board: merged unless
-    // the worker leases the bot (its commit merges it). Returns the bot's
-    // row when its cold state changed, and its bag.
+    // A main-thread save of what waits for a bot on the board, merged at once;
+    // the merge moves the revision, so a far bot's step under way is refused
+    // and rebases on this row. Returns the bot's row when its cold state
+    // changed, and its bag.
     settleBoardOwner(ownerId) {
         const characterId = Number(ownerId);
         if (!characterId || !pendingSettlementOwners.has(characterId)) return Promise.resolve({ settled: false });
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const life = one('SELECT simulationOwner FROM bot_life_state WHERE characterId = ?', [characterId]);
-            if (life?.simulationOwner === COLD_SIMULATION_OWNER) return { settled: false, leased: true };
             const merged = mergeBoardSettlementsUnsafe(characterId, { advance: true });
             if (!merged) return { settled: false };
             return { settled: true, row: merged.row, ownerInventory: afkTradeInventoryUnsafe(characterId) };
@@ -4983,11 +4962,9 @@ const Database = {
             if (coldAuthority && hotAuthority) throw new Error('invalid_market_review_authority');
             const authority = coldAuthority || hotAuthority;
             if (authority) {
-                const life = one(`SELECT phase, simulationOwner, simulationRevision, simulationLeaseId
-                    FROM bot_life_state WHERE characterId = ?`, [characterId]);
-                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot') || life.simulationOwner !== authority.ownerId
-                    || Number(life.simulationRevision) !== authority.revision
-                    || (life.simulationLeaseId || null) !== authority.leaseId) {
+                const life = one('SELECT phase, simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]);
+                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot')
+                    || Number(life.simulationRevision) !== authority.revision) {
                     throw new Error('stale_market_review');
                 }
             }
@@ -5450,17 +5427,14 @@ const Database = {
             if (party?.status !== 'active' || Number(party.revision) !== expectedPartyRevision
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
-            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationOwner,
-                simulationRevision, simulationLeaseId FROM bot_life_state
+            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationRevision FROM bot_life_state
                 WHERE characterId IN (${ids.map(() => '?').join(',')})`, ids);
             const byId = new Map(rows.map(row => [Number(row.characterId), row]));
             if (sources.some(source => {
                 const row = byId.get(source.characterId);
                 return !row || row.phase !== source.phase || row.partyId !== source.partyId
                     || Number(row.updatedAt) !== source.updatedAt
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== source.ownerId
-                    || Number(row.simulationRevision || 0) !== source.revision
-                    || String(row.simulationLeaseId || '') !== source.leaseId;
+                    || Number(row.simulationRevision || 0) !== source.revision;
             })) return { ok: false, reason: 'party_goal_member_changed' };
             write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [statsJson, updatedAt, partyId]);
@@ -5518,7 +5492,7 @@ const Database = {
                     return { ok: false, reason: 'party_recruitment_changed' };
             }
             const placeholders = characterIds.map(() => '?').join(', ');
-            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt, statsJson
+            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);
             const currentById = new Map(currentRows.map((row) => [Number(row.characterId), row]));
             const conflicts = batch.filter((entry) => {
@@ -5530,9 +5504,7 @@ const Database = {
                     || String(current.partyId || '') !== String(entry.expectedPartyId || '')
                     || Number(current.updatedAt || 0) !== Number(entry.expectedUpdatedAt || 0)
                     || entry.expectedSimulationRevision !== undefined
-                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision
-                    || entry.expectedSimulationLeaseId !== undefined
-                        && String(current.simulationLeaseId || '') !== entry.expectedSimulationLeaseId;
+                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision;
             }).map((entry) => Number(entry.row.characterId));
             if (conflicts.length) return { ok: false, reason: 'membership_conflict', conflicts };
 
@@ -5644,100 +5616,6 @@ const Database = {
     // A bot's input revisions (bag summary, learned skills, henna slots) from
     // its bot_life_state row or a state that copied them; 0 = unknown.
     stateRevisions,
-
-    claimColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
-        const leaseUntil = Number(request.leaseUntil || 0);
-        if (!Number.isSafeInteger(characterId) || characterId <= 0) return Promise.resolve({ ok: false, reason: 'invalid_character' });
-        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return Promise.resolve({ ok: false, reason: 'invalid_revision' });
-        if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) return Promise.resolve({ ok: false, reason: 'invalid_lease' });
-
-        return inTransaction(() => {
-            const { row, stats } = coldClaimRow(characterId);
-            const partition = coldSimulationPartition(row, request, stats);
-            if (!partition.ok) return partition;
-            if (Number(row.simulationRevision || 0) !== expectedRevision) return { ok: false, reason: 'stale_revision' };
-            const currentOwner = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            const currentLeaseUntil = Number(row.simulationLeaseUntil || 0);
-            if (currentOwner !== LEGACY_SIMULATION_OWNER && currentLeaseUntil > timestamp) {
-                return { ok: false, reason: 'lease_active' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(currentOwner)) {
-                return { ok: false, reason: 'owner_changed' };
-            }
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = ?, simulationLeaseUntil = ?
-                WHERE characterId = ? AND simulationRevision = ? AND simulationOwner = ?`, [
-                ownerId, revision, leaseId, leaseUntil, characterId, expectedRevision, currentOwner
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId, leaseId, revision, leaseUntil, reason: 'claimed' };
-        }, 'bot-life:cold-owner-claim');
-    },
-
-    claimColdSimulationLeases(requests = []) {
-        const batch = Array.isArray(requests) ? requests.slice(0, 64) : [];
-        if (!batch.length) return Promise.resolve([]);
-        return inTransaction(() => batch.map((request) => {
-            const characterId = Number(request.characterId);
-            const expectedRevision = Number(request.expectedRevision);
-            const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-            const leaseId = String(request.leaseId || '');
-            const timestamp = Number(request.timestamp || now());
-            const leaseUntil = Number(request.leaseUntil || 0);
-            if (!Number.isSafeInteger(characterId) || characterId <= 0) return { ok: false, characterId, reason: 'invalid_character' };
-            if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
-            if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) {
-                return { ok: false, characterId, reason: 'invalid_lease' };
-            }
-            const { row, stats } = coldClaimRow(characterId);
-            const partition = coldSimulationPartition(row, request, stats);
-            if (!partition.ok) return { ...partition, characterId };
-            if (Number(row.simulationRevision || 0) !== expectedRevision) {
-                return {
-                    ok: false,
-                    characterId,
-                    reason: 'stale_revision',
-                    expectedRevision,
-                    actualRevision: Number(row.simulationRevision || 0),
-                    actualOwner: String(row.simulationOwner || LEGACY_SIMULATION_OWNER),
-                    actualLeaseUntil: Number(row.simulationLeaseUntil || 0)
-                };
-            }
-            const currentOwner = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            const currentLeaseUntil = Number(row.simulationLeaseUntil || 0);
-            if (currentOwner !== LEGACY_SIMULATION_OWNER && currentLeaseUntil > timestamp) {
-                return { ok: false, characterId, reason: 'lease_active' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(currentOwner)) {
-                return { ok: false, characterId, reason: 'owner_changed' };
-            }
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = ?, simulationLeaseUntil = ?
-                WHERE characterId = ? AND simulationRevision = ? AND simulationOwner = ?`, [
-                ownerId, revision, leaseId, leaseUntil, characterId, expectedRevision, currentOwner
-            ]);
-            if (result.affectedRows !== 1) {
-                const actual = coldSimulationRow(characterId);
-                return {
-                    ok: false,
-                    characterId,
-                    reason: 'cas_failed',
-                    expectedRevision,
-                    actualRevision: Number(actual?.simulationRevision || 0),
-                    actualOwner: String(actual?.simulationOwner || LEGACY_SIMULATION_OWNER),
-                    actualLeaseUntil: Number(actual?.simulationLeaseUntil || 0)
-                };
-            }
-            return { ok: true, characterId, ownerId, leaseId, revision, leaseUntil, reason: 'claimed' };
-        }), 'bot-life:cold-owner-claim-batch');
-    },
 
     commitAndReleaseColdSimulationLeases(requests = []) {
         const batch = Array.isArray(requests) ? requests.slice(0, 32) : [];
@@ -5993,100 +5871,6 @@ const Database = {
             DiagnosticConfig.developerDiagnostics && Diagnostics.count('commit_batch', 'bots', 'all', batch.length);
             return results;
         }, 'bot-life:cold-owner-commit-release-batch');
-    },
-
-    releaseColdSimulationLeases(requests = []) {
-        const batch = Array.isArray(requests) ? requests.slice(0, 64) : [];
-        if (!batch.length) return Promise.resolve([]);
-        return inTransaction(() => batch.map((request) => {
-            const characterId = Number(request.characterId);
-            let expectedRevision = Number(request.expectedRevision);
-            const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-            const leaseId = String(request.leaseId || '');
-            const row = coldSimulationRow(characterId);
-            // A clan inventory write can advance the row while retaining the
-            // same lease. Its rejected proposal must still relinquish that
-            // lease; otherwise renewal keeps an abandoned owner alive forever.
-            // This opt-in path changes ownership only, never character data.
-            if (request.releaseInvalidated === true && row?.phase === 'cold'
-                && leaseId && row.simulationLeaseId === leaseId
-                && row.simulationOwner === ownerId
-                && Number(row.simulationRevision) > expectedRevision) {
-                expectedRevision = Number(row.simulationRevision);
-            }
-            const conflict = coldSimulationConflict(row, { expectedRevision });
-            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ? AND simulationLeaseId = ?`, [
-                LEGACY_SIMULATION_OWNER, revision, characterId, ownerId, expectedRevision, leaseId
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, characterId, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId: LEGACY_SIMULATION_OWNER, leaseId: null, revision, leaseUntil: 0, reason: 'released' };
-        }), 'bot-life:cold-owner-release-batch');
-    },
-
-    releaseColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        return inTransaction(() => {
-            const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision });
-            if (conflict !== 'cas_failed') return { ok: false, reason: conflict };
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ? AND simulationLeaseId = ?`, [
-                LEGACY_SIMULATION_OWNER, revision, characterId, ownerId, expectedRevision, leaseId
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId: LEGACY_SIMULATION_OWNER, leaseId: null, revision, leaseUntil: 0, reason: 'released' };
-        }, 'bot-life:cold-owner-release');
-    },
-
-    renewColdSimulationLeases(tokens = [], {
-        now: clock = Date.now,
-        leaseMs = 30000,
-        canRenew
-    } = {}) {
-        const batch = Array.isArray(tokens) && tokens.length <= ColdProtocol.MAX_BATCH
-            ? tokens.map(ColdProtocol.leaseRenewalToken) : null;
-        const ids = new Set(batch?.filter(Boolean).map(token => token.characterId));
-        if (!batch || batch.length > ColdProtocol.MAX_BATCH || batch.some(token => !token)
-            || ids.size !== batch.length || (batch.length && (typeof clock !== 'function'
-                || typeof canRenew !== 'function' || !Number.isSafeInteger(leaseMs) || leaseMs < 1000))) {
-            return Promise.reject(new Error('invalid_lease_renewal_batch'));
-        }
-        if (!batch.length) return Promise.resolve([]);
-        return withCharacterFlushes([...ids], () => inTransaction(() => batch.map(token => {
-            const cutoff = clock();
-            if (!Number.isSafeInteger(cutoff) || cutoff < 0 || !Number.isSafeInteger(cutoff + leaseMs)) {
-                throw new Error('invalid_lease_renewal_clock');
-            }
-            const refused = reason => ({ ok: false, ...token, reason });
-            if (canRenew(token) !== true) return refused('renewal_source_changed');
-            const current = one(`SELECT phase, simulationOwner, simulationRevision, simulationLeaseId,
-                simulationLeaseUntil FROM bot_life_state WHERE characterId = ?`, [token.characterId]);
-            if (!current) return refused('missing_state');
-            if (current.phase !== 'cold') return refused('not_cold');
-            if (current.simulationOwner !== token.ownerId) return refused('owner_changed');
-            if (Number(current.simulationRevision) !== token.revision) return refused('stale_revision');
-            if (current.simulationLeaseId !== token.leaseId) return refused('lease_changed');
-            if (Number(current.simulationLeaseUntil) <= cutoff) return refused('lease_expired');
-            const leaseUntil = Math.max(Number(current.simulationLeaseUntil), cutoff + leaseMs);
-            const result = write(`UPDATE bot_life_state
-                SET simulationLeaseUntil = ?
-                WHERE characterId = ? AND phase = 'cold' AND simulationOwner = ?
-                  AND simulationRevision = ? AND simulationLeaseId = ?
-                  AND simulationLeaseUntil > ?`, [
-                leaseUntil, token.characterId, token.ownerId, token.revision, token.leaseId, cutoff
-            ]);
-            return result.affectedRows === 1 ? { ok: true, ...token, leaseUntil, reason: 'renewed' }
-                : refused('renewal_cas_failed');
-        }), 'bot-life:cold-owner-renew-batch'));
     },
 
     endPvpEncounter(key, ids, outcome = 'pvp_expired') {
@@ -6469,18 +6253,17 @@ const Database = {
             if (!row) return { ok: false, reason: 'missing_state' };
             const revision = Number(row.simulationRevision || 0);
             if (expectedRevision !== null && revision !== expectedRevision) return { ok: false, reason: 'stale_revision' };
-            const ownerId = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            if (!Object.keys(patch).length && ownerId === LEGACY_SIMULATION_OWNER) {
-                return { ok: true, characterId, ownerId, leaseId: null, revision, leaseUntil: 0, reason: 'already_main' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(ownerId)) return { ok: false, reason: 'owner_changed' };
-            if (Object.keys(patch).length) {
+            // A main thread taking a far bot is a main write: it always moves the
+            // revision, so a worker step begun before it is refused stale_revision.
+            const patched = Object.keys(patch).length > 0;
+            if (patched) {
                 const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
                 const partition = coldSimulationPartition(proposed, request);
                 if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
             }
             const nextRevision = revision + 1;
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() });
+            // Without a patch only the revision moves: updatedAt stays the cached state's.
+            const entries = patched ? Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() }) : [];
             const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
             assignments.push(
                 'simulationOwner = ?',
@@ -6490,9 +6273,9 @@ const Database = {
             );
             const result = write(`UPDATE bot_life_state
                 SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?`, [
+                WHERE characterId = ? AND simulationRevision = ?`, [
                 ...entries.map(([, value]) => value),
-                LEGACY_SIMULATION_OWNER, nextRevision, characterId, ownerId, revision
+                LEGACY_SIMULATION_OWNER, nextRevision, characterId, revision
             ]);
             if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
             return {
@@ -6502,28 +6285,26 @@ const Database = {
                 leaseId: null,
                 revision: nextRevision,
                 leaseUntil: 0,
-                reason: Object.keys(patch).length ? 'main_transition' : 'hot_handoff',
+                reason: patched ? 'main_transition' : 'hot_handoff',
                 row: coldSimulationRow(characterId)
             };
         }, 'bot-life:hot-owner-handoff');
     },
 
-    recoverColdSimulationLeases({ timestamp = now(), includeActive = false } = {}) {
-        const cutoff = Number(timestamp);
+    // A loan an older server left in a row returns to main at startup.
+    recoverColdSimulationLeases() {
         return inTransaction(() => {
-            const where = `simulationOwner = ?${includeActive ? '' : ' AND simulationLeaseUntil <= ?'}`;
-            const selectParams = includeActive ? [COLD_SIMULATION_OWNER] : [COLD_SIMULATION_OWNER, cutoff];
-            const candidates = all(`SELECT characterId FROM bot_life_state WHERE ${where}`, selectParams);
+            const candidates = all('SELECT characterId FROM bot_life_state WHERE simulationOwner = ?', [COLD_SIMULATION_OWNER]);
             const result = write(`UPDATE bot_life_state
                 SET simulationOwner = ?, simulationRevision = simulationRevision + 1,
                     simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE ${where}`, [LEGACY_SIMULATION_OWNER, ...selectParams]);
+                WHERE simulationOwner = ?`, [LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER]);
             const rows = candidates.length
                 ? all(`SELECT characterId, simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil
                     FROM bot_life_state WHERE characterId IN (${candidates.map(() => '?').join(', ')})`, candidates.map((row) => row.characterId))
                 : [];
             return { ...result, rows };
-        }, includeActive ? 'bot-life:cold-owner-startup-recovery' : 'bot-life:cold-owner-expired-recovery');
+        }, 'bot-life:cold-owner-startup-recovery');
     },
 
     clearRaidBossState(npcId) {
@@ -10110,11 +9891,9 @@ const Database = {
         return inTransaction(() => {
             const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
             if (!row || row.phase !== 'cold' || Number(row.simulationRevision) !== Number(expectedRevision)) return false;
-            if (row.simulationOwner === COLD_SIMULATION_OWNER) {
-                const inventory = jsonObject(row.inventorySummary);
-                const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
-                syncInventorySummaryUnsafe(characterId, supplies);
-            }
+            const inventory = jsonObject(row.inventorySummary);
+            const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
+            syncInventorySummaryUnsafe(characterId, supplies);
             return true;
         }, 'clan-supplies:materialize');
     },
@@ -11310,8 +11089,7 @@ Object.assign(Database, {
             const slot = TradeMeetings.participant(Number(id)), row = one("SELECT *, json_extract(statsJson,'$.playerPartyTakeover.playerId') playerPartyId FROM bot_life_state WHERE characterId=?", [id]);
             return { sequence: slot.nextSequence, meetingId: slot.meetingId, anchor: TradeMeetings.anchor(Number(id)), revision: Number(row?.simulationRevision || 0),
                 partyId: row?.partyId || null, playerPartyId: row?.playerPartyId || null,
-                phase: row?.phase || 'player', ownerId: row?.simulationOwner || null,
-                leaseId: row?.simulationLeaseId || null, hotAt: Number(row?.lastHotAt || 0),
+                phase: row?.phase || 'player', hotAt: Number(row?.lastHotAt || 0),
                 needRevision: Number(row?.simulationRevision || 0),
                 inventory: afkTradeInventoryUnsafe(id), acceptedIncoming: acceptedTradeIncomingUnsafe(Number(id), row),
                 position: tradeMeetingPositionUnsafe(Number(id)) };

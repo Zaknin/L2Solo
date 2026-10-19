@@ -99,7 +99,7 @@ const point = { locX: 83396, locY: 147904, locZ: -3400 };
 
         await assert.rejects(Database.acceptTradeMeeting(request, { freshPreparation: true, validatePreparation: () => false }), /preparation_changed/);
         assert.deepEqual(await held(), holdings, 'worker source invalidation after native flush moves no assets');
-        for (const changed of [{ ownerId: 'stale_owner' }, { leaseId: 'stale_lease' }, { hotAt: 1 }, { revision: parties[0].revision + 1 }]) {
+        for (const changed of [{ phase: 'hot' }, { hotAt: 1 }, { revision: parties[0].revision + 1 }]) {
             const stale = { ...request, parties: request.parties.map((party, side) => side ? party : { ...party, ...changed }) };
             await assert.rejects(Database.acceptTradeMeeting(stale), /authority_changed/);
             assert.deepEqual(await held(), holdings, 'a stale owner moves no assets');

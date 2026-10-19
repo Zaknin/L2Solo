@@ -1,5 +1,4 @@
 const DiagnosticConfig = require('./PopulationConfig');
-const { randomUUID } = require('crypto');
 
 const Database = invoke('Database');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
@@ -10,7 +9,6 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 const OWNER_ID = 'cold_simulation_owner';
 const LEGACY_OWNER_ID = 'legacy_main';
-const DEFAULT_LEASE_MS = 30000;
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const LEGACY_PLAN_STRATEGIES = new Set(['market', 'craft']);
 
@@ -50,19 +48,6 @@ function eligibility(state = {}, options = {}) {
         if (/craft/i.test(reason)) return { ok: false, reason: 'craft_state' };
     }
     return { ok: true, reason: state.partyId || state.party?.partyId ? 'background_party_cold' : 'simple_solo_cold' };
-}
-
-function leaseId() {
-    return `cold-owner:${randomUUID()}`;
-}
-
-function ownership(state = {}) {
-    return {
-        ownerId: state.simulation?.ownerId || LEGACY_OWNER_ID,
-        revision: Math.max(0, Number(state.simulation?.revision || 0)),
-        leaseId: state.simulation?.leaseId || null,
-        leaseUntil: Math.max(0, Number(state.simulation?.leaseUntil || 0))
-    };
 }
 
 function persistencePatch(state = {}, timestamp = Date.now(),
@@ -158,87 +143,6 @@ function reflectRecovery(result = {}) {
         leaseUntil: row.simulationLeaseUntil
     }));
     return result;
-}
-
-function claim(state, options = {}) {
-    const partition = eligibility(state, options);
-    if (!partition.ok) {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(partition.reason);
-        return Promise.resolve(partition);
-    }
-    const timestamp = Number(options.timestamp || Date.now());
-    const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
-    return Database.claimColdSimulationLease({
-        characterId: Number(state.characterId),
-        expectedRevision: ownership(state).revision,
-        ownerId: OWNER_ID,
-        leaseId: options.leaseId || leaseId(),
-        timestamp,
-        leaseUntil: timestamp + leaseMs,
-        allowParty: options.allowParty === true,
-        allowLifecycle: options.allowLifecycle === true
-    }).then((result) => {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
-        return reflect(result);
-    }).catch(recordFailure);
-}
-
-function claimBatch(candidates = [], options = {}) {
-    const timestamp = Number(options.timestamp || Date.now());
-    const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    const rejected = [];
-    const requests = [];
-    (candidates || []).slice(0, 64).forEach((candidate) => {
-        const state = candidate.state || candidate;
-        const partition = eligibility(state, candidate.options || options);
-        if (!partition.ok) {
-            const result = { ...partition, characterId: Number(state?.characterId || candidate.characterId || 0) };
-            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(result.reason);
-            rejected.push(result);
-            return;
-        }
-        requests.push({
-            characterId: Number(state.characterId),
-            expectedRevision: Number(candidate.expectedRevision ?? ownership(state).revision),
-            ownerId: OWNER_ID,
-            leaseId: candidate.leaseId || leaseId(),
-            timestamp,
-            leaseUntil: timestamp + leaseMs,
-            allowParty: candidate.options?.allowParty === true || options.allowParty === true,
-            allowLifecycle: candidate.options?.allowLifecycle === true || options.allowLifecycle === true
-        });
-    });
-    if (!requests.length) return Promise.resolve({ grants: [], rejected });
-    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
-    return Database.claimColdSimulationLeases(requests).then((results) => {
-        results.forEach((result) => {
-            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerClaim(result, Date.now() - startedAt);
-            if (result.ok) reflect(result);
-        });
-        return {
-            grants: results.filter((result) => result.ok),
-            rejected: [...rejected, ...results.filter((result) => !result.ok)]
-        };
-    }).catch(recordFailure);
-}
-
-function release(claimToken, options = {}) {
-    if (!claimToken?.ok) {
-        const result = { ok: false, reason: 'missing_claim' };
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
-        return Promise.resolve(result);
-    }
-    return Database.releaseColdSimulationLease({
-        characterId: Number(claimToken.characterId),
-        expectedRevision: Number(claimToken.revision),
-        ownerId: OWNER_ID,
-        leaseId: claimToken.leaseId,
-        timestamp: Number(options.timestamp || Date.now())
-    }).then((result) => {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
-        return reflect(result);
-    }).catch(recordFailure);
 }
 
 // Each entry commits on the revision its step started from (`revision`): the
@@ -346,7 +250,6 @@ function commitBatch(entries = [], options = {}) {
         results.forEach((result) => {
             DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
             if (result.ok) {
-                DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease({ ok: true });
                 const state = states.get(Number(result.characterId));
                 const kept = LifeState.cachedState(result.characterId);
                 reflect(result, withPersistedStats(state, result));
@@ -358,39 +261,6 @@ function commitBatch(entries = [], options = {}) {
             }
         });
         return [...results, ...rejected];
-    }).catch(recordFailure);
-}
-
-function releaseBatch(tokens = [], options = {}) {
-    const timestamp = Number(options.timestamp || Date.now());
-    const requests = (tokens || []).slice(0, 64).filter((token) => token?.ok).map((token) => ({
-        characterId: Number(token.characterId),
-        expectedRevision: Number(token.revision),
-        ownerId: OWNER_ID,
-        leaseId: token.leaseId,
-        releaseInvalidated: options.releaseInvalidated === true,
-        timestamp
-    }));
-    if (!requests.length) return Promise.resolve([]);
-    return Database.releaseColdSimulationLeases(requests).then((results) => {
-        results.forEach((result) => {
-            DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease(result);
-            if (result.ok) reflect(result);
-        });
-        return results;
-    }).catch(recordFailure);
-}
-
-function renewActiveLeases(tokens = [], options = {}) {
-    return Database.renewColdSimulationLeases(tokens, options).then((results) => {
-        results.forEach((result) => {
-            if (!result.ok) { DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(result.reason); return; }
-            const cached = LifeState.cachedState(result.characterId);
-            const current = cached?.simulation;
-            if (cached?.phase === 'cold' && current?.ownerId === result.ownerId && current.revision === result.revision
-                && current.leaseId === result.leaseId && options.canRenew(result) === true) reflect(result);
-        });
-        return results;
     }).catch(recordFailure);
 }
 
@@ -412,38 +282,19 @@ function handoffToMain(state, options = {}) {
     }).catch(recordFailure);
 }
 
-function recoverExpiredLeases(timestamp = Date.now()) {
-    if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
-    return Database.recoverColdSimulationLeases({ timestamp, includeActive: false }).then((result) => {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRecovery(result.affectedRows, false);
-        return reflectRecovery(result);
-    }).catch(recordFailure);
-}
-
 function recoverStartupLeases() {
     if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
-    return Database.recoverColdSimulationLeases({ includeActive: true }).then((result) => {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRecovery(result.affectedRows, true);
-        return reflectRecovery(result);
-    }).catch(recordFailure);
+    return Database.recoverColdSimulationLeases().then(reflectRecovery).catch(recordFailure);
 }
 
 module.exports = {
     OWNER_ID,
     LEGACY_OWNER_ID,
-    DEFAULT_LEASE_MS,
     SIMPLE_ACTIVITIES,
     LEGACY_PLAN_STRATEGIES,
     eligibility,
-    ownership,
     persistencePatch,
-    claim,
-    claimBatch,
     commitBatch,
-    release,
-    releaseBatch,
-    renewActiveLeases,
     handoffToMain,
-    recoverExpiredLeases,
     recoverStartupLeases
 };

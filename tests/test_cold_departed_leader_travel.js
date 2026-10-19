@@ -43,17 +43,12 @@ async function main() {
     assert.equal(kernel.leaderParty(id), null, 'a departed leader leads no party row');
     assert.equal(kernel.scheduleTokens.get(id).dueAt, paid.timing.nextResolveAt, 'arrival owns the deadline, not the old hunt');
     kernel.tick();
-    const claim = messages.find(m => m.type === 'claim_request');
-    assert(claim, 'the overdue solo trip must enter its next worker batch');
-    assert.equal(claim.payload.candidates[0].purpose.kind, 'resolver');
-    const grant = await Owner.claim(paid, { timestamp: at, allowLifecycle: true });
-    assert(grant.ok);
-    kernel.onClaimAck({ grants: [{ ...grant, purpose: { kind: 'resolver' } }] }, claim.msgId);
+    assert(kernel.inFlight.has(id), 'the overdue solo trip must enter its next worker step');
     await kernel.resolveChain;
     kernel.flush(null, true);
     const proposal = messages.find(m => m.type === 'proposal_batch')?.payload.proposals[0];
     assert(proposal, 'the native arrival resolver must issue a durable proposal');
-    const [committed] = await Owner.commitBatch([{ revision: proposal.token.revision, nextState: proposal.nextState,
+    const [committed] = await Owner.commitBatch([{ revision: proposal.revision, nextState: proposal.nextState,
         proposal, options: proposal.options }], { timestamp: at });
     assert(committed.ok, JSON.stringify(committed));
     const saved = Life.cachedState(id);
@@ -64,7 +59,7 @@ async function main() {
     const amounts = Object.fromEntries((await DB.fetchItems(id)).map(item => [item.selfId, Number(item.amount)]));
     assert.equal(amounts[57], 479600, 'arrival does not charge the trip twice');
     assert.equal(amounts[736], 1);
-    kernel.onCommitAck({ results: [{ characterId: id, ok: true, inputToken: proposal.token,
+    kernel.onCommitAck({ results: [{ characterId: id, ok: true,
         proposalId: proposal.proposalId, state: saved }] });
     assert.equal(lifecycleKind(kernel.states.get(id).state, kernel), 'command',
         'town errands can run after the arrival receipt');
@@ -104,7 +99,7 @@ async function main() {
     assert.equal(soloKernel.leaderParty(departed.characterId), null, 'a solo state leads no stale party row');
     assert.equal(lifecycleKind(departed, soloKernel), 'resolver', 'the solo trip keeps its own writer');
     assert.equal(soloKernel.scheduleTokens.get(departed.characterId).dueAt, leftAt,
-        'the paid trip owns the deadline, no party claim');
+        'the paid trip owns the deadline, no party step');
     await soloKernel.shutdown();
 
     // Native group results repeat the same party row for every member. The
@@ -129,6 +124,6 @@ async function main() {
     assert(!Parties.active().some(party => party.partyId === oldParty.partyId));
     assert.equal((await DB.execute(['SELECT status FROM bot_background_parties WHERE partyId=?', [oldParty.partyId]]))[0].status,
         'dissolved', 'the accepted cache agrees with native membership');
-    console.log('PASS detached leader finishes paid market travel through native worker claim/commit; an older page cannot roll the arrival back');
+    console.log('PASS detached leader finishes paid market travel through native worker step/commit; an older page cannot roll the arrival back');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => world.close());
