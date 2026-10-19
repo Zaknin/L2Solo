@@ -34,7 +34,7 @@ async function reclaim(objective, { parties, life, database, metrics }, now = Da
             Lifecycle.releaseMember(member, now, 'clan_priority')));
         if (!preparedParty || prepared.some(member => !member)) continue;
         const result = await database.commitBackgroundPartyMembership({ party: preparedParty.row, members: prepared,
-            review: true, preserveClanOperations: true, expectedPartyUpdatedAt: party.updatedAt,
+            review: true, preserveClanOperations: true, expectedPartyRevision: party.revision,
             event: { characterId: party.leaderId, eventType: 'party_capacity_reclaimed',
                 summary: 'Background party released capacity for a required clan hunt', weight: 1, createdAt: now,
                 meta: { partyId: party.partyId, clanId: objective.clanId, clanGoalKey: objective.clanGoalKey } } });

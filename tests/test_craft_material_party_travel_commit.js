@@ -92,7 +92,7 @@ async function main() {
     // A party-only change must reject the entire native transition, even when
     // every character lease is still current. No postcommit repair is enough.
     const stale = await proposals(party, route, timestamp);
-    await DB.execute(["UPDATE bot_background_parties SET updatedAt=updatedAt+1,statsJson=json_set(statsJson,'$.concurrentMarker',1) WHERE partyId=?", [party.partyId]]);
+    await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrentMarker',1) WHERE partyId=?", [party.partyId]]);
     const before = await image();
     const rejected = await Owner.commitAndReleaseBatch(stale.entries, { timestamp });
     assert(rejected.every(row => !row.ok && row.detail === 'party_context_changed'), JSON.stringify(rejected));

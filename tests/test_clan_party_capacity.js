@@ -2,7 +2,7 @@ const assert = require('assert');
 const Capacity = require('../src/GameServer/Bot/Population/ClanPartyCapacity');
 const objective = { status: 'open', priority: 'required', clanId: 77, clanGoalKey: 'clan:77:gear' };
 const now = 1000000;
-const ordinary = { partyId: 'ordinary', status: 'active', leaderId: 1, memberIds: [1, 2], updatedAt: 123, stats: {} };
+const ordinary = { partyId: 'ordinary', status: 'active', leaderId: 1, memberIds: [1, 2], updatedAt: 123, revision: 4, stats: {} };
 const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', activity: 'grouped',
     party: { partyId: 'ordinary' }, simulation: { ownerId: 'legacy_main' }, stats: {} }));
 (async () => {
@@ -29,7 +29,7 @@ const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', activit
     assert.strictEqual(writes, 1);
     assert.strictEqual(commits[0].review, true);
     assert.strictEqual(commits[0].preserveClanOperations, true);
-    assert.strictEqual(commits[0].expectedPartyUpdatedAt, 123);
+    assert.strictEqual(commits[0].expectedPartyRevision, 4);
     assert.strictEqual(commits[0].party.status, 'dissolved');
     assert.deepStrictEqual(commits[0].party.memberIds, []);
     assert(commits[0].members.every(x => x.snapshot.activity === 'hunting' && !x.snapshot.party.partyId));

@@ -27,9 +27,10 @@ async function createParty(ids, name = `party-${ids[0]}`) {
     const prepared = Party.prepareCommit({ partyId: name, leaderId: ids[0], memberIds: ids,
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000, stats: { objective: ids[0] === 1 ? null : { npcId: 10 } } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), name, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
     Life.acceptPartyAssignments(assigned);
-    return Party.acceptCommit(prepared);
+    return Party.acceptRow(formed.partyRow);
 }
 function event(a, b) {
     const participant = id => {
@@ -194,7 +195,7 @@ async function run() {
     assert.strictEqual(partial.reason, 'claim_rejected');
     assert([34, 35, 36].every(id => !state(id).simulation.leaseId), 'partial grants are released');
     const race = await apply(34, 36, { owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
-        await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['party-34']]);
+        await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['party-34']]);
         return Owner.commitAndReleaseBatch(entries, opts);
     } } });
     assert.strictEqual(race.reason, 'commit_rejected');
@@ -248,7 +249,7 @@ async function run() {
     await createParty([53, 54]);
     const staleForecast = forecast(53, 55), savedForecast = JSON.stringify(staleForecast);
     const beforeSave = Party.find('party-53');
-    await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
+    await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1, revision=revision+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
     Party.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['party-53']]))[0]);
     await Database.execute(['UPDATE bot_life_state SET hp=99,simulationRevision=simulationRevision+1 WHERE characterId=53', []]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=53', []]))[0]);

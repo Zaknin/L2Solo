@@ -125,7 +125,7 @@ async function run() {
     result = await Takeover.evaluate(player(20), party, members);
     assert.strictEqual(result.reason, 'invalid_party_roster', 'nine bots cannot fit beside a player in a C4 party');
 
-    party = { partyId: 'party-test', memberIds: [1, 2], status: 'hot', stats: {}, updatedAt: 500 };
+    party = { partyId: 'party-test', memberIds: [1, 2], status: 'hot', stats: {}, updatedAt: 500, revision: 3 };
     members = [state(1, 20, party.partyId, { phase: 'hot', simulation: { revision: 4 }, updatedAt: 400 }),
         state(2, 20, party.partyId, { phase: 'hot', simulation: { revision: 7 }, updatedAt: 450 })];
     const sessions = members.map((member) => ({ actor: { fetchId: () => member.characterId } }));
@@ -153,7 +153,7 @@ async function run() {
     sessions.forEach((session) => { session.hotBackgroundPartyId = party.partyId; });
     result = await Takeover.request({ playerSession: player(20), target: sessions[0], source: 'test_chat' });
     assert(result.ok && result.applied, 'a hot compatible roster should transfer to the player');
-    assert.strictEqual(commitRequest.expectedUpdatedAt, 500);
+    assert.strictEqual(commitRequest.expectedPartyRevision, 3);
     assert.deepStrictEqual(commitRequest.members.map((member) => member.expectedRevision), [4, 7]);
     assert.strictEqual(attached.roster.length, 2);
     assert.strictEqual(attached.options.expectedBackgroundPartyId, party.partyId);

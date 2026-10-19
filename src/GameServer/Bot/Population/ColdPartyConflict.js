@@ -101,6 +101,8 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
                 ...(delayed ? { wait } : {}) }) } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, side.party.updatedAt + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
+        // The commit's fenced party write moves the revision by exactly one.
+        prepared.snapshot.revision = side.party.revision + 1;
         return prepared;
     });
     const next = sides.flatMap((side, index) => side.members.map(state => {
@@ -165,7 +167,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
             ...(pvp?.started ? { pvpContext: sides.map(side => side.members.map(s => ({ id: s.characterId,
                 clanId: Number(s.stats?.clanId || s.clanId || 0), karma: Number(s.stats?.karma || 0) }))) } : {}),
             partyChanges: preparedParties.flatMap((prepared, index) => prepared ? [{
-            partyId: prepared.row.partyId, expectedUpdatedAt: sides[index].party.updatedAt,
+            partyId: prepared.row.partyId, expectedPartyRevision: sides[index].party.revision,
             memberIds: sides[index].party.memberIds, nextResolveAt: prepared.row.nextResolveAt,
             statsJson: prepared.row.statsJson, updatedAt: prepared.row.updatedAt }] : []) };
         const results = await owner.commitAndReleaseBatch(next.map((state, index) => ({

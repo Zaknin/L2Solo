@@ -176,7 +176,7 @@ async function perform(playerSession, target, source) {
 
     const persisted = await invoke('Database').takeOverBackgroundParty({
         partyId,
-        expectedUpdatedAt: party.updatedAt,
+        expectedPartyRevision: party.revision,
         playerId: actorId(playerSession),
         source,
         members: states.map((state) => ({

@@ -34,8 +34,9 @@ async function createParty(ids) {
     const p = Party.prepareCommit({ partyId: `p${ids[0]}`, leaderId: ids[0], memberIds: ids,
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000, stats: { objective: ids[0] <= 22 ? null : { npcId: 10 }, ...(ids[0] <= 22 ? { coldCompetition: oldEpisode } : {}) } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned); Party.acceptCommit(p);
+    const formed = await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned); Party.acceptRow(formed.partyRow);
 }
 function event(a, b, action = 'avoid') {
     const participant = id => {
@@ -148,7 +149,7 @@ async function run() {
     assert(!state(23).simulation.leaseId);
     const fresh = event(23, 25);
     const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
-        await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['p23']]);
+        await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['p23']]);
         return Owner.commitAndReleaseBatch(entries, opts);
     } } });
     assert.strictEqual((await race.apply(fresh)).reason, 'commit_rejected');

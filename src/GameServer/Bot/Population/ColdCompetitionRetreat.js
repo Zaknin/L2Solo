@@ -53,6 +53,8 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
             }) } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, side.party.updatedAt + 1);
         prepared.snapshot.updatedAt = prepared.row.updatedAt;
+        // The commit's fenced party write moves the revision by exactly one.
+        prepared.snapshot.revision = side.party.revision + 1;
         return prepared;
     });
     const next = sides.flatMap((side, i) => side.members.map((s, j) => {
@@ -70,7 +72,7 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
             || memory.snapshot(s.characterId)?.revision !== revisions.get(s.characterId))) return { ok: false, reason: 'retreat_changed_during_claim' };
         const group = { id: event.key, memberIds: states.map(s => s.characterId),
             partyChanges: preparedParties.flatMap((p, i) => p ? [{ partyId: p.row.partyId,
-                expectedUpdatedAt: sides[i].party.updatedAt, memberIds: sides[i].party.memberIds,
+                expectedPartyRevision: sides[i].party.revision, memberIds: sides[i].party.memberIds,
                 spotId: p.row.spotId, nextResolveAt: p.row.nextResolveAt, statsJson: p.row.statsJson, updatedAt: p.row.updatedAt }] : []) };
         const results = await owner.commitAndReleaseBatch(next.map((s, i) => ({
             token: grants.find(g => g.characterId === s.characterId), nextState: s, atomicGroup: group,

@@ -1846,8 +1846,8 @@ class ColdSimulationCoordinator {
             // publisher owns it. Its postcommit review may already dissolve
             // the party; a later follower receipt must not resurrect the cache.
             if (committedPartyRow && entry.proposal.partyResolution?.partyId === committedPartyRow.partyId
-                && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.updatedAt || 0)
-                < Number(committedPartyRow.updatedAt)) BackgroundPartyState.acceptRow(committedPartyRow);
+                && Number(BackgroundPartyState.find(committedPartyRow.partyId)?.revision ?? -1)
+                < Number(committedPartyRow.revision)) BackgroundPartyState.acceptRow(committedPartyRow);
         });
         await step('raidCache', () => {
             if (committed.raidRow) invoke('GameServer/Bot/Population/ColdRaidAuthority').accept(committed.raidRow);
@@ -2062,7 +2062,7 @@ class ColdSimulationCoordinator {
             if (!change || cancelled.has(change.partyId)) continue;
             cancelled.add(change.partyId);
             const party = BackgroundPartyState.find(change.partyId);
-            if (party?.updatedAt === change.expectedUpdatedAt) await ClanRaidRoster.cancelUnopened(party, result.detail);
+            if (party?.revision === change.expectedPartyRevision) await ClanRaidRoster.cancelUnopened(party, result.detail);
         }
         if (this.worker !== worker || this.workerEpoch !== epoch) {
             this.finishCommitAcknowledgements(results, false);

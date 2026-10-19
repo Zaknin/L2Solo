@@ -152,7 +152,7 @@ async function stored() {
     DB.commitBackgroundPartyMembership = async request => {
         // A party-only write can race after main checked its cached source.
         // It changes no member row, so member CAS alone cannot protect it.
-        await DB.execute(["UPDATE bot_background_parties SET updatedAt=updatedAt+1,statsJson=json_set(statsJson,'$.concurrent',1) WHERE partyId=?", ['material-recruit']]);
+        await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrent',1) WHERE partyId=?", ['material-recruit']]);
         const [row] = await DB.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['material-recruit']]); Parties.acceptRow(row);
         rejected = await original.commit.call(DB, request); return rejected;
     };

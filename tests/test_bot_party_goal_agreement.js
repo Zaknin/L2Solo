@@ -50,7 +50,7 @@ async function loot(party, units, { stale = false } = {}) {
     const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
     assert.equal(grants.length, members.length);
     const atomicGroup = { id: `help:${grants[0].leaseId}`, memberIds: party.memberIds,
-        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: Date.now() + 60000,
             statsJson: JSON.stringify({ ...party.stats, agreement: { ...party.stats.agreement,
                 help: { ...party.stats.agreement.help, remaining: 99999999 } } }) }] };

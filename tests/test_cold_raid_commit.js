@@ -20,16 +20,17 @@ async function createParty(ids) {
         stats: { objective: { sourceKind: 'raid', npcId: 10484, sourceLevel: 40 },
             raidEncounter: { status: 'active' }, raidPreparation: { ready: true } } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), prepared.row.partyId, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
     Life.acceptPartyAssignments(assigned);
-    return Parties.acceptCommit(prepared);
+    return Parties.acceptRow(formed.partyRow);
 }
 async function proposed(party, id, snapshot) {
     const members = party.memberIds.map(state);
     const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
     assert.equal(grants.length, 9);
     const atomicGroup = { id, memberIds: party.memberIds,
-        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: null, status: 'dissolved',
             statsJson: JSON.stringify({ ...party.stats, raidEncounter: snapshot }) }],
         raidCommit: { key: snapshot.key, expectedRevision: 0, revision: 1, snapshot,

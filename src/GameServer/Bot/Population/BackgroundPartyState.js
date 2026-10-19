@@ -215,19 +215,20 @@ function normalize(row) {
         status: row.status || 'active',
         roleCoverage: parseJson(row.roleCoverageJson, {}),
         stats,
-        updatedAt: Number(row.updatedAt || 0)
+        updatedAt: Number(row.updatedAt || 0),
+        revision: Number(row.revision || 0)
     };
 }
 
 // The bots' downtime (BotLifeState.bootPause, L136) moves the active parties'
 // due times too: the party row is the leader's scheduling authority. Before
-// loadActive, so the cache reads the moved row (party commits fence on its
-// updatedAt, which moves by the same delta for the next boot's measure).
+// loadActive, so the cache reads the moved row (its updatedAt moves by the same
+// delta for the next boot's measure).
 function shiftDueTimesByDowntime() {
     return BotLifeState.bootPause().then(({ startedAt, downtimeMs }) => {
         if (!(downtimeMs > 0)) return 0;
         return Database.execute([
-            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?
+            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?, revision = revision + 1
             WHERE status = 'active' AND nextResolveAt > 0 AND updatedAt > 0 AND updatedAt < ?`,
             [downtimeMs, downtimeMs, startedAt]
         ]).then((result) => {
@@ -259,7 +260,9 @@ function rowFromParty(party) {
         status: party.status || 'active',
         roleCoverageJson: safeJson(party.roleCoverage || {}),
         statsJson: safeJson(party.stats || {}),
-        updatedAt: timestamp
+        updatedAt: timestamp,
+        // The revision the write starts from; the database moves it.
+        revision: Number(party.revision || 0)
     };
 }
 
@@ -280,7 +283,8 @@ function save(row) {
             status = excluded.status,
             roleCoverageJson = excluded.roleCoverageJson,
             statsJson = excluded.statsJson,
-            updatedAt = excluded.updatedAt
+            updatedAt = excluded.updatedAt,
+            revision = ${TABLE}.revision + 1
         WHERE ${TABLE}.status <> 'hot'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanGoalInvalidationVersion'), 0)
               <= COALESCE(json_extract(excluded.statsJson, '$.clanGoalInvalidationVersion'), 0)`,
@@ -313,7 +317,7 @@ const BackgroundPartyState = {
         initStarted = true;
 
         initPromise = Database.execute(['SELECT 1', []], 'schema:bot-parties')
-            .then(() => Database.execute([`UPDATE ${TABLE} SET status = 'active', nextResolveAt = ?, updatedAt = ? WHERE status = 'hot'`, [now() + 30000, now()]], 'bot-party:startup-recovery'))
+            .then(() => Database.execute([`UPDATE ${TABLE} SET status = 'active', nextResolveAt = ?, updatedAt = ?, revision = revision + 1 WHERE status = 'hot'`, [now() + 30000, now()]], 'bot-party:startup-recovery'))
             .then(() => shiftDueTimesByDowntime())
             .then(() => this.loadActive()).then(() => {
             initialized = true;
@@ -406,7 +410,7 @@ const BackgroundPartyState = {
             updatedAt: Math.max(Date.now(), Number(party.updatedAt || 0) + 1) };
         if (!Database.isReady()) return this.createOrUpdate(next);
         const result = await Database.commitBackgroundPartyGoals({
-            partyId: party.partyId, expectedUpdatedAt: Number(party.updatedAt || 0),
+            partyId: party.partyId, expectedPartyRevision: Number(party.revision || 0),
             leaderId: Number(party.leaderId), memberIds: party.memberIds,
             sources: require('./PartyGoalCalculation').sources(members),
             statsJson: safeJson(next.stats), updatedAt: next.updatedAt });
