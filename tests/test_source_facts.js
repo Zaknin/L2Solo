@@ -63,6 +63,24 @@ try {
     assert(earning.spoil.perHour < own.spoil.perHour, 'the wider band retains the native deep-blue spoil penalty');
     assert.equal(byKind(facts({ ...warsmith, level: 56 }, { economicLower: true })).drop.reason, 'level_band',
         'equipment income does not widen the band beyond fifteen levels');
+    // The band's exact edge, killer level by killer level on one item: a
+    // target exactly minGap levels below is hunted, one level further is not,
+    // and the wish's reader picks the full view's best ready fact at each.
+    const wishBest = (state, options) => drain(Planner.sourceFacts(state, 99101, 50,
+        { spots, spotValue, timestamp: 1, ...options, bestForWish: { hourAdena: 100 } })).value;
+    for (const [level, economicLower, hunted] of [[47, false, true], [48, false, false],
+        [55, true, true], [56, true, false], [47, false, true], [48, true, true]]) {
+        // The route gate has its own level rules; this reads the band alone.
+        const state = { ...warsmith, level }, options = { economicLower, routeAllowed: () => true }, all = facts(state, options);
+        const drop = byKind(all).drop, label = `level ${level}${economicLower ? ', equipment income' : ''}`;
+        assert.equal(drop.status === 'ready', hunted, `${label}: ${drop.reason}`);
+        if (!hunted) assert.equal(drop.reason, 'level_band', label);
+        const best = all.filter(row => row.status === 'ready')
+            .reduce((winner, row) => !winner || row.costHours < winner.costHours ? row : winner, null);
+        assert.deepEqual(wishBest(state, options), best ? [best] : [], label);
+    }
+    assert(byKind(facts({ ...warsmith, level: 55 }, { economicLower: true, routeAllowed: () => true })).drop.perHour < own.drop.perHour,
+        'the wider band keeps the deep-blue penalty of its killer level');
     assert.equal(byKind(facts({ ...warsmith, inventory: {} })).drop.reason, 'party_needed');
     const raid = drain(Planner.sourceFacts(warsmith, 99101, 1, { spotValue, timestamp: 1,
         spots: [{ ...spots[0], id: 'facts-raid', raidBoss: true, raidBossTemplateId: 99001 }] })).value;
@@ -296,7 +314,10 @@ try {
                 routeAllowed: () => { routes++; return true; },
                 spotValue: spot => { values++; return spotValue(spot); },
                 bestForWish: { hourAdena: 100, ...bestForWish } }));
-            assert.equal(skipped() - before > 0, shouldSkip, 'refused records are skipped, safe ones walked');
+            // The skip counter includes the level_band prefix: beyond it, refused
+            // records are skipped and safe ones walked.
+            const banded = full.filter(row => row.reason === 'level_band').length;
+            assert.equal(skipped() - before - banded > 0, shouldSkip, 'refused records are skipped, safe ones walked');
             assert.deepEqual([...counts], [...expectedCounts], 'same reason totals and first-key order');
             assert.deepEqual(fast.stages, generic.stages, 'same source yield tags and count');
             if (shouldSkip) {
@@ -326,6 +347,9 @@ try {
         Data.npcRewards = mixedRewards;
         process.env.L2NODE_PROGRESSION_RATE = 'x1';
         checkBound(warsmith, replaceLevels(effective), false);
+        // The band's exact edge: minGap levels below is walked, one further is banded.
+        checkBound(warsmith, replaceLevels(warsmith.level - 7), false);
+        checkBound(warsmith, replaceLevels(warsmith.level - 8), false);
         checkBound(warsmith, replaceLevels(below), true);
         checkBound({ ...warsmith, inventory: {} }, replaceLevels(below, true), true);
         checkBound(warsmith, replaceLevels(effective, true), true);
