@@ -54,13 +54,13 @@ async function bodyMoney(id) {
         // does not move the revision, but it keeps the worker's mind and hands
         // back the row with it.
         const far = await create('cold', { money: OLD_MONEY });
-        const token = await Owner.claim(Life.cachedState(far), { allowLifecycle: true });
-        assert(token.ok, `the far bot is claimed: ${token.reason}`);
+        const stepRevision = Life.cachedState(far).simulation.revision;
         const proposed = { ...Life.cachedState(far),
             stats: { ...Life.cachedState(far).stats, proposalProbe: true, money: NEW_MONEY } };
         await Database.updateGeneratedBotName(far, 'MindRenamed', 3);
         const before = await row(far);
-        const [refused] = await Owner.commitBatch([{ revision: token.revision, nextState: proposed, proposal: { token } }]);
+        const [refused] = await Owner.commitBatch([{ revision: stepRevision, nextState: proposed,
+            proposal: { revision: stepRevision } }]);
         assert.equal(refused.ok, false);
         assert.equal(refused.reason, 'stale_revision', 'the proposal built before the main write is refused');
         const after = await row(far);
@@ -82,10 +82,10 @@ async function bodyMoney(id) {
         // mind: the worker's newer mind is not written back with main's copy.
         const cold = await create('cold', { money: OLD_MONEY });
         const mainCopy = fixtureState(cold, 'MindColumn3', 'cold', { money: OLD_MONEY }, 'trading');
-        const coldToken = await Owner.claim(Life.cachedState(cold), { allowLifecycle: true });
-        assert(coldToken.ok, `the far bot is claimed: ${coldToken.reason}`);
+        const coldRevision = Life.cachedState(cold).simulation.revision;
         const decided = { ...Life.cachedState(cold), stats: { ...Life.cachedState(cold).stats, money: NEW_MONEY } };
-        const [committed] = await Owner.commitBatch([{ revision: coldToken.revision, nextState: decided, proposal: { token: coldToken } }]);
+        const [committed] = await Owner.commitBatch([{ revision: coldRevision, nextState: decided,
+            proposal: { revision: coldRevision } }]);
         assert.equal(committed.ok, true, `the worker's commit lands: ${committed.reason}`);
         assert.deepEqual(JSON.parse((await row(cold)).mindJson).money, NEW_MONEY, 'fixture: the worker wrote its mind');
         await Life.upsertState(mainCopy, 'mind_column_main_save');
