@@ -576,14 +576,6 @@ function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
     economyDiagnostics.count('occupation', 'ask', caller);
     return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
 }
-// The step's build workshop: the held build's while its verdict, judged
-// here for the build that follows on the step's deps and its card's verdict
-// (EconomyContext.heldWorkshop, prepared.eventVerdict), keeps it, else
-// asked. A wish-focus build reads a copy of the state: it judges its own.
-function lifecycleWorkshop(state, timestamp, deps, prepared, wishFocus) {
-    const kept = wishFocus ? null : EconomyContext.heldWorkshop(state, deps, prepared.eventVerdict ||= {});
-    return kept || askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
-}
 async function refreshCraftPacket(state, timestamp, refreshed) {
     if (!refreshed || !CraftEligibility.isServiceCrafter(state)) return refreshed;
     const mp = Number(state.vitals?.mp), preparedMp = refreshed.advisory.preparedMp ?? refreshed.advisory.mp;
@@ -1520,7 +1512,7 @@ function startKernel(config = {}) {
             // Party waiting, failed targets and excluded grounds still take
             // the existing planner; no new choice is made from a thin card.
             // A refused card's verdict serves the build below, which reads
-            // this state unless a wish-focus plan is deferred on a copy of it.
+            // this state, or a copy of it with a wish-focus plan deferred.
             const prepared = {};
             let refreshed = solo && nativeHolds && planHolds()
                 ? ColdEconomyDecision.refreshAdvisory(state, record?.wishAdvisory, deps, { prepared, collect: !wishFocus }) : null;
@@ -1529,9 +1521,18 @@ function startKernel(config = {}) {
             // A null intention takes its ordinary native selection there.
             if (refreshed?.economy.network.activity === null && GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) refreshed = null;
             const nullReuse = refreshed?.economy.network.activity === null;
+            // Build the renewed proof against the native live history, so a
+            // consumed wake/expiry does not invalidate it again on publication.
+            const preparationState = wishFocus && !refreshed ? { ...state, stats: { ...state.stats,
+                equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
             // Both reuses (the card's leaf, a null intention) read the card's
-            // workshop. A build keeps the held one while its sections hold.
-            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, deps, prepared, wishFocus);
+            // workshop. A build keeps the held one while its verdict, judged
+            // here on the state the build reads and handed to it
+            // (EconomyContext.heldWorkshop, prepared.eventVerdict), keeps it;
+            // else it asks. The kernel replaces a state, never edits it: the
+            // copy and its verdict stay the build's across the ask.
+            if (!refreshed) deps.workshop = EconomyContext.heldWorkshop(preparationState, deps, prepared.eventVerdict ||= {})
+                || await askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
@@ -1552,11 +1553,6 @@ function startKernel(config = {}) {
                     partyRequest: null, reusablePartyRequest: false, replanFailure: null,
                     targetNpcId: Number(previousPlan?.next?.npcId || leaf.npcId || 0), plannedState: routedState, route };
             }
-            // Build the renewed proof against the native live history, so a
-            // consumed wake/expiry does not invalidate it again on publication.
-            const preparationState = wishFocus
-                ? { ...state, stats: { ...state.stats,
-                    equipmentPlan: GearPlanSelection.deferredWishPlan(previousPlan, nativeReplan) } } : state;
             const preparedEconomy = nullReuse ? refreshed.economy
                 : Economy.forState(preparationState, withIncomeRoute(withEventVerdict(deps, prepared), prepared.basics));
             const selectedAcquisition = nullReuse ? {
