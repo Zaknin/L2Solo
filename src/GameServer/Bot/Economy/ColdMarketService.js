@@ -11,6 +11,7 @@ const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const OfferOrder = require('./OfferOrder');
 const OfferQuery = require('./OfferQuery');
 const TownVisitInterval = require('./TownVisitInterval');
+const NpcRestock = require('./NpcRestockPlan');
 const { personalOfferAllowed } = require('../Population/PartyAdmission');
 
 function purchaseObservation(state, selfId, requested, budget, phase, reason, extra) {
@@ -469,13 +470,12 @@ async function buyHere(state, plan, options = {}) {
     if (Diagnostics.active()) purchaseObservation(current, plan.selfId, plan.amount - units, money, 'npc_remainder',
         !npcPrice ? 'no_current_npc_quote' : rest < plan.amount - units ? 'funding_partial' : 'funded',
         Diagnostics.enabled(current.characterId) ? { planned: rest, actual: units, unitPrice: npcPrice, source: 'npc', town: plan.town } : undefined);
-    const realSeller = require('./NpcRestockPlan').quoteFor(plan.selfId, plan.town, npcPrice);
+    const realSeller = NpcRestock.quoteFor(plan.selfId, plan.town, npcPrice);
     if (options.deferRealNpc && realSeller) return { state: current, units, spent, hot: false,
         progressApplied: !!options.goal && units > 0 };
     if (rest > 0) {
         let bought;
         if (realSeller && (options.goal || options.errand)) {
-            const NpcRestock = require('./NpcRestockPlan');
             const offer = realSeller;
             const basics = invoke('GameServer/Bot/Economy/EconomyContext').basics(current);
             const baskets = NpcRestock.collect(current, { town: plan.town, seller: offer,
@@ -670,12 +670,12 @@ async function acquireMaterials(state, requirements) {
         if (board.hot) return { state: current, ready: false, hot: true, spent, units };
         const left = Math.max(0, Number(requirement.amount) - held(current, requirement.selfId));
         const offer = options.npc === false ? null
-            : require('./NpcRestockPlan').quoteFor(requirement.selfId, current.currentRegion, Number(plan.npcPrice) || null);
+            : NpcRestock.quoteFor(requirement.selfId, current.currentRegion, Number(plan.npcPrice) || null);
         if (offer && left > 0 && offer.price <= Number(options.maxPrice ?? Infinity)) extras.push({
             selfId: requirement.selfId, amount: left, offer, money: Math.max(0, terms.money - board.spent),
             funding: purchaseTerms(current, { ...terms, npcPrice: offer.price }) });
     }
-    const result = await require('./NpcRestockPlan').purchase(current, {
+    const result = await NpcRestock.purchase(current, {
         town: current.currentRegion, extras, potions: false, scrolls: false, shots: false });
     current = result.state;
     for (const receipt of result.receipts) { spent += Number(receipt.spent || 0); units += Number(receipt.units || 0); }
@@ -910,13 +910,13 @@ const ColdMarketService = {
         for (const errand of CombinedErrands.pending(current, Date.now(), current.currentRegion)) {
             const route = savedRoute(errand);
             if (route.npc === false) continue;
-            const offer = require('./NpcRestockPlan').quoteFor(errand.selfId, current.currentRegion);
+            const offer = NpcRestock.quoteFor(errand.selfId, current.currentRegion);
             if (!offer || errand.maxPrice !== null && errand.maxPrice !== undefined && offer.price > errand.maxPrice) continue;
             extras.push({ selfId: errand.selfId, amount: errand.amount, offer, errand,
                 goal: goalForErrand(current, errand), money: errand.money,
                 funding: purchaseTerms(current, { ...errand, npcPrice: offer.price }) });
         }
-        const bought = await require('./NpcRestockPlan').purchase(current, { town: current.currentRegion, extras });
+        const bought = await NpcRestock.purchase(current, { town: current.currentRegion, extras });
         current = bought.state;
         if (LifeState.hotRow(current.characterId)) return current;
         return endVisit(current);
