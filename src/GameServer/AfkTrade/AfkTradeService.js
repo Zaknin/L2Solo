@@ -3,6 +3,7 @@ const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const BoardRules = require('./BoardRules');
 const { BoardIndex, offerFields, rowOf, recordOf } = require('./BoardIndex');
 const TableChannel = require('../Bot/Population/ColdTableChannel');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
 const Actor = invoke('GameServer/Actor/Actor');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
@@ -581,46 +582,14 @@ async function notifyCommitted(result, kind) {
     await Database.markAfkTradeNotificationsDelivered(ownerId, [result.eventId]);
 }
 
-async function syncColdCharacter(characterId, previousState, reason, rows = [], options = {}) {
-    // The shop write fenced a row the cold worker leases (Database
-    // fenceAfkTradePartiesUnsafe): that row is the new state, and a save here
-    // would be refused. The worker's retry starts from this cached row.
-    const fenced = options.coldLifeRows?.[Number(characterId)];
-    if (fenced) return require('../Bot/Economy/EconomyCommit').acceptRow(fenced);
-    if (!previousState) return null;
-    // A hot row belongs to the actor in the world: syncOnlineInventory has
-    // refreshed its backpack and markCold writes the row. A cold snapshot written here would flip it to cold and roll back
-    // the experience and location earned while hot.
-    if (invoke('GameServer/Bot/Population/BotLifeState').hotRow(characterId)) return null;
-    try {
-        const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-        const synced = await LifeState.syncExternalInventory(
-            Number(characterId),
-            reason,
-            previousState,
-            { autoEquip: options.autoEquip }
-        );
-        if (synced) return synced;
-        const inventory = LifeState.inventorySummaryFromItems(rows);
-        return {
-            ...previousState,
-            adena: Number(inventory['57']?.amount || 0),
-            inventory,
-            stats: { ...(previousState.stats || {}), lastReason: `${reason}_pending_state_persist` },
-            updatedAt: Date.now()
-        };
-    } catch (error) {
-        utils.infoWarn('AfkTrade', 'cold inventory sync failed for %d: %s', characterId, error.message);
-        const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-        const inventory = LifeState.inventorySummaryFromItems(rows);
-        return {
-            ...previousState,
-            adena: Number(inventory['57']?.amount || 0),
-            inventory,
-            stats: { ...(previousState.stats || {}), lastReason: `${reason}_pending_state_persist` },
-            updatedAt: Date.now()
-        };
-    }
+// A shop write fences the row of each far party whose bag it changed
+// (Database fenceAfkTradePartiesUnsafe, in the same transaction: the new
+// summary and the next revision, a purchase's auto-equip included): that row
+// is the party's new state, and a step under way rebases on it. A near party's
+// actor holds the result (syncOnlineInventory); a player has no row.
+function acceptFenced(result, characterId) {
+    const row = result.coldLifeRows?.[Number(characterId)];
+    return row ? EconomyCommit.acceptRow(row) : null;
 }
 
 // What a cold job continues with after a committed AFK trade. The trade is
@@ -637,13 +606,12 @@ function committedTrade(trade, characterId) {
     return { committed: false, hot: false, state: null };
 }
 
-// What a deal left for cold bots on the board reaches them now, unless the
-// worker leases them (its commit merges it): a main-thread save of each.
+// What a deal left for bots on the board reaches them now: a main-thread
+// save of each (Database settleBoardOwner moves the revision, so a far bot's
+// step under way is refused and rebases on the settled row).
 async function settleOwners(ownerIds = []) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    const leasedBy = invoke('GameServer/Bot/Population/ColdSimulationOwner').OWNER_ID;
     for (const ownerId of new Set((ownerIds || []).map(Number).filter(Boolean))) {
-        if (LifeState.cachedState(ownerId)?.simulation?.ownerId === leasedBy) continue;
         let result;
         try {
             result = await Database.settleBoardOwner(ownerId);
@@ -658,13 +626,11 @@ async function settleOwners(ownerIds = []) {
     }
 }
 
-async function finalizeTrade(result, kind, counterpartyId, previousState = null, options = {}) {
+async function finalizeTrade(result, kind, counterpartyId) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
     if (result.replayed) {
         syncOnlineInventory(counterpartyId, result.counterpartyInventory);
-        const row = result.coldLifeRows?.[Number(counterpartyId)];
-        const coldState = row ? require('../Bot/Economy/EconomyCommit').acceptRow(row) : null;
-        return { ...result, coldState };
+        return { ...result, coldState: acceptFenced(result, counterpartyId) };
     }
     for (const [id, counts] of Object.entries(result.marketTrades || {})) {
         LifeState.acceptMarketTrades(Number(id), counts);
@@ -681,13 +647,7 @@ async function finalizeTrade(result, kind, counterpartyId, previousState = null,
     syncOnlineInventory(result.shop.ownerId, result.ownerInventory);
     syncOnlineInventory(counterpartyId, result.counterpartyInventory);
     await settleOwners(result.settlementOwners);
-    const coldState = await syncColdCharacter(
-        counterpartyId,
-        previousState,
-        `afk_trade_${kind}`,
-        result.counterpartyInventory,
-        { ...options, coldLifeRows: result.coldLifeRows }
-    );
+    const coldState = acceptFenced(result, counterpartyId);
     refreshRecord(result.shop);
     await notifyCommitted(result, kind);
     if (invoke('GameServer/Skills/SkillBookCatalog').isBook(Number(result.line?.selfId))) {
@@ -712,14 +672,10 @@ function commandMessage(session, text) {
 async function stop(session) {
     const ownerId = Number(session?.actor?.fetchId?.() || session || 0);
     if (!ownerId) return { stopped: false };
-    const cachedState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId);
-    const ownerState = findOwnerProjection(ownerId)?.actor?.fetchPrivateStore?.()?.botOwned
-        || String(cachedState?.accountName || '').startsWith('bot_') ? cachedState : null;
     const result = await Database.closeAfkTradeShop(ownerId);
     removeProjection(ownerId);
     syncOnlineInventory(ownerId, result.ownerInventory);
-    if (ownerState) await syncColdCharacter(ownerId, ownerState, 'afk_trade_closed', result.ownerInventory,
-        { coldLifeRows: result.coldLifeRows });
+    acceptFenced(result, ownerId);
     if (session?.actor) {
         session.afkTradeDraft = null;
         session.actor.setPrivateStoreType?.(0);
@@ -742,7 +698,7 @@ async function publishBot(ownerId, config) {
     }
     const result = await Database.createAfkTradeShop(characterId, { ...config, kind, replace: kind === 'shop' });
     (result.closedRecords || []).forEach(refreshRecord);
-    await syncOwnerAfterMove(characterId, result, 'bot_afk_trade_published');
+    syncOwnerAfterMove(characterId, result);
     if (kind === 'shop') spawnProjection(result.shop);
     else refreshRecord(result.shop);
     return result.shop;
@@ -750,11 +706,9 @@ async function publishBot(ownerId, config) {
 
 // The owner's own move took from or gave back to its bag: the actor and the
 // bot's cold state follow (the author's sync after a publish).
-async function syncOwnerAfterMove(ownerId, result, reason) {
+function syncOwnerAfterMove(ownerId, result) {
     syncOnlineInventory(ownerId, result.ownerInventory);
-    const ownerState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId);
-    if (ownerState) await syncColdCharacter(ownerId, ownerState, reason, result.ownerInventory,
-        { coldLifeRows: result.coldLifeRows });
+    acceptFenced(result, ownerId);
 }
 
 // A bot's records of one kind become `configs` in one move (its buy ads
@@ -776,7 +730,7 @@ async function replaceBotRecords(ownerId, kind, configs, options = {}) {
     }
     result.closed.forEach(refreshRecord);
     (result.changed || result.opened).forEach(refreshRecord);
-    if (result.ownerInventory) await syncOwnerAfterMove(characterId, result, 'bot_board_records_replaced');
+    if (result.ownerInventory) syncOwnerAfterMove(characterId, result);
     if (observed) diagnostics.push({ owner: characterId, phase: 'buy_ad_reconcile', trigger: 'goal_review',
         reason: result.closed.length || result.opened.length || result.changed?.length ? 'changed' : 'unchanged',
         reserveDelta: reserve() - oldReserve, recordId: result.retained?.[0]?.id || result.opened?.[0]?.id,
@@ -789,7 +743,7 @@ async function openBotRecords(ownerId, kind, configs) {
     const characterId = Number(ownerId);
     const result = await Database.openBoardRecords(characterId, kind, configs);
     result.opened.forEach(refreshRecord);
-    await syncOwnerAfterMove(characterId, result, 'bot_board_records_opened');
+    syncOwnerAfterMove(characterId, result);
     return result;
 }
 
@@ -799,7 +753,7 @@ async function closeBotRecord(ownerId, recordId, options = {}) {
     const result = await Database.closeBoardRecord(characterId, recordId, options);
     if (!result.closed) return result;
     refreshRecord(result.record);
-    await syncOwnerAfterMove(characterId, result, 'bot_board_record_closed');
+    syncOwnerAfterMove(characterId, result);
     return result;
 }
 
@@ -823,7 +777,7 @@ async function repriceBot(ownerId, lineId, price, expectedRevision = null, quant
     const rival = board.first(Number(line.selfId), Number(store.storeType),
         { excludeOwner: Number(ownerId), enchant: 0 })?.price || 0;
     const result = await Database.repriceAfkTradeShop(ownerId, lineId, price, expectedRevision, quantity, rival);
-    await syncAfterReprice(ownerId, result);
+    syncAfterReprice(ownerId, result);
     refreshRecord(result.shop);
     return entriesById.get(Number(result.shop?.id))?.shop || null;
 }
@@ -844,7 +798,7 @@ async function repriceBotLines(ownerId, reprices = [], { withdrawals = [], updat
         skipped: reprices.length + withdrawals.length + updates.length };
     const result = await Database.repriceBoardLines(ownerId, owned,
         { withdrawals: leaving, updates: observations, coldAuthority, hotAuthority, canCommitReview });
-    await syncAfterReprice(ownerId, result);
+    syncAfterReprice(ownerId, result);
     result.shops.forEach(refreshRecord);
     return { changed: result.changed, updated: result.updated,
         skipped: reprices.length - owned.length + withdrawals.length - leaving.length
@@ -854,13 +808,11 @@ async function repriceBotLines(ownerId, reprices = [], { withdrawals = [], updat
 // A reprice that moved an item or Adena: the actor and the bot's cold state
 // follow its bag (the author's sync after a publish). A price-only change
 // moved nothing: no inventory to read, no state to save.
-async function syncAfterReprice(ownerId, result) {
+function syncAfterReprice(ownerId, result) {
     if (!result.ownerInventory) return;
     syncOnlineInventory(ownerId, result.ownerInventory);
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    const ownerState = LifeState.snapshot(ownerId);
-    if (ownerState) await syncColdCharacter(ownerId, ownerState, 'bot_afk_trade_repriced', result.ownerInventory,
-        { coldLifeRows: result.coldLifeRows });
+    acceptFenced(result, ownerId);
     invoke('GameServer/Bot/Economy/BotAfkMarketService').rememberInventory(ownerId, LifeState.snapshot(ownerId));
 }
 
@@ -966,7 +918,7 @@ async function buyFromShop(characterId, store, selfId, amount, options = {}) {
     ));
     if (!store?.afkTrade || Number(store.storeType) !== SELL || (!line && !options.economyCommand)) throw new Error('afk_trade_stock_changed');
     if (store.conditional) return require('./TradeMeetingService').trade(characterId, store, selfId, amount, options);
-    const admission = await admitBotTrade(characterId, require('../Bot/Economy/EconomyCommit').KINDS.afkBuy, options);
+    const admission = await admitBotTrade(characterId, EconomyCommit.KINDS.afkBuy, options);
     let result;
     try { result = await Database.buyFromAfkTradeShop(characterId, {
         shopId: store.shopId,
@@ -979,8 +931,8 @@ async function buyFromShop(characterId, store, selfId, amount, options = {}) {
         validate: admission.validate,
         funding: options.funding,
         autoEquip: options.autoEquip
-    }); } finally { require('../Bot/Economy/EconomyCommit').finish(characterId, admission.command); }
-    return deliverTrade({ ...result, economyCommand: admission.command }, 'sale', characterId, admission.state || options.coldState, options);
+    }); } finally { EconomyCommit.finish(characterId, admission.command); }
+    return deliverTrade({ ...result, economyCommand: admission.command }, 'sale', characterId);
 }
 
 async function sellToShop(characterId, store, selfId, amount, options = {}) {
@@ -991,7 +943,7 @@ async function sellToShop(characterId, store, selfId, amount, options = {}) {
     ));
     if (!store?.afkTrade || Number(store.storeType) !== BUY || (!line && !options.economyCommand)) throw new Error('afk_trade_demand_changed');
     if (store.conditional) return require('./TradeMeetingService').trade(characterId, store, selfId, amount, options);
-    const admission = await admitBotTrade(characterId, require('../Bot/Economy/EconomyCommit').KINDS.afkSell, options);
+    const admission = await admitBotTrade(characterId, EconomyCommit.KINDS.afkSell, options);
     let result;
     try { result = await Database.sellToAfkTradeShop(characterId, {
         shopId: store.shopId,
@@ -1003,8 +955,8 @@ async function sellToShop(characterId, store, selfId, amount, options = {}) {
         expectedRevision: options.expectedRevision,
         economyCommand: admission.command,
         validate: admission.validate
-    }); } finally { require('../Bot/Economy/EconomyCommit').finish(characterId, admission.command); }
-    return deliverTrade({ ...result, economyCommand: admission.command }, 'purchase', characterId, admission.state || options.coldState, options);
+    }); } finally { EconomyCommit.finish(characterId, admission.command); }
+    return deliverTrade({ ...result, economyCommand: admission.command }, 'purchase', characterId);
 }
 
 async function admitBotTrade(characterId, kind, options) {
@@ -1017,21 +969,20 @@ async function admitBotTrade(characterId, kind, options) {
         if (onlineSession(characterId) !== session || session.actor?.isDead?.()) throw Error('economy_session_changed');
     } : null;
     validate?.();
-    const admitted = await require('../Bot/Economy/EconomyCommit').admit(state, kind, options.economyCommand);
+    const admitted = await EconomyCommit.admit(state, kind, options.economyCommand);
     // The original is retained by the caller for an ordinary retry.
     if (Object.isExtensible(options)) options.economyCommand = admitted.command;
     return { ...admitted, validate };
 }
 
-async function deliverTrade(result, kind, characterId, state, options) {
-    try { return await finalizeTrade(result, kind, characterId, state, options); }
+async function deliverTrade(result, kind, characterId) {
+    try { return await finalizeTrade(result, kind, characterId); }
     catch (error) {
         // The physical transaction already committed. Auxiliary delivery may
         // wait, but a counter/notification failure cannot become a new debit.
         utils.infoWarn('AfkTrade', 'postcommit delivery waits for %d: %s', characterId, error.message || error);
         const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-        const row = result.coldLifeRows?.[Number(characterId)];
-        const coldState = row ? require('../Bot/Economy/EconomyCommit').acceptRow(row) : LifeState.cachedState(characterId);
+        const coldState = acceptFenced(result, characterId) || LifeState.cachedState(characterId);
         return { ...result, coldState, deliveryPending: true };
     }
 }

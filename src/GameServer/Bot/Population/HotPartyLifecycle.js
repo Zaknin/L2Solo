@@ -528,7 +528,7 @@ function markedHotStates(party, sessions) {
         // stats serialization. Full lifecycle snapshots belong to its CAS.
         const items = (actor.backpack?.fetchItems?.() || []).filter(item => item.fetchEquipped?.() ?? item.equipped);
         return { ...current, classId: Number(actor.fetchClassId()), clanId: Number(actor.fetchClanId()), level: Number(actor.fetchLevel()),
-            partyId: current.party?.partyId, simulationOwner: current.simulation?.ownerId || 'legacy_main',
+            partyId: current.party?.partyId,
             loc: { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() },
             vitals: { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp() },
             inventory: Life.inventorySummaryFromItems(items),

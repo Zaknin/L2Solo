@@ -823,9 +823,7 @@ function safetyPresence(checkpoint) {
     if (!kernel || !safetyStateReady) return result;
     if (shuttingDown || kernel.stopping) return gate('deferred', 'worker_shutdown');
     if (checkpoint.phase !== 'cold') return gate('ineligible', 'not_cold');
-    if (checkpoint.simulationOwner !== 'legacy_main' || checkpoint.simulationLeaseId !== null
-        || checkpoint.simulationLeaseUntil > 0) return gate('deferred', 'native_ownership_active');
-    // Native ownership can be ahead of the cached row during ACK processing.
+    // The committed row can be ahead of the cached state during ACK processing.
     if (kernel.busy(id)) return gate('deferred', 'worker_busy');
     const normalCovered = kernel.hasNormalCoverage(id);
     if (entry && !Protocol.sameSafetyCheckpoint(checkpoint, entry.state)) return gate('deferred', 'checkpoint_changed');

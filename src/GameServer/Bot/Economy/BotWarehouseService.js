@@ -9,10 +9,6 @@ const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const depositQueues = new Map();
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
 
-function isLegacyMainState(state) {
-    return String(state?.simulation?.ownerId || 'legacy_main') === 'legacy_main';
-}
-
 function serializeDeposit(characterId, work) {
     const key = Number(characterId);
     const previous = depositQueues.get(key) || Promise.resolve();
@@ -301,7 +297,7 @@ async function depositColdUnlocked(state, candidates) {
 
 function depositCold(state) {
     const candidates = ItemDisposition.warehouseCandidates(state);
-    if (!state || !isLegacyMainState(state) || !candidates.length) {
+    if (!state || !candidates.length) {
         return Promise.resolve({ state, count: 0, items: [] });
     }
     return serializeDeposit(state.characterId, () => depositColdUnlocked(state, candidates));
@@ -364,7 +360,6 @@ function historicalCleanupCandidates(afterCharacterId = 0, limit = 4, options = 
         WHERE warehouse.characterId > ?
           AND warehouse.amount > 0
           AND states.phase = 'cold'
-          AND states.simulationOwner = 'legacy_main'
           AND states.accountName NOT LIKE 'bot_craft_%'
           AND (states.partyId IS NULL OR states.partyId = '')
           AND states.activity IN ('hunting', 'resting')
@@ -380,7 +375,7 @@ function cleanupHistoricalOwner(characterId, maxUnits = 16) {
 }
 
 async function cleanupHistoricalOwnerUnlocked(characterId, maxUnits) {
-    let [state] = await LifeState.statesByIds([Number(characterId)], { ownerId: 'legacy_main', unassigned: true });
+    let [state] = await LifeState.statesByIds([Number(characterId)], { unassigned: true });
     if (!canRelease(state)) return { ok: false, reason: 'owner_unavailable', characterId: Number(characterId) };
     const warehouseItems = await Database.fetchWarehouseItems(characterId);
     state = LifeState.cachedState(characterId) || state;
@@ -494,7 +489,7 @@ function marketRequests(state, warehouseItems, reserved = new Map(), options = {
 }
 
 function canRelease(state, options = {}) {
-    return options.inTown === true && !!state && isLegacyMainState(state) && state.phase === 'cold'
+    return options.inTown === true && !!state && state.phase === 'cold'
         && !(state.party?.partyId || state.partyId) && ['hunting', 'resting', 'shopping', 'merchant'].includes(state.activity);
 }
 

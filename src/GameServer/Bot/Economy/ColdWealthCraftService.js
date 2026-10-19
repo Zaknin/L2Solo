@@ -201,7 +201,7 @@ function withOutcome(state, opportunity, outcome, extras = {}) {
 // Retire only the accepted work that actually failed. A purchase/learning
 // await may have published another native row; never save its older caller.
 function rejectedWork(current, accepted) {
-    if (current.phase !== 'cold' || current.simulation?.ownerId && current.simulation.ownerId !== 'legacy_main') return current;
+    if (current.phase !== 'cold') return current;
     return DecisionEvents.rejectedState(current, accepted);
 }
 async function rejectAccepted(state, accepted = state, refusal = null) {

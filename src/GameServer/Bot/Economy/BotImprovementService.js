@@ -37,8 +37,7 @@ function acquisitionTravel(state, leaf, timestamp = Date.now()) {
 // options.decide(): the worker's decision made on exactly this state, or null
 // (L25); without one the wish network is built here.
 async function reviewCold(state, options = {}) {
-    if (!state?.characterId || state.phase !== 'cold' || ['dead','traveling'].includes(state.activity)
-        || state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main') return Promise.resolve({state,changed:false});
+    if (!state?.characterId || state.phase !== 'cold' || ['dead','traveling'].includes(state.activity)) return Promise.resolve({state,changed:false});
     if (pendingCold.has(state.characterId)) return pendingCold.get(state.characterId);
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const { decide, ...writeOptions } = options;
@@ -63,11 +62,11 @@ async function reviewCold(state, options = {}) {
         invoke('GameServer/Bot/Economy/EconomyContext').forget(state.characterId);
         return {state:current,changed:true,result};
     }).catch(async error => {
-        // These native refusals describe the selected input, never a lease,
-        // location, MP or uncertain transaction-delivery retry.
+        // These native refusals describe the selected input, never a stale
+        // revision, location, MP or uncertain transaction-delivery retry.
         if (!rejectedInput(error)) throw error;
         const current = Life.cachedState(state.characterId) || state;
-        if (current.phase !== 'cold' || current.simulation?.ownerId && current.simulation.ownerId !== 'legacy_main') return { state: current, changed: false };
+        if (current.phase !== 'cold') return { state: current, changed: false };
         const rejected = DecisionEvents.rejectedState(current, state);
         const saved = rejected === current ? current : await Life.upsertState(rejected, 'improvement_source_rejected') || current;
         return { state: saved, changed: false, reason: error.message };
