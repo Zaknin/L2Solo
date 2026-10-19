@@ -118,8 +118,11 @@ const bowTemplate = Data.items.find(row => Number(row.selfId) === BOW);
 assert(bowTemplate);
 assert.strictEqual(Gear.suitable(bowTemplate, originalBidBuyer, Gear.roleFor(originalBidBuyer), Gear.gradeForLevel(originalBidBuyer.level)), false,
     'the unchanged bare buyer has no native suitable Bow274');
-assert.strictEqual(originalBidContext.economy.projection.values.get(BOW) || 0, 0);
-assert.strictEqual(originalBidContext.economy.network.demands.get(`item:${BOW}`) || 0, 0);
+// The native build (the background thread's) values the buyer's wishes; main
+// reads a view of this body-less buyer without them.
+const originalBidBuild = Economy.forState(originalBidBuyer, { timestamp: NOW });
+assert.strictEqual(originalBidBuild.projection.values.get(BOW) || 0, 0);
+assert.strictEqual(originalBidBuild.network.demands.get(`item:${BOW}`) || 0, 0);
 assert.strictEqual(originalBidContext.economy.worth(BOW), 0, 'no native usefulness means zero own worth at a positive money price');
 assert.strictEqual(bid(scaledBase), null, 'a caller\'s reference amount cannot create a profitable bid for an unsuitable item');
 
