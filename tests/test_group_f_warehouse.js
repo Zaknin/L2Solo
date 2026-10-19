@@ -13,7 +13,7 @@ const Enchant = invoke('GameServer/Bot/Economy/ColdSafeEnchantService');
 
 const originals = { saleDecision: Market.saleDecision, warehouseRequests: Enchant.warehouseRequests,
     enchantSafe: Enchant.enchantSafe, execute: Database.execute, applyNpcLiquidation: Life.applyNpcLiquidation,
-    applyWarehouseGearCleanup: Life.applyWarehouseGearCleanup, fetchWarehouseItems: Database.fetchWarehouseItems,
+    fetchWarehouseItems: Database.fetchWarehouseItems,
     transferWarehouseToInventory: Database.transferWarehouseToInventory };
 let choices = [];
 const decisions = [];
@@ -106,7 +106,6 @@ async function run() {
         const rows = [];
         for (const enchant of [0, 1, 2, 3]) rows.push(await stock(ids[3], 94, 1, enchant, enchant === 0 ? '{"tag":"copy-zero"}' : null));
         Life.applyNpcLiquidation = async () => { throw Error('unexpected cap-based NPC payout'); };
-        Life.applyWarehouseGearCleanup = async () => { throw Error('unexpected historical NPC payout'); };
         const capped = await Warehouse.depositCold(gear);
         assert.equal(capped.count, 0);
         assert.equal(capped.state.inventory[94].amount, 3, 'warehouse cap leaves all excess bag copies intact');
@@ -129,12 +128,6 @@ async function run() {
         assert.equal((await Warehouse.releaseCold({ ...townGear.state, partyId: 23 }, { inTown: true })).released, false);
         assert.equal((await totals(ids[3], 94)).total, beforeFence);
 
-        const sql = [];
-        Database.execute = (statement, operation) => {
-            if (operation === 'warehouse:cleanup-candidates') sql.push(statement);
-            return originals.execute(statement, operation);
-        };
-        Database.execute = originals.execute;
         await world.reopen(ids[0]);
         assert.equal((await totals(ids[0], 1864)).total, 30, 'withdrawal and money survive reopen');
 
@@ -213,7 +206,7 @@ async function run() {
     } finally {
         Object.assign(Market, { saleDecision: originals.saleDecision });
         Object.assign(Enchant, { warehouseRequests: originals.warehouseRequests, enchantSafe: originals.enchantSafe });
-        Object.assign(Life, { applyNpcLiquidation: originals.applyNpcLiquidation, applyWarehouseGearCleanup: originals.applyWarehouseGearCleanup });
+        Object.assign(Life, { applyNpcLiquidation: originals.applyNpcLiquidation });
         Database.execute = originals.execute;
         Database.fetchWarehouseItems = originals.fetchWarehouseItems;
         Database.transferWarehouseToInventory = originals.transferWarehouseToInventory;

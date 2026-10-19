@@ -47,7 +47,6 @@ const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulati
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
-const WAREHOUSE_CLEANUP_KEY = Symbol('warehouse-cleanup');
 const STATE_RETENTION_KEY = Symbol('state-retention');
 const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanner');
 const PartyGoalCalculation = invoke('GameServer/Bot/Population/PartyGoalCalculation');
@@ -612,13 +611,6 @@ function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation =
     };
 }
 
-// E314: a sale visit ended on a shot meeting it staged stays in town, without
-// new market travel, while that same preparation is still open.
-function shotDealLive(state) {
-    const deal = state?.stats?.townVisit?.completed === true && state.stats.townVisit.shotDeal;
-    return !!deal && TradeMeetingService.preparationOf(state.characterId) === deal;
-}
-
 // An ended visit is saved in town only while a meeting preparation holds the
 // bot (E314); it starts no market travel until that preparation ends.
 function heldVisit(state) {
@@ -1047,9 +1039,6 @@ const PopulationService = {
     seedTimer: null,
     classProgressionMigrationTimer: null,
     nextColdCombatProfileMigrationAt: 0,
-    nextWarehouseCleanupAt: 0,
-    warehouseCleanupCursor: 0,
-    warehouseCleanupPassUnits: 0,
     nextStateRetentionAt: 0,
     stateRetentionPassRows: 0,
     walResetTimer: null,
@@ -1061,7 +1050,6 @@ const PopulationService = {
     resolving: false,
     classProgressionMigrationRunning: false,
     coldCombatProfileMigrationRunning: false,
-    warehouseCleanupRunning: false,
     stateRetentionRunning: false,
     partyFormationRunning: false,
     partyFormationPending: false,
@@ -1148,13 +1136,6 @@ const PopulationService = {
             this.ensureClassProgressionMigrationTimer();
         });
 
-        if (Config.warehouseCleanupEnabled !== false) {
-            this.nextWarehouseCleanupAt = Date.now() + Math.max(1000, Number(Config.warehouseCleanupStartDelayMs) || 60000);
-            this.armBackgroundAlarm(WAREHOUSE_CLEANUP_KEY, 'warehouse_cleanup',
-                Math.max(250, Number(Config.warehouseCleanupIntervalMs) || 2000),
-                () => this.nextWarehouseCleanupAt, timestamp => this.runWarehouseCleanup(timestamp));
-        }
-
         if (Config.stateRetentionEnabled !== false) {
             this.nextStateRetentionAt = Date.now() + Math.max(1000, Number(Config.stateRetentionStartDelayMs) || 90000);
             this.armBackgroundAlarm(STATE_RETENTION_KEY, 'state_retention',
@@ -1213,10 +1194,6 @@ const PopulationService = {
         this.clanActionRunning = false;
         this.clanFounderRunning = false;
         this.nextClanActionAt = 0;
-        this.warehouseCleanupRunning = false;
-        this.warehouseCleanupCursor = 0;
-        this.warehouseCleanupPassUnits = 0;
-        this.nextWarehouseCleanupAt = 0;
         this.stateRetentionRunning = false;
         this.stateRetentionPassRows = 0;
         this.nextStateRetentionAt = 0;
@@ -2715,7 +2692,7 @@ const PopulationService = {
         }
         const activity = this.playerActivityProfile(timestamp);
         if (activity.protected) return Promise.resolve(null);
-        if (this.resolving || this.warehouseCleanupRunning || this.stateRetentionRunning || this.partyFormationRunning) {
+        if (this.resolving || this.stateRetentionRunning || this.partyFormationRunning) {
             return Promise.resolve(null);
         }
 
@@ -2758,71 +2735,9 @@ const PopulationService = {
         });
     },
 
-    runWarehouseCleanup(timestamp = Date.now()) {
-        if (Config.warehouseCleanupEnabled === false || Config.enabled === false
-            || this.warehouseCleanupRunning || this.stateRetentionRunning
-            || timestamp < Number(this.nextWarehouseCleanupAt || 0)) {
-            return Promise.resolve(null);
-        }
-
-        const activity = this.playerActivityProfile(timestamp);
-        if (activity.protected) {
-            Config.developerDiagnostics && Metrics.recordBackgroundDeferral();
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('player_protected');
-            return Promise.resolve(null);
-        }
-        // This timer normally fires before the 5-second reset timer because
-        // both intervals share the same event loop phase. Yielding here gives
-        // a due reset a deterministic quiet window instead of starving it
-        // behind a succession of short cleanup transactions.
-        if (this.checkpointPressure().resetDue) {
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('wal_pressure');
-            return this.runAdaptiveWalReset(timestamp);
-        }
-        const lagMs = Math.max(0, Number(Metrics.currentEventLoopLag()) || 0);
-        const lagLimit = Math.max(1, Number(Config.schedulerLagThrottleMs) || 40);
-        if (lagMs >= lagLimit) {
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('event_loop_lag');
-            return Promise.resolve(null);
-        }
-        if (Database.pending() > 0) {
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanupDeferral('database_queue');
-            return Promise.resolve(null);
-        }
-
-        const startedAt = Date.now();
-        const budgetMs = Math.max(1, Math.min(50, Number(Config.warehouseCleanupBudgetMs) || 12));
-        this.warehouseCleanupRunning = true;
-        return Database.cooperatively(() => BotWarehouse.cleanupHistoricalBatch({
-            cursor: this.warehouseCleanupCursor,
-            ownerLimit: Config.warehouseCleanupOwnersPerTick,
-            maxUnitsPerOwner: Config.warehouseCleanupUnitsPerOwner,
-            deadlineAt: startedAt + budgetMs
-        }), Math.min(budgetMs, Math.max(1, Number(Config.schedulerSliceMs) || 12))).then((result) => {
-            this.warehouseCleanupCursor = Math.max(0, Number(result?.cursor || this.warehouseCleanupCursor));
-            this.warehouseCleanupPassUnits += Math.max(0, Number(result?.units || 0));
-            if (result?.exhausted) {
-                const pauseMs = this.warehouseCleanupPassUnits > 0
-                    ? Math.max(1000, Number(Config.warehouseCleanupPassPauseMs) || 60000)
-                    : Math.max(60000, Number(Config.warehouseCleanupIdlePauseMs) || (6 * 60 * 60 * 1000));
-                this.warehouseCleanupCursor = 0;
-                this.warehouseCleanupPassUnits = 0;
-                this.nextWarehouseCleanupAt = Date.now() + pauseMs;
-            }
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanup(result || {}, Date.now() - startedAt);
-            return result;
-        }).catch((error) => {
-            Config.developerDiagnostics && Metrics.recordWarehouseCleanup({ errors: 1, cursor: this.warehouseCleanupCursor }, Date.now() - startedAt);
-            utils.infoWarn('BotWarehouse', 'bounded historical cleanup failed: %s', error?.message || error);
-            return null;
-        }).finally(() => {
-            this.warehouseCleanupRunning = false;
-        });
-    },
-
     runStateRetention(timestamp = Date.now()) {
         if (Config.stateRetentionEnabled === false || Config.enabled === false
-            || this.stateRetentionRunning || this.warehouseCleanupRunning
+            || this.stateRetentionRunning
             || timestamp < Number(this.nextStateRetentionAt || 0)) {
             return Promise.resolve(null);
         }
@@ -3391,20 +3306,11 @@ const PopulationService = {
             }
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
             const sale = saleVisit(listingState);
-            return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale,
-                shotDealLive: shotDealLive(listingState) }).then((restockedState) => {
+            return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale }).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
-                // A deal in preparation keeps the bot in town; a sale visit it
-                // ended on this pass is saved with its sale retry, not lost in
-                // memory (E314), on the fresh row as the pending sale above (a
-                // meeting marker). Other visit reasons keep the author's path.
-                if (TradeMeetingService.hasPreparation(restockedState.characterId)) {
-                    if (!sale || restockedState.stats?.townVisit?.completed !== true) return restockedState;
-                    const live = LifeState.cachedState(restockedState.characterId) || restockedState, { stats } = restockedState;
-                    const ended = { ...live, stats: { ...live.stats, marketSellRetryAfter: stats.marketSellRetryAfter,
-                        visitEvery: stats.visitEvery, townVisit: stats.townVisit } };
-                    return LifeState.upsertState(ended, 'market_visit_held').then((saved) => saved || ended);
-                }
+                // A deal in preparation keeps the bot in town: a sale visit saved its
+                // end before the meeting was staged (ColdMarketService.finishTownErrands).
+                if (TradeMeetingService.hasPreparation(restockedState.characterId)) return restockedState;
                 const improvement = invoke('GameServer/Bot/Economy/BotImprovementService');
                 const continuation = improvement.acquisitionTravel(restockedState,
                     ColdSimulationCoordinator.economyDecisions.activity(restockedState));

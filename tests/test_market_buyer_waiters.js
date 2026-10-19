@@ -1,4 +1,5 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
+require('../src/Global');
 const assert = require('node:assert/strict');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const { MarketBuyerWaiters } = require('../src/GameServer/Bot/Economy/MarketBuyerWaiters');

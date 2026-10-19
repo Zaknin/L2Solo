@@ -3,8 +3,7 @@ const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('
 
 const columns = Protocol.CHECKPOINT_FIELDS;
 const timing = ['activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt'];
-// The bound lifecycle statement is the native 32-column BotLifeState.save ROW.
-// The revision remains unchanged in its UPDATE and comes from the private proof.
+// The bound lifecycle statement is the native 32-column BotLifeState.save ROW (and its revision).
 const rowParameters = Object.freeze({ characterId: 0, activity: 10, phase: 11,
     activityStartedAt: 12, nextResolveAt: 13, lastResolvedAt: 14, lastHotAt: 15, updatedAt: 28 });
 const sessions = new WeakMap();
