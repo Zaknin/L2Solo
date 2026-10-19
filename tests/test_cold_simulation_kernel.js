@@ -1502,11 +1502,12 @@ function claimAck(kernel, payload) {
     await marketKernel.shutdown();
     assert.strictEqual(marketKernel.lookSeen.size, 0);
 
-    // A party run with no member result (no spot): the leader alone commits
-    // the party row with the resolver's next due and a goal review; the other
-    // claims go back at once. Main writes the row (its 'parties' event comes
-    // before the commit ACK), and the leader is due at that row's time: no
-    // claim again before it.
+    // A party run with no member result (no spot): the whole roster commits
+    // the party row, fenced on the revision the run read, with the resolver's
+    // next due and a goal review; every member stays claimed until the ACK.
+    // Main publishes the row before the commit ACK, and the leader is due at
+    // that row's time. A refused commit (no new row) puts the leader no
+    // sooner than a second away, not at the row's past due.
     const emptyMessages = [];
     let emptyNow = now;
     const emptyKernel = recordingKernel({
@@ -1517,41 +1518,49 @@ function claimAck(kernel, payload) {
         now: () => emptyNow
     });
     const emptyMembers = [250, 251].map(id => state(id, { party: { partyId: 'empty-party', leaderId: 250 } }));
-    const emptyParty = { partyId: 'empty-party', leaderId: 250, memberIds: [250, 251], stats: {}, nextResolveAt: emptyNow - 5000, revision: 4 };
+    const emptyParty = { partyId: 'empty-party', leaderId: 250, memberIds: [250, 251], stats: {}, status: 'active',
+        nextResolveAt: emptyNow - 5000, updatedAt: emptyNow - 5000, revision: 4 };
     emptyMembers.forEach(member => emptyKernel.upsert({ state: member, context: {} }));
     emptyKernel.partyPut(emptyParty.partyId, emptyParty);
-    emptyKernel.tick();
-    const emptyClaim = emptyMessages.find(entry => entry.type === 'claim_request');
-    assert.deepStrictEqual(emptyClaim.payload.candidates.map(candidate => candidate.characterId), [250, 251]);
-    claimAck(emptyKernel, { grants: emptyClaim.payload.candidates.map(candidate => ({ ok: true,
-        characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-        leaseId: `empty-${candidate.characterId}`, leaseUntil: emptyNow + 30000, purpose: candidate.purpose })) });
-    await emptyKernel.resolveChain;
-    const emptyRelease = emptyMessages.find(entry => entry.type === 'release_request');
-    assert.deepStrictEqual(emptyRelease.payload.releases.map(entry => [entry.token.leaseId, entry.reason]),
-        [['empty-251', 'party_no_result']], 'a run with no result releases every member but the leader');
-    const emptyBatch = emptyMessages.find(entry => entry.type === 'proposal_batch');
-    assert.deepStrictEqual(emptyBatch.payload.proposals.map(proposal => proposal.characterId), [250],
-        'a run with no result commits the leader alone');
-    const emptyCommit = emptyBatch.payload.proposals[0];
-    assert.strictEqual(emptyCommit.partyResolution.party.nextResolveAt, emptyNow + 60000, 'the row carries the resolver\'s next due');
-    assert.strictEqual(emptyCommit.partyResolution.reviewGoals, true, 'main reviews the party\'s goals');
-    assert.strictEqual(emptyCommit.result.nextResolveAt, emptyNow + 60000);
-    assert(!emptyCommit.atomicGroup?.partyChanges, 'a leader-only commit carries no fenced party change');
-    emptyKernel.onReleaseAck({ results: emptyRelease.payload.releases.map(entry => ({ ok: true,
-        characterId: entry.token.characterId, inputToken: entry.token, releaseRequestId: emptyRelease.msgId,
-        state: { ...emptyMembers[1], simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } },
-        context: {} })) });
-    assert.strictEqual(emptyKernel.busy(250), true, 'the leader waits for its commit ACK');
+    const emptyRound = async (lease) => {
+        emptyMessages.length = 0;
+        emptyKernel.tick();
+        const claim = emptyMessages.find(entry => entry.type === 'claim_request');
+        assert.deepStrictEqual(claim.payload.candidates.map(candidate => candidate.characterId), [250, 251]);
+        claimAck(emptyKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
+            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
+            leaseId: `${lease}-${candidate.characterId}`, leaseUntil: emptyNow + 30000, purpose: candidate.purpose })) });
+        await emptyKernel.resolveChain;
+        assert(!emptyMessages.some(entry => entry.type === 'release_request'), 'a run with no result releases no member');
+        return emptyMessages.find(entry => entry.type === 'proposal_batch').payload.proposals;
+    };
+    const emptyCommits = await emptyRound('empty');
+    assert.deepStrictEqual(emptyCommits.map(proposal => proposal.characterId), [250, 251], 'the whole roster commits');
+    const emptyChange = emptyCommits[0].atomicGroup.partyChanges[0];
+    assert(emptyCommits.every(proposal => proposal.atomicGroup.id === emptyCommits[0].atomicGroup.id), 'one group');
+    assert.deepStrictEqual([emptyChange.partyId, emptyChange.expectedPartyRevision, emptyChange.nextResolveAt, emptyChange.spotId],
+        ['empty-party', 4, emptyNow + 60000, undefined], 'the row change is fenced on the run\'s revision');
+    const emptyLeaderCommit = emptyCommits.find(proposal => proposal.partyResolution);
+    assert.strictEqual(emptyLeaderCommit.characterId, 250);
+    assert.strictEqual(emptyLeaderCommit.partyResolution.reviewGoals, true, 'main reviews the party\'s goals');
+    assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays claimed until the commit ACK');
     emptyKernel.partyPut(emptyParty.partyId, { ...emptyParty, nextResolveAt: emptyNow + 60000, revision: 5 });
-    commitAck(emptyKernel, { results: [{ ok: true, characterId: 250, context: {},
-        state: { ...emptyCommit.nextState, simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } } }] });
+    commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId, context: {},
+        state: { ...proposal.nextState, simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert.strictEqual(emptyKernel.scheduleTokens.get(250).dueAt, emptyNow + 60000, 'the leader is due at the row\'s next due');
     emptyNow += 1000;
     emptyMessages.length = 0;
     emptyKernel.tick();
     assert(!emptyMessages.some(entry => entry.type === 'claim_request'), 'no claim before the row\'s next due');
+    emptyNow += 60000;
+    const refusedCommits = await emptyRound('refused');
+    commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
+        reason: 'party_group_aborted', detail: 'party_revision_stale', context: {},
+        state: { ...proposal.baseState, simulation: { ownerId: 'legacy_main', revision: 6, leaseId: null, leaseUntil: 0 } } })) });
+    assert.strictEqual(emptyKernel.busy(250), false);
+    assert(emptyKernel.scheduleTokens.get(250).dueAt >= emptyNow + 1000,
+        'a refused commit with no new row waits a second, not the row\'s past due');
 
     console.log('Cold worker protocol, deterministic kernel, scheduling, and fence checks passed');
 })().catch((error) => {

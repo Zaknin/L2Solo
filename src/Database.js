@@ -5452,9 +5452,10 @@ const Database = {
             const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
             if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
                 || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
-                return { affectedRows: 0 };
-            if (previous?.status === 'hot' || Number(jsonObject(previous?.statsJson).clanGoalInvalidationVersion || 0)
-                > Number(jsonObject(row.statsJson).clanGoalInvalidationVersion || 0)) return { affectedRows: 0 };
+                return { affectedRows: 0, reason: 'raid_admission' };
+            if (previous?.status === 'hot') return { affectedRows: 0, reason: 'party_hot' };
+            if (Number(previousStats.clanGoalInvalidationVersion || 0) > Number(nextStats.clanGoalInvalidationVersion || 0))
+                return { affectedRows: 0, reason: 'goal_invalidated' };
             const payment = partyAgreementUnsafe(previous, row);
             row = payment.row;
             const result = write(`INSERT INTO bot_background_parties (

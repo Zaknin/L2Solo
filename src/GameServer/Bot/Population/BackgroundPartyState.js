@@ -117,6 +117,21 @@ function tableRow(party) {
         requirementRefresh: requirementDue(String(party.partyId)) === true };
 }
 
+// Party row writes that wrote nothing, by reason: counted always (one Map
+// write), logged at most once a minute. Such a party keeps its old row and
+// due, and its leader steps again on them.
+const skippedWrites = new Map();
+let skippedLoggedAt = 0;
+function skippedWrite(reason, partyId) {
+    skippedWrites.set(reason, (skippedWrites.get(reason) || 0) + 1);
+    const at = Date.now();
+    if (at - skippedLoggedAt < 60000) return null;
+    skippedLoggedAt = at;
+    utils.infoWarn('BotParty', 'party row writes that wrote nothing since start: %s (last: %s)',
+        [...skippedWrites].map(([key, count]) => `${key}:${count}`).join('|'), partyId);
+    return null;
+}
+
 function publish(partyId) {
     const party = cache.get(String(partyId));
     TableChannel.changed('parties', party?.status === 'active' ? tableRow(party)
@@ -350,21 +365,21 @@ const BackgroundPartyState = {
 
     createOrUpdate(party) {
         const prepared = this.prepareCommit(party);
-        if (!prepared) return Promise.resolve(null);
+        if (!prepared) return Promise.resolve(skippedWrite('roster_size', party?.partyId));
         const ready = initialized ? Promise.resolve(true) : this.init();
 
         return ready.then((isReady) => {
-            if (!isReady) return null;
+            if (!isReady) return skippedWrite('db_not_ready', prepared.snapshot.partyId);
             return Database.saveBackgroundParty(prepared.row).then((result) => {
                 // Only the whole-party lifecycle can change a hot roster.
                 // A cold maintenance job may have prepared this save before activation.
-                if (!result.affectedRows) return null;
+                if (!result.affectedRows) return skippedWrite(result.reason || 'not_written', prepared.snapshot.partyId);
                 (result.lifeRows || []).forEach(row => BotLifeState.acceptNewerLifecycleRow(row));
                 return this.acceptRow(result.row);
             });
         }).catch((err) => {
             utils.infoWarn('BotParty', 'failed to save background party %s: %s', prepared.snapshot.partyId, err.message);
-            return null;
+            return skippedWrite('db_error', prepared.snapshot.partyId);
         });
     },
 

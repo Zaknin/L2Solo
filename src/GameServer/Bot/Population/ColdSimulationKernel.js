@@ -11,6 +11,7 @@ const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
+const CraftMaterialParty = require('./CraftMaterialParty');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const PartyHuntingTarget = require('./PartyHuntingTarget');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
@@ -260,7 +261,18 @@ function finishPartyRouteTravelState(state = {}, timestamp = Date.now()) {
     };
 }
 
-function partyTransitionProposals(run, memberStates, party, timestamp, event = null, activity = 'party_travel') {
+// The party row change a whole-roster commit group carries: main writes it in
+// the members' transaction only while the row still has the revision the run
+// read (Database validateAtomicGroups; else party_revision_stale).
+function fencedPartyChange(run, party) {
+    return { partyId: run.party.partyId, memberIds: run.party.memberIds,
+        expectedPartyRevision: run.party.revision, updatedAt: party.updatedAt,
+        nextResolveAt: party.nextResolveAt, statsJson: JSON.stringify(party.stats),
+        status: party.status, cohesion: party.cohesion, risk: party.risk };
+}
+
+// fence: the group always carries the fenced party row change.
+function partyTransitionProposals(run, memberStates, party, timestamp, event = null, activity = 'party_travel', fence = false) {
     const nextResolveAt = Number(memberStates[0]?.timing?.nextResolveAt || timestamp + 1000);
     const requestedLeaderId = Number(run.party.leaderId || 0);
     const resolutionMemberId = memberStates.some((state) => Number(state.characterId) === requestedLeaderId)
@@ -272,13 +284,10 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
     };
     // Material travel changes the collection contract, and evacuation returns
     // funded help. Fence that party row in the same transaction as every leg.
-    if (require('./CraftMaterialParty').isObjective(run.party.stats?.objective)
-        && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
+    if (fence || (CraftMaterialParty.isObjective(run.party.stats?.objective)
+        && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity))) {
         party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
-        atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-            expectedPartyRevision: run.party.revision, updatedAt: party.updatedAt,
-            nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
-            cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
+        atomicGroup.partyChanges = [{ ...fencedPartyChange(run, party), ...(party.spotId ? { spotId: party.spotId } : {}) }];
     }
     return memberStates.map((state) => {
         const id = Number(state.characterId);
@@ -2047,7 +2056,7 @@ class ColdSimulationKernel {
                 }
             }
             const paidHelp = run.party.stats?.agreement?.help?.status === 'funded';
-            const materialHunt = require('./CraftMaterialParty').isObjective(run.party.stats?.objective);
+            const materialHunt = CraftMaterialParty.isObjective(run.party.stats?.objective);
             // Collection quotas and their physical receipts share the same
             // commit, including completion with no funded helper contract.
             const atomicParty = raid || paidHelp || materialHunt || resolvedParty.status === 'dissolved';
@@ -2056,10 +2065,7 @@ class ColdSimulationKernel {
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
             if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
-                memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-                    expectedPartyRevision: run.party.revision, updatedAt: resolvedParty.updatedAt,
-                    nextResolveAt: resolvedParty.nextResolveAt, statsJson: JSON.stringify(resolvedParty.stats),
-                    status: resolvedParty.status, cohesion: resolvedParty.cohesion, risk: resolvedParty.risk }];
+                memoryGroup.partyChanges = [fencedPartyChange(run, resolvedParty)];
             }
             if (raid) {
                 // Even a preparation or unavailable-boss result is atomic.
@@ -2172,22 +2178,18 @@ class ColdSimulationKernel {
             }
             if (!current()) return;
             if (!proposals.length) {
-                // No member result (the resolver found no spot): the leader
-                // alone commits the party row with the resolver's next due and
-                // a goal review (main writes the row; its 'parties' event moves
-                // the leader's due). The other claims go back now, not at lease
-                // expiry, and main can move those members meanwhile.
+                // No member result (the resolver found no spot): the whole
+                // roster commits the party row, fenced on the revision this run
+                // read, with the resolver's next due and a goal review. Main's
+                // accepted commit publishes the row (its 'parties' event moves
+                // the leader's due); a changed row refuses it.
                 EconomyDiagnostics.count('party_run', 'no_result', resolution.debug?.reason);
-                const leader = run.members.find(member => Number(member.characterId) === Number(run.party.leaderId))
-                    || run.members[0];
-                const [proposal] = partyTransitionProposals(run, [{ ...leader,
-                    timing: { ...(leader.timing || {}), nextResolveAt: resolvedParty.nextResolveAt } }],
-                resolvedParty, startedAt, null, 'party_no_result');
-                proposal.partyResolution = leaderResolution;
-                proposals.push(proposal);
-                const releases = [...run.grants.values()].filter(token => Number(token.characterId) !== proposal.characterId)
-                    .map(token => ({ token, reason: 'party_no_result' }));
-                if (releases.length) this.requestRelease(releases);
+                const waiting = run.members.map(state => ({ ...state,
+                    timing: { ...(state.timing || {}), nextResolveAt: resolvedParty.nextResolveAt } }));
+                const group = partyTransitionProposals(run, waiting, resolvedParty, startedAt, null, 'party_no_result', true);
+                group.find(proposal => proposal.partyResolution).partyResolution = {
+                    ...leaderResolution, party: { ...resolvedParty, updatedAt: group[0].atomicGroup.partyChanges[0].updatedAt } };
+                proposals.push(...group);
             }
             published = handled = true;
             proposals.forEach(proposal => this.dirty.set(proposal.characterId, proposal));
@@ -2461,7 +2463,7 @@ class ColdSimulationKernel {
     }
 
     onCommitAck(payload = {}) {
-        const accepted = [];
+        const accepted = [], refused = [];
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
             const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
@@ -2480,6 +2482,7 @@ class ColdSimulationKernel {
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
                 if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
+                EconomyDiagnostics.count('commit_ack', 'refused', result.detail || result.reason);
                 if (result.state) this.upsert({
                     state: {
                         ...result.state,
@@ -2490,10 +2493,13 @@ class ColdSimulationKernel {
                     },
                     context: result.context || {}
                 });
-                else this.requeue(id, this.now() + 1000);
+                refused.push(id);
             }
             accepted.push(result);
         });
+        // After the whole ACK: a follower's state in it moves its leader to the
+        // party row's due, which an unchanged row has in the past.
+        refused.forEach(id => this.requeueAtDue(id));
         return accepted;
     }
 
@@ -2515,9 +2521,7 @@ class ColdSimulationKernel {
             this.lookSeen.delete(id);
             this.inFlight.delete(id);
             if (result.state) this.upsert(result);
-            // No state back: the kept copy's own due (a leader's party row),
-            // never sooner than a second.
-            else this.requeue(id, Math.max(this.now() + 1000, this.dueAt(this.states.get(id).state)));
+            else this.requeueAtDue(id);
             accepted.push(result);
         });
         return accepted;
@@ -2562,6 +2566,13 @@ class ColdSimulationKernel {
             }
         } else this.requeue(id, this.now() + Math.max(1000, Number(payload.retryAfterMs) || 5000));
         return true;
+    }
+
+    // At the kept copy's own due (a leader's: its party row's), never sooner
+    // than a second.
+    requeueAtDue(characterId) {
+        const current = this.states.get(Number(characterId));
+        if (current) this.requeue(characterId, Math.max(this.now() + 1000, this.dueAt(current.state)));
     }
 
     requeue(characterId, dueAt) {
