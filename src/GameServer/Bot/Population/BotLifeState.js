@@ -899,8 +899,12 @@ function save(row, options = {}) {
             -- The mind rides under the same guard as the body: a near bot's
             -- mind on main is the worker's copy, the next save carries the
             -- same copy, and a refused save is a stale actor snapshot, so a
-            -- second unguarded statement would buy nothing.
-            mindJson = excluded.mindJson,
+            -- second unguarded statement would buy nothing. Over a far row
+            -- (old phase cold) the worker is the mind's one writer: a main
+            -- save there (npc liquidation, a purchase, leaving a party) keeps
+            -- the row's mind; the hot->cold hand-off (old phase hot) still
+            -- carries main's.
+            mindJson = CASE WHEN ${TABLE}.phase = 'cold' THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
             updatedAt = excluded.updatedAt
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
