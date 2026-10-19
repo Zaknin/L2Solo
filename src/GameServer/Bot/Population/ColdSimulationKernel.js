@@ -662,7 +662,7 @@ class ColdSimulationKernel {
             commands: 0,
             errors: 0,
             stale: 0,
-            // Steps requeued after STEP_STALL_MS without a commit ack.
+            // Steps requeued STEP_STALL_MS after their start with no proposal sent.
             stallRecoveries: 0,
             // commit_acks for a step no longer in flight (requeued as stalled, or removed).
             lateAcks: 0,
@@ -1422,16 +1422,21 @@ class ColdSimulationKernel {
         }
     }
 
-    // Steps STEP_STALL_MS past their start without a commit ack: requeued, a
-    // party by its leader. inFlight is in start order, so the scan stops at
-    // the first step still within its time.
+    // Steps STEP_STALL_MS past their start whose proposal never left (a hung
+    // resolve, a send that failed): requeued, a party by its leader. A sent
+    // proposal waits for its commit ack however long main's queue holds it:
+    // the ack or the refusal ends it. inFlight is in start order, so the scan
+    // stops at the first unsent step still within its time.
     recoverStalled(timestamp = this.now()) {
         for (const [id, active] of this.inFlight) {
+            if (active.pendingCommitId) continue;
             if (active.startedAt + STEP_STALL_MS > timestamp) break;
             const run = active.partyId ? this.partyRuns.get(active.partyId) : null;
             const memberIds = active.partyId
                 ? [...this.inFlight].filter(([, entry]) => entry.partyId === active.partyId).map(([memberId]) => memberId)
                 : [id];
+            // A party whose proposal left with any member waits for that ack.
+            if (memberIds.some(memberId => this.inFlight.get(memberId).pendingCommitId)) continue;
             if (run) this.partyRuns.delete(active.partyId);
             this.abandonSteps(memberIds);
             if (active.partyId) {
@@ -1459,12 +1464,15 @@ class ColdSimulationKernel {
     }
 
     // The earliest time tick() can find timed work: the heap head (a bot or a
-    // decision deadline, both on the one heap) or the oldest step's stall. At
-    // or before now: work is due (maybe held by capacity or a pause). A
-    // superseded heap node only makes it earlier.
+    // decision deadline, both on the one heap) or the oldest unsent step's
+    // stall (recoverStalled). At or before now: work is due (maybe held by
+    // capacity or a pause). A superseded heap node only makes it earlier.
     nextWakeAt() {
-        const oldest = this.inFlight.values().next().value;
-        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), oldest ? oldest.startedAt + STEP_STALL_MS : Infinity);
+        let stallAt = Infinity;
+        for (const active of this.inFlight.values()) {
+            if (!active.pendingCommitId) { stallAt = active.startedAt + STEP_STALL_MS; break; }
+        }
+        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), stallAt);
     }
 
     // Diagnostics only: why a scheduler tick started no step. `no_step`: the tick
@@ -2156,7 +2164,13 @@ class ColdSimulationKernel {
                 active.proposed = proposed.get(Number(proposal.characterId));
             }
         }
-        this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes);
+        if (this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes) === false) {
+            // Never sent: no ack comes, the stall recovery frees these steps.
+            for (const proposal of proposals) {
+                const active = this.inFlight.get(Number(proposal.characterId));
+                if (active?.pendingCommitId === proposal.proposalId) active.pendingCommitId = null;
+            }
+        }
         return proposals.length;
     }
 
@@ -2391,7 +2405,7 @@ class ColdSimulationKernel {
                 current
             },
             inFlight: this.inFlight.size,
-            // The oldest step's age (inFlight is in start order); STEP_STALL_MS requeues it.
+            // The oldest step's age (inFlight is in start order), its commit wait included.
             inFlightAgeMs: this.inFlight.size ? Math.max(0, now - this.inFlight.values().next().value.startedAt) : 0,
             dirty: this.dirty.size,
             dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,

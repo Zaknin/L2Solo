@@ -463,10 +463,11 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert.strictEqual(memberOnlyKernel.snapshot().due, 0,
         'party members must not inflate independent worker due-age telemetry');
 
-    // A step whose commit ack never comes is requeued 30 s after its start;
-    // the ack arriving later misses its proposal and is dropped.
+    // A step whose proposal never reached main (the send failed) is requeued
+    // 30 s after its start; an ack arriving later misses it and is dropped.
     let recoveryNow = now;
-    const recoveryKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
+    const unsent = type => type !== 'proposal_batch';
+    const recoveryKernel = recordingKernel({ resolveSolo: resolver, emit: unsent, now: () => recoveryNow });
     recoveryKernel.upsert(standOn(recoveryKernel, { state: state(6) }, { id: 'spot' }));
     recoveryKernel.tick();
     const stalledAt = recoveryNow;
@@ -489,9 +490,31 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert.strictEqual(recoveryKernel.snapshot().lateAcks, 1, 'the late ack is dropped');
     assert.strictEqual(recoveryKernel.states.get(6).state.simulation.revision, 3, 'a dropped ack changes no state');
 
-    // A stalled party step frees every member and requeues the party by its leader.
+    // A sent step waits for its commit ack past 30 s (main's commit queue holds
+    // it): it is not requeued, its stall is no wake, and the ack lands.
+    let sentNow = now;
+    const sentKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => sentNow });
+    sentKernel.upsert(standOn(sentKernel, { state: state(8) }, { id: 'spot' }));
+    sentKernel.tick();
+    const sentAt = sentNow;
+    await sentKernel.resolveChain;
+    sentKernel.flush(null, true);
+    assert.strictEqual(sentKernel.nextWakeAt(), Number(sentKernel.heap.peek()?.dueAt ?? Infinity),
+        'a sent step\'s stall is no wake');
+    sentNow = sentAt + 60000;
+    sentKernel.tick();
+    assert.strictEqual(sentKernel.inFlight.size, 1, 'a sent step keeps its slot until its commit ack');
+    assert.strictEqual(sentKernel.snapshot().stallRecoveries, 0);
+    commitAck(sentKernel, { results: [{ ok: true, characterId: 8,
+        state: state(8, { simulation: { ownerId: 'legacy_main', revision: 4, leaseId: null, leaseUntil: 0 } }) }] });
+    assert.strictEqual(sentKernel.snapshot().lateAcks, 0, 'the ack of a slow commit is not late');
+    assert.strictEqual(sentKernel.inFlight.size, 0);
+    assert.strictEqual(sentKernel.states.get(8).state.simulation.revision, 4, 'the slow commit\'s state lands');
+
+    // A stalled party step (its proposal never sent) frees every member and
+    // requeues the party by its leader.
     let partyStallNow = now;
-    const partyStallKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => partyStallNow,
+    const partyStallKernel = recordingKernel({ resolveSolo: resolver, emit: unsent, now: () => partyStallNow,
         resolveParty: ({ timestamp }) => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: timestamp + 60000 }) });
     [260, 261].forEach(id => partyStallKernel.upsert({ state: state(id, { party: { partyId: 'stall-party', leaderId: 260 } }) }));
     partyStallKernel.partyPut('stall-party', { partyId: 'stall-party', leaderId: 260, memberIds: [260, 261], stats: {},
