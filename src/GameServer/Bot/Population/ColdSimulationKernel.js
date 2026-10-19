@@ -838,10 +838,14 @@ class ColdSimulationKernel {
         if (scheduled.dueAt !== due) this.schedule(id, leader.version, due);
     }
 
+    // entry.ownOutput: the state is this thread's own output echoed back by
+    // main, 'commit' (onCommitAck: the proposal) or 'review' (completeCommand:
+    // the review that ran the plan sent), handed to states.set for its observers.
     upsert(entry = {}) {
         let state = entry.state || entry;
         const characterId = Number(state?.characterId || 0);
         if (!characterId) return false;
+        const ownOutput = entry.ownOutput === 'commit' || entry.ownOutput === 'review' ? entry.ownOutput : null;
         const previousRecord = this.states.locationIndex.getSource(characterId, 'state');
         const current = this.states.get(characterId);
         // Only an active bilateral preparation needs stable object identity.
@@ -887,7 +891,7 @@ class ColdSimulationKernel {
             // A full catalog refresh normally resends the same state. Keep the
             // existing heap version so ten-second refreshes do not accumulate
             // one invalid future node per bot until its next due time.
-            this.states.set(characterId, { ...current, state });
+            this.states.set(characterId, { ...current, state }, ownOutput);
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -907,7 +911,7 @@ class ColdSimulationKernel {
         // economy plan sent and its hash, the card it holds, the decision it
         // published and, for a near bot, the last raise applied and the route
         // rows of its last decision (ColdSimulationWorker nearEvents, publish).
-        this.states.set(characterId, { route: null, ...current, state, version });
+        this.states.set(characterId, { route: null, ...current, state, version }, ownOutput);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -2236,7 +2240,9 @@ class ColdSimulationKernel {
             // cache is the proposal's state with them.
             const committed = result.ok ? result.state || Protocol.committedState(active.proposed, result) : null;
             if (committed) {
-                this.upsert({ state: committed });
+                // Without result.state main changed nothing: the held state is
+                // the step's own output, not news for its economy (ownOutput).
+                this.upsert({ state: committed, ownOutput: result.state ? null : 'commit' });
                 // The commit's slot is free and the kernel holds main's committed
                 // state: the review main named takes the bot before any step does.
                 const review = this.beginReview(id, result.review, active);
@@ -2335,7 +2341,10 @@ class ColdSimulationKernel {
                     && !Protocol.sameCommandCheckpoint(outputCheckpoint, latest)
                     && outputCheckpoint.simulationRevision === latest.simulationRevision
                     && outputCheckpoint.updatedAt <= latest.updatedAt)) output = current.state;
-            this.upsert({ state: output });
+            // An ok review of the plan sent ran this step's own plan: its state is
+            // own output too. A refused one is an input (main asks a refresh).
+            this.upsert({ state: output,
+                ownOutput: attempt.kind === 'review' && attempt.economyPlan && payload.ok !== false ? 'review' : null });
             // Rejected commands often return the unchanged overdue state. Do
             // not let that timestamp immediately re-enter the head of the queue.
             if ((payload.ok === false || Number(payload.retryAfterMs) > 0) && this.scheduleTokens.has(id)) {

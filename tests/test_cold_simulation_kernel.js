@@ -1327,9 +1327,14 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
             committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
         }
         reviewKernel.flush(null, true);
+        // A state on the ack is main's (it changed what it committed): not own
+        // output, so a pending economy refresh runs on it.
+        const ownOutputs = [], nativeSet = reviewKernel.states.set.bind(reviewKernel.states);
+        reviewKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
         commitAck(reviewKernel, { results: [
             { ok: true, characterId: 60, revision: 5, state: committed[60], review: ['plan'] },
             { ok: true, characterId: 61, revision: 5, state: committed[61] }] });
+        assert.deepStrictEqual(ownOutputs, [[60, null], [61, null]], 'a state ack stores main\'s state');
         const request = sentCommands.get(reviewKernel).get(60);
         assert.strictEqual(request?.kind, 'review');
         assert.deepStrictEqual(request.economyPlan, plan, 'the review carries the committed proposal plan');
@@ -1338,7 +1343,11 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         reviewKernel.tick();
         assert.strictEqual(everStepped(reviewKernel, 60), false, 'no step starts while the review runs');
         assert.strictEqual(everStepped(reviewKernel, 61), true);
-        commandAck(reviewKernel, { characterId: 60, state: committed[60] });
+        // The ok review ran the plan this step sent: its state is own output.
+        ownOutputs.length = 0;
+        commandAck(reviewKernel, { characterId: 60, state: { ...committed[60] } });
+        assert.deepStrictEqual(ownOutputs, [[60, 'review']], 'an ok review of the plan sent stores own output');
+        reviewKernel.states.set = nativeSet;
         reviewKernel.tick();
         assert.strictEqual(everStepped(reviewKernel, 60), true, 'the answered review gives the bot back to its schedule');
     }
@@ -1358,7 +1367,13 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         numbersKernel.flush(null, true);
         const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
             hennaRevision: 1, review: ['training'] };
+        // The rebuilt state is the step's own output: its store says so, and
+        // the worker runs no economy refresh for it (own outputs are not inputs).
+        const ownOutputs = [], nativeSet = numbersKernel.states.set.bind(numbersKernel.states);
+        numbersKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
         commitAck(numbersKernel, { results: [ack] });
+        assert.deepStrictEqual(ownOutputs, [[62, 'commit']], 'a numbers ack stores the own commit');
+        numbersKernel.states.set = nativeSet;
         const held = numbersKernel.states.get(62).state;
         assert.deepStrictEqual(held, Protocol.committedState(next, ack));
         assert.deepStrictEqual(held.simulation, { revision: 5 });
@@ -1409,7 +1424,12 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         const sent = id => planKernel.states.get(id).economyPlanHash;
         commitWithPlan(70, ['plan']);
         assert.strictEqual(sent(70), 1234, 'a review on its way keeps the plan as sent');
+        // A refused review ran no plan: its state is an input, not own output.
+        const ownOutputs = [], nativeSet = planKernel.states.set.bind(planKernel.states);
+        planKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
         commandAck(planKernel, { characterId: 70, ok: false, reason: 'stale_command', state: planKernel.states.get(70).state });
+        assert.deepStrictEqual(ownOutputs, [[70, null]], 'a refused review stores no own output');
+        planKernel.states.set = nativeSet;
         assert.strictEqual(sent(70), null, 'a refused review forgets its plan as sent');
         assert.strictEqual(planKernel.states.get(70).economyPending, 2, 'the next state still asks for a refresh');
         commitWithPlan(71, ['buff']);
