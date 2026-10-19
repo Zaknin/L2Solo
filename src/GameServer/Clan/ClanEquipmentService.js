@@ -364,9 +364,10 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
         repaired.stats.clanGoalInvalidationVersion = Math.max(Date.now(), number(stats.clanGoalInvalidationVersion) + 1);
         repaired.stats.lastReason = 'clan_equipment_goal';
         // The write moves the row's revision: a far proposal built on the
-        // superseded goal is refused instead of restoring it.
+        // superseded goal is refused instead of restoring it. It holds only on
+        // the revision read here, so a commit landing meanwhile is not overwritten.
         cleared += (await Database.writeClanGoalMember(current.characterId, repaired.activity,
-            JSON.stringify(repaired.stats))).repairedMembers;
+            JSON.stringify(repaired.stats), number(current.simulation?.revision))).repairedMembers;
     }
     return { ...reformed, cleared };
 }
