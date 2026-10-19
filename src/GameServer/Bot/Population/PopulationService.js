@@ -3378,15 +3378,15 @@ const PopulationService = {
         const marketStatePromise = listingPromise.then(async (listingResult) => {
             let listingState = listingResult.state || purchasedState;
             if (listingResult.pending) {
-                // The sale retry of a deal through a meeting is saved first, on the
-                // fresh row (a meeting marker may have come meanwhile). A deal still
-                // preparing, or accepted as a meeting, keeps the bot in town; a
-                // refused one ends the visit below as every other sale outcome (E311).
+                // The sale retry of a deal through a meeting is on the row already
+                // (ColdMarketListingService.open saves it before the answers): a save
+                // here would move the revision the staged meeting recorded. The fresh
+                // row may carry a meeting marker. A deal still preparing, or accepted
+                // as a meeting, keeps the bot in town; a refused one ends the visit
+                // below as every other sale outcome (E311).
                 const id = listingState.characterId;
                 if (LifeState.hotRow(id)) return LifeState.hotRow(id);
-                const live = LifeState.cachedState(id) || listingState;
-                const waiting = { ...live, stats: { ...live.stats, marketSellRetryAfter: listingState.stats?.marketSellRetryAfter } };
-                listingState = await LifeState.upsertState(waiting, 'market_sale_pending') || waiting;
+                listingState = LifeState.cachedState(id) || listingState;
                 if (TradeMeetingService.hasPreparation(id) || listingState.stats?.tradeMeeting) return listingState;
             }
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;

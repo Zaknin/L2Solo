@@ -70,14 +70,17 @@ function clean() {
     }, 'test_activation');
     // markHot: the durable lifecycle becomes hot, then the actor plays in the
     // world and its own saves move the character on.
-    await LifeState.upsertState({ ...activation, phase: 'hot' }, 'spawn');
+    const hot = await LifeState.upsertState({ ...activation, phase: 'hot' }, 'spawn');
     const hotLoc = { locX: 81200, locY: 148100, locZ: -3466 };
     await Database.updateCharacterExperience(sellerId, 40, 18728112, 0);
     await Database.updateCharacterLocation(sellerId, hotLoc);
 
-    // markHot stamps the session's snapshots with the hot phase (c73e4d3a);
-    // the economy admission checks that phase against the row (71143511).
-    const sessionSnapshot = { ...activation, phase: 'hot' };
+    // markHot stamps the session's snapshots with the saved row's authority
+    // (phase, the revision its save moved, hot time); the economy admission
+    // checks it against the row.
+    const session = { coldLifeState: activation };
+    LifeState.setSessionSnapshotsAuthority(session, hot);
+    const sessionSnapshot = session.coldLifeState;
     const store = AfkTrade.findOwnerProjection(ownerId).actor.fetchPrivateStore();
     const trade = await AfkTrade.sellToShop(sellerId, store, 1865, 1,
         { objectId: varnishId, expectedPrice: 500, coldState: sessionSnapshot });

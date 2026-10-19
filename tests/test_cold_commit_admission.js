@@ -44,7 +44,7 @@ async function main() {
         queue.afterCommit = async () => {};
         queue.onResults = () => {};
         for (let id = 1; id <= (atomic ? 2 : 4); id++) queue.enqueue({
-            characterId: id, token: { leaseId: `lease-${id}`, revision: 1 },
+            characterId: id, revision: 1,
             priority: atomic ? 'P1' : 'P2',
             ...(atomic ? { atomicGroup: { id: 'party', memberIds: [1, 2] } } : {})
         });

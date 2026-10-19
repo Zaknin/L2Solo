@@ -17,6 +17,8 @@ const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
 const DataCache = invoke('GameServer/DataCache');
 const CombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+const ShotStock = invoke('GameServer/Inventory/ShotStock');
+const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const positive = n => Math.max(0, Number(n) || 0);
 const hash = value => fnv1a32(JSON.stringify(value));
 const SAMPLE_BYTES = 20;
@@ -376,10 +378,8 @@ function stateView(state, recipes = null) {
     view.stats = { travel: stats.travel, relations: stats.relations };
     view.dead = Number(state.activity === 'dead' || Number(state.vitals?.hp) <= 0);
     view.riskDeaths = positive(stats.spotRisk?.windowDeaths);
-    // lazy: cycle the stock planners reach this module through the economy context.
-    const shots = invoke('GameServer/Inventory/ShotStock').planForState(state);
-    // lazy: cycle as the shot planner above.
-    const potion = invoke('GameServer/Bot/AI/HealingPotionStock').purchasePotionFor(state);
+    const shots = ShotStock.planForState(state);
+    const potion = HealingPotionStock.purchasePotionFor(state);
     view.supply = stockIds(shots, potion).map(id => [id, positive(state.inventory?.[id]?.amount) > 0]);
     view.stores = storesOf(state);
     // The bag full: its slot limit (the full-bag sale itself is SurvivalFloor's).
